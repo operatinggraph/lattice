@@ -333,6 +333,87 @@ func seedSensitiveCredentialBinding(t *testing.T, ctx context.Context, conn *sub
 	}
 }
 
+// seedSensitivePiiAspect writes one of the identity's sensitive {name, email,
+// phone} aspects, ciphertext-encoded as step 6.5 would produce it.
+//
+// tombstoned writes the shape a soft delete leaves: isDeleted true with the
+// prior body RETAINED, because step 8 preserves the prior document. That
+// retention is the whole point — the aspect still looks like it carries a
+// value until something reads its deletion flag.
+func seedSensitivePiiAspect(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	identityKey, localName, value string, tombstoned bool) {
+	t.Helper()
+	v := testutil.TestVault(t)
+	env := ensureTestPiiKey(t, ctx, conn, v, identityKey)
+
+	pt, err := json.Marshal(map[string]any{"value": value})
+	if err != nil {
+		t.Fatalf("marshal plaintext for %s.%s: %v", identityKey, localName, err)
+	}
+	ct, err := v.Encrypt(ctx, identityKey, env, pt)
+	if err != nil {
+		t.Fatalf("encrypt %s.%s: %v", identityKey, localName, err)
+	}
+	doc := map[string]any{
+		"class": localName, "vertexKey": identityKey, "localName": localName,
+		"isDeleted": tombstoned,
+		"data":      ct,
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, identityKey+"."+localName, b); err != nil {
+		t.Fatalf("seed %s aspect %s: %v", localName, identityKey, err)
+	}
+}
+
+// readDecryptedPiiAspect reads and Vault-decrypts one of identityKey's
+// sensitive {name, email, phone} aspects, returning its `value` field.
+func readDecryptedPiiAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey, localName string) string {
+	t.Helper()
+	v := testutil.TestVault(t)
+	env := readTestPiiKeyEnvelope(t, ctx, conn, identityKey)
+
+	aspectKey := identityKey + "." + localName
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, aspectKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", aspectKey, err)
+	}
+	var doc struct {
+		Data vault.Ciphertext `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", aspectKey, err)
+	}
+	plaintext, err := v.Decrypt(ctx, identityKey, env, doc.Data)
+	if err != nil {
+		t.Fatalf("decrypt %s: %v", aspectKey, err)
+	}
+	var value struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(plaintext, &value); err != nil {
+		t.Fatalf("unmarshal decrypted %s: %v", aspectKey, err)
+	}
+	return value.Value
+}
+
+// mergePayloadWithACR is mergePayload plus the optional
+// aspectConflictResolution map ({name|email|phone: "secondary-wins"}).
+func mergePayloadWithACR(primaryKey, secondaryKey string, edges []string, acr map[string]string) json.RawMessage {
+	type payload struct {
+		Primary                  string            `json:"primary"`
+		Secondary                string            `json:"secondary"`
+		Edges                    []string          `json:"edges"`
+		AspectConflictResolution map[string]string `json:"aspectConflictResolution"`
+	}
+	b, _ := json.Marshal(payload{
+		Primary:                  primaryKey,
+		Secondary:                secondaryKey,
+		Edges:                    edges,
+		AspectConflictResolution: acr,
+	})
+	return b
+}
+
 // ensureTestPiiKey returns identityKey's existing piiKey envelope, or mints
 // and seeds a fresh one via v — the fixture-side mirror of the Processor's
 // step-6.5 lazy piiKey creation (identity-domain/testhelpers_test.go's

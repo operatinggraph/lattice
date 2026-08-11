@@ -131,7 +131,8 @@ func (t *deferredMissTracker) missed() string {
 // with a MAC when a Vault is wired — design sensitive-ref-mac-provenance
 // §3.2) that the bridge unwraps at the external-egress boundary (design
 // sensitive-param-egress §3.2). A non-sensitive doc is unaffected by egress
-// either way.
+// either way. A soft-deleted sensitive doc takes neither disposition: see the
+// IsDeleted branch.
 //
 // requestID is the minting operation's request ID, bound into the egress
 // marker's MAC (splice-resistance, §3.2); ignored for the non-egress
@@ -151,13 +152,50 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	}
 	if doc.IsDeleted {
 		// A soft-deleted sensitive aspect must never yield plaintext, and must
-		// never be handed onward as an egress ref the bridge can open — the
-		// same rule the Refractor enforces on a soft-deleted piiKey
-		// (internal/refractor/pipeline/secure.go). The tombstone retains the
-		// aspect's ciphertext (step 8 preserves the prior document), so the
-		// deletion flag is the only thing standing between a dead aspect and a
-		// live decrypt: fail closed here rather than relying on an erased body.
-		return fmt.Errorf("read deleted sensitive aspect %s", doc.Key)
+		// never be handed onward as an egress ref the bridge can open. The
+		// tombstone RETAINS the aspect's body (step 8 preserves the prior
+		// document), so the deletion flag is the only thing standing between a
+		// dead aspect and a live decrypt; the body itself is never evidence of
+		// anything.
+		//
+		// The two dispositions fail closed differently, because they have
+		// different blast radii.
+		//
+		// egress: refuse outright. A `$sensitiveRef` marker is a capability —
+		// the bridge opens it at the external boundary — and a capability over
+		// a dead aspect must not leave the Processor at all.
+		if egress {
+			return fmt.Errorf("read deleted sensitive aspect %s", doc.Key)
+		}
+		// non-egress: deliver the tombstone with an EMPTY body. A sensitive
+		// aspect is encrypted whole — step 6.5 replaces the entire `data` map
+		// with the ciphertext envelope (step65_encrypt.go) — so clearing Data
+		// scrubs exactly the set the live path would have decrypted, and with
+		// no Vault wired (data at rest as plaintext) it scrubs that too. No key
+		// is recorded on the plaintext tracker, because none is legible.
+		//
+		// An empty map, not nil: parseVertexDoc normalizes every hydrated
+		// document to a non-nil Data, and a script reading `.data` on one and
+		// not the other is a distinction with no meaning behind it.
+		//
+		// The scrub bounds the damage; it does not replace the script's own
+		// `isDeleted` guard, and it must not be read as doing so. An empty Data
+		// renders as an empty Starlark DICT, never None
+		// (starlarksandbox.GoMapToStarlarkDict), so an unguarded
+		// `aspect.data["hash"]` raises a Starlark KeyError — ScriptFailed with
+		// a line and column, which tells a caller MORE than the generic
+		// refusal does, not less. What the scrub guarantees is only that the
+		// secret is not among what leaks.
+		//
+		// Erroring instead would make the whole operation fail on a read the
+		// PLAIN path serves without complaint — a deleted plain aspect
+		// hydrates with IsDeleted true and the script filters it — and that
+		// asymmetry is externally observable: an op whose only sensitive read
+		// happens to be tombstoned renders an internal error rather than the
+		// rejection its own script would have produced, which distinguishes
+		// "already spent" from every other rejection cause.
+		doc.Data = map[string]interface{}{}
+		return nil
 	}
 	if egress {
 		// Ref-marker authoring needs only the DDL lookup + the ciphertext

@@ -13,6 +13,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/appsession"
 
 	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -111,7 +112,7 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 		Class:         "identity",
 		Payload:       initiatePayload,
 		AuthContext:   &processor.AuthContext{Target: uKey},
-		ContextHint:   &processor.ContextHint{Reads: []string{uKey, uKey + ".state"}},
+		ContextHint:   identityceremony.InitiateCredentialLinkContextHint(uKey),
 	}
 	initiateSubmitter := &agent.GatewaySubmitter{URL: s.gatewayURL, Token: uToken}
 	initiateReply, err := initiateSubmitter.Submit(ctx, initiateEnv)
@@ -156,15 +157,12 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 		Class:         "identity",
 		Payload:       completePayload,
 		AuthContext:   &processor.AuthContext{Target: a2Key},
-		ContextHint: &processor.ContextHint{
-			Reads: []string{uKey, uKey + ".state"},
-			// The credentialindex dedup probe is a class-(g) key
-			// identity-domain's derive_reads computes from the actor
-			// (Contract #2 §2.5) — a submitter no longer names it.
-			OptionalReads: []string{
-				uKey + ".linkKey", uKey + ".credentialBinding",
-			},
-		},
+		// authContext.target is the fresh credential A2, not uKey, so step 3's
+		// scope=self gate says nothing about which identity the payload names.
+		// The declared disposition is what keeps this ceremony's "no such
+		// identity" indistinguishable from its "wrong secret" (NFR-S6) — see
+		// identityceremony.CompleteCredentialLinkContextHint.
+		ContextHint: identityceremony.CompleteCredentialLinkContextHint(uKey),
 	}
 	completeSubmitter := &agent.GatewaySubmitter{URL: s.gatewayURL, Token: a2Token}
 

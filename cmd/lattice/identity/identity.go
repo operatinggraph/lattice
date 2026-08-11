@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -216,20 +217,23 @@ Read payload from --payload @file.json or stdin (-).`,
 				// claim_test.go's TestClaimIdentity_Success).
 				AuthContext: &processor.AuthContext{Target: actor},
 				// A descriptor-driven client (Facet) resolves opmetas.go's
-				// Dispatch.Reads templates client-side before submitting; this
-				// raw CLI bypasses that resolution entirely, so it must supply
-				// the same three keys itself. Without them state[] hydrates
-				// none of target_identity_key/.state/.claimKey, and the
-				// script's own absence checks reject every claim — valid or
-				// not — with the same generic ClaimKeyInvalid the anti-
-				// enumeration design intends only for a wrong secret.
-				ContextHint: &processor.ContextHint{
-					Reads: []string{
-						targetIdentityKey,
-						targetIdentityKey + ".state",
-						targetIdentityKey + ".claimKey",
-					},
-				},
+				// Dispatch templates client-side before submitting; this raw
+				// CLI bypasses that resolution entirely, so it must supply the
+				// same keys itself, under the same disposition. Without them
+				// state[] hydrates none of
+				// target_identity_key/.state/.claimKey, and the script's own
+				// absence checks reject every claim — valid or not — with the
+				// same generic ClaimKeyInvalid the anti-enumeration design
+				// intends only for a wrong secret.
+				//
+				// optionalReads, not reads, and nothing at all for a target
+				// the Contract #1 grammar rejects: both dispositions keep this
+				// CLI's rejections indistinguishable from each other, and both
+				// are explained where the shape is built
+				// (identityceremony.ClaimContextHint). It is the shipped path
+				// that is closed, not the envelope surface — the disposition
+				// stays a client choice under Contract #2 §2.5.
+				ContextHint: identityceremony.ClaimContextHint(targetIdentityKey),
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

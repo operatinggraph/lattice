@@ -89,6 +89,7 @@ func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 		Class         string                 `json:"class"`
 		Payload       json.RawMessage        `json:"payload"`
 		Reads         []string               `json:"reads"`
+		OptionalReads []string               `json:"optionalReads"`
 		AuthContext   *processor.AuthContext `json:"authContext"`
 	}
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +101,7 @@ func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 	defer gw.Close()
 
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
-	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"the-plaintext-secret"}`
+	body := `{"targetIdentityKey":"vtx.identity.targetnanoABCDEFGHJK","claimKey":"the-plaintext-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
 	srv.handleClaim(w, r)
@@ -117,15 +118,19 @@ func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 		ClaimKey          string `json:"claimKey"`
 	}
 	require.NoError(t, json.Unmarshal(gotEnv.Payload, &payload))
-	require.Equal(t, "vtx.identity.targetnano01", payload.TargetIdentityKey)
+	require.Equal(t, "vtx.identity.targetnanoABCDEFGHJK", payload.TargetIdentityKey)
 	require.Equal(t, "the-plaintext-secret", payload.ClaimKey)
-	require.Contains(t, gotEnv.Reads, "vtx.identity.targetnano01")
-	require.Contains(t, gotEnv.Reads, "vtx.identity.targetnano01.state")
-	require.Contains(t, gotEnv.Reads, "vtx.identity.targetnano01.claimKey")
+	// optionalReads, not reads: an absent target must reach the script's own
+	// generic refusal rather than faulting hydration with the probed key
+	// echoed back (NFR-S6; identity-domain/opmetas.go's Dispatch spec).
+	require.Empty(t, gotEnv.Reads)
+	require.Contains(t, gotEnv.OptionalReads, "vtx.identity.targetnanoABCDEFGHJK")
+	require.Contains(t, gotEnv.OptionalReads, "vtx.identity.targetnanoABCDEFGHJK.state")
+	require.Contains(t, gotEnv.OptionalReads, "vtx.identity.targetnanoABCDEFGHJK.claimKey")
 
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Equal(t, "vtx.identity.targetnano01", resp["claimedIdentityKey"])
+	require.Equal(t, "vtx.identity.targetnanoABCDEFGHJK", resp["claimedIdentityKey"])
 	require.True(t, strings.HasPrefix(resp["credentialKey"], "vtx.identity."))
 	// The minted device credential must differ from the claimed target — a
 	// throwaway credential, never the identity being claimed.
@@ -153,7 +158,7 @@ func TestHandleClaim_RetriesTransientAuthLagThenSucceeds(t *testing.T) {
 	claimRetryBackoffs = []time.Duration{time.Millisecond}
 	defer func() { claimRetryBackoffs = orig }()
 
-	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"the-plaintext-secret"}`
+	body := `{"targetIdentityKey":"vtx.identity.targetnanoABCDEFGHJK","claimKey":"the-plaintext-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
 	srv.handleClaim(w, r)
@@ -178,7 +183,7 @@ func TestHandleClaim_PersistentDenialDoesNotRetryForever(t *testing.T) {
 	claimRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
 	defer func() { claimRetryBackoffs = orig }()
 
-	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"the-plaintext-secret"}`
+	body := `{"targetIdentityKey":"vtx.identity.targetnanoABCDEFGHJK","claimKey":"the-plaintext-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
 	srv.handleClaim(w, r)
@@ -197,7 +202,7 @@ func TestHandleClaim_GatewayRejectionSurfacesAsError(t *testing.T) {
 	defer gw.Close()
 
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
-	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"wrong-secret"}`
+	body := `{"targetIdentityKey":"vtx.identity.targetnanoABCDEFGHJK","claimKey":"wrong-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
 	srv.handleClaim(w, r)

@@ -587,8 +587,13 @@ async function unlinkCredential(c) {
       {
         operationType: "UnlinkCredential",
         class: "identity",
-        reads: [uKey, uKey + ".state"],
-        optionalReads: [uKey + ".credentialBinding"],
+        // optionalReads, never reads: this ceremony adjudicates an absent or
+        // merged-away subject with a named outcome of its own
+        // (CredentialUnlinkRejected: no-target), and a required read faults
+        // HydrationMiss before that outcome can render — replacing the
+        // ceremony's answer with a hydration wire code that also echoes the
+        // key back. Mirrors identityceremony.ClaimContextHint.
+        optionalReads: [uKey, uKey + ".state", uKey + ".credentialBinding"],
         payload: { credentialActorKey: c.actorKey },
       },
       { authContext: { target: uKey } }
@@ -624,7 +629,10 @@ async function linkNewCredential() {
       {
         operationType: "InitiateCredentialLink",
         class: "identity",
-        reads: [uKey, uKey + ".state"],
+        // optionalReads, matching identityceremony.InitiateCredentialLinkContextHint:
+        // the script adjudicates an absent subject with IdentityNotFound, and a
+        // required read faults before it can.
+        optionalReads: [uKey, uKey + ".state"],
         payload: { linkKeyHash: hash },
       },
       { authContext: { target: uKey } }

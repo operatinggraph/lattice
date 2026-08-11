@@ -230,7 +230,36 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// CreateOnly create's revision-0 assertion instead of
 				// reviving. The CreateOnly create is still the backstop on the
 				// absent branch, so the concurrent-bind race is still caught.
-				Reads: []string{
+				//
+				// All three are optionalReads, and that is an anti-enumeration
+				// requirement (NFR-S6), not a style choice. This op does not
+				// DEPEND on the target's presence, it ADJUDICATES it:
+				// `no-target` is one of its own named outcomes, collapsed with
+				// every other one into the single generic ClaimKeyInvalid.
+				// Under `reads` an absent target is recorded required-absent
+				// and the script's first `target in state` faults
+				// HydrationMiss, which reaches the caller as HydrationFailed
+				// with the probed key echoed back in `details.missingKey` — a
+				// different wire code AND the key itself, one guess at a time.
+				// Under optionalReads the absence lands in KnownAbsent, the
+				// script reads None, and its own generic refusal renders.
+				// Same hazard the DDL's derive_reads records for its
+				// class-(g) keys, and the same disposition
+				// CompleteCredentialLink's dispatchers give the whole of their
+				// target's read set.
+				//
+				// This descriptor governs the descriptor-DRIVEN clients. It is
+				// not an enforcement point and must not be read as one:
+				// Contract #2 §2.5 makes the disposition a client declaration,
+				// the Gateway copies contextHint through verbatim, and
+				// mergeDerivedReads lets an envelope's own disposition stand.
+				// ClaimIdentity is granted to every consumer, so a caller
+				// hand-rolling its envelope can still declare these under
+				// `reads` and get the distinguishable answer. Closing that
+				// needs the Processor to be able to pin a declared key's
+				// disposition — a Contract #2 §2.5 amendment, not a change
+				// here.
+				OptionalReads: []string{
 					"{payload.targetIdentityKey}",
 					"{payload.targetIdentityKey}.state",
 					"{payload.targetIdentityKey}.claimKey",
@@ -351,22 +380,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					Field:  "row_kind",
 					Equals: "credentialBinding",
 				},
-				// The live dispatcher's own list (cmd/facet/credentials.go's
-				// hand-built envelope), verified against the script branch:
-				// U and U.state are required, and U.credentialBinding is
-				// absence-TOLERANT because its absence is the implicit
-				// self-credential case, which the script folds into the
-				// ordinary not-found outcome rather than a fault.
+				// All three absence-TOLERANT, verified against the script
+				// branch: {actor}, {actor}.state and {actor}.credentialBinding
+				// each have a named outcome of their own when absent
+				// (CredentialUnlinkRejected: no-target, or the implicit
+				// self-credential not-found case), and a required read faults
+				// HydrationMiss before any of them can render.
+				//
+				// The subject here is op.actor, pinned by step 3's scope=self
+				// gate, so this is not the cross-identity probe ClaimIdentity's
+				// payload target is. The ceremony still owes its caller its own
+				// answer rather than a hydration wire code.
 				//
 				// The index vertex and the boundTo link this op tombstones
 				// are NOT here: they are class-(g) script-derived keys, so
 				// the DDL's own derive_reads declares them and no submitter
 				// can or should.
-				Reads: []string{
+				OptionalReads: []string{
 					"{actor}",
 					"{actor}.state",
-				},
-				OptionalReads: []string{
 					"{actor}.credentialBinding",
 				},
 			},

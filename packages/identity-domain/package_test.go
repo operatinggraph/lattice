@@ -369,14 +369,16 @@ func TestPackage_UnlinkCredentialIsRowDispatched(t *testing.T) {
 		t.Errorf("VisibleWhen = %+v, want row_kind == credentialBinding — without it the op is offered on any identity-typed row", d.VisibleWhen)
 	}
 	// The dispatcher's declared reads, which must stay the live envelope's:
-	// U and U.state required, U.credentialBinding absence-tolerant. Its
-	// absence is the implicit self-credential case, which the script folds
-	// into not-found rather than faulting on.
-	if got, want := strings.Join(d.Reads, ","), "{actor},{actor}.state"; got != want {
-		t.Errorf("Reads = %q, want %q", got, want)
+	// nothing required, all three absence-tolerant. Each of them has a named
+	// outcome of its own when absent — CredentialUnlinkRejected: no-target,
+	// or the implicit self-credential not-found case — and a required read
+	// faults HydrationMiss before any of those can render, substituting a
+	// hydration wire code that also echoes the probed key back.
+	if got, want := strings.Join(d.Reads, ","), ""; got != want {
+		t.Errorf("Reads = %q, want %q — every key here has a script-rendered absence outcome", got, want)
 	}
-	if got, want := strings.Join(d.OptionalReads, ","), "{actor}.credentialBinding"; got != want {
-		t.Errorf("OptionalReads = %q, want %q — a required credentialBinding faults HydrationMiss for an identity that has none", got, want)
+	if got, want := strings.Join(d.OptionalReads, ","), "{actor},{actor}.state,{actor}.credentialBinding"; got != want {
+		t.Errorf("OptionalReads = %q, want %q", got, want)
 	}
 	// The class-(g) keys stay out of the submitter's declaration: the index
 	// vertex and the boundTo link are derived by the DDL, not by any client.

@@ -74,6 +74,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/capabilitykv"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -242,7 +243,20 @@ func mintDevToken(key *rsa.PrivateKey, sub string) string {
 
 // contextHint mirrors the Gateway's operationRequestContext wire shape.
 type contextHint struct {
-	Reads []string `json:"reads,omitempty"`
+	Reads         []string `json:"reads,omitempty"`
+	OptionalReads []string `json:"optionalReads,omitempty"`
+}
+
+// claimHint projects identityceremony.ClaimContextHint onto this harness's
+// wire struct. Nil in, nil out: a target the Contract #1 grammar rejects is
+// declared not at all, which is how the script's own generic refusal gets to
+// render instead of an InvalidReadKey hydration fault.
+func claimHint(targetKey string) *contextHint {
+	h := identityceremony.ClaimContextHint(targetKey)
+	if h == nil {
+		return nil
+	}
+	return &contextHint{Reads: h.Reads, OptionalReads: h.OptionalReads}
 }
 
 // gatewayOpRequest mirrors the Gateway's POST /v1/operations body (there is
@@ -317,9 +331,12 @@ func submitClaimWithRetry(ctx context.Context, client *http.Client, gatewayURL, 
 		Class:         "identity",
 		Payload:       map[string]any{"claimKey": claimKeyPlaintext, "targetIdentityKey": targetKey},
 		AuthContext:   &processor.AuthContext{Target: deviceKey},
-		ContextHint: &contextHint{Reads: []string{
-			targetKey, targetKey + ".state", targetKey + ".claimKey",
-		}},
+		// Built by the one shared builder every ClaimIdentity dispatcher uses,
+		// so the harness measures the disposition the shipped clients actually
+		// send rather than its own transcription of it. Copied field-wise
+		// because this harness posts the Gateway's JSON body shape, not an
+		// OperationEnvelope.
+		ContextHint: claimHint(targetKey),
 	}
 	var result gatewayResult
 	for attempt := 0; ; attempt++ {

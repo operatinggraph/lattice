@@ -460,3 +460,27 @@ func seedClaimKeyAspect(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 	seedSensitiveAspect(t, ctx, conn, identityKey, "claimKey", map[string]any{"hash": hashHex, "algo": "sha256"})
 }
+
+// seedSpentClaimKeyAspect writes the claimKey aspect a completed claim leaves
+// behind: tombstoned, but still carrying the encrypted body, because step 8
+// preserves the prior document under a tombstone. Any read path that treats
+// the retained body as live data is reading a spent secret.
+func seedSpentClaimKeyAspect(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	identityKey, hashHex string) {
+	t.Helper()
+	seedClaimKeyAspect(t, ctx, conn, identityKey, hashHex)
+	key := identityKey + ".claimKey"
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("read seeded %s: %v", key, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal seeded %s: %v", key, err)
+	}
+	doc["isDeleted"] = true
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("tombstone %s: %v", key, err)
+	}
+}

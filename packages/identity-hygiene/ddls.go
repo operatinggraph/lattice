@@ -166,8 +166,6 @@ func DDLs() []pkgmgr.DDLSpec {
 //   - primary.state, primary.mergedInto
 //   - secondary.state, secondary.mergedInto
 //   - every link vertex key in `edges`
-//   - (optional) primary.{name,email,phone} +
-//     secondary.{name,email,phone}  when ACR is requested
 //
 // Caller's ContextHint.OptionalReads MUST include (dispatch-derivable,
 // absence-tolerant — dedup-over-encrypted-pii-design.md §3.4):
@@ -181,6 +179,17 @@ func DDLs() []pkgmgr.DDLSpec {
 // exactly the merges this closes):
 //   - secondary.credentialBinding
 //   - primary.credentialBinding
+//
+// Caller's ContextHint.OptionalReads MUST also include, when
+// aspectConflictResolution names an aspect:
+//   - secondary.<aspect>  for each aspect named
+//
+// OptionalReads, not Reads, and that is what makes the answer uniform: the
+// merge gives ONE refusal for "the secondary has no value here" regardless of
+// whether the aspect is absent, tombstoned or empty (see the resolution branch
+// below). A required read would fault HydrationMiss on the absent case alone,
+// before the script could render that refusal, splitting one caller-visible
+// question across two wire shapes.
 //
 // Caller's ContextHint.OptionalReads MUST also include, for every entry in
 // `edges`, that edge's key with each secondaryID endpoint rewritten to
@@ -836,12 +845,36 @@ def execute(state, op):
             if asp in acr and acr[asp] == "secondary-wins":
                 sec_aspect_key = secondary + "." + asp
                 sec_aspect = state[sec_aspect_key] if sec_aspect_key in state else None
-                if sec_aspect != None and sec_aspect.data != None and "value" in sec_aspect.data:
-                    sec_val = sec_aspect.data["value"]
-                    if type(sec_val) == type("") and len(sec_val) > 0:
-                        mutations.append({"op": "update", "key": primary + "." + asp,
-                            "document": {"class": asp, "vertexKey": primary, "localName": asp,
-                                         "isDeleted": False, "data": {"value": sec_val}}})
+                # ONE answer to "the secondary has no value here", whatever the
+                # reason -- absent, tombstoned, bodiless, or an empty string.
+                # The caller NAMED this aspect and asked for its value to win,
+                # so a merge that quietly carries nothing and still reports
+                # success is the wrong answer to every one of those: the
+                # primary silently keeps its own value and nobody learns the
+                # instruction was dropped.
+                #
+                # Tombstoned is the case that makes uniformity necessary rather
+                # than merely tidy. These three are sensitive-classed, so a
+                # tombstone arrives with its body SCRUBBED
+                # (internal/processor/sensitive_decrypt.go) and is otherwise
+                # indistinguishable here from a live aspect that happens to
+                # carry nothing -- there is no reading of the hydrated document
+                # that could tell them apart, and no reason to want to.
+                #
+                # Declared optionalReads by the caller (see this file's package
+                # doc), so absence reaches this branch as None rather than
+                # faulting HydrationMiss before it -- which is what lets the
+                # absent case share the answer at all.
+                sec_val = None
+                if sec_aspect != None and not (hasattr(sec_aspect, "isDeleted") and sec_aspect.isDeleted):
+                    if sec_aspect.data != None and "value" in sec_aspect.data:
+                        sec_val = sec_aspect.data["value"]
+                if type(sec_val) != type("") or len(sec_val) == 0:
+                    fail("InvalidArgument: aspectConflictResolution: " + asp +
+                         ": the secondary carries no value for this aspect, so there is nothing to make win")
+                mutations.append({"op": "update", "key": primary + "." + asp,
+                    "document": {"class": asp, "vertexKey": primary, "localName": asp,
+                                 "isDeleted": False, "data": {"value": sec_val}}})
 
     # --- Events ---
     events = [{"class": "identity.merged", "data": {
