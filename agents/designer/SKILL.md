@@ -432,6 +432,22 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   a *structural* fail-closed for the one lens class where a mistake would be a security defect, and it is
   worth a paragraph in "For Andrew"; it is also much stronger than "the algorithm is careful."
 
+- **MULTIPLY the row's own numbers by a measured unit cost and check the product reaches the observed
+  symptom — when the arithmetic does not close, the missing term is usually on a DIFFERENT path than the
+  row names.** The two reflexes above interrogate a handed-down *mechanism* and a handed-down *quantity*.
+  This is the cheap arithmetic that tells you whether you have found *all* the terms: a row says "N of X
+  causes outcome Y", so measure one X and ask whether N of them can produce Y. A shortfall of an order of
+  magnitude is not a rounding error — it is an unnamed cost, invisible precisely because nobody wrote it
+  down. (Trialed 2026-08-11, the class-(e) enumeration budget: the row read *"~19 hops sink self-pay live"*
+  against a 250 ms wall, and a read-only spike measured those hops at ~15–20 ms — the row's own mechanism
+  could not close its own symptom. The missing term was on the *other* live-read path: `kv.Read`'s lazy
+  fallthrough, which Contract #2 §2.5 documents as "one GET" and which is in fact up to four `instanceOf`
+  hops, each a prefix list plus a GET per key, re-walked from a resolver rebuilt on every single read. A
+  design that accepted the row's framing would have optimized the enumeration, measured no improvement, and
+  handed the Steward a fire that did not fix its own headline.) Corollary: the read-only spike that settles
+  a cost fork (below) doubles as this check — run it *before* the shape hardens, and put its numbers in the
+  design as a §measurement table, so the next reader can re-derive the shortfall instead of trusting prose.
+
 - **A removal signal is only meaningful at the granularity every CONSUMER checks it — go read what each
   one tests `isDeleted` ON.** The retraction reflex above asks *"does a retraction transport exist?"*.
   This one asks the next question: *"does the consumer OBSERVE it at the granularity I am emitting?"* —
