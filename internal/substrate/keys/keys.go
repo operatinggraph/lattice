@@ -96,6 +96,21 @@ func ParseVertexKey(key string) (vertexType, id string, ok bool) {
 	return splitVertexKey(key)
 }
 
+// IsVertexKeyOfType reports whether key is a well-formed
+// vtx.<vertexType>.<NanoID> — the whole Contract #1 grammar, not a prefix
+// test.
+//
+// This is what a submitter owes before it templates a caller-supplied key into
+// a ContextHint. The Processor answers a declared key the grammar rejects with
+// an InvalidReadKey hydration fault raised BEFORE the script runs
+// (internal/processor/step4_hydrate.go), so declaring "vtx.identity.x" hands
+// the caller a hydration wire code where the operation had a rejection of its
+// own to render. A prefix test does not catch that string; the grammar does.
+func IsVertexKeyOfType(key, vertexType string) bool {
+	t, _, ok := splitVertexKey(key)
+	return ok && t == vertexType
+}
+
 // ParseAspectKey extracts the parent vertex key, type, id, and local name
 // from an aspect key.
 func ParseAspectKey(key string) (vertexKey, vertexType, id, localName string, ok bool) {

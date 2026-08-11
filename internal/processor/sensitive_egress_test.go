@@ -680,11 +680,14 @@ func TestEgressReads_DeletedSensitiveKey_HydrationFailsClosed(t *testing.T) {
 	}
 }
 
-// TestReads_DeletedSensitiveKey_HydrationFailsClosed: the plaintext
-// disposition is guarded identically — a tombstoned sensitive aspect never
-// decrypts into a script's context. The guard precedes the nil-Vault early
-// return, so it holds even for a pipeline that never wired a Vault.
-func TestReads_DeletedSensitiveKey_HydrationFailsClosed(t *testing.T) {
+// TestReads_DeletedSensitiveKey_DeliversScrubbed: the plaintext disposition
+// fails closed by SCRUBBING, not by refusing. A tombstoned sensitive aspect
+// still never yields its body — the retained at-rest data is dropped — but the
+// tombstone itself reaches the script, so the script's own isDeleted filter
+// decides the outcome, exactly as it does for a tombstoned plain aspect. The
+// scrub precedes the nil-Vault early return, so a pipeline that never wired a
+// Vault (data at rest as plaintext) is scrubbed too, not waved through.
+func TestReads_DeletedSensitiveKey_DeliversScrubbed(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := newEgressTestHydrator(t, ctx, conn, nil)
@@ -695,8 +698,22 @@ func TestReads_DeletedSensitiveKey_HydrationFailsClosed(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.ContextHint = &ContextHint{Reads: []string{aspectKey}}
 
-	if _, err := h.Hydrate(ctx, env); err == nil {
-		t.Fatalf("expected Hydrate to fail closed on a deleted sensitive aspect, got nil")
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	got, ok := state.Context.Hydrated[aspectKey]
+	if !ok {
+		t.Fatalf("hydrated set = %+v, want %q present", state.Context.Hydrated, aspectKey)
+	}
+	if !got.IsDeleted {
+		t.Fatalf("doc = %+v, want IsDeleted true", got)
+	}
+	if len(got.Data) != 0 {
+		t.Fatalf("doc data = %+v, want scrubbed — the retained at-rest body must not reach the script", got.Data)
+	}
+	if _, ok := state.Context.SensitiveReads.plaintextKeys[aspectKey]; ok {
+		t.Fatalf("a scrubbed doc must not be recorded as carrying plaintext")
 	}
 }
 

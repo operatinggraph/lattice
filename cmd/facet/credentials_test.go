@@ -104,14 +104,26 @@ func TestHandleCredentialsLink_RunsInitiateThenCompleteAsDistinctActors(t *testi
 	require.Equal(t, "InitiateCredentialLink", initiate.env.OperationType)
 	require.Equal(t, "identity", initiate.env.Class)
 	require.Equal(t, uKey, initiate.env.AuthContext.Target, "Initiate must be submitted as U itself (scope=self)")
-	require.Contains(t, initiate.env.Reads, uKey)
-	require.Contains(t, initiate.env.Reads, uKey+".state")
+	// Both legs declare absence-tolerantly and declare nothing required. A
+	// required read's absence faults HydrationMiss and echoes the probed key
+	// back — and the link ceremony's fail_link reuses the "ClaimKeyInvalid: "
+	// prefix precisely so NFR-S6's one-generic-answer rule covers it too.
+	require.Empty(t, initiate.env.Reads)
+	require.Contains(t, initiate.env.OptionalReads, uKey)
+	require.Contains(t, initiate.env.OptionalReads, uKey+".state")
 
 	require.Equal(t, "CompleteCredentialLink", complete.env.OperationType)
 	require.NotEqual(t, uKey, complete.env.AuthContext.Target,
 		"Complete must be submitted as the NEW throwaway credential A2, never as U")
 	require.True(t, strings.HasPrefix(complete.env.AuthContext.Target, "vtx.identity."))
 	require.NotEqual(t, initiate.auth, complete.auth, "the two ops must ride different bearer credentials")
+	// Complete's target is caller-named and its scope=self gate binds the
+	// CREDENTIAL, not the target — so nothing derived from it may be required.
+	require.Empty(t, complete.env.Reads)
+	require.Contains(t, complete.env.OptionalReads, uKey)
+	require.Contains(t, complete.env.OptionalReads, uKey+".state")
+	require.Contains(t, complete.env.OptionalReads, uKey+".linkKey")
+	require.Contains(t, complete.env.OptionalReads, uKey+".credentialBinding")
 
 	// The plaintext secret goes only to Complete; only its hash was ever
 	// armed by Initiate — Lattice never holds the plaintext (design §3.2).

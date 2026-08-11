@@ -58,6 +58,11 @@ func ClassifyKey(key string) KeyKind { return keys.ClassifyKey(key) }
 // ParseVertexKey extracts the type and id from a vertex key.
 func ParseVertexKey(key string) (vertexType, id string, ok bool) { return keys.ParseVertexKey(key) }
 
+// IsVertexKeyOfType reports whether key is a well-formed
+// vtx.<vertexType>.<NanoID> — the grammar check a submitter runs on a
+// caller-supplied key before declaring it in a ContextHint.
+func IsVertexKeyOfType(key, vertexType string) bool { return keys.IsVertexKeyOfType(key, vertexType) }
+
 // ParseAspectKey extracts the parent vertex key, type, id, and local name from
 // an aspect key.
 func ParseAspectKey(key string) (vertexKey, vertexType, id, localName string, ok bool) {

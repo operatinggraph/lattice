@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -118,7 +119,10 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		Class:         "identity",
 		Payload:       payload,
 		AuthContext:   &processor.AuthContext{Target: deviceKey},
-		ContextHint:   &processor.ContextHint{Reads: []string{targetKey, targetKey + ".state", targetKey + ".claimKey"}},
+		// The declaration is an NFR-S6 property of the ceremony, not this
+		// handler's choice — see identityceremony.ClaimContextHint for what
+		// each disposition buys and what it does not.
+		ContextHint: identityceremony.ClaimContextHint(targetKey),
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)

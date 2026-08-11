@@ -26,13 +26,21 @@
 //     real collision merge as a duplicate instead of reaching step 8 as a colliding create
 //  16. TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate — omitting that optionalRead
 //     reproduces the pre-fix failure mode: the whole merge is rejected
+//  17. TestMerge_AspectConflictResolution_CarriesSecondaryValue — a live
+//     secondary-wins aspect is decrypted and written onto the primary
+//  18. TestMerge_AspectConflictResolution_NoValueToCarryRefused — one shared
+//     refusal for tombstoned / absent / empty, whichever way the secondary
+//     cannot satisfy the request
 package identityhygiene_test
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
@@ -953,4 +961,138 @@ func TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate(t *testing.T)
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// --- 17/18. aspectConflictResolution ---
+
+// acrMergeEnv builds a MergeIdentity envelope carrying an
+// aspectConflictResolution request for one aspect, declared exactly as this
+// DDL's contract asks: the secondary's copy under OptionalReads, because
+// absence is one of the cases the resolution branch adjudicates rather than a
+// hydration fault.
+func acrMergeEnv(reqID, primaryKey, secondaryKey, asp string) *processor.OperationEnvelope {
+	edges := []string{}
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:30:00Z",
+		Class:         "identityHygiene",
+		Payload: mergePayloadWithACR(primaryKey, secondaryKey, edges,
+			map[string]string{asp: "secondary-wins"}),
+		ContextHint: &processor.ContextHint{
+			Reads:         mergeReads(primaryKey, secondaryKey, edges),
+			OptionalReads: []string{secondaryKey + "." + asp},
+		},
+	}
+}
+
+// assertACRRefused pins the ONE answer the resolution branch gives for "the
+// secondary has no value here" — the same message whatever produced it.
+func assertACRRefused(t *testing.T, outcome processor.MessageOutcome, reply *processor.OperationReply) {
+	t.Helper()
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a secondary-wins request with no value to carry must not pass silently", outcome)
+	}
+	if reply == nil || reply.Error == nil {
+		t.Fatalf("reply = %+v, want a rejection error", reply)
+	}
+	if !strings.Contains(reply.Error.Message, "aspectConflictResolution: phone") {
+		t.Fatalf("error message %q does not name the aspect it could not carry", reply.Error.Message)
+	}
+	if !strings.Contains(reply.Error.Message, "nothing to make win") {
+		t.Fatalf("error message %q is not the shared no-value refusal", reply.Error.Message)
+	}
+}
+
+// TestMerge_AspectConflictResolution_CarriesSecondaryValue is the positive
+// vector: a live secondary aspect requested as secondary-wins is decrypted,
+// read, and written onto the primary. Without it the refusal test below would
+// be satisfied by an ACR arm that refuses everything.
+func TestMerge_AspectConflictResolution_CarriesSecondaryValue(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "macrlive")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimAcrLive00")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecAcrLive000")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+	seedSensitivePiiAspect(t, ctx, conn, primaryKey, "phone", "+15550000001", false)
+	seedSensitivePiiAspect(t, ctx, conn, secondaryKey, "phone", "+15550000002", false)
+
+	env := acrMergeEnv(testutil.GenReqID("MrgAcrLive000"), primaryKey, secondaryKey, "phone")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := readDecryptedPiiAspect(t, ctx, conn, primaryKey, "phone"); got != "+15550000002" {
+		t.Fatalf("primary.phone = %q, want the secondary's value carried across", got)
+	}
+}
+
+// TestMerge_AspectConflictResolution_NoValueToCarryRefused: a secondary-wins
+// request the secondary cannot satisfy is refused by name, and refused
+// IDENTICALLY whichever way it cannot satisfy it.
+//
+// The tombstoned case is what forces the uniformity. These aspects are
+// sensitive-classed, so a tombstone hydrates with its body SCRUBBED
+// (internal/processor/sensitive_decrypt.go) and is indistinguishable at the
+// script from a live aspect carrying nothing — without one shared answer, the
+// requested overwrite would be dropped and the merge would still report
+// success, leaving the primary silently holding its own value.
+func TestMerge_AspectConflictResolution_NoValueToCarryRefused(t *testing.T) {
+	cases := []struct {
+		name    string
+		durable string
+		label   string
+		// seedSecondary writes whatever standing the secondary's phone aspect
+		// has for this case; nil seeds nothing at all (the absent case).
+		seedSecondary func(t *testing.T, ctx context.Context, conn *substrate.Conn, secondaryKey string)
+	}{
+		{
+			name: "tombstoned", durable: "macrtomb", label: "AcrTomb",
+			seedSecondary: func(t *testing.T, ctx context.Context, conn *substrate.Conn, secondaryKey string) {
+				// Body retained under the tombstone — the shape a soft delete
+				// leaves behind, and the one the scrub empties on the way in.
+				seedSensitivePiiAspect(t, ctx, conn, secondaryKey, "phone", "+15550000002", true)
+			},
+		},
+		{name: "absent", durable: "macrabs", label: "AcrAbsn"},
+		{
+			name: "empty", durable: "macrmty", label: "AcrMty0",
+			seedSecondary: func(t *testing.T, ctx context.Context, conn *substrate.Conn, secondaryKey string) {
+				seedSensitivePiiAspect(t, ctx, conn, secondaryKey, "phone", "", false)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupTestEnv(t)
+			cp, cons := newMergePipeline(t, ctx, conn, tc.durable)
+
+			primaryKey := "vtx.identity." + testutil.GenReqID("Prim"+tc.label)
+			secondaryKey := "vtx.identity." + testutil.GenReqID("Sec"+tc.label)
+			seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+			seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+			seedSensitivePiiAspect(t, ctx, conn, primaryKey, "phone", "+15550000001", false)
+			if tc.seedSecondary != nil {
+				tc.seedSecondary(t, ctx, conn, secondaryKey)
+			}
+
+			env := acrMergeEnv(testutil.GenReqID("Mrg"+tc.label), primaryKey, secondaryKey, "phone")
+			outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			assertACRRefused(t, outcome, reply)
+
+			// The whole merge is refused, not partially applied: the primary
+			// keeps its own value and the secondary never moved.
+			if got := readDecryptedPiiAspect(t, ctx, conn, primaryKey, "phone"); got != "+15550000001" {
+				t.Fatalf("primary.phone = %q, want its own value untouched", got)
+			}
+			stateData := readAspectData(t, ctx, conn, secondaryKey+".state")
+			if got, _ := stateData["value"].(string); got != "unclaimed" {
+				t.Fatalf("secondary.state = %q, want unclaimed — the refused merge must not have committed", got)
+			}
+		})
+	}
 }

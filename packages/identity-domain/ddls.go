@@ -1829,13 +1829,18 @@ def execute(state, op):
         if credential_actor_key == None or type(credential_actor_key) != type("") or len(credential_actor_key) == 0:
             fail_unlink("not-found")
 
-        # U.credentialBinding is declared Reads (not optionalReads): a
-        # claimed U always has one (written by ClaimIdentity, or by
+        # U.credentialBinding is declared optionalReads (opmetas.go's
+        # UnlinkCredential Dispatch spec), and it has to be: a claimed U
+        # usually has one -- written by ClaimIdentity, or by
         # CompleteCredentialLink's binding_absent branch for a Scenario-B
-        # identity's first linked credential). Absence here means U has
-        # nothing to unlink -- the implicit self-credential case (§8: "not
-        # an array entry, not unlinkable -- it IS the identity") folds into
-        # the same generic not-found outcome.
+        # identity's first linked credential -- but absence is a real,
+        # ordinary state, not a wiring fault. It means U has nothing to
+        # unlink: the implicit self-credential case (§8: "not an array entry,
+        # not unlinkable -- it IS the identity") folds into the same generic
+        # not-found outcome below, and a required-read declaration would
+        # fault HydrationMiss before this branch could render it. A TOMBSTONED
+        # binding -- what MergeIdentity leaves on a merged-away secondary --
+        # takes the same branch.
         binding_key = u_key + ".credentialBinding"
         existing_binding = state[binding_key] if binding_key in state else None
         binding_absent = existing_binding == None or (hasattr(existing_binding, "isDeleted") and existing_binding.isDeleted)

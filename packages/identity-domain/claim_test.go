@@ -16,16 +16,23 @@
 //  6. TestClaimIdentity_CredentialAlreadyBound_GenericError
 //  7. TestClaimIdentity_FR5_GrandfatheredFlow              — historical import
 //  8. TestClaimIdentity_FR5_ImmediateAccess                — second claim blocked
+//  9. TestClaimIdentity_ReClaimAfterRealClaim_GenericError — spent claimKey
+// 10. TestClaimIdentity_RejectionCausesIndistinguishable   — one wire shape
+// 11. TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub — the script's own
+//     tombstone guard, isolated from the Processor's scrub
 package identitydomain_test
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -286,6 +293,12 @@ func TestClaimIdentity_WrongKey_GenericError(t *testing.T) {
 	}
 }
 
+// TestClaimIdentity_AlreadyClaimed_GenericError seeds the shape a completed
+// claim really leaves: state=claimed AND a TOMBSTONED `.claimKey`. Both halves
+// matter — the aspect is sensitive-classed, so a read path that refuses a
+// tombstoned sensitive doc fails the operation in step 4 hydrate and renders
+// an internal error, never the script's own generic rejection, which makes
+// "already claimed" distinguishable from "wrong key" on the wire.
 func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)
@@ -294,7 +307,7 @@ func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 	identityID := testutil.GenReqID("PreClaimedIdnt")
 	identityKey := "vtx.identity." + identityID
 	seedDirectIdentity(t, ctx, conn, identityKey, "claimed", "")
-	seedClaimKeyAspect(t, ctx, conn, identityKey, "dummy-hash-value")
+	seedSpentClaimKeyAspect(t, ctx, conn, identityKey, "dummy-hash-value")
 
 	claimReqID := testutil.GenReqID("ClmAlrClClaim0")
 	claimEnv := &processor.OperationEnvelope{
@@ -306,24 +319,275 @@ func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"claimKey":"any-key","targetIdentityKey":"` + identityKey + `"}`),
 		AuthContext:   &processor.AuthContext{Target: consumerActorKey},
-		ContextHint: &processor.ContextHint{
-			Reads: []string{
-				identityKey,
-				identityKey + ".state",
-				identityKey + ".claimKey",
-			},
-		},
+		ContextHint:   identityceremony.ClaimContextHint(identityKey),
 	}
-	testutil.PublishOp(t, conn, claimEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claimEnv)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected", outcome)
+	}
+	assertGenericClaimRejection(t, reply)
 
+	// The counter is what proves the script actually RAN and took its own
+	// wrong-state branch. Without it a hydrate fault satisfies "rejected" just
+	// as well, and the assertion above would be the only thing standing
+	// between this test and a vacuous pass.
 	instance := claimInstance + "-alrcl"
 	count, ok := readClaimHealthCounter(t, ctx, conn, instance, "wrong-state")
 	if !ok {
-		t.Fatalf("claim-attempts.wrong-state not found")
+		t.Fatalf("claim-attempts.wrong-state not found — the script never reached its own gate")
 	}
 	if count < 1 {
 		t.Fatalf("wrong-state count = %d", count)
+	}
+}
+
+// assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
+// details map, and no outcome word anywhere in the message. Every claim
+// rejection cause must be indistinguishable through this surface.
+func assertGenericClaimRejection(t *testing.T, reply *processor.OperationReply) {
+	t.Helper()
+	if reply == nil || reply.Error == nil {
+		t.Fatalf("reply = %+v, want a rejection error", reply)
+	}
+	if reply.Error.Code != processor.ErrCodeClaimKeyInvalid {
+		// Details are printed because they are the payload that makes a
+		// divergent code an oracle: HydrationFailed carries `missingKey`, and
+		// the probed key coming back is the whole enumeration primitive.
+		t.Fatalf("error code = %q (details %+v), want %q — every claim rejection collapses to the one generic code",
+			reply.Error.Code, reply.Error.Details, processor.ErrCodeClaimKeyInvalid)
+	}
+	if len(reply.Error.Details) != 0 {
+		t.Fatalf("error details = %+v, want empty", reply.Error.Details)
+	}
+	for _, outcome := range []string{
+		"invalid-key", "no-target", "wrong-state", "flagged", "merged", "erased",
+		"credential-already-bound", "credential-not-provisioned",
+	} {
+		if strings.Contains(reply.Error.Message, outcome) {
+			t.Fatalf("error message %q leaks the outcome word %q", reply.Error.Message, outcome)
+		}
+	}
+}
+
+// TestClaimIdentity_ReClaimAfterRealClaim_GenericError drives the whole
+// ceremony — create, claim, re-claim — because the tombstone the re-claim
+// trips over is written by the first claim itself, not by a fixture. The
+// re-claim declares `.claimKey`, the first claim tombstoned it, and the aspect
+// is sensitive-classed. That triple must clear step 4 hydrate: the ceremony
+// owes the generic rejection its own script produces, never an internal error
+// raised before the script runs.
+func TestClaimIdentity_ReClaimAfterRealClaim_GenericError(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newClaimPipeline(t, ctx, conn, "reclm")
+
+	createReqID := testutil.GenReqID("ClmReclmCreate")
+	identityKey, claimKeyPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, createReqID)
+	hint := identityceremony.ClaimContextHint(identityKey)
+	hint.OptionalReads = append(hint.OptionalReads, credentialIndexKey(consumerActorKey))
+
+	claimEnv := func(reqID, submittedAt string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "ClaimIdentity",
+			Actor:         consumerActorKey,
+			SubmittedAt:   submittedAt,
+			Class:         "identity",
+			Payload:       json.RawMessage(`{"claimKey":"` + claimKeyPlaintext + `","targetIdentityKey":"` + identityKey + `"}`),
+			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+			ContextHint:   hint,
+		}
+	}
+
+	testutil.PublishOp(t, conn, claimEnv(testutil.GenReqID("ClmReclmFirst0"), "2026-05-22T10:01:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The tombstone RETAINS the prior document, so the spent hash is still
+	// sitting at the key the re-claim is about to declare. Assert the hazard
+	// rather than assume it: if the claim ever hard-deleted the aspect, the
+	// re-claim below would prove nothing about the tombstoned-read path.
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, identityKey+".claimKey")
+	if err != nil {
+		t.Fatalf("read %s.claimKey after the first claim: %v", identityKey, err)
+	}
+	var spent map[string]any
+	if err := json.Unmarshal(entry.Value, &spent); err != nil {
+		t.Fatalf("unmarshal spent claimKey: %v", err)
+	}
+	if deleted, _ := spent["isDeleted"].(bool); !deleted {
+		t.Fatalf("claimKey isDeleted = false after a successful claim; doc = %+v", spent)
+	}
+	if body, _ := spent["data"].(map[string]any); len(body) == 0 {
+		t.Fatalf("claimKey tombstone carries no body; the retained-document hazard this test rides is gone: %+v", spent)
+	}
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		claimEnv(testutil.GenReqID("ClmReclmSecond"), "2026-05-22T10:02:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("re-claim outcome = %q, want rejected", outcome)
+	}
+	assertGenericClaimRejection(t, reply)
+
+	instance := claimInstance + "-reclm"
+	if count, ok := readClaimHealthCounter(t, ctx, conn, instance, "wrong-state"); !ok || count < 1 {
+		t.Fatalf("claim-attempts.wrong-state = %d (found=%v) — the re-claim never reached the script's own gate", count, ok)
+	}
+}
+
+// TestClaimIdentity_RejectionCausesIndistinguishable is the anti-enumeration
+// residual: three structurally different rejection causes, one of them a
+// tombstoned-`.claimKey` read, answered with the identical wire shape. The
+// failure mode it guards is a cause that faults EARLIER in the pipeline than
+// its siblings and so renders a different code — which tells a caller which
+// cause it hit.
+func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newClaimPipeline(t, ctx, conn, "indst")
+
+	// A target that was never provisioned at all.
+	absentKey := "vtx.identity." + testutil.GenReqID("IndstAbsent000")
+
+	// A live unclaimed identity whose secret the caller does not hold.
+	wrongKeyKey := "vtx.identity." + testutil.GenReqID("IndstWrongKey0")
+	seedDirectIdentity(t, ctx, conn, wrongKeyKey, "unclaimed", "")
+	seedClaimKeyAspect(t, ctx, conn, wrongKeyKey, sha256HexOf("indistinguishable-real-secret"))
+
+	// A live unclaimed identity whose claimKey has already been spent.
+	spentKey := "vtx.identity." + testutil.GenReqID("IndstSpentKey0")
+	seedDirectIdentity(t, ctx, conn, spentKey, "unclaimed", "")
+	seedSpentClaimKeyAspect(t, ctx, conn, spentKey, sha256HexOf("indistinguishable-spent-secret"))
+
+	cases := []struct {
+		name    string
+		reqID   string
+		target  string
+		secret  string
+		outcome string
+	}{
+		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target"},
+		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key"},
+		{"spent-key", testutil.GenReqID("IndstSpentSbmt"), spentKey, "indistinguishable-spent-secret", "invalid-key"},
+		// A target that fails the Contract #1 grammar. Right prefix, so the
+		// script's own `startswith` guard would accept it and its `no-target`
+		// branch is what should render — but a MALFORMED key declared in a
+		// ContextHint is rejected by step 4 as InvalidReadKey before the
+		// script runs at all. It reaches the script's branch only because the
+		// shared builder declines to declare a key the grammar rejects.
+		{"malformed-target", testutil.GenReqID("IndstMalformed"), "vtx.identity.x", "irrelevant-secret", "no-target"},
+	}
+
+	var shapes []string
+	for _, tc := range cases {
+		env := &processor.OperationEnvelope{
+			RequestID:     tc.reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "ClaimIdentity",
+			Actor:         consumerActorKey,
+			SubmittedAt:   "2026-05-22T10:03:00Z",
+			Class:         "identity",
+			Payload:       json.RawMessage(`{"claimKey":"` + tc.secret + `","targetIdentityKey":"` + tc.target + `"}`),
+			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+			// Every case goes through the identical, shipped builder — the one
+			// every live dispatcher calls — including the absent and malformed
+			// targets. Hand-tailoring any arm's declaration would hide the very
+			// failure this test exists to catch: a submitter cannot know in
+			// advance which of its keys exist or parse, so the declaration it
+			// always sends is the only one worth testing.
+			ContextHint: identityceremony.ClaimContextHint(tc.target),
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
+		}
+		assertGenericClaimRejection(t, reply)
+		shapes = append(shapes, fmt.Sprintf("%s|%d", reply.Error.Code, len(reply.Error.Details)))
+
+		instance := claimInstance + "-indst"
+		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count < 1 {
+			t.Fatalf("%s: claim-attempts.%s = %d (found=%v) — the cause never reached the script's own gate, so the wire-shape match is vacuous",
+				tc.name, tc.outcome, count, ok)
+		}
+	}
+	for i := 1; i < len(shapes); i++ {
+		if shapes[i] != shapes[0] {
+			t.Fatalf("rejection shapes differ: %q vs %q (%v)", shapes[0], shapes[i], shapes)
+		}
+	}
+}
+
+// TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub isolates the script's
+// OWN tombstone guard (`claim_key_aspect ... isDeleted` → invalid-key) from the
+// Processor's scrub of a deleted sensitive body.
+//
+// The two defences are independent and both are load-bearing, but every other
+// spent-key vector conflates them: the scrub empties the body, so the guard
+// below it ("hash" not in data) refuses anyway and the tombstone clause could
+// be deleted with no test noticing. Here the aspect's class resolves to no
+// sensitive DDL, so the scrub does not run and the retained {hash} body
+// survives into the script intact — the shape a DDL-cache miss produces, the
+// same race step 6.5 refuses to guess at. The submitted secret is the CORRECT
+// one for that retained hash, so if the script consulted a spent key's body
+// the claim would be ACCEPTED.
+func TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newClaimPipeline(t, ctx, conn, "spentg")
+
+	identityKey := "vtx.identity." + testutil.GenReqID("SpentGuardIdnt")
+	seedDirectIdentity(t, ctx, conn, identityKey, "unclaimed", "")
+
+	const secret = "spent-guard-plaintext-secret-001"
+	tombstone := map[string]any{
+		// A class no aspectType DDL registers, so decryptSensitiveDoc resolves
+		// it to nothing and leaves the body untouched.
+		"class":     "claimKeyUnresolvedClass",
+		"vertexKey": identityKey,
+		"localName": "claimKey",
+		"isDeleted": true,
+		"data":      map[string]any{"hash": sha256HexOf(secret), "algo": "sha256"},
+	}
+	b, _ := json.Marshal(tombstone)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, identityKey+".claimKey", b); err != nil {
+		t.Fatalf("seed unscrubbed spent claimKey: %v", err)
+	}
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("SpentGuardClm0"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClaimIdentity",
+		Actor:         consumerActorKey,
+		SubmittedAt:   "2026-05-22T10:04:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"claimKey":"` + secret + `","targetIdentityKey":"` + identityKey + `"}`),
+		AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+		ContextHint:   identityceremony.ClaimContextHint(identityKey),
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a spent claim key must not be honoured even when its body survives", outcome)
+	}
+	assertGenericClaimRejection(t, reply)
+
+	// invalid-key, and specifically NOT wrong-state: the identity is still
+	// unclaimed, so the run genuinely descended past the state gates and the
+	// claimKey guard is the branch that fired.
+	instance := claimInstance + "-spentg"
+	if count, ok := readClaimHealthCounter(t, ctx, conn, instance, "invalid-key"); !ok || count < 1 {
+		t.Fatalf("claim-attempts.invalid-key = %d (found=%v) — the run never reached the claimKey guard", count, ok)
+	}
+	if count, ok := readClaimHealthCounter(t, ctx, conn, instance, "wrong-state"); ok && count > 0 {
+		t.Fatalf("claim-attempts.wrong-state = %d — the run stopped at a state gate, so it never exercised the claimKey guard", count)
+	}
+	// Nothing was bound: the refusal is a refusal, not a rejection reply over
+	// a committed batch.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, credentialIndexKey(consumerActorKey)); err == nil {
+		t.Fatalf("a credentialindex exists — the spent key was honoured")
+	}
+	stateAspect := readAspectData(t, ctx, conn, identityKey+".state")
+	if got, _ := stateAspect["value"].(string); got != "unclaimed" {
+		t.Fatalf("state = %q, want unclaimed", got)
 	}
 }
 

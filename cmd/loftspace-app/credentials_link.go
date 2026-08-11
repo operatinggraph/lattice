@@ -10,6 +10,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/identityceremony"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -141,19 +142,15 @@ func (s *server) handleCompleteCredentialLink(w http.ResponseWriter, r *http.Req
 		Class:         "identity",
 		Payload:       payload,
 		AuthContext:   &processor.AuthContext{Target: deviceKey},
-		ContextHint: &processor.ContextHint{
-			Reads: []string{targetKey, targetKey + ".state"},
-			// Absence-tolerant: an identity linking its FIRST extra credential
-			// has no .credentialBinding yet. The credentialindex dedup probe is
-			// deliberately NOT declared here — it is a class-(g) key that
-			// identity-domain's own derive_reads computes from the actor
-			// (Contract #2 §2.5), so declaring it would mean re-deriving, in a
-			// second language, a key the package already produces.
-			OptionalReads: []string{
-				targetKey + ".linkKey",
-				targetKey + ".credentialBinding",
-			},
-		},
+		// The link ceremony is NFR-S6-protected exactly as the claim is —
+		// fail_link reuses the "ClaimKeyInvalid: " prefix verbatim — and its
+		// scope=self gate binds authContext.target to this fresh device
+		// credential, never to payload.targetIdentityKey. Nothing upstream of
+		// the script constrains which identity a submitter names, so the
+		// declared disposition is the whole of what keeps "no such identity"
+		// from answering differently than "wrong secret". See
+		// identityceremony.CompleteCredentialLinkContextHint.
+		ContextHint: identityceremony.CompleteCredentialLinkContextHint(targetKey),
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
