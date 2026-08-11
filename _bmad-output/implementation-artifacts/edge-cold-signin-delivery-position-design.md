@@ -633,3 +633,20 @@ ways: the ACL grant and `DeleteStreamConsumer` are load-bearing and present; the
 cold-signin" dependency the design asserts on the orphan row is **not** load-bearing and is dropped (the
 orphan design's §7 refutes it). No frozen contract is touched — re-grepped `docs/contracts/*` for
 `lattice.sync` / `personal.hydrate` / `hydrationComplete` / `deltaEnvelope`: zero hits.
+
+### Build checkpoint (2026-08-11)
+
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-edge-coldsignin`
+(branch `fire/edge-cold-signin-position`).
+
+**Landing shape: each increment lands on `main` as it goes green** — not held to one merge. The invariant
+that keeps `main` correct at every boundary is that **each increment is behaviour-preserving at its zero
+value**: Fire 1's `SyncStartSeq` is inert until a host reads it; Fire 2's `StartSeq == 0` is `DeliverAll`
+verbatim, so the 9 production `RunDurableConsumer` callers that never set it are untouched; Fire 4's `Lens`
+on the marker degrades to today's first-marker gate when absent; Fire 3's browser host simply omits the
+field until it sends it. No boundary leaves a half-wired path.
+
+**Done:** Fire 1 — `personal.hydrate` returns the SYNC position (`6bdf9bcb`).
+
+**Next:** Fire 2 (the acceptance bar — Go host consumes it, cursor becomes the single resume authority,
+`Term` advances the cursor), then Fire 4 (one hydration marker per hydrate), then Fire 3 (browser parity).
