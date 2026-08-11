@@ -85,13 +85,34 @@ type DeltaSource interface {
 	// because the durable name is per (identity, device) and one node holds it
 	// at a time.
 	//
-	// NOT universally honored. The browser host's implementation
-	// (internal/edge/browser/jstransport.go) drops StartSeq and attaches at the
-	// position its durable already holds. That over-delivers rather than
-	// skipping, so a browser node stays correct — it just still walks the
-	// retained history a positioned node steps over. A caller must not read a
-	// non-zero StartSeq as a guarantee about what will arrive.
+	// Honored by both hosts. The browser host's implementation
+	// (internal/edge/browser/jstransport.go, internal/edge/browser/shell/shell.mjs)
+	// deletes its durable and recreates it positioned, mirroring the same
+	// server-forced delete-then-create this doc describes above.
 	RunDurableConsumer(ctx context.Context, cfg ConsumerConfig, h Handler) error
+}
+
+// AttachGate is the seam's OPTIONAL readiness step, for a transport whose host
+// must win the right to attach before it may open a feed. A DeltaSource that
+// also implements it has AwaitAttachReady awaited FIRST — before the caller
+// reads its cursor, checks it for a retention gap, or hydrates — so everything
+// the caller resolves about its position is resolved as the entitled attacher.
+//
+// It exists because those steps expire. A browser tab computes a position at
+// page boot and can then park on a Web Lock until the leader tab dies, which
+// may be days: the SYNC stream's retention window can pass the position it
+// named, and an out-of-range StartSeq is clamped UP — a silent skip
+// (ConsumerConfig.StartSeq, DurableConsumerConfig.StartSeq). The gap check that
+// would have caught it ran at boot and is not re-run.
+//
+// Implementing it is a transport's choice: the NATS-backed transport does not,
+// because a trusted Go host is entitled to attach the moment it dials, and a
+// caller must treat an absent implementation as "ready now".
+type AttachGate interface {
+	// AwaitAttachReady blocks until this transport's host may attach, or until
+	// ctx is cancelled. It must be idempotent: a host that also gates its own
+	// feed-opening call on the same readiness may await it more than once.
+	AwaitAttachReady(ctx context.Context) error
 }
 
 // ControlClient is the outbound half of the seam: request-reply against a

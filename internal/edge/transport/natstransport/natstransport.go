@@ -59,6 +59,20 @@ var (
 // durable name is per (identity, device) and one node holds it at a time. It is
 // also why that Manager takes its resume position from its own persisted cursor
 // rather than from the ack floor this delete discards.
+//
+// Ownership here is a design convention, not a server-enforced one at this
+// granularity: the per-connection grant scopes DELETE to one identity's own
+// durable family, but the device segment inside that family is the
+// CONNECT-time client name the caller supplies (internal/gateway/natsauth
+// PermissionsFor, sourced from req.ClientInformation.Name), not a value the
+// server attributes to any specific already-running node. A second connection
+// authenticated as the same identity can name any device segment and delete
+// that durable out from under whichever node holds it. A node whose durable
+// is deleted this way does not recover on its own: runDurableLoop
+// (internal/substrate/consumer.go) reopens the message ITERATOR on error, not
+// the consumer, so it spins at durableReconnect backoff against a name that
+// no longer exists until the process restarts and calls RunDurableConsumer
+// again.
 func (s *Conn) RunDurableConsumer(ctx context.Context, cfg transport.ConsumerConfig, h transport.Handler) error {
 	if err := s.conn.DeleteStreamConsumer(ctx, cfg.Stream, cfg.Durable); err != nil {
 		return fmt.Errorf("natstransport: reposition durable %q on %q to sequence %d: %w",

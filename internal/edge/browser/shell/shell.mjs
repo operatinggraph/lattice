@@ -10,7 +10,7 @@
 // `createSyncCore` is the object the wasm host's jsTransport seam calls out to
 // (internal/edge/browser/jstransport.go):
 //
-//	startConsumer({stream, durable, filterSubject}) -> Promise<void>
+//	startConsumer({stream, durable, filterSubject, startSeq}) -> Promise<void>
 //	stopConsumer()                                  -> Promise<void>
 //	request(subject, Uint8Array, actor)             -> Promise<Uint8Array>
 //
@@ -27,6 +27,10 @@ import {
   jetstream,
   jetstreamManager,
   AckPolicy,
+  DeliverPolicy,
+  JetStreamApiCodes,
+  JetStreamApiError,
+  PermissionViolationError,
 } from "./nats.js.mjs";
 import { electLeader } from "./leader.mjs";
 
@@ -44,6 +48,15 @@ const controlTimeoutMs = 15_000;
 // path). 30 minutes is comfortably longer than any real reconnect blip.
 const defaultInactiveThresholdMs = 30 * 60 * 1_000;
 
+// deleteAttempts bounds startConsumer's durable-delete retry, and
+// deleteRetryBackoffMs is the pause before the first retry, doubled each time.
+// Three attempts against the vendored client's 5s API timeout cap the delete
+// phase of an attach at roughly 16s — long enough to ride out a blip on a host
+// that gets one attach per page, short enough that a genuinely unreachable
+// control plane surfaces rather than hangs.
+const deleteAttempts = 3;
+const deleteRetryBackoffMs = 150;
+
 // createSyncCore opens one WebSocket connection for one identity+device and
 // exposes the four transport methods the wasm host's jsTransport calls. It owns
 // no leader election and no rendering — createShell adds those.
@@ -56,6 +69,13 @@ const defaultInactiveThresholdMs = 30 * 60 * 1_000;
 //                     (re)connect so a refreshed token survives a reconnect
 //   inactiveThresholdMs  optional override for the durable's InactiveThreshold
 //   logger            optional {warn, debug} sink (defaults to console)
+//   connectImpl, jetstreamManagerImpl, jetstreamImpl
+//                     optional overrides for the vendored wsconnect /
+//                     jetstreamManager / jetstream functions, each defaulting
+//                     to the real one. The injection seam a unit vector uses
+//                     to drive startConsumer's delete/create wire calls
+//                     against a fake JetStream manager+client, with no
+//                     WebSocket (shell.test.mjs).
 //
 // The pushed-delta target (`deliver`) is set AFTER construction via
 // `core.deliver = fn`, because the wasm host resolves it (`api.deliver`) only
@@ -71,6 +91,9 @@ export function createSyncCore(config) {
     getToken,
     inactiveThresholdMs = defaultInactiveThresholdMs,
     logger = console,
+    connectImpl = wsconnect,
+    jetstreamManagerImpl = jetstreamManager,
+    jetstreamImpl = jetstream,
   } = config;
 
   if (!url) throw new Error("edge/shell: url is required");
@@ -92,7 +115,10 @@ export function createSyncCore(config) {
     // than opening two connections.
     connecting: null,
     // The current consume iterator, so stopConsumer can end the pull loop
-    // without deleting the durable (the ack floor must survive for resume).
+    // without deleting the durable. The durable itself is left in place —
+    // the resume position lives in the wasm host's persisted cursor, not in
+    // the durable's ack floor, so the next startConsumer() deletes and
+    // recreates it positioned at whatever the caller names then.
     consumeIter: null,
     // Set by the page to the wasm host's api.deliver once start() resolves.
     deliver: null,
@@ -107,7 +133,7 @@ export function createSyncCore(config) {
     if (state.nc) return Promise.resolve(state.nc);
     if (state.connecting) return state.connecting;
     state.connecting = (async () => {
-      const nc = await wsconnect({
+      const nc = await connectImpl({
         servers: url,
         name: deviceId,
         inboxPrefix,
@@ -122,27 +148,84 @@ export function createSyncCore(config) {
       // this client speaking exactly the subjects the grant allows, at parity
       // with nats.go. (The consumer-create wire-form parity test pins this.)
       const jsOpts = { checkAPI: false };
-      state.jsm = await jetstreamManager(nc, jsOpts);
-      state.js = jetstream(nc, jsOpts);
+      state.jsm = await jetstreamManagerImpl(nc, jsOpts);
+      state.js = jetstreamImpl(nc, jsOpts);
       state.nc = nc;
       return nc;
     })();
     return state.connecting;
   }
 
-  async function startConsumer({ stream, durable, filterSubject }) {
+  // deleteDurable removes the durable ahead of every create, tolerating the two
+  // answers that are not a failure to delete: "consumer not found" (there was
+  // nothing to remove — the same idempotence substrate.DeleteStreamConsumer
+  // keeps) and a transient transport failure, which is retried.
+  //
+  // The retry is what the browser host's shape demands. It runs ONE Run per page
+  // lifetime with no restart loop (the Go host retries with capped backoff in
+  // cmd/facet/engine.go), and the vendored client's JetStream API request
+  // carries a 5s timeout with no retry of its own (nats.js.mjs:9620, :9679), so
+  // a single API timeout on this delete would otherwise end sync for the whole
+  // page until the user reloads.
+  //
+  // Classification is by the vendored client's own error types, never a message
+  // substring. A JetStreamApiError or a PermissionViolationError means the
+  // server ANSWERED — a rejection or an ACL denial is a verdict, not a blip, so
+  // it propagates on the first attempt and the attach fails loudly. Anything
+  // else (the API timeout, a dropped socket) never reached a verdict.
+  async function deleteDurable(stream, durable) {
+    let backoff = deleteRetryBackoffMs;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await state.jsm.consumers.delete(stream, durable);
+        return;
+      } catch (err) {
+        if (err instanceof JetStreamApiError) {
+          if (err.code === JetStreamApiCodes.ConsumerNotFound) return;
+          throw err;
+        }
+        if (err instanceof PermissionViolationError) throw err;
+        if (attempt >= deleteAttempts) throw err;
+        logger.warn?.(
+          "edge/shell: durable delete failed, retrying",
+          err?.message ?? err,
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+        backoff *= 2;
+      }
+    }
+  }
+
+  async function startConsumer({ stream, durable, filterSubject, startSeq }) {
     await connect();
-    // Idempotent by durable name: create if absent, no-op-update if present.
-    // The wire subject this emits is the ACL-granted filtered-create form
-    // ($JS.API.CONSUMER.CREATE.SYNC.<durable>.<filter>); a client emitting a
-    // different form fails closed here, which is exactly what the parity test
-    // pins (edge-browser-node-design.md §2.3).
-    await state.jsm.consumers.add(stream, {
+
+    // Delete the durable before every create, whatever startSeq says — the
+    // same seam the Go host's natstransport.RunDurableConsumer implements and
+    // for the same reason: the server refuses to change an existing
+    // consumer's DeliverPolicy or OptStartSeq in either direction
+    // (nats-server 2.14 server/consumer.go:2435,:2438), so a conditional
+    // delete would leave a node that resolves to startSeq === 0 unable to
+    // attach at all once a positioned durable already exists under this name.
+    await deleteDurable(stream, durable);
+
+    // Idempotent by durable name: the delete above means this is always a
+    // create. The wire subject this emits is the ACL-granted filtered-create
+    // form ($JS.API.CONSUMER.CREATE.SYNC.<durable>.<filter>); a client
+    // emitting a different form fails closed here, which is exactly what the
+    // parity test pins (edge-browser-node-design.md §2.3). Adding
+    // deliver_policy/opt_start_seq to the body does not change that wire
+    // subject — only the durable name and filter subject appear in it.
+    const consumerCfg = {
       durable_name: durable,
       filter_subject: filterSubject,
       ack_policy: AckPolicy.Explicit,
       inactive_threshold: inactiveThresholdNs,
-    });
+    };
+    if (startSeq > 0) {
+      consumerCfg.deliver_policy = DeliverPolicy.StartSequence;
+      consumerCfg.opt_start_seq = startSeq;
+    }
+    await state.jsm.consumers.add(stream, consumerCfg);
 
     const consumer = await state.js.consumers.get(stream, durable);
     const iter = await consumer.consume();
@@ -198,8 +281,11 @@ export function createSyncCore(config) {
     const iter = state.consumeIter;
     state.consumeIter = null;
     if (iter) {
-      // Stop pulling but leave the durable on the server: its ack floor is the
-      // resume point (edge-browser-node-design.md §3.2's "brief disconnect").
+      // Stop pulling but leave the durable on the server; nothing here reads
+      // its ack floor. The wasm host's persisted cursor is the resume point
+      // (edge-cold-signin-delivery-position-design.md §3.4), and startConsumer
+      // deletes-then-recreates the durable positioned at that cursor on the
+      // next attach regardless of what this durable's floor holds.
       await iter.stop();
     }
   }
@@ -318,11 +404,14 @@ export function createShell(config) {
     };
   }
 
-  // leadership resolves once this tab holds the sync lease. A follower's
-  // startConsumer awaits it, so only the leader opens a durable. The handle is
-  // kept so an explicit close() (e.g. sign-out in a still-open tab) releases the
-  // lease and hands leadership to a follower, rather than waiting for the tab to
-  // close.
+  // leadership resolves once this tab holds the sync lease. Two callers await
+  // it: `awaitLeadership`, which the wasm host awaits before it resolves
+  // anything about its delivery position (jstransport.go's AwaitAttachReady —
+  // a position computed at page boot can be days stale by the time a follower
+  // is promoted), and `startConsumer`, so no path opens a durable from a
+  // follower even if a host skips the gate. The handle is kept so an explicit
+  // close() (e.g. sign-out in a still-open tab) releases the lease and hands
+  // leadership to a follower, rather than waiting for the tab to close.
   let leadership = null;
   let leaderHandle = null;
   function ensureLeadership() {
@@ -349,9 +438,9 @@ export function createShell(config) {
       // onAcquire → resolve() above, and `settled` resolves only when the lease
       // is *lost* (the callback returns) or rejects if the lock request itself
       // fails. Watch it for that failure so a broken election surfaces instead
-      // of hanging startConsumer forever. (A `.catch` on the handle object was
-      // a no-such-method TypeError that rejected this promise on every Web-Locks
-      // host — the bug this replaces.)
+      // of hanging startConsumer forever. `settled` is the only awaitable here —
+      // the handle itself has no `.catch`, so watching the handle would throw a
+      // TypeError on every Web-Locks host rather than report the failure.
       leaderHandle.settled.catch((err) =>
         logger.warn?.("edge/shell: leader election failed", err?.message ?? err));
     });
@@ -360,6 +449,12 @@ export function createShell(config) {
 
   return {
     connect: () => core.connect(),
+    // awaitLeadership is the transport seam's optional readiness step
+    // (internal/edge/transport's AttachGate, reached through jstransport.go):
+    // it resolves when this tab is entitled to attach. ensureLeadership
+    // memoizes, so awaiting it here and again in startConsumer runs one
+    // election.
+    awaitLeadership: () => ensureLeadership(),
     startConsumer: async (cfg) => {
       await ensureLeadership();
       return core.startConsumer(cfg);

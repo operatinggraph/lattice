@@ -30,8 +30,8 @@ npm init -y
 npm i @nats-io/nats-core@3.4.0 @nats-io/jetstream@3.4.0 esbuild@0.24.2
 
 cat > entry.mjs <<'EOF'
-export { wsconnect, tokenAuthenticator, headers } from "@nats-io/nats-core";
-export { jetstream, jetstreamManager, AckPolicy } from "@nats-io/jetstream";
+export { wsconnect, tokenAuthenticator, headers, PermissionViolationError } from "@nats-io/nats-core";
+export { jetstream, jetstreamManager, AckPolicy, DeliverPolicy, JetStreamApiCodes, JetStreamApiError } from "@nats-io/jetstream";
 EOF
 
 BANNER='// Vendored nats.js browser client — DO NOT EDIT BY HAND.
@@ -45,9 +45,21 @@ BANNER='// Vendored nats.js browser client — DO NOT EDIT BY HAND.
   --outfile=<repo>/internal/edge/browser/shell/nats.js.mjs
 ```
 
-The only exports the shell (and its parity test) reach are the six named in
+The only exports the shell (and its parity test) reach are the ten named in
 `entry.mjs`. `esbuild` is deterministic for a given input, so a regeneration on
 the same pins reproduces the file byte-for-byte apart from the banner.
+`DeliverPolicy`, `JetStreamApiCodes`, and `JetStreamApiError` back the
+delete-then-create reposition (`shell.mjs` `startConsumer`): `DeliverPolicy`
+names the `by_start_sequence` policy, and `JetStreamApiCodes.ConsumerNotFound`
++ `instanceof JetStreamApiError` let the delete tolerate a not-found consumer
+by the server's own structured error code rather than a message substring.
+`PermissionViolationError` is the structured signal for a genuine ACL denial —
+`{operation, subject}` on the exact subject a call tried — as opposed to any
+other failure (a dead connection, a bad token). Two callers read it: the parity
+driver (`testdata/consumer_create_driver.mjs`), whose denial verdicts must not
+pass on a failure they never observed, and `shell.mjs`'s durable delete, which
+retries a failure that never reached a verdict but propagates a denial on the
+first attempt.
 
 ## What proves it still works
 

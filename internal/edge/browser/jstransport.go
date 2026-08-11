@@ -24,14 +24,17 @@ import (
 //
 // The shell object must supply:
 //
-//	startConsumer({stream, durable, filterSubject}) -> Promise<void>
+//	startConsumer({stream, durable, filterSubject, startSeq}) -> Promise<void>
 //	stopConsumer()                                  -> Promise<void> (optional)
+//	awaitLeadership()                               -> Promise<void> (optional)
 //	request(subject, Uint8Array, actor)             -> Promise<Uint8Array>
 //
 // Everything the shell needs to know beyond that — the durable's
 // InactiveThreshold, leader election, token-refresh reconnect — is transport
 // policy this seam deliberately does not model: it is the shell's to own, and
-// modelling it here would put browser-only concerns inside the semantics.
+// modelling it here would put browser-only concerns inside the semantics. What
+// the seam DOES model is the moment leadership is settled, because the engine's
+// position is only meaningful from then on (transport.AttachGate).
 type jsTransport struct {
 	shell js.Value
 
@@ -41,6 +44,7 @@ type jsTransport struct {
 
 var _ transport.DeltaSource = (*jsTransport)(nil)
 var _ transport.ControlClient = (*jsTransport)(nil)
+var _ transport.AttachGate = (*jsTransport)(nil)
 
 func newJSTransport(shell js.Value) (*jsTransport, error) {
 	for _, m := range []string{"startConsumer", "request"} {
@@ -49,6 +53,26 @@ func newJSTransport(shell js.Value) (*jsTransport, error) {
 		}
 	}
 	return &jsTransport{shell: shell}, nil
+}
+
+// AwaitAttachReady blocks until this tab holds the shell's sync leadership, so
+// the engine resolves its cursor, its retention-gap check and its delivery
+// floor as the leader rather than at page boot. A follower tab waits here for as
+// long as the leader lives; the position it would have computed at boot could be
+// arbitrarily stale by the time it attaches, and a stale position is the silent
+// skip the cursor exists to prevent (transport.AttachGate).
+//
+// The shell function is optional, like stopConsumer: a shell that runs no
+// election — a single-context host, or a test double — is entitled to attach
+// immediately.
+func (t *jsTransport) AwaitAttachReady(ctx context.Context) error {
+	if t.shell.Get("awaitLeadership").Type() != js.TypeFunction {
+		return nil
+	}
+	if _, err := await(ctx, t.shell.Call("awaitLeadership")); err != nil {
+		return fmt.Errorf("edge/browser: await sync leadership: %w", err)
+	}
+	return nil
 }
 
 // RunDurableConsumer asks the shell to start the durable feed named by cfg,
@@ -72,6 +96,9 @@ func (t *jsTransport) RunDurableConsumer(ctx context.Context, cfg transport.Cons
 		"stream":        cfg.Stream,
 		"durable":       cfg.Durable,
 		"filterSubject": cfg.FilterSubject,
+		// syscall/js converts this uint64 to a JS number (float64), exact for
+		// any value below 2^53 — a stream sequence never approaches that.
+		"startSeq": cfg.StartSeq,
 	}
 	if _, err := await(ctx, t.shell.Call("startConsumer", arg)); err != nil {
 		return fmt.Errorf("edge/browser: start consumer %q: %w", cfg.Durable, err)

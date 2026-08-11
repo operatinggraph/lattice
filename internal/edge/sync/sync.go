@@ -192,7 +192,7 @@ type Manager struct {
 //	| a delivered message Acks or Terms | − its sequence | raised to it | raised to the floor once the store write lands |
 //	| an Ack whose cursor write fails (returned as Nak) | + its sequence again | — | unchanged — the write is retried by a later resolve |
 //	| a Term whose cursor write fails | — | raised | unchanged — the server will not redeliver, so the position is passed regardless |
-//	| the iterator reopens mid-attach (transient receive error) | carried | carried | carried — unacked messages redeliver into the same session |
+//	| the iterator reopens mid-attach (transient receive error) | carried | carried | carried — the abandoned iterator is drained through this handler first (internal/substrate's drainBuffered), so every message the server already delivered resolves into this same floor before higher sequences arrive on the reopened one |
 //	| the process crashes | discarded | discarded | whatever last landed in the store, which is by construction at or below every hole |
 //
 // The floor is `highest`, capped at one below the lowest pending sequence, and
@@ -286,11 +286,11 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 		prefix = defaultSubjectPrefix
 	}
 	return &Manager{
-		tr:     tr,
-		store:  st,
-		cfg:    cfg,
-		stream: stream,
-		prefix: prefix,
+		tr:      tr,
+		store:   st,
+		cfg:     cfg,
+		stream:  stream,
+		prefix:  prefix,
 		durable: DurableName(cfg.IdentityID, cfg.DeviceID),
 		logger:  logger,
 	}, nil
@@ -304,7 +304,21 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 // the consumer starts where this node's knowledge ends instead of at the
 // subject's retained beginning. Blocks until ctx is done; returns the durable
 // consumer's terminal error, if any.
+//
+// Nothing about the position is resolved until the transport says its host may
+// attach (transport.AttachGate — a no-op for a transport that does not
+// implement it). The gap check, the hydrate it may trigger and the delivery
+// floor all read state that goes stale while a host waits for its turn: a
+// browser tab can compute a position at page boot and then park on the Web Lock
+// behind another tab for days, by which time the SYNC stream's retention window
+// may have passed that position — which JetStream clamps UP, skipping the span
+// in between, exactly the direction the cursor exists to prevent.
 func (m *Manager) Run(ctx context.Context) error {
+	if gate, ok := m.tr.(transport.AttachGate); ok {
+		if err := gate.AwaitAttachReady(ctx); err != nil {
+			return fmt.Errorf("edge/sync: await attach readiness: %w", err)
+		}
+	}
 	startSeq, err := m.ensureFresh(ctx)
 	if err != nil {
 		return fmt.Errorf("edge/sync: ensure fresh: %w", err)

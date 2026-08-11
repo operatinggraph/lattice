@@ -2,16 +2,35 @@ package substrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // durableReconnect is the delay before reopening the message iterator after a
 // transient error in RunDurableConsumer.
 const durableReconnect = 5 * time.Second
+
+const (
+	// drainBufferedIdle bounds how long the reconnect-path buffer drain waits
+	// for the next already-delivered message. A drained iterator pulls nothing
+	// more, so a buffer that goes quiet for this long is an empty one.
+	drainBufferedIdle = 2 * time.Second
+	// drainBufferedBudget caps the whole reconnect-path buffer drain, so a
+	// wedged link delays the reconnect by a bounded amount rather than parking
+	// the consumer indefinitely.
+	drainBufferedBudget = 30 * time.Second
+	// drainBufferedMaxErrs is how many errors the drain rides out back-to-back
+	// before giving up on the buffer. Each one may be masking a message that was
+	// ready to be handed back, so a few are worth absorbing; a run of them with
+	// no message in between is a link that will not deliver, and spinning
+	// through the whole budget against it buys nothing.
+	drainBufferedMaxErrs = 8
+)
 
 // Decision is the caller's verdict on a delivered message, returned from a
 // HandlerFunc. It determines the JetStream acknowledgement applied after the
@@ -252,6 +271,19 @@ func (c *Conn) runDurableLoop(
 // drainDurable reads messages until ctx is cancelled or the iterator returns an
 // error. A watcher stops the iterator on ctx.Done so the blocking Next()
 // unblocks promptly for a clean shutdown.
+//
+// The two exits owe the client's prefetch buffer different things. Stop()
+// discards everything sitting in it without a Decision (nats.go v1.52.0
+// jetstream/pull.go:768 sets `closed` but not `draining`, and Next() at :620
+// refuses to hand a buffered message back in that state). That is right on ctx
+// cancellation — the loop is going away, so nothing downstream can record
+// progress past the discarded messages. It is wrong on the reconnect path,
+// where runDurableLoop reopens the iterator on the SAME consumer and keeps
+// handling higher sequences: the server counts a buffered message as delivered
+// and holds it ack-pending until AckWait, so a handler that tracks which
+// delivered sequences are still unresolved never learns about it and is free to
+// record progress over the top of it. The reconnect path therefore hands the
+// buffer to the handler first.
 func (c *Conn) drainDurable(
 	ctx context.Context,
 	mc jetstream.MessagesContext,
@@ -281,8 +313,85 @@ func (c *Conn) drainDurable(
 			}
 			logger.Error("substrate: durable consumer: receive error, will reconnect",
 				"durable", durable, "error", err)
+			c.drainBuffered(ctx, mc, durable, redeliveryDelay, logger, handler)
 			return
 		}
+		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, logger)
+	}
+}
+
+// drainBuffered hands every message already delivered into the client's
+// prefetch buffer to handler before the iterator is abandoned, so no
+// server-delivered message leaves the client without a Decision.
+//
+// Drain() is what makes the buffer readable: it marks the subscription draining
+// as well as closed, so Next() keeps returning buffered messages and reports
+// ErrMsgIteratorClosed only once the buffer is empty and the message channel has
+// closed (nats.go v1.52.0 jetstream/pull.go:786, :620, :646). It is also why the
+// caller's deferred Stop() is a harmless no-op afterwards: both guard on the
+// same closed CompareAndSwap(0, 1).
+//
+// Three bounds keep the drain from outliving the reconnect it precedes, because
+// this runs precisely when the link is unhealthy. A Decision's ack is a
+// fire-and-forget publish that reports an error rather than blocking on a closed,
+// draining or reconnect-buffer-full connection (nats.go v1.52.0 nats.go:4448,
+// :4453, :4468), but a half-open socket can still stall one write up to the
+// connection's FlusherTimeout. So each Next waits at most drainBufferedIdle, a
+// run of drainBufferedMaxErrs errors with no message between them ends the
+// drain, and the whole thing is capped at drainBufferedBudget.
+func (c *Conn) drainBuffered(
+	ctx context.Context,
+	mc jetstream.MessagesContext,
+	durable string,
+	redeliveryDelay time.Duration,
+	logger *slog.Logger,
+	handler HandlerFunc,
+) {
+	mc.Drain()
+	deadline := time.Now().Add(drainBufferedBudget)
+	drained, consecutiveErrs := 0, 0
+	report := func(reason string) {
+		if drained > 0 {
+			logger.Info("substrate: durable consumer: drained the prefetch buffer before reconnecting",
+				"durable", durable, "messages", drained, "reason", reason)
+		}
+	}
+	for {
+		if ctx.Err() != nil {
+			report("shutdown")
+			return
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			logger.Warn("substrate: durable consumer: prefetch-buffer drain budget exhausted",
+				"durable", durable, "messages", drained)
+			return
+		}
+		wait = min(wait, drainBufferedIdle)
+		msg, err := mc.Next(jetstream.NextMaxWait(wait))
+		if err != nil {
+			switch {
+			case errors.Is(err, jetstream.ErrMsgIteratorClosed):
+				report("buffer empty")
+			case errors.Is(err, nats.ErrTimeout):
+				report("buffer idle")
+			default:
+				// Next selects between the message channel and the error
+				// channel, so an error can win the race with a message that is
+				// ready to be handed back. Keep draining while a few of those
+				// are all that arrives; the idle wait above is what decides the
+				// buffer is empty.
+				consecutiveErrs++
+				if consecutiveErrs < drainBufferedMaxErrs {
+					continue
+				}
+				logger.Warn("substrate: durable consumer: prefetch-buffer drain abandoned after repeated errors",
+					"durable", durable, "messages", drained, "error", err)
+			}
+			return
+		}
+		consecutiveErrs = 0
+		drained++
 		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, logger)
 	}
 }

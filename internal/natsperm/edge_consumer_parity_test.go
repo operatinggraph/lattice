@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,7 +69,9 @@ func driverPath(t *testing.T) string {
 // runDriver runs the Node driver once and returns its final stdout line (the
 // machine-readable verdict). A non-zero exit is reported with stderr, since the
 // driver exits non-zero exactly when the observed outcome contradicts MODE.
-func runDriver(t *testing.T, node, driver, wsURL, token, identity, device, stream, filter, mode string) (string, bool) {
+// extraEnv appends further KEY=VALUE pairs (e.g. DURABLE, STARTSEQ) the driver
+// reads as overrides — see consumer_create_driver.mjs's env doc.
+func runDriver(t *testing.T, node, driver, wsURL, token, identity, device, stream, filter, mode string, extraEnv ...string) (string, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -83,6 +86,7 @@ func runDriver(t *testing.T, node, driver, wsURL, token, identity, device, strea
 		"FILTER="+filter,
 		"MODE="+mode,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -159,14 +163,87 @@ func TestEdgeConsumerCreateWireFormParity(t *testing.T) {
 	// positive could pass vacuously on a server that grants everything — this
 	// proves the grant is the thing being satisfied, and that it is the FILTER
 	// (the identity boundary) the create form is pinned to.
+	//
+	// The verdict is asserted against the EXACT subject the driver expected to
+	// be denied, not merely the CREATE_DENIED prefix: the driver reports that
+	// prefix only when the vendored client's PermissionViolationError names
+	// this precise subject (consumer_create_driver.mjs's isPermissionDenial),
+	// so a driver that can't reach the server at all — a dead WS_URL, a bad
+	// TOKEN — reports ERROR here and fails this assertion instead of passing
+	// on an outcome it never actually observed.
 	t.Run("cross-identity filter create is denied", func(t *testing.T) {
 		identity := nanoID(t)
 		other := nanoID(t)
 		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
 		crossFilter := "lattice.sync.user." + other
+		durable := "edge-sync-" + identity + "-" + device
+		wantSubject := fmt.Sprintf("$JS.API.CONSUMER.CREATE.%s.%s.%s", syncStream, durable, crossFilter)
 		line, ok := runDriver(t, node, driver, wsURL, tok, identity, device, syncStream, crossFilter, "create-denied")
-		if !ok || !strings.HasPrefix(line, "CREATE_DENIED") {
-			t.Fatalf("cross-identity filter: want CREATE_DENIED, got %q (ok=%v)", line, ok)
+		if !ok || line != "CREATE_DENIED "+wantSubject {
+			t.Fatalf("cross-identity filter: want %q, got %q (ok=%v)", "CREATE_DENIED "+wantSubject, line, ok)
+		}
+	})
+
+	// Positive, the first of Fire 3's two new vectors (edge-cold-signin-
+	// delivery-position-design.md §6 Fire 3): a positioned create
+	// (deliver_policy=by_start_sequence + opt_start_seq) emits the SAME
+	// granted subject an unpositioned create does — this proves adding those
+	// two config fields does not change the wire form the grant pins, which
+	// "granted filtered-create form succeeds" above pins for the unpositioned
+	// shape.
+	t.Run("positioned create succeeds", func(t *testing.T) {
+		identity := nanoID(t)
+		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
+		filter := "lattice.sync.user." + identity
+		line, ok := runDriver(t, node, driver, wsURL, tok, identity, device, syncStream, filter, "create-positioned")
+		if !ok || !strings.HasPrefix(line, "CREATE_OK") {
+			t.Fatalf("positioned create: want CREATE_OK, got %q", line)
+		}
+	})
+
+	// Positive, the second new vector: DELETE.SYNC.<durable> granted against
+	// a REAL consumer, not only a not-found one (every startConsumer call
+	// deletes first, so the positive vectors above already exercise
+	// delete-when-not-found for free). The driver attaches once, detaches,
+	// then repositions on the SAME durable — self-verifying, because a
+	// server that never saw the delete would reject the changed
+	// DeliverPolicy outright (nats-server 2.14 server/consumer.go:2435) and
+	// this would report CREATE_ERROR, not REPOSITIONED.
+	t.Run("delete against a real consumer succeeds (reposition)", func(t *testing.T) {
+		identity := nanoID(t)
+		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
+		filter := "lattice.sync.user." + identity
+		line, ok := runDriver(t, node, driver, wsURL, tok, identity, device, syncStream, filter, "delete")
+		if !ok || !strings.HasPrefix(line, "REPOSITIONED") {
+			t.Fatalf("reposition: want REPOSITIONED, got %q", line)
+		}
+	})
+
+	// Negative control for the delete vector, proven only after the positive
+	// above: a delete targeting a durable name outside this token's grant (a
+	// different identity's) is denied, the same identity-boundary shape
+	// "cross-identity filter create is denied" pins for create.
+	//
+	// "delete-denied" mode calls jsm.consumers.delete directly (no create
+	// anywhere in the call) specifically so this vector cannot pass for the
+	// wrong reason: overriding DURABLE alone puts BOTH verbs outside the
+	// grant, so a mode driving the whole startConsumer could not tell which
+	// one was denied — a shell.mjs regression that widened the not-found
+	// tolerance into a swallow-all would still "deny" on the create and this
+	// would pass without ever proving the delete itself is guarded. Asserting
+	// the exact subject closes the same wrong-reason gap create-denied above
+	// closes.
+	t.Run("cross-identity delete is denied", func(t *testing.T) {
+		identity := nanoID(t)
+		other := nanoID(t)
+		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
+		filter := "lattice.sync.user." + identity
+		crossDurable := "edge-sync-" + other + "-" + device
+		wantSubject := fmt.Sprintf("$JS.API.CONSUMER.DELETE.%s.%s", syncStream, crossDurable)
+		line, ok := runDriver(t, node, driver, wsURL, tok, identity, device, syncStream, filter, "delete-denied",
+			"DURABLE="+crossDurable)
+		if !ok || line != "DELETE_DENIED "+wantSubject {
+			t.Fatalf("cross-identity delete: want %q, got %q (ok=%v)", "DELETE_DENIED "+wantSubject, line, ok)
 		}
 	})
 }

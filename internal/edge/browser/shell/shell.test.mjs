@@ -14,7 +14,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createShell } from "./shell.mjs";
+import { createShell, createSyncCore } from "./shell.mjs";
+import { JetStreamApiError, JetStreamApiCodes, PermissionViolationError } from "./nats.js.mjs";
 
 // FakeLockManager reproduces the one-relevant Web Locks guarantee: for a given
 // name, at most one request's callback runs at a time; the next queued callback
@@ -108,6 +109,82 @@ async function flush() {
   await Promise.resolve();
 }
 
+// makeFakeConsumeIter models the shape createSyncCore stores as
+// state.consumeIter: async-iterable (empty — these vectors only assert what
+// startConsumer sent to jsm/js before the pull loop begins) plus a no-op
+// stop() matching the real ConsumerMessages the shell calls in stopConsumer.
+function makeFakeConsumeIter() {
+  return {
+    stop: async () => {},
+    [Symbol.asyncIterator]() {
+      return { next: async () => ({ done: true, value: undefined }) };
+    },
+  };
+}
+
+// notFoundError constructs the vendored client's own not-found signal:
+// jsm.consumers.delete rejects with a JetStreamApiError whose `code` getter
+// returns the server's structured err_code (nats.js.mjs:9558-9582), not a
+// message the shell would have to substring-match.
+function notFoundError() {
+  return new JetStreamApiError({
+    err_code: JetStreamApiCodes.ConsumerNotFound,
+    description: "consumer not found",
+    code: 404,
+  });
+}
+
+// makeFakeJetStream fakes the two objects createSyncCore.connect() stores as
+// state.jsm/state.js, driven through the connectImpl/jetstreamManagerImpl/
+// jetstreamImpl injection seam so a vector can call createSyncCore's real
+// startConsumer with no WebSocket. jsm.consumers.{delete,add} record the wire
+// calls in arrival order so a vector can pin delete-before-create; js's
+// consumers.get(...).consume() returns an inert iterator. deleteThrowsFirst
+// rejects the leading delete attempts from its list and lets the next one
+// through, so a vector can drive the retry; deleteThrows rejects every attempt.
+function makeFakeJetStream({ deleteThrows, deleteThrowsFirst = [] } = {}) {
+  const calls = { order: [], deleteArgs: null, addArgs: null, deleteAttempts: 0 };
+  return {
+    calls,
+    connectImpl: async () => ({}),
+    jetstreamManagerImpl: async () => ({
+      consumers: {
+        delete: async (stream, durable) => {
+          calls.order.push("delete");
+          calls.deleteArgs = { stream, durable };
+          calls.deleteAttempts++;
+          if (calls.deleteAttempts <= deleteThrowsFirst.length) {
+            throw deleteThrowsFirst[calls.deleteAttempts - 1];
+          }
+          if (deleteThrows) throw deleteThrows;
+        },
+        add: async (stream, cfg) => {
+          calls.order.push("add");
+          calls.addArgs = { stream, cfg };
+        },
+      },
+    }),
+    jetstreamImpl: () => ({
+      consumers: {
+        get: async () => ({ consume: async () => makeFakeConsumeIter() }),
+      },
+    }),
+  };
+}
+
+function newFakeSyncCore(fake, overrides = {}) {
+  return createSyncCore({
+    url: "ws://test",
+    identityId: "U",
+    deviceId: "D",
+    getToken: () => "token",
+    connectImpl: fake.connectImpl,
+    jetstreamManagerImpl: fake.jetstreamManagerImpl,
+    jetstreamImpl: fake.jetstreamImpl,
+    ...overrides,
+  });
+}
+
 const consumerCfg = { stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U" };
 
 test("the leader opens exactly one consumer (regression: the .catch election bug)", async () => {
@@ -120,9 +197,10 @@ test("the leader opens exactly one consumer (regression: the .catch election bug
     createCore: () => core,
   });
 
-  // Before the fix this rejected: electLeader returns a handle with no `.catch`,
-  // so ensureLeadership's promise rejected with a TypeError and startConsumer
-  // threw on every Web-Locks host.
+  // Pins that ensureLeadership watches `settled` rather than the handle:
+  // electLeader's handle has no `.catch`, so watching it would reject this
+  // promise with a TypeError and make startConsumer throw on every Web-Locks
+  // host.
   await shell.startConsumer(consumerCfg);
   assert.equal(core.calls.startConsumer, 1, "the leader opened its durable exactly once");
   assert.deepEqual(core.calls.lastConsumerCfg, consumerCfg);
@@ -152,6 +230,49 @@ test("a follower opens no consumer until the leader releases", async () => {
   assert.equal(coreB.calls.startConsumer, 1, "B opens the durable once it becomes leader");
 
   b.close();
+  await flush();
+});
+
+test("awaitLeadership gates on the same lease startConsumer does", async () => {
+  // The wasm host awaits this BEFORE it resolves its cursor, its retention-gap
+  // check and its delivery floor (jstransport.go's AwaitAttachReady): a follower
+  // that resolved those at page boot would attach, whenever it is promoted, at a
+  // position the stream may no longer retain — which JetStream clamps up, a
+  // silent skip.
+  const lm = new FakeLockManager();
+  const a = createShell({ identityId: "U", locks: lm, channel: null, createCore: makeFakeCore });
+  const b = createShell({ identityId: "U", locks: lm, channel: null, createCore: makeFakeCore });
+
+  await a.awaitLeadership();
+
+  let bReady = false;
+  const bWait = b.awaitLeadership().then(() => {
+    bReady = true;
+  });
+  await flush();
+  assert.equal(bReady, false, "a follower is not entitled to attach while the leader holds the lease");
+
+  a.close();
+  await bWait;
+  assert.equal(bReady, true, "the follower becomes ready once it is promoted");
+
+  b.close();
+  await flush();
+});
+
+test("awaitLeadership and startConsumer share one election", async () => {
+  const lm = new FakeLockManager();
+  const core = makeFakeCore();
+  const shell = createShell({ identityId: "U", locks: lm, channel: null, createCore: () => core });
+
+  await shell.awaitLeadership();
+  await shell.awaitLeadership();
+  await shell.startConsumer(consumerCfg);
+
+  assert.equal(core.calls.startConsumer, 1, "the memoized lease is not re-elected per await");
+  assert.deepEqual(core.calls.lastConsumerCfg, consumerCfg);
+
+  shell.close();
   await flush();
 });
 
@@ -252,4 +373,161 @@ test("an empty or missing key is not broadcast", async () => {
 
   leader.close();
   follower.close();
+});
+
+// The vectors below drive createSyncCore's startConsumer directly (not
+// through createShell — its fakes stub the core itself, not jsm/js), pinning
+// the delete-then-create reposition (edge-cold-signin-delivery-position-design.md
+// §3.3) at the level shell.mjs actually implements it.
+
+test("startConsumer deletes the durable before creating it", async () => {
+  const fake = makeFakeJetStream();
+  const core = newFakeSyncCore(fake);
+
+  await core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 0 });
+
+  assert.deepEqual(fake.calls.order, ["delete", "add"], "delete must precede create, every attach");
+  assert.deepEqual(fake.calls.deleteArgs, { stream: "SYNC", durable: "edge-sync-U-D" });
+});
+
+test("startConsumer creates a positioned consumer when startSeq is given", async () => {
+  const fake = makeFakeJetStream();
+  const core = newFakeSyncCore(fake);
+
+  await core.startConsumer({
+    stream: "SYNC",
+    durable: "edge-sync-U-D",
+    filterSubject: "lattice.sync.user.U",
+    startSeq: 42,
+  });
+
+  assert.equal(fake.calls.addArgs.stream, "SYNC");
+  assert.equal(fake.calls.addArgs.cfg.deliver_policy, "by_start_sequence");
+  assert.equal(fake.calls.addArgs.cfg.opt_start_seq, 42);
+  assert.equal(fake.calls.addArgs.cfg.durable_name, "edge-sync-U-D");
+  assert.equal(fake.calls.addArgs.cfg.filter_subject, "lattice.sync.user.U");
+});
+
+test("startConsumer omits deliver_policy/opt_start_seq when startSeq is 0 or absent", async () => {
+  for (const cfg of [
+    { stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 0 },
+    { stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U" },
+  ]) {
+    const fake = makeFakeJetStream();
+    const core = newFakeSyncCore(fake);
+    await core.startConsumer(cfg);
+
+    assert.equal("deliver_policy" in fake.calls.addArgs.cfg, false, "no override ⇒ today's unpositioned create");
+    assert.equal("opt_start_seq" in fake.calls.addArgs.cfg, false);
+  }
+});
+
+test("a not-found delete does not abort the attach", async () => {
+  const fake = makeFakeJetStream({ deleteThrows: notFoundError() });
+  const core = newFakeSyncCore(fake);
+
+  await core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 7 });
+
+  assert.deepEqual(fake.calls.order, ["delete", "add"], "the create still runs after a not-found delete");
+  assert.equal(fake.calls.addArgs.cfg.opt_start_seq, 7);
+});
+
+test("a delete error that is NOT not-found aborts the attach", async () => {
+  // Proves the positive vector first: a not-found delete (above) does not
+  // abort. This is the negative — any other failure (permission denied, a
+  // transport error) must propagate, and the create must never run.
+  const denied = new JetStreamApiError({ err_code: 10036, description: "permissions violation", code: 400 });
+  const fake = makeFakeJetStream({ deleteThrows: denied });
+  const core = newFakeSyncCore(fake);
+
+  await assert.rejects(
+    () => core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 7 }),
+    (err) => err === denied,
+  );
+  assert.deepEqual(fake.calls.order, ["delete"], "create must not run when the delete fails for a non-not-found reason");
+});
+
+// transientError stands in for the failures the vendored client raises when a
+// JetStream API request never reaches a verdict — its 5s TimeoutError, a
+// RequestError on a dropped socket. Neither is a JetStreamApiError nor a
+// PermissionViolationError, which is exactly the property startConsumer
+// classifies on, so a plain Error carries the same meaning here.
+function transientError() {
+  const err = new Error("TIMEOUT");
+  err.name = "TimeoutError";
+  return err;
+}
+
+test("a delete that times out is retried, and the attach completes", async () => {
+  // The browser host runs one Run per page lifetime with no restart loop, so an
+  // un-retried timeout on this delete would end sync until the user reloads.
+  const fake = makeFakeJetStream({ deleteThrowsFirst: [transientError()] });
+  const core = newFakeSyncCore(fake);
+
+  await core.startConsumer({
+    stream: "SYNC",
+    durable: "edge-sync-U-D",
+    filterSubject: "lattice.sync.user.U",
+    startSeq: 9,
+  });
+
+  assert.equal(fake.calls.deleteAttempts, 2, "the timed-out delete is tried again");
+  assert.deepEqual(fake.calls.order, ["delete", "delete", "add"], "the create runs once the retry succeeds");
+  assert.equal(fake.calls.addArgs.cfg.opt_start_seq, 9, "the retried attach still creates the positioned consumer");
+});
+
+test("a delete that keeps timing out gives up bounded and aborts the attach", async () => {
+  const timeout = transientError();
+  const fake = makeFakeJetStream({ deleteThrows: timeout });
+  const core = newFakeSyncCore(fake);
+
+  await assert.rejects(
+    () => core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 9 }),
+    (err) => err === timeout,
+  );
+  assert.equal(fake.calls.deleteAttempts, 3, "the retry is bounded, not endless");
+  assert.equal(fake.calls.order.includes("add"), false, "an undeleted durable must never be created over");
+});
+
+test("a permissions denial aborts immediately and is never retried", async () => {
+  // The ACL shape a denied $JS.API.CONSUMER.DELETE takes on the wire: the core
+  // client parses the server's -ERR into a PermissionViolationError carrying the
+  // operation and subject (nats.js.mjs:212-243). The server ANSWERED, so this is
+  // a verdict, not a blip — retrying it would only delay a loud failure.
+  const denied = new PermissionViolationError(
+    'Permissions Violation for Publish to "$JS.API.CONSUMER.DELETE.SYNC.edge-sync-U-D"',
+    "publish",
+    "$JS.API.CONSUMER.DELETE.SYNC.edge-sync-U-D",
+  );
+  const fake = makeFakeJetStream({ deleteThrows: denied });
+  const core = newFakeSyncCore(fake);
+
+  await assert.rejects(
+    () => core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 7 }),
+    (err) => err === denied,
+  );
+  assert.equal(fake.calls.deleteAttempts, 1, "a denial must fail fast, on the first attempt");
+  assert.deepEqual(fake.calls.order, ["delete"], "create must not run when the delete was denied");
+});
+
+test("a JetStream API rejection that is not not-found is never retried either", async () => {
+  const rejected = new JetStreamApiError({ err_code: 10036, description: "bad request", code: 400 });
+  const fake = makeFakeJetStream({ deleteThrows: rejected });
+  const core = newFakeSyncCore(fake);
+
+  await assert.rejects(
+    () => core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 7 }),
+    (err) => err === rejected,
+  );
+  assert.equal(fake.calls.deleteAttempts, 1, "the server answered; there is nothing transient to ride out");
+});
+
+test("a not-found delete is not retried — there is nothing left to delete", async () => {
+  const fake = makeFakeJetStream({ deleteThrows: notFoundError() });
+  const core = newFakeSyncCore(fake);
+
+  await core.startConsumer({ stream: "SYNC", durable: "edge-sync-U-D", filterSubject: "lattice.sync.user.U", startSeq: 7 });
+
+  assert.equal(fake.calls.deleteAttempts, 1);
+  assert.deepEqual(fake.calls.order, ["delete", "add"]);
 });

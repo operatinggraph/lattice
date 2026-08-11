@@ -209,7 +209,7 @@ var require_errors = __commonJS({
       }
     };
     exports.NoRespondersError = NoRespondersError;
-    var PermissionViolationError = class _PermissionViolationError extends Error {
+    var PermissionViolationError2 = class _PermissionViolationError extends Error {
       operation;
       subject;
       queue;
@@ -242,7 +242,7 @@ var require_errors = __commonJS({
         return new _PermissionViolationError(s, operation, subject, queue);
       }
     };
-    exports.PermissionViolationError = PermissionViolationError;
+    exports.PermissionViolationError = PermissionViolationError2;
     exports.errors = {
       AuthorizationError,
       ClosedConnectionError,
@@ -252,7 +252,7 @@ var require_errors = __commonJS({
       InvalidOperationError,
       InvalidSubjectError,
       NoRespondersError,
-      PermissionViolationError,
+      PermissionViolationError: PermissionViolationError2,
       ProtocolError,
       RequestError,
       TimeoutError,
@@ -9546,7 +9546,7 @@ var require_jserrors = __commonJS({
       NoMessageFound: 10037
     };
     function isMessageNotFound(err) {
-      return err instanceof JetStreamApiError && err.code === exports.JetStreamApiCodes.NoMessageFound;
+      return err instanceof JetStreamApiError2 && err.code === exports.JetStreamApiCodes.NoMessageFound;
     }
     var InvalidNameError = class extends Error {
       constructor(message = "", opts) {
@@ -9555,7 +9555,7 @@ var require_jserrors = __commonJS({
       }
     };
     exports.InvalidNameError = InvalidNameError;
-    var JetStreamApiError = class extends Error {
+    var JetStreamApiError2 = class extends Error {
       #apiError;
       constructor(jsErr, opts) {
         super(jsErr.description, opts);
@@ -9572,15 +9572,15 @@ var require_jserrors = __commonJS({
         return Object.assign({}, this.#apiError);
       }
     };
-    exports.JetStreamApiError = JetStreamApiError;
-    var ConsumerNotFoundError = class extends JetStreamApiError {
+    exports.JetStreamApiError = JetStreamApiError2;
+    var ConsumerNotFoundError = class extends JetStreamApiError2 {
       constructor(jsErr, opts) {
         super(jsErr, opts);
         this.name = "ConsumerNotFoundError";
       }
     };
     exports.ConsumerNotFoundError = ConsumerNotFoundError;
-    var StreamNotFoundError = class _StreamNotFoundError extends JetStreamApiError {
+    var StreamNotFoundError = class _StreamNotFoundError extends JetStreamApiError2 {
       constructor(jsErr, opts) {
         super(jsErr, opts);
         this.name = "StreamNotFoundError";
@@ -9599,7 +9599,7 @@ var require_jserrors = __commonJS({
       ConsumerNotFoundError,
       StreamNotFoundError,
       JetStreamError,
-      JetStreamApiError,
+      JetStreamApiError: JetStreamApiError2,
       JetStreamNotEnabled
     };
   }
@@ -13156,6 +13156,10 @@ var require_mod4 = __commonJS({
 var import_nats_core = __toESM(require_mod3(), 1);
 var import_jetstream = __toESM(require_mod4(), 1);
 var export_AckPolicy = import_jetstream.AckPolicy;
+var export_DeliverPolicy = import_jetstream.DeliverPolicy;
+var export_JetStreamApiCodes = import_jetstream.JetStreamApiCodes;
+var export_JetStreamApiError = import_jetstream.JetStreamApiError;
+var export_PermissionViolationError = import_nats_core.PermissionViolationError;
 var export_headers = import_nats_core.headers;
 var export_jetstream = import_jetstream.jetstream;
 var export_jetstreamManager = import_jetstream.jetstreamManager;
@@ -13163,6 +13167,10 @@ var export_tokenAuthenticator = import_nats_core.tokenAuthenticator;
 var export_wsconnect = import_nats_core.wsconnect;
 export {
   export_AckPolicy as AckPolicy,
+  export_DeliverPolicy as DeliverPolicy,
+  export_JetStreamApiCodes as JetStreamApiCodes,
+  export_JetStreamApiError as JetStreamApiError,
+  export_PermissionViolationError as PermissionViolationError,
   export_headers as headers,
   export_jetstream as jetstream,
   export_jetstreamManager as jetstreamManager,
