@@ -504,9 +504,6 @@ func (ex *executor) matchPath(b binding, p PathPattern) ([]binding, error) {
 			if !ex.nodeMatches(ref, first) {
 				return nil, nil
 			}
-			if propsMatchErr := ex.checkProps(ref, first); propsMatchErr != nil {
-				return nil, propsMatchErr
-			}
 			ok, err := ex.propsAllMatch(b, ref, first)
 			if err != nil {
 				return nil, err
@@ -621,9 +618,6 @@ func (ex *executor) nodeMatches(ref *nodeRef, n NodePattern) bool {
 	}
 	return vtype == n.Label
 }
-
-// checkProps is a thin alias retained for readability.
-func (ex *executor) checkProps(_ *nodeRef, _ NodePattern) error { return nil }
 
 // propsAllMatch evaluates each property predicate in n against ref.
 func (ex *executor) propsAllMatch(b binding, ref *nodeRef, n NodePattern) (bool, error) {
@@ -1261,8 +1255,10 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 		g, ok := groups[k]
 		if !ok {
 			g = &groupAcc{row: binding{}, aggs: make([]aggFold, len(items))}
-			for i, v := range groupVals {
-				g.row[itemAlias(i)] = v
+			for i := range items {
+				if v, present := groupVals[i]; present {
+					g.row[itemAlias(i)] = v
+				}
 			}
 			for i, it := range items {
 				if !itemAggregating[i] {

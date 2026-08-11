@@ -110,3 +110,33 @@ func TestProjectItems_RedundantItemProjectsFirstRowValue(t *testing.T) {
 	require.Equal(t, []any{"x", "y"}, reduced[0]["bs"],
 		"every row still folds into the aggregate — only the key fragment was skipped")
 }
+
+// TestProjectItems_DuplicateAliasLastItemWinsDeterministically covers the
+// grouping branch's group-row write: when two non-aggregating items share an
+// alias, the row must resolve to the LATER item's value on every run, not
+// whichever item the map iteration over groupVals happened to visit last.
+//
+// A third, aggregating item is present solely to route the call through the
+// grouping branch — projectItems takes the plain per-binding path when
+// nothing aggregates, which already writes items in order and never exhibited
+// this bug.
+func TestProjectItems_DuplicateAliasLastItemWinsDeterministically(t *testing.T) {
+	items := []ProjectionItem{
+		{Expr: &VariableRef{Name: "a"}, Alias: "v"},
+		{Expr: &VariableRef{Name: "b"}, Alias: "v"},
+		{Expr: &FunctionCall{Name: "count", Args: []Expr{&VariableRef{Name: "a"}}}, Alias: "cnt"},
+	}
+	bindings := []binding{
+		{"a": "first", "b": "second"},
+	}
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		ex := &executor{ctx: context.Background()}
+		out, err := ex.projectItems(bindings, items, nil)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		require.Equal(t, "second", out[0]["v"],
+			"a duplicated alias must resolve to the later item's value on every run (iteration %d)", i)
+	}
+}
