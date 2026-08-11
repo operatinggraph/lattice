@@ -302,8 +302,11 @@ func isPerEntryCapReadOutput(output *lens.OutputDescriptorSpec) bool {
 // mutex; the caller holds the lock.
 //
 // A hand-authored Postgres GrantTable cap-read producer (e.g.
-// packages/clinic-domain's grant_source lenses) carries no Output descriptor
-// and so is never returned here — a distinct gap this fire does not close.
+// packages/clinic-domain's grant_source lenses) carries no Output descriptor,
+// so it is never returned here and its rows are not nullified by this sweep.
+// That is an open gap in the erasure, not an exclusion: the descriptor is what
+// names the per-entry key a nullify has to reach, and a producer without one
+// gives this function nothing to aim at.
 func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.NullifyTarget {
 	var targets []keyshredded.NullifyTarget
 	for id, entry := range registry {

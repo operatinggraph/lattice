@@ -27,10 +27,30 @@ type declaredReads struct {
 	OptionalReads []string
 	EgressReads   []string
 	// EgressAbsenceTolerant names the egressReads keys the descriptor floor
-	// made absence-tolerant (Contract #2 §2.5). Membership changes ONLY what
-	// step 4 records for a key that is missing — known-absent instead of
-	// required-absent — and never what it does with a key that is present,
-	// which still authors the `$sensitiveRef` the egress disposition promises.
+	// made absence-tolerant (Contract #2 §2.5). Step 4 acts on it in exactly
+	// one place — a MISSING key is recorded known-absent instead of
+	// required-absent — and never for a key that is PRESENT, which still
+	// authors the `$sensitiveRef` the egress disposition promises.
+	//
+	// That one step-4 difference is not where its effect ends, because both
+	// absence maps have readers downstream and a key is in one set or the
+	// other. A floored key that turns out to be missing therefore also:
+	//
+	//   - stops being a write-side dependence. firstRequiredAbsentMutation
+	//     (starlark_runner.go) faults a mutation that names — or writes an
+	//     aspect or link onto — a REQUIRED-absent key, because
+	//     applyHydratedRevisions leaves such a write unconditioned. A
+	//     known-absent key is not in that set, so a script that writes it
+	//     proceeds.
+	//   - becomes eligible for the absent-conditioned create retry.
+	//     absentConditionedCreates (commit_path.go) collects `create`
+	//     mutations on KNOWN-absent keys, whose CreateOnly carries the step-4
+	//     absence as its assertion, and the commit path re-probes exactly
+	//     those on a conflict.
+	//
+	// Both are the ordinary treatment of a declared `optionalReads` key that
+	// was not found, which is the point: the floor makes a floored egress key's
+	// ABSENCE behave like an optional read's, and it changes nothing else.
 	//
 	// It is a separate set rather than a list move because the two egress
 	// halves must part company: relocating the key into optionalReads would

@@ -532,7 +532,8 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   oracle without closing it for anyone else. Minted: auth-plane 4d (three dispatchers converted, oracle then
   reproduced on the wire as an ordinary consumer). Check: any claim that an op's rejections are
   indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped one; the
-  enforcement point is a descriptor-pinned disposition (Contract #2 §2.5, proposed).
+  enforcement point is a descriptor-pinned disposition (Contract #2 §2.5), which the Processor applies as a
+  floor over every envelope for the operationType.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.
@@ -567,3 +568,31 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   a type segment through it with no kind filter, so a lens can hold a name the gate believed only a
   vertexType DDL could. Minted: dynamic-type-taxonomy C1.2 (a lens named `meta`, declared abstract, bricked
   every `vtx.meta.*` write). Check: the gate keys on the name as indexed, not on the declarer's class.
+- **A per-key index that stores only the UNION cannot withdraw a contributor** — a rebuild that recomputes
+  one key from the currently-indexed aggregate re-reads the very contributor it is withdrawing, so a
+  tombstoned or edited declaration survives every per-key invalidate while any peer claims the same key.
+  Minted: auth-plane descriptor floor (`unionFloorFromPeers` read `byOpType[op]`; `byName` carried the same
+  shape, where a tombstone dropped a canonicalName a second root still declared). Check: keep per-root truth
+  and derive the aggregate from it, and prove it with a TWO-claimant test asserting byte-equality against a
+  full `Refresh` — a single-claimant test passes vacuously.
+- **A corpus-wide authoring gate does not bind the runtime install path** — `scripts/lint-*.go` rules iterate
+  `pkgregistry`, but an approved capability proposal materializes a one-artifact `Definition` under an
+  arbitrary package name that the registry never sees, and per-`Definition` validation is trivially unique.
+  Minted: auth-plane S11 (a second package could claim an `operationType` a registered package owns and union
+  its read floor into it). Check: for any lint rule about package content, name the `pkgmgr` counterpart that
+  enforces the same invariant at install — and put it in the shared batch builder so fresh install, upgrade
+  and dry-run all see it.
+- **A key-template vocabulary the server can only half-resolve makes a contract clause partial** — the §2.5
+  floor resolves `{actor}`/`{service}`/`{payload.*}` and silently skips `{me.*}`/`{entity.*}`, which live
+  descriptors already use, so the clause reads unconditional while its enforcement is not. Minted: auth-plane
+  close pass (`cafe-domain`'s Charge/Settle). Check: a clause stated unconditionally in `docs/contracts/*`
+  needs a corpus census of the shapes its implementation declines, each declined member named as a residual
+  or a row.
+- **"Degrade instead of refuse" on a cache load path is fail-open when the cache has ONE load point** —
+  `DDLCache.Refresh` runs at construction, so a meta root skipped on a read error is missing for the process
+  lifetime, not until a retry; and because the failing read is the ROOT read every loader starts from, the
+  class is lost as a DDL too. Step 4 still admits the op on its vertex class, step 6.5 finds no aspect class
+  and `continue`s, and a sensitive aspect commits as plaintext behind one WARN. Minted: auth-plane close-pass
+  fix round (the adjudication that asked for the skip was the lead's, and a cold pass on the fix round caught
+  it). Check: before trading a refusal for a warning, name the caller that will retry — if the only caller is
+  construction, "degrade" means "forever", and a bounded retry then refuse is the shape.

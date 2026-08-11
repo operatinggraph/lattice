@@ -135,6 +135,13 @@ func TestDescriptorFloor_EgressIsMarkedNotMoved(t *testing.T) {
 // the seam that decides it: RequiredAbsent is a flat map with no memory of
 // which list named a key, so an absent egress key is the same oracle reached
 // through the third list.
+//
+// It also pins how far the change reaches. Those two maps are read past step 4,
+// so moving a key between them switches it between two different sets of
+// downstream rules — the write-side dependence fault and the absent-conditioned
+// create. Asserting the map alone would leave both readers unstated, and they
+// are the difference between "the reply says less" and "the write behaves
+// differently".
 func TestHydrate_FlooredEgressAbsenceIsKnownNotRequired(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -149,20 +156,53 @@ func TestHydrate_FlooredEgressAbsenceIsKnownNotRequired(t *testing.T) {
 	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
 
 	absent := "vtx.identity." + instID
+	egressKey := absent + ".ssn"
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "CreateIdentity"
 	env.Payload = []byte(`{"targetIdentityKey":"` + absent + `"}`)
-	env.ContextHint = &ContextHint{EgressReads: []string{absent + ".ssn"}}
+	env.ContextHint = &ContextHint{EgressReads: []string{egressKey}}
 
 	state, err := h.Hydrate(ctx, env)
 	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
-	if _, ok := state.Context.RequiredAbsent[absent+".ssn"]; ok {
-		t.Fatalf("%s.ssn is required-absent; egressReads reproduces the oracle past the floor", absent)
+	if _, ok := state.Context.RequiredAbsent[egressKey]; ok {
+		t.Fatalf("%s is required-absent; egressReads reproduces the oracle past the floor", egressKey)
 	}
-	if _, ok := state.Context.KnownAbsent[absent+".ssn"]; !ok {
+	if _, ok := state.Context.KnownAbsent[egressKey]; !ok {
 		t.Fatalf("KnownAbsent = %v, want the floored egress key", state.Context.KnownAbsent)
+	}
+
+	// Both readers of those maps, at one mutation. A `create` on the floored
+	// key no longer trips the write-side dependence fault, and it joins the
+	// absent-conditioned set the commit path re-probes on a conflict.
+	create := []MutationOp{{Op: "create", Key: egressKey, Document: map[string]interface{}{"class": "ssn"}}}
+	if key := firstRequiredAbsentMutation(create, state.Context.RequiredAbsent); key != "" {
+		t.Fatalf("firstRequiredAbsentMutation = %q, want none — a floored key is not a dependence the write side faults on", key)
+	}
+	if got := absentConditionedCreates(create, state.Context.KnownAbsent); !slices.Equal(got, []string{egressKey}) {
+		t.Fatalf("absentConditionedCreates = %v, want [%s] — a create on a known-absent key is conditioned on that absence and so is retry-eligible", got, egressKey)
+	}
+
+	// The control: the same envelope against an operation with NO descriptor.
+	// Both readers answer the other way, which is what shows the two answers
+	// above are the floor's doing rather than the shape of the mutation.
+	unfloored := newTestEnvelope(testNanoID1)
+	unfloored.OperationType = "UndescribedOp"
+	unfloored.Payload = env.Payload
+	unfloored.ContextHint = &ContextHint{EgressReads: []string{egressKey}}
+	plain, err := h.Hydrate(ctx, unfloored)
+	if err != nil {
+		t.Fatalf("Hydrate (no descriptor): %v", err)
+	}
+	if _, ok := plain.Context.RequiredAbsent[egressKey]; !ok {
+		t.Fatalf("RequiredAbsent = %v, want the egress key — with no descriptor the envelope's own disposition is the last word", plain.Context.RequiredAbsent)
+	}
+	if key := firstRequiredAbsentMutation(create, plain.Context.RequiredAbsent); key != egressKey {
+		t.Fatalf("firstRequiredAbsentMutation = %q, want %q", key, egressKey)
+	}
+	if got := absentConditionedCreates(create, plain.Context.KnownAbsent); len(got) != 0 {
+		t.Fatalf("absentConditionedCreates = %v, want none", got)
 	}
 }
 

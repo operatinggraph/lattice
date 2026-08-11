@@ -336,6 +336,15 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 // pkgmgr.validateOpMetas already rejects a duplicate declared inside ONE
 // package's OpMetas. Nothing sees across packages, which is where the
 // remaining case lives.
+//
+// This gate and pkgmgr's Installer.checkOpMetaOperationTypeCollision enforce
+// the same invariant at two different points, and neither subsumes the other.
+// This one reads the AUTHORED corpus — every package compiled into the
+// registry, whether installed anywhere or not — so a collision fails a build
+// before it can reach a kernel. The installer's reads the LIVE kernel, which is
+// where op-metas that never pass through this registry arrive: an approved
+// capability proposal materializes an op-meta Definition of its own and applies
+// it under whatever package name it names.
 func checkS11(rep *report, defs map[string]pkgmgr.Definition) {
 	claimants := map[string][]string{}
 	for _, name := range sortedKeys(defs) {

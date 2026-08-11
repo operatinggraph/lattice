@@ -56,13 +56,15 @@ func (def Definition) validateAll() error {
 
 // validateCanonicalNameUniqueness rejects a package that declares the same
 // meta-vertex canonicalName twice across the union of its DDLs, Lenses, and
-// op-metas — the exact namespace the Processor's DDL cache indexes in one
-// byName map (vtx.meta.<NanoID> keyed by canonicalName). A collision there
-// silently shadows one definition at runtime (the cache keeps first-seen and
-// only logs a WARN), so the install must fail closed instead. It is a pure
-// function (no I/O) so it runs before any KV operation and is unit-testable
-// without a live substrate. Roles (vtx.role.*) are intentionally excluded —
-// they are a separate, deliberately shared namespace.
+// op-metas — the namespace the Processor's DDL cache serves through one byName
+// map (vtx.meta.<NanoID> keyed by canonicalName). A contested name there costs
+// one of the two definitions its lookup entirely: the cache serves the
+// lowest-keyed meta-vertex and drops the other from both its name and key
+// indexes, logging a WARN, so the package must fail closed here instead of
+// letting NanoID ordering pick a winner. It is a pure function (no I/O) so it
+// runs before any KV operation and is unit-testable without a live substrate.
+// Roles (vtx.role.*) are intentionally excluded — they are a separate,
+// deliberately shared namespace.
 //
 // An op-meta's canonicalName is its OperationType: an op-meta vertex is keyed
 // vtx.meta.<NanoID> and is the only meta-vertex kind whose identifying name is

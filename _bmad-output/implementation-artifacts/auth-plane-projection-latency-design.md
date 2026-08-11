@@ -1559,6 +1559,11 @@ widening direction and no lens changes verdict for the wrong reason*:
   wedged `clinicProviders`.** §10 deferred this as "trigger unmeasured"; Inc 3's shadow counters are exactly the
   before-and-after that removes that objection, so it is now a wiring job — **wire the plain arm to the shared
   unit**, do not build a second derivation. (§4.7)
+
+  **FALSIFIED 2026-08-10 — see §22. "It is now a wiring job" is wrong on two independent structural grounds**,
+  and this bullet is retained unedited above only so the reasoning that produced it stays auditable. The shared
+  unit cannot answer for a plain lens at all, and §4.2's healer conjunct can never hold for one. It is a
+  **designer item**, not an increment; its board row names the two pieces it needs.
 - **An actor-aware lens narrows by label but never by relation.** `ConsumerFilter`'s relation dimension is gated
   to plain pipelines: `actorAwareFanOutRelevant` judges by endpoint type alone, so a relation-pinned subject
   would withhold a link its fan-out arm keeps. This is the remainder of **Term A**. Consumer: `capabilityRoles`.
@@ -1778,14 +1783,17 @@ narrower than its predecessor.
 2. ~~**4b — the pre-install ordering guard** (§18.2).~~ **DONE** — see §20. The §19.3 adjudications held
    unchanged: it refuses to NARROW rather than refusing activation, and it disambiguates
    `actorEnumerator == nil` from the lens's DECLARED kind with no install-complete latch.
-3. **4a-4 — Term A's relation dimension** (§18.1, fourth bullet). Unstarted, and note it is an authorization
+3. ~~**4a-4 — Term A's relation dimension** (§18.1, fourth bullet).~~ **DONE** — see §21. The pinned census
+   assertion was flipped by argument, not re-pinned: a set-equality test replaced it. Original note kept below
+   because its warning is what made the flip an argument.
+
+   **4a-4 — Term A's relation dimension** (§18.1, fourth bullet). Unstarted, and note it is an authorization
    change: `auth_plane_narrowing_census_test.go:136-139` currently asserts the ABSENCE of any relation-pinned
    subject on an actor-aware lens, so making `actorAwareFanOutRelevant` relation-aware flips a pinned census
    assertion. That flip is the increment, and it must be argued rather than re-pinned.
-4. **4a-3 — D2 Phase 2, the plain arm** (§18.1, third bullet). Unstarted and the largest. §19.2 confirmed the
-   Increment 3 shadow counters exist, so it remains the wiring job §18.1 calls it: route
-   `evalPlainLinkReprojection`'s endpoint loop through the shared unit rather than building a second
-   derivation.
+4. **4a-3 — D2 Phase 2, the plain arm** (§18.1, third bullet). **NOT an increment — the premise is falsified;
+   re-scoped to a designer item, §22.** §19.2's correction (the Increment 3 shadow counters exist) was true
+   and is not what fails; what fails is the assumption that the shared unit can serve a plain lens at all.
 
 **Worktrees:** all of this fire's worktrees and branches are merged and removed — take a FRESH one per fire,
 never a reused one. **Base skew is the trap this fire actually hit** — 4a-1 and 4a-2 were built in
@@ -1996,3 +2004,151 @@ filter on its own. **The guard's gap is now a missing diagnosis, not a missing r
 moment one walk gains a case the others lack — which is why all three name their leaves explicitly.
 (`label_expansion.go` holds a fourth `addExpr`; a `*`-sigil label hidden in an unmodelled `Expr` escapes
 expansion there, contained by the same argument.)
+
+## 22. Increment 4 close (2026-08-10) — 4a-3's premise falsified, and the cumulative pass discharged
+
+### 22.1 4a-3 is not a wiring job — two independent structural blockers
+
+§18.1 called D2 Phase 2 "a wiring job — wire the plain arm to the shared unit". It is not, and the two reasons
+are structural rather than incidental. Both were grounded in code before the conclusion was drawn, and both
+were re-verified independently.
+
+**The shared unit's anchor is `$actorKey`, and a plain lens has none.** `derivationIndex`'s *first* conjunct is
+`p.actorEnumerator == nil → refuse` (`pipeline/anchor_derivation.go:124`) — a plain lens fails it before any
+other check runs. Behind that, `AnchorHopIndex` defines `Anchor` as the position bound to `$actorKey`
+(`ruleengine/full/hopindex.go:59`) and returns `Anchor = -1, Incomplete = "no pattern position binds
+$actorKey"` when there is none; `walkToAnchors` builds its terminus prefix from `idx.Labels[idx.Anchor]`, so
+`-1` is not a refusal it can route around, it is unindexable. Measured over the installed corpus: **60 of 60
+plain lenses**, no exception. That is §20's bi-conditional (anchored ⟺ actorAggregate ∨ Personal) read from
+the other side.
+
+The pattern *graph* is fine — `clinicProviders` derives `Labels=[provider identity]`,
+`Hops=[{identifiedBy 0→1}]`. What is missing is a **terminus**: a plain lens's anchor is `anchorPattern(q)`,
+the first MATCH's first node, and the hop index neither records that position nor computes `Dist` from it.
+Adding one cannot be done by widening `Anchor`, because `DeclaresActorAnchor()` *is* `Anchor >= 0` and is 4b's
+install-completeness guard — setting `Anchor` to a scan root would make all 60 plain lenses read
+"declared actor-aware, no enumerator installed" and send every one of their consumer filters broad, the
+corpus-wide regression 4b exists to prevent.
+
+**A seedable lens cannot have a standing healer — by construction, not by configuration.** §4.2 refuses to
+narrow a lens with no sweep plan, and that conjunct can never be satisfied here:
+
+- `seedAnchorFor` returns `""` when `p.envelopeFn != nil || p.multiEnvelopeFn != nil` (`pipeline.go:1197`) —
+  a seedable lens has **no** envelope.
+- `Reproject` returns `ErrNotActorAggregate` when `p.envelopeFn == nil && p.multiEnvelopeFn == nil`
+  (`reproject.go:288`) — a lens with no envelope **cannot be repaired**.
+- `Reproject` is the sweeper's only repair verb (`sweep.go:446`).
+
+∴ seedable ⇒ un-sweepable. So §18.5's acceptance ("prove the healer still covers what narrowing removes") is
+not merely unmet, it is **unsatisfiable** for the plain arm as built — and any test that made a plain pipeline
+eligible would have had to install a `SweepPlan` whose every repair fails `ErrNotActorAggregate`. That is the
+"test that proves a narrowing is safe under a configuration production never builds" class in its worst form,
+and it is the third time in this increment that class was the thing standing between a green suite and a real
+answer (§20's install predicate, §21's Personal install, this).
+
+**What the payoff would be, so the designer item is not re-derived from scratch.** For `clinicProviders`, a
+neighbour-link event `lnk.provider.X.identifiedBy.identity.Y` reacts on both endpoints. The *provider*
+endpoint is the anchor label and seeds one anchor. The *identity* endpoint is a neighbour, seeds `""`, and the
+executor falls to the listing path — a `vtx.provider.` prefix scan binding **every provider vertex** as an
+anchor candidate (`full/executor.go:669`). Cost is **N + 1 anchor bindings per event**, N = the provider
+population, × 1,325 events. With a terminus it is **N + 1 → 1**: the derivation returns the same vertex the
+provider endpoint already seeds, so the increment reduces to dropping the neighbour endpoint's rescan. The
+shape generalizes to the 1-hop majority of the plain corpus.
+
+Two notes worth keeping for whoever builds it. The walk's key soundness argument — that it does not expand
+from a node reached at the anchor position, because the anchor is pinned to exactly one vertex per evaluation
+(`anchor_derivation.go:166`) — **transfers intact**, since `executor.seedAnchor` pins the anchor pattern the
+same way `{key: $actorKey}` does. And narrowing the plain neighbour arm would let a neighbour event emit a
+**Delete** it cannot emit today, through the `AnchorProjectionKey` presence check running with an anchor entry
+instead of a neighbour one (`evaluate.go:280`); that is probably correct-and-wider, but it is a behaviour class
+the arm does not have today and deserves a test rather than an argument.
+
+**The aspect arm is the same seam with the same blockers** (`evalPlainAspectReprojection` reaches the identical
+`evaluatePlainFromVertex` → `seedAnchorFor` path). Two differences to record: it needs no adjacency self-apply,
+and for an anchor-typed parent the derivation returns a **superset** of today's single seeded anchor, which is
+a widening and therefore safe. It belongs in scope with the link arm when the terminus exists.
+
+### 22.2 The cumulative close pass — §19.7's obligation, discharged
+
+§19.7 recorded that the descriptor floor's *fix* round added new mechanism (the dispatch-only op-meta, the
+egress absence-tolerance, the union rule, the new lint gate) and carried **lead review only**, and that the
+item's close pass had to cover that delta. It did, and **it found two blocking defects there** — vindicating
+the obligation rather than clearing it as a formality.
+
+- **A per-key index that stores only the UNION cannot withdraw a contributor.** `unionFloorFromPeers` rebuilt
+  an operationType's floor from `byOpType[op]` — the aggregate, which already contained the root being
+  withdrawn — so a tombstoned or edited descriptor's templates survived every `Invalidate` while any peer
+  claimed the same key. Direction is **over-demotion**: a key that should be required stays absence-tolerant,
+  turning a `HydrationMiss` into a silent `None`, which the floor's own "direction of failure" note names as
+  the dangerous one. Fixed by keeping **per-root truth** (`byOpMetaRoot`) and deriving every aggregate from it
+  in sorted key order, so `Refresh` and `Invalidate` are the same computation over the same input — which is
+  what makes the new byte-equality-against-`Refresh` assertion meaningful. **`byName` carried the identical
+  aliasing** and was fixed with it: a tombstone dropped a canonicalName a second root still declared, leaving
+  a DDL resolving to nothing and falling to Contract #1 §1.5's permissive default.
+- **The uniqueness gate was authoring-time only.** `lint-package-standard`'s S11 iterates `pkgregistry`, but
+  `opMeta` is an enabled **capability artifact kind**: an approved proposal materializes a one-entry
+  `Definition` under an arbitrary package name, and per-`Definition` validation is trivially unique. So a
+  second package could claim an `operationType` a registered package owns and union its floor into it — the
+  exact hazard S11's own comment says it prevents, and it **composes with the first defect**, since the rogue
+  floor could then never be withdrawn. Fixed at the shared install batch builder, so fresh install, in-place
+  upgrade and dry-run preview all see it. The lint stays; neither gate subsumes the other, and each now says
+  so. The same "gate sees one entry point" shape in `checkCanonicalNameCollision` (Install-only, never run on
+  the `Apply` upgrade branch) was closed with it.
+
+**The whole-item attacks that came back clean** are worth recording, because they are the guarantee: the
+`opButton` short-circuit really is total (no client builds a submit from a Dispatch-less op-meta, and every
+catalog-building site filters on an empty `dispatchClass`); §19.7's recorded residual really is latent (the
+only two `derive_reads` in `packages/` return `{}` or `optionalReads` on all seven return paths); `withScopeReject`
+is exhaustive over all 3 `Clause` and all 13 `Expr` implementors with a default refusal; the 4a-1 × 4a-2
+composition holds (4a-1's `*With` arm feeds items and `WHERE` through `addExpr`, so an actor-typed position
+inside a staged revocation filter pushes `PositionsBinding` past 1 and refuses the one-key answer); 4b × 4a-4
+holds (all 18 Personal lenses fail §4.2 and take the broad filter, so the relation dimension never reaches an
+out-of-pattern `cap-read` gate); and the revocation direction was walked end to end on `capabilityRoles` — a
+`holdsRole`/`grantedBy` delete, a `vtx.permission` tombstone and a role aspect edit all match a pinned subject.
+
+### 22.3 What Increment 4 shipped
+
+4a-1 · 4a-2 · 4c · 4d · the descriptor floor · 4b · 4a-4, each independently green and CI-verified, plus the
+close-pass fixes above. **4a-3 left the increment as a designer item** (§22.1) rather than being built or
+dropped. The landing invariant held throughout: every conjunct fail-closed, every unresolvable derivation
+falling back to the shipped BFS, so no boundary left `main` narrower than its predecessor.
+
+### 22.4 The close-pass fix rounds — and the lesson §19.7 had to teach twice
+
+§19.7's obligation was not just "review the delta" but a general rule: **a fix round that adds new mechanism
+does not ride on the review of the findings it answers.** Honouring it here took three cold passes, and each
+one paid.
+
+- **Pass 1 (the close pass, §22.2)** found the two blocking defects in the descriptor floor's fix round.
+- **Pass 2, over the fixes for those,** found one blocking defect — **introduced by the lead's own
+  adjudication, not by the implementation.** The brief had asked for a boot-time read failure to *degrade*
+  (WARN and skip) rather than refuse, on the reasoning that a transient blip should not brick startup. Both
+  halves of that were wrong. `DDLCache.Refresh` has no "next refresh" — its callers build the cache once —
+  and the failing read is the **root** read every loader starts from, so a skipped root is lost as a **DDL**
+  too. Step 4 still admits the op on its vertex class, step 6.5 resolves the mutation's aspect class, misses,
+  and `continue`s: **a sensitive aspect commits as plaintext, permanently, behind one WARN line.** The
+  correct shape is a bounded ctx-aware retry and *then* refuse, which addresses the transient case without
+  trading a refusal for a silence. The skip was also removed from `loadMetaVertex`'s aspect reads, where the
+  same hazard reached by a shorter path.
+- **Pass 3, scoped to the new mechanism** (the retry, the `KVGetMulti` batching, the third relocated gate),
+  found nothing blocking — and confirmed the attack that mattered most: a normal operation cannot produce an
+  unreadable meta root, so the widened fail-closed posture is not an availability foot-gun. NATS KV writes
+  are whole-value per revision, installs and step-8 land as atomic batches, a root created after the key list
+  is simply unscanned, and one purged after it surfaces as not-found and is skipped. Its non-blocking finds
+  were still real: the key **listing** was the one read exempt from the retry budget (the first request, whose
+  loss costs the whole scan), the retry's timing assertion derived its bound from the constants under test and
+  so was vacuous against a constant change, and `Invalidate` held the cache write lock across the retry
+  sleeps.
+
+**Three gates now live in one place.** `checkCanonicalNameCollision`, `checkOpMetaOperationTypeCollision` and
+`checkWeaverTargetIDCollision` all run from `buildManifestBatch`, so fresh install, in-place upgrade and
+dry-run preview see the same rules — the "a gate that sees one entry point" shape appeared three times in this
+item and is now closed in all three. Each self-excludes by a **version-independent** `entityNanoID`, so a
+package can always re-declare its own names, and each batches its kernel reads through `KVGetMulti` rather
+than the ~620 sequential GETs the first implementation would have added to every upgrade.
+
+**Recorded, not fixed:** `Refresh` is now strictly fail-closed on any unreadable or unparseable meta root
+under `vtx.meta.>`, which is a wider blast radius than the op-meta arm alone — a genuinely corrupt Core KV
+document there is boot-fatal for the Processor. That is the intended posture (the alternative is the plaintext
+path above), and pass 3 established no routine operation reaches it, but it is worth knowing before the first
+stack that hits it.

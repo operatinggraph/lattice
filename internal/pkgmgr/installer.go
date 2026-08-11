@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -142,39 +144,23 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		return nil, fmt.Errorf("%w: installed=%s requested=%s", ErrVersionMismatch, existing.Version, def.Version)
 	}
 
-	// Step 2.6 — meta canonicalName collision against the already-installed
-	// kernel. Run AFTER the idempotency check confirms this is a genuinely
-	// fresh install of a not-yet-installed package name: a re-install of an
-	// already-present package short-circuits above, so the scan below never
-	// sees a package's own previously-written meta-vertices as a collision.
-	// A collision the install introduces would otherwise silently shadow one
-	// definition at runtime (the DDL cache keeps first-seen, logs a WARN).
+	// Step 2.6 — the ONE Core KV key list this whole Install call needs.
+	// buildManifestBatch (and everything it calls: the canonicalName and
+	// op-meta collision gates, SubtypeOfRef resolution, the installed subtypeOf
+	// graph, the live-instance guard on a newly-declared abstract type) reuses
+	// it rather than re-listing. A def declaring no DDL/Lens/OpMeta name — and
+	// therefore, since Abstract and SubtypeOfRef both live on DDLSpec, no
+	// taxonomy mechanism either — performs zero KV I/O here.
 	//
-	// The scan below is the ONE Core KV key list this whole Install call
-	// needs — buildManifestBatch (and everything it calls: SubtypeOfRef
-	// resolution, the installed subtypeOf graph, the live-instance guard on a
-	// newly-declared abstract type) reuses it rather than re-listing. A def
-	// declaring no DDL/Lens/OpMeta name — and therefore, since Abstract and
-	// SubtypeOfRef both live on DDLSpec, no taxonomy mechanism either —
-	// performs zero KV I/O here.
+	// The collision gates themselves live in buildManifestBatch, not here, so
+	// that an upgrade is held to the same rule as a fresh install; fetching the
+	// scan early only spares that path a second key list.
 	var scan metaScanResult
 	if needsMetaCollisionScan(def) {
 		scan, err = i.scanMeta(ctx)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if err := i.checkCanonicalNameCollision(def, scan.names); err != nil {
-		return nil, err
-	}
-
-	// Step 2.7 — weaver targetId collision against installed targets (§10.8:
-	// targetId uniqueness is install-validated across installed targets). A
-	// weaver target has no canonicalName aspect, so the check above misses it;
-	// this runs after the same idempotency gate so a re-install never collides
-	// with its own prior targets.
-	if err := i.checkWeaverTargetIDCollision(ctx, def); err != nil {
-		return nil, err
 	}
 
 	// Step 3 — build the mutation manifest (role NanoIDs, grant resolution,
@@ -332,12 +318,26 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 	// The lens parse runs FIRST and reads no KV, because whether the label-cap
 	// gate needs the scan at all is a property of the parsed specs.
 	lensLabels := i.lensSpecLabels(def)
-	if !scan.fetched && (needsTaxonomyScan(def) || needsLensCapScan(lensLabels)) {
+	if !scan.fetched && (needsTaxonomyScan(def) || needsLensCapScan(lensLabels) || needsMetaCollisionScan(def)) {
 		var err error
 		scan, err = i.scanMeta(ctx)
 		if err != nil {
 			return nil, nil, "", nil, err
 		}
+	}
+	// The three identity gates, all on this one builder so that a fresh install,
+	// an in-place upgrade and a dry-run preview are held to the same rules.
+	// Each covers a different identity in the namespace the runtime actually
+	// indexes it in: canonicalName for DDLs and lenses, operationType for
+	// op-metas, targetId for weaver targets.
+	if err := i.checkCanonicalNameCollision(def, scan.names); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if err := i.checkOpMetaOperationTypeCollision(ctx, def, scan); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if err := i.checkWeaverTargetIDCollision(ctx, def, scan); err != nil {
+		return nil, nil, "", nil, err
 	}
 	if err := i.checkAbstractNoLiveInstances(ctx, def, scan); err != nil {
 		return nil, nil, "", nil, err
@@ -658,11 +658,13 @@ type InstallResult struct {
 // followed by `lattice-pkg install` to upgrade.
 var ErrVersionMismatch = errors.New("pkgmgr: installed package version differs from requested")
 
-// ErrCanonicalNameCollision is returned by Install when a meta-vertex
-// canonicalName the package declares (a DDL, Lens, or op-meta name) already
-// exists on a meta-vertex in the kernel. Installing it would silently shadow
-// one definition at runtime (the Processor's DDL cache keeps first-seen), so
-// the install is rejected.
+// ErrCanonicalNameCollision is returned when a meta-vertex canonicalName the
+// definition declares (a DDL, Lens, or op-meta name) is already carried by a
+// meta-vertex the package does not own. Installing it would leave one of the two
+// unreachable at runtime: the Processor's DDL cache serves a contested name from
+// the lowest-keyed meta-vertex and drops the other from its lookup, so which
+// definition survives is decided by NanoID ordering rather than by either
+// package.
 var ErrCanonicalNameCollision = errors.New("pkgmgr: meta canonicalName already present in the kernel")
 
 // ErrWeaverTargetIDCollision is returned by Install when a weaver targetId the
@@ -675,6 +677,19 @@ var ErrCanonicalNameCollision = errors.New("pkgmgr: meta canonicalName already p
 // `<targetId>.` prefix into the shared weaver-targets bucket, interleaving two
 // packages' rows, so the install is rejected before any row is written.
 var ErrWeaverTargetIDCollision = errors.New("pkgmgr: weaver targetId already present in the kernel")
+
+// ErrOpMetaOperationTypeCollision is returned when an op-meta the definition
+// declares names an operationType a LIVE op-meta in the kernel already claims.
+//
+// One operationType, one descriptor: the `.dispatch` optionalReads are the
+// Contract #2 §2.5 read-disposition floor the Processor applies to every
+// submitter's envelope for that operationType, and two descriptors make that
+// floor the union of both (internal/processor/ddl_cache.go's floorsByOpType) —
+// one package quietly widening the absence-tolerance of an operation another
+// package owns. An op-meta carries no canonicalName aspect, so
+// ErrCanonicalNameCollision does not cover it: its identity is the
+// operationType on its own root body.
+var ErrOpMetaOperationTypeCollision = errors.New("pkgmgr: operationType already carries an op-meta in the kernel")
 
 // ErrUninstallConflict is returned by Uninstall when a declared key was
 // modified concurrently between this uninstall's read and its commit
@@ -768,28 +783,109 @@ func (i *Installer) findInstalledPackage(ctx context.Context, name string) (*ins
 	return nil, nil
 }
 
+// gateLog is where the install-time collision gates report what they could not
+// see. The gates read meta-vertex documents to learn what the kernel already
+// claims; a document that will not decode is a claim they cannot see, so the
+// gate passes on it — and a blind spot that produces silence is
+// indistinguishable from a clean bucket.
+//
+// slog.Default() rather than an Installer field, chosen after checking the
+// wiring: pkgmgr has no logger of its own, and neither CLI that builds an
+// Installer (cmd/lattice-pkg, cmd/loupe) constructs one to hand it — so a field
+// would be set by nobody, and every one of these lines would reach
+// slog.Default() anyway through a longer path. The day either CLI calls
+// slog.SetDefault, these follow it with no wiring to remember.
+func gateLog() *slog.Logger { return slog.Default() }
+
+// metaRootKeys filters an already-fetched Core KV key list down to 3-segment
+// `vtx.meta.<id>` roots, and metaAspectKeys down to one named aspect of them.
+// Both are pure over the single KVListKeys result every install already has, so
+// no gate below performs a listing of its own.
+func metaRootKeys(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !strings.HasPrefix(k, metaVertexPrefix) {
+			continue
+		}
+		id := k[len(metaVertexPrefix):]
+		if id == "" || strings.Contains(id, ".") {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+func metaAspectKeys(keys []string, localName string) []string {
+	suffix := "." + localName
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		// The length check is what keeps the id expression below from slicing
+		// BACKWARDS. A prefix match and a suffix match can overlap on one short
+		// string — `vtx.meta.spec` satisfies both for localName "spec" — and the
+		// slice would then be [9:8] and panic. These keys arrive from a listing
+		// of the whole bucket, so this filter has to survive any string in it:
+		// its job is to reject what is not a meta aspect, never to assume it.
+		if len(k) < len(metaVertexPrefix)+len(suffix) {
+			continue
+		}
+		if !strings.HasPrefix(k, metaVertexPrefix) || !strings.HasSuffix(k, suffix) {
+			continue
+		}
+		id := k[len(metaVertexPrefix) : len(k)-len(suffix)]
+		if id == "" || strings.Contains(id, ".") {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// readMetaDocs batch-reads a set of meta-vertex keys in ONE round trip.
+//
+// The install gates each need every meta document of one shape, which is a few
+// hundred keys on a populated kernel; issued serially that is a few hundred
+// round trips per install, per upgrade and per dry-run preview. KVGetMulti is
+// the substrate's batched primitive for exactly this (step-4 hydration and
+// personalinterest.IsRelevant read the same way).
+//
+// A key absent from the returned map is absent from the bucket — the batched
+// equivalent of ErrKeyNotFound, and the same non-answer each gate already
+// skips. A FAILED batch is never that: it returns an error, and every caller
+// refuses the install on it, because a gate that cannot read the kernel has not
+// found the kernel clean.
+func (i *Installer) readMetaDocs(ctx context.Context, keys []string) (map[string]*substrate.KVEntry, error) {
+	if len(keys) == 0 {
+		return map[string]*substrate.KVEntry{}, nil
+	}
+	entries, err := i.Conn.KVGetMulti(ctx, CoreBucket, keys)
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: read %d meta keys: %w", len(keys), err)
+	}
+	return entries, nil
+}
+
 // metaScanResult carries the single Core KV key list + its derived
 // canonicalName index that one Install/Upgrade/Apply call threads through
-// every consumer that needs either: the canonicalName collision guard
-// (Install only), cross-package SubtypeOfRef resolution, the installed
-// subtypeOf graph scan, and the live-instance guard on a newly-declared
-// abstract type (taxonomy.go). fetched is false for the zero value, the
-// "nobody has scanned yet" state a def declaring nothing scan-worthy never
-// leaves.
+// every consumer that needs either: the canonicalName and op-meta collision
+// guards, cross-package SubtypeOfRef resolution, the installed subtypeOf graph
+// scan, and the live-instance guard on a newly-declared abstract type
+// (taxonomy.go). fetched is false for the zero value, the "nobody has scanned
+// yet" state a def declaring nothing scan-worthy never leaves.
 type metaScanResult struct {
 	keys    []string          // raw KVListKeys(CoreBucket) result
 	names   map[string]string // canonicalName -> meta-vertex id, derived from keys
 	fetched bool
 }
 
-// needsMetaCollisionScan reports whether def declares any meta canonicalName
-// that could collide (a DDL, Lens, or op-meta) — false only for a def with
-// none of the three, in which case checkCanonicalNameCollision has nothing to
-// check and skips its scan entirely. A distinct gate from needsTaxonomyScan
-// in taxonomy.go: this one governs an Install-only check that must still run
-// for a def with DDLs but no SubtypeOfRef/Abstract at all.
+// needsMetaCollisionScan reports whether def declares any meta-vertex identity
+// that could collide — a DDL or Lens canonicalName, an op-meta operationType, or
+// a weaver targetId. False only for a def declaring none of the four, in which
+// case all three collision guards have nothing to check and the scan is skipped
+// entirely. A distinct gate from needsTaxonomyScan in taxonomy.go: this one must
+// still fire for a def with DDLs but no SubtypeOfRef/Abstract at all.
 func needsMetaCollisionScan(def Definition) bool {
-	return len(def.DDLs) > 0 || len(def.Lenses) > 0 || len(def.OpMetas) > 0
+	return len(def.DDLs) > 0 || len(def.Lenses) > 0 || len(def.OpMetas) > 0 || len(def.WeaverTargets) > 0
 }
 
 // scanMeta performs the ONE KVListKeys pass a caller needs, plus the derived
@@ -822,30 +918,19 @@ func (i *Installer) scanMeta(ctx context.Context) (metaScanResult, error) {
 // stricter check here would silently drop such a fixture from both the
 // collision guard and cross-package SubtypeOfRef resolution.
 func (i *Installer) canonicalNamesFromKeys(ctx context.Context, keys []string) (map[string]string, error) {
-	const metaPrefix = "vtx.meta."
 	const cnSuffix = ".canonicalName"
-	names := make(map[string]string)
-	for _, k := range keys {
-		if len(k) < len(metaPrefix)+len(cnSuffix) {
+	aspectKeys := metaAspectKeys(keys, "canonicalName")
+	entries, err := i.readMetaDocs(ctx, aspectKeys)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(aspectKeys))
+	for _, k := range aspectKeys {
+		entry, present := entries[k]
+		if !present {
 			continue
 		}
-		if k[:len(metaPrefix)] != metaPrefix {
-			continue
-		}
-		if k[len(k)-len(cnSuffix):] != cnSuffix {
-			continue
-		}
-		id := k[len(metaPrefix) : len(k)-len(cnSuffix)]
-		if id == "" || strings.Contains(id, ".") {
-			continue // not a 3-segment vtx.meta.<id> root
-		}
-		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("pkgmgr: get %s: %w", k, err)
-		}
+		id := k[len(metaVertexPrefix) : len(k)-len(cnSuffix)]
 		var env struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
@@ -853,6 +938,13 @@ func (i *Installer) canonicalNamesFromKeys(ctx context.Context, keys []string) (
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(entry.Value, &env); err != nil {
+			// The name this aspect carries is now invisible to the collision
+			// gate, so a package declaring it installs as though nothing owned
+			// it. Skipping is still the only option — an unreadable aspect
+			// names nothing to compare against — but it must not be the silent
+			// option.
+			gateLog().Warn("pkgmgr: meta canonicalName aspect will not decode; the name it carries cannot be checked for collisions",
+				"key", k, "error", err)
 			continue
 		}
 		if env.IsDeleted {
@@ -863,74 +955,216 @@ func (i *Installer) canonicalNamesFromKeys(ctx context.Context, keys []string) (
 	return names, nil
 }
 
-// checkCanonicalNameCollision rejects an install whose declared meta-vertex
-// canonicalNames (DDL + Lens + op-meta OperationType) collide with a
-// canonicalName already carried by a meta-vertex in the kernel. metaNames is
-// the scanMetaCanonicalNames result the caller already computed — a
-// collision the install introduces would otherwise silently shadow one
-// definition at runtime (the DDL cache keeps first-seen, logs a WARN).
+// checkCanonicalNameCollision rejects a definition whose declared meta-vertex
+// canonicalNames collide with a name a meta-vertex in the kernel already
+// carries. metaNames is the canonicalNamesFromKeys result the caller already
+// computed, mapping a LIVE canonicalName to the meta-vertex id holding it.
+//
+// What a collision costs: the Processor's DDL cache serves ONE meta-vertex per
+// canonicalName (ddl_cache.go's indexByCanonicalName arbitrates a contested name
+// to the lowest-keyed root) and drops the loser from both its name index and its
+// by-key index. Every gate keyed off the loser's DDL — permittedCommands,
+// sensitive, custody, script — then stops applying to it, and the loser is not a
+// package's choice: it is whichever NanoID sorts higher.
+//
+// It runs on the shared batch builder, so a fresh install, an in-place upgrade
+// and a dry-run preview are held to one rule. An upgrade re-declares the names
+// its own already-installed meta-vertices carry, so the package's OWN roots are
+// excluded by version-independent key: a declared name's id is
+// entityNanoID(packageName, "<kind>:"+name) (Contract #8 §8.1), and all three
+// kind tags are excluded per name, not just the kind declaring it now — a
+// package moving a name from a DDL to a lens is editing its own entity, not
+// contesting someone else's.
+//
+// COVERAGE, which is narrower than the set of things a package declares and
+// must be read as such. The kernel side of this comparison is
+// `vtx.meta.<id>.canonicalName` aspects, and build.go emits that aspect for
+// DDLs and lenses ONLY:
+//
+//   - DDL and Lens names are checked, in both directions: a declared name
+//     against every installed one, whichever of the two kinds holds it.
+//   - An op-meta's OperationType is NOT checked here, deliberately. It is not a
+//     canonicalName: build.go writes no such aspect for an op-meta, so this gate
+//     could only ever see the collision from one side — refusing a package whose
+//     op-meta names an installed TYPE while blessing the same pair installed in
+//     the other order. Nothing about which package installed first should decide
+//     that, and now that it runs on upgrade the asymmetry would refuse an
+//     upgrade that introduces no new claim at all. The pair is not a runtime
+//     collision either: the Processor's DDL cache indexes op-metas in
+//     byOpMetaRoot, outside the canonicalName namespace, precisely so an
+//     operationType and a type name cannot shadow one another. Op-meta against
+//     op-meta — where a real collision lives, in the read-disposition floor — is
+//     checkOpMetaOperationTypeCollision's, and it is enforced there.
+//     (validateOpMetas' within-package rule still treats the two as one
+//     namespace. That is an authoring convenience over a set one author owns,
+//     not a claim about the kernel, and it is not weakened by this.)
+//   - Panes, loom patterns, roles and retention classes are NOT checked here and
+//     must not be assumed covered. A pane's meta-vertex carries `data.paneId`
+//     and no canonicalName aspect; roles and retention classes are not
+//     `vtx.meta.*` keys at all, so canonicalNamesFromKeys never lists them.
+//     Weaver targets are covered, by their own gate on their own identity
+//     (checkWeaverTargetIDCollision).
 func (i *Installer) checkCanonicalNameCollision(def Definition, metaNames map[string]string) error {
-	declared := make(map[string]struct{}, len(def.DDLs)+len(def.Lenses)+len(def.OpMetas))
+	// ownIDs[name] is every meta-vertex id THIS package could be carrying that
+	// name on. Keyed by name rather than by kind so a name's ownership survives
+	// the kind it is declared under changing between versions.
+	ownIDs := map[string]map[string]struct{}{}
+	claim := func(name string) {
+		if _, seen := ownIDs[name]; seen {
+			return
+		}
+		ownIDs[name] = map[string]struct{}{
+			DDLID(def.Name, name):  {},
+			LensID(def.Name, name): {},
+		}
+	}
 	for _, d := range def.DDLs {
-		declared[d.CanonicalName] = struct{}{}
+		claim(d.CanonicalName)
 	}
 	for _, l := range def.Lenses {
-		declared[l.CanonicalName] = struct{}{}
+		claim(l.CanonicalName)
 	}
-	for _, o := range def.OpMetas {
-		declared[o.OperationType] = struct{}{}
-	}
-	for name := range declared {
-		if id, collides := metaNames[name]; collides {
-			return fmt.Errorf("%w: %q (declared by package %q, already on vtx.meta.%s)",
-				ErrCanonicalNameCollision, name, def.Name, id)
+
+	// Sorted, so a definition introducing two collisions names the same one on
+	// every run: an author fixing them one at a time needs the second report to
+	// be a consequence of the first fix, not of map iteration order.
+	for _, name := range sortedNameKeys(ownIDs) {
+		id, collides := metaNames[name]
+		if !collides {
+			continue
 		}
+		if _, mine := ownIDs[name][id]; mine {
+			continue
+		}
+		return fmt.Errorf("%w: %q (declared by package %q; already carried by vtx.meta.%s, which this package does not own). The Processor's DDL cache serves one meta-vertex per canonicalName and drops the other from its lookup entirely, so whichever of the two sorts higher stops enforcing its permittedCommands, sensitivity, custody and script. Rename this DDL/lens, or upgrade the package that already owns the name",
+			ErrCanonicalNameCollision, name, def.Name, id)
 	}
 	return nil
 }
 
-// checkWeaverTargetIDCollision rejects an install whose declared weaver
-// targetIds collide with a targetId already carried by an installed
-// weaver-target `.spec` aspect (Contract #10 §10.8: targetId uniqueness is
-// install-validated across installed targets). A weaver target has no
-// canonicalName aspect, so checkCanonicalNameCollision cannot catch it; its
-// identity lives on the `.spec` body's `targetId`. Mirrors
-// checkCanonicalNameCollision: a single KVListKeys pass plus a targeted read of
-// only the `vtx.meta.*.spec` keys, filtered to the weaver-target spec class. A
-// tombstoned spec is ignored — its targetId is no longer live. Runs AFTER the
-// idempotency check in Install so a re-install of the same package never sees
-// its own prior targets as a collision.
-func (i *Installer) checkWeaverTargetIDCollision(ctx context.Context, def Definition) error {
-	declared := make(map[string]struct{}, len(def.WeaverTargets))
-	for _, t := range def.WeaverTargets {
-		declared[t.TargetID] = struct{}{}
+// sortedNameKeys returns a name-keyed map's keys in ascending order, so a gate
+// iterating it reports the same finding on every run.
+func sortedNameKeys(m map[string]map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	if len(declared) == 0 {
+	sort.Strings(out)
+	return out
+}
+
+// checkOpMetaOperationTypeCollision refuses a definition whose op-meta
+// operationTypes are already claimed by a live op-meta somebody else installed.
+//
+// It is the runtime counterpart to lint-package-standard's S11, and the reason
+// the invariant needs one is that S11 iterates the compiled-in package registry
+// while op-metas also reach the kernel by a path no lint can see: "opMeta" is
+// an enabled capability artifact kind (capabilitymaterializer.go), so an
+// APPROVED capability proposal materializes a Definition carrying a single
+// OpMetaSpec and installs it under whatever package name the proposal names.
+// Definition.validateOpMetas and validateCanonicalNameUniqueness are both
+// per-Definition, so a one-entry Definition is trivially unique against itself
+// and sees nothing else in the kernel. The lint keeps its job — catching the
+// collision in the authored corpus, where a build fails before anything is
+// installed; this catches the ones that never pass through it.
+//
+// It runs on the shared batch builder rather than beside the Install-only
+// collision guards, because an op-meta enters the kernel through exactly one
+// builder: a fresh install, an in-place upgrade and a dry-run preview all pass
+// here, so the refusal does not depend on which command carried the definition,
+// and a preview reports it before the operator commits to an apply.
+//
+// A definition's OWN root is excluded by KEY rather than by ownership
+// bookkeeping: an op-meta's id is entityNanoID(packageName, "opMeta:"+
+// operationType) (Contract #8 §8.1, version-independent), so the single root a
+// re-install or upgrade of this package would rewrite is the only root it may
+// legitimately share an operationType with, and every other claimant belongs to
+// someone else by construction.
+//
+// The live-claimant test is `data.operationType` on a non-tombstoned root — the
+// same discriminator the Processor's DDL cache uses to tell an op-meta from a
+// DDL, deliberately, so the two cannot disagree about which roots carry a floor.
+func (i *Installer) checkOpMetaOperationTypeCollision(ctx context.Context, def Definition, scan metaScanResult) error {
+	if len(def.OpMetas) == 0 {
 		return nil
 	}
-
-	keys, err := i.Conn.KVListKeys(ctx, CoreBucket)
-	if err != nil {
-		return fmt.Errorf("pkgmgr: list keys: %w", err)
+	ownRoot := make(map[string]string, len(def.OpMetas))
+	for _, o := range def.OpMetas {
+		ownRoot[o.OperationType] = metaVertexPrefix + entityNanoID(def.Name, "opMeta:"+o.OperationType)
 	}
-	const metaPrefix = "vtx.meta."
+	roots := metaRootKeys(scan.keys)
+	entries, err := i.readMetaDocs(ctx, roots)
+	if err != nil {
+		return err
+	}
+	for _, k := range roots {
+		entry, present := entries[k]
+		if !present {
+			continue
+		}
+		var env struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				OperationType string `json:"operationType"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &env); err != nil {
+			// A root that will not decode cannot be seen to claim an
+			// operationType, so this gate passes it — the same blind spot the
+			// canonicalName scan reports, and reported the same way.
+			gateLog().Warn("pkgmgr: meta root will not decode; any operationType it claims cannot be checked for collisions",
+				"key", k, "error", err)
+			continue
+		}
+		if env.IsDeleted || env.Data.OperationType == "" {
+			continue
+		}
+		own, declaredHere := ownRoot[env.Data.OperationType]
+		if !declaredHere || own == k {
+			continue
+		}
+		return fmt.Errorf("%w: %q (declared by package %q, which would write %s; already carried by %s). One operationType carries one descriptor — its optionalReads are the Contract #2 §2.5 read floor the Processor applies to every envelope for this operationType, and a second descriptor makes that floor the union of both, so this package would be changing the read disposition of an operation it does not own. Give the op a vertical-unique name (the cafe-ledger CreditCafeAccount idiom) if the two really are distinct operations, or upgrade the package that already owns it",
+			ErrOpMetaOperationTypeCollision, env.Data.OperationType, def.Name, own, k)
+	}
+	return nil
+}
+
+// checkWeaverTargetIDCollision refuses a definition whose declared weaver
+// targetIds are already carried by an installed weaver-target `.spec` aspect
+// (Contract #10 §10.8: targetId uniqueness is install-validated across installed
+// targets). A weaver target has no canonicalName aspect, so the canonicalName
+// gate cannot catch it; its identity lives on the `.spec` body's `targetId`, and
+// two targets sharing one interleave their rows under the same `<targetId>.`
+// prefix in the shared weaver-targets bucket.
+//
+// The third gate on this builder, and it is here for the reason the other two
+// are: an upgrade is not a weaker install. A definition that could not be
+// installed fresh must not arrive by upgrading into place, and a preview must
+// report the same refusal an apply would.
+//
+// Self-exclusion is by version-independent KEY, as for the other two: a weaver
+// target's meta-vertex id is entityNanoID(packageName, "weaverTarget:"+targetID)
+// (Contract #8 §8.1), so the one spec a re-install or upgrade of this package
+// rewrites is the only spec it may share a targetId with.
+func (i *Installer) checkWeaverTargetIDCollision(ctx context.Context, def Definition, scan metaScanResult) error {
+	if len(def.WeaverTargets) == 0 {
+		return nil
+	}
 	const specSuffix = ".spec"
-	for _, k := range keys {
-		if len(k) < len(metaPrefix)+len(specSuffix) {
+	ownSpec := make(map[string]string, len(def.WeaverTargets))
+	for _, t := range def.WeaverTargets {
+		ownSpec[t.TargetID] = metaVertexPrefix + entityNanoID(def.Name, "weaverTarget:"+t.TargetID) + specSuffix
+	}
+
+	specKeys := metaAspectKeys(scan.keys, "spec")
+	entries, err := i.readMetaDocs(ctx, specKeys)
+	if err != nil {
+		return err
+	}
+	for _, k := range specKeys {
+		entry, present := entries[k]
+		if !present {
 			continue
-		}
-		if k[:len(metaPrefix)] != metaPrefix {
-			continue
-		}
-		if k[len(k)-len(specSuffix):] != specSuffix {
-			continue
-		}
-		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return fmt.Errorf("pkgmgr: get %s: %w", k, err)
 		}
 		var env struct {
 			Class     string `json:"class"`
@@ -940,15 +1174,24 @@ func (i *Installer) checkWeaverTargetIDCollision(ctx context.Context, def Defini
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(entry.Value, &env); err != nil {
+			// A spec that will not decode cannot be seen to claim a targetId.
+			// Same blind spot, same report as the other two gates. A lens spec
+			// lives at this key shape too, which is why the class filter below
+			// is the discriminator and a decode failure is not simply "not a
+			// weaver target".
+			gateLog().Warn("pkgmgr: meta spec aspect will not decode; any weaver targetId it claims cannot be checked for collisions",
+				"key", k, "error", err)
 			continue
 		}
 		if env.IsDeleted || env.Class != weaverTargetSpecClass {
 			continue
 		}
-		if _, collides := declared[env.Data.TargetID]; collides {
-			return fmt.Errorf("%w: %q (declared by package %q, already on %s)",
-				ErrWeaverTargetIDCollision, env.Data.TargetID, def.Name, k)
+		own, declaredHere := ownSpec[env.Data.TargetID]
+		if !declaredHere || own == k {
+			continue
 		}
+		return fmt.Errorf("%w: %q (declared by package %q, which would write %s; already carried by %s). A targetId is the row prefix a weaver target writes under in the shared weaver-targets bucket, so two claimants interleave two packages' rows under one prefix. Give this target a package-unique targetId, or upgrade the package that already owns it",
+			ErrWeaverTargetIDCollision, env.Data.TargetID, def.Name, own, k)
 	}
 	return nil
 }

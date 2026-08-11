@@ -71,8 +71,9 @@ var ErrActorSetTooWide = fmt.Errorf("pipeline: actor enumerator: actor-set cap r
 //     plane is a retraction dropped with nothing said. walkToAnchors applies the
 //     same rule to the identical hazard on its own read cap and states the
 //     reason (anchor_derivation.go's DefaultDerivationReadCap); the two arms
-//     must not disagree about what an exceeded bound means. The cap's SIZING is
-//     untouched (§18.6 holds it out of this fire) — only its failure mode.
+//     must not disagree about what an exceeded bound means. A cap's SIZE and
+//     its failure MODE are separate decisions: this states only what exceeding
+//     the bound means, whatever number it is set to (§18.6 owns the sizing).
 //
 // adjKV and coreKV are the live KV handles, passed through to every
 // adjacency.Neighbors call this type makes. coreKV is required whenever a
@@ -249,10 +250,10 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 // none.
 //
 // An event on a vertex of the actor type is answered with that vertex alone
-// only where oneKeyAnswerSound proves no other anchor can bind it, or
-// where an operator has turned the widening off. Everywhere else the enumerator
-// walks, which is wider than the shipped behaviour and wider in the direction
-// §4.7 requires.
+// only where oneKeyAnswerSound proves no other anchor can bind it, or where an
+// operator has turned the widening off. Everywhere else the enumerator walks —
+// the wider answer §4.7 requires, since an anchor the one-key shortcut omits is
+// a retraction that never reaches its holder.
 func (p *Pipeline) enumerateAnchors(ctx context.Context, rs ruleState, vertexKey, vertexType string) ([]string, error) {
 	if vertexType == p.actorEnumerator.actorType &&
 		(!p.peerAnchorsEnabled() || p.oneKeyAnswerSound(rs)) {

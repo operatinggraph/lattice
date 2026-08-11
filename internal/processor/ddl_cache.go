@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -107,6 +110,111 @@ const (
 	CustodyKindUnresolvable = "!unresolvable"
 )
 
+// errMetaDocumentUntrusted marks a meta-vertex document the cache successfully
+// read and could not parse. Both failures refuse the refresh, so this is not a
+// fork in the OUTCOME; it is the line that decides what is worth retrying.
+// Unparseable bytes are a durable fact about the bucket — the same bytes decode
+// the same way on every attempt — so spending the read budget on them buys
+// nothing but latency, while a read that simply did not answer says nothing
+// about the document and is exactly what the budget is for. Callers test for it
+// with errors.Is; every other error out of the meta loaders is a read failure.
+var errMetaDocumentUntrusted = errors.New("meta vertex document is unparseable")
+
+// The bounded read budget EVERY Core KV read in this file spends before an
+// unanswered read is taken at its word.
+//
+// It exists because substrate's KV calls are bare single-shot requests with no
+// retry of their own, and one Refresh makes a key listing plus one read per meta
+// root: without a budget, a single dropped request decides whether the Processor
+// starts. With it, a blip costs milliseconds and a genuinely unreachable Core KV
+// still refuses — the correct outcome for the sole writer to that bucket.
+//
+// The LISTING is on the budget for the sharpest form of that reason. It is the
+// first read a refresh makes and it returns before any per-root read runs, so
+// one dropped request there does not cost one meta-vertex, it costs the entire
+// scan — the one read the refresh has no way to survive.
+//
+// Three attempts and 50ms between them: small enough that a whole scan of a few
+// hundred roots against a healthy bucket pays nothing (the budget is spent only
+// on the error path), and large enough to cross a reconnect. The delay is not
+// synchronization — nothing is being waited FOR — it is spacing, so the retry
+// does not simply re-send into the same closed window.
+const (
+	metaReadAttempts   = 3
+	metaReadRetryDelay = 50 * time.Millisecond
+)
+
+// retryMetaRead runs read until it answers, the budget is spent, or ctx ends,
+// and reports how many attempts it took so the caller can say so.
+//
+// An absent key is an ANSWER and returns immediately: ErrKeyNotFound is how
+// every meta loader learns that an optional aspect is not declared, and
+// retrying it would spend the budget on the single most common outcome in the
+// scan.
+//
+// Generic over the read's result so the listing and the per-key gets share ONE
+// budget rather than one each — two loops would be two places to change the
+// posture, and this file has already learned what an exempt read costs.
+//
+// Separated from the KV calls it wraps so the budget is testable without a
+// substrate that can be made to fail on command: the loop is the mechanism, and
+// a stub that fails a chosen number of times exercises exactly it.
+func retryMetaRead[T any](ctx context.Context, attempts int, delay time.Duration, read func() (T, error)) (T, int, error) {
+	var zero T
+	var err error
+	for attempt := 1; ; attempt++ {
+		var got T
+		got, err = read()
+		if err == nil {
+			return got, attempt, nil
+		}
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return zero, attempt, err
+		}
+		// A dead context cannot be outwaited, and the next attempt would fail
+		// on it rather than on the bucket.
+		if attempt >= attempts || ctx.Err() != nil {
+			return zero, attempt, err
+		}
+		select {
+		case <-ctx.Done():
+			return zero, attempt, err
+		case <-time.After(delay):
+		}
+	}
+}
+
+// noteRetry reports a read that only succeeded because the budget was there.
+// That is the state one step before the refresh that refuses to boot, and
+// nothing else in the log would show it.
+func (c *DDLCache) noteRetry(target string, attempts int, err error) {
+	if attempts > 1 && err == nil {
+		c.logger.Warn("ddl cache: core kv read succeeded only after a retry",
+			"target", target, "attempts", attempts)
+	}
+}
+
+// listCoreKeys is Refresh's opening read: the full Core KV key listing every
+// meta root is derived from.
+func (c *DDLCache) listCoreKeys(ctx context.Context) ([]string, error) {
+	keys, attempts, err := retryMetaRead(ctx, metaReadAttempts, metaReadRetryDelay, func() ([]string, error) {
+		return c.conn.KVListKeys(ctx, c.coreBucket)
+	})
+	c.noteRetry("key listing", attempts, err)
+	return keys, err
+}
+
+// readMetaKey is the one Core KV read every meta-vertex loader in this file
+// makes. Routing them all through it is what makes the budget a property of the
+// CACHE rather than of whichever loader remembered to retry.
+func (c *DDLCache) readMetaKey(ctx context.Context, key string) (*substrate.KVEntry, error) {
+	entry, attempts, err := retryMetaRead(ctx, metaReadAttempts, metaReadRetryDelay, func() (*substrate.KVEntry, error) {
+		return c.conn.KVGet(ctx, c.coreBucket, key)
+	})
+	c.noteRetry(key, attempts, err)
+	return entry, err
+}
+
 // DDLCache is the Processor's in-memory map from canonicalName to
 // MetaVertexRef. Built at startup via Refresh and refreshed
 // incrementally on `vtx.meta.>` commits (Invalidate).
@@ -119,9 +227,33 @@ type DDLCache struct {
 	coreBucket string
 	logger     *slog.Logger
 
-	mu       sync.RWMutex
-	byName   map[string]MetaVertexRef
-	byMetaPK map[string]string // metaVertexKey → canonicalName (reverse index for invalidate-by-key)
+	// invalidateMu serializes Invalidate calls with each other so the cache
+	// lock never has to be held across a KV read. One writer at a time is what
+	// makes "read the prior state, then mutate" safe without freezing every
+	// reader for the duration of a budgeted retry.
+	invalidateMu sync.Mutex
+
+	mu sync.RWMutex
+	// byRoot holds ONE entry per DDL meta-vertex root: that root's own
+	// projection, exactly as loadMetaVertex read it. Both name-keyed views
+	// below are DERIVED from it, and that is why it exists rather than being
+	// redundant with them. A canonicalName can be claimed by two roots, so an
+	// index keyed by the NAME cannot say which roots contribute to it — and a
+	// per-root Invalidate over such an index can neither withdraw one
+	// claimant's entry without dropping the other's, nor re-run the
+	// arbitration a full Refresh performs. Keeping the per-root truth and
+	// deriving the views makes Refresh and Invalidate the same computation
+	// over the same input, which is the only way the two can be made to agree
+	// by construction instead of by inspection.
+	byRoot map[string]MetaVertexRef
+	// byName is the canonicalName → DDL lookup the Validator and Hydrator
+	// read. Derived from byRoot by indexByCanonicalName, which arbitrates a
+	// name two roots claim; never written key-by-key.
+	byName map[string]MetaVertexRef
+	// byMetaPK maps a meta-vertex root key to the canonicalName it is served
+	// under — byName's reverse, derived alongside it, so it names only the
+	// roots byName actually answers for.
+	byMetaPK map[string]string
 	// byCommand maps an operationType to the single vertexType DDL's
 	// canonicalName that admits it — the operationType→class reverse index
 	// (Contract #2 §2.1). It lets the Hydrator resolve a dispatched op's class
@@ -154,17 +286,36 @@ type DDLCache struct {
 	// canonical names live in, where a package naming an op after one of its
 	// own types would silently shadow that type's DDL.
 	//
-	// Lifetime: identical to byName and byCommand. Built wholesale by Refresh
-	// from the same full `vtx.meta.>` scan, swapped under the same write lock,
-	// and maintained per-root by Invalidate on a meta-commit. Nothing else
-	// mutates it and nothing in it outlives a refresh.
+	// A duplicate operationType is unioned rather than picked, so the index
+	// holds the weakest disposition every claimant declares — see
+	// floorsByOpType, which is its only writer.
+	//
+	// Lifetime: identical to byName and byCommand. Derived from byOpMetaRoot,
+	// swapped under the write lock by Refresh and re-derived in full by
+	// Invalidate. Nothing else mutates it and nothing in it outlives a
+	// refresh.
 	byOpType map[string][]string
-	// byOpMetaPK maps an op-meta's root key to the operationType it carries —
-	// byMetaPK's counterpart for the descriptor index, and needed for the same
-	// reason: a tombstoned root cannot say what it used to be, so a withdrawn
-	// descriptor could not otherwise be dropped by key. Same lifetime as
-	// byOpType, rebuilt and swapped with it.
-	byOpMetaPK map[string]string
+	// byOpMetaRoot holds ONE entry per op-meta root: the operationType that
+	// root claims and the optionalReads templates its own `.dispatch`
+	// declares. byRoot's counterpart for the descriptor index, and byOpType is
+	// derived from it for the sharper of byRoot's two reasons — byOpType's
+	// value is a UNION over claimants, so an index holding only the union can
+	// add a contributor but can never subtract one, and a withdrawn descriptor
+	// would keep flooring its operation until the next process restart.
+	//
+	// Keying it by ROOT also answers the question a tombstone destroys: a
+	// tombstoned root can no longer say which operationType it carried, and
+	// this map still can.
+	byOpMetaRoot map[string]opMetaDescriptor
+}
+
+// opMetaDescriptor is one op-meta root's own contribution to an operation's
+// read-disposition floor (Contract #2 §2.5). Per-root and never merged in
+// place: the merge lives in floorsByOpType, over the whole set, so every
+// rebuild sees exactly the claimants that exist at that moment.
+type opMetaDescriptor struct {
+	operationType string
+	optionalReads []string
 }
 
 // NewDDLCache constructs the cache. Caller MUST invoke Refresh once
@@ -180,14 +331,15 @@ func NewDDLCache(conn *substrate.Conn, coreBucket string, logger *slog.Logger) *
 		logger = slog.Default()
 	}
 	return &DDLCache{
-		conn:       conn,
-		coreBucket: coreBucket,
-		logger:     logger,
-		byName:     map[string]MetaVertexRef{},
-		byMetaPK:   map[string]string{},
-		byCommand:  map[string]string{},
-		byOpType:   map[string][]string{},
-		byOpMetaPK: map[string]string{},
+		conn:         conn,
+		coreBucket:   coreBucket,
+		logger:       logger,
+		byRoot:       map[string]MetaVertexRef{},
+		byName:       map[string]MetaVertexRef{},
+		byMetaPK:     map[string]string{},
+		byCommand:    map[string]string{},
+		byOpType:     map[string][]string{},
+		byOpMetaRoot: map[string]opMetaDescriptor{},
 	}
 }
 
@@ -195,7 +347,7 @@ func NewDDLCache(conn *substrate.Conn, coreBucket string, logger *slog.Logger) *
 // Idempotent. Safe to call repeatedly; concurrent calls are serialized
 // by the cache mutex (only one rebuild proceeds at a time).
 func (c *DDLCache) Refresh(ctx context.Context) error {
-	keys, err := c.conn.KVListKeys(ctx, c.coreBucket)
+	keys, err := c.listCoreKeys(ctx)
 	if err != nil {
 		return fmt.Errorf("ddl cache: list keys: %w", err)
 	}
@@ -217,10 +369,8 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 		}
 	}
 
-	byName := map[string]MetaVertexRef{}
-	byPK := map[string]string{}
-	byOpType := map[string][]string{}
-	byOpMetaPK := map[string]string{}
+	byRoot := map[string]MetaVertexRef{}
+	byOpMetaRoot := map[string]opMetaDescriptor{}
 	for root, members := range metaKeys {
 		// Op-metas and DDLs share the `vtx.meta.>` keyspace and the
 		// `meta.ddl.vertexType` class, so both loaders are offered every root
@@ -229,67 +379,75 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 		// carries.
 		opType, optional, isOpMeta, err := c.loadOpMetaDispatch(ctx, root)
 		if err != nil {
-			// A root that cannot be read as an op-meta cannot be read as a DDL
-			// either — both loaders start from the same KVGet — so falling
-			// through would index it as NEITHER and silently drop whatever
-			// floor it carries. For a DDL that direction is fail-closed (a
-			// missing DDL rejects operations); for a floor it is fail-OPEN.
-			// Refuse the whole refresh instead: a cache built from a partial
-			// scan is the thing that must not become the quiet state.
+			// A root that did not load refuses the WHOLE refresh — a cache
+			// built from a partial scan must not become the quiet state.
+			//
+			// Skipping the root is the tempting answer and it is the wrong one
+			// for every caller Refresh has, in a direction this file already
+			// names. Each of the three builds a cache it then TRUSTS, and none
+			// of them re-scans:
+			//
+			//   - The Processor's commit path builds it once at construction,
+			//     so a root dropped there stays dropped for the process
+			//     lifetime unless something happens to Invalidate that exact
+			//     key. And the drop is not confined to the descriptor — the
+			//     read that failed is the ROOT read every meta loader starts
+			//     from, so the root is lost as a DDL too. A `ssn` aspect DDL
+			//     missing from the cache does not reject writes: step 4 admits
+			//     the op on its vertex class, step 6.5 resolves the aspect's
+			//     class, misses, and commits the aspect as PLAINTEXT.
+			//     permittedCommands, custody and the abstract marker go
+			//     permissive by the same route.
+			//   - `lattice capability` and Loupe's review handler each build a
+			//     ONE-SHOT cache to answer IsSensitiveAspect at approve time —
+			//     the freshness re-check that exists because the record-time
+			//     verdict may be stale. A dropped root there answers `false`
+			//     for a class that IS sensitive, which is a security re-check
+			//     failing open at the exact moment it is being relied on.
+			//
+			// So the widening is not merely tolerable for the two non-boot
+			// callers, it is what they needed most: both already propagate this
+			// error, and refusing to answer beats answering `not sensitive`.
+			//
+			// Transience is answered where transience lives — readMetaKey
+			// spends a bounded retry budget on a read that did not answer — not
+			// by lowering what an unanswered read means once the budget is
+			// spent. A Processor that cannot read Core KV must not start: it is
+			// the sole writer to it, and starting half-blind writes state no
+			// later refresh can take back.
 			return fmt.Errorf("ddl cache: refresh: read meta vertex %s: %w", root, err)
 		}
 		if isOpMeta {
-			// UNION on a duplicate operationType, never a pick. Go map
-			// iteration is randomized, so "keep first-seen" would choose a
-			// different descriptor per Refresh and the floor would flap run to
-			// run; and unlike buildByCommand's ambiguity guard — which drops a
-			// candidate and thereby fails CLOSED, because losing a class
-			// inference rejects the op — dropping a floor fails OPEN. The
-			// union is deterministic, and it is the safe direction: it demotes
-			// every key any claimant declares optional, which can only ever
-			// widen absence-tolerance, never harden a key back.
-			//
-			// No duplicate exists in the corpus (39 op-metas, all distinct)
-			// and validateOpMetas rejects one WITHIN a package; this is the
-			// cross-package case that gate cannot see.
-			if prior, dup := byOpType[opType]; dup {
-				c.logger.Warn("ddl cache: duplicate op-meta descriptor; unioning the floors",
-					"operationType", opType, "key", root, "priorTemplates", len(prior), "addedTemplates", len(optional))
-				optional = unionTemplates(prior, optional)
-			}
-			byOpType[opType] = optional
-			byOpMetaPK[root] = opType
+			byOpMetaRoot[root] = opMetaDescriptor{operationType: opType, optionalReads: optional}
 			continue
 		}
 		ref, ok, err := c.loadMetaVertex(ctx, root, members)
 		if err != nil {
-			c.logger.Warn("ddl cache: skipping meta vertex with load error",
-				"key", root, "error", err)
-			continue
+			// Same rule, same reason: this loader's aspect reads decide
+			// sensitivity, custody, permittedCommands and the script, and each
+			// of them fails OPEN when the meta-vertex is absent from the cache.
+			// A DDL whose `.sensitive` read could not be satisfied is a class
+			// that stops being encrypted, not a class that merely stops being
+			// looked up.
+			return fmt.Errorf("ddl cache: refresh: load meta vertex %s: %w", root, err)
 		}
 		if !ok {
 			continue
 		}
-		if existing, dup := byName[ref.CanonicalName]; dup {
-			c.logger.Warn("ddl cache: duplicate canonicalName; keeping first-seen",
-				"canonicalName", ref.CanonicalName,
-				"kept", existing.MetaVertexKey,
-				"dropped", ref.MetaVertexKey)
-			continue
-		}
-		byName[ref.CanonicalName] = ref
-		byPK[ref.MetaVertexKey] = ref.CanonicalName
+		byRoot[root] = ref
 	}
 
+	byName, byPK := indexByCanonicalName(byRoot, c.logger)
 	c.mu.Lock()
+	c.byRoot = byRoot
 	c.byName = byName
 	c.byMetaPK = byPK
 	c.byCommand = buildByCommand(byName, c.logger)
-	c.byOpType = byOpType
-	c.byOpMetaPK = byOpMetaPK
+	c.byOpMetaRoot = byOpMetaRoot
+	c.byOpType = floorsByOpType(byOpMetaRoot, c.logger)
 	c.mu.Unlock()
 
-	c.logger.Info("ddl cache: refreshed", "entries", len(byName), "opDescriptors", len(byOpType))
+	c.logger.Info("ddl cache: refreshed", "entries", len(byName), "opDescriptors", len(byOpMetaRoot))
 	return nil
 }
 
@@ -315,8 +473,12 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 // still reported found with an empty template list. That is a real answer —
 // "this descriptor declares no optional floor" — and it is not the same as
 // having no descriptor at all.
+//
+// Errors come in the two kinds errMetaDocumentUntrusted separates, and callers
+// are expected to test for it: an unparseable document is a durable fact about
+// the bucket, a failed KVGet is a fact about this attempt.
 func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (operationType string, optionalReads []string, ok bool, err error) {
-	rootEntry, err := c.conn.KVGet(ctx, c.coreBucket, root)
+	rootEntry, err := c.readMetaKey(ctx, root)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
 			return "", nil, false, nil
@@ -330,13 +492,13 @@ func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (operati
 		} `json:"data"`
 	}
 	if uerr := json.Unmarshal(rootEntry.Value, &rootDoc); uerr != nil {
-		return "", nil, false, fmt.Errorf("unmarshal op-meta root %s: %w", root, uerr)
+		return "", nil, false, fmt.Errorf("op-meta root %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
 	}
 	if rootDoc.IsDeleted || rootDoc.Data.OperationType == "" {
 		return "", nil, false, nil
 	}
 
-	dispatchEntry, derr := c.conn.KVGet(ctx, c.coreBucket, root+".dispatch")
+	dispatchEntry, derr := c.readMetaKey(ctx, root+".dispatch")
 	if derr != nil {
 		if errors.Is(derr, substrate.ErrKeyNotFound) {
 			return rootDoc.Data.OperationType, nil, true, nil
@@ -350,7 +512,7 @@ func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (operati
 		} `json:"data"`
 	}
 	if uerr := json.Unmarshal(dispatchEntry.Value, &asp); uerr != nil {
-		return "", nil, false, fmt.Errorf("unmarshal dispatch %s: %w", root, uerr)
+		return "", nil, false, fmt.Errorf("dispatch %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
 	}
 	if asp.IsDeleted {
 		return rootDoc.Data.OperationType, nil, true, nil
@@ -379,7 +541,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	ref := MetaVertexRef{MetaVertexKey: root}
 
 	// Read the root vertex to derive Kind.
-	rootEntry, err := c.conn.KVGet(ctx, c.coreBucket, root)
+	rootEntry, err := c.readMetaKey(ctx, root)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
 			return ref, false, nil
@@ -391,8 +553,15 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		IsDeleted bool                   `json:"isDeleted"`
 		Data      map[string]interface{} `json:"data"`
 	}
+	// Classified as an untrusted DOCUMENT, not a failed read, and the two
+	// decoders make that distinction load-bearing rather than cosmetic: this
+	// one binds `class` as a string where loadOpMetaDispatch ignores the field
+	// entirely, so a root carrying `{"class":123,…}` decodes cleanly there and
+	// fails only here. Left unmarked it would be a durable defect spending the
+	// read budget on every attempt and reported as though the bucket were
+	// unreachable.
 	if err := json.Unmarshal(rootEntry.Value, &rootDoc); err != nil {
-		return ref, false, fmt.Errorf("unmarshal root %s: %w", root, err)
+		return ref, false, fmt.Errorf("root %s: %w: %w", root, errMetaDocumentUntrusted, err)
 	}
 	// A tombstoned root means the whole meta-vertex is gone. Report absent
 	// before any aspect reads so Invalidate drops the entry from byName /
@@ -442,7 +611,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	// nothing else in the meta-vertex carries the lookup name, so there is no
 	// second write that could retire it, and every gate keyed off DDLs.Lookup
 	// keeps answering for a name its owner has withdrawn.
-	if cnEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".canonicalName"); err == nil {
+	if cnEntry, err := c.readMetaKey(ctx, root+".canonicalName"); err == nil {
 		var asp struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
@@ -480,7 +649,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	// tombstone as live would leave a type that declares no commands admitting
 	// every command it used to — and for a type upgraded to ABSTRACT that
 	// inverts the one invariant the abstract marker exists to assert.
-	if pcEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".permittedCommands"); err == nil {
+	if pcEntry, err := c.readMetaKey(ctx, root+".permittedCommands"); err == nil {
 		var asp struct {
 			IsDeleted bool                   `json:"isDeleted"`
 			Data      map[string]interface{} `json:"data"`
@@ -535,7 +704,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	// package tried to stop declaring it sensitive. Same tombstone shape,
 	// opposite safe direction — encryption failing open toward
 	// confidentiality is the harmless side of this particular declaration.
-	if sEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".sensitive"); err == nil {
+	if sEntry, err := c.readMetaKey(ctx, root+".sensitive"); err == nil {
 		var asp struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
@@ -562,7 +731,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	// purpose: an empty CustodyKind IS the identity kind, and every consumer
 	// reads it that way, so a DDL carrying no custody declaration needs no
 	// value materialized at load time to behave correctly.
-	if cEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".custody"); err == nil {
+	if cEntry, err := c.readMetaKey(ctx, root+".custody"); err == nil {
 		var asp struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
@@ -608,7 +777,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	// retained script would keep executing for a class whose package withdrew
 	// it — and on a concrete type upgraded to ABSTRACT, would keep executing
 	// for a type that declares none at all.
-	if scEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".script"); err == nil {
+	if scEntry, err := c.readMetaKey(ctx, root+".script"); err == nil {
 		var asp struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
@@ -682,51 +851,77 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		return fmt.Errorf("ddl cache: invalidate: key %q is not a meta-vertex key", metaRootKey)
 	}
 
-	// Hold the write lock for the entire operation (including the KV read) to
-	// eliminate the TOCTOU window where two concurrent Invalidate calls could
-	// race on priorName and leave the cache indexed under a stale canonical name.
-	// Lock contention is acceptable — Invalidate is a rare DDL-commit path.
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	priorName, hadPrior := c.byMetaPK[metaRootKey]
+	// Serialize invalidations against each other, and hold the CACHE lock only
+	// around the index mutation — the shape Refresh already has (scan
+	// lock-free, swap under the lock).
+	//
+	// Both halves are load-bearing. Holding c.mu across the reads would put a
+	// budgeted retry — up to eight reads, each able to spend the full backoff —
+	// inside the write lock, and every Lookup / ClassForCommand on the step-4
+	// and step-6 hot paths would block on RLock for the duration; a flapping
+	// Core KV during a package's meta commits would stall the commit path for
+	// most of a second. Dropping the lock without this mutex would instead
+	// reopen the TOCTOU it was taken for: two concurrent Invalidates on one
+	// root could interleave and let the older read's document win.
+	//
+	// Refresh is not held to this mutex, and does not need to be: it is a
+	// construction-time full rebuild that publishes one whole cache under c.mu.
+	c.invalidateMu.Lock()
+	defer c.invalidateMu.Unlock()
 
 	// Op-metas share this keyspace, so the same root may be one. Its floor is
 	// re-loaded here for the reason the DDL entry is: a meta-commit that
 	// retires a `.dispatch` aspect must stop the floor being applied without
 	// waiting for the next full Refresh.
-	//
-	// The prior operationType is read from the reverse index rather than from
-	// the document, because a TOMBSTONED root can no longer say which
-	// operationType it carried — the same problem byMetaPK solves for a
-	// tombstoned DDL's canonicalName, solved the same way.
-	priorOpType, hadPriorOp := c.byOpMetaPK[metaRootKey]
 	opType, optional, isOpMeta, oerr := c.loadOpMetaDispatch(ctx, metaRootKey)
 	if oerr != nil {
+		// Both error kinds are returned here, unlike Refresh: this is a
+		// single-root path with a caller (the committer, at step 8) that can
+		// see and report the failure, so there is nothing to gain by
+		// swallowing a read that did not answer and re-deriving the floor
+		// around a root whose current shape is unknown.
 		return fmt.Errorf("ddl cache: invalidate op-meta %s: %w", metaRootKey, oerr)
 	}
-	if hadPriorOp {
-		delete(c.byOpMetaPK, metaRootKey)
-	}
+
+	// A TOMBSTONED root can no longer say which operationType it carried, which
+	// is why the prior claim is read from the index rather than the document.
+	// Safe to read here and act on below: invalidateMu makes this goroutine the
+	// only writer for the whole call.
+	c.mu.RLock()
+	priorOp, hadPriorOp := c.byOpMetaRoot[metaRootKey]
+	c.mu.RUnlock()
+
+	// Every write below lands on a PER-ROOT map and is followed by a full
+	// re-derivation of the aggregate views. That is what makes a single-root
+	// invalidate land on exactly what a full Refresh would produce from the
+	// same KV state, for the three aggregates that are not a function of one
+	// root alone: byName (a canonicalName two roots claim), byCommand (a
+	// global ambiguity count over every vertexType DDL) and byOpType (a union
+	// over every claimant of an operationType). Re-deriving is O(meta roots)
+	// on a path that runs once per DDL commit.
 	if isOpMeta {
-		c.byOpType[opType] = c.unionFloorFromPeers(metaRootKey, opType, optional)
-		c.byOpMetaPK[metaRootKey] = opType
+		c.mu.Lock()
+		c.byOpMetaRoot[metaRootKey] = opMetaDescriptor{operationType: opType, optionalReads: optional}
+		c.byOpType = floorsByOpType(c.byOpMetaRoot, c.logger)
+		templates := len(c.byOpType[opType])
+		c.mu.Unlock()
 		c.logger.Info("ddl cache: op-meta descriptor invalidated",
-			"key", metaRootKey, "operationType", opType, "optionalReads", len(c.byOpType[opType]))
+			"key", metaRootKey, "operationType", opType, "optionalReads", templates)
 		return nil
 	}
 	if hadPriorOp {
-		// Was an op-meta, now tombstoned. Rebuild this operationType's floor
-		// from whatever OTHER roots still claim it rather than deleting the
-		// entry: a single-root Invalidate must reach the same answer Refresh
-		// would, and deleting a still-claimed floor is the fail-open version
-		// of the duplicate hazard the union rule closes.
-		if rebuilt := c.unionFloorFromPeers(metaRootKey, priorOpType, nil); len(rebuilt) > 0 || c.opTypeStillClaimed(metaRootKey, priorOpType) {
-			c.byOpType[priorOpType] = rebuilt
-		} else {
-			delete(c.byOpType, priorOpType)
-		}
+		// Was an op-meta, now tombstoned. Dropping the ROOT and re-deriving is
+		// what withdraws exactly this claimant's templates: any peer still
+		// claiming the operationType keeps its own floor, and an operationType
+		// left with no claimant leaves the index entirely.
+		c.mu.Lock()
+		delete(c.byOpMetaRoot, metaRootKey)
+		c.byOpType = floorsByOpType(c.byOpMetaRoot, c.logger)
+		remaining := len(c.byOpType[priorOp.operationType])
+		c.mu.Unlock()
 		c.logger.Info("ddl cache: op-meta descriptor withdrawn",
-			"key", metaRootKey, "operationType", priorOpType, "remainingTemplates", len(c.byOpType[priorOpType]))
+			"key", metaRootKey, "operationType", priorOp.operationType,
+			"remainingTemplates", remaining)
 		return nil
 	}
 
@@ -735,24 +930,25 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		return fmt.Errorf("ddl cache: invalidate %s: %w", metaRootKey, err)
 	}
 
-	if hadPrior {
-		delete(c.byName, priorName)
-		delete(c.byMetaPK, metaRootKey)
-	}
+	c.mu.Lock()
+	priorDDL, hadPriorDDL := c.byRoot[metaRootKey]
 	if ok {
-		c.byName[ref.CanonicalName] = ref
-		c.byMetaPK[ref.MetaVertexKey] = ref.CanonicalName
+		c.byRoot[metaRootKey] = ref
+	} else {
+		delete(c.byRoot, metaRootKey)
 	}
+	c.byName, c.byMetaPK = indexByCanonicalName(c.byRoot, c.logger)
 	// The ambiguity guard is GLOBAL (it counts how many vertexType DDLs admit
 	// each op across the whole set), so a single-entry edit can change which
 	// ops are unambiguous — rebuild the whole reverse index from byName.
 	c.byCommand = buildByCommand(c.byName, c.logger)
+	c.mu.Unlock()
 	// Log a meaningful canonicalName: the freshly-loaded name when present, else
 	// the prior name on the delete/tombstone path (ref.CanonicalName is empty when
 	// the entry is gone, which would otherwise log a useless empty string).
 	loggedName := ref.CanonicalName
-	if !ok && hadPrior {
-		loggedName = priorName
+	if !ok && hadPriorDDL {
+		loggedName = priorDDL.CanonicalName
 	}
 	c.logger.Info("ddl cache: invalidated",
 		"metaKey", metaRootKey, "canonicalName", loggedName, "present", ok)
@@ -898,38 +1094,77 @@ func unionTemplates(a, b []string) []string {
 	return out
 }
 
-// unionFloorFromPeers recomputes operationType's floor as the union of `own`
-// and every OTHER indexed op-meta root claiming the same operationType, so a
-// single-root Invalidate lands on the answer a full Refresh would.
+// floorsByOpType derives the operationType→floor index from the per-root
+// descriptors. It is the ONLY writer of byOpType, and both Refresh and
+// Invalidate hand it the whole root set, so the two cannot disagree: a
+// withdrawal is a root leaving the input, and the answer follows.
 //
-// Caller holds the write lock.
-func (c *DDLCache) unionFloorFromPeers(selfKey, operationType string, own []string) []string {
-	out := own
-	for peerKey, peerOp := range c.byOpMetaPK {
-		if peerKey == selfKey || peerOp != operationType {
+// A duplicate operationType is UNIONED, never picked. Unlike buildByCommand's
+// ambiguity guard — which drops a candidate and thereby fails CLOSED, because
+// losing a class inference rejects the op — dropping a floor fails OPEN. The
+// union is the safe direction: it demotes every key any claimant declares
+// optional, which can only widen absence-tolerance, never harden a key back.
+//
+// Roots are visited in key order so the union's ORDER, not merely its
+// membership, is a function of the root set alone. Map iteration would leave a
+// two-claimant floor spelled differently on each rebuild, which is exactly the
+// kind of difference that makes "did this invalidate land where a refresh
+// would?" unanswerable by comparison.
+//
+// pkgmgr refuses a duplicate at install (Installer's op-meta operationType
+// collision check) and validateOpMetas refuses one within a single package, so
+// the union is a recovery from state that predates those gates or was written
+// around them, not a supported way to express two descriptors for one op.
+func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logger) map[string][]string {
+	out := make(map[string][]string, len(byOpMetaRoot))
+	claimedBy := make(map[string]string, len(byOpMetaRoot))
+	for _, rootKey := range slices.Sorted(maps.Keys(byOpMetaRoot)) {
+		d := byOpMetaRoot[rootKey]
+		prior, dup := out[d.operationType]
+		if !dup {
+			out[d.operationType] = d.optionalReads
+			claimedBy[d.operationType] = rootKey
 			continue
 		}
-		out = unionTemplates(out, c.peerTemplates(peerOp))
+		if logger != nil {
+			logger.Warn("ddl cache: duplicate op-meta descriptor; unioning the floors",
+				"operationType", d.operationType, "key", rootKey, "alsoClaimedBy", claimedBy[d.operationType],
+				"priorTemplates", len(prior), "addedTemplates", len(d.optionalReads))
+		}
+		out[d.operationType] = unionTemplates(prior, d.optionalReads)
 	}
 	return out
 }
 
-// opTypeStillClaimed reports whether any op-meta root other than selfKey is
-// indexed under operationType.
+// indexByCanonicalName derives the canonicalName-keyed views from the per-root
+// DDL projections. It is the ONLY writer of byName and byMetaPK, and both
+// Refresh and Invalidate hand it the whole root set, for the reason
+// floorsByOpType states: a name TWO roots claim is arbitrated over the set, so
+// a rebuild driven by one root cannot reach an index a full rebuild would not.
 //
-// Caller holds the write lock.
-func (c *DDLCache) opTypeStillClaimed(selfKey, operationType string) bool {
-	for peerKey, peerOp := range c.byOpMetaPK {
-		if peerKey != selfKey && peerOp == operationType {
-			return true
+// The arbitration is by root key, ascending — a property of the set rather than
+// of the order the roots were visited in. That is what lets a winner's
+// withdrawal hand the name to the remaining claimant instead of deleting a
+// still-claimed DDL, and what stops two rebuilds of one KV state disagreeing
+// about which meta-vertex a class resolves to. The loser is left out of BOTH
+// views, so LookupByMetaKey reports it absent rather than answering for it with
+// the winner's ref.
+func indexByCanonicalName(byRoot map[string]MetaVertexRef, logger *slog.Logger) (map[string]MetaVertexRef, map[string]string) {
+	byName := make(map[string]MetaVertexRef, len(byRoot))
+	byPK := make(map[string]string, len(byRoot))
+	for _, rootKey := range slices.Sorted(maps.Keys(byRoot)) {
+		ref := byRoot[rootKey]
+		if existing, dup := byName[ref.CanonicalName]; dup {
+			if logger != nil {
+				logger.Warn("ddl cache: duplicate canonicalName; keeping the lowest-keyed meta-vertex",
+					"canonicalName", ref.CanonicalName,
+					"kept", existing.MetaVertexKey,
+					"dropped", ref.MetaVertexKey)
+			}
+			continue
 		}
+		byName[ref.CanonicalName] = ref
+		byPK[ref.MetaVertexKey] = ref.CanonicalName
 	}
-	return false
-}
-
-// peerTemplates reads the currently-indexed floor for operationType.
-//
-// Caller holds the write lock.
-func (c *DDLCache) peerTemplates(operationType string) []string {
-	return c.byOpType[operationType]
+	return byName, byPK
 }

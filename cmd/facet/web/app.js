@@ -251,6 +251,37 @@ function rowsByNs(ns) {
 function services() { return rowsByNs("manifest.svc"); }
 function ops() { return rowsByNs("manifest.op"); }
 
+// The op-selection predicates each detail surface offers from. Named rather
+// than inlined at their one call site because WHICH ops a surface offers is the
+// statement worth being able to check on its own: the surrounding functions
+// read state and render into the DOM, and the answer to "is this op offered
+// here" should not need either.
+//
+// serviceOps: the ops a service's own detail lists, by the manifest's
+// `viaServices` provenance column.
+function serviceOps(serviceKey) {
+  return ops().filter((o) => (o.data.viaServices || []).includes(serviceKey));
+}
+// entityOps: the candidate ops for an entity row — every one whose declared
+// dispatch targetType IS this row's type. opButton's crossHatMismatch check
+// then withholds a self-administer op this specific row isn't the caller's to
+// submit. A row carrying no entityType matches nothing: an op that declares no
+// targetType is not offered against a row that declares no type either.
+function entityOps(entityType) {
+  return entityType ? ops().filter((o) => o.data.dispatchTargetType === entityType) : [];
+}
+// taskSurfaceOps: the ops a task's detail offers ALONGSIDE its own business op
+// — the admin actions ABOUT a task, not its subject. excludeKey drops the
+// business op so it is not rendered twice.
+function taskSurfaceOps(excludeKey) {
+  return ops().filter((o) => o.data.dispatchTargetType === "task" && o.key !== excludeKey);
+}
+// actionableTargetTypes: the entity types some op can act on. A descriptor
+// naming no targetType makes no type actionable.
+function actionableTargetTypes() {
+  return new Set(ops().map((o) => o.data.dispatchTargetType).filter(Boolean));
+}
+
 // standingOps lists the ops whose authority names no record and which no
 // other surface in this client can offer. Three declared facts, each doing
 // its own work:
@@ -1003,7 +1034,7 @@ function openServiceDetail(key) {
   const row = state.rows.get(key);
   if (!row) return;
   const d = row.data;
-  const myOps = ops().filter((o) => (o.data.viaServices || []).includes(d.serviceKey));
+  const myOps = serviceOps(d.serviceKey);
   const myInstances = instances().filter((i) => i.data.templateKey === d.serviceKey).sort(byCreatedDesc);
   showModal(`
     <button class="close-x" data-close>&times;</button>
@@ -1151,7 +1182,7 @@ function renderBrowse() {
   // category whose every detail view says "nothing to do", i.e. the graph
   // browser §3 F3 ratified this surface is not. The rows stay in state for
   // the picker; only the category goes.
-  const actionable = new Set(ops().map((o) => o.data.dispatchTargetType).filter(Boolean));
+  const actionable = actionableTargetTypes();
   const ents = upcomingEntities().filter((e) => actionable.has(e.data.entityType));
   if (!ents.length) { $("view-browse").innerHTML = `<div class="empty">Nothing nearby yet.</div>`; return; }
   const byType = new Map();
@@ -1196,15 +1227,15 @@ function entityRow(e) {
 }
 
 // openEntityDetail is the seam the dispatch gate has been waiting on
-// (app.js resolveTargetKey's ctx.entityKey candidate): the entity's
-// candidate ops are every one whose declared dispatch.targetType IS this
-// entity's type — opButton's own crossHatMismatch check then withholds a
-// self-administer op this specific row isn't the caller's to submit.
+// (app.js resolveTargetKey's ctx.entityKey candidate): the entity's candidate
+// ops come from entityOps, and opButton's own crossHatMismatch check then
+// withholds a self-administer op this specific row isn't the caller's to
+// submit.
 function openEntityDetail(key) {
   const row = state.rows.get(key);
   if (!row) return;
   const d = row.data;
-  const myOps = ops().filter((o) => o.data.dispatchTargetType === d.entityType);
+  const myOps = entityOps(d.entityType);
   // ctx.row carries the viewed row's own columns so an op gated by
   // dispatchVisibleWhen can read the state this row already declares.
   showModal(`
@@ -1576,7 +1607,10 @@ function paneRowHTML(sec, row) {
 // simply carries no affordance.
 function paneRowOps(sec, row) {
   const dispatch = sec.dispatch;
-  if (!dispatch || !dispatch.targetColumn) return "";
+  // A section naming no target TYPE offers nothing, rather than matching every
+  // op that declares none either — the same rule entityOps applies to a row
+  // with no entityType, and for the same reason: two absences are not a match.
+  if (!dispatch || !dispatch.targetColumn || !dispatch.targetType) return "";
   const entityKey = row[dispatch.targetColumn];
   if (!entityKey) return "";
   return ops()
@@ -1644,7 +1678,7 @@ function openTaskDetail(key) {
   const d = row.data;
   const ctx = { taskKey: d.taskKey, scopedTo: d.scopedTo };
   const opRow = opByFullKey(d.forOperationKey);
-  const taskOps = ops().filter((o) => o.data.dispatchTargetType === "task" && (!opRow || o.key !== opRow.key));
+  const taskOps = taskSurfaceOps(opRow && opRow.key);
   const cards = opRow
     ? [opButton(opRow, ctx)]
     : [`<div class="degraded-card">This task's operation isn't described yet — ask staff for help via the admin console.</div>`];
