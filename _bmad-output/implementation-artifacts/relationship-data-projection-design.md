@@ -340,6 +340,16 @@ gates on the relation **name** (`pipeline.go:712-721`), which a variable does no
 `rel.Type` and `rel.Direction`, both untouched. Inc 1 and Inc 2 add no selector, no label, and no
 `Fallback` degradation.
 
+**Amended at build, 2026-08-11 (§10.4) — this section was incomplete, and the omission is the
+guarantee-held-by-accident class.** Selector/label/`Fallback` are indeed untouched, but binding the
+relationship is **not** semantically inert: `isNonNullExpansion` (`executor.go:402-428`) already reads
+`rel.Variable` and already tests it for a non-nil `*nodeRef`. That arm is unreachable **only** because
+`traverseRel` never binds one — so Inc 1 wakes it, changing `applyMatch`'s verdict for two clause shapes
+(a required `MATCH` whose only new variable is the relationship, and an `OPTIONAL MATCH` with its target
+already bound). Neither shape exists in the shipped corpus (§10.3 re-ran the census live: two bindings,
+both introducing a new node variable), so no live lens changes behaviour — but the delta is real, is
+pinned by a test in both directions, and must not be re-discovered as a surprise.
+
 ### 5.4 Sweep recompute parity — automatic
 
 `Sweeper.pass` → `Pipeline.Reproject` (`internal/refractor/pipeline/reproject.go:98`) →
@@ -398,9 +408,13 @@ green and independently useful.
 1. In `traverseRel` (`executor.go:901-1038`), thread the `adjacency.EdgeEntry` that produced each match
    through to the output loop, and when `rel.Variable != ""` bind it alongside `to.Variable`
    (`executor.go:1031-1034`). Bind it as the existing `nodeRef` shape (`executor.go:45-49`) —
-   `key: e.CoreKvKey`, `revision: 0`, `props` seeded with the relation name — so every downstream consumer
-   (`resolveProperty`, `normalizeForKey`, DISTINCT rendering, the null-sentinel checks) works unchanged.
+   `key: e.CoreKvKey`, `revision: 0` — so every downstream consumer (`resolveProperty`, `normalizeForKey`,
+   DISTINCT rendering, the null-sentinel checks) works unchanged.
    **`props` is NOT the link body in this increment** — no read is added here.
+   *Amended at build, 2026-08-11 (§10.6): the relation name is carried on an explicit `rel` field of
+   `nodeRef`, **not** "seeded into `props`" as originally written. A magic `props` key collides with the real
+   link body the moment Inc 2 resolves `r.<field>` off it, and Inc 2 needs an unambiguous discriminator to
+   pick the link-body arm over the aspect arm.*
 2. Add a `type` arm to the function switch (`executor.go:1418-1546`), returning the bound relationship's
    relation name; error on a non-relationship argument, and return `nil` for the OPTIONAL-MATCH null
    sentinel (mirroring `nanoIdFromKey`'s and `levenshtein`'s nil handling).
@@ -509,3 +523,186 @@ Colocated with the mechanism, per house rules.
 - **Backfilling link `data` onto the 54 empty-payload relations.** Nothing asks for it, and §1.3's reading is
   that topological edges are correct to carry `{}`.
 - **Any change to `docs/contracts/*`** — §6.
+
+---
+
+## 10. Fire brief (build note, 2026-08-11) — the whole item, one fire
+
+Compiled at selection by two read-only `haiku` scouts over `internal/refractor/ruleengine/full`,
+`internal/refractor/pipeline`, `packages/objects-base` and `cmd/loftspace-app`. **Every §1 anchor was
+re-verified live at `4586f0bb`; the doc was written at `ff9f2cc4` and its line numbers have all rotted.**
+
+### 10.1 Scope sentence (verbatim, §4(b) + §7)
+
+> Bind the relationship and project `type(r)`, `r.key`, `r.data.<field>` — Inc 1 (bind + `type()`, zero new
+> reads), Inc 3 (fail-closed validate gate, ships **with** Inc 1), Inc 2 (`r.data.<field>`, one point-read per
+> dereferenced edge), then the consumer: `objectAttachmentsSpec` projects the slot name and filename (§8 test 15).
+
+**Green bar (§7 Gates):** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, every `scripts/lint-*.go`, and the **full** `go test ./...`
+— this changes a shared engine path every lens in the corpus runs through.
+
+### 10.2 Verified touch-list (live line numbers, `4586f0bb`)
+
+| Site | Live anchor | Design said | Status |
+|---|---|---|---|
+| `traverseRel` whole fn | `executor.go:987-1124` | `:901-1038` | rotted +86, mechanism intact |
+| output loop (`nb[to.Variable] = n`) | `executor.go:1103-1122` | `:1031-1034` | rotted |
+| already-bound guard (`to.Variable`) | `executor.go:1109-1115` | `:1023-1029` | rotted |
+| edge loop var over `adjacency.EdgeEntry` | `executor.go:1043` (`e`) | `:957` | rotted |
+| `minHops`/`maxHops` normalize | `executor.go:988-995` | — | new anchor |
+| `minHops == 0` zero-edge admit | `executor.go:1016-1024` | `:930-938` | rotted |
+| `nullBindNewVars` rel arm | `executor.go:447-453` | `:423-430` | rotted |
+| `nodeRef` struct | `executor.go:45-49` | `:45-49` | **held** |
+| function switch / `unsupported function` | `executor.go:1542-1670` / `:1671` | `:1418-1546` | rotted |
+| `nanoidfromkey` fail-closed precedent | `executor.go:1624-1650` | `:1499-1524` | rotted |
+| `resolveProperty` | `executor.go:1807-1833` (key arm `:1815`, aspect arm `:1825`, read-free `:1822`) | `:1682-1707` | rotted |
+| `propertyOf` | `executor.go:1835-1854` | `:1683-1713` | rotted |
+| `fetchNode` memo | `executor.go:868-883` | `:782-796` | rotted |
+| `footprint()` → `NodeRevisions` from `ex.nodes` | `executor.go:304-322` | `:280-297` | rotted, **claim holds** |
+| `recordEdgeSelector` | `executor.go:950-984` | `:864-889` | rotted |
+| `RelPattern` struct | `ast.go:107-114` | `:102-109` | rotted |
+| `rp.Variable = identifierText(vr)` | `visitor.go:291-293` | `:274` | rotted |
+| `Parse` post-visitor analysis seam | `full.go:106-110` (`analyseGroupingRedundancy(v.query)`) | — | **Inc 3's home** |
+| `EvalFootprint.NodeRevisions` "vertex or aspect" comment | `ruleengine.go:89-91` | `:88-90` | rotted |
+| `objectAttachmentsSpec` | `packages/objects-base/lenses.go:150-174`, decl `:41-56` | `:152` | rotted |
+| the blocked-`type(r)` comment to delete | `packages/objects-base/lenses.go:131-134` | `:132-135` | rotted |
+| `objects-base` `Version` | `packages/objects-base/package.go:56` (`0.3.4`) | — | new, **must bump** |
+
+**Two design anchors rotted in NAME, not just number — both re-verified, both claims survive:**
+
+- **§5.1's `plainLinkReactsTo` no longer exists.** The relevance gate is now
+  `linkEventRelevant` (`pipeline.go:1455-1461`) → `rs.linkRelationReactsTo(relation) && (plainReactsTo(typeA)
+  || plainReactsTo(typeB))`. `linkRelationReactsTo` (`:1246-1255`) returns **true** when
+  `!relationsExhaustive`, which is exactly the untyped-`-[r]->` case both objects-base lenses are. **The
+  claim holds: they cannot be missed.** The `KindLink` dispatch is `pipeline.go:2933`;
+  `evalPlainLinkReprojection` is `:3108`.
+- **§5.2's footprint claim holds unchanged.** `footprint()` builds `NodeRevisions` by iterating `ex.nodes`
+  with no key-shape classification (`executor.go:304-322`); `footprintValid` is `evaluate.go:479`,
+  `currentNodeRevision` `:559`. A link read through `fetchNode` enters the footprint by construction.
+
+### 10.3 The design's own census, re-run live (premise → pinned)
+
+`§1.4: "No lens anywhere in the repo dereferences a bound rel variable"` —
+`grep -rnE -- '-\[[A-Za-z_][A-Za-z0-9_]*' --include='*.go' packages internal cmd | grep -v _test.go`
+→ **exactly 2 hits**, `packages/objects-base/lenses.go:98` and `:152`, both `OPTIONAL MATCH (o)-[r]->(owner)`.
+The only other file matching is `ruleengine/full/relations.go:12`, a doc comment. **Census confirmed;
+blast radius is two lenses in one package.**
+
+### 10.4 The find the design missed — `isNonNullExpansion`'s rel arm is dead code that this fire wakes up
+
+`isNonNullExpansion` (`executor.go:402-428`) **already reads `rel.Variable`** (`:415-425`) and already looks
+for it bound to a non-nil `*nodeRef`. That arm is **unreachable today**, because `traverseRel` never binds a
+rel variable — the only writer is `nullBindNewVars`, which binds the nil sentinel. Inc 1 makes it live.
+
+This is a real semantic delta, in the same file, caused by this fire — so it is **this fire's to test and
+record**, not to file. What changes, precisely (`applyMatch`, `:335-397`):
+
+- **Required `MATCH`** whose only new variable is the relationship (`MATCH (a)-[r:x]->(b)`, both nodes
+  already bound): today `isNonNullExpansion` is false → `:363-368` **drops every row**. After Inc 1 it is
+  true → the row is *filtered* by `WHERE`, which is correct Cypher. This narrows — but does **not** close —
+  the first half of the board row *"Two clause shapes the full engine accepts and silently miscompiles"*,
+  which stays 📐 needs-designer-pass: the **anonymous** form `-[:x]->` is still dropped, and that row's fork
+  (refuse-at-parse vs implement) is not this fire's to resolve. **Do not widen into it.**
+- **`OPTIONAL MATCH`** with the target already bound and only `r` new: today the row is treated as
+  null-preserving and kept regardless of `WHERE`; after Inc 1 `WHERE` applies to it.
+- **Neither shape exists in the corpus** (§10.3: both live bindings introduce `owner` as a new node
+  variable, so their `isNonNullExpansion` verdict is already true via the node arm and is unchanged).
+
+**Obligation:** a test that pins the delta in both directions, and a dated amendment to §5.3 — which claims
+"Inc 1 and Inc 2 add no selector, no label, and no `Fallback` degradation" and is silent on OPTIONAL-MATCH
+null semantics. §5.3 is not *wrong*; it is incomplete, and the omission is exactly the class the dossier
+calls *a guarantee held by accident of shape*.
+
+### 10.5 Precedents to mirror
+
+| Edit | Mirror |
+|---|---|
+| `type()` function arm, fail-closed on a bad argument | `nanoidfromkey`, `executor.go:1624-1650` (errors rather than degrading; `nil` arg → `nil`) |
+| rel-variable constrained-target guard | the `to.Variable` guard immediately above it, `executor.go:1109-1115` |
+| Inc 2's link point-read | the aspect-reference arm, `executor.go:1825-1832` — same `fetchNode` memo, same `errCoreKVReadDisabled` mode, but it must branch **before** that arm (an aspect read appends `.<key>` to the key; a link read must use `r.key` itself) |
+| Inc 3's validate-time rejection | `analyseGroupingRedundancy(v.query)` at `full.go:106-110` — a whole-query analysis at the same seam, returning `*ruleengine.ParseError`; and the shipped rejection messages at `hopindex.go:454`,`:460` |
+| the Inc 3 corpus census test | `forEachCorpusCypher`, `internal/refractor/label_derivation_corpus_census_test.go:536`, as used by `grouping_reduction_corpus_census_test.go` |
+| package version bump | `packages/identity-domain` `abd76359` (`0.20.3` → `0.20.4`) |
+
+### 10.6 Implementation decision taken here (Winston, §0) — the relationship marker
+
+The design says bind the rel as a `nodeRef` with "`props` seeded with the relation name". **Built instead as
+an explicit `rel` field on `nodeRef`** (empty string = not a relationship). Reason: a magic `props` key is
+a collision surface the moment Inc 2 resolves `r.<field>` off the real link body — a link whose `data`
+carries a field of that name would shadow or be shadowed by the marker — and Inc 2 needs an unambiguous
+discriminator to choose the link-body arm over the aspect arm. `nodeRef`'s shape is otherwise unchanged, so
+`propertyOf`, `normalizeForKey`, DISTINCT rendering and the null-sentinel checks all work untouched, which
+is what the design's wording was buying. §7 Inc 1 step 1 is amended in place accordingly.
+
+### 10.7 Increment order + runnable green checks
+
+1. **Inc 1 + Inc 3 together** (the design mandates it: "the moment a rel variable becomes bindable-in-
+   principle, the set of bound-but-unprojectable shapes needs a gate").
+   `go test ./internal/refractor/ruleengine/full/... -count=1`
+2. **Inc 2** — `r.data.<field>`, footprint comment.
+   `go test ./internal/refractor/ruleengine/full/... ./internal/refractor/pipeline/... -count=1`
+3. **Consumer** — `objectAttachmentsSpec` projects `linkName`/`filename`, `BodyColumns` + version bump,
+   the `:131-134` comment deleted (it documents a limitation that no longer exists).
+   `go test ./packages/objects-base/... ./internal/refractor/... -count=1`
+4. **Full gates** — `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`,
+   `STRICT=1 go run ./scripts/lint-conventions.go`, `go run ./scripts/lint-package-standard.go`,
+   `go run ./scripts/lint-package-version.go`, `go run ./scripts/lint-lens-anchors.go`, `go test ./... -p 4`.
+
+### 10.8 In-scope gotchas
+
+- **`objectAttachments` is NOT Protected** (`lenses.go:41-56`: `Adapter: nats-kv`, `Bucket: weaver-targets`,
+  `ProjectionKind: actorAggregate`, `EmptyBehavior: delete`). So **no `make provision-readpath`** — but
+  `BodyColumns` must gain the new columns or the projection drops them silently.
+- **A package edit needs a version bump** — `packages/objects-base/package.go:56`, `0.3.4` → `0.3.5`, else
+  the diff-apply is a no-op. `scripts/lint-package-version.go` is the gate.
+- **Live-stack landing:** the lens change diff-applies with no teardown (`make reinstall-package
+  PKG=objects-base`); the engine change ships in `bin/refractor` and needs that binary cycled. Derive the
+  full binary set mechanically from `go list -deps` at admit — an `internal/refractor` change also links
+  into `bin/lattice`.
+- **Full `go test ./...`** is mandatory, not the refractor packages alone — §7 says so because every lens in
+  the corpus runs this engine path.
+- **Inc 3 ships a corpus census in the same fire** — the dossier entry below requires it of any new per-lens
+  analysis, via `forEachCorpusCypher`, with an "armed population is exactly these names" assertion.
+
+**Refractor "Review keeps catching" dossier — the entries this fire trips** (copied from
+`docs/components/refractor.md`):
+
+- *Site censuses derived from key shapes undercount* — **RETIRED/mechanized**, but its lesson binds: run the
+  analysis, don't grep cypher text. §10.3's census was run as a text grep over a **two-hit** population and
+  cross-checked against the design's independent §1.4 enumeration; Inc 3's census test runs the real analysis.
+- *Turning on a behaviour an existing predicate gated hands it exactly the complement.* This fire turns on
+  `isNonNullExpansion`'s rel arm — §10.4 names the population it newly admits and the invariant the old
+  (accidental) gate was supplying.
+- *A soundness claim's stated REASON is load-bearing.* §5.1's reason was stated against a gate that has since
+  been renamed and restructured; §10.2 re-derives it rather than re-citing it.
+- *A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis.* Test 12 (the
+  `data`-only link update) must assert the projected **row value changes**, not merely that an event arrived.
+- *A label narrows the binder, not necessarily the consumer filter.* Inc 1 adds no label and no selector;
+  §8 test 11 pins `EdgeSelectors`/`Fallback` byte-identical to the anonymous-relationship form.
+- *An index whose entries are read from one place and gated from another must agree about absence.* Inc 2's
+  absent/tombstoned link resolves `nil` — the same answer as "no such field", so the null must be proven
+  indistinguishable from the OPTIONAL-MATCH sentinel (test 4), not merely observed.
+
+**Standing checklist** (`agents/fire-brief-template.md`): #2 *every census is a premise* — discharged in
+§10.3. #3 *a negative test needs its positive vector first, and every fix is proven by reverting it* — test
+8 (zero reads for Inc 1) and test 12 (the `KindLink` arm stubbed out) are both written to fail without the
+mechanism. #6 *precedent may carry debt* — the `to.Variable` guard being mirrored was verified to be the
+live shipped one, not a stale copy.
+
+### 10.9 Adjacent finds
+
+- **`isNonNullExpansion`'s rel arm** (§10.4) — **absorbed into this fire**, not filed: same file, same
+  mechanism, caused by this change.
+- **The anonymous-relationship half** of *"Two clause shapes the full engine accepts and silently
+  miscompiles"* — stays on its existing row under the **needs-a-designer-pass** out it already carries
+  (refuse-at-parse vs implement is a clause-semantics fork with corpus-wide blast radius). This fire
+  narrows the row's live surface and says so; it does not resolve the fork.
+
+### 10.10 Non-goals (the drift fence)
+
+§9's four, unchanged — `WHERE` on rel fields / rel in a grouping key / rel as a returned entity /
+variable-length rel lists; a `bound_at` column on `identityCredentialBindingsRead`; retiring
+`cmd/loftspace-app`'s `objectLinkKey`; backfilling link `data` onto the 54 empty-payload relations. Plus:
+**no `docs/contracts/*` edit** (§6), and **no app-side detach wiring** in `cmd/loftspace-app` — the read
+model gains the field; whether the Documents tab consumes it is the named app-side follow-on.
