@@ -38,9 +38,13 @@ func TestControl_PersonalHydrate_SyncStartSeq_ReadBeforeHydratorRuns(t *testing.
 	t.Cleanup(cancel)
 
 	counter := uint64(5)
+	var gotIdentityID atomic.Value
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
-	svc.SetSyncLastSeq(func(context.Context) (uint64, error) { return atomic.LoadUint64(&counter), nil })
+	svc.SetSyncLastSeq(func(_ context.Context, identityID string) (uint64, error) {
+		gotIdentityID.Store(identityID)
+		return atomic.LoadUint64(&counter), nil
+	})
 	// If the seam were read after (or during) the fan-out, this hydrator
 	// would have already moved the counter to 1005 by the time it was read.
 	svc.RegisterPersonalHydrator("rule-1", &bumpingHydrator{revision: 100, counter: &counter, bumpBy: 1000})
@@ -59,6 +63,8 @@ func TestControl_PersonalHydrate_SyncStartSeq_ReadBeforeHydratorRuns(t *testing.
 	assert.Equal(t, uint64(5), resp.PersonalHydrate.SyncStartSeq,
 		"the seam must be read before the hydrator fan-out, not after — a later read would see 1005")
 	assert.Equal(t, uint64(1005), atomic.LoadUint64(&counter), "the hydrator must still have run")
+	assert.Equal(t, "identityA", gotIdentityID.Load(),
+		"the seam must receive the requesting identity, not answer for the whole SYNC stream")
 }
 
 // TestControl_PersonalHydrate_SyncStartSeq_NilSeam_DegradesToZero proves the
@@ -98,7 +104,7 @@ func TestControl_PersonalHydrate_SyncStartSeq_SeamError_DegradesToZero(t *testin
 
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
-	svc.SetSyncLastSeq(func(context.Context) (uint64, error) { return 0, errors.New("stream boom") })
+	svc.SetSyncLastSeq(func(context.Context, string) (uint64, error) { return 0, errors.New("stream boom") })
 	svc.RegisterPersonalHydrator("rule-1", &fakeHydrator{revision: 100})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -115,6 +121,71 @@ func TestControl_PersonalHydrate_SyncStartSeq_SeamError_DegradesToZero(t *testin
 	assert.Equal(t, uint64(0), resp.PersonalHydrate.SyncStartSeq)
 }
 
+// TestControl_PersonalHydrate_SyncStartSeq_NotFoundSubject_DegradesToZero
+// proves the cold-identity case: an identity with no frames yet on its own
+// personal SYNC subject is not a seam error — cmd/refractor's wiring
+// translates jetstream.ErrMsgNotFound to (0, nil), never surfaces it as an
+// err — so hydration succeeds and SyncStartSeq is 0, meaning DeliverAll
+// over an empty subject. Distinct from SeamError_DegradesToZero above,
+// which exercises the non-nil-err branch of the same fail-soft contract.
+func TestControl_PersonalHydrate_SyncStartSeq_NotFoundSubject_DegradesToZero(t *testing.T) {
+	nc, _ := startControlTestServerConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+	svc.SetSyncLastSeq(func(context.Context, string) (uint64, error) { return 0, nil })
+	svc.RegisterPersonalHydrator("rule-1", &fakeHydrator{revision: 100})
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	data, err := json.Marshal(control.ControlRequest{IdentityID: "identityA"})
+	require.NoError(t, err)
+	reply, err := nc.Request(control.ControlSubject("personal", "hydrate"), data, 2*time.Second)
+	require.NoError(t, err)
+	var resp control.ControlResponse
+	require.NoError(t, json.Unmarshal(reply.Data, &resp))
+
+	require.Empty(t, resp.Error)
+	require.NotNil(t, resp.PersonalHydrate)
+	assert.True(t, resp.PersonalHydrate.Hydrated, "a cold identity with no sync frames yet must still hydrate")
+	assert.Equal(t, uint64(0), resp.PersonalHydrate.SyncStartSeq)
+}
+
+// TestControl_PersonalHydrate_SyncStartSeq_PerIdentity proves the seam is
+// evaluated per requesting identity rather than answering a value shared
+// across every caller — the property that closes the whole-SYNC-stream
+// cross-tenant activity oracle: two identities hydrating against the same
+// service each get back their own seam answer.
+func TestControl_PersonalHydrate_SyncStartSeq_PerIdentity(t *testing.T) {
+	nc, _ := startControlTestServerConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	seqByIdentity := map[string]uint64{"identityA": 7, "identityB": 900}
+	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+	svc.SetSyncLastSeq(func(_ context.Context, identityID string) (uint64, error) {
+		return seqByIdentity[identityID], nil
+	})
+	svc.RegisterPersonalHydrator("rule-1", &fakeHydrator{revision: 100})
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	for identityID, want := range seqByIdentity {
+		data, err := json.Marshal(control.ControlRequest{IdentityID: identityID})
+		require.NoError(t, err)
+		reply, err := nc.Request(control.ControlSubject("personal", "hydrate"), data, 2*time.Second)
+		require.NoError(t, err)
+		var resp control.ControlResponse
+		require.NoError(t, json.Unmarshal(reply.Data, &resp))
+
+		require.Empty(t, resp.Error)
+		require.NotNil(t, resp.PersonalHydrate)
+		assert.Equal(t, want, resp.PersonalHydrate.SyncStartSeq,
+			"identity %q must get its own seam answer, not another identity's", identityID)
+	}
+}
+
 // TestControl_PersonalHydrate_SyncStartSeq_Success proves the happy path
 // end to end and that Lenses is still populated as before — no regression
 // from the new field.
@@ -125,7 +196,7 @@ func TestControl_PersonalHydrate_SyncStartSeq_Success(t *testing.T) {
 
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
-	svc.SetSyncLastSeq(func(context.Context) (uint64, error) { return 4242, nil })
+	svc.SetSyncLastSeq(func(context.Context, string) (uint64, error) { return 4242, nil })
 	svc.RegisterPersonalHydrator("rule-1", &fakeHydrator{revision: 100})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 

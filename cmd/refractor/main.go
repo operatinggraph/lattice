@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -1390,18 +1391,36 @@ func main() {
 			})
 			// The hydrate delivery-position read (edge-cold-signin-delivery-
 			// position-design.md §3.2): the "personal.hydrate" control RPC
-			// returns the SYNC stream's last sequence at the moment it read
-			// it, so a cold or gapped Edge node can start its consumer at
-			// that position instead of replaying the stream's full retained
-			// history. A fresh Stream lookup per call reads the current
-			// LastSeq, same posture as the syncgap read above — never a
-			// long-lived handle's stale cache.
-			controlSvc.SetSyncLastSeq(func(ctx context.Context) (uint64, error) {
+			// returns the requesting identity's own last sequence on its
+			// personal SYNC subject, at the moment it read it, so a cold or
+			// gapped Edge node can start its consumer at that position
+			// instead of replaying the stream's full retained history. This
+			// is scoped to the caller's own subject, never the stream-wide
+			// LastSeq — the SYNC stream carries every identity's subject,
+			// and this RPC answers an untrusted, per-identity Edge caller
+			// directly, so a stream-wide answer would leak platform-wide
+			// sync volume across tenants. subjects.PersonalSync is the same
+			// construction the personal lens's own publisher uses, so the
+			// two can never drift. A fresh Stream lookup per call, same
+			// posture as the syncgap read above — never a long-lived
+			// handle's stale cache. An identity with no frames yet on its
+			// subject is the normal cold case, not an error: it degrades to
+			// 0, which means DeliverAll over an empty subject.
+			subjectPrefix := r.Into.SubjectPrefix
+			controlSvc.SetSyncLastSeq(func(ctx context.Context, identityID string) (uint64, error) {
 				st, err := conn.JetStream().Stream(ctx, syncStream)
 				if err != nil {
 					return 0, fmt.Errorf("hydrate: look up stream %q: %w", syncStream, err)
 				}
-				return st.CachedInfo().State.LastSeq, nil
+				subject := subjects.PersonalSync(subjectPrefix, identityID)
+				msg, err := st.GetLastMsgForSubject(ctx, subject)
+				if err != nil {
+					if errors.Is(err, jetstream.ErrMsgNotFound) {
+						return 0, nil
+					}
+					return 0, fmt.Errorf("hydrate: get last msg for subject %q: %w", subject, err)
+				}
+				return msg.Sequence, nil
 			})
 		}
 

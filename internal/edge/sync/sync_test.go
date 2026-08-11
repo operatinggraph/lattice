@@ -475,13 +475,21 @@ func startControlServiceSeams(t *testing.T, ctx context.Context, conn *substrate
 	})
 	if wireStartSeq {
 		// The hydrate delivery-position seam, same fresh-fetch posture as
-		// cmd/refractor's: the sequence the burst is a snapshot of.
-		svc.SetSyncLastSeq(func(ctx context.Context) (uint64, error) {
+		// cmd/refractor's: the requesting identity's own last sequence on
+		// its personal SYNC subject, not the stream-wide sequence.
+		svc.SetSyncLastSeq(func(ctx context.Context, identityID string) (uint64, error) {
 			s, err := conn.JetStream().Stream(ctx, DefaultStream)
 			if err != nil {
 				return 0, err
 			}
-			return s.CachedInfo().State.LastSeq, nil
+			msg, err := s.GetLastMsgForSubject(ctx, subjects.PersonalSync(defaultSubjectPrefix, identityID))
+			if err != nil {
+				if errors.Is(err, jetstream.ErrMsgNotFound) {
+					return 0, nil
+				}
+				return 0, err
+			}
+			return msg.Sequence, nil
 		})
 	}
 	require.NoError(t, svc.StartNATSListener(ctx, conn.NATS()))
