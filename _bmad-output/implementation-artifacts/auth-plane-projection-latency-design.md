@@ -2063,6 +2063,11 @@ same way `{key: $actorKey}` does. And narrowing the plain neighbour arm would le
 instead of a neighbour one (`evaluate.go:280`); that is probably correct-and-wider, but it is a behaviour class
 the arm does not have today and deserves a test rather than an argument.
 
+**Designed: `plain-lens-neighbour-anchor-derivation-design.md`** (📐 awaiting-Andrew). It corrects two figures
+above — the population is 45 exposed of 60 plain (15 are single-node), ≤36 addressable once the 9
+variable-length hops are excluded, so "the 1-hop majority of the plain corpus" holds only against the exposed
+45 — and the listing-path citation, which is now `full/executor.go:724-725`.
+
 **The aspect arm is the same seam with the same blockers** (`evalPlainAspectReprojection` reaches the identical
 `evaluatePlainFromVertex` → `seedAnchorFor` path). Two differences to record: it needs no adjacency self-apply,
 and for an anchor-typed parent the derivation returns a **superset** of today's single seeded anchor, which is
