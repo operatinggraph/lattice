@@ -24,21 +24,29 @@ on:
 #                         unrouted-convergence, crypto-shred,
 #                         system-actor-capability, control-plane-authz
 #                                                                     (no Docker, embedded NATS)
-#   unit-1, unit-2,      — go test ./... -p 4, split into three weight-balanced
-#   unit-3                 package-glob shards (unit was the long pole — one
-#                         `go test ./...` took ~2x any other job; a prior 2-way
-#                         split still left unit-1/unit-2 as the pole at ~220s
-#                         each, so this is that split's next increment — the
-#                         shards are sized off per-package test-file LOC,
-#                         ~82.4k LOC each, so wall-clock drops roughly a third
-#                         further)                                  (each a Postgres
+#   unit-1..unit-4       — go test ./... -p 4, split into four weight-balanced
+#                         package-glob shards (unit was the long pole — one
+#                         `go test ./...` took ~2x any other job; a 2-way then
+#                         3-way split still left unit-2/unit-3 as the pole,
+#                         because the 3-way split was sized off per-package
+#                         test-file LOC, which tracks package size, not the
+#                         actual I/O-bound wall-clock cost of a NATS/Postgres
+#                         integration test. This 4-way split is sized off
+#                         MEASURED `go test -json` per-package elapsed time
+#                         instead (re-derive with
+#                         `go test ./... -p 4 -json | jq -rs 'group_by(.Package)...'`
+#                         summed per package, never from memory or from LOC —
+#                         a slow test added later skews this and re-splitting
+#                         off fresh measurements is the fix, not a bigger
+#                         timeout). Each shard sums to ~243s of measured
+#                         per-package elapsed time.                 (each a Postgres
 #                                                                     service container;
 #                                                                     otherwise no Docker,
 #                                                                     embedded NATS)
-#   unit-shard-coverage — asserts unit-1's + unit-2's + unit-3's package globs
-#                         union to EXACTLY `go list ./...`, so a newly added
-#                         package that isn't sorted into any shard fails CI
-#                         loudly instead of silently skipping          (no Docker)
+#   unit-shard-coverage — asserts unit-1's..unit-4's package globs union to
+#                         EXACTLY `go list ./...`, so a newly added package
+#                         that isn't sorted into any shard fails CI loudly
+#                         instead of silently skipping                (no Docker)
 jobs:
   lint-build:
     runs-on: ubuntu-latest
@@ -311,17 +319,18 @@ jobs:
         run: make test-control-plane-authz
 
   # Shard package globs (also referenced verbatim by unit-shard-coverage below —
-  # keep the three in sync; the coverage job fails CI if they ever drift).
-  # All three carry their own Postgres service (not the docker-compose stack)
+  # keep the four in sync; the coverage job fails CI if they ever drift).
+  # All four carry their own Postgres service (not the docker-compose stack)
   # so whichever shard an RLS integration test (skipIfNoPostgres) lands in —
   # today that's internal/refractor's adapter + ruleengine/full subtrees,
   # cmd/loftspace-app, internal/gateway, packages/clinic-reminders — it runs
   # instead of silently skipping; they used to run under the now-retired
   # Gate 3 stack-gates step, the only place POSTGRES_TEST_DSN was previously
-  # set. Weight-balanced by per-package test-file line count, ~82.4k LOC each
-  # (re-derive with `wc -l` over each glob's *_test.go files, never from
-  # memory — a large package added later skews this and re-splitting is the
-  # fix, not a bigger timeout).
+  # set. Weight-balanced by MEASURED `go test -json` per-package elapsed time
+  # (~243s summed per shard), not LOC — LOC tracks package size, not the
+  # I/O-bound wall-clock cost that actually determines the job's runtime, so
+  # a prior LOC-balanced 3-way split still left one shard as the pole. See the
+  # jobs comment above for the re-derive command; never rebalance from memory.
   unit-1:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -358,13 +367,15 @@ jobs:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m
-          ./cmd/gateway/... ./cmd/lattice/...
-          ./internal/aiagent/... ./internal/bypass/... ./internal/chronicler/... ./internal/edge/...
-          ./internal/guardgrammar/... ./internal/healthkv/... ./internal/identityceremony/...
-          ./internal/objectcrypto/... ./internal/objectmanager/... ./internal/projectionhealth/...
-          ./internal/refractor/... ./internal/vault/...
-          ./packages/capability-author/... ./packages/loftspace-domain/... ./packages/one-bill/...
-          ./packages/orchestration-base/... ./packages/service-location/... ./packages/wellness-ledger/...
+          ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/...
+          ./internal/bootstrap/... ./internal/chronicler/...
+          ./internal/identityceremony/... ./internal/objectmanager/...
+          ./internal/pkgmgr/... ./internal/pkgregistry/... ./internal/refractor/...
+          ./internal/testutil/... ./internal/weaver/... ./packages/clinic-ledger/...
+          ./packages/console-operator/... ./packages/front-desk/...
+          ./packages/orchestration-base/... ./packages/privacy-operator-grant/...
+          ./packages/rbac-domain/... ./packages/semantic-contracts/...
+          ./packages/wellness-reminders/...
 
   unit-2:
     runs-on: ubuntu-latest
@@ -396,19 +407,14 @@ jobs:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m
-          ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/cafe-app/... ./cmd/chronicler/...
-          ./cmd/edge/... ./cmd/edge-wasm/... ./cmd/lattice-pkg/... ./cmd/loom/...
-          ./cmd/object-store-manager/... ./cmd/processor/... ./cmd/weaver/...
-          ./deploy/... ./examples/...
-          ./internal/bootstrap/... ./internal/capabilitykv/... ./internal/gateway/...
-          ./internal/jsstore/... ./internal/lenstest/... ./internal/loom/... ./internal/pkgmgr/...
-          ./internal/privacyworker/... ./internal/processor/... ./internal/spike/...
-          ./internal/starlarksandbox/... ./internal/substrate/...
-          ./packages/cafe-domain/... ./packages/cafe-ledger/... ./packages/clinic-ledger/...
-          ./packages/clinic-reminders/... ./packages/console-operator/... ./packages/edge-manifest/...
-          ./packages/front-desk/... ./packages/identity-hygiene/... ./packages/location-domain/...
-          ./packages/loftspace-ledger/... ./packages/privacy-operator-grant/... ./packages/rbac-domain/...
-          ./packages/service-domain/... ./packages/wellness-domain/... ./scripts/...
+          ./cmd/loftspace-app/... ./internal/bridge/... ./internal/controlauth/...
+          ./internal/objectcrypto/... ./internal/privacyworker/...
+          ./internal/processor/... ./packages/cafe-ledger/...
+          ./packages/capability-author/... ./packages/demo-operator/...
+          ./packages/edge-manifest/... ./packages/lease-signing/...
+          ./packages/loftspace-ledger/... ./packages/objects-base/...
+          ./packages/one-bill/... ./packages/service-location/...
+          ./packages/wellness-domain/...
 
   unit-3:
     runs-on: ubuntu-latest
@@ -440,15 +446,55 @@ jobs:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m
-          ./cmd/clinic-app/... ./cmd/facet/... ./cmd/loftspace-app/... ./cmd/loupe/...
-          ./cmd/refractor/... ./cmd/wellness-app/...
-          ./internal/appsession/... ./internal/bridge/... ./internal/controlauth/...
-          ./internal/natsfixture/... ./internal/natsperm/... ./internal/opstatus/...
-          ./internal/pkgregistry/... ./internal/testutil/... ./internal/weaver/...
-          ./packages/augur/... ./packages/clinic-domain/... ./packages/control-authz/...
-          ./packages/demo-operator/... ./packages/identity-domain/... ./packages/lease-signing/...
-          ./packages/maintenance-domain/... ./packages/objects-base/... ./packages/privacy-base/...
-          ./packages/semantic-contracts/... ./packages/wellness-reminders/...
+          ./cmd/clinic-app/... ./cmd/refractor/... ./internal/aiagent/...
+          ./internal/appsession/... ./internal/gateway/... ./internal/loom/...
+          ./internal/natsfixture/... ./internal/projectionhealth/... ./internal/vault/...
+          ./packages/augur/... ./packages/cafe-domain/... ./packages/identity-domain/...
+          ./packages/identity-hygiene/... ./packages/service-domain/...
+          ./packages/wellness-ledger/...
+
+  unit-4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lattice
+          POSTGRES_PASSWORD: lattice_dev
+          POSTGRES_DB: lattice
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lattice -d lattice"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Run shard-4 tests (unit + integration)
+        env:
+          POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
+        run: >-
+          go test -count=1 -p 4 -timeout 10m
+          ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/cafe-app/... ./cmd/chronicler/...
+          ./cmd/edge/... ./cmd/edge-wasm/... ./cmd/facet/... ./cmd/lattice/...
+          ./cmd/lattice-pkg/... ./cmd/loom/... ./cmd/object-store-manager/...
+          ./cmd/processor/... ./cmd/weaver/... ./deploy/... ./examples/...
+          ./internal/bypass/... ./internal/capabilitykv/... ./internal/edge/...
+          ./internal/guardgrammar/... ./internal/healthkv/... ./internal/jsstore/...
+          ./internal/lenstest/... ./internal/natsperm/... ./internal/opstatus/...
+          ./internal/spike/... ./internal/starlarksandbox/... ./internal/substrate/...
+          ./packages/clinic-domain/... ./packages/clinic-reminders/...
+          ./packages/control-authz/... ./packages/location-domain/...
+          ./packages/loftspace-domain/... ./packages/maintenance-domain/...
+          ./packages/privacy-base/... ./scripts/...
 
   edge-browser-store:
     runs-on: ubuntu-latest
@@ -495,42 +541,48 @@ jobs:
           go-version: "1.26"
           check-latest: true
 
-      - name: Assert unit-1 + unit-2 + unit-3 package globs union to exactly `go list ./...`
+      - name: Assert unit-1..unit-4 package globs union to exactly `go list ./...`
         # A fast (no Docker) guard against silent coverage loss: a package
         # added later that isn't sorted into any shard's glob list above
         # would otherwise never run in CI again.
         run: |
           go list ./... | sort -u > /tmp/all.txt
           go list \
-            ./cmd/gateway/... ./cmd/lattice/... \
-            ./internal/aiagent/... ./internal/bypass/... ./internal/chronicler/... ./internal/edge/... \
-            ./internal/guardgrammar/... ./internal/healthkv/... ./internal/identityceremony/... \
-            ./internal/objectcrypto/... ./internal/objectmanager/... ./internal/projectionhealth/... \
-            ./internal/refractor/... ./internal/vault/... \
-            ./packages/capability-author/... ./packages/loftspace-domain/... ./packages/one-bill/... \
-            ./packages/orchestration-base/... ./packages/service-location/... ./packages/wellness-ledger/... \
+            ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/... \
+            ./internal/bootstrap/... ./internal/chronicler/... \
+            ./internal/identityceremony/... ./internal/objectmanager/... \
+            ./internal/pkgmgr/... ./internal/pkgregistry/... ./internal/refractor/... \
+            ./internal/testutil/... ./internal/weaver/... ./packages/clinic-ledger/... \
+            ./packages/console-operator/... ./packages/front-desk/... \
+            ./packages/orchestration-base/... ./packages/privacy-operator-grant/... \
+            ./packages/rbac-domain/... ./packages/semantic-contracts/... \
+            ./packages/wellness-reminders/... \
+            ./cmd/loftspace-app/... ./internal/bridge/... ./internal/controlauth/... \
+            ./internal/objectcrypto/... ./internal/privacyworker/... \
+            ./internal/processor/... ./packages/cafe-ledger/... \
+            ./packages/capability-author/... ./packages/demo-operator/... \
+            ./packages/edge-manifest/... ./packages/lease-signing/... \
+            ./packages/loftspace-ledger/... ./packages/objects-base/... \
+            ./packages/one-bill/... ./packages/service-location/... \
+            ./packages/wellness-domain/... \
+            ./cmd/clinic-app/... ./cmd/refractor/... ./internal/aiagent/... \
+            ./internal/appsession/... ./internal/gateway/... ./internal/loom/... \
+            ./internal/natsfixture/... ./internal/projectionhealth/... ./internal/vault/... \
+            ./packages/augur/... ./packages/cafe-domain/... ./packages/identity-domain/... \
+            ./packages/identity-hygiene/... ./packages/service-domain/... \
+            ./packages/wellness-ledger/... \
             ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/cafe-app/... ./cmd/chronicler/... \
-            ./cmd/edge/... ./cmd/edge-wasm/... ./cmd/lattice-pkg/... ./cmd/loom/... \
-            ./cmd/object-store-manager/... ./cmd/processor/... ./cmd/weaver/... \
-            ./deploy/... ./examples/... \
-            ./internal/bootstrap/... ./internal/capabilitykv/... ./internal/gateway/... \
-            ./internal/jsstore/... ./internal/lenstest/... ./internal/loom/... ./internal/pkgmgr/... \
-            ./internal/privacyworker/... ./internal/processor/... ./internal/spike/... \
-            ./internal/starlarksandbox/... ./internal/substrate/... \
-            ./packages/cafe-domain/... ./packages/cafe-ledger/... ./packages/clinic-ledger/... \
-            ./packages/clinic-reminders/... ./packages/console-operator/... ./packages/edge-manifest/... \
-            ./packages/front-desk/... ./packages/identity-hygiene/... ./packages/location-domain/... \
-            ./packages/loftspace-ledger/... ./packages/privacy-operator-grant/... ./packages/rbac-domain/... \
-            ./packages/service-domain/... ./packages/wellness-domain/... ./scripts/... \
-            ./cmd/clinic-app/... ./cmd/facet/... ./cmd/loftspace-app/... ./cmd/loupe/... \
-            ./cmd/refractor/... ./cmd/wellness-app/... \
-            ./internal/appsession/... ./internal/bridge/... ./internal/controlauth/... \
-            ./internal/natsfixture/... ./internal/natsperm/... ./internal/opstatus/... \
-            ./internal/pkgregistry/... ./internal/testutil/... ./internal/weaver/... \
-            ./packages/augur/... ./packages/clinic-domain/... ./packages/control-authz/... \
-            ./packages/demo-operator/... ./packages/identity-domain/... ./packages/lease-signing/... \
-            ./packages/maintenance-domain/... ./packages/objects-base/... ./packages/privacy-base/... \
-            ./packages/semantic-contracts/... ./packages/wellness-reminders/... \
+            ./cmd/edge/... ./cmd/edge-wasm/... ./cmd/facet/... ./cmd/lattice/... \
+            ./cmd/lattice-pkg/... ./cmd/loom/... ./cmd/object-store-manager/... \
+            ./cmd/processor/... ./cmd/weaver/... ./deploy/... ./examples/... \
+            ./internal/bypass/... ./internal/capabilitykv/... ./internal/edge/... \
+            ./internal/guardgrammar/... ./internal/healthkv/... ./internal/jsstore/... \
+            ./internal/lenstest/... ./internal/natsperm/... ./internal/opstatus/... \
+            ./internal/spike/... ./internal/starlarksandbox/... ./internal/substrate/... \
+            ./packages/clinic-domain/... ./packages/clinic-reminders/... \
+            ./packages/control-authz/... ./packages/location-domain/... \
+            ./packages/loftspace-domain/... ./packages/maintenance-domain/... \
+            ./packages/privacy-base/... ./scripts/... \
             | sort -u > /tmp/sharded.txt
           diff /tmp/all.txt /tmp/sharded.txt && echo "OK: shards cover exactly go list ./..."
 
