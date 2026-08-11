@@ -674,6 +674,26 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   *verify or correct* the row's figure and to widen the sweep past the glob — not afterwards as a check on a
   draft that has already hardened around the number.
 
+- **A predicate borrowed from another consumer carries THAT consumer's tolerance, not yours — and a guard
+  written on a field only one install path sets is INERT on the other path.** Two faces of one slip, both
+  blocking findings in one adversarial pass (2026-08-11, the plain-lens anchor derivation). (1) I reused a
+  ratified design's **enrolment** predicate as my design's **licence**, praising the reuse as "one
+  predicate, two consumers." But that predicate gates an auditor that only *reads*, and its own text says a
+  lens it cannot check *"is simply not checked in this direction"* — a tolerated gap. Mine gated a **write**
+  narrowing, where the same gap silently truncates a row. **A read-only predicate is never a write licence**:
+  before reusing any predicate, ask *what does its original consumer do when it is wrong?* — if that answer
+  is "nothing much" and yours is "a wrong row", the reuse is a category error wearing a consistency
+  argument. (2) I wrote `!p.authPlane` as a fail-closed conjunct and congratulated myself in the doc for not
+  letting an adapter accident be the guard — while `SetAuthPlane`'s only non-test caller is
+  `InstallActorAggregate`, so on the plain pipeline the field is `false` **by construction** and the guard
+  can never fire, with a test that would pass vacuously. **For every conjunct you write on a component
+  field, grep its setters and confirm the field can be non-zero on the arm you are guarding**; a guard that
+  cannot fire is worse than an absent one, because it buys the reader's confidence. A third, cheaper face
+  from the same pass: **when you cite another design's rejected alternative, re-read the rejection** — I
+  argued at length against a position §8.1 never held (it had already singled out the variant I was
+  rejecting, and deferred it with a named trigger my own design would produce). The ledger rule — cite the
+  code that *does* the thing, never the comment — extends to citing a *decision*: open it, don't recall it.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
