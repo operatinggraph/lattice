@@ -1388,6 +1388,21 @@ func main() {
 				}
 				return st.CachedInfo().State.FirstSeq, nil
 			})
+			// The hydrate delivery-position read (edge-cold-signin-delivery-
+			// position-design.md §3.2): the "personal.hydrate" control RPC
+			// returns the SYNC stream's last sequence at the moment it read
+			// it, so a cold or gapped Edge node can start its consumer at
+			// that position instead of replaying the stream's full retained
+			// history. A fresh Stream lookup per call reads the current
+			// LastSeq, same posture as the syncgap read above — never a
+			// long-lived handle's stale cache.
+			controlSvc.SetSyncLastSeq(func(ctx context.Context) (uint64, error) {
+				st, err := conn.JetStream().Stream(ctx, syncStream)
+				if err != nil {
+					return 0, fmt.Errorf("hydrate: look up stream %q: %w", syncStream, err)
+				}
+				return st.CachedInfo().State.LastSeq, nil
+			})
 		}
 
 		// A Secure Lens (Contract #3 §3.10): install the decrypt-at-projection

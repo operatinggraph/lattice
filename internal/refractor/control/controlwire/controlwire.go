@@ -174,6 +174,14 @@ type PersonalHydrateResult struct {
 	// otherwise-permanently-stranded keys (no emitter is left to retract
 	// them any other way).
 	Lenses []string `json:"lenses,omitempty"`
+	// SyncStartSeq is the SYNC stream's last sequence at the moment the
+	// hydrate burst began publishing (edge-cold-signin-delivery-position-
+	// design.md §3.2): a cold or gapped Edge node resumes at
+	// SyncStartSeq+1 instead of replaying the stream from its retained
+	// beginning. Zero means the control host could not determine the
+	// position (unset seam or a read error) — the requesting node falls
+	// back to today's DeliverAll behaviour.
+	SyncStartSeq uint64 `json:"syncStartSeq,omitempty"`
 }
 
 // PersonalSessionKeyResult is the synchronous acknowledgement returned by the

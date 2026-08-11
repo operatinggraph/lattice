@@ -327,6 +327,16 @@ type Service struct {
 	// one SYNC stream (edge-manifest's manifestStream), so a single handle is
 	// correct here — cleared to nil when that stream's lens rule unloads.
 	syncFirstSeq func(ctx context.Context) (uint64, error)
+	// syncLastSeq backs the "hydrate" op's delivery-position optimisation
+	// (edge-cold-signin-delivery-position-design.md §3.2): a func returning
+	// the SYNC stream's last sequence at read time, from the control host's
+	// own full-grant substrate connection. nil until SetSyncLastSeq is
+	// called; unlike syncFirstSeq this is fail-soft, not fail-closed — a
+	// nil seam or a read error degrades PersonalHydrateResult.SyncStartSeq
+	// to 0 (today's DeliverAll behaviour) rather than failing the hydrate.
+	// Every Personal Lens rule shares one SYNC stream, so a single handle
+	// is correct here, same as syncFirstSeq.
+	syncLastSeq func(ctx context.Context) (uint64, error)
 	// capability authorizes every dispatchEndpoint op (FR30,
 	// control-plane-capability-authz-design.md). Defaults to the fail-closed
 	// denyAllChecker (deny-all + loud Warn) so the pre-set window fails closed;
@@ -503,6 +513,19 @@ func (s *Service) SetVault(v vault.Vault) {
 func (s *Service) SetSyncFirstSeq(fn func(ctx context.Context) (uint64, error)) {
 	s.mu.Lock()
 	s.syncFirstSeq = fn
+	s.mu.Unlock()
+}
+
+// SetSyncLastSeq registers the "hydrate" op's delivery-position read: a func
+// returning the SYNC stream's last sequence. The control host wires it to
+// its own substrate connection's STREAM.INFO — the trusted full-grant read
+// the per-identity Edge grant deliberately denies
+// (edge-cold-signin-delivery-position-design.md §3.2). Thread-safe; may be
+// called at any time. Until called (or after being cleared with nil on lens
+// teardown), the op degrades PersonalHydrateResult.SyncStartSeq to 0.
+func (s *Service) SetSyncLastSeq(fn func(ctx context.Context) (uint64, error)) {
+	s.mu.Lock()
+	s.syncLastSeq = fn
 	s.mu.Unlock()
 }
 
@@ -1239,12 +1262,30 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 		hydrators[ruleID] = h
 	}
 	kv := s.personalInterestKV
+	lastSeqFn := s.syncLastSeq
 	s.mu.Unlock()
 	if len(hydrators) == 0 {
 		return ControlResponse{Error: "hydrate: no personal hydrator configured"}
 	}
 	if body.IdentityID == "" {
 		return ControlResponse{Error: "hydrate: identityId is required"}
+	}
+
+	// The SYNC start position is read once, here, before any hydrator runs
+	// (edge-cold-signin-delivery-position-design.md §3.2): the fan-out below
+	// re-executes each pipeline against Core KV, which only moves forward,
+	// so anything published by the fan-out lands at a SYNC sequence greater
+	// than this read. Fail-soft, deliberately — an unset seam or a read
+	// error degrades to 0 (today's DeliverAll behaviour) rather than
+	// failing the hydrate: the field is an optimisation input, not a
+	// correctness gate.
+	var syncStartSeq uint64
+	if lastSeqFn == nil {
+		slog.Warn("control: hydrate: sync start seq not configured, falling back to DeliverAll", "identityId", body.IdentityID)
+	} else if seq, err := lastSeqFn(ctx); err != nil {
+		slog.Warn("control: hydrate: read sync start seq, falling back to DeliverAll", "identityId", body.IdentityID, "err", err)
+	} else {
+		syncStartSeq = seq
 	}
 
 	ruleIDs := make([]string, 0, len(hydrators))
@@ -1276,7 +1317,7 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 				"deviceId", body.DeviceID, "err", cerr)
 		}
 	}
-	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs}}
+	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs, SyncStartSeq: syncStartSeq}}
 }
 
 // personalSessionKey mints a transient Vault session key for the requesting
