@@ -412,6 +412,50 @@ render a partial world.
 - **Green:** a two-lens hydrate where the higher-revision lens publishes first must not fire
   `OnHydrationComplete` until the second lens's frames have landed.
 
+#### AMENDED 2026-08-11 (build time) — the recommended client-side shape was BUILT and REFUTED. Fire 4 needs a designer pass.
+
+Fire 4 was built to the shape above and put through two cold adversarial reviewers. It is **not merged**;
+the code is preserved on branch `fire/edge-cold-signin-position` (`fab96db4`) as evidence, not as a
+candidate. Four blocking defects, and the shape of them is why this is a design problem rather than a
+build bug: **three are lifetime/ordering questions this section never asks.**
+
+1. **The gate can hang first paint permanently — a strictly worse outcome than the flicker it fixes.**
+   The release rule needs *some* marker carrying `revision >= target` (the response's max). The idle
+   fallback that bounds a silent lens can only be armed **after** that condition is met, so if the lens
+   holding the max is the one that never reports, no timer is ever created and the gate stays armed for
+   the life of the process — suppressing every later `OnHydrationComplete`, including a subsequent
+   `Rehydrate`'s. That is a new unrecoverable state; the old scalar gate always cleared on one marker.
+   Reachable: `MaxMsgsPerSubject: 10_000` on the shared per-actor subject can evict an early marker from a
+   large burst; the marker can be `Term`ed as malformed; a future adapter may not implement
+   `HydrationMarkerPublisher` while still raising the max.
+2. **The idle bound is not a bound.** Idleness is measured from the last *delivered frame*, with no
+   absolute ceiling. The subject is per-**actor**, not per-device, so a second device signed in as the
+   same identity — or one chatty live lens — resets the countdown indefinitely.
+3. **It races its own arming on the `Rehydrate` path.** `personalHydrate` runs its hydrators
+   **sequentially and synchronously**, so every marker is in the stream before the RPC replies — but the
+   gate is armed only *after* it replies. Mid-session the consumer is already attached and draining, so
+   the markers are consumed while the gate is unarmed, each firing the host's ready signal (the original
+   defect, unfixed), after which `arm` installs a pending set nothing will ever drain. The cold path is
+   safe only because the consumer attaches later.
+4. **It is inert whenever `SyncStartSeq == 0`, and that is a live fail-soft path** (a nil seam, or a
+   `STREAM.INFO` error on one hydrate). Freshness is decided positionally, so with no position the
+   staleness test is skipped, the consumer runs `DeliverAll`, and prior cycles' *attributed* markers drain
+   the membership set before this cycle's burst arrives — releasing on a partial world. Membership is not
+   merely vacuous there; it is actively poisoned.
+
+**Why this is the Designer's, not the next builder's.** A correct gate needs an **identity for the
+hydrate cycle on the wire** — a per-hydrate correlation id — so membership can be scoped to the cycle
+without depending on a delivery position that is sometimes absent; it needs an **ordering guarantee**
+that the gate is armed before the burst can be consumed; and it needs a **liveness rule** with an
+absolute deadline that does not presuppose the condition it bounds. §6's "recommended fix (client-side,
+smaller)" is refuted by build evidence: the smaller shape does not survive contact. The board's
+separately-filed row *"[Edge] A second device's hydrate releases this device's first-paint gate"* points
+at the same correlation id, so the two should be designed together.
+
+**What ships in the meantime.** Nothing — the gate keeps its shipped first-marker behaviour. Fire 2 makes
+the partial-world first paint *observable* where a 33-second replay used to hide it, so the flicker is a
+real regression risk; it is a far smaller one than a first paint that never fires.
+
 ---
 
 ## 7. Migration, compatibility, risks
@@ -684,6 +728,12 @@ Fire 2 — the Go host consumes it; the persisted cursor becomes a contiguous fl
 the durable is deleted on every attach (`b44b667b`, CI green). `bin/refractor` + `bin/facet` rebuilt from
 `main` and relaunched; both healthy.
 
-**Next:** Fire 4 (one hydration marker per hydrate — unmasked by Fire 2 and therefore not optional),
-then Fire 3 (browser parity; until it lands the browser host omits the position and keeps today's
-`DeliverAll`, which is safe but unimproved).
+**Fire 4 — BUILT, REFUTED, NOT MERGED.** Two cold reviewers found four blocking defects in the
+ratified client-side shape (§6 Fire 4's amendment records them in full). The code is preserved on branch
+`fire/edge-cold-signin-position` (`fab96db4`) as evidence. **It needs a designer pass**, jointly with the
+board row *"[Edge] A second device's hydrate releases this device's first-paint gate"* — both want a
+per-hydrate correlation id on the marker.
+
+**Next buildable:** Fire 3 (browser parity). Until it lands the browser host omits the position and keeps
+today's `DeliverAll` — safe, but it gets none of this initiative's benefit, and it is the host whose
+`InactiveThreshold` produces the most cold starts.
