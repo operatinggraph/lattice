@@ -18,9 +18,10 @@ const state = {
   mode: "applicant",
   docScope: null,
   // sessionUploads maps an oid uploaded THIS session to the link it was created
-  // with, so the doc can be detached. A listed doc from a prior session has no
-  // linkName in the read model (the lens cannot project type(r)), so detach of
-  // those is a documented follow-up.
+  // with, so the doc can be detached. A doc listed from a prior session is not
+  // in here and gets no detach button. The read model does carry the slot name
+  // per attachment (objectAttachments' `owners[].linkName`); reading it from
+  // there instead of from this map is an FE change nobody has made.
   sessionUploads: {},
   // unitPhotos maps a unitKey → its listing photos ([{oid, contentType}]), cached
   // so the Browse filter/sort re-render reads photos without refetching. Loaded
@@ -2975,9 +2976,10 @@ function renderDocCard(d) {
   view.addEventListener("click", () => openDocument(d.oid, d.sensitive));
   actions.append(view);
 
-  // Detach is available for documents uploaded this session (the FE knows the
-  // link name); a doc listed from a prior session has no link name in the read
-  // model, so detach of those is a documented follow-up.
+  // Detach is offered for documents uploaded this session, where the FE still
+  // holds the link name it created. For a doc listed from a prior session the
+  // name is available on the row (objectAttachments projects the slot per
+  // attachment) but this FE does not read it, so no detach button is drawn.
   if (sess) {
     const detach = document.createElement("button");
     detach.className = "ghost danger";

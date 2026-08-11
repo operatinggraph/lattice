@@ -76,6 +76,13 @@ func Lenses() []pkgmgr.LensSpec {
 //     §0.C guard) and to drive the actorAggregate reprojection; `liveOwners` is
 //     NOT used in the orphan decision. The carry-no-filtering-WHERE / null-restore
 //     grouping behaviour is the documented full-engine idiom.
+//     The hop NAMES its relationship, which makes each link its own intermediate
+//     row: two links to one owner count as two, where an anonymous hop would
+//     count one. `liveOwners` absorbs that — it is neither returned nor a
+//     bodyColumn, and the grouping key carries neither it nor the relationship,
+//     so the projected row is identical either way (pinned by
+//     TestObjectLiveness_NamedRelationshipDoesNotMoveTheProjectedRow). Anything
+//     added here that DOES read the fan-out counts links, not owners.
 //   - DEAD-TARGET tradeoff (§21): because `liveLinks` is only decremented by the
 //     object's OWN attach/detach, an owner-tombstone (which never touches the
 //     object) leaves a stale `liveLinks >= 1` → a dangling link to a dead owner no
@@ -120,18 +127,23 @@ RETURN
 //   - One row per anchor object (the §0.C guard): the `OPTIONAL MATCH
 //     (o)-[r]->(owner)` fan is collapsed by the single `collect`, so any number
 //     of links produces one row. A zero-link object null-restores to one row
-//     with `owners` carrying a degenerate `{ownerKey: null}` artifact (the
-//     documented full-engine grouping behaviour, as in `myTasksSpec`); the app
-//     drops null entries.
+//     with `owners` carrying a degenerate all-null entry (the documented
+//     full-engine grouping behaviour, as in `myTasksSpec`) — `collect` drops a
+//     null value but a map of nulls is not itself null; the app drops entries
+//     with no `ownerKey`.
 //   - The metadata columns are aspect-data reads off `.content` (the
 //     `objectLiveness` storeName idiom), so they resolve directly in the full
 //     engine. A tombstoned object does not bind (`fetchNode` returns nil for a
 //     soft-deleted vertex), so it emits no row and `EmptyBehavior: delete`
 //     reclaims its read-model key.
-//   - The relationship NAME (the upload "slot" / linkName) is NOT projected —
-//     the full engine cannot project `type(r)` — so `owners` carries only the
-//     destination node key. Detach of a listed doc (which needs the linkName)
-//     is therefore a documented follow-up.
+//   - Each `owners` entry carries the three facts an attachment IS: the owner
+//     it hangs off (`ownerKey`), the upload slot it occupies (`linkName`, the
+//     relationship's own name via `type(r)`) and the name the file was uploaded
+//     under (`filename`, off the link's payload — `AttachObject` writes it
+//     there). The slot is what `DetachObject` requires as its `linkName`
+//     argument, and it is a fact about the EDGE, not about either endpoint: one
+//     object attached to one owner under two slots is two links and one object
+//     vertex, so no vertex field could hold it.
 //   - `sensitive` / `governingIdentity` / `encryption` (object-store-crypto-
 //     shred-design.md §3.1/§9 Fire 4 Increment 2) are the same null-safe
 //     `.content.data.<field>` reads as the metadata columns above — a
@@ -159,7 +171,7 @@ WITH
   o.content.data.sensitive AS sensitive,
   o.content.data.governingIdentity AS governingIdentity,
   o.content.data.encryption AS encryption,
-  collect(DISTINCT { ownerKey: owner.key }) AS owners
+  collect(DISTINCT { ownerKey: owner.key, linkName: type(r), filename: r.data.filename }) AS owners
 RETURN
   entityKey AS actorKey,
   entityKey,

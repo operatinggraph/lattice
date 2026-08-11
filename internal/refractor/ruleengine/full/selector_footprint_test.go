@@ -2,7 +2,6 @@ package full
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -214,14 +213,7 @@ func markNodeOverflowed(t *testing.T, adjKV *substrate.KV, nodeID string) {
 // where the write path stops absorbing edges and Core KV is the only record.
 func putLink(t *testing.T, reg *fixtureRegistry, coreKV *substrate.KV, name, fromName, toName string) string {
 	t.Helper()
-	fromID, toID := reg.idByName[fromName], reg.idByName[toName]
-	require.NotEmpty(t, fromID, "fixture: %q not registered", fromName)
-	require.NotEmpty(t, toID, "fixture: %q not registered", toName)
-	key := substrate.LinkKey(reg.typeByID[fromID], fromID, name, reg.typeByID[toID], toID)
-	body, err := json.Marshal(map[string]any{"key": key, "isDeleted": false})
-	require.NoError(t, err)
-	_, err = coreKV.Put(context.Background(), key, body)
-	require.NoError(t, err)
+	key, _ := putLinkBody(t, reg, coreKV, name, fromName, toName, map[string]any{"isDeleted": false})
 	return key
 }
 

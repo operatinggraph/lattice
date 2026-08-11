@@ -512,9 +512,23 @@ Colocated with the mechanism, per house rules.
 
 ## 9. Non-goals
 
-- **`WHERE` on relationship fields**, a relationship in a grouping key, a relationship as a returned entity,
-  and variable-length relationship **lists** — alternative (c), §4. Explicitly deferred, with the selector-
-  footprint reason recorded there so the next designer does not re-open it blind.
+- ~~**`WHERE` on relationship fields**~~ — **amended at build, 2026-08-11 (Winston): ADMITTED, not
+  deferred.** §4(c) rejected this class on one specific soundness ground: a data-predicate **edge filter**
+  would stop `recordEdgeSelector` honestly certifying the footprint, degrading every such lens to whole-
+  document `Fallback`. That harm does not arise here. What ships is a **post-expansion row filter** — the
+  walk's edge filter is untouched, `rel.Type`/`rel.Direction` still drive the selector, and the link enters
+  `NodeRevisions` through `fetchNode`, so a payload change invalidates the footprint and re-triggers.
+  Refusing `r.data.f` inside a `WHERE` while admitting the identical expression in a `RETURN` would be a
+  rule with no statable reason. Proven rather than argued:
+  `TestRelProjection_WhereOnTheLinkPayloadFiltersRows` asserts the surviving rows **and** that
+  `EdgeSelectors`/`EdgeRevisions` are byte-identical to the anonymous walk's — §4(c)'s worry measured absent.
+  The rest of (c) stays rejected on its own grounds.
+- **A relationship in a grouping key, a relationship as a returned entity, and variable-length relationship
+  lists** — alternative (c), §4, still deferred. **No longer deferred-by-convention: refused at parse.**
+  Inc 3's gate rejects a bare relationship variable everywhere except as a `WITH` item's whole expression
+  (the carry), so `RETURN r` / `count(r)` / `collect(r)` / a rel in a grouping key are enforced non-goals
+  rather than stated ones. Left unenforced, `RETURN r` marshals a struct of unexported fields to `{}` — a
+  silent, uninformative column, which is precisely what Inc 3 exists to prevent.
 - **A `bound_at` column on `identityCredentialBindingsRead`.** Inc 2 makes it *possible*; this design does
   not recommend adding it. §3.1 shows the pane needs a provider label, not a timestamp. That is a
   `packages/identity-domain` + `edge-manifest` decision, on its own row, after this lands.
@@ -706,3 +720,86 @@ variable-length rel lists; a `bound_at` column on `identityCredentialBindingsRea
 `cmd/loftspace-app`'s `objectLinkKey`; backfilling link `data` onto the 54 empty-payload relations. Plus:
 **no `docs/contracts/*` edit** (§6), and **no app-side detach wiring** in `cmd/loftspace-app` — the read
 model gains the field; whether the Documents tab consumes it is the named app-side follow-on.
+
+---
+
+## 11. Close pass (2026-08-11) — what the reviews found, and where each lesson went
+
+**Shipped whole in one fire:** Inc 1 + Inc 3 together, then Inc 2, then the consumer. Gates all green,
+verified independently of the builder's report: `go build`, `make vet`, full `go test ./... -p 4`
+(**121 packages ok, 0 fail**), `golangci-lint` 0 issues, all 8 `scripts/lint-*.go` under `STRICT=1`,
+`make verify-kernel: ALL ASSERTIONS PASSED`, `gofmt -l` clean on every file this fire touched (the 9 that
+still list are the pre-existing drift its own board row tracks).
+
+**Review depth (this skill's call, §4).** Inc 1+3 is a new enforcement point and Inc 2 is a gate lift —
+both posture-changing. Rather than run two full 3-layer passes over overlapping diffs, the increments took
+a lead review each and the item took **one cumulative 3-layer cold adversarial pass over its whole diff**:
+three `opus` reviewers, none the implementer, on distinct lenses (engine correctness · the new enforcement
+point's bypass/blast-radius · acceptance against §8's fifteen tests). That is what carries the full-depth
+guarantee here.
+
+### 11.1 What the pass found
+
+The build survived the mechanics: the dedup key's byte-identical claim on every path, guard ordering, the
+null sentinel across every consumer of a binding value, resolver arm placement, the footprint/revision
+split, **zero over-refusal** (17 legitimate shapes probed; the corpus census independently re-derived from
+the grammar rather than from cypher text), and `Parse` being genuinely the only gate.
+
+Three findings mattered:
+
+1. **The gate was enforced at one of the two places it converges.** A reviewer *executed* three bypasses:
+   `WITH coalesce(r, r) AS rr … rr.localName` and `CASE … THEN r` smuggled the binding past
+   `carriedRelVars` (both return the `*nodeRef` itself), and a `*Match`'s **own** inline pattern property
+   expressions were never walked — `MATCH (y {key: r.localName})` served a real link-envelope value and
+   used it as a vertex key. Fixed at the convergence point: `resolveProperty`'s rel arm now applies
+   `relPropertyProjectable` itself and **errors** rather than returning nil, with parse still primary.
+   `carriedRelVars` was rebuilt on the safe side — an item carries the binding *unless its value provably
+   is not one* — after the first cut, which enumerated the carrying shapes, over-refused
+   `objectAttachments`' own `collect(...)`.
+2. **§8's most important test proved the wrong arm.** `newRetractionPipeline` installs no actor enumerator,
+   so the data-only-link-update liveness test exercised `evalPlainLinkReprojection` — while
+   `objectAttachments` declares `ProjectionKind: actorAggregate` and runs `evalLinkFanOut`. Two reviewers
+   found this independently. The fan-out arm now has its own test, proved by stubbing that branch.
+3. **`EdgeEntry.CoreKvKey` is not guaranteed to be a link key.** The legacy event path indexes edges from
+   any Core-KV body carrying a `nodeId`, and `adjacency/builder.go` already counts them
+   (`edgesWithoutLinkKeys`). Binding one blind made `type(r)` a hard error and `r.data.f` a
+   `nats.ErrInvalidKey` — an evaluation failure, i.e. Nak/DLQ, not a degradation. Guarded.
+
+Smaller: a bare `r` escaped the gate; a rel dropped by a `WITH` and dereferenced after still shipped the
+silent null the gate exists to kill; `relBindingReject` judged emptiness before unmodelled-ness, so the
+fail-closed claim was conditional; one test pinned one direction of the §10.4 delta while its comment
+claimed two; the memoization test's whole-query half asserted a tautology; and three documents (the census
+prose, `docs/components/refractor.md`, `cmd/loftspace-app/web/app.js`) stated things this build made false.
+All fixed in-fire. One reported finding — "§5.3 unamended" — was a **false positive**: §5.3 *was* amended,
+in `c11625d6`; the reviewer's worktree was based one commit earlier.
+
+### 11.2 Classification, and where each lesson went
+
+| Class | Verdict | Routed to |
+|---|---|---|
+| An authoring gate and its runtime resolver must agree, or the gate is advisory | **design gap** — §7 specified the parse gate and never said the resolver was a second enforcement point | new dossier entry (below) |
+| A liveness test must run the arm the consumer's `ProjectionKind` actually selects | **brief gap** — the brief named the delivery-vs-projection dossier entry but not *which pipeline shape* the fixture builds | new dossier entry (below) |
+| A guarantee held by accident of shape (`isNonNullExpansion`'s dead rel arm) | **design gap**, caught in Phase 0 rather than by review — the brief found it and §5.3 was amended before the first edit | already discharged; the mechanism worked |
+| A field the codebase itself models as possibly-absent, dereferenced blind | **implementation bug** | fixed; guarded at the binding site |
+| Docs asserting a limitation the same commit removes | **convention** — a third sighting would justify a gate | noted, not yet promotable |
+
+**No lesson is left in a build note.** Two entries are appended to `docs/components/refractor.md`'s
+*Review keeps catching* dossier, so the next fire's brief carries them into its part 5. Neither class has a
+second sighting yet, so neither is promoted to a `scripts/lint-*.go` gate — the promotion rule fires on the
+**second** sighting, and inventing a gate for a once-seen class is how a checklist stops being walked.
+
+### 11.3 Discoveries this fire did NOT fix, and the out each carries
+
+Exactly two, both under the **needs-a-designer-pass** out, neither a new row:
+
+- **The anonymous-relationship half** of *"Two clause shapes the full engine accepts and silently
+  miscompiles"* — stays on its existing board row. This fire narrows the live surface (a **named**
+  relationship on a required MATCH is now filtered by `WHERE` instead of dropped) without touching the
+  refuse-at-parse-vs-implement fork, which is corpus-wide.
+- **`count()`/`collect()` fold on a bare `v != nil` rather than `isNullBound`**, so a node bound to the
+  OPTIONAL null sentinel counts as present. Pre-existing, unrelated to relationships, and outside this
+  mechanism — the gate now stops a *relationship* reaching it.
+
+The app-side detach wiring in `cmd/loftspace-app` remains the design's own named non-goal (§9/§10.10): the
+platform blocker is removed and `linkName` is projected, and consuming it is ~10 lines of app code behind
+the ratified fence.

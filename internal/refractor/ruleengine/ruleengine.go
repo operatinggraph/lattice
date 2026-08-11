@@ -77,7 +77,7 @@ type ProjectionResult struct {
 }
 
 // EvalFootprint is the read-surface certificate one full-engine ExecuteWith
-// call produces: every Core KV key (vertex or aspect) the evaluation read,
+// call produces: every Core KV key (vertex, aspect, or link) the evaluation read,
 // paired with the KV revision observed (0 for a key that was absent), and
 // every adjacency node it read, paired with the fingerprint
 // adjacency.Neighbors returned for it. A validating caller re-reads every
@@ -86,8 +86,11 @@ type ProjectionResult struct {
 // absence flipping to present (or the reverse) counts as a moved value,
 // since 0 is itself a recorded revision, not a missing map entry.
 type EvalFootprint struct {
-	// NodeRevisions maps a Core KV vertex or aspect key to the revision it
-	// was read at.
+	// NodeRevisions maps a Core KV key the evaluation point-read — a vertex, an
+	// aspect, or a link whose payload a lens dereferenced off a bound
+	// relationship — to the revision it was read at. The key shape plays no
+	// part: an entry is whatever key the evaluation asked for, validated by
+	// re-reading that key.
 	NodeRevisions map[string]uint64
 	// EdgeRevisions maps an adjacency NodeID to the fingerprint
 	// adjacency.Neighbors returned when the evaluation read that node's

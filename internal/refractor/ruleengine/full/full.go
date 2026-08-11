@@ -104,6 +104,16 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 			Message: "visitor produced no query",
 		}
 	}
+	// A relationship variable projects its link key and its relation name and
+	// nothing else, so the shapes that would execute into a silent column of
+	// nulls are refused here, in front of the author, rather than at evaluation
+	// where the only symptom is an empty column (relbinding.go).
+	if reject := relBindingReject(v.query); reject != "" {
+		return nil, &ruleengine.ParseError{
+			Engine:  ruleengine.EngineFull,
+			Message: reject,
+		}
+	}
 
 	return &CompiledRule{
 		Query:             v.query,

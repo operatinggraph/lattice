@@ -486,6 +486,73 @@ a plain map, so `.data.<field>` is ordinary map navigation. Authoring rule:
 write the path the data actually lives at — `perm.data.operationType` (root),
 `role.canonicalName.data.value` (aspect).
 
+### Property model (how lens cypher reads a relationship)
+
+A pattern may name the relationship it walks — `-[r:boundTo]->`, `-[r]->` — and
+the walk binds `r` to the **link** it crossed, built from the adjacency entry it
+already holds. Three things project off it:
+
+| Cypher | Resolves to | Cost |
+|---|---|---|
+| `type(r)` | the relation name — the `<relation>` segment of the link key, i.e. the link's localName (an untyped `-[r]->` reports whichever relation the walk actually crossed) | free — already in the adjacency entry |
+| `r.key` | the full Contract #1 6-segment link key `lnk.<typeA>.<idA>.<relation>.<typeB>.<idB>` | free — same |
+| `r.data.<field>` | the link's own payload (`AttachObject`'s `filename`; `duplicateOf`'s `criteria`) | **one Core-KV point-read per dereferenced edge**, memoized per evaluation |
+
+The payload read enters the evaluation footprint under the **link key**, so a
+concurrent write to a projected link is caught by the same read-surface
+validation a vertex or aspect read is. It adds no edge selector and no
+`Fallback`: the adjacency read surface is the hop's, and a projection does not
+change the hop. `WHERE r.data.<field> = …` is therefore admissible — it is a row
+filter applied after the expansion, not an edge filter the walk honours, so
+`recordEdgeSelector` still certifies the same footprint.
+
+**The two halves come from different stores, and they can disagree.** `type(r)`
+and `r.key` are read out of the ADJACENCY document; `r.data.*` is a point-read
+of Core KV. Adjacency lags Core KV, so in the window after a link is deleted the
+walk still crosses the edge (identity facts present) while the payload resolves
+null — `objectAttachments` projects `{ownerKey, linkName, filename: null}` for a
+just-detached document until the adjacency catch-up removes the edge, and the
+row disappears then. Reading the link envelope for the identity halves would
+close the window and destroy the property that makes them free; a consumer that
+cannot tolerate the tear should treat a null payload on a present entry as
+"in flight", not as "no filename".
+
+**Naming a relationship changes what a row IS — even when the variable is never
+read.** Two links between the same endpoint pair (an object attached to one
+owner under two slots) are two rows, where an anonymous hop yields one row per
+endpoint. So adding a name to an existing `-[]->` is a cosmetically-null edit
+that multiplies every aggregate in the lens: a `count()` doubles, a `collect()`
+gains duplicate entries, and a grouping key that never mentioned the
+relationship still partitions the same rows. Check the aggregates before adding
+a name. A relationship variable reused in a later clause means the same link,
+exactly as a reused node variable means the same node; an `OPTIONAL MATCH` that
+finds nothing binds it to null, so all three forms are null and never an error.
+
+Everything else about a relationship is refused at **parse**, because it would
+otherwise project a column of silent nulls with no diagnostic
+(`ruleengine/full/relbinding.go`):
+
+- a relationship variable on a **variable-length hop** (`-[r:x*1..3]->`,
+  `-[r:x*0..]->`) — an expansion of several hops crosses no single relationship,
+  and a zero-hop one crosses none at all;
+- a **dereference other than `.key` or `.data`** (`r.localName`, `r.class`) —
+  the key is already projectable and the rest of a link's envelope is provenance
+  no lens reads, so it is refused rather than served;
+- a **bare use of the variable** — `RETURN r`, `count(r)`, `collect(r)`, `r` in
+  a grouping key. A relationship is bound for its identity and its payload, not
+  as a value: rendered it is an empty object, and counted it changes what the
+  aggregate means;
+- a **reference to a name a `WITH` stopped carrying**, which is unbound there
+  and would read as null for the rest of the query.
+
+The refusal is judged over every position the executor evaluates an expression
+from — a clause's `WHERE`, its projection items, and its patterns' inline
+property maps — and it follows the BINDING rather than the name, so a `WITH`
+that carries a relationship under another name carries the rule with it.
+`resolveProperty` applies the same projectable-property rule at evaluation and
+ERRORS on anything else, so a shape that reaches it by any other route fails
+loudly instead of serving a link's envelope.
+
 ### Engine selection algorithm
 
 1. `LensSpec.engine` field is inspected at spec load time (in `translateSpec`)
@@ -949,7 +1016,19 @@ band — so a one-cycle spike does not flap the heartbeat.)
 The component's recurring review-finding classes — fire briefs copy the applicable entries into part 5
 (`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md` §4).
 **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike
-the entry).
+the entry). Retired so far — the gate is the record, so the prose is gone: *site censuses derived from key
+shapes undercount* (`label_derivation_corpus_census_test.go`, `grouping_reduction_corpus_census_test.go`),
+*turning on a behaviour an existing predicate gated hands it the complement*
+(`TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation`), *a label narrows the binder, not
+necessarily the consumer filter* (`label_derivation_corpus_census_test.go`'s per-lens
+`(labels, exhaustive, filterMode)` pin).
+
+**Standing rule, not a finding class:** a new per-lens analysis **ships its corpus census in the same
+fire**, reusing `forEachCorpusCypher` rather than sweeping its own way — enumerate every parseable corpus
+rule body through the *real* analysis (never a grep of cypher text, and never a reimplementation of the
+predicate, which would agree with a broken gate), pin the per-lens verdict, and assert the population is
+exactly these names with a floor on the count so an empty enumeration cannot read as a table of unchanged
+rows.
 
 - **A meta sweep multiplies `Rebuild`** — a rebuild is a durable delete-recreate per lens, so any fan-out over
   the lens set floods the server's consumer management and starves every other lens behind it; a bound held
@@ -968,31 +1047,10 @@ the entry).
   manager on one inline durable handler (*not* `rebuildSerial`, which excludes only those callers from each
   other), while its drain-wait budget is tens of minutes. Worst case is the bound plus one, and that one can
   overlap a gated rebuild of the same lens.
-- **Turning on a behaviour an existing predicate gated hands it exactly the complement — and any safety
-  property that rode on that predicate is absent there.** A shrink-truncate flag reached the lenses
-  `ApplyTruncateScope` returns early for, i.e. the ones whose purge is unconfined, so it aimed a whole-bucket
-  wipe at shared `capability-kv`. Minted: dynamic-type-taxonomy B0 (cold pass, reproduced). **Seen a second
-  time at auth-plane 4a-1**, in the harder direction: narrowing the blanket `WITH` refusal handed
-  `AnchorHopIndex` the shapes it had never had to walk, and its builder had no `*With` arm — so a pattern
-  living only in a `WITH … WHERE` contributed no hop while the index still reported `Complete`, and a
-  revocation would have derived zero anchors. **Mechanized** for this component by
-  `TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation` (every complete index must have walked
-  every relation it references, with a floor on the count checked so an empty gate cannot read as a pass).
-  Check elsewhere: for a new flag or a relaxed refusal, name the population it newly admits and the invariant
-  the old gate was silently supplying for it.
 - **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
   order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
   item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
   standing checklist #1.
-- ~~**Site censuses derived from key shapes undercount**~~ — **RETIRED 2026-08-11: mechanized.** Seen twice
-  (dynamic-type-taxonomy §5.1, four → six; grouping-key reduction, where the design's "the three generated
-  producers are the **entire** census" missed `identityErasureResidue`'s five chained aggregating `WITH`s and
-  the Phase-0 re-run repeated the miss, because both grepped cypher TEXT instead of running the analysis).
-  Gates: `internal/refractor/label_derivation_corpus_census_test.go` and
-  `internal/refractor/grouping_reduction_corpus_census_test.go` — each enumerates every parseable corpus rule
-  body through the real analysis and pins the per-lens verdict, plus an "armed population is exactly these
-  names" assertion so a lost member cannot read as a table of unchanged rows. **A new per-lens analysis ships
-  its corpus census in the same fire**, reusing `forEachCorpusCypher` rather than sweeping its own way.
 - **A soundness claim's stated REASON is load-bearing, and a reason measurement can falsify is worse than
   none** — §4.4 justified "evaluate, don't render" by "a shrunken footprint turns a match into a spurious
   drift retry." Backwards: `footprintValid` re-reads only what the footprint NAMES, so a smaller footprint
@@ -1009,12 +1067,6 @@ the entry).
   `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
   (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
   second sighting.
-- **A label narrows the binder, not necessarily the consumer filter** — `ReferencedLabels` clears
-  exhaustiveness for *any* variable-length hop (`ruleengine/full/labels.go:135-138`) and `ConsumerFilter`
-  takes the broad arm before cap arithmetic, so a lens carrying a `*0..` walk is broad whatever its labels.
-  Minted: dynamic-type-taxonomy §9.4, whose headline "converts an unnarrowable lens into a narrowed one"
-  survived three increments before anyone measured it. Check:
-  `label_derivation_corpus_census_test.go` pins `(labels, exhaustive, filterMode)` per shipped lens.
 - **Lens lag is not read-model incompleteness** — anti-join / field-diff against the source before designing
   any drain or backfill. Minted: capability-projection reconciliation. Check: none yet.
 - **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
@@ -1042,3 +1094,20 @@ the entry).
   error and no log line. Minted: adjacency Shape B close review (the state table had named the boundary and
   answered it with an environmental assertion). Check: a cache of durable state is consulted for PRESENCE
   only, never to conclude absence — or it is deleted, which is what shipped.
+- **An authoring gate and its runtime resolver must agree, or the gate is advisory.** A parse-time refusal
+  named the projectable surface of a relationship binding while `resolveProperty`'s arm resolved *whatever
+  reached it*, so any shape the parse walk did not model served the value anyway: `WITH coalesce(r, r) AS rr`
+  and `CASE … THEN r` both hand the binding on (the scope walk recognised only a bare variable item), and a
+  `MATCH`'s **own** inline property map was never walked, so `MATCH (y {key: r.localName})` used a real
+  link-envelope field as a vertex key. Minted: relationship-data-projection close pass (all three
+  *executed* by a cold reviewer, not reasoned). Check: for any authoring-time refusal, name the runtime
+  point the refused value would flow through and enforce the same predicate there too — one shared
+  function, so relaxing it moves both. A scope walk that enumerates the shapes that CARRY a binding is
+  fail-open by construction; enumerate the shapes that provably do not, and assume the rest carry it.
+- **A liveness test must run the arm the consumer's `ProjectionKind` actually selects.** The design's
+  self-declared most-important test — a data-only link update must move the projected row — was written on
+  a fixture whose pipeline installs no actor enumerator, so it exercised `evalPlainLinkReprojection` while
+  the feature's only consumer declares `actorAggregate` and runs `evalLinkFanOut`. The mechanism was proved
+  on an arm nothing ships. Minted: relationship-data-projection close pass (found independently by two
+  reviewers). Check: read the consumer lens's `ProjectionKind` and assert the fixture takes the same branch
+  of `handle`'s `KindLink` case — a re-trigger proof on the wrong arm is an argument, not a test.

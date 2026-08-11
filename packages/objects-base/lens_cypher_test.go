@@ -23,6 +23,7 @@ package objectsbase
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,8 +116,18 @@ func (f *objLensFixture) owner(t *testing.T, name string, deleted bool) string {
 	return key
 }
 
-// link builds the object→owner adjacency edge (object is the source, Contract #1 §1.1).
+// link builds the object→owner attachment with an empty payload — what
+// AttachObject writes when the caller supplied no filename.
 func (f *objLensFixture) link(t *testing.T, name, objName, ownerName string) {
+	t.Helper()
+	f.linkWithData(t, name, objName, ownerName, map[string]any{})
+}
+
+// linkWithData builds the object→owner adjacency edge (object is the source,
+// Contract #1 §1.1) AND the link envelope in Core KV carrying data — both
+// halves of what one AttachObject commit persists, so a lens reading the
+// relationship's payload reads the shape the op actually writes.
+func (f *objLensFixture) linkWithData(t *testing.T, name, objName, ownerName string, data map[string]any) {
 	t.Helper()
 	ctx := context.Background()
 	objID, ownerID := f.ids[objName], f.ids[ownerName]
@@ -127,6 +138,13 @@ func (f *objLensFixture) link(t *testing.T, name, objName, ownerName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "outbound", NodeID: objID, OtherNodeID: ownerID, OtherType: ownerType}))
 	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: ownerID, OtherNodeID: objID, OtherType: objType}))
+	body := map[string]any{"key": linkKey, "class": "link", "isDeleted": false,
+		"sourceVertex": "vtx." + objType + "." + objID, "targetVertex": "vtx." + ownerType + "." + ownerID,
+		"localName": name, "data": data}
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	_, err = f.coreKV.Put(ctx, linkKey, raw)
+	require.NoError(t, err)
 }
 
 func (f *objLensFixture) project(t *testing.T, objName string) []ruleengine.ProjectionResult {
@@ -409,4 +427,108 @@ func TestObjectAttachments_Sensitive_ProjectsEncryptionEnvelope(t *testing.T) {
 	require.Equal(t, "AES-256-GCM", enc["algo"])
 	require.Equal(t, "d3JhcHBlZA==", enc["wrappedCEK"])
 	require.Equal(t, governingIdentity, enc["keyId"])
+}
+
+// attachmentEntries extracts every `owners` entry as an (ownerKey, linkName,
+// filename) triple, keyed by the slot name — the shape the Documents tab reads
+// to offer a detach, which needs the linkName DetachObject requires.
+func attachmentEntries(t *testing.T, owners any) map[string]map[string]any {
+	t.Helper()
+	list, ok := owners.([]any)
+	require.True(t, ok, "owners must be a list, got %T", owners)
+	out := map[string]map[string]any{}
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		require.True(t, ok, "owners entry must be a map, got %T", e)
+		slot, _ := m["linkName"].(string)
+		if slot == "" {
+			continue
+		}
+		out[slot] = m
+	}
+	return out
+}
+
+// Test F — the attachment's own facts: the slot it occupies and the name the
+// file was uploaded under, both read off the RELATIONSHIP. One object attached
+// to one owner under two slots is two links and one object vertex, so neither
+// fact can live on a vertex — and `linkName` is the argument DetachObject
+// requires, which is why a document could be listed but never removed without
+// it.
+func TestObjectAttachments_ProjectsSlotNameAndFilenamePerLink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObjLensFixture(t)
+	f.object(t, "scan", 1, 2)
+	f.content(t, "scan", "store-abc", "application/pdf", 2048)
+	ownerKey := f.owner(t, "applicant", false)
+	f.linkWithData(t, "idDocument", "scan", "applicant", map[string]any{"filename": "passport.pdf"})
+	f.linkWithData(t, "proofOfIncome", "scan", "applicant", map[string]any{})
+
+	rows := f.projectAttachments(t, "scan")
+	require.Len(t, rows, 1, "two links to one owner still collapse to one anchor row")
+	entries := attachmentEntries(t, rows[0].Values["owners"])
+	require.Len(t, entries, 2,
+		"two slots on one owner are two distinguishable entries — collapsing them by owner would hide a slot")
+
+	require.Equal(t, ownerKey, entries["idDocument"]["ownerKey"])
+	require.Equal(t, "passport.pdf", entries["idDocument"]["filename"],
+		"the filename AttachObject wrote onto the link")
+	require.Equal(t, ownerKey, entries["proofOfIncome"]["ownerKey"])
+	require.Nil(t, entries["proofOfIncome"]["filename"],
+		"an attach that supplied no filename leaves the payload empty, which projects null")
+}
+
+// Test G — the zero-link null artifact keeps its shape. `collect` drops a null
+// VALUE, but a map of nulls is not null, so a zero-link object still restores
+// to exactly one row carrying one degenerate entry — the artifact the app
+// already filters on a missing ownerKey.
+func TestObjectAttachments_ZeroLinks_DegenerateEntryHasNullSlotAndFilename(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObjLensFixture(t)
+	f.object(t, "orphan", 1, 0)
+	f.content(t, "orphan", "store-orphan", "application/pdf", 7)
+
+	rows := f.projectAttachments(t, "orphan")
+	require.Len(t, rows, 1)
+	list, ok := rows[0].Values["owners"].([]any)
+	require.True(t, ok)
+	require.Len(t, list, 1, "one degenerate entry, exactly as before the slot columns existed")
+	entry, ok := list[0].(map[string]any)
+	require.True(t, ok)
+	require.Nil(t, entry["ownerKey"])
+	require.Nil(t, entry["linkName"])
+	require.Nil(t, entry["filename"])
+	require.Empty(t, ownerKeys(t, rows[0].Values["owners"]))
+	require.Empty(t, attachmentEntries(t, rows[0].Values["owners"]))
+}
+
+// Test H — objectLiveness binds `r` as walk plumbing and reads nothing off it,
+// but naming a relationship still changes what a row IS: two links to one owner
+// are two intermediate rows where an anonymous hop gives one. The lens folds
+// them through `count(owner.key)` into a grouping key that carries neither the
+// relationship nor the count, so the projected row is unchanged — and that is a
+// property of THIS cypher, not of the engine, so it is pinned rather than
+// argued. A lens that projected the fan-out would double it.
+func TestObjectLiveness_NamedRelationshipDoesNotMoveTheProjectedRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObjLensFixture(t)
+	f.object(t, "scan", 4, 2)
+	f.content(t, "scan", "store-abc", "application/pdf", 2048)
+	f.owner(t, "applicant", false)
+	f.link(t, "idDocument", "scan", "applicant")
+	f.link(t, "proofOfIncome", "scan", "applicant")
+
+	named := f.project(t, "scan")
+	require.Len(t, named, 1, "the anchor still projects exactly one row")
+
+	anonymous := f.projectSpec(t, strings.Replace(objectLivenessSpec, "-[r]->", "-[]->", 1), "scan")
+	require.Len(t, anonymous, 1)
+	require.Equal(t, anonymous[0].Values, named[0].Values,
+		"binding the relationship must not move a single projected value on this lens")
 }

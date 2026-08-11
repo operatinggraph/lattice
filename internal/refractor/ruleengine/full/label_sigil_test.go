@@ -148,9 +148,12 @@ func TestParse_LabelSigilNoRegressionInExpressionGrammar(t *testing.T) {
 
 // TestParse_LabelSigilNoRegressionInVariableLengthRel pins that the
 // relationship quantifier `*1..3` (a completely different grammar position)
-// is unaffected by the node-pattern sigil addition.
+// is unaffected by the node-pattern sigil addition. The hop is anonymous
+// because a variable-length hop binding a relationship variable is refused by
+// the relationship-binding gate (relbinding.go), which would answer this
+// question with the wrong error.
 func TestParse_LabelSigilNoRegressionInVariableLengthRel(t *testing.T) {
-	q := parse(t, `MATCH (a)-[r:REL*1..3]->(b) RETURN a`)
+	q := parse(t, `MATCH (a)-[:REL*1..3]->(b) RETURN a`)
 	rel := firstMatch(t, q).Patterns[0].Rels[0]
 	require.Equal(t, 1, rel.MinHops)
 	require.Equal(t, 3, rel.MaxHops)

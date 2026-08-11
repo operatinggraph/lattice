@@ -36,15 +36,27 @@ const maxVarLengthHops = 10
 // falls through to a re-execute, never a wrong Delete.
 var errCoreKVReadDisabled = errors.New("full engine: Core KV read disabled (read-free key resolution)")
 
-// nodeRef is the executor's in-memory handle to a Core KV vertex.
+// nodeRef is the executor's in-memory handle to one Core KV entry a variable
+// is bound to — a vertex, or the LINK a relationship variable binds.
 // A nil nodeRef represents an OPTIONAL MATCH null binding.
+//
+// rel is the relation name of the link this handle refers to, and is empty for
+// a vertex. It is what tells a relationship binding apart from a node one, and
+// what type(r) returns. It is a field rather than a reserved props entry
+// because props is the entry's own body: a marker kept in there would collide
+// with a link whose data carries a field of that name.
 //
 // revision is the Core KV revision the entry was read at (0 for an absent
 // key) — the read-surface footprint a validating caller compares after
-// evaluation to detect a mid-evaluation write to this key.
+// evaluation to detect a mid-evaluation write to this key. A relationship
+// binding carries 0, because it is built from the adjacency entry rather than
+// read: the link document is read only where a lens dereferences a property
+// off it, and that read enters the footprint as its own memo entry at its own
+// revision.
 type nodeRef struct {
 	key      string
 	props    map[string]any
+	rel      string
 	revision uint64
 }
 
@@ -1000,7 +1012,15 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 	}
 	starts := []frontier{{node: from, seen: map[string]struct{}{from.key: {}}}}
 
-	var matched []*nodeRef
+	// A hit is one admitted endpoint together with the edge the walk crossed to
+	// reach it — the relationship a named rel variable binds. edge is nil for
+	// the zero-hop admission of `from`, which crosses no edge at all.
+	type hit struct {
+		node *nodeRef
+		edge *adjacency.EdgeEntry
+	}
+
+	var matched []hit
 	// Hop 0 means "from itself" — admit if minHops==0 and to filters allow.
 	admit := func(ref *nodeRef) (bool, error) {
 		if !ex.nodeMatches(ref, to) {
@@ -1019,7 +1039,7 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 			return nil, err
 		}
 		if ok {
-			matched = append(matched, from)
+			matched = append(matched, hit{node: from})
 		}
 	}
 
@@ -1071,7 +1091,8 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 						return nil, err
 					}
 					if ok {
-						matched = append(matched, neighbor)
+						edge := e
+						matched = append(matched, hit{node: neighbor, edge: &edge})
 					}
 				}
 				// Extend frontier for next hop.
@@ -1089,19 +1110,31 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 		}
 	}
 
-	// Deduplicate matched by key — same target reachable via multiple paths.
+	// Deduplicate matched — the same target is reachable via multiple paths.
+	//
+	// What a row IS decides what makes two of them the same. Where the pattern
+	// names no relationship variable, a row is the endpoint alone, so every
+	// path to one endpoint collapses to a single row. Where it names one, the
+	// relationship is part of the row too: two distinct links to the same
+	// neighbour are two different bindings of that variable, and collapsing
+	// them by endpoint would drop one of the links the pattern matched.
 	seen := map[string]bool{}
-	var unique []*nodeRef
+	var unique []hit
 	for _, m := range matched {
-		if seen[m.key] {
+		dedupeKey := m.node.key
+		if rel.Variable != "" && m.edge != nil {
+			dedupeKey += "\x00" + m.edge.CoreKvKey
+		}
+		if seen[dedupeKey] {
 			continue
 		}
-		seen[m.key] = true
+		seen[dedupeKey] = true
 		unique = append(unique, m)
 	}
 
 	out := make([]binding, 0, len(unique))
-	for _, n := range unique {
+	for _, m := range unique {
+		n := m.node
 		// If the destination variable is already bound in this binding, the
 		// traversal must arrive at the same node (constrained-target case,
 		// e.g. `(report)<-[:reportsTo]-(identity)` where identity is already
@@ -1114,9 +1147,47 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 				}
 			}
 		}
+		var relRef *nodeRef
+		if rel.Variable != "" {
+			// An expansion that crossed no edge (the zero-hop admission of
+			// `from`) has no relationship to bind, so a pattern naming one
+			// yields no row for it. Validate refuses a rel variable on a
+			// variable-length hop, which is the only pattern that reaches
+			// here that way.
+			if m.edge == nil {
+				continue
+			}
+			// An adjacency entry is not guaranteed to carry a Contract #1 link
+			// key: the legacy event path indexes an edge off any Core KV
+			// message carrying a nodeId, taking coreKvKey and name verbatim
+			// from the body (adjacency's own overflow latch refuses to engage
+			// on a node holding such edges for the same reason). Binding one
+			// would project an empty or malformed key, and a payload
+			// dereference would point-read it and fail the whole evaluation.
+			// The expansion is dropped instead, exactly as a zero-hop one is.
+			if substrate.ClassifyKey(m.edge.CoreKvKey) != substrate.KindLink {
+				continue
+			}
+			// The relationship binding is built from the adjacency entry the
+			// walk already holds: the link key and the relation name, no read.
+			relRef = &nodeRef{key: m.edge.CoreKvKey, rel: m.edge.Name}
+			// The destination variable's constrained-target rule, applied to
+			// the relationship: a rel variable already bound in this binding
+			// must resolve to the same link, or this expansion is not the one
+			// the pattern names.
+			if existing, ok := b[rel.Variable]; ok {
+				bound, _ := existing.(*nodeRef)
+				if bound == nil || bound.key != relRef.key {
+					continue
+				}
+			}
+		}
 		nb := cloneBinding(b)
 		if to.Variable != "" {
 			nb[to.Variable] = n
+		}
+		if rel.Variable != "" {
+			nb[rel.Variable] = relRef
 		}
 		out = append(out, nb)
 	}
@@ -1648,6 +1719,36 @@ func (ex *executor) evalFunctionCall(b binding, fc *FunctionCall) (any, error) {
 			return nil, fmt.Errorf("full engine: nanoIdFromKey argument must be a string, got %T", v)
 		}
 		return nanoIDFromVertexKey(s)
+	case "type":
+		// type(r) → the relation name of the relationship r is bound to: the
+		// <relation> segment of its Contract #1 link key, which is the link's
+		// localName and, for an object attachment, the slot a detach must name.
+		//
+		// Fail-closed in nanoIdFromKey's shape. Cypher NULL — an OPTIONAL MATCH
+		// that found no relationship, or a variable this row never bound — is
+		// NULL, the one answer a caller can tell apart from a relation name.
+		// Anything that is not a relationship (a node binding, a scalar, a
+		// list) ERRORS: a column that silently stopped naming a relation is
+		// indistinguishable from a row that genuinely had none, which is the
+		// diagnosis-free null this projection exists to replace.
+		if len(fc.Args) != 1 {
+			return nil, fmt.Errorf("full engine: type takes exactly 1 argument, got %d", len(fc.Args))
+		}
+		v, err := ex.evalExpr(b, fc.Args[0])
+		if err != nil {
+			return nil, err
+		}
+		if isNullBound(v) {
+			return nil, nil
+		}
+		ref, ok := v.(*nodeRef)
+		if !ok {
+			return nil, fmt.Errorf("full engine: type argument must be a relationship, got %T", v)
+		}
+		if ref.rel == "" {
+			return nil, fmt.Errorf("full engine: type argument must be a relationship, got the node bound at %q", ref.key)
+		}
+		return ref.rel, nil
 	case "coalesce":
 		// coalesce(a, b, ...) → the first argument that is not Cypher NULL.
 		// The shared-anchor composition primitive (pkgmgr Walks, composeDataLensSpec):
@@ -1814,6 +1915,39 @@ func (ex *executor) resolveProperty(target any, key string) (any, error) {
 	}
 	if key == "key" {
 		return nr.key, nil
+	}
+	if nr.rel != "" {
+		// A relationship binding carries the link's key and relation name and
+		// nothing else, so any other property comes off the LINK's own body:
+		// a point-read of the link key ITSELF, not the <nodeKey>.<key> aspect
+		// key the vertex arm below builds. `r.data` yields the body's data
+		// object, and a field of it is ordinary map navigation from there.
+		//
+		// The projectable set is enforced HERE as well as at parse
+		// (relbinding.go), and enforced as an error: any other name would
+		// otherwise serve a link's envelope out of a query the parse gate is
+		// supposed to have refused, and answering it with nil would be the very
+		// silent column that gate exists to make impossible. Parse is the
+		// primary gate; this is the one that has to hold if a route ever
+		// reaches evaluation without passing it.
+		if !relPropertyProjectable(key) {
+			return nil, fmt.Errorf(
+				"full engine: relationship %q has no projectable property %q — a bound relationship "+
+					"projects its link key, its payload (data) and its relation name", nr.rel, key)
+		}
+		if ex.coreKV == nil {
+			return nil, errCoreKVReadDisabled
+		}
+		lref, err := ex.fetchNode(nr.key)
+		if err != nil {
+			return nil, err
+		}
+		if lref == nil {
+			// An absent or tombstoned link has no properties — the same nil a
+			// missing field resolves to (Cypher missing-property semantics).
+			return nil, nil
+		}
+		return lref.props[key], nil
 	}
 	// Absent from the root body → aspect reference: point-read <nodeKey>.<key>.
 	// A nil coreKV is the read-free key-resolution mode (the anchor-tombstone
