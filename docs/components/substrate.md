@@ -526,3 +526,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   caller's ctx outlives its connection, which for every test that closes a fixture before cancelling is the
   rest of the process — it reddened an unrelated package by starvation. Minted: dynamic-type-taxonomy C2.5.
   Check: the loop tests `nc.IsClosed()` BEFORE any probe, since the probe is what cannot decide it.
+- **Abandoning a consumer iterator DISCARDS messages the server already counts as delivered** — `Stop()`
+  drops the whole client prefetch buffer (hundreds of messages) while `Drain()` hands it back
+  (`pull.go:768` vs `:786`, `Next` at `:620`). Anything downstream that tracks "unresolved" by what a
+  handler actually saw is blind to the discarded set, so it will happily record progress past it — and if
+  the resume authority is local rather than the server's ack floor, that progress is permanent. A reconnect
+  path must drain; only a shutdown path may stop, because nothing after it records progress. Minted:
+  cold-sign-in Fire 3's close review (`942f78df`) — the hole that survived Fire 2's contiguous floor.
+  Check: `TestDrainDurable_ReconnectHandsBackTheWholePrefetchBuffer` (and its shutdown-still-discards
+  sibling).

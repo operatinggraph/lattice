@@ -253,3 +253,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   timer, a membership set, a freshness test) can be satisfied or reset by the other device. Minted:
   cold-sign-in Fire 4 review. Check: none yet; board row *"A second device's hydrate releases this
   device's first-paint gate"*.
+- **On the browser, resolving a position and using it are separated by an UNBOUNDED wait** — the Web-Locks
+  leader gate sits between them, so a follower tab computes its cursor, gap check and floor at page boot
+  and may attach days later, after retention has passed the position it named. An out-of-range
+  `OptStartSeq` is clamped UP, so the stale value skips rather than over-delivers. Anything a browser host
+  resolves about *where it is* must be resolved after it has won the right to attach, not at boot.
+  Minted: cold-sign-in Fire 3 (`942f78df`). Check: `TestManager_Run_ResolvesThePositionOnlyOnceReadyToAttach`
+  + `transport.AttachGate`.
+- **The browser host gets ONE attach per page — it has no restart loop** — the Go host retries
+  `runSyncLoop` with capped backoff, so a transient wire error there is invisible; the same error on the
+  browser kills sync until the user reloads. Every wire call added to the browser attach path needs its own
+  bounded retry, and a fail-fast class (a permissions denial) must stay fail-fast. Minted: cold-sign-in
+  Fire 3 review (`942f78df`). Check: `shell.test.mjs`'s delete timeout-then-success and
+  bounded-give-up vectors.

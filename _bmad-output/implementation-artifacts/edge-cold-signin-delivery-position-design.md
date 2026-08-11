@@ -404,13 +404,17 @@ so whichever lens holds the max can release the gate while other lenses are stil
 33-second replay hides it; after Fire 2 the burst is the only thing on the wire and a first paint can
 render a partial world.
 
-- **Recommended fix (client-side, smaller):** stamp `Lens` on the `hydrationComplete` envelope (every
+- ~~**Recommended fix (client-side, smaller):** stamp `Lens` on the `hydrationComplete` envelope (every
   other attributed envelope already carries it) and have the Manager release the gate only once it has
   seen a satisfying marker for **every** rule ID in the hydrate response's existing `Lenses` field.
   No control-plane sequencing change, and it degrades safely against a pre-Fire-4 producer (no `Lens`
-  ⇒ today's first-marker behaviour).
-- **Green:** a two-lens hydrate where the higher-revision lens publishes first must not fire
-  `OnHydrationComplete` until the second lens's frames have landed.
+  ⇒ today's first-marker behaviour).~~ **REFUTED — do not build this shape.** It was built, reviewed and
+  rejected; the amendment below records the four blocking defects and why a correct gate needs a
+  per-hydrate correlation id instead.
+- ~~**Green:** a two-lens hydrate where the higher-revision lens publishes first must not fire
+  `OnHydrationComplete` until the second lens's frames have landed.~~ **This is the acceptance criterion
+  of the refuted shape, not of Fire 4.** A designed Fire 4 states its own, and must additionally bound
+  first paint against a lens that never reports — the defect that made the shape above unrecoverable.
 
 #### AMENDED 2026-08-11 (build time) — the recommended client-side shape was BUILT and REFUTED. Fire 4 needs a designer pass.
 
@@ -464,10 +468,11 @@ real regression risk; it is a far smaller one than a first paint that never fire
 |---|---|
 | **Existing `DeliverAll` durables** (demo box, any running node) | Handled by design: the hydrate/warm paths delete before creating. No operator action, no downtime step. |
 | **Version skew** — new node ↔ old control plane | `SyncStartSeq` absent ⇒ `0` ⇒ `DeliverAll` ⇒ exactly today. Old node ↔ new control plane: the extra field is ignored. |
-| **Delete-then-create is destructive to a concurrent consumer on the same durable name** | Durable names are per `(identity, device)`; `cmd/facet` mints one device id per engine and the browser shell holds a leader lock so only the leader opens the durable. This is a real sharp edge, so Fire 2 states it in the seam's doc comment: *the caller must own the durable*. |
+| **Delete-then-create is destructive to a concurrent consumer on the same durable name** | **AMENDED 2026-08-11 (build time) — the stated mechanism no longer exists; the conclusion survives on a different one, with a named hole.** The original text read *"`cmd/facet` mints one device id per engine"*. It does not: `enginemanager.go:127-132` resolves this host's **stable, store-persisted** id, so two engines for one identity share ONE durable name (the same premise §1.3 was amended to retract). What actually keeps one owner is `engineManager.entries` being `map[identityID]*engineEntry` (`enginemanager.go:59`) — one engine per identity — plus the browser shell's leader lock. **The hole that premise papered over:** `Acquire`'s lost-race path (`enginemanager.go:135-145`) builds a second engine, and `newEngine` starts `runSyncLoop` in a goroutine *before* returning (`engine.go:241-243`), so the loser is live and can attach — deleting the winner's durable mid-flight — before `eng.Close()` runs. Bounded, not data-losing: the winner's loop restarts with backoff and re-attaches from its contiguous-floor cursor. Tracked as the filed row *"[Facet] Two concurrent first-time `Acquire`s for one identity race the mirror"*, whose fix (serialize the build per identity) closes this consequence too. Fire 2 still states the precondition in the seam's doc comment: *the caller must own the durable*. |
 | **Crash between delete and create** | Safe — the next boot recreates from the local cursor, which is unaffected. |
-| **A start position ahead of what the node actually applied** | **AMENDED 2026-08-11 (build time) — this row was WRONG on the warm path and the build fixes it.** The original text read *"Impossible on the warm path (`cursor + 1` is by definition applied+persisted)"*. It is not: the persisted cursor is a **high-water mark, not a contiguous floor**. `handle` writes the sequence of whichever message just succeeded, so a frame that `Nak`s on a transient store error leaves a hole while later frames advance the cursor past it — and `cursor + 1` then starts *above* the hole. Combined with the delete-then-create this design mandates, the server ack floor that used to hold that hole for redelivery is discarded, so the frame is never delivered again and `gapped()` (`cursor < firstSeq`) cannot see it. A skipped `delete`/`keyset` frame leaves the local mirror holding a key the actor lost authorization to. Closed in Fire 2 by making the persisted position a genuine contiguous floor — never advanced past the lowest unresolved sequence. The hydrate path was and remains sound (§3.2's forward-only argument). |
+| **A start position ahead of what the node actually applied** | **AMENDED 2026-08-11 (build time) — this row was WRONG on the warm path and the build fixes it.** The original text read *"Impossible on the warm path (`cursor + 1` is by definition applied+persisted)"*. It is not: the persisted cursor is a **high-water mark, not a contiguous floor**. `handle` writes the sequence of whichever message just succeeded, so a frame that `Nak`s on a transient store error leaves a hole while later frames advance the cursor past it — and `cursor + 1` then starts *above* the hole. Combined with the delete-then-create this design mandates, the server ack floor that used to hold that hole for redelivery is discarded, so the frame is never delivered again and `gapped()` (`cursor < firstSeq`) cannot see it. A skipped `delete`/`keyset` frame leaves the local mirror holding a key the actor lost authorization to. Closed in Fire 2 by making the persisted position a genuine contiguous floor — never advanced past the lowest unresolved sequence. The hydrate path was and remains sound (§3.2's forward-only argument). **Fire 3's close review found the floor closed only ONE of the two ways a sequence goes unresolved.** The floor learns of a sequence only when `handle` sees it and returns `Nak`. But `drainDurable` abandoned its iterator with `Stop()`, which discards every message already delivered into the client's prefetch buffer (hundreds; nats.go `pull.go:768,:620` — `Drain()` is the variant that preserves them). Those are ack-pending on the server yet were never handed to a handler, so `pending` stayed empty, the reopened iterator delivered higher sequences, and `release` persisted the cursor straight over the gap — the same authorization-losing outcome, reached without a single `Nak`. A stalled link reaches it routinely (`ReportMissingHeartbeats` is on by default, so `ErrNoHeartbeat` IS the reconnect path). Closed in Fire 3: the reconnect path drains the buffer through the handler under an idle/error-run/total budget; the shutdown path still stops outright, where no later `release` can advance the cursor. **Residual, accepted:** a message in flight on the wire when the socket breaks is equally ack-pending and equally invisible, and the client API cannot enumerate it. Its window is the wire, not a 500-deep buffer, and it self-heals by `AckWait` redelivery unless the node exits inside that window. |
 | **A pruned start sequence** (`cursor + 1 < firstSeq`) | Cannot reach the consumer: `personal.syncgap` runs first and forces the hydrate path, which uses `SyncStartSeq` instead. If it somehow did, JetStream starts at the first available message — the over-deliver direction. |
+| **A position that expires between being resolved and being used** (browser) | **Added 2026-08-11 (Fire 3 close review) — this design assumed resolving and attaching are adjacent, and on the browser they are not.** `Manager.Run` resolved the cursor, ran the gap check and seeded the floor, and only then called the transport — where the shell parks on the Web Lock until the leader tab dies, possibly days. The gap check ran at boot and is never re-run, so a cursor that retention has since passed names an out-of-range `OptStartSeq`, which JetStream clamps **UP**: a silent skip, the one direction the cursor exists to prevent. Closed in Fire 3 by `transport.AttachGate`: a transport may gate the attach, and `Run` awaits it before any position work. The browser awaits leadership; the NATS transport does not implement it, because a trusted Go host is entitled to attach the moment it dials. |
 
 ---
 
@@ -727,6 +732,14 @@ field until it sends it. No boundary leaves a half-wired path.
 Fire 2 — the Go host consumes it; the persisted cursor becomes a contiguous floor; `Term` advances it;
 the durable is deleted on every attach (`b44b667b`, CI green). `bin/refractor` + `bin/facet` rebuilt from
 `main` and relaunched; both healthy.
+Fire 3 — the browser host consumes it too (`942f78df`): `jstransport` forwards the position, the shell
+deletes-then-creates positioned, the parity gate pins the new wire forms against the granted ACL. The
+same commit carries the three defects the item's cumulative close review found — the discarded prefetch
+buffer (§7 row 5), the position resolved before the browser was entitled to attach (§7 row 7), and a
+bounded retry for the browser's new delete, which runs one attach per page with no restart loop.
+
+**All three buildable fires are done. What remains is Fire 4, and it is the Designer's** — the ratified
+client-side shape was built and refuted (§6's amendment). No further Steward fire can advance this item.
 
 **Fire 4 — BUILT, REFUTED, NOT MERGED.** Two cold reviewers found four blocking defects in the
 ratified client-side shape (§6 Fire 4's amendment records them in full). The code is preserved on branch
@@ -734,6 +747,10 @@ ratified client-side shape (§6 Fire 4's amendment records them in full). The co
 board row *"[Edge] A second device's hydrate releases this device's first-paint gate"* — both want a
 per-hydrate correlation id on the marker.
 
-**Next buildable:** Fire 3 (browser parity). Until it lands the browser host omits the position and keeps
-today's `DeliverAll` — safe, but it gets none of this initiative's benefit, and it is the host whose
-`InactiveThreshold` produces the most cold starts.
+**Next:** the Designer's Fire 4 pass, designed jointly with the second-device row per §6's amendment.
+Nothing here is left for a builder.
+
+**Acceptance still open:** §10's live measurement. Both hosts are proven under test and the Go host was
+measured after Fire 2; the browser host's benefit is unmeasured live because the running Facet serves the
+native engine — the browser path needs `up-facet-edge`. The honest state is *proven under test*, not
+*measured live*.
