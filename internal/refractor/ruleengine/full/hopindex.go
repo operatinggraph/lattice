@@ -553,6 +553,20 @@ func (b *hopIndexBuilder) addExpr(e Expr) {
 			b.addExpr(alt.Then)
 		}
 		b.addExpr(x.Else)
+	case *Literal, *ParameterRef, *VariableRef:
+		// Terminals: no sub-expression and no pattern inside one, so there is
+		// nothing here for the graph. Listed rather than defaulted so the arm
+		// below can default-DENY.
+	default:
+		// An Expr shape this walk does not model may carry a pattern position
+		// it never indexes, and PositionsBinding would then return a set
+		// SHORTER than the truth. That is the direction every consumer of this
+		// index must never move in: pipeline.ActorTypeBindsAnchorOnly reads a
+		// short set as "the actor type binds only at the anchor" and licenses
+		// the one-key answer, which on the auth plane is a live grant. Refusing
+		// the index costs a BFS; guessing costs a grant. Mirrors withscope.go's
+		// varScan.expr, which default-denies the same AST for the same reason.
+		b.rejectOnce(fmt.Sprintf("expression node %T is not modelled by the hop index", e))
 	}
 }
 

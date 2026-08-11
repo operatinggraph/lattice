@@ -273,6 +273,11 @@ type Pipeline struct {
 	// before it gives up and falls back. Zero means DefaultDerivationReadCap.
 	derivReadCap atomic.Int64
 
+	// peerAnchorMode is this pipeline's override of whether an event on a vertex
+	// of the actor type may reach anchors other than that vertex. Zero is
+	// PeerAnchorModeUnset, i.e. take the package default (actor_enumerator.go).
+	peerAnchorMode atomic.Int64
+
 	// actorDeleteKey derives the Capability KV target key to delete when an
 	// actor disappears (tombstone shortcut and reprojectActors missing-actor
 	// path). It maps an actor vertex key to the key this lens's envelope
