@@ -147,7 +147,13 @@ JetStream history — permanently unrecoverable, at exactly the granularity that
 validation and **before** the step-8 atomic commit:
 
 1. Step 4 (hydrate) decrypts any sensitive aspect read into the Starlark context, so scripts operate on
-   plaintext (Starlark never sees ciphertext or key material).
+   plaintext (Starlark never sees ciphertext or key material). A **soft-deleted** sensitive aspect is never
+   decrypted, and its disposition depends on how it was declared. Under `reads` / `optionalReads` it is
+   delivered with `isDeleted: true` and an **empty body** — the tombstone preserves the stored document
+   whole (§3.2), so the retained ciphertext is scrubbed rather than handed on, and the script adjudicates
+   the deletion through its own `isDeleted` filter exactly as it does for a non-sensitive aspect. Under
+   `egressReads` the hydrate **fails**: a `$sensitiveRef` marker is a capability the bridge opens at the
+   external boundary, and one over a dead aspect must not leave the Processor.
 2. Step 6 (validate) validates schema / `permittedCommands` / `sensitiveAspectScope` against the
    **plaintext** mutation, exactly as for non-sensitive aspects.
 3. After validation, for each mutation whose resolved DDL is `sensitive`, the Processor encrypts
