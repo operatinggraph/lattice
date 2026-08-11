@@ -180,8 +180,13 @@ func TestBoundTo_UndeclaredSubmitter_StillEmits(t *testing.T) {
 	testutil.PublishOp(t, conn, initiateLinkEnv(testutil.GenReqID("BoundToNDArm"), uKey, sha256HexOf(secret)))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
+	// Everything the submitter CAN name stays declared, as the shipped
+	// dispatchers send it; only the two class-(g) keys derive_reads owns — the
+	// credentialindex probe and the boundTo link — are left out.
 	env := completeLinkEnv(testutil.GenReqID("BoundToNDCmpl"), secondCredActorKey, uKey, secret)
-	env.ContextHint.OptionalReads = []string{uKey + ".linkKey", uKey + ".credentialBinding"}
+	env.ContextHint.OptionalReads = []string{
+		uKey, uKey + ".state", uKey + ".linkKey", uKey + ".credentialBinding",
+	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 

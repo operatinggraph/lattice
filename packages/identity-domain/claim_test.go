@@ -341,6 +341,17 @@ func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 	}
 }
 
+// hardenedClaimHint is the declaration a HOSTILE submitter sends: the three
+// target-derived keys under `reads`, the fail-closed disposition, hand-rolled
+// rather than built. No shipped client produces this; nothing in the transport
+// can refuse it. It exists so the tests can send the exact probe the fix has to
+// answer, and it must never be wired into a dispatcher.
+func hardenedClaimHint(targetKey string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads: []string{targetKey, targetKey + ".state", targetKey + ".claimKey"},
+	}
+}
+
 // assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
 // details map, and no outcome word anywhere in the message. Every claim
 // rejection cause must be indistinguishable through this surface.
@@ -465,21 +476,47 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		target  string
 		secret  string
 		outcome string
+		// hint overrides the shipped builder for the hostile arms. nil means
+		// "submit exactly what a conforming dispatcher sends".
+		hint func(target string) *processor.ContextHint
 	}{
-		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target"},
-		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key"},
-		{"spent-key", testutil.GenReqID("IndstSpentSbmt"), spentKey, "indistinguishable-spent-secret", "invalid-key"},
+		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target", nil},
+		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key", nil},
+		{"spent-key", testutil.GenReqID("IndstSpentSbmt"), spentKey, "indistinguishable-spent-secret", "invalid-key", nil},
 		// A target that fails the Contract #1 grammar. Right prefix, so the
 		// script's own `startswith` guard would accept it and its `no-target`
 		// branch is what should render — but a MALFORMED key declared in a
 		// ContextHint is rejected by step 4 as InvalidReadKey before the
 		// script runs at all. It reaches the script's branch only because the
 		// shared builder declines to declare a key the grammar rejects.
-		{"malformed-target", testutil.GenReqID("IndstMalformed"), "vtx.identity.x", "irrelevant-secret", "no-target"},
+		{"malformed-target", testutil.GenReqID("IndstMalformed"), "vtx.identity.x", "irrelevant-secret", "no-target", nil},
+		// The hostile arms. These bypass the shared builder entirely and
+		// hand-roll the declaration a conforming client no longer sends —
+		// `reads`, the fail-closed disposition, on the three target-derived
+		// keys. That is the exact probe that reproduced the oracle: under
+		// `reads` an absent target is required-absent, the script's first
+		// `target in state` faults HydrationMiss, and the reply comes back
+		// HydrationFailed with the probed key in details.missingKey.
+		//
+		// Nothing in the transport can stop this envelope being sent —
+		// contextHint is client-supplied and step 3 never inspects it — so the
+		// only thing that can make it answer like every other cause is the
+		// descriptor floor (Contract #2 §2.5) demoting it Processor-side.
+		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint},
+		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint},
 	}
 
 	var shapes []string
 	for _, tc := range cases {
+		// Default: the identical shipped builder every live dispatcher calls,
+		// including for the absent and malformed targets. Hand-tailoring a
+		// conforming arm's declaration would hide the failure this test exists
+		// to catch — a submitter cannot know in advance which of its keys exist
+		// or parse, so the declaration it ALWAYS sends is the one worth testing.
+		hint := identityceremony.ClaimContextHint(tc.target)
+		if tc.hint != nil {
+			hint = tc.hint(tc.target)
+		}
 		env := &processor.OperationEnvelope{
 			RequestID:     tc.reqID,
 			Lane:          processor.LaneDefault,
@@ -489,13 +526,7 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 			Class:         "identity",
 			Payload:       json.RawMessage(`{"claimKey":"` + tc.secret + `","targetIdentityKey":"` + tc.target + `"}`),
 			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
-			// Every case goes through the identical, shipped builder — the one
-			// every live dispatcher calls — including the absent and malformed
-			// targets. Hand-tailoring any arm's declaration would hide the very
-			// failure this test exists to catch: a submitter cannot know in
-			// advance which of its keys exist or parse, so the declaration it
-			// always sends is the only one worth testing.
-			ContextHint: identityceremony.ClaimContextHint(tc.target),
+			ContextHint:   hint,
 		}
 		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 		if outcome != processor.OutcomeRejected {

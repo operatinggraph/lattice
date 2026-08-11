@@ -19,6 +19,7 @@ package identitydomain_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -134,10 +135,88 @@ func completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.Ope
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"targetIdentityKey":"` + uKey + `","linkKey":"` + linkKeyPlaintext + `"}`),
 		AuthContext:   &processor.AuthContext{Target: a2Key},
+		// The shipped dispatchers' declaration
+		// (identityceremony.CompleteCredentialLinkContextHint, used by
+		// cmd/facet/credentials.go and cmd/loftspace-app/credentials_link.go),
+		// plus the credentialindex probe those two leave to derive_reads.
+		// Nothing required: this ceremony adjudicates an absent target with a
+		// named outcome of its own, and a required read faults HydrationMiss
+		// with the probed key before it can.
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{uKey, uKey + ".state"},
-			OptionalReads: []string{uKey + ".linkKey", uKey + ".credentialBinding", credentialIndexKey(a2Key)},
+			OptionalReads: []string{
+				uKey, uKey + ".state", uKey + ".linkKey", uKey + ".credentialBinding",
+				credentialIndexKey(a2Key),
+			},
 		},
+	}
+}
+
+// hardenedCompleteLinkEnv is completeLinkEnv as a HOSTILE submitter writes it:
+// the target-derived keys under `reads`, the fail-closed disposition. No
+// shipped client sends this and nothing in the transport can refuse it —
+// contextHint is client-supplied and step 3 never inspects it — so the only
+// thing that can stop it answering differently from every other rejection
+// cause is the Contract #2 §2.5 descriptor floor, applied Processor-side.
+func hardenedCompleteLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.OperationEnvelope {
+	env := completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext)
+	env.ContextHint = &processor.ContextHint{
+		Reads: []string{uKey, uKey + ".state", uKey + ".linkKey"},
+	}
+	return env
+}
+
+// TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate is this op's
+// acceptance for the descriptor floor.
+//
+// CompleteCredentialLink is the sharper of the two link-ceremony oracles and
+// the reason its dispatch-only op-meta exists. Its scope=self gate binds
+// authContext.target to the RAW NEW CREDENTIAL, so — unlike ClaimIdentity,
+// whose actor at least self-matches the thing being claimed — nothing upstream
+// of the script constrains which identity the payload names. `fail_link`
+// reuses the "ClaimKeyInvalid: " prefix so every rejection collapses to one
+// generic answer; a hardened `reads` declaration would answer the absent-target
+// case with HydrationFailed and the probed key in details.missingKey instead,
+// which is an identity-keyspace probe costing one request per guess on an
+// ordinary consumer credential.
+func TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-hard")
+
+	// A live, armed identity — the positive vector, so the comparison below is
+	// between two answers that both really reached the script.
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "CmplHard")
+	seedIdentityCapDoc(t, ctx, conn, uKey, "InitiateCredentialLink")
+	testutil.PublishOp(t, conn, initiateLinkEnv(testutil.GenReqID("CmplHardArm"), uKey, sha256HexOf("the-real-secret")))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// An identity that was never provisioned at all.
+	absentKey := "vtx.identity." + testutil.GenReqID("CmplHardAbsnt")
+
+	shapes := map[string]string{}
+	for _, tc := range []struct{ name, reqID, target, secret string }{
+		{"wrong-key", testutil.GenReqID("CmplHardWrong"), uKey, "a-guessed-wrong-secret"},
+		{"absent-target", testutil.GenReqID("CmplHardGone"), absentKey, "a-guessed-wrong-secret"},
+	} {
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+			hardenedCompleteLinkEnv(tc.reqID, secondCredActorKey, tc.target, tc.secret))
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
+		}
+		if reply == nil || reply.Error == nil {
+			t.Fatalf("%s: reply = %+v, want a rejection error", tc.name, reply)
+		}
+		if reply.Error.Code != processor.ErrCodeClaimKeyInvalid {
+			t.Fatalf("%s: error code = %q (details %+v), want %q — a hardened envelope must not buy a different answer",
+				tc.name, reply.Error.Code, reply.Error.Details, processor.ErrCodeClaimKeyInvalid)
+		}
+		if len(reply.Error.Details) != 0 {
+			t.Fatalf("%s: error details = %+v, want empty", tc.name, reply.Error.Details)
+		}
+		shapes[tc.name] = string(reply.Error.Code) + "|" + fmt.Sprint(len(reply.Error.Details))
+	}
+	if shapes["wrong-key"] != shapes["absent-target"] {
+		t.Fatalf("a nonexistent identity is distinguishable from a wrong secret: %v", shapes)
 	}
 }
 

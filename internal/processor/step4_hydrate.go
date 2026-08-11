@@ -187,8 +187,18 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// untouched — the entrypoint is read off the already-compiled program, so
 	// the check costs no invocation.
 	declared := declaredReadsFromEnvelope(env)
+	// The descriptor floor is applied FIRST, to the envelope's own declaration
+	// (Contract #2 §2.5, "the descriptor's disposition is a floor the envelope
+	// cannot raise"). Before derive_reads, so mergeDerivedReads' "the
+	// envelope's disposition stands" rule sees the DEMOTED set and a derived
+	// `reads` entry cannot re-harden what the floor just softened. See
+	// applyDescriptorFloor for the full precedence, and for why an
+	// unresolvable descriptor demotes nothing rather than everything.
+	if templates, hasDescriptor := h.DDLs.DispatchOptionalReads(env.OperationType); hasDescriptor {
+		declared = applyDescriptorFloor(declared, templates, env, h.Logger)
+	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
-		derived, err := deriveReads(ctx, prog, env, h.deriveBudget())
+		derived, err := deriveReads(ctx, prog, env, declared, h.deriveBudget())
 		if err != nil {
 			return HydratedState{}, err
 		}
@@ -335,6 +345,23 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		}
 		entry, ok := snapshot[key]
 		if !ok {
+			// The descriptor floor reaches egressReads too, but ONLY here, at
+			// absence (Contract #2 §2.5; applyDescriptorFloor's precedence
+			// note 3). RequiredAbsent is a flat map that does not record which
+			// list named a key, so an absent egress key faults HydrationMiss
+			// with details.missingKey exactly as an absent `reads` key does —
+			// the same oracle reached through the third list. A floored key
+			// records known-absent instead. Its PRESENT behaviour is untouched
+			// below: the ref disposition is never demoted, because handing the
+			// script plaintext where the submitter asked for a bridge-opened
+			// ref would be a worse trade than the fault it avoids.
+			if _, tolerant := declared.EgressAbsenceTolerant[key]; tolerant {
+				if knownAbsent == nil {
+					knownAbsent = map[string]struct{}{}
+				}
+				knownAbsent[key] = struct{}{}
+				continue
+			}
 			markRequiredAbsent(key)
 			continue
 		}
