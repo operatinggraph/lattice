@@ -714,13 +714,13 @@ before being chosen as the mirror; the richer refusal shape won.
 | Design's claim | Re-run | Verdict |
 |---|---|---|
 | §3: the three generated producers are the entire census of the carried-accumulator shape | `grep -rn "WITH " packages/ internal/bootstrap/`, producer emission read at `anchorwalk.go:549-559` | **Holds** — every other multi-`WITH` lens carries `*nodeRef`s only (O(1) render) |
-| §5: `wellness-ledger` is the corpus's only `WITH DISTINCT` | `grep -rn "WITH DISTINCT" packages/ internal/` | **Holds for `packages/`** — 1 hit (`wellness-ledger/lenses.go:327`). **Correction:** 2 further hits in `internal/refractor/pipeline/filter_retraction_internal_test.go:544,608` — *test* cyphers, not corpus lenses, but they exercise Inc 2's new path and their expectations must be re-checked |
+| §5: `wellness-ledger` is the corpus's only `WITH DISTINCT` | `grep -rn "WITH DISTINCT" packages/ internal/ cmd/ clients/ examples/ scripts/` | **Holds.** 3 hits total: `wellness-ledger/lenses.go:327` (the only corpus lens) + `filter_retraction_internal_test.go:544,608`. ~~The two test cyphers exercise Inc 2's new path~~ — **this brief's own claim, amended at build: FALSE.** Both sit inside `TestReferencedLabels_WithScoping`, whose helper is `parseFull(spec).ReferencedLabels()` — a static AST walk that parses and label-derives but **never executes**, so `applyWith` is never reached and neither expectation moves. Nothing was changed there |
 | §12: `applyReturn` dedupes by `json.Marshal` | read at `executor.go:1311-1322` | **FALSE at head** — fixed by `dc390846`; §2 and §12 amended above |
 
 ### 7. Adjacent finds
 
-- **`filter_retraction_internal_test.go:544,608` carry `WITH DISTINCT`** — in scope by consequence: Inc 2
-  changes what those cyphers do. Absorbed into Inc 2, not filed.
+- ~~**`filter_retraction_internal_test.go:544,608` carry `WITH DISTINCT`** — in scope by consequence.~~
+  **Withdrawn at build (see part 6):** they never execute. Not in scope, nothing changed, nothing filed.
 - **No board row is owed for the §12 residual** — it is already fixed (part 6). Recording "filed" would be
   the false-record failure the close pass checks for.
 
