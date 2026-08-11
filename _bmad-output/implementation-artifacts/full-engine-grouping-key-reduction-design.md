@@ -741,10 +741,14 @@ Plus every `scripts/lint-*.go` gate, and the §8 benchmark recorded here as this
   design's Inc 2 (`peakBindingRows`) is **not** this fire's instrument — it measures *rows*, and this fire
   changes *per-row rendering cost* at a fixed row count. §8's benchmark is the right instrument and is
   in-scope; `peakBindingRows` stays with the branch-decomposition fire.
-- **§4.4 is a constraint, not an oversight: evaluate, don't render.** Skipping `evalExpr` for a redundant
-  item would shrink the footprint an auth-plane caller compares after evaluation
-  (`pipeline/evaluate.go`) and turn a match into a spurious drift retry. The footprint must stay
-  **bit-identical**.
+- **§4.4 is a constraint, not an oversight: evaluate, don't render.** ~~Skipping `evalExpr` would shrink the
+  footprint and turn a match into a spurious drift retry.~~ **Amended 2026-08-11 (build) — this brief repeated
+  the design's backwards reason, and it is backwards in the FAIL-OPEN direction.** `footprintValid`
+  (`pipeline/evaluate.go:479-534`) ranges over the **recorded** footprint and re-reads only the keys it names;
+  there is no coverage assertion and no second footprint. Removing an entry only removes an opportunity to
+  return false, so a shrunken footprint validates **fewer** keys and **silently passes** — the harm is lost
+  drift detection on the auth plane (a `cap-read.*` slice built across two instants and trusted), never a
+  spurious retry. The footprint must stay bit-identical, and specifically **not smaller**.
 - **Unexported field, so a hand-built test rule gets `nil`** (`&full.CompiledRule{Query: q}`) — nil-safe
   `redundantFor` is what keeps 42 existing test files on today's path.
 - **`packages/` is untouched** ⇒ no version bump, no `make reinstall-package`, no `provision-readpath`.

@@ -984,9 +984,24 @@ the entry).
   order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
   item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
   standing checklist #1.
-- **Site censuses derived from key shapes undercount** — `nodeMatches` also admits a vertex whose body
-  `class`/`label` matches, so derive label/equality censuses from the matcher, not the key grammar. Minted:
-  dynamic-type-taxonomy §5.1 census correction (four → six). Check: executable census, re-run at Phase 0.
+- ~~**Site censuses derived from key shapes undercount**~~ — **RETIRED 2026-08-11: mechanized.** Seen twice
+  (dynamic-type-taxonomy §5.1, four → six; grouping-key reduction, where the design's "the three generated
+  producers are the **entire** census" missed `identityErasureResidue`'s five chained aggregating `WITH`s and
+  the Phase-0 re-run repeated the miss, because both grepped cypher TEXT instead of running the analysis).
+  Gates: `internal/refractor/label_derivation_corpus_census_test.go` and
+  `internal/refractor/grouping_reduction_corpus_census_test.go` — each enumerates every parseable corpus rule
+  body through the real analysis and pins the per-lens verdict, plus an "armed population is exactly these
+  names" assertion so a lost member cannot read as a table of unchanged rows. **A new per-lens analysis ships
+  its corpus census in the same fire**, reusing `forEachCorpusCypher` rather than sweeping its own way.
+- **A soundness claim's stated REASON is load-bearing, and a reason measurement can falsify is worse than
+  none** — §4.4 justified "evaluate, don't render" by "a shrunken footprint turns a match into a spurious
+  drift retry." Backwards: `footprintValid` re-reads only what the footprint NAMES, so a smaller footprint
+  validates fewer keys and silently PASSES — lost drift detection, fail-open. The constraint was right and the
+  argument for it was refutable by anyone who measured retries, which is how a correct guardrail gets deleted
+  by a later fire (§9.6 defers a generalization whose reads do reach Core KV). Minted: grouping-key close pass,
+  found by the capability-plane reviewer, not the author. Check: for any "don't do X or Y breaks" constraint,
+  read Y's consumer and state which DIRECTION the failure runs; if removing X makes a check pass more readily
+  rather than fail, say so.
 - **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
