@@ -1791,8 +1791,8 @@ narrower than its predecessor.
    `evalPlainLinkReprojection`'s endpoint loop through the shared unit rather than building a second
    derivation.
 
-**Worktrees:** `authplane-inc4-*`, `authplane-inc4d-*`, `authplane-inc4a2-*` are all merged and reusable; reset
-to `main` before picking one up. **Base skew is the trap this fire actually hit** — 4a-1 and 4a-2 were built in
+**Worktrees:** all of this fire's worktrees and branches are merged and removed — take a FRESH one per fire,
+never a reused one. **Base skew is the trap this fire actually hit** — 4a-1 and 4a-2 were built in
 parallel and 4a-2 landed on a base predating its own prerequisite, which a cold reviewer caught as a failing
 test against merged `main`. Sequence dependent increments, or re-derive at admit.
 
