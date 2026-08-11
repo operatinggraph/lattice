@@ -254,9 +254,13 @@ func TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	// The submitter declares only what it can name; the credentialindex probe
-	// is left to derive_reads.
+	// is left to derive_reads. Everything else stays as the shipped dispatchers
+	// send it — absence-tolerant, per the Contract #2 §2.5 floor this op's
+	// descriptor now declares.
 	env := completeLinkEnv(testutil.GenReqID("LinkNoDeclCmpl"), secondCredActorKey, uKey, secret)
-	env.ContextHint.OptionalReads = []string{uKey + ".linkKey", uKey + ".credentialBinding"}
+	env.ContextHint.OptionalReads = []string{
+		uKey, uKey + ".state", uKey + ".linkKey", uKey + ".credentialBinding",
+	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 

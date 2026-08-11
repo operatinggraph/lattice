@@ -179,8 +179,13 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 		"RotateClaimKey":          "standing",
 		"UnlinkCredential":        "self",
 	}
-	if got, want := len(Package.OpMetas), len(wantAuthContext); got != want {
-		t.Fatalf("OpMetas: got %d, want %d", got, want)
+	// The five FULL descriptors, plus the one dispatch-only entry pinned by
+	// TestPackage_DispatchOnlyOpMetaCarriesTheFloorOnly below. The two counts
+	// are stated separately because they are different promises: a full
+	// descriptor says a client can submit this op from the descriptor alone, a
+	// dispatch-only one says only that the Processor can read its read floor.
+	if got, want := len(Package.OpMetas), len(wantAuthContext)+1; got != want {
+		t.Fatalf("OpMetas: got %d, want %d (%d full + 1 dispatch-only)", got, want, len(wantAuthContext))
 	}
 	byOp := map[string]pkgmgr.OpMetaSpec{}
 	for _, m := range Package.OpMetas {
@@ -273,12 +278,72 @@ func TestPackage_ExemptOpsStateTheirExemption(t *testing.T) {
 			t.Errorf("%s: expected a permission entry to carry its exemption", op)
 		}
 	}
-	// The complement: an exempt op must not ALSO carry a descriptor, which
-	// would be the exemption and the promise at once.
+	// The complement: an exempt op must not ALSO carry a FULL descriptor,
+	// which would be the exemption and the promise at once.
+	//
+	// "Full" is the operative word, and the distinction is the same one
+	// lint-package-standard's descriptorGaps draws. A DISPATCH-ONLY op-meta is
+	// not a promise that a client can submit the op — it carries no
+	// Presentation, no FieldDescriptions and no Dispatch.Class, so no client
+	// builds an envelope from it — it exists because the Processor now reads
+	// Dispatch.optionalReads as the Contract #2 §2.5 floor a submitter's
+	// envelope cannot raise. An op with no op-meta has no floor, and for
+	// CompleteCredentialLink that is an identity-keyspace oracle.
 	for _, m := range Package.OpMetas {
-		if _, isExempt := exempt[m.OperationType]; isExempt {
-			t.Errorf("%s: exempt in its Note but also declares an op-meta", m.OperationType)
+		if _, isExempt := exempt[m.OperationType]; !isExempt {
+			continue
 		}
+		if m.Presentation != nil || len(m.FieldDescriptions) > 0 ||
+			(m.Dispatch != nil && (m.Dispatch.Class != "" || m.Dispatch.AuthContext != "")) {
+			t.Errorf("%s: exempt in its Note but declares a submittable descriptor. Either surrender the exemption or keep the op-meta dispatch-only (read floor only): %+v", m.OperationType, m)
+		}
+	}
+}
+
+// TestPackage_DispatchOnlyOpMetaCarriesTheFloorOnly pins the shape that lets
+// CompleteCredentialLink hold a descriptor AND keep its exemption.
+//
+// Every omission is load-bearing and each has a different reader:
+//   - no Dispatch.Class → cmd/facet/web/app.js's opButton short-circuits before
+//     it can build an envelope, so no client submits from this descriptor and
+//     the step-3 denial the exemption exists to avoid stays unreachable.
+//   - no Presentation / FieldDescriptions → descriptorGaps stays non-empty, so
+//     lint-package-standard's S1 keeps treating the exemption as valid rather
+//     than as the "exemption plus full descriptor" drift it exists to catch.
+//   - optionalReads present, reads EMPTY → the whole point. These four
+//     templates are what the Processor floors a hostile envelope against
+//     (internal/processor/descriptor_floor.go); a `reads` entry here would
+//     declare the opposite of what the floor is for.
+func TestPackage_DispatchOnlyOpMetaCarriesTheFloorOnly(t *testing.T) {
+	var m *pkgmgr.OpMetaSpec
+	for i := range Package.OpMetas {
+		if Package.OpMetas[i].OperationType == "CompleteCredentialLink" {
+			m = &Package.OpMetas[i]
+		}
+	}
+	if m == nil {
+		t.Fatal("CompleteCredentialLink: no op-meta — without one the Processor has no Contract #2 §2.5 floor to read, and the op's absent-target case answers HydrationFailed with the probed key")
+	}
+	if m.Dispatch == nil {
+		t.Fatal("CompleteCredentialLink: no Dispatch — the floor lives there")
+	}
+	if m.Dispatch.Class != "" || m.Dispatch.AuthContext != "" {
+		t.Errorf("Dispatch declares Class=%q AuthContext=%q; either makes a client offer an op whose step-3 gate binds the raw credential, which is what the exemption avoids", m.Dispatch.Class, m.Dispatch.AuthContext)
+	}
+	if len(m.Dispatch.Reads) != 0 {
+		t.Errorf("Dispatch.Reads = %v, want empty — a required read is what the floor exists to prevent", m.Dispatch.Reads)
+	}
+	want := []string{
+		"{payload.targetIdentityKey}",
+		"{payload.targetIdentityKey}.state",
+		"{payload.targetIdentityKey}.linkKey",
+		"{payload.targetIdentityKey}.credentialBinding",
+	}
+	if strings.Join(m.Dispatch.OptionalReads, ",") != strings.Join(want, ",") {
+		t.Errorf("Dispatch.OptionalReads = %v, want %v — the live dispatchers' set (identityceremony.CompleteCredentialLinkContextHint)", m.Dispatch.OptionalReads, want)
+	}
+	if m.Presentation != nil || len(m.FieldDescriptions) > 0 {
+		t.Errorf("dispatch-only entry must stay unrenderable: Presentation=%+v FieldDescriptions=%v", m.Presentation, m.FieldDescriptions)
 	}
 }
 

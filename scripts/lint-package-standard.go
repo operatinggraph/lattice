@@ -25,6 +25,15 @@
 //     Definition, field by field. This runs the same VerifyAgainstDefinition
 //     the installer runs, over the whole corpus, with no install and no
 //     per-package test needed.
+//   - S11 — an operationType has at most ONE op-meta in the whole corpus. The
+//     descriptor is now read Processor-side: its `optionalReads` are the floor
+//     the envelope cannot raise (Contract #2 §2.5), so two descriptors for one
+//     operationType make that floor ambiguous. The Processor resolves the
+//     ambiguity by UNIONING them, which is deterministic and safe but is a
+//     recovery, not a design — and it means a second descriptor can silently
+//     widen the absence-tolerance of an op some other package owns.
+//     `validateOpMetas` already rejects the duplicate WITHIN a package; this is
+//     the cross-package case that check structurally cannot see.
 //
 // Two escape hatches, both explicit, neither silent:
 //
@@ -214,6 +223,10 @@ func main() {
 	// S10 is corpus-wide for the same reason and one more: the helpers it pins
 	// are pasted per SCRIPT, so the copies do not line up with packages at all.
 	checkS10(rep)
+	// S11 is corpus-wide because a duplicate operationType across two packages
+	// is invisible to the per-package validateOpMetas that catches it within
+	// one.
+	checkS11(rep, defs)
 
 	for ref := range s1Debt {
 		if !seenS1Debt[ref] {
@@ -306,6 +319,42 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 				name, opRef{name, p.OperationType, p.Scope}, strings.Join(humanRoles(p), "+"),
 				p.OperationType, strings.Join(others, ", "))
 		}
+	}
+}
+
+// checkS11 enforces corpus-wide op-meta operationType uniqueness.
+//
+// It exists because the descriptor stopped being advisory. Its `optionalReads`
+// are read at step 4 as the floor an envelope cannot raise (Contract #2 §2.5,
+// internal/processor/descriptor_floor.go), so two op-metas claiming one
+// operationType leave the Processor deciding which floor applies. It unions
+// them — deterministic, and safe in that it can only widen absence-tolerance
+// — but a union is a recovery from an authoring mistake, not a way to express
+// one: it lets a second package quietly change the read disposition of an op
+// the first package owns.
+//
+// pkgmgr.validateOpMetas already rejects a duplicate declared inside ONE
+// package's OpMetas. Nothing sees across packages, which is where the
+// remaining case lives.
+func checkS11(rep *report, defs map[string]pkgmgr.Definition) {
+	claimants := map[string][]string{}
+	for _, name := range sortedKeys(defs) {
+		for _, m := range defs[name].OpMetas {
+			claimants[m.OperationType] = append(claimants[m.OperationType], name)
+		}
+	}
+	ops := make([]string, 0, len(claimants))
+	for op := range claimants {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	for _, op := range ops {
+		pkgs := claimants[op]
+		if len(pkgs) < 2 {
+			continue
+		}
+		rep.issuef("corpus: S11 — operationType %q carries an op-meta in %s. The descriptor's optionalReads are the Contract #2 §2.5 floor the Processor applies to a submitter's envelope, so two descriptors make that floor ambiguous — the Processor unions them, which lets one package widen another's read disposition. Keep one op-meta per operationType (give the op a vertical-unique name, the S9 idiom, if both really are distinct ops).",
+			op, strings.Join(pkgs, " and "))
 	}
 }
 

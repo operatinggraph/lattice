@@ -26,6 +26,24 @@ type declaredReads struct {
 	Reads         []string
 	OptionalReads []string
 	EgressReads   []string
+	// EgressAbsenceTolerant names the egressReads keys the descriptor floor
+	// made absence-tolerant (Contract #2 §2.5). Membership changes ONLY what
+	// step 4 records for a key that is missing — known-absent instead of
+	// required-absent — and never what it does with a key that is present,
+	// which still authors the `$sensitiveRef` the egress disposition promises.
+	//
+	// It is a separate set rather than a list move because the two egress
+	// halves must part company: relocating the key into optionalReads would
+	// hand the script decrypted plaintext where the submitter asked for a ref
+	// the bridge opens.
+	//
+	// Lifetime: derived inside one Hydrate call, from that call's envelope and
+	// the descriptor as the cache holds it at that instant. It is built by
+	// applyDescriptorFloor at the head of step 4, read by the egress loop at
+	// the end of it, and dropped with the declaredReads value. Nothing
+	// persists it, and step 4 re-derives it on every OCC retry from the same
+	// two inputs.
+	EgressAbsenceTolerant map[string]struct{}
 }
 
 // declaredReadsFromEnvelope is the un-derived set — what step 4 hydrated
@@ -58,8 +76,14 @@ func declaredReadsFromEnvelope(env *OperationEnvelope) declaredReads {
 // mapped to ErrCodeHydrationFailed. A derivation that cannot be trusted must
 // not silently degrade to "the submitter's set was all there was": that is the
 // class-(b) undeclared read this whole posture exists to eliminate.
-func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, budget starlarksandbox.Budget) (declaredReads, error) {
-	base := declaredReadsFromEnvelope(env)
+// base is the envelope's declared set AS THE CALLER HAS ALREADY ADJUSTED IT,
+// never a fresh read of env.ContextHint, and that is load-bearing: step 4
+// applies the descriptor floor (Contract #2 §2.5) to the envelope's own
+// declaration before calling here, and re-deriving base from the envelope
+// would discard that demotion — letting a derived `reads` entry re-harden a
+// key the descriptor declared optional, by the very rule below that exists to
+// stop derivation hardening anything.
+func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, base declaredReads, budget starlarksandbox.Budget) (declaredReads, error) {
 	rid := env.RequestID
 
 	// One op value, bound BOTH as the call argument and as the `op` global.

@@ -9,12 +9,24 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // written once the vocabulary has settled against the corpus rather than ahead
 // of it.
 //
-// Five ops carry a descriptor; two carry a stated `[no-op-meta: <code> — …]`
+// Five ops carry a FULL descriptor; two carry a stated `[no-op-meta: <code> — …]`
 // exemption in their permission Note (permissions.go) instead. That split is
-// not a shortcut: a descriptor is a machine-readable PROMISE that a client
+// not a shortcut: a full descriptor is a machine-readable PROMISE that a client
 // holding only these fields can build a valid Contract #2 envelope, and an op
 // that cannot honour it must decline rather than ship a form that fails in
 // ways the descriptor itself claims are impossible.
+//
+// CompleteCredentialLink is a THIRD case, and it exists because the descriptor
+// stopped being purely client-facing. Its Dispatch.optionalReads are now read
+// Processor-side as the Contract #2 §2.5 floor an envelope cannot raise, so an
+// op with no op-meta at all has no floor — and this one is the sharpest
+// anti-enumeration path in the package: its scope=self gate binds
+// authContext.target to the RAW NEW CREDENTIAL, so nothing upstream of the
+// script constrains which identity a submitter names in the payload, and
+// `fail_link` reuses the "ClaimKeyInvalid: " prefix precisely so NFR-S6's one
+// generic answer covers it. It therefore carries a DISPATCH-ONLY op-meta: the
+// read declaration and nothing else. Its permission exemption stands
+// unchanged, because the reason for it is untouched — see the entry itself.
 //
 // Three of the ops that could not honour it now can, and the reason each was
 // exempt is the reason it no longer is. CreateUnclaimedIdentity and
@@ -32,8 +44,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // The two that remain exempt are exempt for reasons a ceremony field does not
 // touch: both submit as a different actor than the client authenticated as.
 //
-// Dispatch.Class is "identity" on all five — the owning vertexType DDL's own
-// CanonicalName, never a vertical name.
+// Dispatch.Class is "identity" on all five submittable ops — the owning
+// vertexType DDL's own CanonicalName, never a vertical name. The dispatch-only
+// entry deliberately omits it; that omission is what keeps a client from
+// offering the op, and it is load-bearing rather than an oversight.
 //
 // Each Reads list is the live dispatcher's, verified against the script branch
 // it feeds: cmd/facet/claim.go for ClaimIdentity, the onboarding userTask
@@ -248,17 +262,24 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// CompleteCredentialLink's dispatchers give the whole of their
 				// target's read set.
 				//
-				// This descriptor governs the descriptor-DRIVEN clients. It is
-				// not an enforcement point and must not be read as one:
-				// Contract #2 §2.5 makes the disposition a client declaration,
-				// the Gateway copies contextHint through verbatim, and
-				// mergeDerivedReads lets an envelope's own disposition stand.
-				// ClaimIdentity is granted to every consumer, so a caller
-				// hand-rolling its envelope can still declare these under
-				// `reads` and get the distinguishable answer. Closing that
-				// needs the Processor to be able to pin a declared key's
-				// disposition — a Contract #2 §2.5 amendment, not a change
-				// here.
+				// THIS LIST IS AN ENFORCEMENT POINT. It is not advisory and
+				// it is not only for descriptor-driven clients: the Processor
+				// reads it at the head of step 4 and demotes any of these keys
+				// a submitter's envelope declared under `reads`
+				// (internal/processor/descriptor_floor.go, the Contract #2
+				// §2.5 clause "the descriptor's disposition is a floor the
+				// envelope cannot raise"). Since contextHint is client-supplied
+				// and step 3 never inspects it, these four lines are the only
+				// thing standing between a hand-rolled envelope and an
+				// identity-keyspace oracle on this op.
+				//
+				// So: removing an entry, or moving one to Dispatch.Reads,
+				// re-opens that oracle for every caller — not just for the
+				// clients that read the descriptor. What the floor does NOT
+				// cover is a template it cannot resolve server-side
+				// (`{me.<type>}`, `{entity.<column>}` name a vertex out of the
+				// caller's projected view); these are all `{payload.*}`, which
+				// resolves.
 				OptionalReads: []string{
 					"{payload.targetIdentityKey}",
 					"{payload.targetIdentityKey}.state",
@@ -400,6 +421,81 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{actor}",
 					"{actor}.state",
 					"{actor}.credentialBinding",
+				},
+			},
+		},
+		{
+			// DISPATCH-ONLY, and every omission below is deliberate.
+			//
+			// This op cannot be submitted from a descriptor: the Gateway's
+			// raw-credential carve-out resolves op.actor to the NEW credential,
+			// so a declared `self` authContext (which names the resolved
+			// business identity) is denied at step 3. That is why the
+			// permission Note carries `[no-op-meta: raw-credential-actor — …]`
+			// and why it still does — §4.4's credential authContext value is
+			// the mechanism that would retire it, and it has not landed.
+			//
+			// What changed is that the descriptor is no longer only for
+			// clients. Dispatch.optionalReads is read at step 4 as the
+			// Contract #2 §2.5 floor a submitter's envelope cannot raise
+			// (internal/processor/descriptor_floor.go), and without an op-meta
+			// there is nothing for that floor to read. This op needs one more
+			// than any other in the package: its scope=self gate binds
+			// authContext.target to the raw credential, so — unlike
+			// ClaimIdentity, whose actor at least self-matches — NOTHING
+			// upstream of the script constrains which identity the payload
+			// names. Its script touches that submitter-named key, and
+			// `fail_link` reuses the "ClaimKeyInvalid: " prefix so every
+			// rejection collapses to one generic answer. Declared `reads`, the
+			// absent-target case answers HydrationFailed with the probed key
+			// in details.missingKey instead: an identity-keyspace oracle, one
+			// guess per request, on a consumer credential.
+			//
+			// No Presentation, InputSchema, FieldDescriptions, Class or
+			// AuthContext. That is not an incomplete descriptor, it is the
+			// whole mechanism by which this entry changes nothing
+			// client-side:
+			//   - No Dispatch.Class means opButton short-circuits before it
+			//     can build an envelope (cmd/facet/web/app.js), so no client
+			//     submits from this descriptor and the step-3 denial the
+			//     exemption avoids is never reachable.
+			//   - The three missing self-description fields keep
+			//     lint-package-standard's S1 descriptorGaps non-empty, so the
+			//     permission's exemption remains VALID rather than becoming
+			//     the "exemption plus full descriptor" drift S1 exists to
+			//     catch.
+			// Authorization is untouched: permissions.go is unchanged, and the
+			// only new graph edge is the install-time `forOperation` link
+			// pkgmgr mints from the permission that already existed.
+			OperationType: "CompleteCredentialLink",
+			// The one field the read templates below build on, declared
+			// REQUIRED so the guarantee is stated rather than inferred. Without
+			// it the templates wrap a payload field nothing promises: an
+			// omitted targetIdentityKey substitutes empty and leaves a
+			// malformed key, which NATS rejects outright instead of reporting
+			// absent (lint-package-standard's read-template rule). The
+			// Processor's own resolver already declines to floor an unresolved
+			// template, but that safety is a property of one call site — this
+			// is the property being true of the descriptor itself, which is
+			// what the next author reads.
+			//
+			// It is deliberately NOT a form schema: no titles, no help text, no
+			// FieldDescriptions. Two S1 gaps remain (Presentation.Title and
+			// FieldDescriptions), which is what keeps the permission's
+			// exemption valid.
+			InputSchema: `{"type":"object","properties":` +
+				`{"targetIdentityKey":{"type":"string","description":"vtx.identity.<NanoID> of the identity the new credential is binding to."}},` +
+				`"required":["targetIdentityKey"]}`,
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				// The live dispatchers' own list, verified against the script
+				// branch: cmd/facet/credentials.go and
+				// cmd/loftspace-app/credentials_link.go, both of which build it
+				// from identityceremony.CompleteCredentialLinkContextHint.
+				OptionalReads: []string{
+					"{payload.targetIdentityKey}",
+					"{payload.targetIdentityKey}.state",
+					"{payload.targetIdentityKey}.linkKey",
+					"{payload.targetIdentityKey}.credentialBinding",
 				},
 			},
 		},
