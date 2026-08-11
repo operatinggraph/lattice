@@ -160,7 +160,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-11 · `PLACEHOLDER` · [Refractor/objects-base] a lens can project a relationship — `type(r)`, `r.key`, `r.data.<field>`; `objectAttachments` now supplies the `linkName` `DetachObject` requires
+- 2026-08-11 · `2bb5a38b` · [Refractor/objects-base] a lens can project a relationship — `type(r)`, `r.key`, `r.data.<field>`; `objectAttachments` now supplies the `linkName` `DetachObject` requires
 - 2026-08-11 · `bfbfe0c9` · [CI] unit sharded 3→4, re-balanced by measured `go test` time not LOC; unit pole 196s→170s, wall-clock 197s→171s; all gates still run, coverage assertion still exact
 - 2026-08-11 · `f63c6d57` · [Refractor] grouping-key reduction + `WITH DISTINCT` honoured — 9.7×/118× at 5k anchors; review caught a fail-open refusal path and an undercounted census, both mechanized
 - 2026-08-11 · `942f78df` · [Edge/Substrate] cold sign-in delivery position — both hosts start where their knowledge ends; the discarded prefetch buffer and the boot-time position closed
