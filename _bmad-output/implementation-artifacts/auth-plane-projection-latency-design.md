@@ -1757,3 +1757,41 @@ not. This design's own standard makes that a real finding — `ddls.go:1489` rej
 partly because it would hand a caller holding no valid secret "a measurably shorter path". Equalizing it is a
 constant-time-rejection mechanism with no ratified pattern to extend, so it is filed for a designer pass rather
 than improvised here.
+
+### 19.6 CHECKPOINT (2026-08-10) — what Increment 4 landed, and what remains
+
+**Landed on `main`, each independently green and CI-verified.** The landing shape held: every conjunct is
+fail-closed and every derivation that cannot resolve falls back to the shipped BFS, so no boundary left `main`
+narrower than its predecessor.
+
+| Unit | SHA | What |
+|---|---|---|
+| 4a-1 | `fef53ea7` | the `WITH` conjunct narrowed to the actual re-reference hazard — 24 of 54 anchored cyphers move onto the index — **and** the `*With` traversal gap that removal exposed, closed with a `ReferencedRelations ⊆ Hops` corpus gate |
+| 4c | `8013da3e` | the mandated healer proven end to end: a row deleted under a *narrowed* consumer, an excluded event that does not heal it, a control differing by one §4.2 conjunct that does, and `RunSweep` restoring it |
+| 4d | `e72c86ed` | the tombstoned-sensitive read delivers scrubbed instead of failing the operation; the claim and link ceremonies' rejections collapse to one wire shape; `internal/identityceremony` holds the shared builders |
+| 4a-2 | `d4f7ebba` | the enumerator's singleton fast path kept only where a standing healer exists, and the vertex + tombstone sibling arms brought to the same seam |
+| contracts | `20a45bb4` | #1, #2 and #3 ratified by Andrew and committed |
+
+**Remaining, in order.**
+
+1. **The Contract #2 §2.5 enforcement — highest priority, and the only fail-open item.** The clause is
+   committed and nothing implements it: the merged read disposition must be the weaker of descriptor and
+   envelope, or a hand-rolled `contextHint` re-opens the `HydrationMiss` existence oracle on every op whose
+   script adjudicates absence generically. 4d closed our own dispatchers; this closes everyone else's. Its own
+   board row, `🎯 top-priority`.
+2. **4b — the pre-install ordering guard** (§18.2). Unstarted. Adjudicated in §19.3 and unchanged by anything
+   since: refuse to NARROW rather than refusing activation, and disambiguate `actorEnumerator == nil` by
+   reading the lens's DECLARED projection kind rather than adding an install-complete latch.
+3. **4a-4 — Term A's relation dimension** (§18.1, fourth bullet). Unstarted, and note it is an authorization
+   change: `auth_plane_narrowing_census_test.go:136-139` currently asserts the ABSENCE of any relation-pinned
+   subject on an actor-aware lens, so making `actorAwareFanOutRelevant` relation-aware flips a pinned census
+   assertion. That flip is the increment, and it must be argued rather than re-pinned.
+4. **4a-3 — D2 Phase 2, the plain arm** (§18.1, third bullet). Unstarted and the largest. §19.2 confirmed the
+   Increment 3 shadow counters exist, so it remains the wiring job §18.1 calls it: route
+   `evalPlainLinkReprojection`'s endpoint loop through the shared unit rather than building a second
+   derivation.
+
+**Worktrees:** `authplane-inc4-*`, `authplane-inc4d-*`, `authplane-inc4a2-*` are all merged and reusable; reset
+to `main` before picking one up. **Base skew is the trap this fire actually hit** — 4a-1 and 4a-2 were built in
+parallel and 4a-2 landed on a base predating its own prerequisite, which a cold reviewer caught as a failing
+test against merged `main`. Sequence dependent increments, or re-derive at admit.
