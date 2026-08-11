@@ -224,3 +224,32 @@ never a Gate-3 exposure.
 - `docs/vendors.md` — `go.etcd.io/bbolt` (the Go hosts' embedded KV), **IndexedDB** (the browser host's,
   incl. the transaction-lifetime and key-generator semantics the port is written around), and
   **wasmbrowsertest** (the headless-Chrome runner the browser conformance gate uses).
+
+---
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **The local cursor is a FLOOR, not "the sequence that just succeeded"** — delivery is serial but a Nak'd
+  frame redelivers later, so a cursor written per-success sits above the hole, and the next attach starts
+  past it. Anything that makes the cursor a resume authority must keep it at or below every unresolved
+  sequence. Minted: cold-sign-in Fire 2 (`b44b667b`) — two cold reviewers, independently. Check:
+  `TestManager_Handle_CursorIsAContiguousFloorNotAHighWaterMark` +
+  `TestManager_Restart_RedeliversAFrameTheCursorNeverPassed`.
+- **A skipped delta is invisible to gap detection** — `personal.syncgap` tests `cursor < firstSeq`, so a
+  cursor that is too HIGH is not a gap, and the warm path runs no keyset heal. A lost `delete`/`keyset`
+  frame therefore leaves the mirror holding a key the actor no longer has, permanently and silently.
+  Any change to delivery positioning must argue the skip direction explicitly. Minted: same fire.
+- **A first-paint gate is state with a LIFETIME, and the failure to design for is the gate that never
+  opens** — a release rule whose liveness fallback is armed only *after* its own release precondition is
+  met cannot bound the case where that precondition never arrives. Hanging first paint forever is
+  strictly worse than the partial paint being fixed. Minted: cold-sign-in Fire 4, built and refuted
+  (`fab96db4`, not merged). Check: none yet — routed to a designer pass.
+- **The SYNC subject is per-ACTOR, not per-device** — a second device signed in as the same identity
+  publishes onto the same feed, so any per-device rule keyed on "what arrived on my subject" (an idle
+  timer, a membership set, a freshness test) can be satisfied or reset by the other device. Minted:
+  cold-sign-in Fire 4 review. Check: none yet; board row *"A second device's hydrate releases this
+  device's first-paint gate"*.

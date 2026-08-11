@@ -54,8 +54,13 @@ stops being walked). The builder walks it before the first edit; the reviewers w
    over the enumerated state table, never one clause over a multi-shape set.
 3. **A negative test needs its positive vector proven first**, and every fix is proven by reverting it and
    watching its test fail — a test that passes with the mechanism disabled pins nothing.
-4. **Removal needs a transport AND an observer** — read what each consumer actually tests, at what
-   granularity; an upsert-only writer retracts nothing whose key drops out.
+4. **Removal needs a transport AND an observer, and a demoted mechanism needs EVERY obligation
+   enumerated** — read what each consumer actually tests, at what granularity; an upsert-only writer
+   retracts nothing whose key drops out. When a mechanism is *replaced* rather than deleted, list
+   everything it was silently doing and account for each: finding one obligation and moving on is the
+   same defect wearing a smaller hat (cold-sign-in Fire 2 — the design found the server ack floor's
+   poison-disposal job, missed that it also held the resume position behind un-acked holes, and shipped a
+   permanent-skip path that only cold review caught).
 5. **One deterministic key, one writer** — a create-only writer bricks the second; a second writer needs an
    explicit arbitration or a single owner, decided before it is added.
 6. **Precedent may carry debt** — verify a mirrored pattern against the rule it claims to follow before

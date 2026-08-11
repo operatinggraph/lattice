@@ -493,6 +493,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **Narrowing a JetStream consumer's filter strands its pending set** — messages pending under the old
   filter never redeliver under the new one; widen-then-drain or recreate the consumer. Minted: the
   JetStream filter-narrowing incident. Check: none yet.
+- **A server-immutable consumer field needs delete-then-create in BOTH directions** — JetStream refuses to
+  update `DeliverPolicy` *or* `OptStartSeq` on an existing consumer (`nats-server` 2.14
+  `server/consumer.go:2435,:2438`), so deleting only when a caller names a position leaves the *unpositioned*
+  attach unable to recreate a positioned durable at all: it fails outright rather than degrading. Minted:
+  cold-sign-in Fire 2 (`b44b667b`). Check: `TestNatsTransport_UnpositionedAttachAfterAPositionedDurable`.
 - **The batch CAS is per-subject** (`Nats-Expected-Last-Subject-Sequence`), not whole-stream —
   different-key writes never serialize, so don't design contention remedies for a lock that does not
   exist. Minted: `substrate/batch.go` grounding (designer SKILL §2 trial). Check: none yet.
