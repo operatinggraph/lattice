@@ -478,3 +478,134 @@ disposition — each one is folded into the design above, not deferred:
 The initiative is done when, on the demo box, a cold Facet sign-in for a `W`-key world receives
 **O(W + L)** frames rather than O(n·(W + L)) — measured the same way the defect was: the frame count and
 time-to-`ready` for one identity's cold start, before and after, recorded here.
+
+---
+
+## 11. Fire brief (build note, 2026-08-11) — the whole initiative, Fires 1–4
+
+Compiled by the Lattice Steward at selection, from three read-only scouts + the lead's own live grounding.
+One brief per ITEM; later fires of this item run a delta-scout, not a recompiled brief.
+
+### 1. Scope sentence (verbatim, §10 + §6)
+
+> The initiative is done when, on the demo box, a cold Facet sign-in for a `W`-key world receives
+> **O(W + L)** frames rather than O(n·(W + L)) — measured the same way the defect was.
+
+Fire 2 carries the acceptance bar: *a cold-started node receives fewer than `W + 2L + 5` frames, not 200.*
+
+### 2. Verified touch-list — every design citation re-checked live; ALL had rotted
+
+The design's line numbers are from 2026-08-01 and are off by 50–440 lines. Anchors below are today's.
+
+| File | Design said | **Actual today** | What changes |
+|---|---|---|---|
+| `internal/refractor/control/service.go` `personalHydrate` | :1023 | **:1235** | read SYNC last-seq once before the hydrator loop |
+| `…/service.go` `syncFirstSeq` field | :278 | **:329** | add `syncLastSeq` sibling |
+| `…/service.go` `SetSyncFirstSeq` | :405-412 | **:503-507** | add `SetSyncLastSeq`, verbatim mirror |
+| `…/control/controlwire/controlwire.go` `PersonalHydrateResult` | — | **:167** | `+ SyncStartSeq uint64` |
+| `cmd/refractor/main.go` wiring | :944 | **:1384** | add `SetSyncLastSeq` off `st.CachedInfo().State.LastSeq` |
+| `internal/substrate/consumer.go` `DurableConsumerConfig` | — | **:89-130** | `+ StartSeq uint64` |
+| `…/consumer.go` hardcoded `DeliverAllPolicy` | :141-142 | **:165** | branch on `StartSeq > 0` |
+| `…/consumer.go` `meta.Sequence.Stream` | :265 | **:296** | unchanged (reference) |
+| `internal/substrate/subscribe.go` `DeleteStreamConsumer` | :256 | **:394-402** | unchanged; called by transport |
+| `internal/edge/transport/transport.go` `ConsumerConfig` | verified | **:48-53** | `+ StartSeq uint64` |
+| `internal/edge/sync/sync.go` `Manager.Run` | :183 | **:200-213** | resolve §3.4 table, pass `StartSeq` |
+| `…/sync.go` `hydrate()` | :331-337 | **:341-354** | return `SyncStartSeq` |
+| `…/sync.go` `armHydrateGate`/`hydrationGateReady` | both :379 | **:383-388 / :396-407** | Fire 4: per-rule satisfaction |
+| `…/sync.go` `handle` Term paths | :455,:525 | **:472 + `classifyApplyError` :543 returned at :480,:492** | advance cursor on Term |
+| `…/sync.go` `SetCursor` | — | **:526** | the single call all Term paths skip |
+| `internal/edge/browser/jstransport.go` arg map | :71 | **:71-75** | `+ startSeq` |
+| `internal/edge/browser/shell/shell.mjs` `startConsumer` | — | **:133, add at :140-145** | delete-then-create + `deliver_policy`/`opt_start_seq` |
+| `internal/refractor/adapter/natssubject.go` `PublishHydrationComplete` | — | **:367-374** | Fire 4: `+ Lens: a.ruleID` |
+
+### 3. Precedents to mirror
+
+- **Control seam** → `SetSyncFirstSeq` (`service.go:503-507`) + its wiring (`cmd/refractor/main.go:1384`),
+  which already takes a **freshly fetched** `StreamInfo` (`conn.JetStream().Stream(ctx,…)` then
+  `CachedInfo()`), exactly the posture §3.2 mandates. `LastSeq` replaces `FirstSeq`, nothing else.
+- **`Lens` on an envelope** (Fire 4) → `Upsert` (`natssubject.go:266`) and `PublishKeySet` (`:291`) already
+  set `Lens: a.ruleID`. `hydrationComplete` and `delete` do not.
+- **Delete-then-create** → `DeleteStreamConsumer` already documented idempotent-on-not-found; existing
+  callers `cmd/processor/main.go:184`, `cmd/facet/enginemanager.go:342`.
+- **Control-plane test shape** → `personal_syncgap_test.go` (the only file exercising `SetSyncFirstSeq`).
+
+### 4. Increment order + runnable green checks
+
+1. **Inc 1 = Fire 1** (control plane returns the position).
+   `go test ./internal/refractor/control/... -count=1`
+2. **Inc 2 = Fire 2** (Go host consumes it + Term advances the cursor). **The acceptance bar.**
+   `go test ./internal/substrate/... ./internal/edge/... -count=1`
+3. **Inc 3 = Fire 4** (one hydration marker per hydrate).
+   `go test ./internal/edge/sync/... ./internal/refractor/adapter/... -count=1`
+4. **Inc 4 = Fire 3** (browser parity). `make test-edge-consumer-parity`
+
+Gates, all increments: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `make verify-kernel`.
+
+### 5. In-scope gotchas
+
+**Premises re-run live this fire — three corrections, one confirmation:**
+
+- **`L` = 15, not "≈12"** (`packages/edge-manifest/lenses.go`, `Personal: true` ×15). So Fire 2's bar for a
+  14-key world is `W + 2L + 5` = **49 frames**, not ~43.
+- **The live baseline is far worse than the design's 2026-07-31 reading.** All **9** SYNC durables are
+  `deliver_policy=all` with no `opt_start_seq`; **three sit at exactly 10,000 pending** — pinned at
+  `MaxMsgsPerSubject`, i.e. ~700× amplification for a 14-key world, not 146×. Stream: 556,687 msgs /
+  683 MB / 116 subjects.
+- **`RunDurableConsumer` census CONFIRMS the design:** 9 production callers + 10 test constructions, none
+  setting `StartSeq`; the zero value leaves every one on `DeliverAllPolicy` verbatim.
+- **The `DELETE` grant is present** — `natsauth.go:362` `$JS.API.CONSUMER.DELETE.SYNC.<durable>`. No ACL change.
+- **Vendor premises re-verified at the pins** (`nats-server v2.14.0`, `nats.go v1.52.0`):
+  `checkNewConsumerConfig` refuses both `deliver policy can not be updated` (`consumer.go:2435`) and
+  `start sequence can not be updated` (`:2438`) ⇒ delete-then-create is mandatory, not stylistic.
+  `OptStartSeq` / `DeliverByStartSequencePolicy` exist (`jetstream/consumer_config.go:129,:423`).
+
+**Two falsified body claims — amended in this fire's commits, per the body-stays-true rule:**
+
+- **§1.3** says `cmd/facet`'s `engineManager.Acquire` "mints a fresh device id per engine build
+  (`enginemanager.go:117`)". **Falsified:** `0b6879dc` (2026-08-01) shipped *"one durable per identity, not
+  one per engine build"*; `enginemanager.go:128` now reads the host's "stable, store-persisted" id. §5
+  already narrows this; the body must say so where it stands.
+- **§5** says the orphan-expiry backstop "is sequenced behind" this fork. **Falsified by the later ratified
+  design** `edge-sync-orphan-expiry-design.md`, whose §7 proves reaping is free under *either* branch and
+  states "**This row is unblocked**". Amend; do not leave a wrong sequencing instruction for the next fire.
+
+**Dossiers.** `refractor.md` (12 entries) and `substrate.md` (6) carry dossiers; the ones that bind here:
+*pipeline state lifetimes*, *consumer settlement*, *delivery vs. projection axes*, *latch timing*,
+*JetStream filter narrowing*, *server-state memoization*, *vendor claims*, *reopen/retry loop closure*.
+**`docs/components/edge.md` has NO dossier section** — this fire's close pass creates it.
+
+**Standing checklist (all six bind here; 1, 3 and 4 are the sharp ones):**
+1. *New state needs a LIFETIME* — `StartSeq` is per-session derived, but Fire 4's per-rule gate is a real
+   accumulated set: write its table (armed / satisfied / re-armed on a second hydrate / crash).
+2. *Every census is a premise* — done above.
+3. *A negative test needs its positive vector proven first* — the "<49 frames" assertion is worthless unless
+   the same harness first proves ~200 stale frames DO arrive without the fix.
+4. *Removal needs a transport AND an observer* — the ack floor is being removed as resume authority; its
+   silent second job (poison disposal) is the observer nobody had.
+5. *One deterministic key, one writer* — delete-then-create requires the caller own the durable; state it in
+   the seam's doc comment (§7's sharp edge).
+6. *Precedent may carry debt* — `SetSyncFirstSeq` is the mirror; verify its fresh-fetch posture before copying.
+
+### 6. Adjacent finds
+
+- **`delete` envelopes carry no `Lens`** (`natssubject.go:332-348`) while `upsert`/`keyset` do. Absorbed into
+  Inc 3 if it costs nothing there; otherwise this run's next unit.
+- **`docs/components/edge.md` has no "Review keeps catching" dossier.** Absorbed — created at close.
+- **`shell.mjs` already sets `inactive_threshold`** — the browser-side constant the orphan-expiry design
+  wants to make a stream-level policy. Informational; that row is a separate ratified item, unblocked.
+
+### 7. Non-goals (drift fence)
+
+`Rehydrate`, `personal.syncgap`, `armHydrateGate`'s existence, SYNC retention (`MaxAge` /
+`MaxMsgsPerSubject`), per-key subjects, compaction, any ACL/natsperm change, any `docs/contracts/*` change,
+and the orphan-expiry `InactiveThreshold` work (its own ratified design).
+
+### Scope-diff gate — PASSED
+
+Parts 2–4 trace item-by-item to part 1; the brief **narrows** (it fixes the design's rotted anchors and
+tightens `L`), never widens, and substitutes no adjacent mechanism. Declared dependencies re-verified both
+ways: the ACL grant and `DeleteStreamConsumer` are load-bearing and present; the "sequenced behind
+cold-signin" dependency the design asserts on the orphan row is **not** load-bearing and is dropped (the
+orphan design's §7 refutes it). No frozen contract is touched — re-grepped `docs/contracts/*` for
+`lattice.sync` / `personal.hydrate` / `hydrationComplete` / `deltaEnvelope`: zero hits.
