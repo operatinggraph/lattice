@@ -1645,10 +1645,17 @@ below was re-read live against `main@13ff8615`.
   `pipeline/anchor_derivation_shadow.go` carries `DerivationShadowStats`, `AnchorDerivationShadow()`,
   `SetAnchorDerivationSampling`, and both the shadow and act-mode tallies. §18.1's "the shadow counters are the
   before-and-after" premise holds; 4a-3 is the wiring job it says it is.
-- **CORRECTED — `optionalReads` does not fix 4d.** The obvious reading of §18.4 ("the re-claim still declares
-  it") suggests demoting `.claimKey` to `optionalReads`. It does not work: `step4_hydrate.go:318-319` runs the
-  same `decryptSensitiveDoc` on an optional key that is *present-but-deleted*, so the 500 is unchanged. It is
-  also against Contract #2 §2.5, which reserves `optionalReads` for keys that are never required. Rejected.
+- **CORRECTED — `optionalReads` does not fix the *deleted* case.** The obvious reading of §18.4 ("the re-claim
+  still declares it") suggests demoting `.claimKey` to `optionalReads`. That does not fix the tombstone:
+  `step4_hydrate.go:318-319` runs the same `decryptSensitiveDoc` on an optional key that is
+  *present-but-deleted*, so the 500 is unchanged. The scrub in `sensitive_decrypt.go` is what fixes it.
+
+  **Amended 2026-08-10, twice over — this paragraph originally read "Rejected", and both halves of that were
+  wrong.** It also claimed Contract #2 §2.5 reserves `optionalReads` for keys that are never required. §2.5's
+  authoring rule (`02-operation-envelope.md:156`) actually reserves it for a read *whose absence is a legitimate
+  branch* — which `no-target` and `invalid-key` are, by the script's own design. So `optionalReads` is not merely
+  permitted here, it is the correct disposition, and 4d uses it for the *absent* case (§19.5). Do not re-derive
+  the rejection from this section.
 
 ### 19.3 Adjudications made here (decide-don't-defer)
 
@@ -1729,6 +1736,18 @@ one request per guess, on the public claim endpoint. The package already names t
 unguarded, which left the script's own `no-target` branch (`:1409-1411`) unreachable. The three keys move to
 `optionalReads` at the descriptor and at every dispatcher — an incomplete sweep would be inert, since a key in
 both lists keeps fail-closed `reads` semantics (`step4_hydrate.go:292-304`).
+
+**What that did NOT achieve — stated because the first draft of this section claimed otherwise.** The read
+disposition is a **client choice, not a server policy**, so converting the dispatchers does not close the oracle;
+it stops *our own* callers tripping it. `gateway.go:823-830` copies `contextHint.reads` from the request body
+verbatim and step 3 never inspects it, `mergeDerivedReads` leaves the envelope's disposition standing
+(`derive_reads.go:295-297`), and `ClaimIdentity` is `scope: self` granted to every consumer. A caller who
+hand-rolls `ContextHint{Reads: [...]}` gets `HydrationFailed` + `details.missingKey` for an absent target and the
+generic refusal for a live one — demonstrated on the wire by review, as an ordinary consumer. **A soundness claim
+needs the code that enforces it, and there is none**: the enforcement point would be the Processor pinning a
+descriptor-declared disposition against a submitter override, which is the Contract #2 §2.5 amendment staged
+uncommitted in `main` for Andrew (extend *weakest wins* from derived-vs-envelope to descriptor-vs-envelope). Until
+that lands, this is a dispatcher-hygiene fix plus a filed contract gap, and the code comments say exactly that.
 
 **Residual — the timing oracle, which this fire does NOT close.** The tombstoned path returns at
 `sensitive_decrypt.go:190`, before `readPiiKeyEnvelope`'s `KVGet` (`:224`) and the AEAD decrypt (`:228`), and the
