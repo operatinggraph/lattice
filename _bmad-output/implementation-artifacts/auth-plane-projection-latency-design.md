@@ -1795,3 +1795,50 @@ narrower than its predecessor.
 to `main` before picking one up. **Base skew is the trap this fire actually hit** — 4a-1 and 4a-2 were built in
 parallel and 4a-2 landed on a base predating its own prerequisite, which a cold reviewer caught as a failing
 test against merged `main`. Sequence dependent increments, or re-derive at admit.
+
+### 19.7 The descriptor floor — Contract #2 §2.5's enforcement, and the ceremony measured clean
+
+Andrew ratified §2.5's new clause mid-fire and it was committed (`20a45bb4`) **ahead of its enforcement**, which
+is the direction that reads as closed while staying fail-open. `abd76359` implements it.
+
+**The descriptor was never readable server-side.** `loadMetaVertex` skips any meta-vertex without a
+`canonicalName`, an op-meta root has none, and `.dispatch` had exactly one non-test reader — the `addCreate`
+that writes it. So the disposition really was a pure client choice, and the fix is a wiring job: `Refresh` now
+offers every meta root to a second loader that recognizes an op-meta by `data.operationType` (sound because an
+op-meta's root class is byte-identical to a vertexType DDL's, while no DDL root carries that field), into its
+own index — not `byName`, which would put operationTypes into the namespace DDL canonical names live in.
+
+**Three findings from the cold review, each a real hole rather than a polish item.**
+
+- **The floor could not reach `CompleteCredentialLink`** — the same oracle with a *less* constrained target,
+  since its gate binds to the raw new credential — because that op deliberately has no op-meta (a descriptor's
+  `self` authContext would deny it at step 3). The narrow route was expressible after all: a **dispatch-only
+  op-meta**. Omitting `Dispatch.Class` makes `opButton` short-circuit before it can build an envelope, so no
+  client submits from it and the step-3 denial is never reachable; permissions are untouched, and the lint's own
+  definition of a "full" descriptor keeps the package's exemption valid.
+- **`egressReads` was a second hardening channel** — an absent egress key calls the same `markRequiredAbsent`
+  and `RequiredAbsent` is flat. Floored by making a floored key's *absence* tolerant in place, NOT by moving it
+  between lists: moving it would swap a bridge-opened `$sensitiveRef` for decrypted plaintext, a disposition
+  change in the dangerous direction.
+- **Duplicate `operationType` was nondeterministic in `Refresh` and fail-open in `Invalidate`.** It mirrored
+  `buildByCommand`, whose drop is fail-*closed* because it rejects ops — dropping a floor is fail-*open*. Both
+  now union order-independently, a tombstoned root rebuilds from surviving claimants, and a new corpus-wide gate
+  rejects the collision at authoring time (in `lint-package-standard`, because a `Definition` cannot see its
+  siblings).
+
+**Measured live, on the running stack, after cycling the processor and re-installing the package.**
+`make test-claim-ceremony` — the harness §17.7 recorded at **8 OK / 1 FAIL in both `off` and `act` modes**, the
+persistent failure being exactly the re-claim 500 — now returns **9 OK / 0 FAIL**, including
+*"second device re-claiming an already-claimed identity: denied with the generic ClaimKeyInvalid (HTTP 400)"*.
+That is §18.4's acceptance, met against a real Gateway rather than a package test.
+
+**Review depth, stated honestly.** The floor had one full cold adversarial pass, which produced the three
+findings above. The round that *fixed* them added new mechanism — the dispatch-only op-meta, the egress
+absence-tolerance, the union rule, the new lint gate — and carries **lead review only**. It is revert-proven at
+every point and green on the full suite plus the `leaseshortwindow` convergence suite, and it only ever widens
+absence-tolerance, so the risk is bounded. **The item's cumulative close pass (§4) must cover this delta** —
+that is the guarantee the close pass exists to carry, and it has not been discharged for this unit.
+
+**Recorded, not fixed:** a derived `reads` can still harden a floored key the envelope never declared, because
+the floor applies to the envelope rather than to the merged set. Latent — every `derive_reads` in `packages/`
+returns only `optionalReads` — and outside the clause's literal scope, which binds the submitter.
