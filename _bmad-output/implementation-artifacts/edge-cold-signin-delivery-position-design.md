@@ -514,6 +514,28 @@ The initiative is done when, on the demo box, a cold Facet sign-in for a `W`-key
 **O(W + L)** frames rather than O(n·(W + L)) — measured the same way the defect was: the frame count and
 time-to-`ready` for one identity's cold start, before and after, recorded here.
 
+### Measured (2026-08-11, Fire 2)
+
+**Under test, against a real NATS server** (`internal/edge/sync/delivery_position_test.go`), one harness,
+both vectors differing only in whether the control plane names a position:
+
+| | frames delivered | stale keys in the mirror |
+|---|---|---|
+| no start position (today) | **244** | 200 |
+| positioned at the hydration point | **44** (bar: `W + 2L + 5` = 49) | 0 |
+
+**Live baseline before the fix**, re-measured on the running stack: the `SYNC` stream held 556,687 msgs /
+683 MB across 116 subjects, and all **9** edge durables were `deliver_policy=all` with **three pinned at
+exactly 10,000 pending** — the per-subject cap, i.e. ~700× amplification for a 14-key world rather than
+the 146× that motivated the item.
+
+**Not yet measured: a live cold sign-in after the fix.** The positioned durable is created on a node's
+next *attach*, and no Edge session has signed in since `bin/facet` was cycled, so all nine durables on the
+stack are still the pre-existing `DeliverAll` ones. The per-attach migration is proven by test (a
+pre-existing `DeliverAll` durable is replaced, asserted on the server-side consumer config), not yet by
+observation. **This acceptance line closes when a real cold sign-in is measured on the box** — the honest
+state is "proven under test, awaiting a live sign-in", not "done".
+
 ---
 
 ## 11. Fire brief (build note, 2026-08-11) — the whole initiative, Fires 1–4
@@ -657,7 +679,11 @@ verbatim, so the 9 production `RunDurableConsumer` callers that never set it are
 on the marker degrades to today's first-marker gate when absent; Fire 3's browser host simply omits the
 field until it sends it. No boundary leaves a half-wired path.
 
-**Done:** Fire 1 — `personal.hydrate` returns the SYNC position (`6bdf9bcb`).
+**Done:** Fire 1 — `personal.hydrate` returns the SYNC position (`6bdf9bcb`, CI green).
+Fire 2 — the Go host consumes it; the persisted cursor becomes a contiguous floor; `Term` advances it;
+the durable is deleted on every attach (`b44b667b`, CI green). `bin/refractor` + `bin/facet` rebuilt from
+`main` and relaunched; both healthy.
 
-**Next:** Fire 2 (the acceptance bar — Go host consumes it, cursor becomes the single resume authority,
-`Term` advances the cursor), then Fire 4 (one hydration marker per hydrate), then Fire 3 (browser parity).
+**Next:** Fire 4 (one hydration marker per hydrate — unmasked by Fire 2 and therefore not optional),
+then Fire 3 (browser parity; until it lands the browser host omits the position and keeps today's
+`DeliverAll`, which is safe but unimproved).
