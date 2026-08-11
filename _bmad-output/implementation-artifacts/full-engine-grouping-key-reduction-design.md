@@ -139,7 +139,7 @@ Every row cites the code that **does** the thing, never a comment describing it.
 | `CompiledRule.KeyColumns` is already assigned **after** `Parse`, at activation — the struct is not treated as parse-immutable | `ast.go:250-257`; `executor.go:230` |
 | `normalizeForKey`'s rendering is explicitly declared in-memory-only: "never persisted, never compared across processes" | `executor.go:1849-1853` |
 | `collect(DISTINCT …)` dedupes by `normalizeForKey` **per collected element** — a separate, per-element consumer of the same function | `aggregate.go:111-117` |
-| `applyReturn`'s `DISTINCT` dedupes by `json.Marshal`, not by `normalizeForKey` — a third, independent path | `executor.go:1227-1239` |
+| ~~`applyReturn`'s `DISTINCT` dedupes by `json.Marshal`, not by `normalizeForKey` — a third, independent path~~ **Amended 2026-08-11 (build): false at head.** `applyReturn` dedupes by `normalizeForKey(map[string]any(row))`, and its comment states the node-column reason explicitly. Closed by `dc390846` (2026-08-03), between this design's authoring and its ratification. | `executor.go:1311-1322` |
 | `newAggFold` on a `BinaryOp` requires **both** operands to be aggregates; a bare `VariableRef` operand is `"unsupported aggregate expression"` | `aggregate.go:57-68` |
 | `With.Distinct` is set by the visitor… | `visitor.go:172` |
 | …and `applyWith` never reads it — `WITH DISTINCT` is a silent no-op | `executor.go:1042-1061` |
@@ -555,13 +555,178 @@ radius, so the full suite is required, not the touched packages.
 
 ## 12. Residuals — named, with their triggers
 
-- **`applyReturn`'s `DISTINCT` dedupes by `json.Marshal`, not by `normalizeForKey`** (`executor.go:1231`).
-  The marshal error is discarded, and a `*nodeRef` has no exported fields, so two rows differing only in a
-  node-valued column render alike and one is dropped. No lens returns a bare node column today (every
-  `RETURN` item is a `.key` or an aspect field), so there is no live victim — but it is the same class of
-  defect Inc 2 closes, in the sibling function. **Filed as a board row by this fire.**
+- ~~**`applyReturn`'s `DISTINCT` dedupes by `json.Marshal`, not by `normalizeForKey`.**~~ **RESOLVED before
+  this fire began — amended 2026-08-11 at build.** `dc390846` (2026-08-03, *"an alternation is refused, and
+  DISTINCT stops erasing a node column"*) landed exactly this fix: `applyReturn` now dedupes by
+  `normalizeForKey(map[string]any(row))` (`executor.go:1311-1322`), and its comment records both the
+  `*nodeRef`-marshals-to-`{}` reason and the retirement of the dropped marshal error. The commit lands
+  between this design's authoring (2026-08-02) and its ratification (2026-08-06), so the residual was stale
+  on arrival. **No board row is filed** — there is nothing left to fix, and filing one would be a false
+  record. Inc 2 below therefore has no sibling defect to mirror; it stands on `applyWith` alone.
 - **The binding set is still materialized in full** — the existing separate board row. Unchanged by this
   design and still without a live consumer; §4 removes a per-row cost, not the peak-set ceiling. No reason
   to fold it in here.
 - **§9.5 (cost-based governor) and §9.6 (generalized dependence)** — deferred with the named triggers
   above, per the dead-scaffolding test.
+
+---
+
+## 13. Grouping-key reduction fire brief (build note, 2026-08-11)
+
+Phase-0 brief for the whole item (Inc 1 + Inc 2), compiled at selection by the Lattice Steward from one
+read-only `haiku` scout over `ruleengine/full`. **One brief per item** — a later resume runs a delta-scout,
+not a recompiled brief.
+
+### 1. Scope sentence (verbatim, §11)
+
+> **Increment 1 — grouping-key reduction (the fix).** `ruleengine/full/grouping.go`
+> (`analyseGroupingRedundancy`), the `CompiledRule` field wired at `full.go:108`, the executor field, the
+> third parameter on `projectItems`, and the `keyParts` skip. […] *Green criterion:* every existing
+> `ruleengine/full`, `projection`, `pipeline` and `packages/*` lens test unchanged and passing — the
+> design's contract is that no projected row moves.
+>
+> **Increment 2 — honour `WITH DISTINCT`.** The `applyWith` de-duplication (§5), its unit tests, and the
+> `memberAccountsSpec` one-row-per-member test. *Green criterion:* `packages/wellness-ledger` tests pass
+> with the new expectation; no other lens changes behaviour.
+
+### 2. Verified touch-list (checked live, this fire — **every design anchor had drifted**)
+
+The design's `file:line` citations are 30–100 lines stale throughout; `executor.go` is now 2055 lines. The
+live anchors:
+
+| What | Design said | **Live** | Note |
+|---|---|---|---|
+| `projectItems` signature | `:1083-1160` | **`executor.go:1142`** | body runs to `:1267` |
+| the grouping-key render (`keyParts` append) | `:1129` | **`executor.go:1205`** | the one line Inc 1 makes conditional |
+| the group-row first-write (`g.row[itemAlias(i)] = v`) | `:1133-1150` | **`executor.go:1215-1218`** | §4.4's "evaluate, don't render" depends on this |
+| `applyWith` | `:1042-1061` | **`executor.go:1118-1137`** | Inc 2's site; confirmed **does not read `w.Distinct`** |
+| `applyReturn` + its DISTINCT | `:1205-1239` | **`executor.go:1296-1322`** | **already fixed — see §12 amendment** |
+| `normalizeForKey` + injectivity doc | `:1849-1928` | **`executor.go:1932-1951`** | doc confirms in-memory-only + injective |
+| executor construction, `keyColumns` | `:225-237`, `:230` | **`executor.go:232-245`**, `:237` | the field-copy precedent Inc 1 mirrors |
+| `Parse`, sole `*CompiledRule` constructor | `full.go:108` | **`full.go:108`** ✅ | returns `&CompiledRule{Query: v.query}` |
+| `CompiledRule` struct / `KeyColumns` | `ast.go:250-257` | **`ast.go:252-262`** | plus `LabelExpansion` |
+| `With` / `Return` structs | — | **`ast.go:62-76`** | both carry `Distinct bool` |
+| `With.Distinct` set / `Return.Distinct` set | `visitor.go:172` / `:189` | **`visitor.go:172` / `:189`** ✅ | both exact |
+| `newAggFold` BinaryOp arm | `aggregate.go:57-68` | **`aggregate.go:50-69`** | bare `VariableRef` ⇒ unsupported (kills §9.2) |
+| `callFold` dedupe by `normalizeForKey` | `aggregate.go:111-117` | **`aggregate.go:111-117`** ✅ | exact |
+| producer head / staging `WITH` / `RETURN` | `anchorwalk.go:72`,`:549-559`,`:562-566` | **all three exact** ✅ | one actor per evaluation confirmed |
+| `memberAccountsSpec` `WITH DISTINCT` | `wellness-ledger/lenses.go:250` | **`:326-332`** (`WITH DISTINCT` at `:327`) | |
+
+**To create:** `internal/refractor/ruleengine/full/grouping.go`. Confirmed absent; `analyseGroupingRedundancy`
+and `groupingRedundant` have **zero** matches repo-wide (design-doc references only) — this is a to-build
+design, not a stale audit.
+
+### 3. Precedents to mirror
+
+- **A compile-time AST analysis in its own file, fail-closed, stored on/derived from `CompiledRule`** —
+  the design names `labels.go` (`ReferencedLabels`). Two **stronger** precedents the design does not name,
+  both in this same package and both closer in shape:
+  - **`withscope.go`** (`withScopeReject`, 324 lines) — reasons about exactly the property Inc 1 needs
+    (*what a `WITH` carries, and what a later clause may therefore re-reference*), returns a **refusal
+    reason string** rather than a bool, and refuses on any unmodelled node. Its `newVarScan` whole-query
+    pre-scan is the shape §4.2's fail-closed branches should copy.
+  - **`branchplan.go`** (`ClassifyBranchReturnColumns`, 210 lines) — per-RETURN-column classification via
+    `CollectVariableRefs`, fail-closed on anything unclassifiable, refusal names the offending column.
+  Mirror `withscope.go`'s refusal-with-a-reason over `labels.go`'s bare `exhaustive bool`: a refusal reason
+  is what makes §8.3's structural gate diagnose rather than merely fail.
+- **The executor field copy** — `keyColumns: compiled.KeyColumns` (`executor.go:237`). Inc 1's
+  `groupingRedundant` copy sits beside it verbatim.
+- **Equivalence-over-a-real-corpus test** — `read_grant_producer_staging_test.go`'s
+  `seedEdgeManifestReadGrantCorpus(t)` (`:73`) returns `{adjKV, coreKV, actorKey}`; `executor_test.go`
+  supplies `startExecKVs`, `newFixtureRegistry`, `putVertex`, `putEdge`, `vtxKey`. Reuse both — §8.1 says
+  mirror this fire's precedent rather than inventing a proof style.
+- **Inc 2's dedupe** — `applyReturn`'s shipped DISTINCT block (`executor.go:1311-1322`) is now the exact
+  pattern to copy (first-occurrence-wins over `normalizeForKey`), which is *better* than the design
+  anticipated: §5 asked Inc 2 to improve on `json.Marshal`, and the sibling already did.
+
+### 4. Increment order + runnable green checks
+
+**Inc 1 — grouping-key reduction.** `grouping.go` → `CompiledRule` field → executor field → `projectItems`
+third param → conditional `keyParts` append. Then §4.1's two precondition tests, §8.1 three-domain
+equivalence, §8.2 randomized differential, §8.3 structural gate.
+
+```bash
+go test ./internal/refractor/ruleengine/full/ -count=1
+```
+
+**Inc 2 — honour `WITH DISTINCT`.** `applyWith` dedupe after `projectItems`, **before** the `WHERE` filter.
+
+```bash
+go test ./internal/refractor/ruleengine/full/ ./packages/wellness-ledger/ -count=1
+```
+
+**Item close (§11 Gates — the full suite is required, not the touched packages):**
+
+```bash
+go build ./... && make vet && golangci-lint run ./... && make verify-kernel && go test ./... -p 4
+```
+
+Plus every `scripts/lint-*.go` gate, and the §8 benchmark recorded here as this fire's own before/after.
+
+### 5. In-scope gotchas
+
+- **The headline measurement has no provenance (banner).** *Do not* cite 3.3 s / 7.2 GB as the acceptance
+  criterion. This fire produces its own number via §8's benchmark. **Adjudicated at Phase 0:** the sibling
+  design's Inc 2 (`peakBindingRows`) is **not** this fire's instrument — it measures *rows*, and this fire
+  changes *per-row rendering cost* at a fixed row count. §8's benchmark is the right instrument and is
+  in-scope; `peakBindingRows` stays with the branch-decomposition fire.
+- **§4.4 is a constraint, not an oversight: evaluate, don't render.** Skipping `evalExpr` for a redundant
+  item would shrink the footprint an auth-plane caller compares after evaluation
+  (`pipeline/evaluate.go`) and turn a match into a spurious drift retry. The footprint must stay
+  **bit-identical**.
+- **Unexported field, so a hand-built test rule gets `nil`** (`&full.CompiledRule{Query: q}`) — nil-safe
+  `redundantFor` is what keeps 42 existing test files on today's path.
+- **`packages/` is untouched** ⇒ no version bump, no `make reinstall-package`, no `provision-readpath`.
+  `lint-package-version`'s generator-content rule is not triggered (this fire does not touch
+  `anchorwalk.go`) — §8 says so explicitly so the fire does not bump `edge-manifest` for nothing.
+- **Wide blast radius ⇒ full `go test ./...`**, per memory [[feedback_full_suite_for_wide_default_change]]
+  and §11's own gate list: a shared rule-engine change breaks unedited consumers.
+- **Flake triage:** an embedded-NATS handshake failure (`i/o timeout` at a fixture connect line) in a
+  package this fire never touched is host contention — ONE re-run of that package, never a loosened
+  assertion (CLAUDE.md triage rule).
+
+**Refractor dossier entries that apply to this fire** (`docs/components/refractor.md`), copied in:
+
+- **Site censuses derived from key shapes undercount** — derive censuses from the *matcher*, not the key
+  grammar; re-run executable censuses at Phase 0. *Applied:* §3's "three generated producers are the entire
+  census" and §5's "only `WITH DISTINCT` in the corpus" were both re-run live (part 6).
+- **A label narrows the binder, not necessarily the consumer filter** — `ReferencedLabels` is adjacent code;
+  this fire must not perturb its input. §6 argues it does not (no projected alias changes); the
+  `label_derivation_corpus_census_test.go` pin is the check.
+- **New pipeline state without a declared lifetime** — the new `map[Clause][]bool` is parse-time, immutable,
+  and per-`CompiledRule`. Lifetime table: *created* at `Parse`, the sole production constructor; *never
+  mutated*; *reset* implicitly on every re-`Parse` (activation + hot-reload), so no pre-existing population
+  is out of reach; *absent* ⇒ today's path.
+- **Turning on a behaviour an existing predicate gated hands it exactly the complement** — Inc 2 is exactly
+  this shape: `WITH DISTINCT` is a no-op today, so honouring it newly *removes* rows from a live lens.
+  Name the population: `memberAccountsSpec` only (part 6's census). The rows removed are byte-identical
+  duplicates, so no row's *content* changes — but the retraction direction must be checked, not assumed.
+
+**Standing checklist** (all six walked): #1 lifetime table — above. #2 every census re-run live — part 6.
+#3 negative test needs a positive vector — §8.3's structural gate must be proven to FAIL on a renamed carry
+before it counts. #4 removal needs a transport and an observer — Inc 2 removes rows from a live lens; the
+observer is the `memberAccountsSpec` row-count test. #5 one deterministic key, one writer — untouched, no
+new writer. #6 precedent may carry debt — `labels.go` was verified against `withscope.go`/`branchplan.go`
+before being chosen as the mirror; the richer refusal shape won.
+
+### 6. Censuses re-run live (every stated count is a premise)
+
+| Design's claim | Re-run | Verdict |
+|---|---|---|
+| §3: the three generated producers are the entire census of the carried-accumulator shape | `grep -rn "WITH " packages/ internal/bootstrap/`, producer emission read at `anchorwalk.go:549-559` | **Holds** — every other multi-`WITH` lens carries `*nodeRef`s only (O(1) render) |
+| §5: `wellness-ledger` is the corpus's only `WITH DISTINCT` | `grep -rn "WITH DISTINCT" packages/ internal/` | **Holds for `packages/`** — 1 hit (`wellness-ledger/lenses.go:327`). **Correction:** 2 further hits in `internal/refractor/pipeline/filter_retraction_internal_test.go:544,608` — *test* cyphers, not corpus lenses, but they exercise Inc 2's new path and their expectations must be re-checked |
+| §12: `applyReturn` dedupes by `json.Marshal` | read at `executor.go:1311-1322` | **FALSE at head** — fixed by `dc390846`; §2 and §12 amended above |
+
+### 7. Adjacent finds
+
+- **`filter_retraction_internal_test.go:544,608` carry `WITH DISTINCT`** — in scope by consequence: Inc 2
+  changes what those cyphers do. Absorbed into Inc 2, not filed.
+- **No board row is owed for the §12 residual** — it is already fixed (part 6). Recording "filed" would be
+  the false-record failure the close pass checks for.
+
+### 8. Non-goals (the drift fence)
+
+`anchorwalk.go` / the generator (§9.2, rejected on `newAggFold`) · un-staging the generated producers ·
+`peakBindingRows` and any executor observability (the sibling design's Inc 2) · branch decomposition
+itself · §9.5's cost-based governor · §9.6's generalized dependence beyond bare carries · raising or
+lowering `REFRACTOR_MAX_BINDINGS` · any `packages/**` cypher rewrite.
