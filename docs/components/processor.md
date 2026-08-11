@@ -526,6 +526,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 (`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
+- **A read disposition the CLIENT declares is not a server policy** — the Gateway copies `contextHint.reads`
+  from the request body verbatim, step 3 never inspects it, and a key in both lists keeps fail-closed `reads`,
+  so converting an op's dispatchers to `optionalReads` stops OUR callers tripping a `HydrationMiss` existence
+  oracle without closing it for anyone else. Minted: auth-plane 4d (three dispatchers converted, oracle then
+  reproduced on the wire as an ordinary consumer). Check: any claim that an op's rejections are
+  indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped one; the
+  enforcement point is a descriptor-pinned disposition (Contract #2 §2.5, proposed).
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.

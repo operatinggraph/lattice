@@ -961,8 +961,15 @@ the entry).
 - **Turning on a behaviour an existing predicate gated hands it exactly the complement — and any safety
   property that rode on that predicate is absent there.** A shrink-truncate flag reached the lenses
   `ApplyTruncateScope` returns early for, i.e. the ones whose purge is unconfined, so it aimed a whole-bucket
-  wipe at shared `capability-kv`. Minted: dynamic-type-taxonomy B0 (cold pass, reproduced). Check: for a new
-  flag, name the population it newly affects and the invariant the old gate was silently supplying.
+  wipe at shared `capability-kv`. Minted: dynamic-type-taxonomy B0 (cold pass, reproduced). **Seen a second
+  time at auth-plane 4a-1**, in the harder direction: narrowing the blanket `WITH` refusal handed
+  `AnchorHopIndex` the shapes it had never had to walk, and its builder had no `*With` arm — so a pattern
+  living only in a `WITH … WHERE` contributed no hop while the index still reported `Complete`, and a
+  revocation would have derived zero anchors. **Mechanized** for this component by
+  `TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation` (every complete index must have walked
+  every relation it references, with a floor on the count checked so an empty gate cannot read as a pass).
+  Check elsewhere: for a new flag or a relaxed refusal, name the population it newly admits and the invariant
+  the old gate was silently supplying for it.
 - **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
   order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
   item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
@@ -988,9 +995,11 @@ the entry).
 - **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
   over-grant. Minted: negative/retraction design pass (designer SKILL §2). Check: none yet (the retraction
   primitive is its own backlog item).
-- **A `WITH` boundary drops unprojected variables** — any set derived from a query (labels, carried state)
-  must model the drop or it re-seeds / excuses wrongly. Minted: lens-label-key-type binding design (two
-  reviewers broke the same increment in opposite directions). Check: none yet.
+- **A consumer that has SETTLED has not necessarily finished its handler** — `NumPending == 0` drops when a
+  delivery is prefetched into the client buffer, not when the write it causes has landed, so a
+  purge-then-observe test races an in-flight reprojection and the row reappears on its own. Minted:
+  auth-plane 4c (surfaced at `-count=3`, not at `-count=1`). Check: barrier on the EFFECT — poll until the
+  row's own revision advances past the last pre-purge write — never on pending alone.
 - **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒
   widen the filter" reads as safe and is, for delivery; the same unresolved answer also published an empty
   matcher, so the lens went to zero rows and a retracting lens to a mass Delete. Minted: dynamic-type-taxonomy
