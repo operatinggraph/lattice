@@ -910,6 +910,7 @@ above).
   "ruleEngine": "<engineName>",
   "lastProjectedAt": "<RFC3339>",
   "projectionLag": <uint64>,
+  "peakBindingRows": <uint64>,
   "lagProgressAt": "<RFC3339>",
   "ackPending": <uint64>,
   "ackFloorProgressAt": "<RFC3339>",
@@ -983,6 +984,32 @@ the deployed fleet, and holding any lens with a message in flight yellow would f
 mid-processing state rather than on a stall. The two fields are written as a pair or not at all — a
 poll that cannot read them leaves both alone rather than writing `ackPending` 0 over a real
 observation (design: lens-consumer-ack-window-design.md §3).
+`peakBindingRows` is the lens's **evaluation cost** gauge, and the counterpart to
+`projectionLag`'s throughput one: lag says the lens is behind, this says how expensive a single
+evaluation is. It is the largest binding set any of the lens's recent evaluations materialized at
+one time — the high-water mark, over a rolling window of the most recent evaluations, of exactly
+the per-stage row count the full engine's binding-set cap refuses on
+(`REFRACTOR_MAX_BINDINGS`, 1,000,000 by default). Read it against that cap: a lens sitting within
+an order of magnitude of it is materializing a product it almost certainly does not need, and a
+lens that has just been refused reports the row count that refused it rather than leaving an
+operator to reconstruct the incident by hand.
+
+It is a **peak**, not a total and not the projected row count. A stage that expands into a wide
+cross product and then folds it into a handful of aggregated rows reports the wide number — which
+is the point, since that width is what the evaluation actually held in memory. For a multi-walk
+Personal lens it is the widest single branch, not the sum: the branches are evaluated one after
+another and their binding sets are never co-resident.
+
+It is a **gauge, so it falls**. The window is rolling — a spike ages out once newer evaluations
+displace it — and the published value is the window's current maximum, overwritten each poll
+rather than accumulated. The window is also per-process and is **never published while empty**, so
+a restart, a pause, or a quiet lens leaves the last real observation standing instead of blanking
+it to zero; a rebuild deliberately CARRIES the window, because a rescan walks the widest anchor set
+the lens ever sees and those are the samples worth having. ABSENT means no evaluation has reported
+one — a lens that has not evaluated, or an entry written by a Refractor that predates the field.
+Like every other field here it is observation, not control: nothing in the engine or the pipeline
+reads it back.
+
 `sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
 position and cumulative heal count; both are omitted for a lens that does not sweep. They
 live on this existing entry rather than in new state, so a restarted Refractor resumes the

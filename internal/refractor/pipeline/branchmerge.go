@@ -57,7 +57,7 @@ func walkOwnedColumns(branches []ruleengine.CompiledRule) map[string]int {
 }
 
 // executeBranches runs this pipeline's compiled rule(s) for one actor: a
-// single ExecuteWithFootprint call for an ordinary lens, or one independent
+// single ExecuteWithStats call for an ordinary lens, or one independent
 // call per branch — merged by output key, footprints unioned — for a
 // multi-walk Personal lens (refractor-shared-keyspace-arbitration-
 // design.md §13.2). Factored out of executeFullForActorOnce so the single-
@@ -68,30 +68,41 @@ func walkOwnedColumns(branches []ruleengine.CompiledRule) map[string]int {
 // (seedAnchorLabels is cleared for multi-walk installs, and a Personal lens
 // carries an ActorEnumerator besides) — so the branch loop passes the unseeded
 // context and every branch builds its own anchor candidate set by scan.
+//
+// The EvalStats return is populated on every path, error included: for a
+// multi-walk lens it is the peak over the branches evaluated SO FAR, so a
+// branch refused by the binding-set cap reports the row count that refused it
+// even though its results are discarded. Peak, not sum — the branches are
+// evaluated one after another and their binding sets are not co-resident, so
+// what the lens materialized at once is the widest of them.
 func (p *Pipeline) executeBranches(
 	ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, params map[string]any, seedAnchor string,
-) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
+) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, ruleengine.EvalStats, error) {
 	ec := ruleengine.EventContext{NodeKey: actorKey, NodeProps: nodeProps, Parameters: params}
 	if len(rs.branches) <= 1 {
 		ec.SeedAnchor = seedAnchor
-		return rs.engine.ExecuteWithFootprint(ctx, rs.cr, ec, p.adjKV, p.coreKV)
+		return rs.engine.ExecuteWithStats(ctx, rs.cr, ec, p.adjKV, p.coreKV)
 	}
 
 	branchOuts := make([][]ruleengine.ProjectionResult, len(rs.branches))
 	footprints := make([]ruleengine.EvalFootprint, len(rs.branches))
+	var stats ruleengine.EvalStats
 	for i, cr := range rs.branches {
-		out, fp, err := rs.engine.ExecuteWithFootprint(ctx, cr, ec, p.adjKV, p.coreKV)
+		out, fp, branchStats, err := rs.engine.ExecuteWithStats(ctx, cr, ec, p.adjKV, p.coreKV)
+		if branchStats.PeakBindingRows > stats.PeakBindingRows {
+			stats.PeakBindingRows = branchStats.PeakBindingRows
+		}
 		if err != nil {
-			return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: branch %d: %w", i, err)
+			return nil, ruleengine.EvalFootprint{}, stats, fmt.Errorf("pipeline: branch %d: %w", i, err)
 		}
 		branchOuts[i] = out
 		footprints[i] = fp
 	}
 	merged, err := mergeBranchRows(branchOuts, rs.walkOwnedColumns)
 	if err != nil {
-		return nil, ruleengine.EvalFootprint{}, err
+		return nil, ruleengine.EvalFootprint{}, stats, err
 	}
-	return merged, mergeFootprints(footprints), nil
+	return merged, mergeFootprints(footprints), stats, nil
 }
 
 // mergeBranchRows merges the row sets N independently-evaluated branches of

@@ -1503,6 +1503,7 @@ func main() {
 		lp := health.NewLagPoller(conn, p.Pending, reporter, r.ID)
 		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
 		lp.SetAckStatsFunc(p.AckStats)
+		lp.SetPeakRowsFunc(p.PeakBindingRows)
 		p.SetLagPoller(lp)
 
 		// Transient write failures escalate to the shared retry queue (deferred

@@ -120,6 +120,29 @@ type Entry struct {
 	// ProjectionLag is the operator-facing alias of ConsumerLag (same NumPending
 	// value, named for what it means to an operator: events behind).
 	ProjectionLag uint64 `json:"projectionLag"`
+	// PeakBindingRows is the largest binding set any of this lens's recent
+	// evaluations materialized at one time — the high-water mark, over a
+	// rolling window of the most recent evaluations, of the same per-stage row
+	// count the full engine's binding-set cap refuses on. It is a COST gauge,
+	// the counterpart to ProjectionLag's throughput one: lag says the lens is
+	// behind, this says how expensive one evaluation is.
+	//
+	// Read it against the cap (REFRACTOR_MAX_BINDINGS, 1,000,000 by default).
+	// A refused evaluation's peak is included, so a lens that has just been
+	// refused reports the row count that refused it instead of leaving an
+	// operator to reconstruct it. A lens sitting within an order of magnitude
+	// of the cap is the signal that its query materializes a product it does
+	// not need.
+	//
+	// The window is rolling and per-process: it holds only samples this
+	// Refractor recorded, and it is never written while empty, so a restart
+	// leaves the last real observation standing rather than blanking it to
+	// zero. ABSENT means no evaluation has ever reported one for this lens —
+	// a lens that has not evaluated, or an entry written by a Refractor that
+	// predates the field. A recorded peak of 0 (an evaluation whose first
+	// pattern matched nothing) is also absent from the wire by omitempty; the
+	// distinction does not matter to a reader, since neither is a cost.
+	PeakBindingRows uint64 `json:"peakBindingRows,omitempty"`
 	// LagProgressAt is when ConsumerLag was last observed to decrease (stamped
 	// at first observation too) — RFC3339 UTC; "" before the lens's first lag
 	// poll. A newly-activated consumer on a bucket-wide filter can carry a

@@ -41,6 +41,13 @@ type AckStatsFunc func(ctx context.Context) (substrate.AckStats, error)
 // lens's first projection.
 type ProgressFunc func() time.Time
 
+// PeakRowsFunc optionally returns the lens's peak binding rows over the
+// pipeline's rolling observation window, and whether the window holds any
+// sample at all. A false second return means "no evaluation to report" — the
+// poller then writes nothing, rather than laying a fabricated zero over a real
+// earlier observation.
+type PeakRowsFunc func() (uint64, bool)
+
 // LagPoller publishes per-lens consumer lag metrics to lattice.refractor.metrics.<lensId>
 // at the interval captured from MetricsInterval at construction time.
 // It also updates the health KV consumerLag/projectionLag/lastProjectedAt fields
@@ -57,6 +64,12 @@ type LagPoller struct {
 	// lastProjectedAt is then left at whatever it already held (see
 	// Reporter.SetProjectionProgress).
 	progress ProgressFunc
+
+	// peakRows optionally supplies the lens's peak-binding-rows gauge. nil (the
+	// default, unless SetPeakRowsFunc is called) leaves the Entry's
+	// peakBindingRows untouched, so a caller that does not wire it is unchanged
+	// rather than reporting a fabricated zero.
+	peakRows PeakRowsFunc
 
 	// ackStats optionally supplies the consumer's un-acked count and ack floor.
 	// nil (the default, unless SetAckStatsFunc is called) leaves the Entry's
@@ -96,6 +109,12 @@ func (lp *LagPoller) SetProgressFunc(fn ProgressFunc) {
 // before Start. Pass nil to clear (the default).
 func (lp *LagPoller) SetAckStatsFunc(fn AckStatsFunc) {
 	lp.ackStats = fn
+}
+
+// SetPeakRowsFunc attaches the pipeline's peak-binding-rows source. Must be
+// called before Start. Pass nil to clear (the default).
+func (lp *LagPoller) SetPeakRowsFunc(fn PeakRowsFunc) {
+	lp.peakRows = fn
 }
 
 // NewLagPoller creates a LagPoller for the given rule. The lag source is read
@@ -185,6 +204,30 @@ func (lp *LagPoller) poll(ctx context.Context) {
 				slog.Warn("lag poller: SetProjectionProgress failed",
 					"ruleId", lp.ruleID, "err", err)
 			}
+		}
+		lp.pollPeakRows(ctx)
+	}
+}
+
+// pollPeakRows publishes the lens's peak-binding-rows gauge onto its health
+// entry. It is a separate read-modify-write from SetProjectionProgress because
+// it is a separate concern with its own source and its own "nothing to say"
+// case: a nil source or an empty observation window writes nothing at all,
+// leaving whatever the entry already holds — the alternative, folding a
+// fabricated zero into the progress write, would erase a real peak every time a
+// lens went quiet.
+func (lp *LagPoller) pollPeakRows(ctx context.Context) {
+	if lp.peakRows == nil {
+		return
+	}
+	rows, ok := lp.peakRows()
+	if !ok {
+		return
+	}
+	if err := lp.reporter.SetPeakBindingRows(ctx, rows); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("lag poller: SetPeakBindingRows failed",
+				"ruleId", lp.ruleID, "err", err)
 		}
 	}
 }

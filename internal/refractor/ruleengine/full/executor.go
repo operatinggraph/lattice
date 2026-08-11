@@ -140,6 +140,14 @@ type executor struct {
 	maxBindings int
 	steps       int
 
+	// peakBindingRows is the largest binding-slice size any stage of THIS
+	// evaluation materialized — the high-water mark of the same quantity
+	// maxBindings caps, stamped by checkBindings wherever a stage's slice has
+	// just grown. It is per-evaluation state and lives here rather than on the
+	// *CompiledRule, which Parse writes once and every concurrent evaluation of
+	// the lens shares.
+	peakBindingRows int
+
 	// labelExpansion is the compiled rule's LabelExpansion, threaded through
 	// so nodeMatches and the re-check inside seedNodes can resolve a
 	// LabelExpand-flagged pattern without a graph read (§4.4 — the hot path
@@ -203,7 +211,18 @@ func (ex *executor) checkCancelled() error {
 // A refused evaluation is redelivered and visible. (This is the opposite call
 // from the actor enumerator's cap, which truncates-and-warns because it bounds
 // who gets notified, not the content of a row.)
+//
+// It is also where the evaluation's peak binding rows is stamped, because this
+// is the one place every growing binding slice passes through — the clause
+// accumulator in applyMatch, the per-pattern expansion in matchPatterns, and
+// both the seed set and each relationship hop in matchPath. The stamp lands
+// BEFORE the cancellation and cap checks so a refused or cancelled evaluation
+// still reports the row count it reached, which is the number an operator
+// diagnosing that refusal is looking for.
 func (ex *executor) checkBindings(rows int) error {
+	if rows > ex.peakBindingRows {
+		ex.peakBindingRows = rows
+	}
 	if err := ex.checkCancelled(); err != nil {
 		return err
 	}
@@ -248,12 +267,33 @@ func (e *Engine) ExecuteWithFootprint(
 	ec ruleengine.EventContext,
 	adjKV, coreKV *substrate.KV,
 ) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
+	results, footprint, _, err := e.ExecuteWithStats(ctx, cr, ec, adjKV, coreKV)
+	return results, footprint, err
+}
+
+// ExecuteWithStats runs cr exactly as ExecuteWithFootprint does, additionally
+// returning the evaluation's cost observations (ruleengine.EvalStats) — the
+// gauge that sizes what a lens actually materializes against the binding-set
+// cap that refuses it.
+//
+// The stats are returned on EVERY path, error included, and are meaningful
+// there: a cap refusal or a cancellation still reports the peak row count it
+// had reached, because that number is the diagnosis. Results and footprint
+// keep their existing error-path contract (both zero when err is non-nil).
+func (e *Engine) ExecuteWithStats(
+	ctx context.Context,
+	cr ruleengine.CompiledRule,
+	ec ruleengine.EventContext,
+	adjKV, coreKV *substrate.KV,
+) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, ruleengine.EvalStats, error) {
 	compiled, ok := cr.(*CompiledRule)
 	if !ok {
-		return nil, ruleengine.EvalFootprint{}, fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
+		return nil, ruleengine.EvalFootprint{}, ruleengine.EvalStats{},
+			fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
 	}
 	if compiled.Query == nil {
-		return nil, ruleengine.EvalFootprint{}, errors.New("full engine: compiled rule has nil query")
+		return nil, ruleengine.EvalFootprint{}, ruleengine.EvalStats{},
+			errors.New("full engine: compiled rule has nil query")
 	}
 
 	ex := &executor{
@@ -272,6 +312,16 @@ func (e *Engine) ExecuteWithFootprint(
 		groupingRedundant: compiled.groupingRedundant,
 	}
 
+	results, footprint, err := ex.run(compiled)
+	return results, footprint, ex.evalStats(), err
+}
+
+// run walks compiled's clauses over this executor's per-evaluation state and
+// returns the result rows with the read-surface footprint. It is the body of
+// one evaluation, split from the entry point so every return path — including
+// each error — passes back through the caller, which reports the evaluation's
+// EvalStats whatever the outcome.
+func (ex *executor) run(compiled *CompiledRule) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
 	bindings := []binding{{}}
 	var lastReturn *Return
 
@@ -302,10 +352,18 @@ func (e *Engine) ExecuteWithFootprint(
 		return nil, ruleengine.EvalFootprint{}, err
 	}
 	footprint := ex.footprint()
-	if hook := footprintCapturedHook(ctx); hook != nil {
+	if hook := footprintCapturedHook(ex.ctx); hook != nil {
 		hook()
 	}
 	return results, footprint, nil
+}
+
+// evalStats returns this evaluation's cost observations. Valid at any point
+// after the executor is built — the peak is stamped as the evaluation runs, so
+// a caller that abandoned the run on an error reads the high-water mark it had
+// reached rather than a zero.
+func (ex *executor) evalStats() ruleengine.EvalStats {
+	return ruleengine.EvalStats{PeakBindingRows: ex.peakBindingRows}
 }
 
 // footprint returns the read-surface certificate this evaluation observed —

@@ -360,8 +360,15 @@ type Pipeline struct {
 	// latencyBuf captures the (CDC → projection-write) latency per event
 	// so the heartbeat can compute mean/p95/p99 per Lens. Nil disables.
 	latencyBuf *LatencyRingBuffer
-	adapterMu  sync.RWMutex    // protects adpt for concurrent hot-reload
-	adpt       adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
+
+	// peakRowsBuf captures the peak binding rows each full-engine evaluation
+	// materialized, so the lag poller can publish the lens's peakBindingRows
+	// gauge. New installs one on every pipeline — the gauge answers "why was
+	// this evaluation refused", which no lens is exempt from — but a directly
+	// constructed Pipeline leaves it nil and simply records nothing.
+	peakRowsBuf *PeakRowsRingBuffer
+	adapterMu   sync.RWMutex    // protects adpt for concurrent hot-reload
+	adpt        adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
 
 	// requireGuardedAdapter records that this lens's writes must run under the
 	// §6.2 monotonic projection-write guard. The guard is a property of the
@@ -573,6 +580,7 @@ func New(
 		rebuildPollInterval: iv,
 		started:             make(chan struct{}),
 		rebuildSerial:       make(chan struct{}, 1),
+		peakRowsBuf:         NewPeakRowsRingBuffer(DefaultPeakRowsBufferSize),
 	}
 	p.adpt = adpt
 	return p, nil
@@ -2047,6 +2055,32 @@ func (p *Pipeline) SetLatencyBuffer(buf *LatencyRingBuffer) {
 // the heartbeater to summarise per-Lens latency at tick.
 func (p *Pipeline) LatencyBuffer() *LatencyRingBuffer {
 	return p.latencyBuf
+}
+
+// PeakBindingRows reports the largest binding set any of this lens's recent
+// evaluations materialized, and whether the window holds any sample at all.
+// The false return is "no evaluation to report", which a publisher must not
+// write as a zero — health.PeakRowsFunc, the lag poller's source hook.
+func (p *Pipeline) PeakBindingRows() (uint64, bool) {
+	if p.peakRowsBuf == nil {
+		return 0, false
+	}
+	snap := p.peakRowsBuf.Snapshot()
+	if snap.Count == 0 {
+		return 0, false
+	}
+	return uint64(snap.Peak), true
+}
+
+// recordPeakBindingRows folds one evaluation's peak into the observation
+// window. Called for every engine evaluation, refusals included — a refused
+// evaluation's peak IS the diagnosis, so it must land before the pipeline
+// disposes of the error.
+func (p *Pipeline) recordPeakBindingRows(stats ruleengine.EvalStats) {
+	if p.peakRowsBuf == nil {
+		return
+	}
+	p.peakRowsBuf.Record(stats.PeakBindingRows)
 }
 
 // currentAdapter returns the active adapter under a read lock.

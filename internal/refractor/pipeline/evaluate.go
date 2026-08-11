@@ -595,7 +595,23 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 		"now":         now.Format(time.RFC3339),
 		"projectedAt": projectedAt,
 	}
-	out, footprint, err := p.executeBranches(ctx, rs, actorKey, nodeProps, params, seedAnchor)
+	out, footprint, stats, err := p.executeBranches(ctx, rs, actorKey, nodeProps, params, seedAnchor)
+	// The evaluation's peak binding rows lands before the error is inspected.
+	// A cap refusal is the case the gauge exists for, and this is the one
+	// attempt boundary that sees every evaluation exactly once — a
+	// footprint-drift re-execution re-enters here and contributes its own
+	// sample, as does each retry-queue redelivery.
+	p.recordPeakBindingRows(stats)
+	// Per-evaluation detail for an operator who has turned Debug on; the health
+	// entry's rolling gauge is the always-on surface, and a cap refusal logs its
+	// own Warn from the engine. The Enabled check is what keeps this off the hot
+	// path: a variadic slog call builds its argument slice at the call site,
+	// before the handler ever gets to drop it by level, and this runs once per
+	// event per actor.
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.Debug("pipeline: evaluation cost",
+			"ruleId", p.ruleID, "actorKey", actorKey, "peakBindingRows", stats.PeakBindingRows)
+	}
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}

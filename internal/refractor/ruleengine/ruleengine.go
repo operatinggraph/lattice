@@ -141,6 +141,27 @@ type EdgeSelectorFootprint struct {
 	Matched  map[EdgeSelector]map[string]struct{} // selector -> matched EdgeIDs
 }
 
+// EvalStats is the cost certificate one full-engine evaluation reports
+// alongside its results and its EvalFootprint: what the evaluation COST to
+// run, as opposed to what it read. It is an observation, never an input —
+// nothing in the engine or the pipeline branches on it.
+//
+// It is returned on every path, error included. A refused or cancelled
+// evaluation is exactly the case an operator is diagnosing, so its numbers
+// must survive the error return rather than being lost with the result set.
+type EvalStats struct {
+	// PeakBindingRows is the largest binding-set the evaluation materialized
+	// at any one point — the high-water mark of the same per-stage row count
+	// the engine's binding-set cap refuses on, so a refusal's value is the
+	// row count that tripped the cap. It is a peak, not a total and not the
+	// final row count: a stage that expands to a wide cross product and then
+	// folds it into a handful of aggregated rows reports the wide number.
+	//
+	// Zero means the evaluation never materialized a binding set — its first
+	// pattern matched nothing, or it failed before any expansion.
+	PeakBindingRows int
+}
+
 // ParseError carries a structured failure from an engine's Parse() call so
 // the selection-logic can report which engine(s) rejected the rule body.
 type ParseError struct {

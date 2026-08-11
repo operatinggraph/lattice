@@ -527,6 +527,35 @@ func (r *Reporter) RecordSecureRedactions(ctx context.Context, n uint64) error {
 	return r.put(ctx, existing)
 }
 
+// SetPeakBindingRows persists the lens's peak-binding-rows gauge — the largest
+// binding set its recent evaluations materialized, over the pipeline's rolling
+// observation window (pipeline.PeakRowsRingBuffer). Read-modify-write under the
+// same writeMu as every other setter, so it cannot lose an update to a
+// concurrent RecordError.
+//
+// It takes the window's CURRENT maximum rather than one evaluation's peak, and
+// therefore overwrites: the value is allowed to fall as a spike ages out, which
+// is the whole point of a gauge over a counter. Callers publish it on a poll
+// cycle, not per evaluation — a per-evaluation write would turn every event
+// into a health KV write.
+//
+// A caller with no sample must not call this at all: writing a fabricated zero
+// over a real prior observation would erase the one number an operator
+// diagnosing a refusal is looking for.
+func (r *Reporter) SetPeakBindingRows(ctx context.Context, rows uint64) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetPeakBindingRows read: %w", err)
+	}
+	existing.PeakBindingRows = rows
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
 // Delete removes the health KV entry for this rule (FR39 — rule deletion cleanup).
 // After Delete, subsequent GetStatus calls return the default active zero Entry
 // (ErrKeyNotFound path in readExisting). Safe to call when no entry exists —
