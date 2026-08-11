@@ -106,11 +106,24 @@ published to the retained subject, so the *next* cold start replays it too. With
 n · (W + 2L)   frames  — every prior burst — plus the live deltas in the window
 ```
 
-`edge-manifest` alone installs over a dozen personal lenses (`service.go`'s
-`personalHydratorByRuleID` comment), and `cmd/facet`'s `engineManager.Acquire` mints a **fresh device id
-per engine build** (`cmd/facet/enginemanager.go:117`) — so every engine rebuild is a cold start. With
-`W=14`, `L≈12`, that is ~38 frames per burst and ~2,000 frames at `n≈50`, which is the order the
-measurement found. It grows until the 10,000-message per-subject cap clips it.
+`edge-manifest` installs **15** personal lenses (counted 2026-08-11: `Personal: true` ×15 in
+`packages/edge-manifest/lenses.go`, whose own header says "fifteen Personal-Lens declarations"). With
+`W=14`, `L=15`, that is ~44 frames per burst, and `n` bursts accumulate until the 10,000-message
+per-subject cap clips them.
+
+**Amended 2026-08-11 (build time): what makes a cold start frequent is no longer device-id churn.** This
+section originally read that `cmd/facet`'s `engineManager.Acquire` mints a fresh device id per engine
+build, so every rebuild was a cold start. `0b6879dc` (2026-08-01, *"one durable per identity, not one per
+engine build"*) landed after this design was written and falsified it: `enginemanager.go` now resolves
+"this host's stable, store-persisted" device id, so a rebuild resumes the durable it left. §5 already
+narrows the blast radius on that ground; the sentence is corrected here so the body does not instruct the
+next reader with a premise its own §5 retracts. What remains cold is a genuinely new device, and the
+reaped-then-recreated durable the browser host's `InactiveThreshold` produces on every return.
+
+**The amplification itself did not shrink — it grew.** Re-measured live 2026-08-11: the SYNC stream holds
+556,687 messages / 683 MB across 116 subjects, and **all 9** edge durables are `deliver_policy=all` with no
+`opt_start_seq`, **three of them pinned at exactly 10,000 pending** — the per-subject cap, i.e. ~700× for a
+14-key world rather than the 146× that motivated the item.
 
 ### 1.4 It contradicts the design of record
 
@@ -307,9 +320,20 @@ smaller than the number that motivated it.
 That `InactiveThreshold` is also why the Go host still has no server-side backstop for an orphan a purge
 cannot reach (a revoked credential, a crashed host). The browser's 30-minute value cannot simply be
 copied over: on a long-lived Go host it would convert routine next-day sign-ins into exactly the cold
-start this initiative is about. **The fork below sets that value** — the backstop is sequenced behind it.
+start this initiative is about.
+
+**Amended 2026-08-11 (build time) — this design does NOT gate the backstop.** The sentence here originally
+read *"the fork below sets that value — the backstop is sequenced behind it."* The later
+`edge-sync-orphan-expiry-design.md` (ratified 2026-08-06) answers that directly and refutes it: its §7
+shows the threshold derives from the SYNC stream's own retention horizon, not from this fork — past
+`MaxAge` a surviving durable and a fresh one deliver the **identical** message set, so reaping at
+`MaxAge + margin` costs the same under either branch. Its "For Andrew" block states the conclusion as
+*"This row is unblocked."* It also deliberately takes the **stream-level** `ConsumerLimits.InactiveThreshold`
+shape precisely so it need not touch `RunDurableConsumer` or the transport seam this design edits. The two
+are independent; neither sequences the other.
+
 No other in-flight design touches `RunDurableConsumer`, the sync seam, or the personal control ops
-(grepped across `_bmad-output/implementation-artifacts/`).
+(grepped across `_bmad-output/implementation-artifacts/`; re-verified 2026-08-11).
 
 **Loupe, cross-lane, informational.** Loupe's Edge Fleet triage derives retention headroom from *stream*
 state and the device cursor, not from consumer `num_pending`, so it needs no change — but operators will
