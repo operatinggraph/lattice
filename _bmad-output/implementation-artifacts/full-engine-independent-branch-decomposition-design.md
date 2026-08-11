@@ -500,4 +500,211 @@ and the **trigger** that would revive the deferred streaming work (§9-C). Add t
 **Inc 3 — streaming / lazy binding expansion. NOT BUILT.** Design shelved per §9-C with its trigger.
 The board row for it points here.
 
-Build order is Inc 1 → Inc 2. Inc 1 alone closes the defect; Inc 2 alone is a gauge with nothing to show.
+~~Build order is Inc 1 → Inc 2.~~ **Superseded by the ratification banner (2026-08-06), applied here
+2026-08-11: build order is Inc 2 → Inc 1.** The banner ships Inc 2 first because it is the *acceptance
+instrument* for Inc 1 — without it, Inc 1's headline claim ("peak rows fall from the product to the largest
+single branch") is an extrapolation with nothing in the engine measuring peak rows. Inc 1 alone still closes
+the defect; Inc 2 first is what turns the acceptance criterion from argument into observation.
+
+---
+
+## 12. Independent-branch decomposition fire brief (build note, 2026-08-11)
+
+Compiled Phase-0 by the Lattice Steward from three read-only scouts, before the first edit. One brief per
+ITEM; resumes run a delta-scout instead.
+
+### 1. Scope sentence (verbatim, ratified)
+
+> A stage of independent `OPTIONAL MATCH` branches off one anchor is evaluated today as their **cross
+> product**. A compile-time pass proves which branches are *foldable* (their variables reach the projection
+> only through a multiplicity-insensitive aggregator over that one branch), and the executor evaluates those
+> against the anchor set **separately**, folding each into its own aggregator. Peak rows fall from the
+> product of the branches to the **largest single branch**; the projected rows are identical, element for
+> element and in the same order.
+
+**Green bar:** every existing `ruleengine/full`, `projection`, `pipeline` and corpus-census test green, plus
+the §7 suite (differential deep-equality both directions, randomized corpora, refusal units, cap test, new
+corpus census). `clauseSatisfaction` must report **no** decomposition.
+
+**Build order — Inc 2 → Inc 1** (ratification banner; §11's body line said the reverse and is struck above).
+Inc 3 (streaming) is NOT built.
+
+### 2. Verified touch-list (`file:line` re-checked live 2026-08-11)
+
+The design's citations were written 2026-08-02; **the engine has had 12 commits since** and most anchors
+moved. Verified positions:
+
+| What | Design cites | **Actual** | Status |
+|---|---|---|---|
+| clause loop threading `[]binding` | `executor.go:239-259` | **`:278-295`** | moved |
+| `applyMatch` | `:311` | **`:347`** (null-preserving fallback `:356-401`) | moved |
+| `matchPatterns` | `:439` | **`:475`** | moved |
+| `matchPath` | `:465` | **`:501`** | moved |
+| `checkBindings` + refuse-not-truncate comment | `:172` / `:166-171` | **`:206`** / **`:200-205`** | moved |
+| `nullBindNewVars` | `:412` | **`:448`** | moved |
+| `footprint()` | `:280` | **`:316`** | moved |
+| node / edge memos | `:98`, `:110` | **`:110`** (`nodes`), **`:122-123`** (`edges`,`edgeRevisions`) | moved |
+| `projectItems` | — | **`:1254`**; grouping-key loop **`:1305-1325`** | — |
+| zero-rows-in-zero-rows-out | `:1176-1189` | **`:1372-1386`** | moved |
+| `RETURN DISTINCT` dedup | `:1231` | **`:1431-1442`** | moved |
+| `ExecuteWithFootprint` | — | **`:245-250`** | — |
+| `newAggFold` | `aggregate.go:29`,`:51`,`:56-66` | **`:29`**; `callFold` **`:94-101`**; `binOpFold` **`:149-153`** | ✅ |
+| first-occurrence dedupe | `aggregate.go:90-118` | **`:111-116`** | narrowed |
+| the cross-product comment | `aggregate.go:81-95` | **`:80-88`** | ✅ |
+| `defaultMaxBindings` | `full.go:21` | **`:21`** | ✅ |
+| `Parse` (sole `*CompiledRule` ctor) | — | **`full.go:58`**, analysis embedded **`:118-122`** | — |
+| `CollectVariableRefs` | `bindings.go:17` | **`:17`** | ✅ |
+| `CompiledRule` struct | — | **`ast.go:252-287`** | — |
+
+**Lens specs (§2's census):**
+
+| Lens | Design cites | **Actual** |
+|---|---|---|
+| `edgeIdentitySpec` | `edge-manifest/lenses.go:499` | **`:499`** ✅ |
+| `capabilityEphemeralSpec` | `orchestration-base/lenses.go:358` | **`:358`** ✅ |
+| `myTasksSpec` | `orchestration-base/lenses.go:295` | **`:295`** ✅ |
+| `identityAnchorsSpec` | `identity-domain/lenses.go:158` | **`:220`** ROTTED |
+| `leaseApplicationCompleteSpec` | `lease-signing/lenses.go:619` | **`:657`**; non-DISTINCT `max()` **`:706-710`,`:715`** (cited `:667-675`) ROTTED |
+| `renewalCompleteSpec` | `lease-signing/renewal_lenses.go:198` | **`:211`** ROTTED |
+| `clauseSatisfactionSpec` | `semantic-contracts/lenses.go:106` | **`:203`**; `count(t.key)` **`:219`** (cited `:122`) ROTTED |
+
+**Inc 2 targets — the design's health citations rotted WHOLESALE.** `health/lattice_heartbeater.go:233-241`
+is a block of issue-code constants and `:1160` is a lag-streak helper; neither has anything to do with
+`projectionLag`. The real surface:
+
+| What | **Actual** |
+|---|---|
+| per-lens Health entry struct | **`internal/refractor/health/healthwire/healthwire.go:102-212`** (type `Entry`) |
+| `projectionLag` field | **`healthwire.go:122`** |
+| the setter that writes it | **`health/reporter.go:581`** (`SetProjectionProgress`) |
+| **the precedent to mirror** (engine-observed counter → per-lens Entry) | **`health/reporter.go:513`** (`RecordSecureRedactions`), `:474`/`:492` (eval-drift) |
+| rolling per-evaluation buffer precedent | **`pipeline/latency.go`** (whole file; `LatencyRingBuffer`, rolling, reads do not clear) |
+| where an evaluation records its per-event stat today | **`pipeline/evaluate.go:383-389`** (`latencyBuf.Record(time.Since(start))`) |
+| schema doc (REAL path) | **`docs/observability/health-kv-schema.md`** — per-lens entry `:898-918`, `projectionLag` at `:912`. The design's `docs/health-kv-schema.md` does not exist. |
+
+### 3. Precedents to mirror
+
+- **The compile-time-analysis-on-`CompiledRule` seam** — `grouping.go` (402 lines, landed `029ef85b`):
+  `analyseGroupingRedundancy` at `:117`, result stored on the unexported `CompiledRule.groupingRedundant`
+  (`ast.go:277-286`, "written once by Parse … never mutated — a compiled rule is shared across concurrent
+  evaluations"), consumed in `projectItems` at `:1317`, and exposed for tests/diagnostics via the public
+  `CompiledRule.GroupingReduction()` (`grouping.go:159-174`) returning `[]GroupingClauseReduction`. **The new
+  analysis copies this seam exactly**, including the public diagnostic accessor — the census test needs it.
+- **Inc 2 counter transport** — `RecordSecureRedactions` (`reporter.go:513`): pipeline-observed value →
+  read-modify-write onto the per-lens `Entry`. Rolling-window semantics from `pipeline/latency.go`.
+- **Differential harness** — `read_grant_producer_staging_test.go:258-298`
+  (`TestReadGrantProducer_StagedMatchesFlatAnchorSet`), corpus builder `seedEdgeManifestReadGrantCorpus`
+  `:73-148`.
+- **Randomized corpora** — `grouping_equivalence_test.go`: `readGrantCorpusShape` `:24-46`,
+  `randomCorpusShape` `:78-107`, `seedReadGrantCorpus` `:112-277`, driver
+  `TestGroupingReduction_RandomizedCorporaDifferential` `:417-450`. Deterministic seeding via
+  `rand.NewSource(int64(i)+1)` — keep that (CLAUDE.md determinism).
+- **Corpus census** — `grouping_reduction_corpus_census_test.go` (freshest, `029ef85b`): verdict map
+  `:63-178`, derivation `:225-254`, population invariant `:304-313`. Enumerator `forEachCorpusCypher`
+  (`label_derivation_corpus_census_test.go:536-592`) — expands read-grant walks *and* iterates
+  `SpecBranches`, so per-branch cyphers are named `"name#N"`.
+- **Test fixture** — `executor_test.go`: `startExecKVs` `:25-45`, `newFixtureRegistry` `:57-63`, `putVertex`
+  `:88-104`, `putEdge` `:108-128`, deterministic `c1NanoID` `:69-82`.
+
+**Two places the precedent is WEAKER than §7 requires — build to §7, not to the precedent:**
+1. The staging test asserts **set equality** (`canonicalAnchorSet`/`diffAnchorSets`, `:217-255`). §4.5 claims
+   **order preservation**, so the new harness must assert deep equality **including list order**.
+2. The randomized driver runs **6** corpora. §7 requires **≥60**.
+
+### 4. Increment order (each with its runnable green check)
+
+**Inc 2 — peak-rows observability (S).** Carry peak binding rows (and per stage, the count of groups that did
+not decompose + the refusing §4.2/§4.3 clause) out of the executor alongside the footprint; surface
+`peakBindingRows` on the per-lens Health entry; document it.
+
+```bash
+go test ./internal/refractor/ruleengine/full/... ./internal/refractor/pipeline/... ./internal/refractor/health/... -count=1
+```
+
+**Inc 1 — the analysis + decomposed evaluation (M–L).** `branchgroups.go`: stage partition, branch grouping,
+pinned frontier (§4.1), global precondition (§4.2), per-group + per-subtree foldability (§4.3), computed at
+`Parse`, stored on `CompiledRule`, with a public diagnostic accessor. Executor: deferred groups, routed fold
+`add`, per-leaf group stamping (§4.5). Then the full §7 suite.
+
+```bash
+go test ./internal/refractor/... -count=1
+go test ./internal/refractor/ -run 'Corpus|Census' -count=1     # label + grouping + new branch census
+go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go
+```
+
+### 5. In-scope gotchas
+
+- **`branchgroups.go` vs the existing `branchplan.go`.** `branchplan.go` (210 lines) already owns the word
+  "branch" for a **different** thing — a multi-walk Personal lens's N independently-compiled *spec* branches
+  (`ColumnOwnership`, `ClassifyBranchReturnColumns`, shared-keyspace-arbitration §13.2). `pipeline/branchmerge.go`
+  is the same sense. The new file's "branch group" means **sibling `OPTIONAL MATCH` clauses in one stage**.
+  The doc comment must disambiguate explicitly or the next reader conflates them.
+- **The label-derivation obligation is live.** The label fire's Inc 2 accumulates an `OPTIONAL MATCH`'s labels
+  **per path**, sound only because a clause's paths thread into one binding stream. Branch grouping changes
+  which clauses share that stream ⇒ **re-derive `ReferencedLabels`' optional-label scope per branch group**.
+  `label_derivation_corpus_census_test.go` pins 114+ per-lens `(labels, exhaustive, filterMode)` verdicts — a
+  regression surfaces there, and a *changed* verdict must be adjudicated, never re-pinned to make it green.
+- **Peak rows is new state and needs a LIFETIME** (standing checklist #1). An all-time monotonic max is pinned
+  forever by one spike and is useless as a gauge. Decided: **rolling window**, mirroring `LatencyRingBuffer`
+  (rolling, reads do not clear); report the max over the window. Write the state table — created / reset /
+  carried at restart, rebuild, pause/resume, replay — before writing the struct.
+- **`CompiledRule` is shared across concurrent evaluations** (`ast.go:277-286`). The analysis is written once
+  at `Parse` and never mutated. Peak-rows accumulation is per-*evaluation* state and must NOT live there.
+- **Fail-safe direction is always "do not decompose."** `CollectVariableRefs` returning `unknown`, an
+  unrecognised aggregator, a cross-group `WHERE` ⇒ today's path exactly.
+- **A new per-lens analysis ships its corpus census in the same fire** (refractor dossier standing rule):
+  enumerate via `forEachCorpusCypher` through the *real* analysis — never a grep of cypher text, never a
+  reimplementation of the predicate (it would agree with a broken gate) — pin the per-lens verdict, assert the
+  population is exactly these names **with a floor on the count** so an empty enumeration cannot read as a
+  table of unchanged rows.
+- **Refractor dossier, copied in:** *(a)* **a meta sweep multiplies `Rebuild`** — not tripped here (no fan-out
+  over the lens set; this fire adds no rebuild path). *(b)* **new pipeline state without a declared lifetime**
+  (registry / latch / armed flag) — reset, carry and order it at replay, reconnect, tombstone and retry, or the
+  review will. **Directly tripped by Inc 2's peak buffer** — see the lifetime gotcha above.
+- **Standing checklist:** #1 lifetime (Inc 2 buffer). #2 every census is a premise — the §2 "fourteen lenses"
+  number is pinned by the shipped census, not by the doc. #3 a negative test needs its positive vector proven
+  first — the `clauseSatisfaction` refusal test must be shown to fail if the refusal is removed. #4 removal
+  needs a transport and an observer. #6 precedent may carry debt — see the two §7-vs-precedent gaps above.
+- **MERGED ≠ RUNNING.** The full stack is up (`bin/refractor` live). Derive affected binaries mechanically
+  from `internal/refractor/ruleengine/full` + `internal/refractor/health` and cycle them from `main`.
+
+### 6. Adjacent finds (this run's batch, or one of the two outs)
+
+- **Done-log SHA `f63c6d57` is not on `main`** — the grouping-key fire's pre-rebase SHA; the landed commit is
+  `029ef85b`. Audited every SHA in `lattice.md`: this is the only one. **Fixed in this brief's commit** (not
+  filed).
+- **§11's build-order line contradicted the ratification banner** and had never been rewritten. **Struck and
+  amended in this brief's commit** (not filed).
+- **Design citation rot is systemic in this doc** (the whole §2 lens table and every health anchor). Corrected
+  in part 2 above rather than filed — the brief is now the build's map of record.
+
+### 7. Non-goals (the drift fence)
+
+- **Inc 3 (streaming / lazy binding expansion)** — shelved per §9-C with its trigger; Inc 2 is what makes the
+  trigger observable.
+- **Un-staging the generated read-grant producers** (`internal/pkgmgr/anchorwalk.go`) — explicitly not
+  proposed (§6); re-flattening would trade a proof for a proof.
+- **Raising `defaultMaxBindings`** (§9-D) and **a cost-based governor** (§9-E) — both rejected.
+- **Rewriting any lens cypher.** Option (B) is the rejected fork; no package changes, no version bumps, no
+  reinstall (§6).
+- **`RETURN DISTINCT`'s dedup** (`executor.go:1431-1442`) and the auth-plane consumer-filter work — filed
+  separately, untouched here (§8).
+
+### 8. Scope-diff gate — PASSED
+
+Parts 2–4 diffed item-by-item against part 1. Every touch traces to the scope sentence; the brief **narrows**
+(Inc 3 excluded by the design itself) and widens nowhere. No adjacent mechanism substituted: the fix is the
+engine decomposition (fork A), not the authoring convention (fork B).
+
+**Declared dependencies re-verified both ways.** The design sequences
+`lens-label-key-type-binding` → `full-engine-grouping-key-reduction` → this. Label fire shipped 2026-08-07;
+grouping-key shipped **`029ef85b`** (2026-08-11) — `grouping.go` is present and `projectItems` no longer
+re-renders carried accumulators, which is the loop this fire adds a second caller to. **Both load-bearing,
+both satisfied.** No unlisted dependency found.
+
+**Census premise re-run live.** Coarse independent scan of every backtick cypher literal under `packages/**`
+and `internal/bootstrap/**` (134 literals): **32** have ≥2 `OPTIONAL MATCH` in one `WITH`-stage — an upper
+bound on the design's **14 with ≥2 branch *groups***, and consistent with it (chained clauses collapse into
+one group: `capabilityEphemeral` has 9 optionals but 3 groups). The premise is not falsified, but the doc's 14
+is **not pinned by anything executable yet** — the shipped corpus census is the authority and must assert the
+population by name with a count floor.
