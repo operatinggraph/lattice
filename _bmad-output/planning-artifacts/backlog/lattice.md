@@ -159,7 +159,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-11 · `9ffc8ac8` · [Refractor/Processor/Pkgmgr] auth-plane grant latency CLOSED (Inc 4 + close pass) — withdrawn descriptor floors, three install gates unified onto one entry point, boot meta reads fail closed; 4a-3 re-scoped to a designer row
+- 2026-08-11 · `9ffc8ac8` · [Refractor/Processor/Pkgmgr] auth-plane grant latency CLOSED — Inc 4 close pass: descriptor-floor withdrawal, three install gates onto one entry point, boot meta reads fail closed
 - 2026-08-11 · `d7126548` · [Refractor] 4a-4 — the actor-aware link arm gains a relation gate so the filter may narrow by relation; set-equality with the client arm, capabilityRoles 9 relation-blind subjects → 15 pinned
 - 2026-08-11 · `fba7f172` · [Refractor] 4b — a half-installed pipeline refuses to narrow, reading the lens's declared kind from its own cypher rather than a new latch
 - 2026-08-11 · `0ae2b7a1` · [CI] unit sharded 2→3 runners, re-balanced by test-file LOC (82.4k each); unit pole 210s→179s, CI wall-clock 227s→195s; all gates still run, coverage assertion still exact
