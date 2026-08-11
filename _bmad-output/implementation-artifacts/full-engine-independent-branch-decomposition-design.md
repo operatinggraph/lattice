@@ -708,3 +708,34 @@ bound on the design's **14 with ≥2 branch *groups***, and consistent with it (
 one group: `capabilityEphemeral` has 9 optionals but 3 groups). The premise is not falsified, but the doc's 14
 is **not pinned by anything executable yet** — the shipped corpus census is the authority and must assert the
 population by name with a count floor.
+
+### Build checkpoint (2026-08-11)
+
+**Landing shape: land each increment on `main`.** Each increment is independently green and safe — Inc 2 is
+additive observability that changes no projection semantics, and Inc 1 is fail-safe by construction (unproven
+⇒ no decomposition ⇒ today's path). The invariant that keeps `main` correct at every boundary is the
+analysis's own default: a lens either decomposes with a proven-equivalent projection or takes the flat path
+unchanged.
+
+- **Inc 2 — SHIPPED** `6c528efd`, CI green. `EvalStats.PeakBindingRows`, stamped in `checkBindings` before the
+  cancel/cap checks so a refused evaluation reports the count that refused it; rolling window on the pipeline;
+  `peakBindingRows` on the per-lens Health entry + `docs/observability/health-kv-schema.md`.
+- **Inc 1 — built, in adversarial fix round.** Worktree `/tmp/lattice-worktrees/branch-decomp-20260811-143423`,
+  branch `fire/branch-decomposition`. `branchgroups.go` + executor/aggregate routing + the §7 suite + the corpus
+  census. Three cold reviews could not break the equivalence claim (~2,150 randomized decomposing cyphers:
+  identical rows, order and footprint); the fix round covers two demonstrated over-grant fail-opens in the
+  reference walk, the peak-vs-cap counter split, three surviving mutations, and one false coverage claim.
+- **Inc 3 — NOT BUILT** (shelved per §9-C with its trigger).
+
+**Census correction, derived not eyeballed.** §2's "fourteen lenses" is **24** by the shipped analysis (the fire
+brief's coarse scan bounded it above at 32 clause-counted literals); 17 decompose, folding 46 subtrees. §2's
+per-lens *sibling group* counts are **clause** counts and are wrong where the optionals chain: `renewalComplete`
+is listed at 5 groups and has **1** (all five hang off `app`), `leaseApplicationsRead` likewise — so §2's
+"worst first" ordering is not the real ordering. The pinned verdicts in
+`internal/refractor/branch_decomposition_corpus_census_pins_test.go` are the executable record; §2's table is
+superseded by it wherever they disagree.
+
+**Acceptance measurement (§11's reason for sequencing Inc 2 first).** `capabilityEphemeral`, 50 direct × 30
+reports' tasks × 50 queued: peak binding rows **75,000 → 50**. At `WithMaxBindings(50_000)` the flat product is
+refused at 50,050; decomposed it succeeds and projects the uncapped flat run's rows. Peak = the largest single
+branch, as claimed — re-measured after the counter split.
