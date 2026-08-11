@@ -683,3 +683,101 @@ RETURN identity.key AS actorKey, k.key AS kk
 	require.Equal(t, 2, ix.Dist[seeds[0].Pos])
 	require.True(t, seeds[0].SrcIsAnchorSide)
 }
+
+// TestDeclaresActorAnchor_IsIndependentOfCompleteness is the property
+// ConsumerFilter's install-completeness guard rests on: the DECLARATION survives
+// every refusal the index can raise for some other reason. Reading Anchor only
+// on a Complete index would report the shapes below — a real slice of the
+// shipped actorAggregate and Personal corpus — as plain, and the guard would
+// then let a pre-install call narrow exactly the lenses it exists to protect.
+func TestDeclaresActorAnchor_IsIndependentOfCompleteness(t *testing.T) {
+	cases := []struct {
+		name           string
+		body           string
+		wantDeclared   bool
+		wantIncomplete string
+	}{
+		{
+			name:         "indexable actor-anchored lens",
+			body:         shippedCapabilityRoles,
+			wantDeclared: true,
+		},
+		{
+			name: "untyped relationship — objectAttachments' shape",
+			body: `
+MATCH (identity:identity {key: $actorKey})-[]->(o:object)
+RETURN identity.key AS actorKey, o.key AS ok
+`,
+			wantDeclared:   true,
+			wantIncomplete: "pattern carries an untyped relationship",
+		},
+		{
+			name: "variable-length relationship — capabilityServiceAccess' shape",
+			body: `
+MATCH (identity:identity {key: $actorKey})-[:memberOf*1..3]->(s:site)
+RETURN identity.key AS actorKey, s.key AS sk
+`,
+			wantDeclared:   true,
+			wantIncomplete: "pattern carries a variable-length relationship",
+		},
+		{
+			name: "pattern head the anchor never reaches — the ungrounded refusal",
+			body: `
+MATCH (identity:identity {key: $actorKey})
+MATCH (r:role)-[:grantedBy]->(p:permission)
+RETURN identity.key AS actorKey, p.key AS pk
+`,
+			wantDeclared:   true,
+			wantIncomplete: "is not reached from the anchor",
+		},
+		{
+			name: "two positions pin the anchor — the multi-anchor refusal",
+			body: `
+MATCH (a:identity {key: $actorKey})-[:knows]->(b:identity {key: $actorKey})
+RETURN a.key AS actorKey, b.key AS bk
+`,
+			wantDeclared:   true,
+			wantIncomplete: "several pattern positions bind $actorKey",
+		},
+		{
+			name: "a plain lens declares nothing",
+			body: `
+MATCH (u:unit)-[:listedBy]->(l:landlord)
+RETURN u.key AS k, l.key AS lk
+`,
+			wantDeclared:   false,
+			wantIncomplete: "no pattern position binds $actorKey",
+		},
+		{
+			name: "the parameter appears, but not as the key property",
+			body: `
+MATCH (u:unit)
+WHERE u.data.owner <> $actorKey
+RETURN u.key AS k
+`,
+			wantDeclared:   false,
+			wantIncomplete: "no pattern position binds $actorKey",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := parseFull(t, tc.body)
+			require.Equal(t, tc.wantDeclared, cr.DeclaresActorAnchor())
+			ix := cr.AnchorHopIndex()
+			if tc.wantIncomplete == "" {
+				require.True(t, ix.Complete, "%s", ix.Incomplete)
+				return
+			}
+			require.False(t, ix.Complete)
+			require.Contains(t, ix.Incomplete, tc.wantIncomplete)
+		})
+	}
+}
+
+// TestDeclaresActorAnchor_NilSafe pins the two zero shapes the pipeline can hold
+// before any rule is published: neither may claim a declaration.
+func TestDeclaresActorAnchor_NilSafe(t *testing.T) {
+	var nilCR *CompiledRule
+	require.False(t, nilCR.DeclaresActorAnchor())
+	require.False(t, (&CompiledRule{}).DeclaresActorAnchor())
+}

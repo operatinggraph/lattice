@@ -52,6 +52,7 @@ const (
 	FilterBroadReasonLabelCap             = healthwire.FilterBroadReasonLabelCap
 	FilterBroadReasonTaxonomyUnarmed      = healthwire.FilterBroadReasonTaxonomyUnarmed
 	FilterBroadReasonTaxonomyUnresolvable = healthwire.FilterBroadReasonTaxonomyUnresolvable
+	FilterBroadReasonInstallIncomplete    = healthwire.FilterBroadReasonInstallIncomplete
 	FilterBroadReasonRegistrationFailed   = healthwire.FilterBroadReasonRegistrationFailed
 )
 

@@ -1774,14 +1774,10 @@ narrower than its predecessor.
 
 **Remaining, in order.**
 
-1. **The Contract #2 §2.5 enforcement — highest priority, and the only fail-open item.** The clause is
-   committed and nothing implements it: the merged read disposition must be the weaker of descriptor and
-   envelope, or a hand-rolled `contextHint` re-opens the `HydrationMiss` existence oracle on every op whose
-   script adjudicates absence generically. 4d closed our own dispatchers; this closes everyone else's. Its own
-   board row, `🎯 top-priority`.
-2. **4b — the pre-install ordering guard** (§18.2). Unstarted. Adjudicated in §19.3 and unchanged by anything
-   since: refuse to NARROW rather than refusing activation, and disambiguate `actorEnumerator == nil` by
-   reading the lens's DECLARED projection kind rather than adding an install-complete latch.
+1. ~~**The Contract #2 §2.5 enforcement.**~~ **DONE** — `abd76359`, the descriptor floor; see §19.7.
+2. ~~**4b — the pre-install ordering guard** (§18.2).~~ **DONE** — see §20. The §19.3 adjudications held
+   unchanged: it refuses to NARROW rather than refusing activation, and it disambiguates
+   `actorEnumerator == nil` from the lens's DECLARED kind with no install-complete latch.
 3. **4a-4 — Term A's relation dimension** (§18.1, fourth bullet). Unstarted, and note it is an authorization
    change: `auth_plane_narrowing_census_test.go:136-139` currently asserts the ABSENCE of any relation-pinned
    subject on an actor-aware lens, so making `actorAwareFanOutRelevant` relation-aware flips a pinned census
@@ -1842,3 +1838,67 @@ that is the guarantee the close pass exists to carry, and it has not been discha
 **Recorded, not fixed:** a derived `reads` can still harden a floored key the envelope never declared, because
 the floor applies to the envelope rather than to the merged set. Latent — every `derive_reads` in `packages/`
 returns only `optionalReads` — and outside the clause's literal scope, which binds the submitter.
+
+## 20. Increment 4b build note (2026-08-10) — the ordering guard, and the census fidelity it cost
+
+**The declaration was already in the cypher.** §19.3 called for a DECLARED projection kind and no
+install-complete latch, and the search for one ended at the pattern: an actorAggregate lens pins a position
+with `{key: $actorKey}`, which `AnchorHopIndex` already records. `full.(*CompiledRule).DeclaresActorAnchor()`
+is that read; `ruleState.declaresActorAnchor` carries it, derived in the same lockstep walk as the label and
+relation sets so the three cannot disagree about one rule. No new state, no new lifetime, and it arrives with
+`UseFullEngineBranches` — first in the install order.
+
+The guard lives in the shared `narrowedFilterEligible`, so `ConsumerFilterLabels` and the exported
+`NarrowedFilterEligible` probe inherit the refusal rather than each having to remember it. `ConsumerFilter`
+repeats the condition only to own the reason (`health.FilterBroadReasonInstallIncomplete`) and the log line,
+which do not survive being flattened into a bare not-eligible.
+
+**Two premises that did not survive contact, both caught by tests rather than reasoning.**
+
+- **`HopIndex`'s zero value has `Anchor == 0` — a valid position, not `-1`.** `anchorHops` is published only
+  on the single-walk arm, so reading the declaration off `rs.anchorHops.Anchor >= 0` would have called every
+  multi-walk lens (edge-manifest's `edgeCatalog`, `edgeTasks`, `edgeEntitySessions`) and every non-full
+  pipeline actor-anchored, and refused to narrow them forever. Deriving over every branch sidesteps it. The
+  trap is now pinned with the anchored branch placed SECOND, so a first-branch-only derivation fails.
+- **`Anchor` is populated even when the index is `Incomplete` for another reason.** Gating on `Complete`
+  would have read `objectAttachments`, `capabilityServiceAccess` and five edge-manifest lenses as plain —
+  the exact failure the guard exists to prevent.
+
+**The corpus is bi-conditional, and that is now asserted rather than assumed.** Anchored ⟺ (actorAggregate ∨
+Personal), no exceptions across 105 lenses — the 15 Personal ones acquire the anchor from
+`pkgmgr.ExpandReadGrantWalks`' prepended head, which is why an un-expanded spec reads plain.
+`capabilityRoleIndex` is unanchored and untouched. So no shipped lens goes permanently broad and no
+enumerator-bearing lens escapes the guard.
+
+**The finding that mattered was in the test, not the code.** The label-derivation corpus census had been
+building a BARE pipeline per cypher and pinning its filter mode. Once the guard existed, the census's first
+fix installed the actor components off `DeclaresActorAnchor()` — the CYPHER — while production installs off
+`projection.IsActorAggregate(r)` / `IsPersonalLens(r)` — the LENS DEFINITION. The two agree today, so the
+census stayed green; but the divergence between them is precisely the defect this guard creates (an anchored
+cypher with no `projectionKind` takes the broad filter forever, with one log line and nothing else), and the
+census would have absorbed it instead of failing. It now installs off the definition, and
+`TestCorpusLenses_DeclaredAnchorMatchesInstalledKind` asserts the bi-conditional directly, over a floor of
+100+ checked cyphers so a collapsed enumeration cannot pass vacuously.
+
+**22 census rows moved, all `narrowed-relation` → `narrowed-label`, none to broad.** Every one is
+attributable to the `!actorAware` relation gate that has been live since Increment 2 — the census had been
+pinning a plain-pipeline fiction NARROWER than production. It also resolves a standing disagreement: the
+corpus census pinned `capabilityRoles: modeRelation` while `TestAuthPlaneLenses_ConsumerFilterVerdict`
+asserts relation-blind subjects for the shipped lens. The two now agree. **These 22 rows are expected to move
+BACK to `modeRelation` when 4a-4 opens the relation dimension** — that is the widening signal §18.5 asks 4a-4
+to produce, and a 4a-4 that does not move them has not done its job.
+
+**Health-KV vocabulary.** `filterBroadReason` is declared closed and total, so `install-incomplete` landed in
+the schema doc in the same change — JSON example, the reason→owner table, and the precedence rule, where it
+outranks the other three for a different reason than they rank each other: they are competing accounts of a
+derivation that RAN, this one says the derivation did not run, so every verdict below it would describe a
+pipeline shape the lens does not have. It is also the only reason that is a defect without raising
+`errorCount`, which is why it logs at `ERROR` where a footprint regression logs `WARN`.
+
+**Recorded, not fixed.** `addExpr` default-denies an unmodelled `Expr` without descending, so a
+`{key: $actorKey}` buried inside such an expression reports plain and the guard stays silent on it. No
+shipped cypher is in that shape and the same blind spot already costs every other consumer of that index its
+answer. The caveat is stated at `ConsumerFilter`, where the soundness claim is made, not on the predicate.
+The secure decryptor is the one install stage the guard cannot cover — nothing in a cypher declares a lens
+secure — and secure ∧ actorAggregate is refused at spec load today; whoever lifts that ban owes the guard a
+declared signal.

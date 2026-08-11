@@ -167,6 +167,57 @@ func TestConsumerFilter_DecisionIsTheSameDerivationAsTheFilter(t *testing.T) {
 			wantDecision: FilterDecision{Mode: health.FilterModeNarrowedLabel, LabelCount: 4},
 		},
 		{
+			name: "declared actor-anchored, enumerator not installed — broad, install-incomplete",
+			build: func() *Pipeline {
+				// The shape the ordering guard exists for, held at the exact
+				// moment it is dangerous: the rule publication has landed an
+				// exhaustive label set AND the declaration, and
+				// InstallActorAggregate has not run. Every plain condition is
+				// met, the exhaustive relation set included, so without the
+				// guard this row would deliver the relation-narrowed filter —
+				// the most aggressive form in the vocabulary — with none of the
+				// actor-aware conjuncts evaluated.
+				return &Pipeline{
+					ruleID: "fd-preinstall", coreKVBucket: "core-kv",
+					engineKind:               ruleengine.EngineFull,
+					plainReprojectLabels:     map[string]struct{}{"identity": {}},
+					plainReprojectRelations:  map[string]struct{}{"holdsRole": {}},
+					plainRelationsExhaustive: true,
+					declaresActorAnchor:      true,
+				}
+			},
+			wantFilterSubject: "$KV.core-kv.>",
+			wantDecision: FilterDecision{
+				Mode:        health.FilterModeBroad,
+				BroadReason: health.FilterBroadReasonInstallIncomplete,
+			},
+		},
+		{
+			// The same rule state with the enumerator INSTALLED is the
+			// companion the row above needs: the guard clears, and the
+			// actor-aware conjunction then decides on its own terms. Here it
+			// refuses for a §4.2 reason (no pattern-closure declaration, no
+			// sweep plan), which reports as the ordinary not-eligible — proving
+			// the two refusals stay distinguishable in the health entry.
+			name: "declared actor-anchored, enumerator installed — the §4.2 conjunction decides",
+			build: func() *Pipeline {
+				return &Pipeline{
+					ruleID: "fd-postinstall", coreKVBucket: "core-kv",
+					engineKind:               ruleengine.EngineFull,
+					plainReprojectLabels:     map[string]struct{}{"identity": {}},
+					plainReprojectRelations:  map[string]struct{}{"holdsRole": {}},
+					plainRelationsExhaustive: true,
+					declaresActorAnchor:      true,
+					actorEnumerator:          &ActorEnumerator{actorType: "identity"},
+				}
+			},
+			wantFilterSubject: "$KV.core-kv.>",
+			wantDecision: FilterDecision{
+				Mode:        health.FilterModeBroad,
+				BroadReason: health.FilterBroadReasonNotEligible,
+			},
+		},
+		{
 			name: "label count past the cap — broad, label-cap",
 			build: func() *Pipeline {
 				return &Pipeline{
@@ -737,4 +788,92 @@ func TestRegisterWithFilterFallback_CleanRegistrationLeavesTheFootprintAlone(t *
 	require.Equal(t, health.FilterModeNarrowedLabel, entry.FilterMode)
 	require.Equal(t, 2, entry.FilterLabelCount)
 	require.Empty(t, entry.FilterBroadReason)
+}
+
+// TestDeclaresActorAnchor_RidesTheRulePublication proves the ordering guard's
+// input is actually derived and published, and — the part a table row cannot
+// reach — that it has the rule snapshot's LIFETIME rather than one of its own.
+// A declaration left standing across a reload would refuse to narrow a lens the
+// author has since rewritten as plain, permanently.
+func TestDeclaresActorAnchor_RidesTheRulePublication(t *testing.T) {
+	const anchored = `
+MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
+RETURN identity.key AS actorKey, role.key AS r
+`
+	const plain = `
+MATCH (u:unit)-[:managedBy]->(o:owner)
+RETURN u.key AS key, o.name AS ownerName
+`
+	eng := full.New()
+	parse := func(spec string) ruleengine.CompiledRule {
+		cr, err := eng.Parse(spec)
+		require.NoError(t, err)
+		return cr
+	}
+
+	t.Run("single walk", func(t *testing.T) {
+		p, err := New("decl-single", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+		require.NoError(t, err)
+
+		require.NoError(t, p.UseFullEngine(eng, parse(anchored)))
+		require.True(t, p.ruleState().declaresActorAnchor)
+
+		// A reload to a plain body must clear it.
+		require.NoError(t, p.UseFullEngine(eng, parse(plain)))
+		require.False(t, p.ruleState().declaresActorAnchor,
+			"a reload must not leave the previous rule body's declaration armed")
+	})
+
+	t.Run("multi walk — one branch is enough", func(t *testing.T) {
+		// anchorHops is derived only on the single-walk arm, so a multi-walk
+		// Personal lens would read as plain if the declaration were taken from
+		// it. It is derived over every branch instead, and the anchored branch
+		// is deliberately the SECOND one so a first-branch-only derivation fails
+		// here.
+		p, err := New("decl-multi", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+		require.NoError(t, err)
+
+		branches := []ruleengine.CompiledRule{parse(plain), parse(anchored)}
+		require.NoError(t, p.UseFullEngineBranches(eng, branches[0], branches))
+		require.True(t, p.ruleState().declaresActorAnchor)
+
+		// And the trap that shape would walk into. The multi-walk arm publishes
+		// NO pattern graph, so anchorHops stays at its zero value — whose Anchor
+		// is 0, an ordinary valid position, not the -1 an anchorless index
+		// carries. Reading the declaration off `anchorHops.Anchor >= 0` would
+		// therefore call every non-full and every multi-walk pipeline
+		// actor-anchored and refuse to narrow it forever.
+		require.Zero(t, p.ruleState().anchorHops.Anchor)
+		require.False(t, p.ruleState().anchorHops.Complete)
+	})
+}
+
+// TestNarrowedFilterEligible_RefusesOnAnIncompleteInstall covers the exported
+// eligibility probe, which is the third door onto the same derivation and the
+// one with no health entry and no log line to make a wrong answer visible. It
+// has no production caller, so this pins the property for the activation-path
+// caller that acquires one: an eligibility computed off components that are not
+// installed describes a lens the deployment does not have.
+func TestNarrowedFilterEligible_RefusesOnAnIncompleteInstall(t *testing.T) {
+	preInstall := &Pipeline{
+		ruleID: "elig-preinstall", coreKVBucket: "core-kv",
+		engineKind:           ruleengine.EngineFull,
+		plainReprojectLabels: map[string]struct{}{"identity": {}},
+		declaresActorAnchor:  true,
+	}
+	labels, ok := preInstall.NarrowedFilterEligible()
+	require.False(t, ok,
+		"a declared actor-anchored rule with no enumerator must not answer the PLAIN branch's eligibility")
+	require.Nil(t, labels)
+
+	// The same rule state on a lens that declares no anchor is a genuinely plain
+	// lens, and the probe answers for it exactly as it does for every other.
+	plain := &Pipeline{
+		ruleID: "elig-plain", coreKVBucket: "core-kv",
+		engineKind:           ruleengine.EngineFull,
+		plainReprojectLabels: map[string]struct{}{"identity": {}},
+	}
+	labels, ok = plain.NarrowedFilterEligible()
+	require.True(t, ok)
+	require.Equal(t, map[string]struct{}{"identity": {}}, labels)
 }

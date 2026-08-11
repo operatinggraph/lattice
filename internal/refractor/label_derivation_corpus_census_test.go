@@ -54,6 +54,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
@@ -62,7 +63,8 @@ import (
 type labelVerdict struct {
 	exhaustive bool
 	labels     string // space-separated, sorted
-	// mode is the Core KV consumer filter this cypher's OWN derivation earns —
+	// mode is the Core KV consumer filter this cypher earns on a pipeline
+	// installed the way production installs it —
 	// health.FilterMode{NarrowedRelation,NarrowedLabel,Broad}, taken from the
 	// real pipeline.ConsumerFilter, not recomputed here
 	// (dynamic-type-taxonomy-design.md §10.3's footprint vocabulary). It is the
@@ -72,19 +74,21 @@ type labelVerdict struct {
 	// lands in — a lens can keep an unchanged label set and still double its
 	// delivery volume by losing a relation type.
 	//
-	// TWO LIMITS ON WHAT THIS PIN CLAIMS, both structural to a census that
-	// reads compiled cypher rather than a running Refractor:
+	// "Installed the way production installs it" is load-bearing, and it is what
+	// consumerFilterMode below spends its extra lines on. Asking a BARE pipeline
+	// what filter an actor-aware lens earns is not a conservative reading of that
+	// lens — it is a reading of a lens no deployment runs. The actor-aware
+	// conjunction has conjuncts the plain branch never evaluates, and the
+	// relation dimension is gated OFF for it, so the plain answer can be strictly
+	// NARROWER than the truth. ConsumerFilter refuses that question outright
+	// (health.FilterBroadReasonInstallIncomplete), which is why the census
+	// supplies the install rather than pinning a fiction.
 	//
-	//   - It is derived on a PLAIN pipeline. An actor-aware lens (an
-	//     actorAggregate or Personal lens) has more conjuncts than its cypher —
-	//     pattern-closure, a sweep plan, its anchor type in the label set — and
-	//     narrows by label only even when its relation set is exhaustive. For
-	//     those lenses this column is the cypher's own verdict and an UPPER
-	//     bound on the runtime one; auth_plane_narrowing_census_test.go pins the
-	//     runtime verdict for the auth-plane lenses that matter most.
-	//   - It is PER EXECUTABLE CYPHER, like every other column here. A
-	//     multi-walk lens's real filter comes from the UNION over its branches,
-	//     so its `name#N` rows pin each branch's own mode, not the lens's.
+	// ONE LIMIT ON WHAT THIS PIN CLAIMS, structural to a census that reads
+	// compiled cypher rather than a running Refractor: it is PER EXECUTABLE
+	// CYPHER, like every other column here. A multi-walk lens's real filter
+	// comes from the UNION over its branches, so its `name#N` rows pin each
+	// branch's own mode, not the lens's.
 	mode string
 }
 
@@ -106,23 +110,23 @@ const (
 // installed corpus ships, keyed by canonical name (`name#N` for one branch of a
 // multi-walk lens, in Walks declaration order).
 var corpusLabelVerdicts = map[string]labelVerdict{
-	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
-	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},
+	"appointmentReminders":           {narrow, "appointment patient provider", modeLabel},
+	"augurDispatchPending":           {narrow, "augurproposal", modeLabel},
 	"augurProposals":                 {narrow, "augurproposal", modeRelation},
 	"availableListings":              {narrow, "unit", modeRelation},
 	"cafeLeaseAccounts":              {narrow, "cafeaccount leaseapp", modeRelation},
 	"cafeLedgerHistory":              {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
-	"cafeStaleTabSettlement":         {narrow, "tab", modeRelation},
-	"cafeTabSettlement":              {narrow, "cafetransaction leaseapp tab", modeRelation},
-	"capability":                     {narrow, "identity role", modeRelation},
+	"cafeStaleTabSettlement":         {narrow, "tab", modeLabel},
+	"cafeTabSettlement":              {narrow, "cafetransaction leaseapp tab", modeLabel},
+	"capability":                     {narrow, "identity role", modeLabel},
 	"capabilityAuthorContext":        {narrow, "meta", modeRelation},
-	"capabilityAuthorPending":        {narrow, "capabilityproposal", modeRelation},
+	"capabilityAuthorPending":        {narrow, "capabilityproposal", modeLabel},
 	"capabilityProposals":            {narrow, "capabilityproposal", modeRelation},
-	"capabilityRead":                 {narrow, "identity", modeRelation},
+	"capabilityRead":                 {narrow, "identity", modeLabel},
 	"capabilityReadGrants":           {narrow, "identity", modeRelation},
 	"capabilityReadWildcardGrants":   {narrow, "identity role", modeRelation},
 	"capabilityRoleIndex":            {narrow, "permission role", modeRelation},
-	"capabilityRoles":                {narrow, "identity permission role", modeRelation},
+	"capabilityRoles":                {narrow, "identity permission role", modeLabel},
 	"clinicAppointments":             {narrow, "appointment building patient provider", modeLabel},
 	"clinicAppointmentsRead":         {narrow, "appointment building identity patient provider", modeLabel},
 	"clinicLedgerHistory":            {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
@@ -134,7 +138,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"clinicPatientsRead":             {narrow, "appointment building identity patient provider", modeLabel},
 	"clinicProviderReadGrants":       {narrow, "provider", modeRelation},
 	"clinicProviders":                {narrow, "identity provider", modeRelation},
-	"clinicSiteBackfill":             {narrow, "appointment building", modeRelation},
+	"clinicSiteBackfill":             {narrow, "appointment building", modeLabel},
 	"clinicSites":                    {narrow, "building", modeRelation},
 	"consoleOperatorReadGrants":      {narrow, "identity role", modeRelation},
 	"demoOperatorReadGrants":         {narrow, "identity role", modeRelation},
@@ -143,12 +147,12 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"edgeEntityBookings":             {narrow, "booking identity instructor session studio", modeLabel},
 	"edgeEntitySessions#1":           {narrow, "identity instructor session studio", modeLabel},
 	"edgeEntityTabs":                 {narrow, "identity leaseapp tab unit", modeLabel},
-	"edgeInstances":                  {narrow, "identity service", modeRelation},
+	"edgeInstances":                  {narrow, "identity service", modeLabel},
 	"edgeManifestProviderReadGrants": {narrow, "appointment identity instructor provider service serviceprovider session", modeLabel},
-	"edgeProviderQueue":              {narrow, "identity service serviceprovider", modeRelation},
-	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeRelation},
-	"edgeStaffPanes":                 {narrow, "identity meta role", modeRelation},
-	"followUpReminders":              {narrow, "appointment patient provider", modeRelation},
+	"edgeProviderQueue":              {narrow, "identity service serviceprovider", modeLabel},
+	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeLabel},
+	"edgeStaffPanes":                 {narrow, "identity meta role", modeLabel},
+	"followUpReminders":              {narrow, "appointment patient provider", modeLabel},
 	"frontDeskBookings":              {narrow, "booking leaseapp session", modeRelation},
 	"frontDeskLeaseDetails":          {narrow, "leaseapp unit", modeRelation},
 	"frontDeskVisits":                {narrow, "appointment leaseapp", modeRelation},
@@ -158,14 +162,14 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"leaseAccounts":                  {narrow, "account leaseapp", modeRelation},
 	"leaseApplicationsRead":          {narrow, "augurproposal identity leaseapp object service unit", modeLabel},
 	"leaseExpiry":                    {narrow, "identity leaseapp renewal unit", modeLabel},
-	"leaseRentSettlement":            {narrow, "clause leaseapp", modeRelation},
+	"leaseRentSettlement":            {narrow, "clause leaseapp", modeLabel},
 	"ledgerHistory":                  {narrow, "account clause leaseapp transaction", modeLabel},
 	"oneBillCafeEntries":             {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
 	"oneBillClinicEntries":           {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
 	"oneBillRentEntries":             {narrow, "account leaseapp transaction", modeRelation},
 	"oneBillWellnessEntries":         {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
-	"pastDueAppointments":            {narrow, "appointment patient provider", modeRelation},
-	"pastDueBookings":                {narrow, "booking identity session", modeRelation},
+	"pastDueAppointments":            {narrow, "appointment patient provider", modeLabel},
+	"pastDueBookings":                {narrow, "booking identity session", modeLabel},
 	"patientIdentityReadGrants":      {narrow, "identity patient", modeRelation},
 	"piiKeyEnvelope":                 {narrow, "identity", modeRelation},
 	"providerAppointmentsRead":       {narrow, "appointment building identity patient provider", modeLabel},
@@ -185,18 +189,18 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"retentionKeyStatus":                {narrow, "retentionclass", modeRelation},
 	"shredStatus":                       {narrow, "identity", modeRelation},
 	"staffReadGrants":                   {narrow, "building identity role", modeRelation},
-	"unroutedTasks":                     {narrow, "role task", modeRelation},
-	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
+	"unroutedTasks":                     {narrow, "role task", modeLabel},
+	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeLabel},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},
-	"wellnessBookingReminders":          {narrow, "booking identity session", modeRelation},
+	"wellnessBookingReminders":          {narrow, "booking identity session", modeLabel},
 	"wellnessBookings":                  {narrow, "booking identity session studio", modeLabel},
 	"wellnessClassPriceSettlement":      {narrow, "booking identity session wellnessaccount wellnesstransaction", modeLabel},
 	"wellnessInstructors":               {narrow, "instructor studio", modeRelation},
 	"wellnessLedgerHistory":             {narrow, "identity wellnessaccount wellnesstransaction", modeRelation},
 	"wellnessMemberAccounts":            {narrow, "booking identity wellnessaccount", modeRelation},
 	"wellnessNoShowSettlement":          {narrow, "booking identity wellnessaccount wellnesstransaction", modeLabel},
-	"wellnessOrphanedBookingSettlement": {narrow, "booking session", modeRelation},
-	"wellnessRefundSettlement":          {narrow, "wellnessrefund wellnesstransaction", modeRelation},
+	"wellnessOrphanedBookingSettlement": {narrow, "booking session", modeLabel},
+	"wellnessRefundSettlement":          {narrow, "wellnessrefund wellnesstransaction", modeLabel},
 	"wellnessStudios":                   {narrow, "studio", modeRelation},
 
 	// Broad: something in the cypher binds a type no label names — an unlabeled
@@ -263,10 +267,12 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 // the caps are the pipeline package's own unexported constants precisely so
 // there is one place that knows them.
 //
-// The pipeline is plain and bare — no actor enumerator, no taxonomy resolver, no
-// supervisor — which is what makes the pin reproducible from compiled cypher
-// alone. See labelVerdict.mode for exactly what that costs.
-func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule) string {
+// actorAware comes from the LENS DEFINITION (forEachCorpusCypher's doc), which
+// is the only source cmd/refractor's install switch consults. Deciding it here
+// from the cypher instead would make the census install components a deployment
+// would not, and the mode it pinned would then be a mode no deployment can
+// produce.
+func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule, actorAware bool) string {
 	t.Helper()
 	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
 	require.NoErrorf(t, err, "%s census adapter", name)
@@ -281,7 +287,28 @@ func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengi
 	// declared taxonomy, which is exactly what a taxonomy-driven expansion makes
 	// it in production: declare a fourth location leaf and this census moves.
 	p.SetTaxonomyResolver(corpusTaxonomyResolver(t))
-	require.NoErrorf(t, p.UseFullEngine(eng, cr), "%s must activate against a plain pipeline", name)
+	require.NoErrorf(t, p.UseFullEngine(eng, cr), "%s must activate", name)
+	// The install stages an actor-aware lens gets, in cmd/refractor's own order
+	// (UseFullEngine → InstallActorAggregate → ConsumerFilter). The three
+	// components arrive together in production and so they do here; supplying
+	// only some of them would pin a footprint no deployment can produce.
+	//
+	// The anchor TYPE is the one input taken off the pattern, because
+	// pkgmgr.LensSpec's descriptor and the cypher must agree on it anyway: the
+	// descriptor's anchor is the vertex the pattern pins with `{key: $actorKey}`,
+	// so that position's own label IS the anchor type. An actor-aware lens whose
+	// pattern pins nothing has no anchor position to read, and the census fails
+	// it in TestCorpusLenses_DeclaredAnchorMatchesInstalledKind rather than
+	// guessing one here.
+	if fullCR, isFull := cr.(*full.CompiledRule); isFull && actorAware {
+		ix := fullCR.AnchorHopIndex()
+		require.GreaterOrEqualf(t, ix.Anchor, 0,
+			"%s is installed actor-aware but its pattern pins no $actorKey position", name)
+		anchorType := ix.Labels[ix.Anchor]
+		p.SetActorEnumerator(pipeline.NewActorEnumerator(nil, nil, anchorType))
+		p.SetPatternClosedOutput(true)
+		p.SetSweepPlan(pipeline.SweepPlan{AnchorType: anchorType, KeyPrefix: "census-" + name + "."})
+	}
 	_, _, dec := p.ConsumerFilter()
 	return dec.Mode
 }
@@ -332,7 +359,7 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 	eng := full.New()
 	got := make(map[string]labelVerdict)
 
-	derive := func(name, spec string) {
+	derive := func(name, spec string, actorAware bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)
@@ -345,7 +372,7 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 		sort.Strings(sorted)
 		_, dup := got[name]
 		require.Falsef(t, dup, "two installed lenses share the canonical name %q", name)
-		got[name] = labelVerdict{exhaustive, strings.Join(sorted, " "), consumerFilterMode(t, name, eng, cr)}
+		got[name] = labelVerdict{exhaustive, strings.Join(sorted, " "), consumerFilterMode(t, name, eng, cr, actorAware)}
 	}
 	forEachCorpusCypher(t, derive)
 	return got
@@ -361,12 +388,22 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 // alone — for the two reasons this file's header gives. A second census that
 // swept the registry its own way would quietly cover a different corpus and
 // pin a different thing.
-func forEachCorpusCypher(t *testing.T, visit func(name, spec string)) {
+//
+// actorAware is the lens DEFINITION's answer to "does activation install the
+// cross-vertex fan-out for this lens", read off the same two aspects
+// cmd/refractor's install switch reads (projection.IsActorAggregate /
+// projection.IsPersonalLens, main.go) and off nothing else — notably NOT off
+// the cypher. A census that decided it from the cypher would be deciding by a
+// different rule than the deployment it claims to model, and would absorb the
+// exact disagreement between the two that
+// TestCorpusLenses_DeclaredAnchorMatchesInstalledKind exists to catch.
+func forEachCorpusCypher(t *testing.T, visit func(name, spec string, actorAware bool)) {
 	t.Helper()
 	addLens := func(l pkgmgr.LensSpec) {
+		actorAware := l.ProjectionKind == projection.ActorAggregateKind || l.Personal
 		if len(l.SpecBranches) > 0 {
 			for i, b := range l.SpecBranches {
-				visit(fmt.Sprintf("%s#%d", l.CanonicalName, i), b)
+				visit(fmt.Sprintf("%s#%d", l.CanonicalName, i), b, actorAware)
 			}
 			return
 		}
@@ -382,7 +419,7 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string)) {
 				"lens %q has no cypher but sources %q, not an event stream", l.CanonicalName, l.Source.Kind)
 			return
 		}
-		visit(l.CanonicalName, l.Spec)
+		visit(l.CanonicalName, l.Spec, actorAware)
 	}
 
 	for _, name := range pkgregistry.Names() {
@@ -400,8 +437,57 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string)) {
 		bootstrap.CapabilityReadGrantsLensDefinition(),
 		bootstrap.CapabilityReadWildcardGrantsLensDefinition(),
 	} {
-		visit(l.CanonicalName, l.CypherRule)
+		// bootstrap.LensDefinition carries projectionKind and no Personal flag —
+		// the kernel ships no Personal lens, and the seeder writes the same
+		// projectionKind aspect a package lens declares, so activation switches
+		// on it identically.
+		visit(l.CanonicalName, l.CypherRule, l.ProjectionKind == projection.ActorAggregateKind)
 	}
+}
+
+// TestCorpusLenses_DeclaredAnchorMatchesInstalledKind pins the bi-conditional
+// two independent mechanisms rest on, across every executable cypher the corpus
+// ships: a lens's CYPHER pins `{key: $actorKey}` if and only if its DEFINITION
+// makes activation install the cross-vertex fan-out.
+//
+// The two mechanisms read different sources and can only agree by this
+// invariant holding. cmd/refractor installs off the definition
+// (projection.IsActorAggregate / IsPersonalLens); pipeline.ConsumerFilter's
+// install-completeness guard reads the cypher (declaresActorAnchor). A lens
+// that satisfies one and not the other is the defect, in both directions:
+//
+//   - Cypher anchored, definition plain. Activation installs no enumerator, the
+//     guard sees a declared anchor with none installed, and the lens takes the
+//     BROAD filter for the life of the process — one log line and no other
+//     signal. The head is easy to write by accident: `MATCH (t:tab {key:
+//     $actorKey})` is what cafeStaleTabSettlement already opens with, so a new
+//     nats-kv lens copied from it and missing `ProjectionKind` lands here.
+//   - Definition actor-aware, cypher unanchored. The enumerator is installed and
+//     the guard stays silent, but nothing pins an anchor position, so the
+//     affected-anchor derivation can never index the lens and every event falls
+//     back to the BFS — correct, permanently un-narrowed, and invisible.
+//
+// It is a test of its own rather than an assertion inside the label census
+// because the census would otherwise ABSORB the disagreement: it would install
+// components production does not, and report a narrowed mode for a lens that is
+// broad on the wire.
+func TestCorpusLenses_DeclaredAnchorMatchesInstalledKind(t *testing.T) {
+	eng := full.New()
+	checked := 0
+	forEachCorpusCypher(t, func(name, spec string, actorAware bool) {
+		cr, err := eng.Parse(spec)
+		require.NoErrorf(t, err, "%s must parse", name)
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.Truef(t, isFull, "%s must compile to the full engine", name)
+		require.Equalf(t, actorAware, fullCR.DeclaresActorAnchor(),
+			"%s: its lens definition says activation installs the actor fan-out = %v, but its cypher pins {key: $actorKey} = %v. "+
+				"Anchored-but-plain takes the broad filter forever (the install-completeness guard refuses to narrow); "+
+				"actor-aware-but-unanchored can never index its affected anchors. Fix the lens, not this assertion",
+			name, actorAware, fullCR.DeclaresActorAnchor())
+		checked++
+	})
+	require.Greaterf(t, checked, 100,
+		"the corpus enumeration collapsed to %d cyphers — this invariant is only worth what it covers", checked)
 }
 
 func TestCorpusLabelDerivation_PinnedVerdicts(t *testing.T) {

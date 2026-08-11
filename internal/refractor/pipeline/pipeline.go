@@ -221,6 +221,15 @@ type Pipeline struct {
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
 
+	// declaresActorAnchor is whether the PUBLISHED rule's cypher pins a pattern
+	// position with `{key: $actorKey}` — see the ruleState field of the same
+	// name for what reads it and why. Guarded by ruleMu and republished on every
+	// rule swap alongside anchorHops. Its zero value is false, which reads as
+	// "declares nothing", the correct answer for a pipeline no rule has ever
+	// been published on: ConsumerFilter's plain arm already refuses such a
+	// pipeline on engineKind.
+	declaresActorAnchor bool
+
 	// labelExpansion is the taxonomy expansion the PUBLISHED rule state
 	// matches against — the very map threaded into full.WithLabelExpansion,
 	// HopIndex.WithLabelExpansion and seedAnchorLabels by the publication that
@@ -725,6 +734,13 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			// through the same path every other `*` branch goes through.
 			continue
 		}
+		// The lens's declared projection kind, collected in the same lockstep
+		// walk as the label and relation sets so the three come from one
+		// traversal of one rule and cannot disagree about it. One branch
+		// declaring the anchor makes the lens actor-anchored.
+		if fullCR.DeclaresActorAnchor() {
+			next.declaresActorAnchor = true
+		}
 		ls, ok := fullCR.ReferencedLabels()
 		if !ok {
 			exhaustive = false
@@ -1038,6 +1054,21 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// declaresActorAnchor is true when this rule's cypher pins a pattern
+	// position with `{key: $actorKey}` — the lens's DECLARED projection kind,
+	// as against p.actorEnumerator, which is what the host has INSTALLED so
+	// far. ConsumerFilter compares the two: declared actor-anchored with no
+	// enumerator is an install that has not finished, and the only input in
+	// that derivation whose absence is otherwise indistinguishable from a
+	// genuinely plain lens.
+	//
+	// Derived over every branch, not only the single-walk arm anchorHops takes:
+	// a multi-walk Personal lens's branches each carry their own anchor, and
+	// one branch declaring it is enough to make the lens actor-anchored. It
+	// rides the rule snapshot for the same reason narrowingBlocked does — it is
+	// a property OF this compiled rule, published atomically with it, so a
+	// reload cannot leave a previous rule body's declaration standing.
+	declaresActorAnchor bool
 	// labelExpansion is the taxonomy expansion this rule state's matcher,
 	// anchor graph and seed set were all built from — see the Pipeline field
 	// of the same name, which this publishes into.
@@ -1088,6 +1119,7 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
+		declaresActorAnchor: p.declaresActorAnchor,
 		labelExpansion:      p.labelExpansion,
 		narrowingBlocked:    p.plainNarrowingBlocked,
 	}
@@ -1126,6 +1158,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.declaresActorAnchor = rs.declaresActorAnchor
 	p.labelExpansion = rs.labelExpansion
 	p.plainNarrowingBlocked = rs.narrowingBlocked
 }
@@ -1410,6 +1443,12 @@ func (p *Pipeline) PatternClosedOutput() bool { return p.patternClosedOutput }
 // arm judges by parent type. It emits a source-pinned AND a target-pinned link
 // form, so a link is admitted when EITHER endpoint type is in the set — which is
 // what the link arm judges, skipping only when NEITHER is.
+//
+// A pipeline whose install has not finished answers (nil, false) here, not the
+// plain branch's verdict — see narrowedFilterEligible. An eligibility answered
+// off components that are not installed yet is a claim about a lens that does
+// not exist, and this accessor is exactly where an activation-path caller would
+// otherwise pick one up.
 func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool) {
 	return p.narrowedFilterEligible(p.ruleState())
 }
@@ -1417,7 +1456,18 @@ func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool
 // narrowedFilterEligible is NarrowedFilterEligible against a snapshot the
 // caller already holds — see actorAwareNarrowingLabels for why the in-pipeline
 // callers must not take their own.
+//
+// It carries the install-completeness guard itself, rather than leaving it to
+// each caller, so eligibility is unanswerable-by-construction on a pipeline
+// whose install has not finished and a fourth entry point inherits the refusal
+// instead of having to remember it. ConsumerFilter still tests the same
+// condition ahead of this call: it owes the health entry a REASON and an
+// operator a log line, and neither survives being flattened into a bare
+// not-eligible here.
 func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struct{}, ok bool) {
+	if p.actorEnumerator == nil && rs.declaresActorAnchor {
+		return nil, false
+	}
 	if p.actorEnumerator != nil {
 		return p.actorAwareNarrowingLabels(rs)
 	}
@@ -1457,24 +1507,56 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // InstallActorAggregate (enumerator, pattern-closure, sweep plan) →
 // SetSecureDecryptor → ConsumerFilter → RunOn (cmd/refractor/main.go).
 //
-// GETTING THAT ORDER WRONG COSTS CORRECTNESS, NOT MERELY NARROWING, and the
-// failure is counter-intuitive enough to state outright: a missing stage does
-// NOT fall back to the broad filter. With the enumerator not yet installed this
-// pipeline is indistinguishable from a plain one, so narrowedFilterEligible
-// takes the PLAIN branch — whose two conditions (full engine, exhaustive labels)
-// UseFullEngineBranches has already satisfied. The result is a narrowed filter
-// granted with NONE of §4.2's conjuncts evaluated: no pattern-closure, no sweep
-// plan, no anchor-type-in-labels, no decryptor check — and then the relation
-// dimension applies too, because that gate also reads the enumerator. Calling
-// this early therefore yields the MOST aggressive filter, not the broadest. A
-// missed anchor soft-delete is an over-grant, and per the paragraph below no
-// revert recovers it. Any new install stage belongs ABOVE this call.
+// GETTING THAT ORDER WRONG WOULD COST CORRECTNESS, NOT MERELY NARROWING, and
+// the failure is counter-intuitive enough to state outright: a missing stage
+// does not naturally fall back to the broad filter. With the enumerator not yet
+// installed this pipeline is indistinguishable from a plain one, so
+// narrowedFilterEligible would take the PLAIN branch — whose two conditions
+// (full engine, exhaustive labels) UseFullEngineBranches has already satisfied.
+// The result would be a narrowed filter granted with NONE of §4.2's conjuncts
+// evaluated: no pattern-closure, no sweep plan, no anchor-type-in-labels, no
+// decryptor check — and the relation dimension would apply too, because that
+// gate also reads the enumerator. An early call therefore reaches for the MOST
+// aggressive filter, not the broadest, and a missed anchor soft-delete is an
+// over-grant that (per the paragraph below) no revert recovers.
 //
-// The secure-decryptor conjunct is a special case of the same rule: installing a
-// decryptor after this call would narrow a secure lens whose decryptor conjunct
-// was never evaluated. Secure columns are refused on any non-empty
-// projectionKind at spec load, so secure ∧ actorAggregate cannot exist today;
-// whoever lifts that ban owns this ordering.
+// The install-completeness guard is what closes that off for every lens whose
+// declaration this pipeline can see. It compares the lens's DECLARED kind
+// against what is installed: a rule whose cypher pins `{key: $actorKey}`
+// (rs.declaresActorAnchor) with no enumerator on the pipeline is an install
+// caught mid-flight, and this function then refuses to NARROW — broad filter,
+// health.FilterBroadReasonInstallIncomplete, logged at Error, louder than the
+// label cap's Warn because that arm reports a lens whose footprint regressed
+// while this one reports a HOST that wired the pipeline in the wrong order,
+// which no lens author can fix and no data will clear. It does not refuse
+// activation: the hazard is asymmetric (an over-narrow filter is unrecoverable,
+// a broad one is merely wasteful and heals on the next rebuild), so a
+// caller-ordering bug must not take a healthy lens down. Any new install stage
+// still belongs ABOVE this call — the guard reports the mistake, it does not
+// make the ordering free.
+//
+// "Whose declaration this pipeline can see" is the guard's one gap, and it is
+// stated here rather than left on the predicate because this is where the
+// soundness claim gets made: full.DeclaresActorAnchor cannot see a
+// `{key: $actorKey}` node buried inside an expression shape the hop-index
+// builder does not model, because that arm default-denies without descending. It
+// would report such a lens plain, and the guard would stay silent on it. No
+// shipped cypher is in that shape, and the same blind spot already costs every
+// other consumer of that index its answer — but a new one written that way gets
+// the pre-install narrowing this guard otherwise refuses.
+//
+// Two SIBLING surfaces share the guard rather than reimplementing it:
+// narrowedFilterEligible carries it (so ConsumerFilterLabels and the exported
+// NarrowedFilterEligible probe inherit the refusal), and this function repeats
+// the condition only to own the REASON and the log line.
+//
+// The secure-decryptor conjunct is the one stage the guard does NOT cover, for
+// want of a declared signal: a decryptor installed after this call would narrow
+// a secure lens whose decryptor conjunct was never evaluated, and nothing in the
+// cypher declares that a lens is secure. Secure columns are refused on any
+// non-empty projectionKind at spec load, so secure ∧ actorAggregate cannot exist
+// today; whoever lifts that ban owns this ordering, and owes the guard a
+// declared signal for it.
 //
 // RECOVERING FROM A WRONG NARROW IS NOT A CODE REVERT, and this is the site that
 // has to say so. A JetStream filter update never rewinds the consumer's cursor,
@@ -1569,6 +1651,27 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// carry this — actor-awareness is installed, not compiled — so it is hoisted
 	// here instead.
 	actorAware := p.actorEnumerator != nil
+	// The install-completeness guard, evaluated before any verdict because a
+	// verdict derived from an unfinished install is not a verdict about this
+	// lens at all: the plain branch it would take answers a question about a
+	// DIFFERENT pipeline shape. Declared actor-anchored (the cypher pins
+	// `{key: $actorKey}`) with no enumerator installed is the one input whose
+	// absence is otherwise indistinguishable from a genuinely plain lens, and
+	// it is the only combination this arm claims — a lens the host really did
+	// install as plain declares no anchor, so nothing that narrows today stops.
+	//
+	// Refusing to NARROW rather than refusing to activate is the asymmetry: the
+	// broad filter costs delivered-then-skipped events and heals on the next
+	// rebuild, while an over-narrow one is unrecoverable, so a caller-ordering
+	// bug must not take a healthy lens down.
+	if !actorAware && rs.declaresActorAnchor {
+		slog.Error("pipeline: consumer filter derived before the lens's install stages completed — refusing to narrow, falling back to the broad filter",
+			"ruleId", p.ruleID)
+		return nil, subjects.CoreKVFilter(p.coreKVBucket), FilterDecision{
+			Mode:        health.FilterModeBroad,
+			BroadReason: health.FilterBroadReasonInstallIncomplete,
+		}
+	}
 	labels, ok := p.narrowedFilterEligible(rs)
 	if !ok || len(labels) == 0 {
 		// An eligible lens with an EMPTY label set lands here too, and reports
@@ -1610,7 +1713,13 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// because its relations do not qualify.
 	//
 	// The relation dimension is PLAIN-ONLY, and that is a correctness gate, not
-	// a budget one. It is sound for a plain lens because plainLinkReactsTo is its
+	// a budget one. Reaching it with !actorAware means the lens is GENUINELY
+	// plain rather than merely not-yet-installed — the install-completeness
+	// guard above has already returned for any rule that DECLARES an actor
+	// anchor — and that is what entitles this arm to name the plain client gate
+	// as its counterpart at all.
+	//
+	// It is sound for a plain lens because plainLinkReactsTo is its
 	// client-side counterpart: the arm already skips a link whose relation the
 	// patterns never traverse, so the server withholding that link is strictly
 	// more conservative than a gate that ran regardless. The actor-aware link arm
@@ -1654,6 +1763,12 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 // dimension too, so diffing their strings reports a relation-narrowed filter
 // widening to a label-narrowed one — strictly more admitted — as though labels
 // had been dropped.
+//
+// It inherits the install-completeness guard from narrowedFilterEligible, which
+// is what keeps "narrowed" meaning the same thing in both answers: an unfinished
+// install makes the label verdict unsafe here exactly as it does there.
+// Not-narrowed is the answer that keeps the shrink comparison honest — a broad
+// filter admits everything, so no caller can read a dropped label out of it.
 func (p *Pipeline) ConsumerFilterLabels() (map[string]struct{}, bool) {
 	rs := p.ruleState()
 	labels, ok := p.narrowedFilterEligible(rs)

@@ -21,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
@@ -157,6 +158,138 @@ func TestNonExhaustiveAuthPlaneLenses_StayBroad(t *testing.T) {
 				"a non-exhaustive pattern must keep the unconditional fan-out — any type may bind")
 		})
 	}
+}
+
+// TestConsumerFilter_RefusesToNarrowBeforeInstallCompletes drives cmd/refractor's
+// real activation ORDER against the real capabilityRoles cypher, and stops it one
+// stage short. Every other test here builds a fully-installed pipeline, which is
+// precisely the state in which the ordering hazard is invisible.
+//
+// The hazard is inverted, which is why it needs its own test rather than an
+// assertion bolted onto an existing one: with the enumerator not yet installed,
+// the pipeline is shaped exactly like a plain lens, so the derivation would take
+// the PLAIN branch — whose conditions UseFullEngineBranches has already met — and
+// hand back the MOST aggressive filter with none of §4.2's actor-aware conjuncts
+// evaluated. Nothing widens a registered filter back, so the mistake would be
+// permanent.
+//
+// The second half is what stops the guard from degenerating into "always broad":
+// the SAME pipeline, one install stage later, must narrow to the same three
+// labels the census above pins.
+func TestConsumerFilter_RefusesToNarrowBeforeInstallCompletes(t *testing.T) {
+	const anchorType = "identity"
+	eng := full.New()
+	cr, err := eng.Parse(rbacCapabilityRolesSpec(t))
+	require.NoError(t, err)
+	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	p, err := pipeline.New("CensusOrderIng9999999", "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
+	require.NoError(t, err)
+
+	// Stage 1 of the install order, and only stage 1. The enumerator, the
+	// pattern-closure declaration and the sweep plan all arrive together with
+	// projection.InstallActorAggregate, which has not run yet.
+	require.NoError(t, p.UseFullEngine(eng, cr))
+
+	filterSubjects, filterSubject, decision := p.ConsumerFilter()
+	require.Empty(t, filterSubjects,
+		"an unfinished install must not yield a narrowed subject set — no filter update rewinds a JetStream cursor")
+	require.Equal(t, "$KV."+bootstrap.CoreKVBucket+".>", filterSubject,
+		"the refusal is the BROAD filter, not a refusal to activate: a caller-ordering bug must not take a healthy lens down")
+	require.Equal(t, health.FilterModeBroad, decision.Mode)
+	require.Equal(t, health.FilterBroadReasonInstallIncomplete, decision.BroadReason,
+		"the health entry must name the incompleteness, not report it as an ordinary not-eligible lens")
+
+	labels, narrowed := p.ConsumerFilterLabels()
+	require.False(t, narrowed,
+		"the label view must agree with the filter about whether this lens is narrowed")
+	require.Nil(t, labels)
+
+	// Finish the install. The identical call must now narrow, or the guard is
+	// merely a permanent broad filter wearing a reason.
+	p.SetActorEnumerator(pipeline.NewActorEnumerator(nil, nil, anchorType))
+	p.SetPatternClosedOutput(true)
+	p.SetSweepPlan(pipeline.SweepPlan{AnchorType: anchorType, KeyPrefix: "CensusOrderIng9999999."})
+
+	filterSubjects, filterSubject, decision = p.ConsumerFilter()
+	require.Empty(t, filterSubject)
+	require.Equal(t, health.FilterModeNarrowedLabel, decision.Mode)
+	require.Equal(t, 3, decision.LabelCount)
+	require.ElementsMatch(t, []string{
+		"$KV." + bootstrap.CoreKVBucket + ".vtx.identity.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.identity.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.identity.>",
+		"$KV." + bootstrap.CoreKVBucket + ".vtx.role.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.role.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.role.>",
+		"$KV." + bootstrap.CoreKVBucket + ".vtx.permission.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.permission.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.permission.>",
+	}, filterSubjects)
+
+	labels, narrowed = p.ConsumerFilterLabels()
+	require.True(t, narrowed)
+	require.Equal(t, map[string]struct{}{"identity": {}, "role": {}, "permission": {}}, labels)
+}
+
+// TestConsumerFilter_PlainLensNarrowsWithNoEnumerator is the guard's regression
+// axis, stated on the real corpus rather than on a fixture: a lens the host
+// installs as plain declares no `$actorKey` anchor, so the install-completeness
+// guard does not apply to it and it narrows on its own terms. A failure here
+// means the guard has started reading plain lenses as half-installed ones, which
+// puts every plain narrowing in the corpus on the broad filter.
+func TestConsumerFilter_PlainLensNarrowsWithNoEnumerator(t *testing.T) {
+	cypher, found := plainNarrowingSpec(t)
+	if !found {
+		t.Skip("no plain full-engine lens in the registry snapshot derives an exhaustive label set")
+	}
+	eng := full.New()
+	cr, err := eng.Parse(cypher)
+	require.NoError(t, err)
+	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	p, err := pipeline.New("CensusPlaiNarrow99999", "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
+	require.NoError(t, err)
+	require.NoError(t, p.UseFullEngine(eng, cr))
+
+	filterSubjects, filterSubject, decision := p.ConsumerFilter()
+	require.Empty(t, filterSubject,
+		"a genuinely plain lens has no enumerator by design — the install-completeness guard must not read that as unfinished")
+	require.NotEmpty(t, filterSubjects)
+	require.NotEqual(t, health.FilterModeBroad, decision.Mode)
+	require.Empty(t, decision.BroadReason)
+}
+
+// plainNarrowingSpec returns a shipped cypher that is full-engine, declares no
+// actor anchor, and derives an exhaustive label set — the shape the regression
+// test needs. Found by walking the registry rather than named, so the test keeps
+// working when the corpus moves.
+func plainNarrowingSpec(t *testing.T) (cypher string, found bool) {
+	t.Helper()
+	eng := full.New()
+	for _, def := range pkgregistry.All() {
+		for _, l := range def.Lenses {
+			if l.Spec == "" || l.ProjectionKind != "" || l.Personal {
+				continue
+			}
+			cr, err := eng.Parse(l.Spec)
+			if err != nil {
+				continue
+			}
+			fullCR, isFull := cr.(*full.CompiledRule)
+			if !isFull || fullCR.DeclaresActorAnchor() {
+				continue
+			}
+			if ls, ok := fullCR.ReferencedLabels(); !ok || len(ls) == 0 || len(ls) > 6 {
+				continue
+			}
+			if len(fullCR.ExpansionLabels()) > 0 {
+				continue
+			}
+			return l.Spec, true
+		}
+	}
+	return "", false
 }
 
 // rbacCapabilityRolesSpec returns rbac-domain's shipped capabilityRoles cypher.

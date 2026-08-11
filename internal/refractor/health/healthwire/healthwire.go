@@ -66,6 +66,13 @@ const (
 //     vanished abstract type, or no snapshot ever loaded. Waiting does not fix
 //     this one; a package does. An operator handed taxonomy-unarmed here would
 //     wait forever for an arming that changes nothing.
+//   - install-incomplete — the filter was derived before the lens's install
+//     stages finished: its cypher DECLARES an actor anchor while its enumerator
+//     is not installed yet, so the actor-aware conjuncts could not be evaluated
+//     at all. The one reason that reports a HOST bug (a `cmd/refractor` install
+//     stage ordered after the derivation) rather than a property of the lens,
+//     and the only one whose broad filter is a refusal to answer rather than an
+//     answer of "cannot narrow".
 //   - registration-failed — the lens DID derive a narrowed filter and
 //     JetStream refused to register it, so it fell back to the broad one. The
 //     only reason decided after the derivation, and the only one that also
@@ -81,6 +88,7 @@ const (
 	FilterBroadReasonLabelCap             = "label-cap"
 	FilterBroadReasonTaxonomyUnarmed      = "taxonomy-unarmed"
 	FilterBroadReasonTaxonomyUnresolvable = "taxonomy-unresolvable"
+	FilterBroadReasonInstallIncomplete    = "install-incomplete"
 	FilterBroadReasonRegistrationFailed   = "registration-failed"
 )
 

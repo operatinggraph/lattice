@@ -918,7 +918,7 @@ above).
   "secureRedactions": <uint64>,
   "filterMode": "narrowed-relation | narrowed-label | broad",
   "filterLabelCount": <int>,
-  "filterBroadReason": "not-eligible | non-exhaustive | label-cap | taxonomy-unarmed | taxonomy-unresolvable | registration-failed"
+  "filterBroadReason": "not-eligible | non-exhaustive | label-cap | taxonomy-unarmed | taxonomy-unresolvable | install-incomplete | registration-failed"
 }
 ```
 
@@ -1024,6 +1024,7 @@ it names the cause the derivation actually acted on, not every condition that ha
 | `label-cap` | the derivation was exhaustive but resolved to more labels than the narrowed filter carries | nobody, necessarily — a **footprint regression**: another package's install can push a one-label lens over the cap |
 | `taxonomy-unarmed` | every referenced label resolved, but the resolver's answer is not guaranteed **current** — a snapshot is loaded and the invalidation consumer is not live | **nobody: this one clears on its own** the moment the resolver arms. The only reason in the vocabulary that needs no edit anywhere |
 | `taxonomy-unresolvable` | the taxonomy could not answer **at all** — a `subtypeOf` cycle, an over-depth chain, an ambiguous `canonicalName`, a vanished abstract type, or no snapshot ever loaded | **a package author, and waiting never helps.** This never clears by itself; it is the reason `taxonomy-unarmed` must not be used for it |
+| `install-incomplete` | the filter was derived before the lens's install stages finished: its cypher **declares** an actor anchor (`{key: $actorKey}`) while its enumerator is not installed, so none of the actor-aware conjuncts could be evaluated and the derivation **refused to answer** rather than answering wrong | **a `cmd/refractor` maintainer — nobody else can.** The only reason in the vocabulary that reports a HOST wiring bug rather than a property of the lens: no lens author can fix it, no cypher edit clears it, and no amount of waiting or data changes it. An install stage was ordered after the filter derivation instead of before it |
 | `registration-failed` | the lens DID derive a narrowed filter and JetStream refused to register it | an operator: this is the one reason that is also a **fault**, and the only one that raises `errorCount`/`lastError` alongside |
 
 The two taxonomy reasons are deliberately separate words for the two halves of §4.2's fork, and the
@@ -1032,16 +1033,31 @@ distinction is the whole point: `taxonomy-unarmed` is a lens waiting for somethi
 where the second is true waits forever.
 
 When more than one reason holds at once, the one reported is the one that **survives fixing the
-others** — `non-exhaustive` outranks `taxonomy-unresolvable` outranks `taxonomy-unarmed`. So a lens
-whose cypher is inexhaustive AND whose resolver is unarmed reads `non-exhaustive`: arming would not
-change its verdict, and reporting the transient cause would point at the wrong repair.
+others** — `install-incomplete` outranks `non-exhaustive` outranks `taxonomy-unresolvable` outranks
+`taxonomy-unarmed`. So a lens whose cypher is inexhaustive AND whose resolver is unarmed reads
+`non-exhaustive`: arming would not change its verdict, and reporting the transient cause would point
+at the wrong repair.
 
-Only `registration-failed` is an error. A cap-driven or eligibility-driven fallback is a lens
+`install-incomplete` sits at the top of that chain for a different reason than the rest of it. The
+other three are competing accounts of one derivation that ran; this one says the derivation **did not
+run at all**, because the inputs it needed were not installed yet. Every verdict below it would have
+been computed from a pipeline shape the lens does not have — an actor-aware lens read as plain — so
+none of them is a claim about this lens, and reporting one would send an operator to edit a cypher
+whose verdict was never in question.
+
+Only `registration-failed` raises `errorCount`. A cap-driven or eligibility-driven fallback is a lens
 reading more of the stream than it needs while projecting every row it should, so it is deliberately
 kept out of `errorCount` — putting it there would file a correct lens beside a DLQ write. The
 broadening still matters, because a lens whose `filterMode` moves from narrowed to `broad` on a
 cypher edit has silently multiplied its delivery volume; `filterBroadReason` is what says whether
 that was authored, resolved, or refused.
+
+`install-incomplete` is the one reason that is a **defect without being an `errorCount` fault**. The
+lens itself is healthy — it projects every row it should, off a wider filter — so counting it as a
+fault would misreport a working lens; but unlike every other broad reason it is nobody's intended
+state, so Refractor logs it at `ERROR` (`ruleId` on the line) rather than the `WARN` a footprint
+regression gets. An entry carrying it means the deployment is running a lens no ordering in
+`cmd/refractor` was supposed to produce.
 
 ### `health.bootstrap.complete`
 

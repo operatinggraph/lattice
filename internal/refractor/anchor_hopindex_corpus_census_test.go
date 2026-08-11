@@ -144,7 +144,7 @@ func corpusAnchorIndexDerivation(t *testing.T) map[string]string {
 	t.Helper()
 	eng := full.New()
 	got := map[string]string{}
-	forEachCorpusCypher(t, func(name, spec string) {
+	forEachCorpusCypher(t, func(name, spec string, _ bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)
@@ -212,7 +212,7 @@ func TestCorpusAnchorHopIndex_PinnedConjuncts(t *testing.T) {
 func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testing.T) {
 	eng := full.New()
 	checked := 0
-	forEachCorpusCypher(t, func(name, spec string) {
+	forEachCorpusCypher(t, func(name, spec string, _ bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)

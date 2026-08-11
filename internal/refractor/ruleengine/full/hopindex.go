@@ -275,6 +275,44 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 	return idx
 }
 
+// DeclaresActorAnchor reports whether this compiled query pins a pattern
+// position with `{key: $actorKey}` — the shape every actor-anchored lens
+// (actorAggregate and Personal alike) opens with. It is the lens's DECLARED
+// projection kind, read off the cypher the package author wrote, so answering it
+// needs no installed component, no setter and no state of its own.
+//
+// Cheap to REASON about, not cheap to CALL: it builds the whole pattern graph,
+// distances() included, every time. What makes that irrelevant is where it is
+// called — once per rule publication (pipeline.useFullEngineBranches), with the
+// answer published onto the rule snapshot and read from there afterwards. Do not
+// put it on a per-event path without caching it.
+//
+// It is deliberately independent of Complete. noteAnchor fires while
+// addPattern walks a pattern's NODES, ahead of every hop-level and
+// grounding-level refusal, and the completeness switch only writes Incomplete —
+// so a query this index cannot walk (an untyped or variable-length hop, a
+// re-reference across a WITH, an ungrounded pattern head) still reports its
+// declaration truthfully. Which is exactly the question the caller asks:
+// pipeline.ConsumerFilter needs to know whether the lens was WRITTEN to be
+// actor-anchored, not whether the affected-anchor derivation can run on it.
+// Reading Anchor only when Complete would report the shapes that refuse for
+// some other reason — objectAttachments, capabilityServiceAccess and half the
+// edge-manifest corpus among them — as plain.
+//
+// The one shape it under-reports is a `{key: $actorKey}` node buried inside an
+// Expr addExpr does not model: that arm default-denies WITHOUT descending, so
+// the position is never created and no anchor is recorded. It is the same blind
+// spot every other consumer of this index already has, and no shipped lens is in
+// that shape — but the consequence lands on the CALLER, so it is spelled out
+// where the soundness claim is made (pipeline.ConsumerFilter's doc) rather than
+// only here.
+func (cr *CompiledRule) DeclaresActorAnchor() bool {
+	if cr == nil || cr.Query == nil {
+		return false
+	}
+	return cr.AnchorHopIndex().Anchor >= 0
+}
+
 func describeLabel(l string) string {
 	if l == "" {
 		return "unlabeled"
