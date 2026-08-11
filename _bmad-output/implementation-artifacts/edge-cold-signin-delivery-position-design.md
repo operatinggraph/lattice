@@ -166,10 +166,20 @@ and this design does not overload that field.
 stream's last sequence, taken once before the hydrator fan-out**, returned as a new
 `controlwire.PersonalHydrateResult.SyncStartSeq`.
 
-The seam mirrors the shipped one exactly: `Service.SetSyncLastSeq(func(ctx) (uint64, error))`, sibling
-to `SetSyncFirstSeq` (`service.go:412`), wired in `cmd/refractor/main.go:944` off the same full-grant
-stream handle (`st.State.LastSeq` where the existing call takes `st.State.FirstSeq`). One handle is
-correct for the same reason the existing comment gives: every Personal Lens rule shares one SYNC stream.
+The seam is `Service.SetSyncLastSeq(func(ctx, identityID) (uint64, error))`, sibling to `SetSyncFirstSeq`,
+wired in `cmd/refractor/main.go` off the same full-grant stream handle. One handle is correct for the
+same reason the existing comment gives: every Personal Lens rule shares one SYNC stream.
+
+**AMENDED 2026-08-11 (build time) — the seam is per-IDENTITY, not stream-wide.** This section originally
+specified `st.State.LastSeq`, "where the existing call takes `st.State.FirstSeq`... nothing else". That
+read is the whole stream's, and SYNC carries `lattice.sync.user.*` for **every** identity — so returning
+it to an untrusted per-identity client makes the RPC response a cross-tenant activity oracle: two hydrate
+calls disclose how many frames the entire platform published in between. The security argument in §3.7
+reasons only about what the node can *receive*, and never about what the answer *discloses*; the response
+is outbound surface too. The seam therefore takes the requesting identity and reads that identity's own
+subject (`GetLastMsgForSubject` over `subjects.PersonalSync`, the helper the publisher already uses).
+Absent frames are the normal cold case and degrade to `0`. The per-identity value is also strictly ≤ the
+stream-wide one, so the position it names is tighter, not merely safer.
 
 **Why this is race-free, and fail-safe in the one direction that matters.**
 
@@ -360,8 +370,9 @@ Four fires, each independently shippable and green. Sizes are S unless noted; th
 ### Fire 1 — `personal.hydrate` returns the SYNC start position
 
 - `controlwire.PersonalHydrateResult` gains `SyncStartSeq uint64` (`json:"syncStartSeq,omitempty"`).
-- `Service.SetSyncLastSeq(fn func(ctx) (uint64, error))` + the `syncLastSeq` field, mirroring
-  `SetSyncFirstSeq`/`syncFirstSeq` (`service.go:278`, `:405`).
+- `Service.SetSyncLastSeq(fn func(ctx, identityID) (uint64, error))` + the `syncLastSeq` field, sibling to
+  `SetSyncFirstSeq`/`syncFirstSeq`. The identity parameter is load-bearing, not incidental — see §3.2's
+  build-time amendment: a stream-wide read discloses every tenant's publish volume to the caller.
 - `personalHydrate` reads it **once, before** the hydrator loop, and returns it. Unset seam ⇒ return
   `0` and log — hydration itself must still succeed (the field is an optimisation input, and its zero
   value is today's behaviour; failing hydrate closed on it would be a regression, not a safety win).
