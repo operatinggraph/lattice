@@ -177,7 +177,7 @@ re-verified by a third reviewer (§12.3).
 | A tombstoned canonicalName stops blocking a package | `installer.go:685-687` — `if env.IsDeleted { continue }` |
 | **`ddl_cache` honours `isDeleted` on the ROOT ONLY** | `ddl_cache.go:191` is the only check; `:205/:233/:249/:268` read `.canonicalName`/`.permittedCommands`/`.sensitive`/`.script` into structs with **no `isDeleted` field**. This is why §3.4 refuses aspect-level retirement. |
 | **`registry_probe` counts a lens declared on the ROOT ONLY** | `registry_probe.go:201` — `if vp.Class != "meta.lens" \|\| vp.IsDeleted { continue }`; the `.spec` fetch (`:204-214`) is deliberately fail-closed and never tests `isDeleted`. Second reason §3.4 refuses aspect-level retirement. |
-| The primordial set is ~76 entries | `primordial.go:302` — *"Total ≈ 76 Core KV entries"*; `docs/components/bootstrap.md` says "~75". So a `vtx.meta.>` listing is a cheap boot-time read. |
+| The primordial set is ~76 entries | `primordial.go:302` — *"Total ≈ 76 Core KV entries"*; `docs/components/bootstrap.md` says "~75". So a `vtx.meta.>` **listing** is a cheap boot-time read. ~~And so is the scan built on it.~~ **Amended 2026-08-11 (Inc 1 build):** the listing is cheap; the *scan* is not, because the kernel is the wrong denominator. Measured live on the shared dev stack: **2,488 `vtx.meta.*` keys — 388 roots, 2,100 aspects — of which only 13 roots and 88 aspects are bootstrap-built.** The candidate set is the **package** meta population, which grows with every installed package. See §3.3. |
 
 ---
 
@@ -228,8 +228,32 @@ silently-partial result (`kv.go:245`).
 
 ### 3.3 Read path, write path, and where it hangs
 
-**Read path.** `ListKeysFiltered(ctx, "vtx.meta.>")` on the KV handle `planReconcile` already holds → for
-each key not in the built set, one `KVGet` → apply §3.1. Bootstrap reads Core KV directly; it is on
+**Read path.** `ListKeysFiltered(ctx, "vtx.meta.>")` on the KV handle `planReconcile` already holds → ~~for
+each key not in the built set, one `KVGet`~~ → apply §3.1.
+
+> **Amended 2026-08-11 (Inc 1 build) — "one `KVGet` per unbuilt key" is falsified as an instruction; do not
+> build it.** On a package-installed bucket that is ~2,400 sequential round-trips, and the first
+> implementation of it took a *second* `KVGet` per aspect to test its root's presence: **4,487 reads per
+> `planReconcile`**, doubled by `VerifyKernel` calling the plan twice, measured at **`verify-kernel`
+> 0.21s → 2.0s**. `make up`'s reuse branch runs `bootstrap verify` on every invocation
+> (`Makefile:201`), so it lands on the inner dev loop, and it scales with the package population rather
+> than the kernel's.
+>
+> **What the scan actually needs to read**, and nothing more:
+>
+> - **Root presence comes from the LISTING, never a `KVGet`.** The `vtx.meta.>` listing already names every
+>   present root; §3.1 rows 4/5 are answered from that set for free.
+> - **Classify first, read second.** Only an unbuilt **root** (row 1/2), an unbuilt aspect of a **built**
+>   root (row 3), and an aspect whose root is absent from the bucket entirely (row 5) need their envelope.
+>   An aspect of an unbuilt-but-present root (row 4) is adjudicated by its root's own row and is **never
+>   read**.
+> - **One plan per consumer.** `KernelDrift` and `KernelOrphans` both derive from `planReconcile`; a caller
+>   wanting both reads one `KernelReport` rather than building the plan twice.
+>
+> Measured on the same bucket: **463 reads per plan**. The cost now tracks the *root* population, not the
+> aspect population.
+
+Bootstrap reads Core KV directly; it is on
 CLAUDE.md's P5 platform-binary exception list, and `kv.go:181-182` names the meta-vertex sub-set as an
 explicitly bounded listing target. No lens is involved and none should be — the kernel is what lenses are
 *defined by*.
@@ -547,6 +571,12 @@ status unchanged on every bucket. Nothing is written that was not written before
 **This increment is the measurement.** Its build note must record both counts on the shared dev stack and
 the demo box.
 
+> **Precondition on Inc 2, independent of the census (added 2026-08-11, §12.4).** Inc 2 additionally
+> requires a **binary-version floor** on retirement: an older binary against a newer-seeded bucket shares
+> the same `lattice.bootstrap.json` and therefore the same `BootstrapOpKey`, so the current kernel's delta
+> satisfies every §3.1 condition and would be tombstoned wholesale. A non-zero census does not clear this;
+> only the floor does.
+
 > **Gate before Inc 2.** If Inc 1 reports **zero orphan entities** on both long-lived buckets, do **not**
 > build Inc 2 — file it `🗄️ shelved` with the trigger *"a non-zero orphan-entity report, or the first
 > kernel shrink that ships without a `lattice.bootstrap.json` version bump"*. Retirement machinery for an
@@ -650,10 +680,41 @@ verification. **The pass reshaped the design; it was not ceremony.**
 
 ### 12.2 What the pass could not refute
 
-No reviewer found a path by which a **live** key is tombstoned once §3.4's whole-entity narrowing is
-applied. The negative case (`createdByOp != BootstrapOpKey` ⇒ keep) survived a dedicated attempt to break
-it across package installs, operator ops, Loom/Weaver/Refractor writers, crash recovery, and partial-file
-regeneration. §11 lists what was checked and found clean.
+~~No reviewer found a path by which a **live** key is tombstoned once §3.4's whole-entity narrowing is
+applied.~~ **Struck 2026-08-11 — the Inc 1 build's cold review found one; see §12.4.** What stands is the
+narrower claim the pass actually established: the negative case (`createdByOp != BootstrapOpKey` ⇒ keep)
+survived a dedicated attempt to break it across package installs, operator ops, Loom/Weaver/Refractor
+writers, crash recovery, and partial-file regeneration. §11 lists what was checked and found clean. That
+is a claim about **foreign** writers, and it holds. §12.4 is about a **second bootstrap binary**, which
+the pass never modelled.
+
+### 12.4 The version-skew path the design pass missed (found by the Inc 1 build's cold review, 2026-08-11)
+
+**An OLDER binary run against a NEWER-seeded bucket reads the current kernel's delta as retired.** §4(d)
+covers the *regenerated-`lattice.bootstrap.json`* direction — a different file mints a different
+`BootstrapOpKey`, so a foreign op keeps. It does not cover the reverse, where the file is the **same**:
+
+- A bucket is seeded by a binary building entities `A…Z`. An older binary building only `A…M` is then run
+  against it — a rollback deploy, or a stale `lattice` CLI on the demo box.
+- Both read the same `lattice.bootstrap.json`, so both compute the **same `BootstrapOpKey`**.
+  `checkVersion` gates on the file's `"16"`, which both accept, and `encoding/json` ignores an id field the
+  older struct no longer declares — so the older binary boots cleanly.
+- Every entity in `N…Z` is then absent from the older binary's built set, kernel-provenanced, and live: it
+  satisfies §3.1 conditions 1–5 in full and is classified **retired**.
+
+**Inc 1 impact: noise.** The report names `N…Z`; nothing is written.
+
+**Inc 2 impact: this is the live-key deletion path §12.2 claimed did not exist.** A stale binary running
+`make reseed-kernel` would tombstone the entire delta of the current kernel, stamping provenance that says
+the retirement was legitimate. The discriminator is not wrong — "absent from the built set" is exactly what
+it tests. The wrong assumption is the design's implicit one that **the running binary is always the newest
+one that has touched this bucket**, which nothing enforces.
+
+**This is now a precondition on Inc 2, not a residual.** Inc 2 does not build until retirement carries a
+**binary-version floor**: the seeder stamps the generation of the kernel it wrote (alongside, not inside,
+`BootstrapOpKey`), and retirement refuses outright when the stored generation exceeds the running binary's
+— fail-closed, the same posture §3.6 takes on the auth plane. Retiring on behalf of a binary that knows
+less than the one that wrote the bucket is never sound, and no census can make it so.
 
 ### 12.3 Citation audit
 

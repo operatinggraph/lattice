@@ -16,7 +16,7 @@ func TestBootstrapVerify_HappyPath(t *testing.T) {
 
 	// SetupPackageTestEnv seeds the full kernel via bootstrap.SeedPrimordial.
 	// Verify that all assertions pass after seeding.
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	if len(failures) > 0 {
 		t.Fatalf("expected no verification failures after full bootstrap, got:\n%v", failures)
 	}

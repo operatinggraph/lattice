@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -44,11 +45,28 @@ type reconcileStep struct {
 // `retained` names entries that differ but are deliberately left alone: a
 // deleted entity, or topology whose ongoing lifecycle belongs to operations
 // rather than to the seeder. They are reported, never rewritten.
+//
+// `orphanedEntities` and `orphanedAspects` name vtx.meta.* keys this binary
+// no longer builds at all — retired kernel, not merely stale kernel. Neither
+// ever reaches steps(): reporting a candidate for retirement and actually
+// retiring it are different acts, and this plan only ever proves out the
+// former.
+//
+// `orphanScanErr` carries a failure of the orphan LISTING itself
+// (kernel-orphan-retirement-design.md §3.2's partial-result guard) separately
+// from planReconcile's own error return. A reader that never asked about
+// orphans — KernelDrift, or ReconcilePrimordial's kernel-repair path — must
+// not be denied its own answer because the unrelated orphan scan could not
+// run; only a caller whose contract IS the orphan report (KernelOrphans)
+// surfaces it.
 type reconcilePlan struct {
-	missing   []reconcileStep
-	stale     []reconcileStep
-	retained  []string
-	unchanged int
+	missing          []reconcileStep
+	stale            []reconcileStep
+	retained         []string
+	unchanged        int
+	orphanedEntities []string
+	orphanedAspects  []string
+	orphanScanErr    error
 }
 
 func (p reconcilePlan) steps() []reconcileStep {
@@ -109,6 +127,11 @@ func planReconcile(ctx context.Context, kv jetstream.KeyValue) (reconcilePlan, e
 		return plan, fmt.Errorf("build primordial entries: %w", err)
 	}
 
+	built := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		built[e.key] = true
+	}
+
 	for _, e := range entries {
 		if e.key == BootstrapOpKey {
 			continue
@@ -135,7 +158,152 @@ func planReconcile(ctx context.Context, kv jetstream.KeyValue) (reconcilePlan, e
 		}
 		plan.stale = append(plan.stale, reconcileStep{key: e.key, value: e.value, revision: stored.Revision()})
 	}
+
+	orphanedEntities, orphanedAspects, orphanErr := scanKernelOrphans(ctx, kv, built)
+	plan.orphanedEntities = orphanedEntities
+	plan.orphanedAspects = orphanedAspects
+	plan.orphanScanErr = orphanErr
+
 	return plan, nil
+}
+
+// scanKernelOrphans enumerates every vtx.meta.* key Core KV holds that this
+// binary does not build, and classifies each against the
+// kernel-orphan-retirement-design.md §3.1 discriminator: a retired-kernel
+// ENTITY (its meta-vertex root, absent from built and from nothing else), an
+// orphaned ASPECT of an entity that is still built
+// (kernel-orphan-retirement-design.md §3.4 — reported, never retired on its
+// own), or a candidate this pass must leave entirely alone.
+//
+// The listing itself must be trusted or refused outright: a silently short
+// listing would report fewer orphans than exist, which is safe (a missed
+// retirement, never an invented one — kernel-orphan-retirement-design.md
+// §3.2), but a listing that goes
+// silently PARTIAL under context expiry is indistinguishable from a complete
+// one unless checked, and acting on it as "no orphans" would be the exact
+// wrong direction. So the listing error is returned to the caller — see
+// reconcilePlan's orphanScanErr doc for how far that propagates.
+//
+// A failure reading any ONE candidate — a KVGet error, an unparseable
+// envelope, a missing or foreign createdByOp — does not propagate: that
+// candidate is silently kept. Nothing here is written, so there is nothing an
+// unreadable candidate could corrupt; propagating its error instead would let
+// one unreadable package meta-vertex take every boot down with it, which is
+// strictly worse than leaving it unreported.
+//
+// Root presence — the row-4/5 discriminator between "an aspect whose entity
+// row already adjudicates it" and "a parentless aspect" — is answered from
+// the listing itself (presentRoots), never a second per-candidate KVGet: the
+// listing already names every root the bucket holds. A candidate's own body
+// is read at most once, and only when its classification actually needs it —
+// an unbuilt root, an aspect of a still-built root, or a parentless aspect.
+// An aspect whose unbuilt root is present in the listing is never read at
+// all, which is what keeps this pass proportional to the ORPHAN count rather
+// than to the platform's whole package-meta population.
+func scanKernelOrphans(ctx context.Context, kv jetstream.KeyValue, built map[string]bool) (entities, aspects []string, err error) {
+	lister, err := kv.ListKeysFiltered(ctx, "vtx.meta.>")
+	if err != nil {
+		return nil, nil, fmt.Errorf("list kernel meta-vertices: %w", err)
+	}
+	defer lister.Stop()
+	var candidates []string
+	for k := range lister.Keys() {
+		candidates = append(candidates, k)
+	}
+	// The lister's feed goroutine exits (closing the channel) on ctx expiry
+	// exactly as it does on completion, so a timed-out listing is otherwise
+	// indistinguishable from a complete one — mirrors the guard
+	// substrate/kv.go's KVListKeysPrefix applies to the same hazard.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("list kernel meta-vertices: interrupted (partial result discarded): %w", err)
+	}
+
+	presentRoots := make(map[string]bool, len(candidates))
+	for _, key := range candidates {
+		if _, _, ok := substrate.ParseVertexKey(key); ok {
+			presentRoots[key] = true
+		}
+	}
+
+	for _, key := range candidates {
+		if built[key] {
+			continue
+		}
+		root, ok := metaVertexRoot(key)
+		if !ok {
+			continue
+		}
+		switch {
+		case root == key:
+			// Vertex-shape candidate: it IS the root. Its own filters decide
+			// row 1 (report as entity) vs row 2 (keep).
+			if kernelCandidatePasses(ctx, kv, key) {
+				entities = append(entities, key)
+			}
+		case built[root]:
+			// Aspect of a still-built root. Its own filters decide row 3
+			// (report as aspect) vs row 6 (keep).
+			if kernelCandidatePasses(ctx, kv, key) {
+				aspects = append(aspects, key)
+			}
+		case presentRoots[root]:
+			// Row 4 — the root is itself an unbuilt candidate in this same
+			// listing; row 1/2 over the root key is what adjudicates the
+			// entity. This aspect is never read and never reported on its
+			// own, or one orphaned entity would surface once as an entity
+			// and again, separately, as every one of its aspects.
+		default:
+			// Row 5 — parentless: no entity row will ever adjudicate it, so
+			// this aspect's own filters decide row 5 (report) vs row 6 (keep).
+			if kernelCandidatePasses(ctx, kv, key) {
+				aspects = append(aspects, key)
+			}
+		}
+	}
+
+	sort.Strings(entities)
+	sort.Strings(aspects)
+	return entities, aspects, nil
+}
+
+// metaVertexRoot returns a vtx.meta.* candidate's root vertex key: itself,
+// for a vertex-shape key, or its parent, for an aspect-shape one. ok is
+// false for a listed key that is neither — something the vtx.meta.> filter
+// should never surface, but a corrupt or foreign write might.
+func metaVertexRoot(key string) (root string, ok bool) {
+	if _, _, vertexOK := substrate.ParseVertexKey(key); vertexOK {
+		return key, true
+	}
+	if vertexKey, _, _, _, aspectOK := substrate.ParseAspectKey(key); aspectOK {
+		return vertexKey, true
+	}
+	return "", false
+}
+
+// kernelCandidatePasses reports whether a candidate key's stored envelope
+// clears every kernel-orphan-retirement-design.md §3.1 filter this pass is
+// licensed to act on: it reads, it parses, its createdByOp is this
+// deployment's bootstrap op tracker (kernel-orphan-retirement-design.md §4 —
+// the sound discriminator no other writer can produce), and it is not
+// already tombstoned. Any failure here
+// means "unknown provenance" or "already retired", and both keep — the
+// default is keep, and nothing an author omits can flip it.
+func kernelCandidatePasses(ctx context.Context, kv jetstream.KeyValue, key string) bool {
+	stored, err := kv.Get(ctx, key)
+	if err != nil {
+		return false
+	}
+	var env struct {
+		CreatedByOp string `json:"createdByOp"`
+		IsDeleted   bool   `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(stored.Value(), &env); err != nil {
+		return false
+	}
+	if env.CreatedByOp != BootstrapOpKey {
+		return false
+	}
+	return !env.IsDeleted
 }
 
 // ReconcilePrimordial brings an already-seeded Core KV's kernel into agreement
@@ -203,6 +371,21 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 			"key", key)
 	}
 
+	switch {
+	case plan.orphanScanErr != nil:
+		s.logger.Warn("cannot scan for kernel orphans — kernel repair proceeds without an orphan report",
+			"error", plan.orphanScanErr)
+	default:
+		for _, key := range plan.orphanedEntities {
+			s.logger.Warn("kernel entity no longer built by this binary — reported, not retired",
+				"key", key)
+		}
+		for _, key := range plan.orphanedAspects {
+			s.logger.Warn("kernel aspect orphaned but its entity is still built — reported, not retired",
+				"key", key)
+		}
+	}
+
 	steps := plan.steps()
 	if len(steps) == 0 {
 		s.logger.Info("kernel definitions already match this binary — no writes",
@@ -258,6 +441,44 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 	return res, nil
 }
 
+// KernelReport is the combined read-only view over one planReconcile pass:
+// drift (missing/stale) plus kernel orphans, so a caller wanting both — every
+// verify-kernel consumer does — pays for a single plan instead of running the
+// comparison twice. KernelDrift and KernelOrphans are thin wrappers over
+// ReadKernelReport for callers that only want one half.
+type KernelReport struct {
+	Missing, Stale                    []string
+	OrphanedEntities, OrphanedAspects []string
+	// OrphanScanErr is the orphan LISTING's own failure (reconcilePlan's
+	// orphanScanErr doc) — distinct from the error ReadKernelReport itself
+	// returns, which reflects only a failure of the built-set comparison
+	// every consumer depends on.
+	OrphanScanErr error
+}
+
+// ReadKernelReport runs planReconcile once and returns everything a
+// verification gate needs from it. The returned error is non-nil only when
+// the built-set comparison itself failed — a plan no caller can trust at
+// all. OrphanScanErr is narrower: the orphan listing alone could not be
+// trusted, which does not invalidate Missing/Stale.
+func ReadKernelReport(ctx context.Context, kv jetstream.KeyValue) (KernelReport, error) {
+	plan, err := planReconcile(ctx, kv)
+	if err != nil {
+		return KernelReport{}, err
+	}
+	var report KernelReport
+	for _, st := range plan.missing {
+		report.Missing = append(report.Missing, st.key)
+	}
+	for _, st := range plan.stale {
+		report.Stale = append(report.Stale, st.key)
+	}
+	report.OrphanedEntities = plan.orphanedEntities
+	report.OrphanedAspects = plan.orphanedAspects
+	report.OrphanScanErr = plan.orphanScanErr
+	return report, nil
+}
+
 // KernelDrift reports kernel entries this binary builds that Core KV does not
 // match: `missing` are absent outright, `stale` are present with a different
 // body. It is the read-only twin of ReconcilePrimordial — same plan, no writes —
@@ -268,17 +489,35 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 // while running superseded DDL scripts. Drift is only visible by comparing
 // stored content against built content.
 func KernelDrift(ctx context.Context, kv jetstream.KeyValue) (missing, stale []string, err error) {
-	plan, err := planReconcile(ctx, kv)
+	report, err := ReadKernelReport(ctx, kv)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, st := range plan.missing {
-		missing = append(missing, st.key)
+	return report.Missing, report.Stale, nil
+}
+
+// KernelOrphans reports vtx.meta.* keys this binary no longer builds at all:
+// `entities` are meta-vertex roots retired kernel has shed entirely;
+// `aspects` are orphaned aspects of an entity whose root is still built
+// (kernel-orphan-retirement-design.md §3.4 — never retired on their own,
+// whole-entity retirement only). It is the read-only twin of KernelDrift over
+// the same shared plan, so a verification gate reports exactly what a future
+// repair pass would act on and the two can never disagree about what counts
+// as orphaned.
+//
+// Unlike KernelDrift, which has no interest in the orphan listing's own
+// health, KernelOrphans's entire contract IS the orphan report — so a failed
+// listing (ReadKernelReport's OrphanScanErr) is surfaced as this function's
+// own error rather than answered as a false "no orphans".
+func KernelOrphans(ctx context.Context, kv jetstream.KeyValue) (entities, aspects []string, err error) {
+	report, err := ReadKernelReport(ctx, kv)
+	if err != nil {
+		return nil, nil, err
 	}
-	for _, st := range plan.stale {
-		stale = append(stale, st.key)
+	if report.OrphanScanErr != nil {
+		return nil, nil, report.OrphanScanErr
 	}
-	return missing, stale, nil
+	return report.OrphanedEntities, report.OrphanedAspects, nil
 }
 
 // sameDocument reports whether two stored envelope bodies carry the same

@@ -316,24 +316,46 @@ func main() {
 		}
 	}
 
-	// Kernel freshness. Every check above asserts that a key is present and
-	// well-formed, which a bucket seeded by an older binary satisfies while
-	// running superseded DDL scripts. This compares stored content against
-	// what this binary builds, so a kernel that boot would reconcile is
-	// reported rather than passing silently.
+	// Kernel freshness + orphans, from a SINGLE plan (bootstrap.ReadKernelReport
+	// — one call rather than KernelDrift then KernelOrphans separately, which
+	// would walk the whole vtx.meta.* population twice). Every check above
+	// asserts that a key is present and well-formed, which a bucket seeded by
+	// an older binary satisfies while running superseded DDL scripts. This
+	// compares stored content against what this binary builds, so a kernel
+	// that boot would reconcile is reported rather than passing silently.
 	fmt.Println("Checking kernel content matches this binary...")
-	missing, stale, driftErr := bootstrap.KernelDrift(ctx, coreKV)
+	report, reportErr := bootstrap.ReadKernelReport(ctx, coreKV)
 	switch {
-	case driftErr != nil:
-		failures = append(failures, fmt.Sprintf("CANNOT compare kernel content: %v", driftErr))
-	case len(missing) == 0 && len(stale) == 0:
+	case reportErr != nil:
+		failures = append(failures, fmt.Sprintf("CANNOT compare kernel content: %v", reportErr))
+	case len(report.Missing) == 0 && len(report.Stale) == 0:
 		fmt.Printf("  OK  kernel content matches this binary\n")
 	default:
-		for _, k := range missing {
+		for _, k := range report.Missing {
 			failures = append(failures, fmt.Sprintf("KERNEL ENTRY MISSING: %s (run `make reseed-kernel`)", k))
 		}
-		for _, k := range stale {
+		for _, k := range report.Stale {
 			failures = append(failures, fmt.Sprintf("KERNEL ENTRY STALE: %s holds a body this binary no longer builds (run `make reseed-kernel`)", k))
+		}
+	}
+
+	// Kernel orphans (kernel-orphan-retirement-design.md §9) — report only,
+	// never a failure: this pass does not retire anything, so an orphan must
+	// not move the exit status a stale kernel already drives above.
+	fmt.Println("Checking for kernel orphans (report only — not retired)...")
+	switch {
+	case reportErr != nil:
+		fmt.Printf("  INFO  cannot check kernel orphans: kernel content comparison itself failed: %v\n", reportErr)
+	case report.OrphanScanErr != nil:
+		fmt.Printf("  INFO  cannot check kernel orphans: %v\n", report.OrphanScanErr)
+	case len(report.OrphanedEntities) == 0 && len(report.OrphanedAspects) == 0:
+		fmt.Printf("  OK  no kernel orphans\n")
+	default:
+		for _, k := range report.OrphanedEntities {
+			fmt.Printf("  INFO  KERNEL ENTITY ORPHANED: %s no longer built by this binary\n", k)
+		}
+		for _, k := range report.OrphanedAspects {
+			fmt.Printf("  INFO  KERNEL ASPECT ORPHANED: %s — its entity is still built\n", k)
 		}
 	}
 

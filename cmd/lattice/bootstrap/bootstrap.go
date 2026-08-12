@@ -131,13 +131,26 @@ Exit 0 if all assertions pass. Exit 1 with a summary of failures otherwise.`,
 			}
 			defer conn.Close()
 
-			failures := internalbootstrap.VerifyKernel(ctx, conn)
+			failures, notices := internalbootstrap.VerifyKernel(ctx, conn)
 
 			if *outputFmt == "json" {
 				return output.PrintJSON(map[string]interface{}{
 					"passed":   len(failures) == 0,
 					"failures": failures,
+					"notices":  notices,
 				})
+			}
+
+			// Notices never affect pass/fail, but a report with no printer is
+			// a mute measurement — an operator on the default text output
+			// must see a kernel orphan exactly as a `--output json` caller
+			// does, before the pass/fail line either way.
+			if len(notices) > 0 {
+				fmt.Printf("verify-kernel: %d NOTICE(S)\n", len(notices))
+				for _, n := range notices {
+					fmt.Printf("  ~ %s\n", n)
+				}
+				fmt.Println()
 			}
 
 			if len(failures) == 0 {

@@ -38,25 +38,28 @@ func CoreKVEmpty(ctx context.Context, conn *substrate.Conn) (bool, error) {
 }
 
 // VerifyKernel checks that all kernel Core KV keys and infrastructure
-// elements exist with correct envelopes. Returns a (possibly empty)
-// slice of failure descriptions; an empty slice means all assertions passed.
+// elements exist with correct envelopes. Returns a (possibly empty) slice of
+// failure descriptions — an empty slice means all assertions passed — plus a
+// (possibly empty) slice of informational notices that never affect
+// pass/fail: today, kernel-orphaned vtx.meta.* entities and aspects
+// (kernel-orphan-retirement-design.md §9) an operator may want to see but
+// that this pass neither writes nor holds against the bucket.
 //
 // This is the callable equivalent of scripts/verify-kernel.go so that
 // any tooling can reuse the same assertions without drift.
-func VerifyKernel(ctx context.Context, conn *substrate.Conn) []string {
+func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices []string) {
 	js := conn.JetStream()
-	var failures []string
 
 	// Open Core KV.
 	coreKV, err := js.KeyValue(ctx, CoreKVBucket)
 	if err != nil {
-		return []string{fmt.Sprintf("cannot open Core KV bucket %q: %v", CoreKVBucket, err)}
+		return []string{fmt.Sprintf("cannot open Core KV bucket %q: %v", CoreKVBucket, err)}, nil
 	}
 
 	// Open Health KV.
 	healthKV, err := js.KeyValue(ctx, HealthKVBucket)
 	if err != nil {
-		return []string{fmt.Sprintf("cannot open Health KV bucket %q: %v", HealthKVBucket, err)}
+		return []string{fmt.Sprintf("cannot open Health KV bucket %q: %v", HealthKVBucket, err)}, nil
 	}
 
 	// 1. Top-level kernel vertex keys + envelope sanity.
@@ -251,25 +254,47 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) []string {
 		}
 	}
 
-	// Kernel freshness. Every check above asserts that a key is present and
-	// well-formed, which a bucket seeded by an older binary satisfies while
-	// running superseded DDL scripts. This compares stored content against
-	// what this binary builds, so `make up`'s reuse short-circuit (which
-	// calls this function) stops treating a stale kernel as fresh.
-	missing, stale, err := KernelDrift(ctx, coreKV)
+	// Kernel freshness + orphans, from a SINGLE plan (ReadKernelReport): every
+	// check above asserts that a key is present and well-formed, which a
+	// bucket seeded by an older binary satisfies while running superseded DDL
+	// scripts. This compares stored content against what this binary builds,
+	// so `make up`'s reuse short-circuit (which calls this function) stops
+	// treating a stale kernel as fresh. Reading missing/stale and the orphan
+	// report from one call rather than two (KernelDrift then KernelOrphans)
+	// halves the vtx.meta.* read volume this function drives — the built-set
+	// comparison and the orphan scan both walk the same bucket.
+	report, err := ReadKernelReport(ctx, coreKV)
 	switch {
 	case err != nil:
 		failures = append(failures, fmt.Sprintf("CANNOT compare kernel content: %v", err))
 	default:
-		for _, k := range missing {
+		for _, k := range report.Missing {
 			failures = append(failures, fmt.Sprintf("KERNEL ENTRY MISSING: %s (run `make reseed-kernel`)", k))
 		}
-		for _, k := range stale {
+		for _, k := range report.Stale {
 			failures = append(failures, fmt.Sprintf("KERNEL ENTRY STALE: %s holds a body this binary no longer builds (run `make reseed-kernel`)", k))
+		}
+
+		// Kernel orphans (kernel-orphan-retirement-design.md §9). Neither
+		// class is a failure: an orphan is dead weight this pass reports,
+		// never retires on its own say-so
+		// (kernel-orphan-retirement-design.md §3.4's whole-entity-only rule),
+		// so it belongs in notices rather than in the failures slice that
+		// drives this function's own exit status.
+		switch {
+		case report.OrphanScanErr != nil:
+			notices = append(notices, fmt.Sprintf("CANNOT check kernel orphans: %v", report.OrphanScanErr))
+		default:
+			for _, k := range report.OrphanedEntities {
+				notices = append(notices, fmt.Sprintf("KERNEL ENTITY ORPHANED: %s no longer built by this binary", k))
+			}
+			for _, k := range report.OrphanedAspects {
+				notices = append(notices, fmt.Sprintf("KERNEL ASPECT ORPHANED: %s — its entity is still built", k))
+			}
 		}
 	}
 
-	return failures
+	return failures, notices
 }
 
 // InspectKernel reads and returns selected primordial entries for human display.

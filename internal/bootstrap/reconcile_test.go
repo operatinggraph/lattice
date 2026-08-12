@@ -12,6 +12,7 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,49 @@ func TestReconcilePrimordial_DoesNotReviveADeletedDDL(t *testing.T) {
 	require.Equal(t, 1, res.Retained)
 }
 
+// TestReconcilePrimordial_DoesNotWriteAnOrphan is Inc 1's whole write-side
+// claim under test: a bucket holding a retired kernel entity is a candidate
+// KernelOrphans reports, but ReconcilePrimordial — report-only this
+// increment — must leave it untouched: no create, no update, and its
+// revision must not move. This is also the only test that actually runs the
+// Warn branch over plan.orphanedEntities/plan.orphanedAspects; deleting
+// either loop must not turn this test red on its own (it asserts on
+// ReconcileResult and the stored revision, not on log output), but it does
+// prove the loop executes against a real orphan without panicking or writing.
+func TestReconcilePrimordial_DoesNotWriteAnOrphan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seeder, kv := newReconcileSeeder(ctx, t)
+
+	_, err := seeder.ReconcilePrimordial(ctx)
+	require.NoError(t, err)
+
+	id, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	orphan := substrate.VertexKey("meta", id)
+	env, err := MakeVertexEnvelope(orphan, "meta.ddl", nil)
+	require.NoError(t, err)
+	rev, err := kv.Put(ctx, orphan, env)
+	require.NoError(t, err)
+
+	entities, _, err := KernelOrphans(ctx, kv)
+	require.NoError(t, err)
+	require.Contains(t, entities, orphan, "fixture sanity: this must actually be a reported candidate")
+
+	res, err := seeder.ReconcilePrimordial(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, res.Created)
+	require.Equal(t, 0, res.Updated)
+	require.False(t, res.Changed(), "an orphan report must never become a write")
+
+	stored, err := kv.Get(ctx, orphan)
+	require.NoError(t, err)
+	require.Equal(t, rev, stored.Revision(), "the orphan's revision must not move")
+}
+
 // TestKernelDrift_SeesWhatPresenceChecksCannot is the proof for the
 // verify-kernel freshness assertion. A stale kernel key is present, carries a
 // well-formed envelope and correct provenance, and differs only in its body —
@@ -363,6 +407,340 @@ func TestKernelDrift_SeesWhatPresenceChecksCannot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{key}, missing, "an absent kernel entry must be reported as missing")
 	require.Empty(t, stale)
+}
+
+// putRaw marshals a raw envelope value (built with substrate.NewDocumentEnvelopeAt
+// or substrate.AspectEnvelope directly, bypassing MakeVertexEnvelope/
+// MakeAspectEnvelope's bootstrap provenance) and puts it at key.
+func putRaw(ctx context.Context, t *testing.T, kv jetstream.KeyValue, key string, env any) {
+	t.Helper()
+	raw, err := json.Marshal(env)
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, key, raw)
+	require.NoError(t, err)
+}
+
+// TestKernelOrphans_DiscriminatorTable proves each row of the §3.1
+// discriminator (fire brief §13 part 5's state table) in isolation:
+// candidate shape × build-membership × provenance × tombstone state,
+// checked against the classification KernelOrphans and ReconcilePrimordial's
+// orphan scan share via planReconcile.
+func TestKernelOrphans_DiscriminatorTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	t.Run("row1_unbuilt_vertex_bootstrap_provenance_reports_entity", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		env, err := MakeVertexEnvelope(root, "meta.ddl", nil)
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, root, env)
+		require.NoError(t, err)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Equal(t, []string{root}, entities)
+		require.Empty(t, aspects)
+	})
+
+	t.Run("row2_foreign_createdByOp_keeps_silent", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		foreignOpID, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		foreignOp := substrate.VertexKey("op", foreignOpID)
+		env := substrate.NewDocumentEnvelopeAt("meta.ddl", BootstrapIdentityKey, foreignOp, BootstrapTime)
+		env.Key = root
+		putRaw(ctx, t, kv, root, env)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities, "a foreign op's meta-vertex must never be reported")
+		require.Empty(t, aspects)
+	})
+
+	t.Run("row2_unparseable_envelope_keeps_silent", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		// createdByOp decodes correctly to BootstrapOpKey; isDeleted carries
+		// the wrong JSON type. encoding/json still populates every
+		// successfully-typed field before returning the type-mismatch error,
+		// so this body reaches kernelCandidatePasses with a matching
+		// createdByOp AND isDeleted at its bool zero value (false) — the
+		// json.Unmarshal error check is the ONLY thing standing between this
+		// candidate and a (wrong) report. A syntactically-broken body like
+		// "not json" cannot prove that: encoding/json validates the whole
+		// document before touching the destination at all, so it never
+		// populates createdByOp either, and the very next check
+		// (createdByOp != BootstrapOpKey) would keep the candidate silent
+		// even with the unmarshal-error check deleted.
+		body := fmt.Sprintf(`{"createdByOp":%q,"isDeleted":"not-a-bool"}`, BootstrapOpKey)
+		_, err = kv.Put(ctx, root, []byte(body))
+		require.NoError(t, err)
+
+		var probe struct {
+			CreatedByOp string `json:"createdByOp"`
+			IsDeleted   bool   `json:"isDeleted"`
+		}
+		probeErr := json.Unmarshal([]byte(body), &probe)
+		require.Error(t, probeErr, "fixture sanity: the body as a whole must fail to unmarshal")
+		require.Equal(t, BootstrapOpKey, probe.CreatedByOp,
+			"fixture sanity: createdByOp must still decode correctly despite the overall error")
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities, "an envelope that fails to unmarshal must keep silent even though createdByOp itself would have matched")
+		require.Empty(t, aspects)
+	})
+
+	t.Run("row2_tombstoned_bootstrap_provenance_keeps_silent", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		env := substrate.NewDocumentEnvelopeAt("meta.ddl", BootstrapIdentityKey, BootstrapOpKey, BootstrapTime)
+		env.Key = root
+		env.IsDeleted = true
+		putRaw(ctx, t, kv, root, env)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities, "an already-tombstoned candidate must not be re-reported")
+		require.Empty(t, aspects)
+	})
+
+	t.Run("row3_aspect_of_live_built_entity_reports_aspect", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		seeder, kv := newReconcileSeeder(ctx, t)
+
+		// The bucket must actually HOLD MetaRootKey as a live root. Without
+		// seeding, MetaRootKey is absent from the bucket (only from `built`),
+		// so deleting scanKernelOrphans' built[root] branch would fall
+		// through to the parentless default (row 5) and still report this
+		// aspect — the test would pass for the wrong reason. Seeding first
+		// makes presentRoots[root] true too, so only the built[root] branch
+		// can route this candidate to row 3.
+		_, err := seeder.ReconcilePrimordial(ctx)
+		require.NoError(t, err)
+
+		key := substrate.AspectKey(MetaRootKey, "orphanDiscriminatorTestAspect")
+		env, err := MakeAspectEnvelope(key, MetaRootKey, "orphanDiscriminatorTestAspect", "description", nil)
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, key, env)
+		require.NoError(t, err)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities)
+		require.Equal(t, []string{key}, aspects, "an orphaned aspect of a still-built root is reported")
+	})
+
+	t.Run("row4_aspect_of_unbuilt_root_present_defers_to_the_entity_row", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		rootEnv, err := MakeVertexEnvelope(root, "meta.ddl", nil)
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, root, rootEnv)
+		require.NoError(t, err)
+
+		aspectKey := substrate.AspectKey(root, "script")
+		aspectEnv, err := MakeAspectEnvelope(aspectKey, root, "script", "script", nil)
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, aspectKey, aspectEnv)
+		require.NoError(t, err)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Equal(t, []string{root}, entities, "the unbuilt root is reported as the entity")
+		require.Empty(t, aspects, "its aspect must not ALSO be reported separately")
+	})
+
+	t.Run("row5_parentless_aspect_reports_aspect", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		aspectKey := substrate.AspectKey(root, "script")
+		aspectEnv, err := MakeAspectEnvelope(aspectKey, root, "script", "script", nil)
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, aspectKey, aspectEnv)
+		require.NoError(t, err)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities)
+		require.Equal(t, []string{aspectKey}, aspects, "a parentless aspect has no entity row to adjudicate it")
+	})
+
+	t.Run("row6_aspect_with_failing_filters_keeps_silent", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, kv := newReconcileSeeder(ctx, t)
+
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		root := substrate.VertexKey("meta", id)
+		aspectKey := substrate.AspectKey(root, "script")
+		foreignOpID, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		foreignOp := substrate.VertexKey("op", foreignOpID)
+		base := substrate.NewDocumentEnvelopeAt("script", BootstrapIdentityKey, foreignOp, BootstrapTime)
+		base.Key = aspectKey
+		env := substrate.AspectEnvelope{DocumentEnvelope: base, VertexKey: root, LocalName: "script"}
+		putRaw(ctx, t, kv, aspectKey, env)
+
+		entities, aspects, err := KernelOrphans(ctx, kv)
+		require.NoError(t, err)
+		require.Empty(t, entities)
+		require.Empty(t, aspects, "an unbuilt parentless aspect that fails its own filters keeps silent")
+	})
+}
+
+// TestKernelOrphans_IgnoresPackageInstalledMeta is the load-bearing negative
+// (§4): a realistic package-installed DDL — a meta-vertex root plus
+// canonicalName and script aspects, all carrying the INSTALLING op's
+// provenance rather than bootstrap's — must never be reported as a kernel
+// orphan, even though it is the only unbuilt vtx.meta.* content the bucket
+// holds. createdByOp is what separates "this binary no longer builds it"
+// from "some other writer owns it"; getting this backwards would report —
+// and, once retirement ships, delete — every capability package installed
+// on the platform.
+func TestKernelOrphans_IgnoresPackageInstalledMeta(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, kv := newReconcileSeeder(ctx, t)
+
+	id, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	root := substrate.VertexKey("meta", id)
+	installOpID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	installOp := substrate.VertexKey("op", installOpID)
+
+	rootEnv := substrate.NewDocumentEnvelopeAt("meta.ddl", BootstrapIdentityKey, installOp, BootstrapTime)
+	rootEnv.Key = root
+	putRaw(ctx, t, kv, root, rootEnv)
+
+	for _, localName := range []string{"canonicalName", "script"} {
+		aspectKey := substrate.AspectKey(root, localName)
+		base := substrate.NewDocumentEnvelopeAt(localName, BootstrapIdentityKey, installOp, BootstrapTime)
+		base.Key = aspectKey
+		env := substrate.AspectEnvelope{DocumentEnvelope: base, VertexKey: root, LocalName: localName}
+		putRaw(ctx, t, kv, aspectKey, env)
+	}
+
+	entities, aspects, err := KernelOrphans(ctx, kv)
+	require.NoError(t, err)
+	require.Empty(t, entities, "a package's own meta-vertex must never be reported")
+	require.Empty(t, aspects, "nor its aspects")
+}
+
+// TestKernelOrphans_LiveLensAspectShrinkIsReportedNeverWritten
+// regression-guards §3.4's reshape: a kernel lens migrating adapters
+// (nats-kv -> postgres) keeps its root and ID but drops an aspect from the
+// built set. That must surface as an orphaned ASPECT of a still-live
+// entity for an operator to see — never as an entity, and never as a
+// write, since steps() only ever carries missing/stale.
+func TestKernelOrphans_LiveLensAspectShrinkIsReportedNeverWritten(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seeder, kv := newReconcileSeeder(ctx, t)
+
+	_, err := seeder.ReconcilePrimordial(ctx)
+	require.NoError(t, err)
+
+	// Stand-in for the aspect a NATS-KV-adapter lens carries that a postgres
+	// one drops: a live kernel lens root (CapabilityLensKey), plus an aspect
+	// this binary's built set no longer includes.
+	key := substrate.AspectKey(CapabilityLensKey, "targetBucketShrinkTest")
+	env, err := MakeAspectEnvelope(key, CapabilityLensKey, "targetBucketShrinkTest", "targetBucket",
+		map[string]any{"bucket": "capability"})
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, key, env)
+	require.NoError(t, err)
+
+	entities, aspects, err := KernelOrphans(ctx, kv)
+	require.NoError(t, err)
+	require.Empty(t, entities, "a live entity's shrunk aspect must never be reported as an entity")
+	require.Equal(t, []string{key}, aspects)
+
+	plan, err := planReconcile(ctx, kv)
+	require.NoError(t, err)
+	require.Empty(t, plan.steps(), "an orphaned aspect must never reach steps() — reported, never written")
+}
+
+// TestKernelOrphans_ReflectsPlanReconcileClassification pins concrete
+// expected values across BOTH orphan classes from a single KernelOrphans
+// call, over a bucket seeded with one of each kind at once. Comparing
+// KernelOrphans' result against a SECOND, separately-computed planReconcile
+// call proves only that the function is deterministic against unchanged
+// state — it would still pass if KernelOrphans quietly reimplemented the
+// classification instead of reading planReconcile's own fields. Pinning real
+// keys is what actually exercises "the read-only twin sharing planReconcile's
+// comparison."
+func TestKernelOrphans_ReflectsPlanReconcileClassification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seeder, kv := newReconcileSeeder(ctx, t)
+
+	_, err := seeder.ReconcilePrimordial(ctx)
+	require.NoError(t, err)
+
+	entityID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	entityKey := substrate.VertexKey("meta", entityID)
+	entityEnv, err := MakeVertexEnvelope(entityKey, "meta.ddl", nil)
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, entityKey, entityEnv)
+	require.NoError(t, err)
+
+	aspectKey := substrate.AspectKey(CapabilityLensKey, "reflectsClassificationTestAspect")
+	aspectEnv, err := MakeAspectEnvelope(aspectKey, CapabilityLensKey, "reflectsClassificationTestAspect", "description", nil)
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, aspectKey, aspectEnv)
+	require.NoError(t, err)
+
+	entities, aspects, err := KernelOrphans(ctx, kv)
+	require.NoError(t, err)
+	require.Equal(t, []string{entityKey}, entities)
+	require.Equal(t, []string{aspectKey}, aspects)
 }
 
 // TestSeedPrimordial_SeededBucketReconciles proves the wiring: SeedPrimordial

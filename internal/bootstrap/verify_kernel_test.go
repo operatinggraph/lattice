@@ -63,7 +63,7 @@ func TestVerifyKernel_FreshlySeededPasses(t *testing.T) {
 	defer cancel()
 	conn := seededKernelConn(ctx, t)
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.Empty(t, failures, "a freshly seeded kernel must pass every assertion")
 }
 
@@ -74,7 +74,7 @@ func TestVerifyKernel_DetectsMissingKey(t *testing.T) {
 
 	require.NoError(t, conn.KVPurge(ctx, bootstrap.CoreKVBucket, bootstrap.MetaRootKey))
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "MISSING key: "+bootstrap.MetaRootKey))
 }
@@ -87,7 +87,7 @@ func TestVerifyKernel_DetectsMissingAspect(t *testing.T) {
 	aspectKey := bootstrap.MetaRootKey + ".canonicalName"
 	require.NoError(t, conn.KVPurge(ctx, bootstrap.CoreKVBucket, aspectKey))
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "MISSING aspect: "+aspectKey))
 }
@@ -100,7 +100,7 @@ func TestVerifyKernel_DetectsInvalidJSON(t *testing.T) {
 	_, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, bootstrap.MetaRootKey, []byte("not json"))
 	require.NoError(t, err)
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "INVALID JSON for key "+bootstrap.MetaRootKey))
 }
@@ -114,7 +114,7 @@ func TestVerifyKernel_DetectsTamperedIsDeleted(t *testing.T) {
 		env["isDeleted"] = true
 	})
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "INVALID isDeleted for key "+bootstrap.MetaRootKey))
 }
@@ -128,7 +128,7 @@ func TestVerifyKernel_DetectsWrongCreatedBy(t *testing.T) {
 		env["createdBy"] = "vtx.identity.someimposter99999991"
 	})
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "WRONG createdBy for key "+bootstrap.MetaRootKey))
 }
@@ -143,7 +143,7 @@ func TestVerifyKernel_DetectsAspectClassMismatch(t *testing.T) {
 		env["class"] = "wrongClass"
 	})
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "CLASS MISMATCH for aspect "+aspectKey))
 }
@@ -165,7 +165,7 @@ func TestVerifyKernel_DetectsStaleContent(t *testing.T) {
 	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, key, staleVal)
 	require.NoError(t, err)
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "KERNEL ENTRY STALE: "+key))
 }
@@ -177,7 +177,7 @@ func TestVerifyKernel_DetectsMissingHealthReadinessSignal(t *testing.T) {
 
 	require.NoError(t, conn.KVPurge(ctx, bootstrap.HealthKVBucket, bootstrap.HealthBootstrapCompleteKey))
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "MISSING Health KV readiness signal"))
 }
@@ -189,9 +189,27 @@ func TestVerifyKernel_DetectsMissingKVBucket(t *testing.T) {
 
 	require.NoError(t, conn.JetStream().DeleteKeyValue(ctx, bootstrap.LoomStateBucket))
 
-	failures := bootstrap.VerifyKernel(ctx, conn)
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
 	require.NotEmpty(t, failures)
 	require.Condition(t, containsSubstring(failures, "MISSING KV bucket: "+bootstrap.LoomStateBucket))
+}
+
+func TestVerifyKernel_ReportsKernelOrphanAsNoticeNotFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	id, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	orphan := substrate.VertexKey("meta", id)
+	env, err := bootstrap.MakeVertexEnvelope(orphan, "meta.ddl", nil)
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, orphan, env)
+	require.NoError(t, err)
+
+	failures, notices := bootstrap.VerifyKernel(ctx, conn)
+	require.Empty(t, failures, "a kernel orphan must never fail verify-kernel (D1 — informational only)")
+	require.Condition(t, containsSubstring(notices, "KERNEL ENTITY ORPHANED: "+orphan))
 }
 
 func containsSubstring(haystack []string, want string) func() bool {
