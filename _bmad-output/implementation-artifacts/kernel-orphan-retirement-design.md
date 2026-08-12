@@ -663,3 +663,118 @@ the lens/DDL-cache/installer references and all contract sections checked out, s
 sentence; a handful were off by 1–3 lines with the substance unaffected and have been corrected. The errors
 it found are folded as #7, #8 and #9 above. The `~75` figure is independently grounded at
 `primordial.go:302` (*"Total ≈ 76 Core KV entries"*).
+
+---
+
+## 13. Increment 1 fire brief (build note, 2026-08-11)
+
+### 1. Scope sentence (verbatim, §9 Increment 1)
+
+> `KernelOrphans(ctx, kv) (entities, aspects []string, err error)` in `reconcile.go`, the read-only twin of
+> `KernelDrift`, sharing `planReconcile` so report and repair can never disagree […]. `planReconcile` gains
+> `orphanedEntities` / `orphanedAspects`, populated but **not** appended to `steps()`. `ReconcilePrimordial`
+> logs each at `Warn`. `VerifyKernel` (`verify.go:259`) and `scripts/verify-kernel.go:325` report both
+> classes as **informational, non-failing** lines.
+>
+> *Green criterion:* every existing `internal/bootstrap` test passes unchanged; `make verify-kernel` exit
+> status unchanged on every bucket. Nothing is written that was not written before.
+
+### 2. Verified touch-list (`file:line` checked live, this fire)
+
+| File | Anchor | Edit |
+|---|---|---|
+| `internal/bootstrap/reconcile.go` | `:47-52` `reconcilePlan` | add `orphanedEntities`, `orphanedAspects []string` |
+| | `:54-56` `steps()` | **unchanged** — the regression guard |
+| | `:104` `planReconcile(ctx, kv jetstream.KeyValue)` | after the built-set loop, add the orphan scan |
+| | `:183` `ReconcilePrimordial` | `Warn` per orphan, mirroring `:202` |
+| | `:270` `KernelDrift` | add `KernelOrphans` beside it, same shape |
+| `internal/bootstrap/verify.go` | `:46` `VerifyKernel(...) []string` | → `(failures, notices []string)` (decision D1) |
+| | `:256-267` drift block | add the orphan block below it, into `notices` |
+| `cmd/lattice/bootstrap/bootstrap.go` | `:134` sole non-test caller | consume the 2nd return; JSON gains `"notices"` |
+| `scripts/verify-kernel.go` | `:325` drift block | `KernelOrphans` call + `  INFO ` lines, no `failures` append |
+| `internal/bootstrap/reconcile_test.go` | 10 tests, `:57-372` | add the discriminator table + 2 named tests |
+| `internal/bootstrap/verify_kernel_test.go` | 13 funcs, `:61-222` | update `VerifyKernel` call sites for the 2nd return |
+
+**Citations that rotated vs the design:** none material. Design §12.1 #10 is confirmed — `planReconcile`
+holds a `jetstream.KeyValue`, which exposes `ListKeysFiltered` directly (`substrate/kv.go:239,287` are the
+only two in-repo callers, both on a `*Conn`-obtained handle).
+
+### 3. Precedents to mirror
+
+- **Enumeration + partial-result guard** — `substrate/kv.go:220-247` (`KVListKeysPrefix`). The inline
+  `ListKeysFiltered` **must** copy its `ctx.Err()` check (`:242-247`): §3.2's safety argument rests on the
+  listing refusing to return a silently-partial result, and calling the handle directly bypasses the helper
+  that provides it. *This is the single easiest thing in this fire to drop.*
+- **Envelope field read from a raw stored value** — `reconcile.go:68-76` (`storedIsDeleted`): unmarshal into
+  a minimal anonymous struct with JSON tags, tolerate the error. Extend the same shape, do not switch to
+  `map[string]any`.
+- **Read-only twin over the shared plan** — `reconcile.go:270-282` (`KernelDrift`) exactly.
+- **Warn line style** — `reconcile.go:202` (`s.logger.Warn("…", "key", key)`).
+- **Informational print style** — `scripts/verify-kernel.go:284,291,300,315` (`  OK  <what>: %s`).
+
+### 4. Increment order
+
+**Inc A — the scan + the twin.** `reconcilePlan` fields, the orphan loop in `planReconcile`, `KernelOrphans`.
+Green: `go test ./internal/bootstrap/ -run 'Reconcile|KernelDrift|KernelOrphans' -count=1`.
+
+**Inc B — the report plumbing.** `ReconcilePrimordial` Warns; `VerifyKernel`'s second return; both consumers;
+test call-site updates. Green: `go build ./...` · `go test ./internal/bootstrap/ -count=1`.
+
+**Inc C — the measurement (this increment IS the deliverable, §9).** Run `make verify-kernel` against the
+shared dev stack and the demo box; record both counts here.
+
+Gates: `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go` ·
+`make verify-kernel` (exit status unchanged) · `go test ./...`.
+
+### 5. In-scope gotchas
+
+- **The orphan loop's failure posture is the INVERSE of the built-set loop's.** `planReconcile:116-120`
+  *propagates* a KVGet error for a built key. §3.1 requires the opposite for a candidate: `KVGet` error,
+  unparseable envelope, absent `createdByOp` — all **keep, silently**. Returning an error there would let one
+  unreadable package meta take down every boot.
+- **Enumeration failure must still propagate.** A listing that errors is not "no orphans"; return the error.
+  (The *partial* case is what `ctx.Err()` covers.)
+- **Classification is a state table, not one clause** (candidate `K` under `vtx.meta.`, `K ∉ built`;
+  `R` = `K`'s first three segments):
+
+  | # | shape | classify |
+  |---|---|---|
+  | 1 | `K == R`, `R ∉ built`, envelope parses, `createdByOp == BootstrapOpKey`, `isDeleted == false` | **entity** → report `R` |
+  | 2 | `K == R`, any filter fails (foreign op · unparseable · tombstoned · read error) | keep, silent |
+  | 3 | `K != R`, `R ∈ built`, `K` passes the filters | **aspect** → report `K` |
+  | 4 | `K != R`, `R ∉ built`, `R` present in the bucket | silent — row 1/2 adjudicates the entity |
+  | 5 | `K != R`, `R` **absent from the bucket**, `K` passes the filters | **aspect** → report `K` (parentless; no entity row covers it) |
+  | 6 | `K != R`, filters fail | keep, silent |
+
+  Rows 4 and 5 are why the root's presence must be tested against **both** the built set and the bucket.
+- **`steps()` stays untouched** — the whole non-destructiveness of Inc 1 is that the two new slices never
+  reach it. `TestReconcilePrimordial_IsAFixpoint` (`reconcile_test.go:90`) is the standing proof.
+- **`BootstrapTime` / determinism** — Inc 1 writes nothing, so nothing here may introduce a timestamp.
+- Standing checklist, the two that bind here: **#2 every census is a premise** — Inc C re-measures live, and
+  the design's own §1.2 reachability table says the dev loop's count may legitimately be **zero**;
+  **#4 removal needs a transport AND an observer** — Inc 1 is deliberately observer-only, and `KernelOrphans`
+  is that observer (a report with no printer would be a mute measurement).
+- No `docs/components/bootstrap.md` "Review keeps catching" dossier exists yet; if this item's close pass
+  yields a component-shaped class, it mints one.
+
+### 6. Adjacent finds
+
+- **`VerifyKernel` had no non-failing report channel at all** — resolved in-fire as decision D1, not filed.
+- **`BootstrapOpKey` is a package-level `var`** (`nanoid.go:69,603`), reassigned by `envelope_test.go:17`.
+  Inert for Inc 1 (report-only) but it is the symbol §4(e)'s Inc 2 lint gate protects; noted for Inc 2.
+
+### 7. Non-goals (the drift fence)
+
+No tombstone write · no revive rule · no §3.6 auth-plane refusal · no aspect-level `isDeleted` support in
+`ddl_cache`/`registry_probe` · no `ReconcileResult` counters · no `lint-conventions` gate · no
+`verify-kernel` exit-status change. All Inc 2 or §10.
+
+### Decisions taken in-fire (Winston, §0 decide-don't-defer)
+
+**D1 — `VerifyKernel` returns `(failures, notices []string)`.** The design names `verify.go:259` as a report
+site, but the function returns only a failures slice, so an "informational, non-failing" line had nowhere to
+go. Census: **one** non-test caller (`cmd/lattice/bootstrap/bootstrap.go:134`), so the change is contained.
+The rejected alternative — leave the signature alone and have each of the two consumers call `KernelOrphans`
+itself — duplicates the report at two sites that can then disagree, which is the exact failure the
+"share `planReconcile`" instruction exists to prevent. The JSON arm gains `"notices"`; `"passed"` stays keyed
+on `len(failures) == 0`, so exit status is untouched.
