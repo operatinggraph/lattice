@@ -115,9 +115,12 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 		}
 	}
 
+	branchStages, branchDeferred := analyseBranchDecomposition(v.query)
 	return &CompiledRule{
 		Query:             v.query,
 		groupingRedundant: analyseGroupingRedundancy(v.query),
+		branchStages:      branchStages,
+		branchDeferred:    branchDeferred,
 	}, nil
 }
 

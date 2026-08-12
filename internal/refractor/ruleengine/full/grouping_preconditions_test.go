@@ -96,13 +96,13 @@ func TestProjectItems_RedundantItemProjectsFirstRowValue(t *testing.T) {
 		{"a": "second", "b": "y"},
 	}
 
-	unreduced, err := ex.projectItems(bindings, items, nil)
+	unreduced, err := ex.projectItems(bindings, items, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, unreduced, 2, "with `a` in the key the two rows are two groups")
 	require.Equal(t, "first", unreduced[0]["a"])
 	require.Equal(t, "second", unreduced[1]["a"])
 
-	reduced, err := ex.projectItems(bindings, items, []bool{true, false})
+	reduced, err := ex.projectItems(bindings, items, []bool{true, false}, nil)
 	require.NoError(t, err)
 	require.Len(t, reduced, 1, "with `a` out of the key both rows fall in one group")
 	require.Equal(t, "first", reduced[0]["a"],
@@ -133,7 +133,7 @@ func TestProjectItems_DuplicateAliasLastItemWinsDeterministically(t *testing.T) 
 	const iterations = 50
 	for i := 0; i < iterations; i++ {
 		ex := &executor{ctx: context.Background()}
-		out, err := ex.projectItems(bindings, items, nil)
+		out, err := ex.projectItems(bindings, items, nil, nil)
 		require.NoError(t, err)
 		require.Len(t, out, 1)
 		require.Equal(t, "second", out[0]["v"],

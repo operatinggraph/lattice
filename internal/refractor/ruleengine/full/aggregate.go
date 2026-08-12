@@ -15,36 +15,57 @@ import (
 // per-row argument values themselves, which is what a large MATCH multiplies.
 type aggFold interface {
 	add(ex *executor, b binding) error
+	// addRouted adds b only to the leaves stamped with branch, leaving every
+	// other leaf untouched. It is what lets projectItems feed one decomposed
+	// branch's rows to that branch's own aggregator: without it, folding branch
+	// g1 would evaluate g2's collect() on a row where g2's variables are unbound
+	// (branchgroups.go).
+	addRouted(ex *executor, b binding, branch int) error
 	value() (any, error)
 }
 
-// newAggFold builds the fold tree for one aggregating projection item,
+// newAggFold builds the fold tree for one aggregating projection item with
+// every leaf reading the base row — the undecomposed shape, where one binding
+// stream feeds the whole tree.
+func newAggFold(e Expr) (aggFold, error) { return newAggFoldRouted(e, nil) }
+
+// newAggFoldRouted builds the fold tree for one aggregating projection item,
 // mirroring the expression tree: a FunctionCall folds its own argument, a
 // BinaryOp folds each side independently and combines the two at value().
+//
+// Each leaf is stamped with the branch whose rows feed it, read off the
+// compile-time analysis by the call's own pointer; a nil stamp map, or a call
+// the analysis never judged, reads the base row. The stamp binds at the CALL
+// and not at the item because an item is often a composition —
+// `collect(DISTINCT A_g1) + collect(DISTINCT B_g2)`, the shape every generated
+// read-grant producer and both orchestration lenses take.
 //
 // Folds are built per group, on that group's first row, so a query whose
 // required MATCH bound zero rows builds none and therefore reports no arity or
 // unsupported-aggregator error — preserving projectItems' zero-rows-in,
 // zero-rows-out contract.
-func newAggFold(e Expr) (aggFold, error) {
+func newAggFoldRouted(e Expr, stamps map[*FunctionCall]int) (aggFold, error) {
 	switch x := e.(type) {
 	case *FunctionCall:
-		f := &callFold{call: x}
-		switch {
-		case strings.EqualFold(x.Name, "collect"):
+		f := &callFold{call: x, branch: branchGroupBase}
+		if b, stamped := stamps[x]; stamped {
+			f.branch = b
+		}
+		switch aggregatorName(x.Name) {
+		case aggNameCollect:
 			f.kind = aggCollect
 			// Non-nil empty: an empty collect() projects [], never null.
 			f.list = []any{}
-		case strings.EqualFold(x.Name, "count"):
+		case aggNameCount:
 			f.kind = aggCount
-		case strings.EqualFold(x.Name, "max"), strings.EqualFold(x.Name, "min"):
+		case aggNameMax, aggNameMin:
 			if len(x.Args) != 1 {
 				return nil, fmt.Errorf("full engine: %s takes exactly 1 argument, got %d",
 					strings.ToLower(x.Name), len(x.Args))
 			}
 			f.kind = aggExtreme
 			f.extreme.op = ">"
-			if strings.EqualFold(x.Name, "min") {
+			if aggregatorName(x.Name) == aggNameMin {
 				f.extreme.op = "<"
 			}
 		default:
@@ -55,17 +76,44 @@ func newAggFold(e Expr) (aggFold, error) {
 		}
 		return f, nil
 	case *BinaryOp:
-		left, err := newAggFold(x.Left)
+		left, err := newAggFoldRouted(x.Left, stamps)
 		if err != nil {
 			return nil, err
 		}
-		right, err := newAggFold(x.Right)
+		right, err := newAggFoldRouted(x.Right, stamps)
 		if err != nil {
 			return nil, err
 		}
 		return &binOpFold{op: x.Op, left: left, right: right}, nil
 	}
 	return nil, errors.New("full engine: unsupported aggregate expression")
+}
+
+// The aggregators this engine folds, named once.
+//
+// Four places have to agree on this set — the fold tree built here, the
+// containsAggregator walk that decides which projection items GROUP, the
+// branch analysis's §4.2 multiplicity test, and its fold-shape check. They
+// agreed by four hand-copied literals, and the copies are not equivalent in
+// their failure: a name in containsAggregator but not here fails loudly at
+// newAggFold, while a name known to the analysis but not to containsAggregator
+// would be read as a plain grouping term and let a stage decompose with a
+// multiplicity-sensitive aggregator in it. One set, one place.
+const (
+	aggNameCollect = "collect"
+	aggNameCount   = "count"
+	aggNameMax     = "max"
+	aggNameMin     = "min"
+)
+
+// aggregatorName canonicalises a recognised aggregator's name — the engine
+// matches these case-insensitively — and returns "" for anything else.
+func aggregatorName(name string) string {
+	switch lowered := strings.ToLower(name); lowered {
+	case aggNameCollect, aggNameCount, aggNameMax, aggNameMin:
+		return lowered
+	}
+	return ""
 }
 
 type aggKind int
@@ -92,8 +140,12 @@ const (
 // branch collects) compares by content rather than by Go reference. First
 // occurrence wins, so the result order stays the binding order.
 type callFold struct {
-	call    *FunctionCall
-	kind    aggKind
+	call *FunctionCall
+	kind aggKind
+	// branch is the decomposed branch whose rows this call reads, or
+	// branchGroupBase for a call that reads only base variables and is therefore
+	// fed each base row exactly once.
+	branch  int
 	seen    map[string]struct{} // non-nil iff the call carries DISTINCT
 	list    []any               // aggCollect
 	count   int64               // aggCount
@@ -131,6 +183,13 @@ func (f *callFold) add(ex *executor, b binding) error {
 	return nil
 }
 
+func (f *callFold) addRouted(ex *executor, b binding, branch int) error {
+	if f.branch != branch {
+		return nil
+	}
+	return f.add(ex, b)
+}
+
 func (f *callFold) value() (any, error) {
 	switch f.kind {
 	case aggCollect:
@@ -157,6 +216,13 @@ func (f *binOpFold) add(ex *executor, b binding) error {
 		return err
 	}
 	return f.right.add(ex, b)
+}
+
+func (f *binOpFold) addRouted(ex *executor, b binding, branch int) error {
+	if err := f.left.addRouted(ex, b, branch); err != nil {
+		return err
+	}
+	return f.right.addRouted(ex, b, branch)
 }
 
 func (f *binOpFold) value() (any, error) {

@@ -159,6 +159,24 @@ type executor struct {
 	// (grouping.go), read through redundantFor as each projecting clause runs.
 	// Nil means every non-aggregating item is rendered into the grouping key.
 	groupingRedundant map[Clause][]bool
+
+	// branchStages and branchDeferred are the compiled rule's parse-time
+	// branch-group analysis (branchgroups.go): the OPTIONAL MATCH clauses run
+	// skips, and the plan projectItems expands them under, per base row. Nil
+	// means every clause runs in the product, which is the path every evaluation
+	// took before the analysis existed.
+	branchStages   map[Clause]*stagePlan
+	branchDeferred map[*Match]struct{}
+}
+
+// branchPlanFor returns c's branch-decomposition plan, or nil when the rule
+// carries none for it — the product path, which is what a directly constructed
+// *CompiledRule takes.
+func (ex *executor) branchPlanFor(c Clause) *stagePlan {
+	if ex.branchStages == nil {
+		return nil
+	}
+	return ex.branchStages[c]
 }
 
 // redundantFor returns c's redundant-item mask, or nil when the rule carries no
@@ -213,19 +231,47 @@ func (ex *executor) checkCancelled() error {
 // who gets notified, not the content of a row.)
 //
 // It is also where the evaluation's peak binding rows is stamped, because this
-// is the one place every growing binding slice passes through — the clause
+// is the one place every MATERIALIZED binding slice passes through — the clause
 // accumulator in applyMatch, the per-pattern expansion in matchPatterns, and
 // both the seed set and each relationship hop in matchPath. The stamp lands
 // BEFORE the cancellation and cap checks so a refused or cancelled evaluation
 // still reports the row count it reached, which is the number an operator
 // diagnosing that refusal is looking for.
+//
+// A running total across slices that are never co-resident goes to
+// checkBindingsCumulative instead, which caps without stamping: the peak is what
+// the evaluation held at one time, not what it walked in total.
 func (ex *executor) checkBindings(rows int) error {
 	if rows > ex.peakBindingRows {
 		ex.peakBindingRows = rows
 	}
+	return ex.enforceBindingCap(rows)
+}
+
+// checkBindingsCumulative applies the cancellation check and the cap to a
+// RUNNING TOTAL — the rows a decomposed branch has expanded across every base
+// row of one stage — and deliberately does NOT stamp the peak.
+//
+// The two quantities are different and both are wanted. The CAP bounds the work
+// an evaluation may do: a branch walked once per base row costs the whole total
+// even though each expansion is discarded before the next is built, so capping
+// only the widest single expansion would admit an evaluation the product path
+// correctly refuses. The PEAK gauge answers a different question — what the
+// evaluation held at any ONE point, which is what
+// docs/observability/health-kv-schema.md promises an operator, and the only
+// reading under which decomposition is visible at all: a summed gauge reports
+// the same number for the product and for the branches it replaced. Each
+// expansion's own co-resident size is stamped where it is materialized, by
+// checkBindings inside applyMatch.
+func (ex *executor) checkBindingsCumulative(rows int) error {
 	if err := ex.checkCancelled(); err != nil {
 		return err
 	}
+	return ex.enforceBindingCap(rows)
+}
+
+// enforceBindingCap refuses past the cap, and never truncates.
+func (ex *executor) enforceBindingCap(rows int) error {
 	if ex.maxBindings <= 0 || rows <= ex.maxBindings {
 		return nil
 	}
@@ -310,6 +356,8 @@ func (e *Engine) ExecuteWithStats(
 		maxBindings:       e.maxBindings,
 		labelExpansion:    compiled.LabelExpansion,
 		groupingRedundant: compiled.groupingRedundant,
+		branchStages:      compiled.branchStages,
+		branchDeferred:    compiled.branchDeferred,
 	}
 
 	results, footprint, err := ex.run(compiled)
@@ -328,6 +376,13 @@ func (ex *executor) run(compiled *CompiledRule) ([]ruleengine.ProjectionResult, 
 	for _, clause := range compiled.Query.Clauses {
 		switch c := clause.(type) {
 		case *Match:
+			if _, deferred := ex.branchDeferred[c]; deferred {
+				// A decomposed branch: its rows never enter this stage's
+				// binding slice at all. projectItems expands it against each
+				// base row instead, through this same applyMatch, and folds it
+				// into its own aggregator.
+				break
+			}
 			next, err := ex.applyMatch(bindings, c)
 			if err != nil {
 				return nil, ruleengine.EvalFootprint{}, err
@@ -1255,7 +1310,7 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 // --- WITH ---
 
 func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
-	projected, err := ex.projectItems(bindings, w.Items, ex.redundantFor(w))
+	projected, err := ex.projectItems(bindings, w.Items, ex.redundantFor(w), ex.branchPlanFor(w))
 	if err != nil {
 		return nil, err
 	}
@@ -1309,7 +1364,13 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 // footprint bit-identical — but contributes no fragment to the grouping key,
 // because the aliases still in that key already determine its value. A nil or
 // short slice renders every item, which is the behaviour with no analysis.
-func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, redundant []bool) ([]binding, error) {
+//
+// plan is the clause's parse-time branch-group analysis (branchgroups.go). When
+// it is non-nil, `bindings` is the BASE row set — the stage's sibling OPTIONAL
+// MATCH branches it names were never applied to it — and this function expands
+// each of them per base row, folding each into the aggregators stamped with it.
+// Nil is the product path, where every branch already multiplied the rows.
+func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, redundant []bool, plan *stagePlan) ([]binding, error) {
 	// Decide aggregating vs non-aggregating per item.
 	itemAggregating := make([]bool, len(items))
 	anyAggregating := false
@@ -1327,6 +1388,17 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 	}
 
 	if !anyAggregating {
+		// A plan here would mean run() skipped this stage's deferred branches
+		// while the projection has no fold to feed them into — their rows would
+		// simply be gone, which is a SHORT projection written to the read model
+		// with nothing downstream able to tell it from a correct one. The
+		// analysis cannot produce that pairing (it defers nothing unless the
+		// stage aggregates), so this is the impossible case failing loudly
+		// rather than the engine's one silent-wrongness mode.
+		if plan != nil && len(plan.deferred) > 0 {
+			return nil, errors.New(
+				"full engine: branch decomposition deferred a clause into a projection that aggregates nothing")
+		}
 		out := make([]binding, 0, len(bindings))
 		for _, b := range bindings {
 			if err := ex.checkCancelled(); err != nil {
@@ -1356,6 +1428,18 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 	}
 	groups := map[string]*groupAcc{}
 	var order []string
+	// branchRows counts, per decomposed branch, the rows this stage has expanded
+	// through it across every base row — the quantity that was |base| × Π|G| in
+	// the product and is now |base ⋈ G| per branch. The CAP is enforced against
+	// that total, because the work is really done even though each base row's
+	// expansion is discarded before the next is built; capping one expansion
+	// instead would admit an evaluation the product path refuses. The PEAK gauge
+	// is not stamped from it — these expansions are never co-resident, and each
+	// one's own size is stamped inside applyMatch where it is materialized.
+	var branchRows []int
+	if plan != nil {
+		branchRows = make([]int, len(plan.deferred))
+	}
 	for _, b := range bindings {
 		if err := ex.checkCancelled(); err != nil {
 			return nil, err
@@ -1393,7 +1477,15 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 				if !itemAggregating[i] {
 					continue
 				}
-				f, err := newAggFold(it.Expr)
+				var (
+					f   aggFold
+					err error
+				)
+				if plan == nil {
+					f, err = newAggFold(it.Expr)
+				} else {
+					f, err = newAggFoldRouted(it.Expr, plan.foldGroup)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -1402,12 +1494,51 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 			groups[k] = g
 			order = append(order, k)
 		}
+		if plan == nil {
+			for i := range items {
+				if !itemAggregating[i] {
+					continue
+				}
+				if err := g.aggs[i].add(ex, b); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		// A fold reading no decomposed branch sees each base row ONCE, where the
+		// product fed it once per product row. Every such fold is
+		// multiplicity-insensitive by §4.2, so the two agree; feeding it once is
+		// what makes that agreement independent of how wide the branches are.
 		for i := range items {
 			if !itemAggregating[i] {
 				continue
 			}
-			if err := g.aggs[i].add(ex, b); err != nil {
+			if err := g.aggs[i].addRouted(ex, b, branchGroupBase); err != nil {
 				return nil, err
+			}
+		}
+		for di, branch := range plan.deferred {
+			rows := []binding{b}
+			for _, m := range branch.clauses {
+				next, err := ex.applyMatch(rows, m)
+				if err != nil {
+					return nil, err
+				}
+				rows = next
+			}
+			branchRows[di] += len(rows)
+			if err := ex.checkBindingsCumulative(branchRows[di]); err != nil {
+				return nil, err
+			}
+			for _, rb := range rows {
+				for i := range items {
+					if !itemAggregating[i] {
+						continue
+					}
+					if err := g.aggs[i].addRouted(ex, rb, di); err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 	}
@@ -1454,16 +1585,15 @@ func projectionAutoAlias(e Expr, idx int) string {
 	return fmt.Sprintf("_col%d", idx)
 }
 
-// containsAggregator returns true if the expression tree contains a
-// recognized aggregator (collect, count, max, min).
+// containsAggregator returns true if the expression tree contains an aggregator
+// this engine folds, reading the same name set newAggFold dispatches on
+// (aggregate.go). An item holding one GROUPS its clause's input rows; an item
+// holding none is a grouping term.
 func containsAggregator(e Expr) bool {
 	found := false
 	walkExprAll(e, func(x Expr) {
-		if fc, ok := x.(*FunctionCall); ok {
-			switch strings.ToLower(fc.Name) {
-			case "collect", "count", "max", "min":
-				found = true
-			}
+		if fc, ok := x.(*FunctionCall); ok && aggregatorName(fc.Name) != "" {
+			found = true
 		}
 	})
 	return found
@@ -1472,7 +1602,7 @@ func containsAggregator(e Expr) bool {
 // --- RETURN ---
 
 func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.ProjectionResult, error) {
-	rows, err := ex.projectItems(bindings, r.Items, ex.redundantFor(r))
+	rows, err := ex.projectItems(bindings, r.Items, ex.redundantFor(r), ex.branchPlanFor(r))
 	if err != nil {
 		return nil, err
 	}

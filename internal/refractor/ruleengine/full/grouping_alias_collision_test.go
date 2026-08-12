@@ -67,7 +67,7 @@ RETURN a AS k, s AS v`
 	// two differently-valued rows in two groups.
 	second, mask := secondWithOf(t, body)
 	ex := &executor{ctx: context.Background()}
-	rows, err := ex.projectItems([]binding{{"a": int64(1)}, {"a": int64(2)}}, second.Items, mask)
+	rows, err := ex.projectItems([]binding{{"a": int64(1)}, {"a": int64(2)}}, second.Items, mask, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2,
 		"two rows with different `a` are two groups; one row means the key was emptied")
@@ -89,7 +89,7 @@ RETURN a AS k, s AS v`
 
 	second, mask := secondWithOf(t, body)
 	ex := &executor{ctx: context.Background()}
-	rows, err := ex.projectItems([]binding{{"a": int64(1)}, {"a": int64(2)}}, second.Items, mask)
+	rows, err := ex.projectItems([]binding{{"a": int64(1)}, {"a": int64(2)}}, second.Items, mask, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 }
@@ -115,7 +115,7 @@ RETURN identity AS k, s AS v`
 	second, mask := secondWithOf(t, body)
 	ex := &executor{ctx: context.Background()}
 	rows, err := ex.projectItems(
-		[]binding{{"identity": "actorA"}, {"identity": "actorB"}}, second.Items, mask)
+		[]binding{{"identity": "actorA"}, {"identity": "actorB"}}, second.Items, mask, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2, "two actors must never share a group")
 }
@@ -146,7 +146,7 @@ RETURN a AS k, b AS v, c AS w`
 	rows, err := ex.projectItems([]binding{
 		{"a": int64(1), "b": []any{"x"}},
 		{"a": int64(1), "b": []any{"y"}},
-	}, second.Items, mask)
+	}, second.Items, mask, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2,
 		"two groups of the refused clause must not be merged by the clause after it")

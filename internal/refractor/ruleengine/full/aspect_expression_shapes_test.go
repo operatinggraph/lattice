@@ -15,7 +15,7 @@ import (
 // vtx.<class>.<id>.<localName>. The body mirrors what a package's
 // make_aspect emits (location-domain/ddls.go), so the engine sees the same
 // shape it sees on a live stack: envelope fields plus a `data` object.
-func putAspect(t *testing.T, reg *fixtureRegistry, kv *substrate.KV, vertexName, localName string, data map[string]any) {
+func putAspect(t testing.TB, reg *fixtureRegistry, kv *substrate.KV, vertexName, localName string, data map[string]any) {
 	t.Helper()
 	vk := vtxKey(reg, vertexName)
 	require.NotEmpty(t, vk, "fixture: %q not registered", vertexName)

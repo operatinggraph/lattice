@@ -15,6 +15,13 @@
 // product comfortably clears a binding cap the staged form never approaches is
 // exactly the shape that put a live edgeManifestReadGrants evaluation over a
 // 1,000,001-row cross product on one event.
+//
+// The engine's own branch decomposition (branchgroups.go) now folds independent
+// branches apart wherever it can prove them foldable, flat form included — so
+// the peak difference this file measures is a property of the PRODUCT
+// evaluation, and the tests that measure it disable decomposition to reach it.
+// The staging primitive is unchanged and still shipped; §6 of the decomposition
+// design explicitly does not propose un-staging the generator.
 package full
 
 import (
@@ -298,13 +305,20 @@ func TestReadGrantProducer_StagedMatchesFlatAnchorSet(t *testing.T) {
 }
 
 // TestReadGrantProducer_FlatFormExceedsBindingCapStagedDoesNot is the bound
-// proof: under the SAME low cap, the flat form's cross product refuses while
-// the staged form — whose peak binding set is only its largest single walk's
-// own fan-out — comfortably succeeds. 50,000 sits well above the staged
-// form's ~33-row peak (the sess walk: 2 containers × 2 studios × 8 sessions)
-// and well below the flat form's ~330,000-row total (2 containers ×
-// (4 tpl × 3 op) × 3 task × 2 inst × (2 studio × 8 sess) × 3 prov × 4 booking
-// × 2 tab × 6 item).
+// proof: under the SAME low cap, the flat form's cross product refuses while the
+// staged form — whose peak binding set is only its largest single walk's own
+// fan-out — comfortably succeeds. 50,000 sits well above the staged form's ~33-row
+// peak (the sess walk: 2 containers × 2 studios × 8 sessions) and well below the
+// flat form's ~330,000-row total (2 containers × (4 tpl × 3 op) × 3 task ×
+// 2 inst × (2 studio × 8 sess) × 3 prov × 4 booking × 2 tab × 6 item).
+//
+// The flat form is run with the engine's branch decomposition DISABLED, because
+// that decomposition (branchgroups.go) now folds the flat form's independent
+// branches apart too — the same relief staging buys, applied by the engine
+// rather than by the generator. Disabling it is what keeps this test measuring
+// the thing it is named for: the product a shared row stream materializes.
+// TestReadGrantProducer_FlatFormUnderDecompositionAlsoFits, below, is the other
+// half of that fact.
 func TestReadGrantProducer_FlatFormExceedsBindingCapStagedDoesNot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -318,7 +332,8 @@ func TestReadGrantProducer_FlatFormExceedsBindingCapStagedDoesNot(t *testing.T) 
 
 	flatCR, err := eng.Parse(flatEdgeManifestReadGrantsCypher)
 	require.NoError(t, err)
-	_, err = eng.ExecuteWith(context.Background(), flatCR, params, corpus.adjKV, corpus.coreKV)
+	_, err = eng.ExecuteWith(context.Background(),
+		withoutBranchDecomposition(flatCR.(*CompiledRule)), params, corpus.adjKV, corpus.coreKV)
 	require.Error(t, err, "the flat form's cross product must overrun a %d-row cap", lowCap)
 	require.Contains(t, err.Error(), "over the cap of",
 		"the refusal must be the binding-set cap, not some other error: %v", err)
@@ -328,6 +343,47 @@ func TestReadGrantProducer_FlatFormExceedsBindingCapStagedDoesNot(t *testing.T) 
 	stagedOut, err := eng.ExecuteWith(context.Background(), stagedCR, params, corpus.adjKV, corpus.coreKV)
 	require.NoError(t, err, "the staged form's peak (its largest single walk) must stay well under the same cap")
 	require.NotEmpty(t, canonicalAnchorSet(t, stagedOut))
+}
+
+// TestReadGrantProducer_FlatFormUnderDecompositionAlsoFits records what the
+// engine's branch decomposition changed about the fact above: the UNSTAGED
+// producer, the shape that put a live evaluation over a 1,000,001-row cross
+// product, now fits under the same low cap and grants exactly the anchor set the
+// staged form does.
+//
+// It does not make the §12 staging redundant and is not an argument to un-stage
+// the generator (the design's §6 non-goal): the staging is shipped, proven and
+// cheap. It is here so the two mechanisms' relationship is pinned rather than
+// inferred — if a future change to either one made the flat form refuse again,
+// this is where that shows up.
+func TestReadGrantProducer_FlatFormUnderDecompositionAlsoFits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	corpus := seedEdgeManifestReadGrantCorpus(t)
+
+	const lowCap = 50_000
+	eng := New().WithMaxBindings(lowCap)
+	params := ruleengine.EventContext{Parameters: map[string]any{"actorKey": corpus.actorKey}}
+
+	flatCR, err := eng.Parse(flatEdgeManifestReadGrantsCypher)
+	require.NoError(t, err)
+	compiled := flatCR.(*CompiledRule)
+	require.NotEmpty(t, compiled.branchStages, "the flat producer must be the shape decomposition applies to")
+
+	flatOut, _, stats, err := eng.ExecuteWithStats(context.Background(), compiled, params, corpus.adjKV, corpus.coreKV)
+	require.NoError(t, err, "decomposed, the flat form must fit under the same cap the product overran")
+	require.Lessf(t, stats.PeakBindingRows, lowCap,
+		"decomposed peak %d must be the largest single branch, not the product", stats.PeakBindingRows)
+
+	stagedCR, err := eng.Parse(stagedEdgeManifestReadGrantsSpec(t))
+	require.NoError(t, err)
+	stagedOut, err := eng.ExecuteWith(context.Background(), stagedCR, params, corpus.adjKV, corpus.coreKV)
+	require.NoError(t, err)
+
+	onlyInFlat, onlyInStaged := diffAnchorSets(canonicalAnchorSet(t, flatOut), canonicalAnchorSet(t, stagedOut))
+	require.Empty(t, onlyInFlat, "the decomposed flat form granted anchors the staged form does not: %v", onlyInFlat)
+	require.Empty(t, onlyInStaged, "the decomposed flat form dropped anchors the staged form grants: %v", onlyInStaged)
 }
 
 // TestReadGrantProducer_StagingScopesWalkVariablesApart is the runtime proof

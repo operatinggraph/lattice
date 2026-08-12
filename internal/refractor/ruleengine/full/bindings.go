@@ -128,19 +128,40 @@ func variableRefChainRoot(e Expr) (name string, ok bool, unknown bool) {
 	}
 }
 
-// collectPatternVariableRefs adds the NodePattern/RelPattern variable names a
-// path pattern binds into out, for every node/rel whose Variable is
-// non-empty.
+// collectPatternVariableRefs adds every variable name a path pattern's
+// evaluation touches into out: the NodePattern/RelPattern variables the pattern
+// BINDS, and the variables its inline PROPERTY MAPS read.
+//
+// The property maps are not decoration. A pattern reached through an expression
+// is evaluated as a predicate or a comprehension (executor.existsAsPredicate,
+// executor.evalPatternComprehension) and its property maps are ordinary
+// expressions run through evalExpr — so `(:task {key: t.key})` makes the whole
+// predicate depend on `t`, a binding nothing else in the pattern names. Walking
+// only the pattern's own variables reported a SHORT dependency set with
+// unknown=false, which is the one answer this walk must never give: a caller
+// reasoning about which bindings an expression needs would conclude it needs
+// none of them, and the fail-closed arm it relies on would never fire.
 func collectPatternVariableRefs(p PathPattern, out map[string]bool) bool {
+	unknown := false
 	for _, n := range p.Nodes {
 		if n.Variable != "" {
 			out[n.Variable] = true
+		}
+		for _, v := range n.Properties {
+			if collectVariableRefsInto(v, out) {
+				unknown = true
+			}
 		}
 	}
 	for _, r := range p.Rels {
 		if r.Variable != "" {
 			out[r.Variable] = true
 		}
+		for _, v := range r.Properties {
+			if collectVariableRefsInto(v, out) {
+				unknown = true
+			}
+		}
 	}
-	return false
+	return unknown
 }

@@ -284,6 +284,19 @@ type CompiledRule struct {
 	// Written once by Parse, over the Query above, and never mutated
 	// afterwards — a compiled rule is shared across concurrent evaluations.
 	groupingRedundant map[Clause][]bool
+
+	// branchStages holds, per projecting clause, the sibling OPTIONAL MATCH
+	// branches the executor folds against the base row set separately instead of
+	// through their cross product (branchgroups.go), and branchDeferred is the
+	// set of clauses run() therefore skips. Absent clause, nil maps, and a
+	// directly constructed *CompiledRule all mean "evaluate the product", which
+	// is the executor's behaviour with no analysis at all.
+	//
+	// Same immutability contract as groupingRedundant above: written once by
+	// Parse, never afterwards. Per-EVALUATION state (the branch row counters
+	// each stage's expansion is capped against) lives on the executor.
+	branchStages   map[Clause]*stagePlan
+	branchDeferred map[*Match]struct{}
 }
 
 // EngineName implements ruleengine.CompiledRule.
