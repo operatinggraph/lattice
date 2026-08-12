@@ -39,6 +39,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -347,7 +348,14 @@ func (r *Responder) resolveIdentity(ctx context.Context, actorID string) (bound 
 // one caller, authorize, always validates first) so a malformed id here is a
 // caller-contract bug, not a runtime input to guard again.
 func PermissionsFor(identityID, deviceID string) *jwt.Permissions {
-	durable := fmt.Sprintf("edge-sync-%s-%s", identityID, deviceID)
+	// The granted name MUST be the one the host actually creates. Every
+	// producer of it derives from subjects.EdgeSyncDurable — the Edge node's
+	// sync.Manager, the browser shell's Go-side config, Loupe's inspector and
+	// Refractor's reconciler — and this grant is the security-load-bearing
+	// consumer of that agreement: a drift here signs a JWT for one consumer
+	// name while the device creates another, and the device's own attach is
+	// refused by its own credential.
+	durable := subjects.EdgeSyncDurable(identityID, deviceID)
 	syncSubject := syncSubjectPrefix + "." + identityID
 
 	p := &jwt.Permissions{}

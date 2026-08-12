@@ -115,7 +115,12 @@ func TestManager_Run_ResolvesThePositionOnlyOnceReadyToAttach(t *testing.T) {
 		t.Fatal("Run never returned after the gate opened")
 	}
 
-	require.Equal(t, []string{"syncgap"}, tr.requests, "the gap check runs once, after the wait")
+	// The exact sequence, not just its contents: everything the control plane
+	// is asked happens after the wait, the gap check runs exactly once, and
+	// the warm path's Interest Set refresh follows it — still before the
+	// attach, which is the ordering that refresh exists for.
+	require.Equal(t, []string{"syncgap", "register"}, tr.requests,
+		"after the wait: one gap check, then the warm resume's registration refresh, and nothing else")
 	require.Equal(t, uint64(42), tr.cfg.StartSeq,
 		"the position must come from the cursor as it stands at attach time, not at boot")
 	require.Equal(t, uint64(41), floorPersisted(&mgr.floor),

@@ -385,6 +385,112 @@ func (c *Conn) DeleteOrphanDurables(ctx context.Context, bucket string, orphaned
 	return deleted, nil
 }
 
+// drainConsumerNames reads a stream's consumer names to completion and
+// reports the lister's own error, so a short or aborted paging run can never
+// reach a caller as a complete-looking empty slice.
+//
+// It is a separate function because that error is the whole point and it is
+// unreachable from outside: js.Stream round-trips (nats.go v1.52.0
+// jetstream/jetstream.go:812), so a caller passing a dead context fails there
+// and never gets far enough to page. Taking the already-resolved stream
+// handle as an argument is what lets a test drive the paging failure on its
+// own.
+func drainConsumerNames(ctx context.Context, stream jetstream.Stream) ([]string, error) {
+	var names []string
+	lister := stream.ConsumerNames(ctx)
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+// BackfillConsumerInactiveThreshold gives every consumer on the named stream
+// that currently declares no InactiveThreshold the supplied one, and returns
+// the names it changed, sorted. streamName is a STREAM name, not a KV bucket
+// — unlike PruneStaleDurables and DeleteOrphanDurables this operates on plain
+// event streams, so nothing is prepended to it.
+//
+// It exists because a stream's ConsumerLimits.InactiveThreshold does not
+// retro-apply. A new or updated consumer that declares none inherits the
+// stream's (nats-server v2.14.0 server/consumer.go:666), and one asking for
+// more is refused (:843-844), but changing a stream's limits only validates
+// that no EXISTING consumer exceeds the new value (server/stream.go:2433-2441):
+// a consumer sitting at zero does not exceed anything, passes, and keeps zero
+// forever. So a stream that adopts the policy leaves every consumer that
+// predates it unbounded — including exactly those whose owner will never come
+// back to re-issue a create and pick the policy up.
+//
+// It never decides whether a consumer is abandoned. It only makes every
+// consumer CAPABLE of expiring and leaves the verdict to the server, which
+// protects a consumer with un-acked in flight (server/consumer.go:2175-2210)
+// or a waiting pull request (:2155-2172) on its own. There is no delete
+// verdict here, so there is no ack floor to lose and no enumeration to trust:
+// a listing that comes back short just means fewer get fixed this pass.
+//
+// The write-back reuses the READ-BACK ConsumerInfo.Config and mutates only
+// InactiveThreshold. A freshly-constructed ConsumerConfig would differ from
+// the stored one in fields checkNewConsumerConfig refuses to update —
+// DeliverPolicy and OptStartSeq among them (server/consumer.go:2435, :2438) —
+// so the update would be rejected on precisely the consumers this exists for,
+// the ones that started somewhere other than the defaults.
+//
+// A failure to LIST is returned: an empty listing must never read as "nothing
+// to do". The listing is drained fully before any per-consumer I/O, since each
+// name costs an Info round trip and possibly an update and holding the lister's
+// paging subscription open across all of them is what the drain avoids. A
+// per-consumer info or update failure is logged and the pass continues.
+//
+// Every nats-server line cited here is v2.14.0, the pinned module (go.mod).
+// The running server may be a later 2.14.x, where these lines shift.
+func (c *Conn) BackfillConsumerInactiveThreshold(ctx context.Context, streamName string, threshold time.Duration, logger *slog.Logger) ([]string, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	stream, err := c.js.Stream(ctx, streamName)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: BackfillConsumerInactiveThreshold: get stream %q: %w", streamName, err)
+	}
+
+	names, err := drainConsumerNames(ctx, stream)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: BackfillConsumerInactiveThreshold: list consumers on %q: %w", streamName, err)
+	}
+	sort.Strings(names)
+
+	var updated []string
+	for _, name := range names {
+		cons, err := c.js.Consumer(ctx, streamName, name)
+		if err != nil {
+			logger.Warn("substrate: BackfillConsumerInactiveThreshold: consumer lookup failed, skipping",
+				"stream", streamName, "durable", name, "err", err)
+			continue
+		}
+		info, err := cons.Info(ctx)
+		if err != nil {
+			logger.Warn("substrate: BackfillConsumerInactiveThreshold: consumer info failed, skipping",
+				"stream", streamName, "durable", name, "err", err)
+			continue
+		}
+		if info.Config.InactiveThreshold != 0 {
+			continue
+		}
+		cfg := info.Config
+		cfg.InactiveThreshold = threshold
+		if _, err := c.js.CreateOrUpdateConsumer(ctx, streamName, cfg); err != nil {
+			logger.Warn("substrate: BackfillConsumerInactiveThreshold: update failed",
+				"stream", streamName, "durable", name, "err", err)
+			continue
+		}
+		logger.Info("substrate: backfilled consumer inactive threshold",
+			"stream", streamName, "durable", name, "threshold", threshold)
+		updated = append(updated, name)
+	}
+	return updated, nil
+}
+
 // DeleteStreamConsumer removes a single named durable consumer from an event
 // stream (not a KV bucket — use DeleteDurable for those). It is the seam for a
 // one-time durable migration: retiring a superseded consumer whose un-acked

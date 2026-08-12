@@ -31,11 +31,26 @@ type StreamSpec struct {
 	// ConsumerInactiveThreshold sets the stream's ConsumerLimits.
 	// InactiveThreshold: every durable consumer on this stream that does not
 	// declare its own InactiveThreshold inherits this one, and a consumer
-	// that asks for a longer one is refused (nats-server 2.14
-	// server/consumer.go:662-666 inherits; :843-844 refuses the excess).
+	// that asks for a longer one is refused (nats-server v2.14.0 — the pinned
+	// module — server/consumer.go:662-666 inherits; :843-844 refuses the
+	// excess).
 	// Zero means no policy — today's behaviour, an unbounded consumer
 	// lifetime.
 	ConsumerInactiveThreshold time.Duration
+	// ConsumerMaxAckPending sets the stream's ConsumerLimits.MaxAckPending,
+	// the ceiling on any consumer's un-acked in-flight window.
+	//
+	// A caller setting ConsumerInactiveThreshold on a stream that ALREADY has
+	// explicit-ack consumers must set this too. Adopting either limit makes
+	// nats-server re-validate every existing consumer against BOTH of them,
+	// and that validation compares a zero MaxAckPending limit as if zero were
+	// the allowance (v2.14.0 server/stream.go:2433-2434) rather than guarding
+	// it with `> 0` the way the consumer-create path does (server/consumer.go:
+	// 840). Every explicit-ack consumer carries at least the server's own
+	// JsDefaultMaxAckPending of 1000 (server/consumer.go:576, :670), so it
+	// "exceeds" a zero limit and the whole stream update is refused with
+	// JSStreamInvalidConfig ("change to limits violates consumers").
+	ConsumerMaxAckPending int
 }
 
 // EnsureStream creates or updates the stream described by spec (idempotent —
@@ -55,7 +70,10 @@ func (c *Conn) EnsureStream(ctx context.Context, spec StreamSpec) error {
 		MaxAge:            spec.MaxAge,
 		MaxMsgsPerSubject: spec.MaxMsgsPerSubject,
 		MaxBytes:          spec.MaxBytes,
-		ConsumerLimits:    jetstream.StreamConsumerLimits{InactiveThreshold: spec.ConsumerInactiveThreshold},
+		ConsumerLimits: jetstream.StreamConsumerLimits{
+			InactiveThreshold: spec.ConsumerInactiveThreshold,
+			MaxAckPending:     spec.ConsumerMaxAckPending,
+		},
 	}
 	if _, err := c.js.CreateOrUpdateStream(ctx, cfg); err != nil {
 		return fmt.Errorf("substrate: EnsureStream %q: %w", spec.Name, err)

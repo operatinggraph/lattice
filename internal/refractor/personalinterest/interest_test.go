@@ -224,3 +224,120 @@ func TestIsRelevant_ScopedToIdentityPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, relevant, "identityA has no registration of its own and must default to admit-all")
 }
+
+// TestParseKey_IsTheExactInverseOfKey pins ParseKey against the constructor
+// that writes every row, rather than against a hand-written expectation: the
+// two are a matched pair, and a reconciler that deletes on the strength of a
+// parsed key is only as sound as that pairing.
+func TestParseKey_IsTheExactInverseOfKey(t *testing.T) {
+	for _, tc := range []struct{ identityID, deviceID string }{
+		{"AAAAAAAAAAAAAAAAAAAA", "phone-1"},
+		// The device half may itself carry dots — the split is on the FIRST
+		// dot, so only the identity half is required to be dot-free.
+		{"AAAAAAAAAAAAAAAAAAAA", "chrome.macos.1"},
+		{"MQsmTTAgNkngkdEjQz9L", "BHrdHRUWXPkLiukEvK9e"},
+	} {
+		key, err := personalinterest.Key(tc.identityID, tc.deviceID)
+		require.NoError(t, err)
+		gotID, gotDev, ok := personalinterest.ParseKey(key)
+		require.True(t, ok, "key %q built by Key must parse", key)
+		require.Equal(t, tc.identityID, gotID)
+		require.Equal(t, tc.deviceID, gotDev)
+	}
+}
+
+// TestParseKey_FailsClosedOnAnythingKeyCannotHaveWritten: a key that does not
+// have the shape Key produces is not this package's, and must be reported as
+// unparseable rather than split into some best-effort pair.
+func TestParseKey_FailsClosedOnAnythingKeyCannotHaveWritten(t *testing.T) {
+	for _, bad := range []string{"", "nodot", ".leading", "trailing.", "."} {
+		_, _, ok := personalinterest.ParseKey(bad)
+		require.False(t, ok, "key %q must not parse", bad)
+	}
+}
+
+// TestParsedRegisteredAt_ReadsWhatRegisterWrote closes the loop the same way:
+// the accessor is exercised against a document Register actually produced, so
+// it cannot drift from the wire shape it reads.
+func TestParsedRegisteredAt_ReadsWhatRegisterWrote(t *testing.T) {
+	kv := newTestKV(t)
+	ctx := context.Background()
+
+	want := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", nil, nil, want.Format(time.RFC3339)))
+
+	key, err := personalinterest.Key("identityA", "deviceX")
+	require.NoError(t, err)
+	entry, err := kv.Get(ctx, key)
+	require.NoError(t, err)
+
+	got, err := personalinterest.ParsedRegisteredAt(entry.Value)
+	require.NoError(t, err)
+	require.True(t, want.Equal(got), "ParsedRegisteredAt = %v, want %v", got, want)
+}
+
+// TestParsedRegisteredAt_ErrorsRatherThanGuessing: a caller aging a
+// registration must be told the document did not answer, never handed a zero
+// time that would read as "registered at the epoch" and age past any grace.
+func TestParsedRegisteredAt_ErrorsRatherThanGuessing(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"not json":            []byte("{not json"),
+		"no registeredAt":     []byte(`{"types":["lease"]}`),
+		"empty registeredAt":  []byte(`{"registeredAt":""}`),
+		"unparseable instant": []byte(`{"registeredAt":"yesterday"}`),
+	} {
+		_, err := personalinterest.ParsedRegisteredAt(body)
+		require.Error(t, err, "case %q must error", name)
+	}
+}
+
+// TestRegisteredAtWireTagIsPinned. Every accessor in this package reads
+// registeredAt through the same struct tag it writes, so renaming the tag
+// keeps the round trip green while silently breaking every OTHER reader of
+// the bucket — Loupe's fleet roster, and the reconciler that ages a
+// registration before removing it. Assert the bytes on the wire.
+func TestRegisteredAtWireTagIsPinned(t *testing.T) {
+	kv := newTestKV(t)
+	ctx := context.Background()
+
+	at := time.Now().UTC().Format(time.RFC3339)
+	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", nil, nil, at))
+
+	key, err := personalinterest.Key("identityA", "deviceX")
+	require.NoError(t, err)
+	entry, err := kv.Get(ctx, key)
+	require.NoError(t, err)
+
+	require.Contains(t, string(entry.Value), `"registeredAt":"`+at+`"`,
+		"the on-wire field name and value must be exactly this — other components read this document without this package's struct")
+}
+
+// TestDeregisterRevision_RefusesASupersededRevision pins the optimistic
+// concurrency the reconciler relies on: it READS a registration to decide the
+// removal is warranted, so a device that re-registers in between must survive.
+func TestDeregisterRevision_RefusesASupersededRevision(t *testing.T) {
+	kv := newTestKV(t)
+	ctx := context.Background()
+
+	at := time.Now().UTC().Format(time.RFC3339)
+	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", nil, nil, at))
+	key, err := personalinterest.Key("identityA", "deviceX")
+	require.NoError(t, err)
+	entry, err := kv.Get(ctx, key)
+	require.NoError(t, err)
+
+	// The device re-registers under the reader.
+	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", []string{"lease"}, nil, at))
+
+	err = personalinterest.DeregisterRevision(ctx, kv, "identityA", "deviceX", entry.Revision)
+	require.ErrorIs(t, err, substrate.ErrRevisionConflict)
+	_, err = kv.Get(ctx, key)
+	require.NoError(t, err, "the re-registered document must survive a delete conditioned on the superseded revision")
+
+	// At the current revision it goes.
+	entry, err = kv.Get(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, personalinterest.DeregisterRevision(ctx, kv, "identityA", "deviceX", entry.Revision))
+	_, err = kv.Get(ctx, key)
+	require.ErrorIs(t, err, substrate.ErrKeyNotFound)
+}

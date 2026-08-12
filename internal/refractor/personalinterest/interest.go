@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -47,6 +49,54 @@ func Key(identityID, deviceID string) (string, error) {
 		return "", errors.New("personalinterest: identityId and deviceId must both be non-empty")
 	}
 	return identityID + "." + deviceID, nil
+}
+
+// ParseKey splits a personal-lens-interest key back into the identity and
+// device ids Key joined, on the FIRST dot: a device id may contain dots, an
+// identity id may not.
+//
+// That asymmetry holds because a control-plane ActorVerifier rebinds the
+// request's identityId to the verified actor's bare NanoID before the
+// registration is written. With no verifier configured — the dev/e2e posture
+// the Refractor deliberately preserves — the id is self-asserted and only
+// checked non-empty, so a dotted identity id would mis-split here. Callers
+// must therefore treat a parsed key as an attribution, not a proof: it is
+// good enough to render a roster row, and anything that DELETES on the
+// strength of it owes its own authoritative check on the artifact the ids
+// name.
+//
+// Fail-closed on any deviation from the shape Key produces: no dot, or an
+// empty half, is not a key this package wrote.
+func ParseKey(key string) (identityID, deviceID string, ok bool) {
+	id, dev, found := strings.Cut(key, ".")
+	if !found || id == "" || dev == "" {
+		return "", "", false
+	}
+	return id, dev, true
+}
+
+// ParsedRegisteredAt reads the registeredAt instant out of a raw registration
+// document's bytes. It exists so a caller outside this package can age a
+// registration without declaring a second Go struct for the same JSON shape —
+// registrationDoc stays the single spelling of the wire format.
+//
+// An unparseable document and an unparseable/absent timestamp are distinct
+// errors from the caller's point of view only in the message; both mean the
+// document did not answer, and a caller deciding whether to remove the
+// registration must read either as "keep".
+func ParsedRegisteredAt(body []byte) (time.Time, error) {
+	var doc registrationDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return time.Time{}, fmt.Errorf("personalinterest: unmarshal registration: %w", err)
+	}
+	if doc.RegisteredAt == "" {
+		return time.Time{}, errors.New("personalinterest: registration carries no registeredAt")
+	}
+	at, err := time.Parse(time.RFC3339, doc.RegisteredAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("personalinterest: parse registeredAt %q: %w", doc.RegisteredAt, err)
+	}
+	return at, nil
 }
 
 // Register upserts a device's Interest Set. types/anchors may both be empty
@@ -199,6 +249,26 @@ func Deregister(ctx context.Context, kv *substrate.KV, identityID, deviceID stri
 	}
 	if err := kv.Delete(ctx, key); err != nil {
 		return fmt.Errorf("personalinterest: delete %q: %w", key, err)
+	}
+	return nil
+}
+
+// DeregisterRevision removes a device's Interest Set only while the document
+// is still at expectedRevision, surfacing substrate.ErrRevisionConflict
+// otherwise. It is the deregister a caller owes whenever it READ the
+// registration in order to decide the removal was warranted: between that
+// read and this call the device can re-register itself, and an unconditional
+// delete would silently discard the registration it had just written.
+//
+// A caller holding no such read — a sign-out purge destroying the device
+// anyway — wants Deregister.
+func DeregisterRevision(ctx context.Context, kv *substrate.KV, identityID, deviceID string, expectedRevision uint64) error {
+	key, err := Key(identityID, deviceID)
+	if err != nil {
+		return err
+	}
+	if err := kv.DeleteRevision(ctx, key, expectedRevision); err != nil {
+		return fmt.Errorf("personalinterest: delete %q at revision %d: %w", key, expectedRevision, err)
 	}
 	return nil
 }

@@ -1149,6 +1149,29 @@ func main() {
 		return entry.Revision
 	}
 
+	// syncStreams is this process's record of which SYNC streams its Personal
+	// Lenses target. It answers two questions from one piece of state: whether
+	// a given stream still needs its one-time consumer-lifetime adoption (the
+	// backfill of consumers predating ConsumerLimits.InactiveThreshold, plus
+	// the reconciler that then reads those now-expiring durables), and whether
+	// more than one stream has been seen at all — which makes every
+	// registration in the single, stream-less Interest Set bucket
+	// unattributable and stops the reconciler deleting anything.
+	//
+	// LIFETIME: per process; see SyncStreamWitness's own note. The adoption
+	// side is safe to forget at exit because after Inc 1 nothing in the tree
+	// can create a zero-threshold consumer on SYNC, so a second pass over the
+	// same stream is a provable no-op, a transient failure simply retries at
+	// the next boot, and a hot reload that introduces a NEW stream name still
+	// gets its own first pass. The population the backfill drains is fixed and
+	// shrinking, which is why there is no ticker behind it.
+	//
+	// It has to exist because the stream name is only knowable inside
+	// startPipeline (it is the personal lens rule's own Into.Stream), and
+	// startPipeline runs once per personal-lens rule — edge-manifest alone
+	// ships ten — and again for every one of them on every hot reload.
+	syncStreams := health.NewSyncStreamWitness()
+
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
 		// recording (below, on a UseFullEngineBranches failure) and the
@@ -1412,6 +1435,55 @@ func main() {
 			// Stream lookup per call reads the current FirstSeq (mirrors the
 			// deleted natstransport.FirstSequence).
 			syncStream := r.Into.Stream
+
+			// The consumer-lifetime adoption for this SYNC stream, once per
+			// process (see syncStreams' lifetime note). Observing the stream
+			// here is also what lets the reconciler notice a SECOND stream and
+			// stop deleting. It sits here,
+			// rather than beside the DurableJanitor in the boot sequence,
+			// because this is the first and only place the stream's name is
+			// known: it is the lens rule's own Into.Stream, and a "SYNC"
+			// literal would sweep the wrong stream — or none — in a
+			// deployment whose personal lens targets a differently-named one.
+			//
+			// Ordering: buildRuleAdapter ran at the top of startPipeline, and
+			// NewNatsSubjectAdapter's own constructor calls ensureSyncStream
+			// before it returns an adapter, so by the time control reaches
+			// here the stream carries its ConsumerLimits and the write-backs
+			// below cannot exceed a ceiling that does not exist yet.
+			if syncStreams.Observe(syncStream) {
+				// Off the activation path: the sweep costs two round trips per
+				// consumer on the stream, and the population it exists to drain
+				// is by definition large (74 orphans were swept by hand once
+				// already), so running it inline would hold up every lens
+				// behind this one for no correctness gain.
+				go func() {
+					// The consumers that predate the policy never inherit it —
+					// a stream-limits change only rejects consumers that EXCEED
+					// the new value, and one sitting at zero exceeds nothing.
+					// An orphan by definition never re-attaches, so this is the
+					// only thing that reaches the very population the policy
+					// exists for. Failure is logged and the process continues:
+					// a best-effort sweep is never a reason to fail activation,
+					// and the next boot retries.
+					backfilled, err := conn.BackfillConsumerInactiveThreshold(ctx, syncStream,
+						adapter.SyncConsumerInactiveThreshold, logger)
+					if err != nil {
+						logger.Warn("backfill SYNC consumer inactive threshold", "stream", syncStream, "err", err)
+					} else if len(backfilled) > 0 {
+						logger.Info("backfilled SYNC consumers onto the inactive-threshold policy",
+							"stream", syncStream, "count", len(backfilled))
+					}
+					// The registration's own backstop: a device's Interest Set
+					// row has no expiry of its own, so it follows the durable
+					// that now does. Started after the backfill rather than
+					// beside it so the two read the same world, though the
+					// reconciler's own boot grace window would cover the gap
+					// anyway.
+					health.NewInterestReconciler(conn, personalInterestKV, syncStream, syncStreams, logger).Run(ctx)
+				}()
+			}
+
 			controlSvc.SetSyncFirstSeq(func(ctx context.Context) (uint64, error) {
 				st, err := conn.JetStream().Stream(ctx, syncStream)
 				if err != nil {

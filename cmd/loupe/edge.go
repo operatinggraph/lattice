@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -172,23 +173,19 @@ type retentionWindow struct {
 func (w retentionWindow) empty() bool { return w.LastSeq < w.FirstSeq || w.LastSeq == 0 }
 
 // splitInterestKey splits a personal-lens-interest key into its identity and
-// device halves, on the FIRST dot: the device id may contain dots, the identity
-// id may not.
+// device halves. personalinterest.ParseKey is the single parser — the exact
+// inverse of the Key constructor that wrote the row — and this stays as a
+// local name only because every call site in this file already reads
+// splitInterestKey(k).
 //
-// That asymmetry holds because a control-plane ActorVerifier rebinds the
-// request's identityId to the verified actor's bare NanoID before the
-// registration is written. With no verifier configured — the dev/e2e posture
-// the Refractor deliberately preserves — the id is self-asserted and only
-// checked non-empty, so a dotted id would mis-split here and attribute the row
-// to a truncated identity. The row is still rendered rather than dropped: an
-// operator seeing an odd identity on a dev stack is better served than one
-// seeing a silently short roster.
+// A key that does not parse costs its row a rendering. That is the right
+// trade for an inspector: an identity id containing a dot (possible only in
+// the no-verifier dev posture the Refractor preserves, where the id is
+// self-asserted) would otherwise be attributed to a truncated identity, and a
+// wrong roster row is worse than a missing one for an operator chasing a
+// specific device.
 func splitInterestKey(key string) (identityID, deviceID string, ok bool) {
-	id, dev, found := strings.Cut(key, ".")
-	if !found || id == "" || dev == "" {
-		return "", "", false
-	}
-	return id, dev, true
+	return personalinterest.ParseKey(key)
 }
 
 // edgeSyncDurable builds the durable consumer name internal/edge/sync gives a
@@ -541,11 +538,17 @@ func (s *server) edgeReaders(ctx context.Context, conn *substrate.Conn) edgeRead
 // revocation set and the Vault's shred ledger.
 //
 // This is a REGISTRATION roster, not a liveness view, and the UI says so: edge
-// nodes structurally cannot self-report health (their per-identity permission
-// set admits only their own sync subject and control RPCs — publishing to
-// health-kv would be a permissions violation, not a missing grant), and nothing
-// garbage-collects a registration, so a device that vanished without a clean
-// deregister keeps its row forever.
+// nodes structurally cannot self-report health — their per-identity permission
+// set admits only their own sync subject and control RPCs, so publishing to
+// health-kv would be a permissions violation, not a missing grant.
+//
+// A row does eventually go when its device does. A clean sign-out deregisters
+// it, and for a device that vanished without one the Refractor's
+// InterestReconciler removes the row once the device's SYNC durable has
+// expired (health.InterestReconciler, edge-sync-orphan-expiry-design.md §5).
+// That reconciliation runs on a durable's own expiry clock, measured in days,
+// so a row here can outlive its device by that much — it is stale-tolerant,
+// not unbounded.
 func (s *server) handleEdgeFleet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusBadRequest, "GET required")

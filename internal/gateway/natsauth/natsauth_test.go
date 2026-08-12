@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -602,5 +603,39 @@ func TestUnsealRequest_MissingXkeyHeader(t *testing.T) {
 	responderXkp := mustXkeyPair(t)
 	if _, err := UnsealRequest([]byte("anything"), "", responderXkp); err == nil {
 		t.Fatal("UnsealRequest with an empty serverXkey: want error, got nil")
+	}
+}
+
+// TestPermissionsFor_GrantsExactlyTheDurableTheHostCreates is the parity that
+// makes this grant sound. Every JetStream subject below is built from the
+// durable NAME, and the device builds that same name from
+// subjects.EdgeSyncDurable on its own side; a drift between the two signs a
+// credential for one consumer and has the device create another, so the
+// device's own attach is refused by its own JWT.
+//
+// This asserts against the shared constructor rather than a literal on
+// purpose — the literal is already pinned, byte for byte, by
+// TestPermissionsFor_ExactPerConnectionPinning above and by
+// internal/natsperm's independently-spelled parity vector. What is unpinned
+// without this is the AGREEMENT, which is the property a drift breaks.
+func TestPermissionsFor_GrantsExactlyTheDurableTheHostCreates(t *testing.T) {
+	const identityID = "MQsmTTAgNkngkdEjQz9L"
+	const deviceID = "BHrdHRUWXPkLiukEvK9e"
+
+	durable := subjects.EdgeSyncDurable(identityID, deviceID)
+	perms := PermissionsFor(identityID, deviceID)
+
+	want := []string{
+		"$JS.API.CONSUMER.CREATE.SYNC." + durable + ".lattice.sync.user." + identityID,
+		"$JS.API.CONSUMER.MSG.NEXT.SYNC." + durable,
+		"$JS.API.CONSUMER.INFO.SYNC." + durable,
+		"$JS.API.CONSUMER.DELETE.SYNC." + durable,
+		"$JS.ACK.SYNC." + durable + ".>",
+	}
+	granted := strings.Join([]string(perms.Pub.Allow), "\n")
+	for _, subject := range want {
+		if !strings.Contains(granted, subject) {
+			t.Fatalf("Pub.Allow does not grant %q for the durable the host creates;\ngranted:\n%s", subject, granted)
+		}
 	}
 }

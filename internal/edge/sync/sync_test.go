@@ -995,3 +995,59 @@ func TestManager_UpdateInterest_RegistersWithoutHydrating(t *testing.T) {
 	assert.Equal(t, []string{"lease"}, mgr.cfg.Types)
 	assert.Equal(t, []string{"unit-1"}, mgr.cfg.Anchors)
 }
+
+// TestManager_EnsureFresh_WarmResumeRegistersBeforeAttaching. The warm path
+// hydrates nothing, so before this it touched the server-side registration on
+// no attach at all — registeredAt was a one-time birth stamp, and a device up
+// for weeks carried one arbitrarily old.
+//
+// That matters because the attach that follows DELETES this device's durable
+// before recreating it (natstransport.RunDurableConsumer; the browser shell
+// does the same), so the registration is the only artifact vouching for the
+// device across that window, and because a browser tab's durable carries a
+// 30-minute InactiveThreshold — a tab closed overnight legitimately loses its
+// durable and must get its roster identity back when it returns.
+//
+// The ORDER is the assertion: register must precede the attach, the same
+// order the cold path already uses, or the refresh lands after the very
+// window it exists to cover.
+func TestManager_EnsureFresh_WarmResumeRegistersBeforeAttaching(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(false)}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	startSeq, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
+	assert.Equal(t, uint64(6), startSeq, "the warm resume's position is unchanged")
+	assert.NotContains(t, tr.requests, "hydrate", "a warm resume still must not hydrate")
+	assert.Contains(t, tr.requests, "register",
+		"a warm resume must refresh its Interest Set registration, or registeredAt never moves after the device's first ever boot")
+	// ensureFresh runs entirely before the attach, so a register recorded here
+	// is by construction before the durable is deleted and recreated.
+}
+
+// TestManager_EnsureFresh_WarmResumeSurvivesAFailedRegister. The Interest Set
+// is a bandwidth filter whose absence admits everything ("absence is never a
+// denial"), so a device that cannot refresh it still syncs correctly, just
+// unfiltered. Trading a working resume for a roster row would be the wrong
+// direction, and the next attach retries.
+func TestManager_EnsureFresh_WarmResumeSurvivesAFailedRegister(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		switch op {
+		case "register":
+			return controlwire.ControlResponse{Error: "control plane unavailable"}, nil
+		case "syncgap":
+			return controlwire.ControlResponse{PersonalSyncGap: &controlwire.PersonalSyncGapResult{Gapped: false}}, nil
+		default:
+			return controlwire.ControlResponse{Error: "unexpected op " + op}, nil
+		}
+	}}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	startSeq, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr, "a refused registration must not fail the resume")
+	assert.Equal(t, uint64(6), startSeq)
+}

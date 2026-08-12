@@ -61,6 +61,14 @@ func (k *KV) Delete(ctx context.Context, key string) error {
 	return k.conn.KVDelete(ctx, k.bucket, key)
 }
 
+// DeleteRevision soft-deletes key only if its revision still matches, and
+// returns ErrRevisionConflict otherwise. See Conn.KVDeleteRevision — the
+// delete a caller owes whenever it READ the entry to decide the deletion was
+// warranted.
+func (k *KV) DeleteRevision(ctx context.Context, key string, expectedRevision uint64) error {
+	return k.conn.KVDeleteRevision(ctx, k.bucket, key, expectedRevision)
+}
+
 // ListKeys returns all live (non-tombstone) keys. See Conn.KVListKeys.
 func (k *KV) ListKeys(ctx context.Context) ([]string, error) {
 	return k.conn.KVListKeys(ctx, k.bucket)

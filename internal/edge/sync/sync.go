@@ -426,6 +426,31 @@ func (m *Manager) ensureFresh(ctx context.Context) (startSeq uint64, err error) 
 			return 0, fmt.Errorf("check gap: %w", err)
 		}
 		if !gapped && !hydrationRequested {
+			// A warm resume hydrates nothing, so nothing else on this path
+			// would touch the server-side registration — and the attach that
+			// follows DELETES this device's durable before recreating it
+			// (natstransport.RunDurableConsumer, and the browser shell does
+			// the same), so the registration is the only artifact that
+			// vouches for the device across that window.
+			//
+			// Registering here, before the attach, is the same order hydrate()
+			// uses. It buys two things: registeredAt becomes a real
+			// "last attached" instant rather than a one-time birth stamp, and
+			// a registration that was legitimately reaped while this device
+			// was away comes back when it returns — which is the normal case
+			// for the browser host, whose durable carries a 30-minute
+			// InactiveThreshold, so a tab closed overnight loses its durable
+			// by design and must not lose its roster identity with it.
+			//
+			// A failure here does not fail the attach. The Interest Set is a
+			// bandwidth filter whose absence admits everything
+			// (personalinterest: "absence is never a denial"), so a device
+			// that could not refresh it still syncs correctly, just
+			// unfiltered; trading a working resume for a roster row would be
+			// the wrong direction, and the next attach retries.
+			if rerr := m.registerInterest(ctx); rerr != nil {
+				m.logger.Warn("edge/sync: warm resume could not refresh its Interest Set registration", "err", rerr)
+			}
 			if cursor == 0 {
 				// A persisted zero records no applied message, so cursor+1
 				// would assert the node had passed sequence 1 without ever

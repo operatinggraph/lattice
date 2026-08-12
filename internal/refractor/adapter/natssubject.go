@@ -128,8 +128,8 @@ const syncDurableReapMargin = 1 * time.Hour
 // SyncConsumerInactiveThreshold is the SYNC stream's ConsumerLimits.
 // InactiveThreshold (edge-sync-orphan-expiry-design.md §4.3): every durable
 // consumer on SYNC that declares no threshold of its own inherits this one
-// (nats-server 2.14 server/consumer.go:662-666), and one that asks for a
-// longer threshold is refused (:843-844,
+// (nats-server v2.14.0 — the pinned module — server/consumer.go:662-666), and
+// one that asks for a longer threshold is refused (:843-844,
 // NewJSConsumerInactiveThresholdExcessError). Expressed as a sum against
 // syncStreamMaxAge rather than as a bare literal — a durable's ack floor is
 // worth preserving only while a resume from it can still deliver something a
@@ -137,6 +137,37 @@ const syncDurableReapMargin = 1 * time.Hour
 // cannot (edge-sync-orphan-expiry-design.md §7), so the threshold must move
 // with whatever that horizon is.
 const SyncConsumerInactiveThreshold = syncStreamMaxAge + syncDurableReapMargin
+
+// SyncConsumerMaxAckPending is the SYNC stream's ConsumerLimits.MaxAckPending.
+// Its VALUE is the one nats-server already gives every explicit-ack consumer
+// that asks for none (JsDefaultMaxAckPending, v2.14.0 server/consumer.go:576,
+// :670), so nothing that exists today is affected. Its PRESENCE is forced:
+// SyncConsumerInactiveThreshold cannot be adopted without it.
+//
+// Adopting either consumer limit makes the server re-validate every EXISTING
+// consumer against both, and that validation reads a zero MaxAckPending limit
+// as an allowance of zero (server/stream.go:2433-2434) rather than guarding it
+// with `> 0` the way the consumer-create path does (:840). So on any stream
+// that already carries an explicit-ack consumer — every deployment whose
+// devices have ever attached — declaring only the InactiveThreshold is refused
+// outright ("change to limits violates consumers"), ensureSyncStream fails,
+// and the Personal Lens pipeline never activates.
+//
+// Two consequences a future author on this stream inherits, both refusals at
+// consumer-create time rather than silent behaviour changes:
+//
+//   - A consumer asking for more than 1000 un-acked in flight is refused
+//     (server/consumer.go:840-841). Raise this constant if a SYNC host ever
+//     genuinely needs a deeper window.
+//   - A PUSH consumer with AckPolicy=none is refused outright. The stream
+//     limit is stamped onto the config (server/consumer.go:656-660) BEFORE the
+//     ack-policy defaulting that would otherwise leave it zero (:669), and
+//     checkConsumerCfg's push branch then rejects a non-zero MaxAckPending
+//     alongside AckNone (:801). A PULL AckNone consumer is unaffected
+//     (verified against the pinned server). Nothing in the tree creates
+//     either, but `js.Subscribe(..., nats.OrderedConsumer())` is the natural
+//     reach that would hit it.
+const SyncConsumerMaxAckPending = 1000
 
 // ensureSyncStream provisions the backing stream, unioning subjectPrefix's
 // wildcard into any subjects the stream already carries rather than
@@ -160,6 +191,7 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 			MaxAge:                    syncStreamMaxAge,
 			MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
 			ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
+			ConsumerMaxAckPending:     SyncConsumerMaxAckPending,
 		})
 	}
 	return conn.EnsureStream(ctx, substrate.StreamSpec{
@@ -168,6 +200,7 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 		MaxAge:                    syncStreamMaxAge,
 		MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
 		ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
+		ConsumerMaxAckPending:     SyncConsumerMaxAckPending,
 	})
 }
 

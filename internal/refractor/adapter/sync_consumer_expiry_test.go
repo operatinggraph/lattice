@@ -2,7 +2,6 @@ package adapter_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -56,11 +55,43 @@ func TestEnsureSyncStream_ExcessThresholdRefused(t *testing.T) {
 	require.Error(t, err, "a durable asking for longer than the stream ceiling must be refused")
 
 	var apiErr *jetstream.APIError
-	if errors.As(err, &apiErr) {
-		// nats-server 2.14 server/jetstream_errors_generated.go:189 —
-		// JSConsumerInactiveThresholdExcess = 10153.
-		assert.EqualValues(t, 10153, apiErr.ErrorCode, "must be refused specifically for the excess threshold, not some other cause")
-	}
+	require.ErrorAs(t, err, &apiErr, "the refusal must be a JetStream API error, not a transport failure")
+	// nats-server v2.14.0 server/jetstream_errors_generated.go:189 —
+	// JSConsumerInactiveThresholdExcess = 10153.
+	assert.EqualValues(t, 10153, apiErr.ErrorCode, "must be refused specifically for the excess threshold, not some other cause")
+}
+
+// TestSyncConsumerInactiveThreshold_OutlivesTheStreamsOwnRetention pins the
+// RELATION the value exists to hold, not the arithmetic that produces it.
+// Every other assertion in this file compares the observed threshold against
+// the constant, so the constant can be mutated to anything — including a
+// NEGATIVE margin, yielding a threshold SHORTER than MaxAge — and stay green.
+//
+// A threshold below the stream's retention horizon reaps durables whose ack
+// floor could still have delivered something a fresh consumer would not,
+// which is exactly the property edge-sync-orphan-expiry-design.md §7 argues
+// makes this reaping free. MaxAge is read back from the server rather than
+// from the sibling constant, so the relation is checked against what the
+// stream actually enforces.
+func TestSyncConsumerInactiveThreshold_OutlivesTheStreamsOwnRetention(t *testing.T) {
+	conn, js := startSyncServer(t)
+	ctx := context.Background()
+
+	_, err := adapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
+	require.NoError(t, err)
+
+	s, err := js.Stream(ctx, "SYNC")
+	require.NoError(t, err)
+	cfg := s.CachedInfo().Config
+
+	require.Positive(t, cfg.MaxAge, "precondition: the SYNC stream must bound retention by age")
+	assert.Greater(t, cfg.ConsumerLimits.InactiveThreshold, cfg.MaxAge,
+		"a durable must outlive the stream's own retention horizon, or the reap destroys an ack floor that could still have delivered something")
+
+	assert.EqualValues(t, adapter.SyncConsumerMaxAckPending, cfg.ConsumerLimits.MaxAckPending,
+		"the MaxAckPending ceiling must reach the stream; without it the InactiveThreshold adoption is refused on any populated stream")
+	assert.EqualValues(t, 1000, cfg.ConsumerLimits.MaxAckPending,
+		"the ceiling must stay at the server's own JsDefaultMaxAckPending, or existing consumers start exceeding it")
 }
 
 // TestEnsureSyncStream_BrowserShellThresholdAcceptedUnchanged proves the
@@ -133,4 +164,54 @@ func TestEnsureSyncStream_SubjectAlreadyPresentBranchSetsConsumerInactiveThresho
 	require.NoError(t, err)
 	assert.Equal(t, adapter.SyncConsumerInactiveThreshold, s.CachedInfo().Config.ConsumerLimits.InactiveThreshold,
 		"the subject-already-present branch must itself set ConsumerLimits.InactiveThreshold")
+}
+
+// TestEnsureSyncStream_AdoptsThePolicyOnAStreamThatAlreadyHasConsumers is the
+// live-upgrade case, and the one every other test in this file structurally
+// cannot reach: a SYNC stream provisioned before the policy existed, carrying
+// the durables of devices that have already attached.
+//
+// Adopting a consumer limit makes nats-server re-validate every existing
+// consumer against BOTH limits, and it compares a zero MaxAckPending limit as
+// an allowance of zero (2.14 server/stream.go:2433-2434) instead of guarding
+// it with `> 0` the way the create path does (:842). Every explicit-ack
+// consumer carries JsDefaultMaxAckPending=1000, so an InactiveThreshold-only
+// adoption is refused with "change to limits violates consumers" — the stream
+// keeps no policy at all, ensureSyncStream returns an error, and the Personal
+// Lens never activates. Nothing about this is visible on a fresh stream.
+func TestEnsureSyncStream_AdoptsThePolicyOnAStreamThatAlreadyHasConsumers(t *testing.T) {
+	conn, js := startSyncServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, conn.EnsureStream(ctx, substrate.StreamSpec{
+		Name:              "SYNC-POPULATED",
+		Subjects:          []string{"lattice.sync.user.>"},
+		MaxAge:            24 * time.Hour,
+		MaxMsgsPerSubject: 10_000,
+		// No consumer limits: the pre-Inc-1 stream.
+	}))
+	_, err := js.CreateOrUpdateConsumer(ctx, "SYNC-POPULATED", jetstream.ConsumerConfig{
+		Durable:       "edge-sync-identityA-deviceA",
+		FilterSubject: "lattice.sync.user.identityA",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+	})
+	require.NoError(t, err, "precondition: a device attached before the policy existed")
+
+	_, err = adapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", "lattice.sync.user", "SYNC-POPULATED", []string{adapter.PersonalActorKeyField})
+	require.NoError(t, err, "the adapter must come up against a stream that already carries a device's durable")
+
+	s, err := js.Stream(ctx, "SYNC-POPULATED")
+	require.NoError(t, err)
+	assert.Equal(t, adapter.SyncConsumerInactiveThreshold, s.CachedInfo().Config.ConsumerLimits.InactiveThreshold,
+		"the policy must actually land on a populated stream, not merely fail to error")
+
+	// The pre-existing consumer keeps its zero threshold — the limit does not
+	// retro-apply (server/stream.go:2433-2441 only rejects consumers that
+	// EXCEED it), which is the entire reason substrate's backfill exists.
+	cons, err := js.Consumer(ctx, "SYNC-POPULATED", "edge-sync-identityA-deviceA")
+	require.NoError(t, err)
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, info.Config.InactiveThreshold,
+		"a consumer predating the policy must NOT inherit it — Inc 2's backfill is what reaches these")
 }
