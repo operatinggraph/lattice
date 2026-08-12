@@ -1,6 +1,7 @@
 # Kernel-orphan retirement — reconcile's missing third verb
 
-**Status:** ✅ **Inc 1 RATIFIED 2026-08-06 (Winston, delegated) · Inc 2 shape settled, build conditional on Inc 1's census**
+**Status:** ✅ **Inc 1 SHIPPED 2026-08-11 (`1839f173`) · Inc 2 🗄️ SHELVED — census zero on both long-lived
+buckets, and §12.4's binary-version floor is now a hard precondition. Triggers in §13's Inc C result.**
 
 ## Ratification (Winston, 2026-08-06 — delegated by Andrew)
 
@@ -783,6 +784,35 @@ test call-site updates. Green: `go build ./...` · `go test ./internal/bootstrap
 
 **Inc C — the measurement (this increment IS the deliverable, §9).** Run `make verify-kernel` against the
 shared dev stack and the demo box; record both counts here.
+
+### Inc C result — the census (2026-08-11)
+
+| Bucket | Orphan entities | Orphan aspects | `verify-kernel` exit |
+|---|---|---|---|
+| Shared dev stack (`localhost:4222`) | **0** | **0** | 0 (unchanged) |
+| Demo box (`2.28.0.155`, `/opt/lattice`) | **0** | **0** | 0 (unchanged) |
+
+The demo box additionally reports *"kernel content matches this binary"* — no drift either, so its kernel is
+byte-identical to the one `1839f173` builds. Both counts were taken with the shipped code: the dev stack
+from the fire worktree, the demo box from a detached worktree at `1839f173` (its `/opt/lattice` HEAD and
+working tree untouched, worktree removed after).
+
+**§1.2 predicted exactly this and the census confirms it.** `checkVersion` hard-fails an old
+`lattice.bootstrap.json` against a new binary and `make down` clears bucket and file together, so a kernel
+orphan can only survive an author removing an entity *without* bumping the version — which has not
+happened on either deployment.
+
+**Gate resolution: Inc 2 is 🗄️ SHELVED.** Zero on both long-lived buckets is the design's own stated
+condition for not building it, and §12.4 adds a second, independent bar. Two triggers, either of which
+reopens it — and the first one alone is no longer sufficient:
+
+1. **Demand** — a non-zero orphan-entity report on a long-lived bucket, *or* the first kernel shrink that
+   ships without a `lattice.bootstrap.json` version bump.
+2. **Soundness (hard precondition, §12.4)** — a binary-version floor on retirement must exist *first*.
+   Without it a rollback deploy tombstones the current kernel's whole delta. Demand does not waive this.
+
+Inc 1 standing alone is the right resting state: it converts a silent condition into a visible one, which
+per §1.2 is most of the value, and it is the instrument that will detect trigger 1 if it ever fires.
 
 Gates: `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go` ·
 `make verify-kernel` (exit status unchanged) · `go test ./...`.

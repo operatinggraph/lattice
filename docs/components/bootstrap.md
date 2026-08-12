@@ -163,3 +163,29 @@ the recreated-containers-under-a-live-stack case, so on that path the binary-lev
 fires. The probe therefore covers the remaining ones: a stopped-process stack, and any invocation
 that never goes through `make` (Docker, CI, running the binary directly). Reconciling the two so the
 stable-ID recovery wins where it can is tracked as a separate board item.
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A read-only computation added to `planReconcile` inherits the failure posture of the repair path it
+  shares.** The plan has three consumers with different tolerances — `KernelOrphans` (informational),
+  `KernelDrift` (drives `verify-kernel`'s exit status), `ReconcilePrimordial` (drives boot) — so an error
+  returned from the shared function converts an advisory scan into a failed boot. Minted:
+  kernel-orphan-retirement Inc 1 (the orphan listing's error reached all three; `verify-kernel` exit 1 on a
+  converged bucket). Check: an advisory computation carries its error **in the plan**, and only its own
+  reporter reads it — never a `return`.
+- **A boot-time scan's cost is set by the population it ENUMERATES, not the one it is about.** The kernel is
+  ~76 entries; `vtx.meta.>` on an installed bucket is 2,488 (388 roots, 2,100 aspects) and grows with every
+  package. Minted: kernel-orphan-retirement Inc 1 — a design ledger row reading "~76 entries, a cheap
+  boot-time read" licensed 4,487 sequential KVGets per plan and took `verify-kernel` 0.21s → 2.0s, on a path
+  `make up` runs every invocation. Check: state the candidate count from a **live listing** before costing a
+  scan, and derive from the listing anything the listing already knows (key presence needs no `KVGet`).
+- **`BootstrapOpKey` identifies the deployment, not the binary generation.** Two binaries sharing one
+  `lattice.bootstrap.json` compute the same op key, so "this key is bootstrap-provenanced and I don't build
+  it" cannot distinguish *retired* from *newer than me*. Minted: kernel-orphan-retirement §12.4 — an older
+  binary reads the current kernel's whole delta as retired. Check: any verb keyed on kernel provenance
+  states its behaviour under a rollback, and fails closed when the stored generation exceeds the running
+  binary's.
