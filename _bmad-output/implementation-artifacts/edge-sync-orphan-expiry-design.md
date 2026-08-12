@@ -167,6 +167,38 @@ The derivation, which §7 turns into the proof that this is free:
 than `MaxAge`, which only strengthens the argument. The 1h margin is slack for clock skew and for a node
 that reconnects right at the boundary.
 
+> **AMENDED AT BUILD, 2026-08-11 — the threshold cannot be adopted alone.** This section, and §5's Inc 1,
+> described Inc 1 as declaring `ConsumerInactiveThreshold` and nothing else. That is not implementable.
+>
+> Adopting **either** consumer limit makes nats-server re-validate every **existing** consumer against
+> **both**, and that validation compares `MaxAckPending` against a zero limit as if zero were the allowance
+> (`v2.14.0 server/stream.go:2433-2434`) — with none of the `> 0` guard the consumer-*create* path has
+> (`server/consumer.go:840`). Every explicit-ack consumer carries `JsDefaultMaxAckPending = 1000`
+> (`consumer.go:576`, `:670`). So on any stream that already carries a device durable — every deployment
+> whose devices have ever attached — declaring only the threshold is refused outright ("change to limits
+> violates consumers"), `ensureSyncStream` fails, and **every** Personal Lens pipeline fails to activate.
+>
+> Inc 1 therefore also declares `SyncConsumerMaxAckPending = 1000`, the server's own default, so every
+> existing consumer sits *at* the ceiling rather than above it. Verified live before adopting it: all nine
+> SYNC consumers on the dev stack carry `max_ack_pending=1000` and `inactive_threshold=0` — which also
+> confirms §3's non-retro-apply row against real data, and sizes Inc 2's actual backfill population.
+>
+> Two consequences this design did not consider, recorded rather than papered over:
+> - **1000 is now a real ceiling**, not merely a restatement. Any future SYNC consumer asking for more is
+>   refused at create. That is the same fail-closed posture §2 chose for the threshold, and it is why a
+>   deployment that somehow *already* has a >1000 consumer wedges Personal Lens activation until the
+>   operator raises the constant or removes that consumer. Nothing in this tree can create one — neither
+>   `substrate.RunDurableConsumer` nor the browser shell exposes the field — so the hazard is an upgrade
+>   hazard, and a loud failure is the right one: it means a consumer exists that the policy will not admit.
+> - **A push consumer with `AckNone` on SYNC is now refused**, because the stream limit is stamped in
+>   (`consumer.go:656-660`) *before* the ack-policy-gated default (`:669`), and `checkConsumerCfg:801`
+>   rejects `MaxAckPending > 0` with `AckNone`. Nothing in-tree does this; `js.Subscribe(…,
+>   nats.OrderedConsumer())` is the idiom an operator might reach for. This is inherent to adopting
+>   `ConsumerLimits.MaxAckPending` at all — no positive value avoids it — so it is documented, not fixed.
+>
+> §11's ephemeral note stands and gains this clause: an ephemeral on SYNC now also inherits the 25h
+> threshold instead of the server's ~5s, and a push/`AckNone` one is refused outright.
+
 ## 5. Increments (the Steward's build order)
 
 Each is independently shippable and green.
@@ -230,7 +262,31 @@ read of the one artifact that decides it — `ConsumerInfo(SYNC, DurableName(ide
 
 The grace exists only for the birth race: `hydrate()` calls `personal.register` before
 `RunDurableConsumer` creates the durable (`sync.go:355-357` → `:207`), a millisecond-wide window that 1h
-covers with absurd margin. A *live* device is protected by the probe itself, not by the grace.
+covers with absurd margin. ~~A *live* device is protected by the probe itself, not by the grace.~~
+
+> **STRUCK AT BUILD, 2026-08-11 — the probe alone does not protect a live device.** Cold review found, and
+> the code confirms, that **every attach deletes the durable before recreating it** — `natstransport`'s
+> `RunDurableConsumer` opens with an unconditional `DeleteStreamConsumer`, and the browser shell does the
+> same, both because JetStream refuses to update a changed `DeliverPolicy`/`OptStartSeq`. So
+> `ErrConsumerNotFound` is transiently true for a fully live device on every attach. The grace could not
+> absorb it either, because `registeredAt` was written only by `hydrate()`, which a warm resume skips.
+>
+> This is the *precise* sense in which §1.3's "the `DurableJanitor` precedent does not transfer" was right
+> for a narrower reason than it knew: `lensIsGone` reads a KV vertex that is **never** transiently absent.
+> A single-read verdict is sound only over an artifact with that property, and a durable consumer does not
+> have it.
+>
+> As built, a live device is protected by **two** things: a deletion needs the durable observed absent on
+> **two consecutive sweeps** (30 min apart, against a one-RTT attach window), and the warm-resume path now
+> re-registers before attaching, so `registeredAt` is a real *last-attached* instant and a registration
+> legitimately reaped while a device was away returns when the device does. That second half matters most
+> for the browser host, whose durable carries a 30-minute `InactiveThreshold` (`shell.mjs:49`) — a tab
+> closed overnight loses its durable by design and must not lose its roster identity with it.
+>
+> Consequently the §6-C claim that `registerInterest` is "called **only** from `hydrate()`" is now false in
+> two ways: `UpdateInterest` was always a second caller, and the warm-resume path is a third. §6-C's
+> *rejection* of the per-key TTL stands unchanged — its reason was that the TTL needs something recurring
+> to re-arm it, and a heartbeat is still what that would require.
 
 This increment is **sequenced behind Inc 1+2 and depends on them**: before the durable has an authoritative
 expiry, "durable absent" means "someone deleted it", not "this device is gone", and 3b would be inferring
@@ -340,9 +396,16 @@ SYNC.
 a reason for the recommendation rather than an accident. The two compose: repositioning makes a reaped
 durable cheaper still.
 
-**"Does this introduce new state?"** None. No new key, bucket, vertex, aspect, link, or lens. Inc 1 adds
-one field to an existing stream config; Inc 2 writes only to consumer configs that already exist; Inc 3
-deletes existing keys.
+**"Does this introduce new state?"** ~~None.~~ No new key, bucket, vertex, aspect, link, or lens — that
+half holds. Inc 1 adds one field to an existing stream config; Inc 2 writes only to consumer configs that
+already exist; Inc 3 deletes existing keys.
+
+> **AMENDED AT BUILD, 2026-08-11.** It does introduce **process-local** state, and saying "none" was wrong.
+> Three pieces, each with its lifetime declared at the field: the `SyncStreamWitness` (which SYNC stream
+> names this process has seen, and the once-per-stream adoption memo); the `InterestReconciler`'s ticker
+> goroutine; and the reconciler's `absentLastSweep` strike set. None is persisted and none is durable
+> state, which is what the original sentence was reaching for — but "no new state" is the sentence the
+> house checklist tests a design against, and this design would have passed that check on a false premise.
 
 ## 10. Adversarial pass (run in this fire — gate discharged)
 
@@ -402,6 +465,25 @@ orphans, a callerless `Deregister`, and a monotonically growing bucket Loupe alr
   assertion.
 - **Inc 3b deregisters a device mid-birth** if the grace is removed or the probe is inverted. Pinned by
   the within-grace table case.
+
+**Added at build, 2026-08-11 — two risks this design did not enumerate.**
+
+- **Inc 3b deregisters a device mid-ATTACH.** The one that mattered: every attach deletes the durable
+  before recreating it, so the probed artifact is transiently absent for a live device. Closed by the
+  two-strike rule and the warm-resume re-register (§5's struck paragraph). The general lesson is worth
+  more than the fix: **a `DurableJanitor`-shaped single-read verdict is sound only over an artifact that
+  is never transiently absent**, and whether a probed artifact has that property must be checked, not
+  inherited from the precedent's shape.
+- **Two Personal Lens streams would make the reconcilers wipe each other's registrations.** The
+  `personal-lens-interest` bucket is global and its keys carry no stream dimension, but each reconciler
+  probes only its own stream — so with rules naming streams A and B, each deletes every device belonging
+  to the other, every sweep. Unreachable today (`packages/edge-manifest` pins `SYNC`, asserted by its own
+  package test) but one edit away, and a hot reload can move `Into.Stream` under a running reconciler
+  without re-entering activation. Closed by a process-wide `SyncStreamWitness`: once a second distinct
+  stream is observed, every reconciler stops deleting and says so loudly. This mirrors what `cmd/loupe`
+  already does with the same ambiguity — it refuses to render a fleet-wide verdict — and the asymmetry is
+  the point: **a mechanism that DELETES must never be more permissive about ambiguous input than the
+  inspector that merely RENDERS it.**
 
 ---
 

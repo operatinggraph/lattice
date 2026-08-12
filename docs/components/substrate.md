@@ -556,3 +556,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   are different promises. Minted: structural-pause Inc 2 capability-plane review. Check:
   `TestSupervisor_StructuralProbe_FailedAnnouncement_RetriesAtNextOpen` (first call errors, second succeeds,
   exactly one record).
+- **Adopting ONE `ConsumerLimits` field re-validates every existing consumer against ALL of them, and a
+  zero limit reads as an allowance of zero** — `nats-server v2.14.0 server/stream.go:2433-2434` compares
+  both `InactiveThreshold` and `MaxAckPending` with no `> 0` guard, unlike the consumer-CREATE path at
+  `server/consumer.go:840`. Every explicit-ack consumer carries `JsDefaultMaxAckPending = 1000` (`:576`,
+  `:670`), so declaring only an `InactiveThreshold` on a stream that already has consumers is refused
+  outright ("change to limits violates consumers") and takes down whatever the ensure gates. The trap is
+  that a stream-limit test on a FRESH stream can never see it — the defect reached `main` fully green.
+  Minted: edge-sync-orphan-expiry Inc 1, caught by the next increment's builder re-reading the pinned
+  server, and confirmed against the live stack (9 SYNC consumers, all at exactly 1000). Check:
+  `TestEnsureSyncStream_AdoptsThePolicyOnAStreamThatAlreadyHasConsumers` — the stream carries an
+  explicit-ack consumer BEFORE the adoption. General form: any stream-config test whose production case is
+  an *existing* stream must build the fixture with the population that stream will really have.

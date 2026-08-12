@@ -1053,23 +1053,26 @@ predicate, which would agree with a broken gate), pin the per-lens verdict, and 
 exactly these names with a floor on the count so an empty enumeration cannot read as a table of unchanged
 rows.
 
-- **A meta sweep multiplies `Rebuild`** — a rebuild is a durable delete-recreate per lens, so any fan-out over
-  the lens set floods the server's consumer management and starves every other lens behind it; a bound held
-  per PATH leaves the sum unbounded, and a bound released mid-handover covers less than it claims (this is a
-  concurrency/fairness bound — **not** memory; §17.19 retired that attribution). Minted:
-  dynamic-type-taxonomy §17.8. Check, claim by claim: every path that can BURST (reload scheduler, `rebuild`
-  op) runs on one shared `internal/refractor/rebuildgate.Gate` —
-  `TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound`,
-  `TestRebuildGate_TaxonomyAndControlPathsShareOneBound`; the slot spans the handover *in the shipped
-  rebuild* — `TestRebuild_HoldsUntilTheConsumerPumpHasReopened` (fails if `Pipeline.Rebuild` reverts to a
-  non-waiting reset); the barrier itself, including overlapping waiters —
-  `TestSupervisor_ResetAwaitReopen_{ReturnsOnlyAfterThePumpReopens,OverlappingWaitersAreBothReleased}`. The
-  barrier is best-effort by design (an open already in flight can release a waiter early; consequence is a
-  slot released early). Two things sit outside the bound BY CHOICE, not as holes: the replay DRAIN, and the
-  synchronous `RebuildRule` arm — at most one exists process-wide because there is one `classkeyshredded`
-  manager on one inline durable handler (*not* `rebuildSerial`, which excludes only those callers from each
-  other), while its drain-wait budget is tens of minutes. Worst case is the bound plus one, and that one can
-  overlap a gated rebuild of the same lens.
+- **A removal verdict's premises are the whole mechanism — check the PROBED ARTIFACT, not the precedent's
+  shape.** Two ways this fire nearly shipped a reconciler that deleted live state. (a) **A probe artifact
+  its own owner deletes-then-recreates is transiently absent for a perfectly live subject.** The Edge
+  reconciler mirrored `DurableJanitor` structurally and inherited its single-read verdict — but
+  `lensIsGone` reads a `vtx.meta.<id>` that is *never* transiently absent, while every Edge attach opens
+  with an unconditional `DeleteStreamConsumer` (JetStream refuses a changed `DeliverPolicy`/`OptStartSeq`),
+  so `ErrConsumerNotFound` is true for one RTT on every connect. The grace that would have covered it was
+  anchored to a `registeredAt` nothing refreshed. A single-read verdict is sound ONLY over an artifact that
+  is never transiently absent; establish that property before copying the shape. (b) **A verdict scoped to
+  one dimension, over a store keyed without it, must fail closed when that dimension goes ambiguous — and
+  must never be more permissive than the INSPECTOR rendering the same data.** One global
+  `personal-lens-interest` bucket, one reconciler per SYNC stream: two streams and each deletes the other's
+  devices wholesale. `cmd/loupe` already refuses to render a fleet verdict on that exact ambiguity; the
+  deleter proceeded. Minted: edge-sync-orphan-expiry, (a) and (b) found independently by two cold reviewers.
+  Check: `TestInterestReconciler_*` two-strike table + `TestSyncStreamWitness_ObserveAndAmbiguity`.
+  (Displaced *"a meta sweep multiplies `Rebuild`"*, retired per this dossier's own rule — fully mechanized
+  by `TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound`,
+  `TestRebuildGate_TaxonomyAndControlPathsShareOneBound`, `TestRebuild_HoldsUntilTheConsumerPumpHasReopened`
+  and `TestSupervisor_ResetAwaitReopen_{ReturnsOnlyAfterThePumpReopens,OverlappingWaitersAreBothReleased}`,
+  which are now the record.)
 - **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
   order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
   item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
