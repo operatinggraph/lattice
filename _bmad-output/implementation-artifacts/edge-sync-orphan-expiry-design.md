@@ -402,3 +402,203 @@ orphans, a callerless `Deregister`, and a monotonically growing bucket Loupe alr
   assertion.
 - **Inc 3b deregisters a device mid-birth** if the grace is removed or the probe is inverted. Pinned by
   the within-grace table case.
+
+---
+
+## 13. Fire brief (build note, 2026-08-11)
+
+Compiled by the Lattice Steward at selection, from three read-only scouts over the Inc 1 / Inc 2 / Inc 3
+surfaces. The whole ratified plan (Inc 1+2+3) is **one fire**.
+
+### 1. Scope sentence
+
+Verbatim, §2: *"Stop building a reaper. **Make expiry a property of the stream, enforced by the server**, so
+no client-side liveness inference is needed at all — then use that now-authoritative expiry to reconcile the
+one artifact (§1.2) that has no expiry of its own."*
+
+**Green bar** = §11's five test groups, all green, plus the whole-repo gates.
+
+### 2. Verified touch-list (checked live, this fire)
+
+**Most of §5's `file:line` citations had rotted** — the facts hold, the anchors moved. Corrected here; the
+design body's own numbers are left as written (they are leads, and §5's prose is still true).
+
+| Site | Design said | Live now | What changes |
+|---|---|---|---|
+| `internal/substrate/stream.go` | `:19-31` `StreamSpec` | `:19-31` ✅, `EnsureStream` `:38-55` | + `ConsumerInactiveThreshold`, mapped to `jetstream.StreamConfig.ConsumerLimits.InactiveThreshold` |
+| `internal/refractor/adapter/natssubject.go` | `:112` maxAge, `:139`,`:141-146` | ✅ all three exact | + `syncDurableReapMargin`, + exported threshold, set on both `EnsureStream` calls |
+| `internal/substrate/subscribe.go` | `DeleteOrphanDurables` `:268` | **`:324-386`** | + `BackfillConsumerInactiveThreshold` beside it |
+| `cmd/refractor/main.go` | interest KV `:283` | **`:487-491`**; `syncStream := r.Into.Stream` **`:1414`** | call the backfill once per distinct stream; start the Inc 3b reconciler |
+| `internal/refractor/health/durable_janitor.go` | precedent | struct `:74-83`, ctor `:89-108`, `Run` `:112-130`, `sweep` `:133-161`, `lensIsGone` `:166-183` | mirrored, not edited |
+| `internal/edge/sync/sync.go` | `DurableName` `:47` | **`:48-50`**; `registerInterest` **`:604-621`**, called **`:551-552`**; `RunDurableConsumer` **`:336-342`** | `DurableName` delegates to `subjects` |
+| `cmd/facet/enginemanager.go` | `Purge` `:274/:309/:329/:333-338` | **`Purge` `:223-262`, `reapSyncDurable` `:281-347`** (mint `:307`, connect `:318`, durable `:341`, delete `:342`) | + `personal.deregister` on the same connection |
+| `cmd/facet/deviceid_test.go` | `:137` | ✅ `:137-181` | extended to assert the registration is gone |
+| `cmd/loupe/edge.go` | `consumerLookup` `:127-150`, GC note `:535-545` | **`:146-156`**, `readConsumer` **`:493-509`**, `edgeSyncDurable` **`:195-197`**, doc note near `:543` | the hand-copied durable name delegates; stale GC comment retires |
+| `internal/refractor/subjects/` | *(not named)* | `subjects.go`, `lens_durable.go` | **new** `EdgeSyncDurable` — see find #1 |
+| `internal/refractor/personalinterest/interest.go` | *(not named)* | `registrationDoc` `:28-41` (`registeredAt` RFC3339), `Register` `:57`, `Deregister` `:195-204` | read-only for this fire |
+
+Two facts the design asserts, re-verified live rather than trusted:
+
+- **The browser stays under the ceiling.** `internal/edge/browser/shell/shell.mjs:49` —
+  `defaultInactiveThresholdMs = 30 * 60 * 1_000`, sent as `inactive_threshold` at `:222`. 30 min ≪ 25 h. ✅
+- **No path in the tree creates an ephemeral on SYNC.** Every consumer goes through substrate's durable
+  primitives or the shell's explicit config; the only bare `inactive_threshold` literals are inside the
+  vendored `nats.js.mjs`. ✅ §11's ephemeral note stands as written.
+
+### 3. Precedents to mirror
+
+| Edit | Mirror |
+|---|---|
+| `BackfillConsumerInactiveThreshold` | `DeleteOrphanDurables` (`subscribe.go:324-386`) — drain the listing *fully* before per-item I/O; list error fails the call, per-item error logs `Warn` and continues; return the names acted on. **But take a STREAM name, not a bucket**: that helper and `PruneStaleDurables` both prepend `KV_`; SYNC is a plain stream, not a KV backing store. |
+| Reading back a consumer config | `ConsumerSupervisor.consumerInfo` (`consumer_supervisor.go:568-584`) → `cons.Info(ctx)`; write back with `c.js.CreateOrUpdateConsumer` (`:611`) |
+| Inc 3b reconciler | `DurableJanitor` end to end (`durable_janitor.go`) — grace-window delay, then sweep, then ticker; judge each candidate on **its own** authoritative read; every error keeps |
+| Inc 3b test | `durable_janitor_internal_test.go:42-91` — `makeConsumer` / `quietLogger` / call `sweep(ctx)` directly and `require.ElementsMatch` the acted-on set |
+| Adapter test setup | `natssubject_test.go:21-35` `startSyncServer` — `natsfixture.Server(t)` → `substrate.Wrap` → `jetstream.New` |
+| Inc 3a test | `deviceid_test.go:137-181` extended in place |
+
+### 4. Increment order + runnable green checks
+
+**Inc 1 — the stream declares the policy.**
+`StreamSpec.ConsumerInactiveThreshold` → `ConsumerLimits.InactiveThreshold`; zero keeps today's behaviour
+(verified: all six other `EnsureStream` call sites leave it unset). `syncDurableReapMargin = 1 * time.Hour`
+and an **exported** `SyncConsumerInactiveThreshold = syncStreamMaxAge + syncDurableReapMargin` in the adapter
+package, set on **both** `natssubject.go:139` and `:141-146`.
+
+```bash
+go test ./internal/refractor/adapter/ ./internal/substrate/ -run 'Sync|Stream' -count=1
+```
+
+**Inc 2 — backfill what predates the policy.**
+`(*Conn).BackfillConsumerInactiveThreshold(ctx, streamName string, threshold time.Duration, logger *slog.Logger) ([]string, error)`:
+list consumer names, `Info` each, and for `Config.InactiveThreshold == 0` write back **the read-back config
+with that one field changed** — never a fresh struct (§12; substrate dossier: a server-immutable field
+refuses an update).
+
+```bash
+go test ./internal/substrate/ -run Backfill -count=1
+```
+
+**Inc 3a — the clean path deregisters too.**
+In `reapSyncDurable` (`enginemanager.go:281-347`), after the durable delete, issue `personal.deregister` on
+the **same** connection, in the same swallow-every-failure posture. The seam: the control plane binds the
+actor from the verified `Lattice-Actor` header (`control/service.go:930-941` —
+`controlauth.BareIdentityID(actor)`, and a mismatched `identityId` in the body is refused), and
+`reapSyncDurable` already mints exactly that identity's token at `:307`. Subject is
+`controlwire.ControlSubject("personal", "deregister")`.
+
+```bash
+go test ./cmd/facet/ -run PurgeReaps -count=1
+```
+
+**Inc 3b — the backstop reconciler.**
+`internal/refractor/health/`, mirroring `DurableJanitor`. Enumerate `personal-lens-interest`; probe
+`Consumer(syncStream, subjects.EdgeSyncDurable(id, dev))`. `ErrConsumerNotFound` **and** `registeredAt`
+older than a **1 h** grace → `Deregister`. Found / unparseable doc / malformed key / **any** read error →
+keep.
+
+```bash
+go test ./internal/refractor/health/ ./cmd/loupe/ -count=1
+```
+
+**Whole-fire gates** (from the worktree):
+
+```bash
+go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go && go test ./internal/substrate/ ./internal/refractor/... ./internal/edge/... ./cmd/facet/ ./cmd/loupe/ ./cmd/refractor/ -count=1
+```
+
+### 5. In-scope gotchas
+
+**This fire's own obligations.**
+
+- **`EnsureStream` uses `CreateOrUpdateStream`** (`stream.go:52`) and never diffs the existing config — so
+  Inc 1 *does* update the live SYNC stream in place. That is the intent; it also means Inc 1 is what makes
+  Inc 2's write-backs legal (a consumer may not exceed the stream ceiling), so the order is load-bearing.
+- **`ensureSyncStream` runs per nats-subject rule, not once per boot** — `NewNatsSubjectAdapter`
+  (`natssubject.go:102`) is called from `buildRuleAdapter` (`main.go:1068`) inside `startPipeline`
+  (`:1152`), which `activateIfNotRegistered` (`:1631`) also drives on **hot reload**. So Inc 2 must not
+  hang off it naively: guard the backfill with a `main()`-local set keyed by stream name. **Its lifetime,
+  stated rather than assumed:** per process; after Inc 1 nothing in the tree can create a zero-threshold
+  consumer on SYNC, so one pass per stream per process is sufficient, a second is a provable no-op, and a
+  hot reload that introduces a *new* stream name still gets its own first pass.
+- **`Deregister` has exactly one caller today** (`control/service.go:1244`, the handler) — re-verified. Inc
+  3a is the first real one, as §5 claims.
+- **No Health-KV emission changes**, so the Health-KV schema-doc lockstep does not fire.
+- **No package/DDL/lens edit**, so no version bump, no `make reinstall-package`, no `provision-readpath`.
+- **MERGED ≠ RUNNING**: this fire changes `internal/substrate` (very wide) plus `internal/refractor/*`,
+  `cmd/facet`, `cmd/loupe`. Derive the affected binaries with the §4 `go list -deps` loop; `bin/refractor`
+  and `bin/facet` are both live right now (pids 75714 / 453) and must be rebuilt and cycled.
+
+**Touched components' "Review keeps catching" dossiers — copied in, the applicable entries:**
+
+*Substrate.*
+- **A server-immutable consumer field needs delete-then-create in BOTH directions** — JetStream refuses to
+  update `DeliverPolicy` *or* `OptStartSeq` on an existing consumer (`nats-server` 2.14
+  `server/consumer.go:2435,:2438`). ← **directly binds Inc 2**: this is why the write-back copies the
+  read-back config.
+- **A vendor-behaviour claim in a comment needs a pinned `file:line`** — every new constant asserting NATS
+  behaviour carries its pinned source location, or it is a hypothesis.
+- **A process-local memo of server-owned state must name its invalidation boundary** — ← binds Inc 2's
+  once-per-stream guard; the boundary is stated above, at the field.
+- **Abandoning a consumer iterator DISCARDS messages the server already counts as delivered** — a reconnect
+  path drains, only a shutdown path stops.
+
+*Refractor.*
+- **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
+  order it at replay, reconnect, tombstone, and retry, or the review will.
+- **A meta sweep multiplies `Rebuild`** — any fan-out over the lens set floods consumer management. ← the
+  reason Inc 2 is once-per-stream rather than once-per-lens.
+- **A two-layer seam can be green at each layer and broken across it — the interposed step is where it
+  dies.** ← Inc 3b spans `personalinterest` (KV) and JetStream; write the seam test with the **real**
+  intervening sequence.
+- **An upsert-only reprojection retracts nothing whose key drops out.**
+
+*Edge.*
+- **The SYNC subject is per-ACTOR, not per-device** — a second device on the same identity shares the feed.
+  ← Inc 3b's probe must key on the **durable** (identity+device), never on subject traffic.
+- **The browser host gets ONE attach per page — it has no restart loop.**
+- **The local cursor is a FLOOR, not "the sequence that just succeeded"** — §8.3's unconditional
+  `SetCursor` is pre-existing and out of scope; do not "fix" it here.
+
+**The standing checklist** (`agents/fire-brief-template.md`) applies unmodified; #1 (lifetime, not data
+structure), #2 (every census is a premise), #4 (removal needs a transport AND an observer — §8 is that
+enumeration) and #6 (precedent may carry debt — the `KV_` prefix, above) are the live ones.
+
+### 6. Adjacent finds
+
+1. **The edge-sync durable-name format already has two independent copies** —
+   `internal/edge/sync/sync.go:48-50` (`DurableName`) and `cmd/loupe/edge.go:195-197` (`edgeSyncDurable`,
+   the same string built by hand). Loupe copied rather than imported because `internal/edge/sync` drags the
+   whole edge client (store, transport, vault) into any binary that imports it. Inc 3b needs the same
+   construction on the Refractor side and would mint a **third** copy.
+   → **Absorbed into this fire, as Inc 3b's first step**: hoist it to `internal/refractor/subjects` — the
+   package that already owns durable-name construction and parsing (`lens_durable.go`) and that
+   `internal/edge/sync`, `internal/refractor/adapter`, `internal/refractor/health` and `cmd/refractor` all
+   already import. `edgesync.DurableName` and Loupe's helper both delegate; no third copy is created and
+   the existing drift hazard closes. This is narrowing, not widening — it is the minimum that gives Inc 3b
+   its probe without a new copy.
+2. **`cmd/loupe/edge.go`'s in-tree note that nothing GCs the interest registration** (near `:543`) becomes
+   false the moment Inc 3b lands. → Fixed in the same increment; the design's §5 already calls the roster
+   change out as operator-visible.
+3. Nothing else surfaced that needs Andrew or a designer pass.
+
+### 7. Non-goals (the drift fence)
+
+- **No change to the consumer-config seam** — `substrate/consumer.go`'s `DeliverPolicy`/`OptStartSeq`
+  handling is the cold-sign-in design's territory (§6-A, §9). This fire touches stream config and a
+  consumer's `InactiveThreshold` only.
+- **No delete-verdict janitor on SYNC** (§6-B) — the server is the only thing that decides expiry.
+- **No per-consumer `InactiveThreshold` plumbing** through `DurableConsumerConfig` / `transport.ConsumerConfig`
+  (§6-A: default-open).
+- **No TTL on `personal-lens-interest`** (§6-C).
+- **No fix to the unconditional `SetCursor`** (§8.3) — pre-existing, conservative in direction, out of scope.
+- No contract edit; nothing under `docs/contracts/*` describes this plane (§"For Andrew", re-grepped).
+
+### Scope-diff gate — PASSED
+
+Parts 2–4 diffed item-by-item against part 1. Every touch traces to "make expiry a property of the stream"
+(Inc 1+2) or "reconcile the one artifact that has no expiry of its own" (Inc 3). One **narrowing**
+correction and one **absorption**, both recorded above; no widening, no substituted mechanism. Declared
+dependencies re-verified both ways: Inc 3 genuinely depends on Inc 1+2 (§5's circularity argument), and the
+board's former `seq behind cold-signin` marker is confirmed already cleared. The design states no numeric
+census to re-run; its two live claims (the browser's 30 min, no ephemerals on SYNC) were re-verified above
+and both hold.
