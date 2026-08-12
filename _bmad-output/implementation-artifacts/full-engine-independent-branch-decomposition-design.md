@@ -1,7 +1,15 @@
 # Full-engine independent-branch decomposition — sibling OPTIONAL branches fold, they do not multiply
 
-**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — fork resolved to the ENGINE option**
+**Status: ✅ BUILT 2026-08-11 — Inc 2 `6c528efd`, Inc 1 `59441252`. Inc 3 (streaming) NOT built, shelved per
+§9-C with its trigger, which Inc 2's `peakBindingRows` now makes observable.**
+**Ratified 2026-08-06 (Winston, under delegated authority) — fork resolved to the ENGINE option**
 · Designer fire, Winston, 2026-08-02
+
+> **§2's census is superseded by the shipped one.** It said fourteen lenses by eye; the analysis derives
+> **24** with ≥2 sibling branch groups, of which **17** decompose. §2's per-lens counts are *clause* counts
+> and overstate wherever a stage's optionals chain rather than branch (`renewalComplete` is listed at 5 and
+> has 1), so its "worst first" ordering is not the real ordering. The executable record is
+> `internal/refractor/branch_decomposition_corpus_census_pins_test.go`.
 
 ## Ratification (Winston, 2026-08-06 — delegated by Andrew)
 
@@ -690,7 +698,30 @@ go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scrip
 - **`RETURN DISTINCT`'s dedup** (`executor.go:1431-1442`) and the auth-plane consumer-filter work — filed
   separately, untouched here (§8).
 
-### 8. Scope-diff gate — PASSED
+### 8. What the cap relief actually reaches (measured, Inc 1)
+
+The design's headline — "peak rows fall from the product of the branches to the largest single
+branch" — is a claim about **peak co-resident rows**, and it holds as stated: measured through Inc 2's
+gauge, `capabilityEphemeral` over a 50 × 30 × 50 corpus falls from **75,000 to 50**, and an unanchored
+two-branch lens over 10 base rows falls from **600 to 20**.
+
+**The binding CAP is a different quantity and moves less.** It is enforced against the rows a branch is
+walked through *in total* across every base row (`|base ⋈ G|`), not against one base row's expansion:
+the work is really done even though each expansion is discarded before the next is built, and capping a
+single expansion would admit an evaluation the product path correctly refuses. So:
+
+- **On a stage with ≥2 branch groups the cap relief is real** — the total falls from `|base| × Π_G |G|`
+  to `max_G |base ⋈ G|`. This is the whole §2 population and the incident shape.
+- **On a stage with ONE branch group — which is most of the folding population by lens count** (the
+  three generated read-grant producers are 17 of the 46 folded subtrees, one per staged walk, plus
+  `identityErasureResidue`'s five) — the cumulative total **equals the flat product**, so those stages
+  gain nothing against the cap. They still gain on peak resident heap, which is what the row's own
+  "streaming" remedy was about, and they were never near the cap: their staging already bounded them.
+
+Stated here because the two numbers diverge and an operator reading `peakBindingRows` beside a cap
+refusal must not infer that the cap now bounds the same thing the gauge reports.
+
+### 9. Scope-diff gate — PASSED
 
 Parts 2–4 diffed item-by-item against part 1. Every touch traces to the scope sentence; the brief **narrows**
 (Inc 3 excluded by the design itself) and widens nowhere. No adjacent mechanism substituted: the fix is the
