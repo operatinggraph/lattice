@@ -717,6 +717,31 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   answer for ops authored outside the package plane at all. A surprising caller is evidence about the
   architecture, not just an obstacle to the edit.
 
+- **Reusing a publish path for a RETRACTION inherits that path's freshness posture — and a revision that
+  UNDER-claims is safe for a snapshot and fatal for a retraction. Ask what the READER does with the
+  number, not what the writer meant by it.** When a design routes a removal through machinery built for
+  *delivery* (a frame, a snapshot, an upsert stream, a cache fill), the ordering token that machinery
+  stamps was chosen for the delivery job, where under-claiming loses a row that arrives again anyway. A
+  retraction hands that same token to guards on the consumer side, where under-claiming means the removal
+  is **dropped or exempted** — silently, in the over-grant direction, with a success signal on the
+  publish. (Trialed 2026-08-11, the personal-lens grant-change design: I specified the new per-actor
+  entry point as *"`Hydrate` minus the terminal marker"* and copied its capture-`highWater`-**before**
+  posture, citing its own doc comment for why under-claiming is the safe side. It is — for a cold bulk
+  hydrate. The Edge store drops a frame whose revision is below the lens's high-water
+  (`edge/store/bolt.go:208-210`) and exempts from pruning any key whose attribution revision exceeds the
+  frame's (`:291-294`), so an under-claiming *retraction* frame provably cannot retract, in the fast path
+  **and** in the standing sweep that was supposed to be its backstop. The whole payoff evaporated on a
+  posture I had inherited by analogy.) **The check:** for every ordering token / sequence / watermark your
+  design reuses, open the **consumer's** comparison and evaluate it once per direction — grow and shrink.
+  A token whose two directions want opposite roundings is telling you they are two mechanisms. Same
+  precedent-transfer family as the RLS-anchor and "guard" lessons above: identical word ("publish the
+  authoritative frame"), different job. Two corollaries from the same pass: a **write path that bypasses
+  the guard you hooked** (`Truncate`/`Purge` beside a CAS'd `Update`) is a whole arm of the mechanism
+  missing, and it is usually reachable *automatically* — there, a narrowing cypher edit drives a
+  truncating rebuild with no operator involved; and an **outcome type existing is not an outcome being
+  read** — `DeleteWithOutcome` shipped and compiled, and the one loop that mattered called the plain
+  `Delete` and discarded it, so the revocation half of my mechanism had no channel at all.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
