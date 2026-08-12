@@ -694,6 +694,29 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   rejecting, and deferred it with a named trigger my own design would produce). The ledger rule — cite the
   code that *does* the thing, never the comment — extends to citing a *decision*: open it, don't recall it.
 
+- **A REMOVAL design's census must be per-entity and must NOT exclude tests, docs, or examples — the
+  platform's own reference implementation is a caller, and it lives in `_test.go`.** The glob reflex
+  above says a census's *file pattern* is a premise; this is its sharpest and most repeatable instance,
+  because `grep -v "_test.go"` looks like hygiene rather than a claim. It is a claim: for *"is anything
+  using X?"* — the question every delete/withdraw/deprecate design turns on — the exclusion removes the
+  exact corpus where a tutorial, a conformance harness, or an NFR probe calls the thing. Two rules.
+  (1) **Sweep `--include` over `*.go` (tests included), `*.md`, and the examples tree**, then *classify*
+  each hit — a `permittedCommands` list, a spec fixture, and a README are declarations; only a submit is
+  a caller. (2) **Run it per entity, never over the group.** A census over "the trio" returns one answer
+  for three things; run per-op and they may disagree, and that disagreement is usually the design.
+  (Trialed 2026-08-11, the grant-provenance fire: I proposed withdrawing `CreatePermission` /
+  `UpdatePermission` / `GrantPermission` as "zero live callers, dead surface". Re-run without the
+  exclusion: `internal/hellolattice` submits two of them across Milestones 3 and 5 *and* the NFR-P3
+  latency probe — a **required** CI job (`make test-hello-lattice`, `-tags integration`, so
+  `go test ./...` never compiles it) plus the shipped tutorial at `docs/hello-lattice.md`. Per-op, the
+  three split cleanly: `UpdatePermission` genuinely had no caller, the other two were load-bearing, and
+  that split *became* the design — withdraw the one, add provenance to the others. The grouped census
+  had hidden it.) **And when the census is wrong, ask what the caller's existence PROVES**, not just
+  that it exists: hello-lattice's own comment explained *why* it must use the channel — an ad-hoc DDL
+  ships no `permissions.go` — which generalized into the structural finding that the design had no
+  answer for ops authored outside the package plane at all. A surprising caller is evidence about the
+  architecture, not just an obstacle to the edit.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
