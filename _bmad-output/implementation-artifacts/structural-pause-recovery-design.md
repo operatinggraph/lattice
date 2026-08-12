@@ -558,3 +558,207 @@ preserved cause is observable end-to-end — worth confirming opportunistically 
 [client-ceremony Inc 2b-3](client-ceremony-op-descriptors-design.md) §16.8, whose pane read was waiting on exactly
 this. And the *other* live status defect is untouched and re-confirmed at a second restart: three
 `edgeManifest*ReadGrants` lenses still report `rebuilding` at lag 0 — its own board row, not this design's.
+
+---
+
+## 12. Inc 2 fire brief (build note, 2026-08-11)
+
+Phase 0 of the Inc 2 build fire. Two read-only scouts re-verified every §2 ledger cite live; the design was
+written against `bb027dc5` (2026-08-03) and the pump file has moved twice since (`e2cff298`, `e107083a`), so
+**most pump line numbers in §2 have rotted**. The corrected anchors below are authoritative for this fire.
+
+### 1. Scope sentence (verbatim, §9)
+
+> **Inc 2 — self-adjudicating structural pause (M).** Build order **inside** the fire — do not split (b) from
+> (a), an opt-in shipped without the cadence fix is a lens that reports `active` for 5 minutes out of every 5
+> while broken: (a) `ConsumerSpec.StructuralProbe`, the `waitWhilePaused` branch, `runProbeLoop` parameterised
+> by reason; (b) Nak-with-delay on a structural failure when `StructuralProbe` is set (G13); (c) the relapse
+> counter + latch; (d) `cmd/refractor/main.go` opts in exactly `Protected || GrantTable` (**not** plain
+> Postgres — G8b); (e) unique-constraint verification in both verifiers + `42P10` into the structural set
+> (G6c); (f) the `structural-pause-auto-recovered` health issue, emitted after the post-recovery activation
+> gate clears; (g) explicit `CatPrivacyCritical` case + the bare-sentinel pin (G12, G16); (h) docs.
+
+**Green bar:** §8's Inc-2 test list, plus the full `go test ./...` the wide-blast-radius rule mandates
+(`consumer_supervisor_pump.go` is consumed by Loom, Weaver, Bridge and the Processor).
+
+### 2. Verified touch-list (checked live 2026-08-11; ✅ = design cite held, ⟳ = rotted, corrected)
+
+| File | Anchor | Design said | Live |
+|---|---|---|---|
+| `internal/substrate/consumer_supervisor_spec.go` | `ConsumerSpec` struct | — | `:123-198`; `Probe` `:182`, `InitialPause` `:189`, `Health` `:195` |
+| ″ | `PauseInfra/Structural/Manual` consts | — | `:51`, `:53`, `:55` |
+| ″ | `HealthSink` interface | five implementations (§10) | `:79-88` — confirmed 5: refractor/loom/weaver/bridge + tests |
+| `internal/substrate/consumer_supervisor_pump.go` | `pumpState` | `reasons` + `reopenFailures` present ✅ | `:59-112` (`reasons` `:62`, `reopenFailures` `:111`) |
+| ″ | `operatorResume` | `:118-127` ⟳ | `:149-156` — deletes `PauseManual` + `PauseStructural` only |
+| ″ | `runPump` | `:217`/`:226` ⟳ | `:267`; `restoreState` call `:271`; `InitialPause` seeding `:280-283`, **outside** the `for` at `:285` — G2b holds |
+| ″ | `waitWhilePaused` | `:288`/`:291-300` ⟳ | `:346-362`; the infra-only route is `:350-352` |
+| ″ | `processMsg` | `:349-360` ⟳ | `:410-423`; structural arm returns `(class, herr, false)` at `:416-418` |
+| ″ | `keepAckAlive` | not in design (post-dates it) | `:444-452` — **new since `e2cff298`** |
+| ″ | `handleDrainOutcome` `ClassStructural` | `:372-376` ⟳ | `:478-501`, structural case `:486-490` |
+| ″ | `runProbeLoop` | `:401`,`:415` ⟳ | `:503-546`; `clearReason(PauseInfra)` at **three** sites `:515` (force-resume), `:528` (probe pass), `:537` (structural escalation) |
+| ″ | `restoreState` | `:450-459` ⟳ | `:551-579` |
+| `internal/refractor/failure/classify.go` | structural SQLSTATE set | `:177-181` ⟳ | `:171-184` — `42P01,42703,23502,42804,22P02`; **`42P10` absent, confirmed** |
+| ″ | bare `ErrBucketNotFound` sentinel | `:167` ✅ | `:167`, `errors.Is`, no helper |
+| ″ | `CatPrivacyCritical` const | — | `:16-36` |
+| `internal/refractor/pipeline/supervisor_adapt.go` | `classifyForSupervisor` | `:102-113` ✅ | `:101-113` — no `CatPrivacyCritical` case, `default:` → `ClassTransient` |
+| ″ | `newHealthSink` | — | `:32` (adapts `*health.Reporter` to `substrate.HealthSink`) |
+| `internal/refractor/adapter/rls.go` | `VerifyProtectedTable` | `:468-563` ⟳ | `:514-611` — `pg_class` `:527-551`, `pg_attribute` `:553-589`, `pg_policy` `:591-610` |
+| ″ | `VerifyGrantTable` | `:576-600` ⟳ | `:622-649` (method on `*PostgresGrantWriter`) |
+| ″ | `UpsertGrant` `ON CONFLICT` | `(actor_id, anchor_id, grant_source)` ✅ | `:341-354`; `RevokeGrant` `:362-375`, same target |
+| ″ | no constraint/index check | ✅ | confirmed — `pg_index`/`pg_constraint` appear **nowhere** in `internal/` |
+| `internal/refractor/adapter/postgres.go` | protected `ON CONFLICT (<keyOrder>)` | `:230` ✅ | conflict cols built `:186-191`, SQL `:229-236` |
+| ″ | plain `Probe` = `pool.Ping` (G8) | `:95-97` ✅ | `:95-97` |
+| `internal/refractor/adapter/read_path_adapters.go` | `ProtectedAdapter.Probe`, `GrantWriterAdapter.Probe` | `:273-275`, `:155` ✅ | `:273-275`, `:155` |
+| `internal/refractor/health/reporter.go` | `SetPaused` / `SetActive` / `put` | `:146-157`,`:110`,`:444-453` ⟳ | `:193-269`, `:114-188`, `put` `:690-699` |
+| `internal/refractor/health/lattice_heartbeater.go` | issue-code consts | — | `:209-225`; business paused issue raised `:1380-1386` in `evalLenses` `:1280` |
+| `cmd/refractor/main.go` | `InitialPause` opt-in block | `:1002-1005` ⟳ | `:1450-1457`; spec literal `:1489-1497` |
+| ″ | `lensAckWait = 5 * time.Minute` | `:64` ⟳ | `:69`, applied `:1496` |
+| ″ | `Into.Columns` protected-only (G8b) | `:728`/`:735` ⟳ | `:1018` plain base, `:1022` returns unwrapped when `!Protected`, `:1025` `NewProtectedAdapter(..., r.Into.Columns)` |
+| `internal/refractor/lens/schema.go` | `IntoConfig` / `Columns` comment | `:79` ✅ | `:63-116`, `Columns` `:79` |
+
+**Censuses re-run live (every design count is a premise):** `StructuralProbe` — **0 occurrences** repo-wide, so
+nothing is partially built ✅. `42P10` — **0 occurrences** ✅. `pg_index`/`pg_constraint` — **0** ✅.
+`Workers:` set on a production `ConsumerSpec` — **exactly one site**, `internal/processor/lanes.go:105`; every
+Refractor lens leaves it zero, so the latch's per-worker bound is 3, not 3×N, in this fire's blast radius ✅.
+
+**One scout claim rejected.** The substrate scout's closing note ("a new `StructuralProbe` field would require
+updates at 12 production + 28 test construction sites") is wrong: every site is a keyed struct literal, so a
+new bool defaults false and compiles untouched. That is precisely why §4.2's default-off is the safe
+direction. Its second note — that the field is redundant because `Probe` already escalates — misreads the
+mechanism: escalation is *into* structural, this fire is recovery *out of* it.
+
+### 3. Precedents to mirror
+
+- **(a) the probe branch** → `waitWhilePaused:350-352`'s existing infra-only route, extended with one clause;
+  `runProbeLoop` already takes the whole `pumpState`, so the reason parameter is a signature change, not a
+  restructure.
+- **(b) Nak-with-delay** → `substrate.NakWithDelay` + `applyDecision` (`consumer.go:448-462`) already exist and
+  are already the pump's transient cadence; `spec.RedeliveryDelay` is the existing floor field. Not greenfield.
+- **(c) the latch** → `pumpState.reopenFailures` (`:111`) + `nextReopenDelay`/`resetReopenBackoff`
+  (`:191`,`:210`) are the shipped shape for "a per-worker counter reset by success, consulted by the loop".
+- **(d) the opt-in** → the `InitialPause` block at `cmd/refractor/main.go:1450-1457`, same `r.Into` derivation,
+  same literal.
+- **(e) the constraint check** → `VerifyProtectedTable`'s own `pg_attribute` block (`:553-589`) is the
+  catalog-query shape; `to_regclass($1)` parameterisation is already established there.
+- **(f) the health issue** → `issueLensSecureRedaction` (`lattice_heartbeater.go:209-225` + `:1394`) is the
+  closest sibling: a per-lens condition surfaced from a reporter-derived snapshot field into `evalLenses`'s
+  `active` map, with an `alert` token.
+- **(g)** → the existing `case` arms in `classifyForSupervisor:101-113`.
+
+### 4. Increment order + runnable green checks
+
+Run from the worktree. `POSTGRES_TEST_DSN` is exported by all four CI unit shards
+(`.github/workflows/ci.yml:367,407,446,483`), so the Postgres-gated tests are real gates, not local-only.
+
+1. **(a)+(b) together** — the field, the `waitWhilePaused` clause, `runProbeLoop(reason)`, Nak-with-delay.
+   `go test ./internal/substrate/ -run 'Supervisor|Structural|Nak' -count=1`
+2. **(c)** latch + counter on `pumpState`.  `go test ./internal/substrate/ -count=1`
+3. **(e)** constraint verification + `42P10`.
+   `go test ./internal/refractor/adapter/ ./internal/refractor/failure/ -count=1`
+4. **(g)** `CatPrivacyCritical` case + bare-sentinel pin.  `go test ./internal/refractor/... -count=1`
+5. **(d)+(f)** opt-in + the recovered issue.  `go test ./internal/refractor/... ./cmd/refractor/... -count=1`
+6. **e2e** (see gotcha 3).  `go test ./internal/refractor/ -run StructuralPause -count=1`
+7. **(h)** docs.
+8. **Gates:** `go build ./...` · `make vet` · `golangci-lint run ./...` · every `scripts/lint-*.go`
+   (`STRICT=1 go run ./scripts/lint-conventions.go` and the eight siblings) · `make verify-kernel` ·
+   **full `go test ./... -p 4`**.
+
+### 5. In-scope gotchas
+
+**Design-specific**
+
+1. **G13's premise moved under `e2cff298`, its conclusion did not.** `processMsg` now holds the ack window open
+   with `InProgress` heartbeats *while the handler runs* (`keepAckAlive:444-452`). On a structural failure the
+   handler has already **returned**, `stopHeartbeat()` fires, and the message then sits un-acked for the full
+   `lensAckWait` = 5 min. So §4.2(b) is still exactly the right fix. Same commit dropped the pull prefetch to
+   **1 message per worker**, which makes the Nak strictly cleaner: there is no client-side buffer for the
+   redelivered message to queue behind.
+2. **Do not widen `HealthSink`.** §10 already cut a `Load` widening for this reason (five implementations).
+   (f)'s seam is an **optional interface** asserted on `spec.Health` in substrate — only Refractor's
+   `newHealthSink` (`supervisor_adapt.go:32`) implements it; Loom/Weaver/Bridge compile untouched. The pump
+   latches `pendingAutoRecovered` when a **probe-driven** structural clear happens and fires the callback at
+   the next `persistActive`, which is what makes "after the post-recovery activation gate clears" fall out for
+   free: on the restart path `runPump:280-283` re-seeds `PauseInfra` before any `persistActive`, so the single
+   emission lands after the second probe; on the same-process path there is only one.
+3. **The §8 e2e has no existing shape to copy — this is the one greenfield.** Every e2e in `internal/refractor`
+   uses `natsfixture` and **no Postgres**; every Postgres test lives in `internal/refractor/adapter` behind
+   `skipIfNoPostgres`. The Inc-2 e2e is the first to need both. Build it as
+   `internal/refractor/structural_pause_recovery_e2e_test.go`: embedded NATS via `natsfixture`, a real
+   protected table via `POSTGRES_TEST_DSN`, the real `ProtectedAdapter.Probe` + real `classifyForSupervisor`
+   through a real `ConsumerSupervisor`. Skip when the DSN is absent (CI always has it). Deterministic sync
+   only — condition polling, never `time.Sleep`.
+4. **Issue-code naming deviates from the design's prose, deliberately.** The design writes
+   `structural-pause-auto-recovered`; the codebase splits these two ways (`issueLensProjectionPaused =
+   "LensProjectionPaused"` vs the lowercase per-lens `alert` token `secure-redaction`). This fire ships issue
+   code **`LensStructuralPauseAutoRecovered`** + alert token **`structural-pause-auto-recovered`**.
+5. **The freshness window is 2 heartbeat cycles, not 1.** The design says "live for one heartbeat cycle"; a
+   strict one-cycle window can be straddled by jitter and emit **nothing**, which is the silent-auto-heal the
+   design exists to refuse. Two cycles guarantees at least one emission and at most two — mirroring the
+   shipped `capabilitySweepSuppressionFreshnessCycles = 2` (`lattice_heartbeater.go:200`).
+6. **Docs (h) are load-bearing, not decoration.** `refractor-failure-tiers.md:16` (the Structural row) and
+   `:81-88` (the "an operator must reach it by hand" paragraph) both become **false** the moment (d) lands —
+   amend them in the same commit. Plus `docs/components/refractor.md` protected-provisioning and
+   `health-kv-schema.md` (the new issue code + the entry fields (f) adds).
+7. **`persistDominant`/`dominantReason` rank manual above structural** (`:235`): a manual pause held alongside
+   a structural one must never probe. The clause in (a) tests the whole reason set, not just structural.
+
+**Dossier — `docs/components/substrate.md` (copied in)**
+
+- *A process-local memo of server-owned state must name its invalidation boundary* — the latch is
+  process-local by design; §4.2(c) already states the restart re-arm. Say it in the code comment too.
+- *A reopen/retry loop needs a connection-closed exit of its own* — the probe loop is a round trip; it already
+  exits on ctx, and this fire adds no new loop, but the latch must not convert a connection-closed probe
+  failure into a permanent latch. `VerifyProtectedTable` returns **untagged** errors for absence (`rls.go`),
+  which `Classify` defaults to transient — the latch counts **structural relapses**, not probe failures.
+- *A vendor-behaviour claim in a comment needs a pinned `file:line`* — any AckWait/Nak claim in a new comment
+  cites `nats-server`/`nats.go` at our pin.
+
+**Dossier — `docs/components/refractor.md` (copied in)**
+
+- *New pipeline state without a declared lifetime* — the relapse counter and the `pendingAutoRecovered` latch
+  are exactly this class. Write the state table (created/reset/carried/ordered at crash, replay, reconnect,
+  operator Resume, worker restart) before the first edit.
+- *A soundness claim's stated REASON is load-bearing* — §4.2's security argument is "the probe **is** the
+  fail-closed gate". State the failure direction explicitly for the constraint check in (e): a missing unique
+  index must make the probe **fail** (lens stays dark), never pass.
+- *A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis* — (b) changes
+  delivery (Nak) and (a) changes projection (resume). Prove both.
+- *One latch guarding two states that commit at different times* — the relapse counter is reset by an operator
+  Resume and by a successful drain; pin which, and prove the compared baseline and the acted-on state share a
+  commit point.
+
+**Standing checklist** (all six apply; #1, #3 and #4 are the live ones here): new state needs a **lifetime**
+(the counter + the latch + `pendingAutoRecovered`); every census is a premise (§2 above re-ran all of them); a
+negative test needs its positive vector first (the latch test only means something once the recovery test
+passes, and each fix is proven by reverting it and watching its test fail); removal needs a transport and an
+observer (nothing is removed here, but (b) changes what happens to a message that was previously left pending
+— enumerate every consumer of that behaviour, i.e. every `StructuralProbe:false` consumer must be
+byte-identical); one deterministic key one writer (n/a); precedent may carry debt (the `InitialPause` block
+being mirrored in (d) is clean — verified above).
+
+### 6. Adjacent finds
+
+- **No `internal/refractor` e2e combines embedded NATS with Postgres.** Absorbed into this fire (gotcha 3) —
+  it is the design's own mandated proof, not a new scope.
+- **`classifyForSupervisor`'s `default:` arm is the only thing standing between `CatPrivacyCritical` and
+  `ClassTransient`.** Absorbed — it is (g).
+- Nothing else surfaced that needs Andrew or a designer pass.
+
+### 7. Non-goals (the drift fence)
+
+Plain `PostgresAdapter` opt-in (G8b — explicitly excluded); NATS-KV / NATS-subject opt-in (no live consumer);
+any behaviour change for a `StructuralProbe:false` consumer, i.e. Loom, Weaver, Bridge, the Processor and every
+non-protected lens (byte-identical, asserted); persisting the latch or the counter; any Core-KV read or write;
+any op, bucket or orchestration; any `docs/contracts/*` edit (§5: none required); Loupe's `readOnlyOps`; any
+grant widening; the three `edgeManifest*ReadGrants` lenses stuck at `rebuilding` (§11 — their own row).
+
+### Scope-diff gate — PASSED
+
+Parts 2–4 diffed item-by-item against part 1. Every touch traces to a lettered sub-item of §9's Inc 2: (a)→
+spec + pump; (b)→`processMsg`/`applyDecision`; (c)→`pumpState`; (d)→`cmd/refractor/main.go:1450`; (e)→`rls.go`
++ `classify.go`; (f)→`supervisor_adapt.go` + `reporter.go` + `lattice_heartbeater.go`; (g)→
+`supervisor_adapt.go` + `classify_test.go`; (h)→ the four docs. **No widening and no substituted mechanism.**
+Two **narrowings**, both recorded above: the e2e is scoped to the real-probe/real-supervisor seam rather than a
+full stack (gotcha 3), and the issue code follows the codebase's naming convention rather than the design's
+prose (gotcha 4). Declared dependencies re-verified both ways: Inc 1 and Inc 3 are shipped (`bb027dc5`) and
+neither is load-bearing for this green bar; no unlisted dependency surfaced.
