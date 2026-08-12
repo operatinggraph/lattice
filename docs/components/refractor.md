@@ -1102,7 +1102,14 @@ rows.
   link-envelope field as a vertex key. Minted: relationship-data-projection close pass (all three
   *executed* by a cold reviewer, not reasoned). Check: for any authoring-time refusal, name the runtime
   point the refused value would flow through and enforce the same predicate there too — one shared
-  function, so relaxing it moves both. A scope walk that enumerates the shapes that CARRY a binding is
+  function, so relaxing it moves both. **The walk-completeness half is now MECHANIZED —
+  `full/variable_refs_completeness_test.go`**: it discovers every `Expr` implementation and every
+  expression-bearing field from the package source at test time and probes each position, so a new type *or a
+  new field* fails until the walk handles it. Built after the same property-map blind spot reappeared in
+  `collectPatternVariableRefs` (independent-branch decomposition close pass), where it made a fail-closed
+  premise return `unknown=false` on a short reference set and a grant list gained an entry. A type-level
+  `default:` arm cannot catch an unwalked FIELD on a type the walk already recognises — that is where both
+  bugs lived. A scope walk that enumerates the shapes that CARRY a binding is
   fail-open by construction; enumerate the shapes that provably do not, and assume the rest carry it.
 - **A liveness test must run the arm the consumer's `ProjectionKind` actually selects.** The design's
   self-declared most-important test — a data-only link update must move the projected row — was written on
