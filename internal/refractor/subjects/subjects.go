@@ -126,6 +126,28 @@ func ParseLensDurable(name string) (string, bool) {
 	return id, true
 }
 
+// edgeSyncDurablePrefix is the fixed prefix of every Edge device's SYNC
+// durable JetStream consumer name.
+const edgeSyncDurablePrefix = "edge-sync-"
+
+// EdgeSyncDurable returns the durable JetStream consumer name a device's
+// Personal-Lens delta feed binds to on the SYNC stream
+// (personal-secure-lens-design.md Fire 1). The name is STABLE per
+// identity+device — not per-boot-nonce — so a device keeps exactly one
+// durable across restarts and resumes from its own ack floor instead of
+// replaying the whole retained stream.
+//
+// The format is load-bearing beyond this package: the Gateway's NATS
+// auth-callout grants exactly this name's consumer subjects
+// (internal/gateway/natsauth's PermissionsFor), so every constructor of this
+// name — the Edge node's own sync.Manager, Loupe's fleet inspector, and
+// Refractor's own reconciliation — must derive it here rather than
+// re-spelling it, or a drift between "what was created" and "what is
+// recognized" strands a live device's durable or misattributes a dead one.
+func EdgeSyncDurable(identityID, deviceID string) string {
+	return edgeSyncDurablePrefix + identityID + "-" + deviceID
+}
+
 // CoreKVStream returns the JetStream stream name for the given NATS KV bucket.
 // NATS convention: KV bucket "foo" is backed by stream "KV_foo".
 func CoreKVStream(bucket string) string {

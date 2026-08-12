@@ -134,7 +134,7 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	// The actor key the control plane's self-asserted-actor fallback expects,
 	// shared verbatim by the sync manager below and the Vault client — both
 	// address that same control plane.
-	actorHeader := "vtx.identity." + identityID
+	actorHeader := edgeActorHeader(identityID)
 	ctrl := natstransport.New(conn)
 
 	// A Vault session-key client for this identity, so the sealed `name`

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/edge/store"
 	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -266,18 +269,19 @@ func (m *engineManager) Purge(identityID string) error {
 // not hold it open.
 const reapDurableTimeout = 5 * time.Second
 
-// reapSyncDurable deletes the SYNC durable consumer identityID was feeding,
-// over a short-lived connection of its own (the engine's is already closed by
-// the time a purge reaches here). An empty deviceID is read back from the
-// mirror at storePath — the no-engine-was-live path.
+// reapSyncDurable deletes the SYNC durable consumer identityID was feeding
+// and deregisters its personal-lens-interest registration, over a
+// short-lived connection of its own (the engine's is already closed by the
+// time a purge reaches here). An empty deviceID is read back from the mirror
+// at storePath — the no-engine-was-live path.
 //
 // Every failure is logged and swallowed: a purge must never fail the
 // sign-out it is part of, and its load-bearing half — the local mirror —
 // is deleted by the caller regardless. A revoked credential in particular
 // CANNOT complete this — the auth callout refuses the connection, which is
 // the correct outcome for revocation. What that leaves behind is one
-// durable, unreachable from this host ever after: the id naming it is in the
-// mirror the caller is about to delete.
+// durable and one registration, unreachable from this host ever after: the
+// id naming them is in the mirror the caller is about to delete.
 func (m *engineManager) reapSyncDurable(identityID, deviceID, storePath string) {
 	if m.deps.Signer == nil {
 		return // boot-env fallback: no minter, so no connection to reap over
@@ -341,9 +345,64 @@ func (m *engineManager) reapSyncDurable(identityID, deviceID, storePath string) 
 	durable := edgesync.DurableName(identityID, deviceID)
 	if err := conn.DeleteStreamConsumer(ctx, edgesync.DefaultStream, durable); err != nil {
 		logger.Warn("facet purge: sync durable not reaped", "identityId", identityID, "durable", durable, "err", err)
+	} else {
+		logger.Info("facet purge: sync durable reaped", "identityId", identityID, "durable", durable)
+	}
+
+	// The durable and the personal-lens-interest registration are two
+	// independent artifacts of the same device (edge-sync-orphan-expiry-
+	// design.md §1.2/§5 Inc 3a): attempted regardless of whether the delete
+	// above succeeded, over the SAME connection, in the SAME
+	// swallow-every-failure posture — a purge must never fail the
+	// sign-out/revocation it is part of.
+	deregisterInterest(ctx, conn, identityID, deviceID, logger)
+}
+
+// edgeActorHeader returns the Lattice-Actor header value facet stamps on
+// every control-plane request it self-asserts for identityID — the
+// vtx.identity.<id> vertex-key shape internal/refractor/control/service.go's
+// self-asserted-body fallback binds to. Shared by every self-asserting call
+// site in this package so there is exactly one spelling of it.
+func edgeActorHeader(identityID string) string {
+	return "vtx.identity." + identityID
+}
+
+// deregisterInterest issues the "personal.deregister" control op so a
+// device's Interest Set registration does not outlive the durable it names —
+// the caller Deregister has been waiting for since it shipped
+// (personalinterest.Deregister). The Lattice-Actor header carries facet's
+// self-asserted actor key (edgeActorHeader) — exactly what this connection's
+// own "personal.register" already sends on the sync Manager's behalf
+// (engine.go's ActorHeader). With no ActorVerifier configured on the control
+// plane the header is trusted as asserted; with one configured it is instead
+// authenticated as a signed token (internal/controlauth/verified_actor.go:
+// 58-70's ResolveActor passes it straight to Authenticate), so a bare
+// vtx.identity.<id> string is refused there — the same way register's
+// identical header is refused on the same connection. The two ops fail
+// alike under that posture, which is why swallowing the failure here costs
+// nothing beyond what an unregistered device already costs.
+func deregisterInterest(ctx context.Context, conn *substrate.Conn, identityID, deviceID string, logger *slog.Logger) {
+	actorHeader := edgeActorHeader(identityID)
+	data, err := json.Marshal(controlwire.ControlRequest{IdentityID: identityID, DeviceID: deviceID})
+	if err != nil {
+		logger.Warn("facet purge: marshal deregister request failed; leaving the interest registration in place", "identityId", identityID, "deviceId", deviceID, "err", err)
 		return
 	}
-	logger.Info("facet purge: sync durable reaped", "identityId", identityID, "durable", durable)
+	reply, err := natstransport.New(conn).Request(ctx, controlwire.ControlSubject("personal", "deregister"), data, actorHeader)
+	if err != nil {
+		logger.Warn("facet purge: deregister request failed; leaving the interest registration in place", "identityId", identityID, "deviceId", deviceID, "err", err)
+		return
+	}
+	var resp controlwire.ControlResponse
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		logger.Warn("facet purge: deregister response undecodable; leaving the interest registration in place", "identityId", identityID, "deviceId", deviceID, "err", err)
+		return
+	}
+	if resp.Error != "" {
+		logger.Warn("facet purge: deregister refused", "identityId", identityID, "deviceId", deviceID, "err", resp.Error)
+		return
+	}
+	logger.Info("facet purge: interest registration deregistered", "identityId", identityID, "deviceId", deviceID)
 }
 
 // engineFleetSnapshot is a read-only point-in-time summary of every engine

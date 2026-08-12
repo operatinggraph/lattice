@@ -44,9 +44,12 @@ const DefaultStream = "SYNC"
 // The format is load-bearing beyond this package: the Gateway's NATS
 // auth-callout grants exactly this name's consumer subjects
 // (internal/gateway/natsauth's PermissionsFor), so a host reaping its own
-// durable must derive the name here rather than re-spelling it.
+// durable must derive the name here rather than re-spelling it. Delegates to
+// subjects.EdgeSyncDurable, the single constructor every caller across the
+// tree — this package, Loupe's fleet inspector, Refractor's own
+// reconciliation — shares.
 func DurableName(identityID, deviceID string) string {
-	return "edge-sync-" + identityID + "-" + deviceID
+	return subjects.EdgeSyncDurable(identityID, deviceID)
 }
 
 const (

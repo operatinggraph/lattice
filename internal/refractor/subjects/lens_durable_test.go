@@ -52,3 +52,18 @@ func TestLensDurable_MalformedRuleIDIsNotRecognizedBack(t *testing.T) {
 		}
 	}
 }
+
+// TestEdgeSyncDurable_ExactString pins the produced name byte-for-byte: it is
+// spliced into the Gateway's NATS auth-callout grant
+// (internal/gateway/natsauth's PermissionsFor) independently of this
+// constructor, so a drift here would desync the durable a device creates
+// from the subject the server actually authorizes.
+func TestEdgeSyncDurable_ExactString(t *testing.T) {
+	const identityID = "AbCdEfGhJkMnPqRsTuVw"
+	const deviceID = "ZwVuTsRqPnMkJhGfEdCb"
+	got := EdgeSyncDurable(identityID, deviceID)
+	want := "edge-sync-" + identityID + "-" + deviceID
+	if got != want {
+		t.Fatalf("EdgeSyncDurable(%q, %q) = %q, want %q", identityID, deviceID, got, want)
+	}
+}

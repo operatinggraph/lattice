@@ -120,6 +120,24 @@ const syncStreamMaxAge = 24 * time.Hour
 // path as falling behind MaxAge.
 const syncStreamMaxMsgsPerSubject = 10_000
 
+// syncDurableReapMargin is slack added atop syncStreamMaxAge for
+// SyncConsumerInactiveThreshold: clock skew, plus a node reconnecting right
+// at the retention boundary (edge-sync-orphan-expiry-design.md §4.3).
+const syncDurableReapMargin = 1 * time.Hour
+
+// SyncConsumerInactiveThreshold is the SYNC stream's ConsumerLimits.
+// InactiveThreshold (edge-sync-orphan-expiry-design.md §4.3): every durable
+// consumer on SYNC that declares no threshold of its own inherits this one
+// (nats-server 2.14 server/consumer.go:662-666), and one that asks for a
+// longer threshold is refused (:843-844,
+// NewJSConsumerInactiveThresholdExcessError). Expressed as a sum against
+// syncStreamMaxAge rather than as a bare literal — a durable's ack floor is
+// worth preserving only while a resume from it can still deliver something a
+// fresh consumer would not, and past the stream's own retention horizon it
+// cannot (edge-sync-orphan-expiry-design.md §7), so the threshold must move
+// with whatever that horizon is.
+const SyncConsumerInactiveThreshold = syncStreamMaxAge + syncDurableReapMargin
+
 // ensureSyncStream provisions the backing stream, unioning subjectPrefix's
 // wildcard into any subjects the stream already carries rather than
 // replacing them outright. JetStream's CreateOrUpdateStream (substrate's
@@ -136,13 +154,20 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 		return err
 	}
 	if slices.Contains(existingSubjects, wildcard) {
-		return conn.EnsureStream(ctx, substrate.StreamSpec{Name: stream, Subjects: existingSubjects, MaxAge: syncStreamMaxAge, MaxMsgsPerSubject: syncStreamMaxMsgsPerSubject})
+		return conn.EnsureStream(ctx, substrate.StreamSpec{
+			Name:                      stream,
+			Subjects:                  existingSubjects,
+			MaxAge:                    syncStreamMaxAge,
+			MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
+			ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
+		})
 	}
 	return conn.EnsureStream(ctx, substrate.StreamSpec{
-		Name:              stream,
-		Subjects:          append(existingSubjects, wildcard),
-		MaxAge:            syncStreamMaxAge,
-		MaxMsgsPerSubject: syncStreamMaxMsgsPerSubject,
+		Name:                      stream,
+		Subjects:                  append(existingSubjects, wildcard),
+		MaxAge:                    syncStreamMaxAge,
+		MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
+		ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
 	})
 }
 

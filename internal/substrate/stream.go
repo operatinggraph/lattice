@@ -28,6 +28,14 @@ type StreamSpec struct {
 	MaxMsgsPerSubject int64
 	// MaxBytes bounds total stream storage by size. Zero means no byte limit.
 	MaxBytes int64
+	// ConsumerInactiveThreshold sets the stream's ConsumerLimits.
+	// InactiveThreshold: every durable consumer on this stream that does not
+	// declare its own InactiveThreshold inherits this one, and a consumer
+	// that asks for a longer one is refused (nats-server 2.14
+	// server/consumer.go:662-666 inherits; :843-844 refuses the excess).
+	// Zero means no policy — today's behaviour, an unbounded consumer
+	// lifetime.
+	ConsumerInactiveThreshold time.Duration
 }
 
 // EnsureStream creates or updates the stream described by spec (idempotent —
@@ -47,6 +55,7 @@ func (c *Conn) EnsureStream(ctx context.Context, spec StreamSpec) error {
 		MaxAge:            spec.MaxAge,
 		MaxMsgsPerSubject: spec.MaxMsgsPerSubject,
 		MaxBytes:          spec.MaxBytes,
+		ConsumerLimits:    jetstream.StreamConsumerLimits{InactiveThreshold: spec.ConsumerInactiveThreshold},
 	}
 	if _, err := c.js.CreateOrUpdateStream(ctx, cfg); err != nil {
 		return fmt.Errorf("substrate: EnsureStream %q: %w", spec.Name, err)

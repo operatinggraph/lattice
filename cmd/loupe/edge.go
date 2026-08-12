@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -191,9 +192,12 @@ func splitInterestKey(key string) (identityID, deviceID string, ok bool) {
 }
 
 // edgeSyncDurable builds the durable consumer name internal/edge/sync gives a
-// device's SYNC subscription. Must match sync.go's construction by value.
+// device's SYNC subscription — subjects.EdgeSyncDurable is the single shared
+// constructor (internal/edge/sync.DurableName delegates to it too), kept as
+// a local name here since every call site in this file already reads
+// edgeSyncDurable(identityID, deviceID).
 func edgeSyncDurable(identityID, deviceID string) string {
-	return "edge-sync-" + identityID + "-" + deviceID
+	return subjects.EdgeSyncDurable(identityID, deviceID)
 }
 
 // deviceTriageTier orders the roster for triage rather than for census:
