@@ -535,3 +535,24 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   cold-sign-in Fire 3's close review (`942f78df`) — the hole that survived Fire 2's contiguous floor.
   Check: `TestDrainDurable_ReconnectHandsBackTheWholePrefetchBuffer` (and its shutdown-still-discards
   sibling).
+- **A verdict computed OUTSIDE the lock is stale by the time it is applied** — the supervisor's probe runs
+  for tens of milliseconds (a Postgres posture check is several catalog round trips), and an operator
+  `Resume` lands on a different goroutine. Applying the probe's result across separate `mu` acquisitions let
+  a resume that arrived mid-probe be overwritten: the pass re-armed the pause machinery the operator had
+  just cleared, stamping "recovered without operator action" onto a pause a human personally lifted, and
+  leaving the relapse arm set so the NEXT genuine pause counted as attempt 2. The comment above it asserted
+  atomicity for the one pair that *was* atomic and said nothing about the operator act landing BEFORE it —
+  a correct sentence guarding the wrong boundary. Minted: structural-pause Inc 2, found by a cold reviewer
+  reasoning about the interleaving, not by a test. Check: any long-running check whose result mutates shared
+  state samples a `resumeEpoch`-style generation counter before it starts and discards its verdict if the
+  counter moved — `TestSupervisor_StructuralProbe_ResumeDuringProbe_DiscardsTheVerdict`, whose probe blocks
+  on a channel the test closes only after `Resume` returns.
+- **A pending flag consumed BEFORE the work it gates succeeds is a signal deleted by its own failure** — the
+  recovery announcement took its flag, then attempted the health write; on error it logged and returned with
+  nothing left to retry. The realistic trigger is the cruel one: the health store is briefly unreachable
+  because of the very outage that raised the pause, so the one record of a self-heal is lost precisely when
+  it happened. Peek, do the work, clear only on success — and if the retry rides an existing rendezvous
+  rather than a timer, say so at the field, because "retries" and "retries the next time the pump reopens"
+  are different promises. Minted: structural-pause Inc 2 capability-plane review. Check:
+  `TestSupervisor_StructuralProbe_FailedAnnouncement_RetriesAtNextOpen` (first call errors, second succeeds,
+  exactly one record).

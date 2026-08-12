@@ -163,6 +163,14 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The cost gauge belongs to that same group, and is the one member
+		// NOTHING restores after a transition. SetPeakBindingRows refuses to
+		// write without a real sample, and samples come only from evaluations —
+		// so a paused lens produces none, and a zero written here would stand for
+		// the whole length of the pause. That is exactly when an operator is
+		// reading the entry, and exactly the number they want: how expensive the
+		// evaluation that preceded the trouble was.
+		PeakBindingRows: existing.PeakBindingRows,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -176,6 +184,26 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		FilterMode:        existing.FilterMode,
 		FilterLabelCount:  existing.FilterLabelCount,
 		FilterBroadReason: existing.FilterBroadReason,
+		// The last probe-driven structural recovery, by the same rule and for
+		// the sharpest reason of any field here: a status transition observes
+		// nothing about a recovery that already happened, and these three are
+		// the ONLY record it leaves. The pause it cleared is gone from
+		// PauseReason and its diagnosis is gone from LastError the moment
+		// SetActive runs, so an omission here does not merely reset a value —
+		// it deletes the event.
+		//
+		// The erasure would land exactly where the fields matter most. A
+		// self-heal that does not hold re-pauses within one ProbeInterval (10s,
+		// the same order as the heartbeat), so a stamp dropped by the next
+		// SetPaused is never observed by any beat: StructuralAutoRecoveryAttempts
+		// would be unreadable in precisely the flapping case it exists to
+		// report, and a lens that flapped to its relapse latch would end
+		// carrying no auto-recovery record at all. A self-heal mid-rebuild is
+		// the second instance: SetRebuilding on the way in, SetActive on the way
+		// out, and the stamp gone twice over.
+		StructuralAutoRecoveredAt:      existing.StructuralAutoRecoveredAt,
+		StructuralAutoRecoveredCause:   existing.StructuralAutoRecoveredCause,
+		StructuralAutoRecoveryAttempts: existing.StructuralAutoRecoveryAttempts,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -245,6 +273,9 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The cost gauge, for the reason SetActive states: nothing restores it
+		// after a transition, because samples come only from evaluations.
+		PeakBindingRows: existing.PeakBindingRows,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -258,6 +289,13 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		FilterMode:        existing.FilterMode,
 		FilterLabelCount:  existing.FilterLabelCount,
 		FilterBroadReason: existing.FilterBroadReason,
+		// The last probe-driven structural recovery, preserved for the reason
+		// SetActive states: a status transition observes nothing about a
+		// recovery that already happened, and these three are the only record it
+		// leaves once the pause and its diagnosis are cleared.
+		StructuralAutoRecoveredAt:      existing.StructuralAutoRecoveredAt,
+		StructuralAutoRecoveredCause:   existing.StructuralAutoRecoveredCause,
+		StructuralAutoRecoveryAttempts: existing.StructuralAutoRecoveryAttempts,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -316,6 +354,9 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The cost gauge, for the reason SetActive states: nothing restores it
+		// after a transition, because samples come only from evaluations.
+		PeakBindingRows: existing.PeakBindingRows,
 		// The consumer-filter footprint, by the same rule: a status transition
 		// observes nothing about which subjects this lens's consumer filters
 		// on, so writing zeroes here would assert something no derivation
@@ -329,6 +370,16 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		FilterMode:        existing.FilterMode,
 		FilterLabelCount:  existing.FilterLabelCount,
 		FilterBroadReason: existing.FilterBroadReason,
+		// The last probe-driven structural recovery, preserved for the reason
+		// SetActive states: a status transition observes nothing about a
+		// recovery that already happened, and these three are the only record it
+		// leaves once the pause and its diagnosis are cleared. A rebuild is the
+		// second place the omission would bite — SetRebuilding on the way in and
+		// SetActive on the way out erase it twice over, on the very operation an
+		// operator runs BECAUSE the recovery told them a rebuild was owed.
+		StructuralAutoRecoveredAt:      existing.StructuralAutoRecoveredAt,
+		StructuralAutoRecoveredCause:   existing.StructuralAutoRecoveredCause,
+		StructuralAutoRecoveryAttempts: existing.StructuralAutoRecoveryAttempts,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -525,6 +576,48 @@ func (r *Reporter) RecordSecureRedactions(ctx context.Context, n uint64) error {
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)
+}
+
+// RecordStructuralAutoRecovery stamps a structural pause that cleared with no
+// operator involved: the consumer's own probe re-verified the condition the
+// pause was raised on, every remaining gate passed, and the lens is about to
+// project again. cause is the diagnosis the pause carried; attempts is which
+// self-heal attempt lifted it, from 1.
+//
+// It exists because the recovery is otherwise INVISIBLE. The entry it writes
+// reads `active`, exactly like a lens that never faulted and like one a human
+// repaired, and the pause's cause is gone from LastError the moment the pause
+// clears — so without these three fields the only trace of a lens having been
+// dark, and of what was wrong with it, is a log line nobody is reading. The
+// pause's own backlog does replay on resume — the failing message was never
+// acked — but a condition cleared by re-provisioning or restoring the target
+// leaves everything written BEFORE the pause unreplayable, and only the cause
+// says which of the two happened.
+//
+// It records the recovery only — Status and PauseReason are the supervisor's to
+// write, and are already correct by the time this is called. Read-modify-write
+// through put under writeMu like every other setter, so it cannot lose an
+// update to a concurrent RecordError.
+func (r *Reporter) RecordStructuralAutoRecovery(ctx context.Context, cause string, attempts int) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: RecordStructuralAutoRecovery read: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	existing.StructuralAutoRecoveredAt = now
+	existing.StructuralAutoRecoveredCause = cause
+	existing.StructuralAutoRecoveryAttempts = attempts
+	existing.LastUpdated = now
+	existing.RuleID = r.ruleID
+	if err := r.put(ctx, existing); err != nil {
+		return err
+	}
+	slog.Info("health: structural pause recovered without operator action",
+		"ruleId", r.ruleID, "attempts", attempts, "cause", cause)
+	return nil
 }
 
 // SetPeakBindingRows persists the lens's peak-binding-rows gauge — the largest

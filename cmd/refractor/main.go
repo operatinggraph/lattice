@@ -851,6 +851,21 @@ func main() {
 			if st.LastError != nil {
 				snap.LastError = *st.LastError
 			}
+			// A structural pause this lens cleared under its own probe. Every
+			// grant-table lens is auth-plane (projection.IsAuthPlane) AND is
+			// opted into structural self-heal (verifiesReadPathPosture), so this
+			// path carries the recovery for the lenses feeding actor_read_grants
+			// — precisely the ones whose silent self-heal would be worst. An
+			// unparseable stamp leaves the zero time, which the heartbeater reads
+			// as "never self-healed": a malformed value must not manufacture a
+			// recovery that did not happen.
+			if st.StructuralAutoRecoveredAt != "" {
+				if at, perr := time.Parse(time.RFC3339, st.StructuralAutoRecoveredAt); perr == nil {
+					snap.StructuralAutoRecoveredAt = at
+				}
+			}
+			snap.StructuralAutoRecoveredCause = st.StructuralAutoRecoveredCause
+			snap.StructuralAutoRecoveryAttempts = st.StructuralAutoRecoveryAttempts
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
 				snap.Status = "unknown"
@@ -942,6 +957,21 @@ func main() {
 			if st.LastError != nil {
 				snap.LastError = *st.LastError
 			}
+			// A structural pause this lens cleared under its own probe. It is a
+			// fact about a lens that is FINE now, which makes it the easiest one
+			// to lose to a fault observing something else — and the one whose
+			// loss is silent, since the recovered entry is otherwise identical to
+			// a lens that never faulted. An unparseable stamp leaves the zero
+			// time, which the heartbeater reads as "never self-healed": a
+			// malformed value must not manufacture a recovery that did not
+			// happen.
+			if st.StructuralAutoRecoveredAt != "" {
+				if at, perr := time.Parse(time.RFC3339, st.StructuralAutoRecoveredAt); perr == nil {
+					snap.StructuralAutoRecoveredAt = at
+				}
+			}
+			snap.StructuralAutoRecoveredCause = st.StructuralAutoRecoveredCause
+			snap.StructuralAutoRecoveryAttempts = st.StructuralAutoRecoveryAttempts
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
 				snap.Status = "unknown"
@@ -1442,19 +1472,6 @@ func main() {
 			logger.Info("secure lens decryptor installed", "lensId", r.ID, "columns", len(cols))
 		}
 
-		// Configure the supervised runtime: durable name refractor-<ruleID>,
-		// queue group = same name (NFR12), DeliverLastPerSubject (ADR-15), Core
-		// KV stream + filter. The supervisor creates the durable idempotently when
-		// Run registers it (CreateOrUpdateConsumer). ruleID must not be "adjacency"
-		// (collides with the bootstrapper's refractor-adjacency consumer).
-		// A protected/grant Postgres lens starts infra-paused so its Probe verifies
-		// the out-of-band RLS posture BEFORE the first projection — fail-closed
-		// (Contract #6 §6.14, verify-and-pause). Every other lens drains
-		// immediately (zero-value InitialPause).
-		var initialPause substrate.PauseReason
-		if r.Into.Protected || r.Into.GrantTable {
-			initialPause = substrate.PauseInfra
-		}
 		// D1 (refractor-footprint-reduction-design.md): a full-engine lens
 		// with an exhaustive referenced-label set gets a narrowed,
 		// server-side FilterSubjects consumer instead of the broad
@@ -1486,16 +1503,7 @@ func main() {
 		// observational either way — the spec below is built from the two
 		// filter values alone, exactly as before.
 		filterSubjects, filterSubject, filterDecision := p.ConsumerFilter()
-		p.RunOn(conn, substrate.ConsumerSpec{
-			Name:           subjects.LensDurable(r.ID),
-			Stream:         subjects.CoreKVStream(coreKVBucket),
-			FilterSubjects: filterSubjects,
-			FilterSubject:  filterSubject,
-			DeliverPolicy:  substrate.DeliverLastPerSubject,
-			DeliverGroup:   subjects.LensDurable(r.ID),
-			AckWait:        lensAckWait,
-			InitialPause:   initialPause,
-		})
+		p.RunOn(conn, lensConsumerSpec(r, coreKVBucket, filterSubjects, filterSubject))
 
 		// Per-lens lag metrics: read pending from the supervised consumer by
 		// durable name, so the poller tracks the live consumer across a rebuild
@@ -1844,6 +1852,72 @@ func main() {
 	logger.Info("refractor shutting down")
 	wg.Wait()
 	poolManager.Close()
+}
+
+// lensConsumerSpec builds the supervised-runtime spec for one lens: durable name
+// refractor-<ruleID>, queue group = the same name (NFR12), DeliverLastPerSubject
+// (ADR-15), the Core KV stream, and whichever consumer filter the caller's
+// derivation produced. ruleID must not be "adjacency" (it would collide with the
+// bootstrapper's refractor-adjacency consumer). The supervisor creates the
+// durable idempotently when Run registers it.
+//
+// The two pause fields are derived here, from one predicate, rather than at the
+// call site: a lens whose Probe verifies its read-path posture starts
+// infra-paused so that verification runs BEFORE its first projection —
+// fail-closed, Contract #6 §6.14, verify-and-pause — and the same property is
+// what makes its structural pause self-adjudicating. One predicate licenses
+// both, so they are the same set by construction and cannot drift apart. Every
+// other lens drains immediately and waits for an operator.
+//
+// It is a named function rather than a literal inside the activation closure so
+// the derivation is testable: inlined, flipping StructuralProbe to false shipped
+// a dead feature past a fully green suite, because the predicate was tested in
+// isolation and the e2e set the flag by hand.
+func lensConsumerSpec(r *lens.Rule, coreKVBucket string, filterSubjects []string, filterSubject string) substrate.ConsumerSpec {
+	var initialPause substrate.PauseReason
+	if verifiesReadPathPosture(r.Into) {
+		initialPause = substrate.PauseInfra
+	}
+	return substrate.ConsumerSpec{
+		Name:            subjects.LensDurable(r.ID),
+		Stream:          subjects.CoreKVStream(coreKVBucket),
+		FilterSubjects:  filterSubjects,
+		FilterSubject:   filterSubject,
+		DeliverPolicy:   substrate.DeliverLastPerSubject,
+		DeliverGroup:    subjects.LensDurable(r.ID),
+		AckWait:         lensAckWait,
+		InitialPause:    initialPause,
+		StructuralProbe: verifiesReadPathPosture(r.Into),
+	}
+}
+
+// verifiesReadPathPosture reports whether a lens's Probe is a full read-path
+// POSTURE VERIFICATION — VerifyProtectedTable / VerifyGrantTable, which check
+// the table, its columns, its RLS state and the unique constraint its
+// ON CONFLICT needs — rather than a liveness ping.
+//
+// It is the single condition behind two decisions that must never diverge: the
+// fail-closed InitialPause gate (verify before the first projection) and the
+// StructuralProbe opt-in (probe your own way out of a structural pause). Both
+// are licensed by the same property — a probe that adjudicates the condition —
+// so they are one predicate rather than two copies that a future widening could
+// desynchronize silently.
+//
+// The set is narrower than "every lens that has a Probe", and that is not an
+// oversight. A plain PostgresAdapter's Probe is pool.Ping and nothing more, so
+// it passes while the structural condition still holds — opting it in buys
+// resume → re-pause → resume churn, with the entry reading active for a share of
+// it, which is strictly worse than an honest structural pause. Completing that
+// probe is not cheap either: a plain lens declares no body columns at all
+// (Into.Columns is protected-only — the plain base adapter is returned unwrapped
+// when !Protected, and only the protected path is handed r.Into.Columns), so a
+// verification would be key-columns-only and would still pass through the
+// missing-column fault it is supposed to catch. The NATS-KV and NATS-subject
+// lenses are left out for a different reason: their structural class (bucket or
+// stream absent) is real but has never been observed live, and the machinery
+// waits for a consumer rather than shipping ahead of one.
+func verifiesReadPathPosture(into lens.IntoConfig) bool {
+	return into.Protected || into.GrantTable
 }
 
 // isOperationRoleIndexLens reports whether r is the operation-aggregate

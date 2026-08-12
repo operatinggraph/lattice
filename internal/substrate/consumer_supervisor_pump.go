@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -99,7 +100,77 @@ type pumpState struct {
 	// successful open, driving nextReopenDelay's exponential growth. Reset to
 	// 0 once the consumer and its message iterator both open successfully.
 	reopenFailures int
+
+	// probeResumedStructural marks that the structural reason this worker last
+	// cleared was cleared by a PASSING PROBE rather than by an operator. It arms
+	// the relapse counter: the next structural pause is then a self-heal that did
+	// not hold, not a fresh fault. Consumed by that pause (noteStructuralPause),
+	// and cleared by an operator Resume.
+	probeResumedStructural bool
+
+	// structuralRelapses counts consecutive structural pauses that each followed
+	// a probe-driven structural resume. A structural pause that did NOT follow one
+	// starts a new chain and resets it to 0; an operator Resume resets it too. It
+	// is NOT reset by a successful drain: a probe-driven resume that projects for
+	// an hour and then hits a different structural fault still counts, which bounds
+	// self-healing slightly sooner than a per-episode count would — the direction
+	// that hands the operator control, never the one that withholds it.
+	structuralRelapses int
+
+	// structuralLatched makes this worker treat ConsumerSpec.StructuralProbe as
+	// false for the rest of its life: the pause is operator-only again, because
+	// the probe has now adjudicated recovery structuralRelapseLimit times and been
+	// wrong every time. It is in-process and per-worker, never persisted, so a
+	// restart re-arms it — deliberately: a restart is a deploy or an operator act,
+	// which bounds self-healing at structuralRelapseLimit per restart, and the
+	// state whose whole purpose is to expire with the process has no business in a
+	// health schema. Cleared by an operator Resume.
+	structuralLatched bool
+
+	// pendingAutoRecovered records that a probe-driven structural clear has not
+	// yet been announced to the operator: a structural pause that healed itself is
+	// exactly the event a health entry reading "active" would otherwise hide. The
+	// pump takes it immediately before its next drain, where every gate it had to
+	// pass — the structural probe AND any InitialPause re-verification — has
+	// cleared and it is about to project. It is cleared without announcement by an
+	// operator Resume (the human already knows) and by a latch (the recovery did
+	// not hold, so there is none to announce).
+	//
+	// autoRecoveredCause and autoRecoveredAttempt are captured WITH it, at the
+	// clear, so the announcement carries the cause the pause actually held and the
+	// attempt that lifted it rather than whatever the state has drifted to by the
+	// time the pump reaches its next open.
+	pendingAutoRecovered bool
+	autoRecoveredCause   string
+	autoRecoveredAttempt int
+
+	// lastStructuralCause is the cause currently persisted for a held structural
+	// pause, empty when none is held. It exists so a probe that keeps reporting an
+	// unchanged fault does not rewrite the health entry every ProbeInterval: every
+	// setter stamps a fresh timestamp, so re-persisting an unchanged cause would
+	// make a permanently dead consumer publish a permanently fresh entry. It is
+	// set at each structural persist, cleared whenever the structural reason
+	// clears, and read at the clear to fill autoRecoveredCause.
+	lastStructuralCause string
+
+	// resumeEpoch counts operator Resumes. A Probe is a round trip — tens of
+	// milliseconds of catalog queries for a protected lens — and it runs with no
+	// lock held, so an operator can lift the pause while the probe that is
+	// adjudicating it is still in flight. The verdict that comes back is then
+	// about a pause nobody holds any more: applying it would credit the platform
+	// with a recovery a human performed, and would re-arm the relapse counter
+	// across the very Resume that is supposed to clear it. The probe arm samples
+	// this before calling Probe and drops its verdict if it has moved.
+	resumeEpoch uint64
 }
+
+// structuralRelapseLimit is how many probe-driven structural resumes may fail to
+// hold before a worker latches into operator-only pausing. With the failing
+// message Nak'd one probe interval out (processMsg), each attempt costs about a
+// probe interval, so the bound is seconds of churn rather than an unbounded
+// resume/re-pause cycle — and the operator gets both the cause and the fact that
+// the platform tried.
+const structuralRelapseLimit = 3
 
 func newPumpState() *pumpState {
 	return &pumpState{
@@ -146,13 +217,150 @@ func (st *pumpState) clearReason(reason PauseReason) {
 
 // operatorResume clears manual + structural reasons, wakes a blocked
 // structural/manual select, and force-exits an in-flight infra probe loop.
+//
+// It also returns the worker's structural self-healing to its starting state:
+// the latch, the relapse count, the arming flag and the un-announced recovery
+// all clear together. An operator Resume is a human asserting the condition is
+// fixed, so it earns a full fresh set of attempts — and a latch that survived
+// one would be unclearable short of a restart.
 func (st *pumpState) operatorResume() {
 	st.mu.Lock()
 	delete(st.reasons, PauseManual)
 	delete(st.reasons, PauseStructural)
+	st.structuralLatched = false
+	st.structuralRelapses = 0
+	st.probeResumedStructural = false
+	st.pendingAutoRecovered = false
+	st.lastStructuralCause = ""
+	st.resumeEpoch++
 	st.mu.Unlock()
 	nonBlockingSend(st.resumeCh)
 	nonBlockingSend(st.forceResumeCh)
+}
+
+// currentEpoch samples the operator-resume generation. A probe arm takes it
+// BEFORE calling Probe, so the verdict it applies afterwards can be checked
+// against the state the pause was in when the question was asked.
+func (st *pumpState) currentEpoch() uint64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.resumeEpoch
+}
+
+// probePassed applies a passing probe's verdict in ONE critical section: it
+// clears the reason the loop was adjudicating and, for a structural pause,
+// captures the recovery (its cause, and which self-heal attempt lifted it) for
+// the pump to announce before it next drains.
+//
+// It is a no-op returning false when an operator Resume landed while the probe
+// was in flight. That verdict answers a question about a pause the operator has
+// already lifted: applying it would stamp the health entry "recovered without
+// operator action" for a recovery a human performed, and would leave the relapse
+// counter armed across the Resume that exists to disarm it.
+func (st *pumpState) probePassed(reason PauseReason, epoch uint64) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.resumeEpoch != epoch {
+		return false
+	}
+	delete(st.reasons, reason)
+	if reason == PauseStructural {
+		st.probeResumedStructural = true
+		st.pendingAutoRecovered = true
+		st.autoRecoveredCause = st.lastStructuralCause
+		// The counter holds the relapses BEFORE this attempt, so the first
+		// self-heal of a chain is attempt 1.
+		st.autoRecoveredAttempt = st.structuralRelapses + 1
+		st.lastStructuralCause = ""
+	}
+	return true
+}
+
+// recordStructuralCause remembers the cause persisted for the structural pause
+// now held and reports whether it differs from the one already recorded — the
+// test a repeating probe uses to decide whether it has anything new to say.
+func (st *pumpState) recordStructuralCause(cause string) (changed bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastStructuralCause == cause {
+		return false
+	}
+	st.lastStructuralCause = cause
+	return true
+}
+
+// forgetStructuralCause drops the recorded cause when the structural reason
+// clears, so the same fault returning later is persisted afresh rather than
+// mistaken for the one already on the entry.
+func (st *pumpState) forgetStructuralCause() {
+	st.mu.Lock()
+	st.lastStructuralCause = ""
+	st.mu.Unlock()
+}
+
+// enterStructuralPause holds the structural reason and records it against the
+// relapse machinery, reporting whether the worker is now latched and on which
+// attempt. Adding the reason and deciding the latch are ONE critical section: an
+// operator Resume landing between them would clear a latch that the caller then
+// persists anyway, telling the operator no further attempt will be made on a
+// worker whose attempts they had just reset.
+func (st *pumpState) enterStructuralPause() (latched bool, attempts int) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.probeResumedStructural {
+		st.probeResumedStructural = false
+		st.structuralRelapses++
+	} else {
+		// A structural pause that no self-heal preceded starts a new chain.
+		st.structuralRelapses = 0
+	}
+	if st.structuralRelapses >= structuralRelapseLimit {
+		st.structuralLatched = true
+	}
+	st.reasons[PauseStructural] = struct{}{}
+	return st.structuralLatched, st.structuralRelapses
+}
+
+// structuralProbeAllowed reports whether a structural pause on this worker may
+// probe its own way out: the spec must opt in and supply the Probe that
+// adjudicates the condition, and the worker must not have latched.
+func (st *pumpState) structuralProbeAllowed(spec ConsumerSpec) bool {
+	if !spec.StructuralProbe || spec.Probe == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return !st.structuralLatched
+}
+
+// peekPendingAutoRecovered returns the probe-driven structural clear waiting to
+// be announced WITHOUT consuming it: the announcement can fail, and a recovery
+// dropped because the health store was briefly unreachable — plausibly the same
+// blip that paused the consumer — is exactly the silent self-heal the
+// announcement exists to prevent.
+func (st *pumpState) peekPendingAutoRecovered() (cause string, attempt int, pending bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.pendingAutoRecovered {
+		return "", 0, false
+	}
+	return st.autoRecoveredCause, st.autoRecoveredAttempt, true
+}
+
+// clearPendingAutoRecovered retires the pending recovery once it has been
+// delivered — or once it is established that nothing can receive it.
+func (st *pumpState) clearPendingAutoRecovered() {
+	st.mu.Lock()
+	st.pendingAutoRecovered = false
+	st.autoRecoveredCause, st.autoRecoveredAttempt = "", 0
+	st.mu.Unlock()
+}
+
+// latchedCause prefixes a structural pause's cause with the fact that the
+// platform tried to heal it and failed, so the operator reading the health
+// entry gets the diagnosis AND the reason no further attempt will be made.
+func latchedCause(attempts int, cause string) string {
+	return fmt.Sprintf("structural pause latched after %d self-heal attempts: %s", attempts, cause)
 }
 
 func (st *pumpState) requestReopen() { nonBlockingSend(st.reopenTrigger) }
@@ -335,6 +543,7 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 		// that had not happened.
 		st.resetReopenBackoff()
 		st.signalReopened()
+		s.announceStructuralRecovery(ctx, spec, st)
 		class, drainErr := s.drain(ctx, spec, st, mc)
 		s.handleDrainOutcome(ctx, spec, st, class, drainErr)
 	}
@@ -343,11 +552,22 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 // waitWhilePaused blocks until an operator Resume clears the structural/manual
 // reasons or ctx is done. Returns true when the pump should exit (ctx cancelled).
 // Infra-only pauses are not handled here — they run the probe loop after a drain.
+//
+// A structural pause is the one reason whose route depends on the spec: a
+// consumer whose Probe adjudicates the structural condition (StructuralProbe)
+// probes its own way out, bounded by the relapse latch; every other consumer
+// waits for an operator, which is the default.
 func (s *ConsumerSupervisor) waitWhilePaused(ctx context.Context, spec ConsumerSpec, st *pumpState) bool {
 	// If the only reason is infra, run the probe loop directly (e.g. restored
 	// infra pause with no failing message yet).
 	if st.hasReason(PauseInfra) && !st.hasReason(PauseManual) && !st.hasReason(PauseStructural) {
-		return s.runProbeLoop(ctx, spec, st)
+		return s.runProbeLoop(ctx, spec, st, PauseInfra)
+	}
+	// A manual pause is an operator holding the pump down and outranks any
+	// verdict a probe could reach, so the whole reason set is tested here, not
+	// just the structural bit.
+	if st.hasReason(PauseStructural) && !st.hasReason(PauseManual) && st.structuralProbeAllowed(spec) {
+		return s.runProbeLoop(ctx, spec, st, PauseStructural)
 	}
 	drainSignal(st.resumeCh)
 	select {
@@ -359,6 +579,42 @@ func (s *ConsumerSupervisor) waitWhilePaused(ctx context.Context, spec ConsumerS
 		}
 		return false
 	}
+}
+
+// announceStructuralRecovery tells the operator that a structural pause cleared
+// because the consumer's own Probe adjudicated the condition, with nobody
+// involved. It runs immediately before a drain, which is the only point that is
+// after EVERY gate the pump had to pass: a pump that clears a restored
+// structural pause falls back through runPump's InitialPause seeding and
+// re-verifies its precondition before its first projection, so announcing at the
+// structural clear would tell the operator something the pump does not yet know.
+//
+// A sink that does not implement StructuralRecoveryAnnouncer is told nothing.
+//
+// The recovery is retired only once it has been delivered. An announcement that
+// fails — the health store briefly unreachable, plausibly the same blip that
+// paused the consumer — stays armed and is retried at the pump's NEXT open: a
+// reconnect, a Reset, or the next pause and resume. There is no timer, because
+// the pump has no other rendezvous and a second scheduler for one health write
+// would cost more than it is worth; the alternative, dropping it, leaves an
+// auth-plane lens self-healing with nothing but a log line behind it.
+// Announcement errors are logged and never fatal, like every other sink call.
+func (s *ConsumerSupervisor) announceStructuralRecovery(ctx context.Context, spec ConsumerSpec, st *pumpState) {
+	cause, attempt, pending := st.peekPendingAutoRecovered()
+	if !pending {
+		return
+	}
+	logger := specLogger(spec)
+	if announcer, ok := spec.Health.(StructuralRecoveryAnnouncer); ok {
+		if err := announcer.RecordStructuralAutoRecovery(ctx, cause, attempt); err != nil {
+			logger.Error("substrate: ConsumerSupervisor: health record structural auto-recovery, retrying at the next open",
+				"consumer", spec.Name, "error", err)
+			return
+		}
+	}
+	st.clearPendingAutoRecovered()
+	logger.Info("substrate: ConsumerSupervisor: structural pause recovered without operator action",
+		"consumer", spec.Name, "attempt", attempt, "cause", cause)
 }
 
 // drain reads and processes messages until ctx is done, the iterator errors, a
@@ -394,9 +650,9 @@ func (s *ConsumerSupervisor) drain(ctx context.Context, spec ConsumerSpec, st *p
 		}
 
 		current := st.currentSpec(spec)
-		class, herr, disposed := s.processMsg(ctx, current, msg)
-		if !disposed {
-			// Infra/Structural: message left un-acked for redelivery on resume.
+		class, herr, keepDraining := s.processMsg(ctx, current, st, msg)
+		if !keepDraining {
+			// Infra/Structural: message un-acked, redelivered on resume.
 			return class, herr
 		}
 	}
@@ -404,16 +660,49 @@ func (s *ConsumerSupervisor) drain(ctx context.Context, spec ConsumerSpec, st *p
 
 // processMsg invokes the spec's handler and applies its verdict. Returns the
 // FailureClass, the handler error (when infra/structural), and whether the
-// message was disposed (acked/naked). A false "disposed" means an
-// infra/structural failure: the message is intentionally left pending and the
-// caller must pause.
-func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, msg jetstream.Msg) (FailureClass, error, bool) {
+// drain may continue. A false "continue" means an infra/structural failure and
+// the caller must pause; the message is left pending for redelivery on resume,
+// except for the structural failure of a consumer that will probe its own way
+// out, which is Nak'd with a delay (below) — still un-acked, but asked for
+// sooner.
+func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, st *pumpState, msg jetstream.Msg) (FailureClass, error, bool) {
 	stopHeartbeat := keepAckAlive(msg, spec)
 	decision, herr := spec.Handler(ctx, newMessage(msg))
 	stopHeartbeat()
 	if herr != nil {
 		class := classify(spec, herr)
 		if class == ClassInfra || class == ClassStructural {
+			// One predicate for "this consumer heals itself", shared with
+			// waitWhilePaused: bringing the retest forward is only useful for a
+			// pump that is going to retest, and a latched worker (or one with no
+			// Probe) waits for an operator with the message simply pending.
+			if class == ClassStructural && st.structuralProbeAllowed(spec) {
+				// This pump is about to probe its own way out of the pause, and
+				// this message is the only thing that can test whether the
+				// recovery actually took. Left pending it returns only when
+				// AckWait expires — five minutes for a lens — so the health
+				// entry would read "active" for that whole window while the
+				// consumer is still broken. A Nak carrying a delay does not ack
+				// and does not advance the ack floor; it asks the server for
+				// redelivery one probe interval out, and the pump is paused
+				// until then, so nothing is consumed early. (An undelayed Nak
+				// would ignore AckWait and redeliver instantly —
+				// nats.go@v1.52.0 jetstream/message.go:60-70.)
+				//
+				// KNOWN WINDOW, accepted: stopHeartbeat closes the heartbeat's
+				// done channel but does not wait for the goroutine, so a +WPI
+				// already past its select can still land AFTER this Nak. The
+				// server implements the delay by BACKDATING the pending entry to
+				// now-AckWait+delay (nats-server@v2.14.0 server/consumer.go:
+				// 3173-3176), and progressUpdate re-stamps that entry to
+				// time.Now() (:2762-2771) — so a straggler erases the backdate
+				// and redelivery reverts to the full AckWait. The window is one
+				// scheduling gap wide and only reachable for a handler whose
+				// latency exceeds AckWait/2; closing it means making
+				// stopHeartbeat synchronous, which changes the ack path of every
+				// consumer in the system for a slow-path optimisation.
+				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), specLogger(spec))
+			}
 			return class, herr, false
 		}
 		// Transient/Terminal handler error: fall back to the returned Decision.
@@ -484,10 +773,20 @@ func (s *ConsumerSupervisor) handleDrainOutcome(ctx context.Context, spec Consum
 			"consumer", spec.Name, "error", drainErr)
 		s.persistDominant(ctx, spec, st, errString(drainErr))
 	case ClassStructural:
-		st.addReason(PauseStructural)
-		logger.Error("substrate: ConsumerSupervisor: structural failure, pausing until resume",
-			"consumer", spec.Name, "error", drainErr)
-		s.persistDominant(ctx, spec, st, errString(drainErr))
+		latched, attempts := st.enterStructuralPause()
+		if latched {
+			logger.Error("substrate: ConsumerSupervisor: structural failure latched, pausing until resume",
+				"consumer", spec.Name, "attempts", attempts, "error", drainErr)
+		} else {
+			logger.Error("substrate: ConsumerSupervisor: structural failure, pausing until resume",
+				"consumer", spec.Name, "error", drainErr)
+		}
+		// A structural pause is always published on entry — the status transition
+		// is itself the news — and its cause is recorded so a probe repeating that
+		// same fault has nothing to rewrite.
+		cause := structuralCause(latched, attempts, drainErr)
+		st.recordStructuralCause(cause)
+		s.persistDominant(ctx, spec, st, cause)
 	default:
 		// Transient reconnect, manual pause, or reopen: drain stale triggers and
 		// loop. The pump's top re-checks the reason set.
@@ -497,14 +796,19 @@ func (s *ConsumerSupervisor) handleDrainOutcome(ctx context.Context, spec Consum
 }
 
 // runProbeLoop polls the spec's Probe hook at the configured interval until it
-// passes (clears the infra reason), an operator Resume force-exits, ctx is
-// cancelled, or a probe error classified Structural escalates the pause. Returns
-// true when the pump should exit (ctx cancelled).
-func (s *ConsumerSupervisor) runProbeLoop(ctx context.Context, spec ConsumerSpec, st *pumpState) bool {
+// passes (clearing the reason it is probing), an operator Resume force-exits, ctx
+// is cancelled, or a probe error classified Structural escalates the pause.
+// Returns true when the pump should exit (ctx cancelled).
+//
+// reason is the pause the loop is adjudicating — PauseInfra for a dependency
+// that is expected back, PauseStructural for a consumer whose Probe verifies the
+// very condition its Classify calls structural. It is the reason a passing probe
+// clears; every other held reason survives the loop.
+func (s *ConsumerSupervisor) runProbeLoop(ctx context.Context, spec ConsumerSpec, st *pumpState, reason PauseReason) bool {
 	logger := specLogger(spec)
 	drainSignal(st.forceResumeCh)
 	interval := effectiveProbeInterval(spec)
-	logger.Info("substrate: ConsumerSupervisor: entering probe loop", "consumer", spec.Name)
+	logger.Info("substrate: ConsumerSupervisor: entering probe loop", "consumer", spec.Name, "reason", reason)
 	for {
 		select {
 		case <-ctx.Done():
@@ -512,7 +816,8 @@ func (s *ConsumerSupervisor) runProbeLoop(ctx context.Context, spec ConsumerSpec
 		case <-st.forceResumeCh:
 			logger.Info("substrate: ConsumerSupervisor: probe loop overridden by resume",
 				"consumer", spec.Name)
-			st.clearReason(PauseInfra)
+			st.clearReason(reason)
+			st.forgetStructuralCause()
 			if !st.anyReason() {
 				s.persistActive(context.WithoutCancel(ctx), spec)
 			}
@@ -521,28 +826,71 @@ func (s *ConsumerSupervisor) runProbeLoop(ctx context.Context, spec ConsumerSpec
 			if spec.Probe == nil {
 				continue
 			}
+			// Sampled BEFORE the probe: a Probe is a round trip, and the pause it
+			// is adjudicating can be lifted by an operator while it runs.
+			epoch := st.currentEpoch()
 			err := spec.Probe(ctx)
 			if err == nil {
+				if !st.probePassed(reason, epoch) {
+					logger.Info("substrate: ConsumerSupervisor: probe passed after an operator resume, verdict discarded",
+						"consumer", spec.Name, "reason", reason)
+					return false
+				}
 				logger.Info("substrate: ConsumerSupervisor: dependency recovered, resuming",
-					"consumer", spec.Name)
-				st.clearReason(PauseInfra)
+					"consumer", spec.Name, "reason", reason)
 				if !st.anyReason() {
 					s.persistActive(context.WithoutCancel(ctx), spec)
 				}
 				return false
 			}
 			if classify(spec, err) == ClassStructural {
+				if reason == PauseStructural {
+					// Already probing a structural pause: there is no tier to
+					// escalate to, and the pause the loop would re-enter is the
+					// one it is standing in. Clearing and re-adding the reason
+					// would spend a relapse on a probe that never passed —
+					// latching on failed PROBES rather than on failed
+					// RECOVERIES — and would flicker the health entry through
+					// active. So keep the pause and keep probing.
+					//
+					// The entry is rewritten only when the fault CHANGES. A
+					// probe repeating a fault has told the operator nothing
+					// new, and every health setter stamps a fresh timestamp —
+					// so persisting on every attempt would leave a permanently
+					// dead consumer publishing a permanently FRESH entry, which
+					// is exactly the shape a freshness check exists to catch. A
+					// fault that changes is news: that string is the operator's
+					// whole diagnosis.
+					logger.Warn("substrate: ConsumerSupervisor: structural condition still unmet, probing again",
+						"consumer", spec.Name, "error", err)
+					if st.recordStructuralCause(errString(err)) {
+						s.persistDominant(context.WithoutCancel(ctx), spec, st, errString(err))
+					}
+					continue
+				}
 				logger.Error("substrate: ConsumerSupervisor: structural error during probe, escalating",
 					"consumer", spec.Name, "error", err)
-				st.clearReason(PauseInfra)
-				st.addReason(PauseStructural)
-				s.persistDominant(context.WithoutCancel(ctx), spec, st, errString(err))
+				st.clearReason(reason)
+				latched, attempts := st.enterStructuralPause()
+				cause := structuralCause(latched, attempts, err)
+				st.recordStructuralCause(cause)
+				s.persistDominant(context.WithoutCancel(ctx), spec, st, cause)
 				return false
 			}
 			logger.Warn("substrate: ConsumerSupervisor: dependency not yet available, probing again",
 				"consumer", spec.Name)
 		}
 	}
+}
+
+// structuralCause renders the cause persisted for a structural pause: the
+// handler's or probe's own error, prefixed once the worker has latched so the
+// operator reads why nothing further will happen on its own.
+func structuralCause(latched bool, attempts int, err error) string {
+	if latched {
+		return latchedCause(attempts, errString(err))
+	}
+	return errString(err)
 }
 
 // restoreState reads the spec's HealthSink at startup and enters the matching
@@ -564,7 +912,7 @@ func (s *ConsumerSupervisor) restoreState(ctx context.Context, spec ConsumerSpec
 	switch reason {
 	case PauseInfra:
 		st.addReason(PauseInfra)
-		return s.runProbeLoop(ctx, spec, st)
+		return s.runProbeLoop(ctx, spec, st, PauseInfra)
 	case PauseStructural:
 		st.addReason(PauseStructural)
 		return s.waitWhilePaused(ctx, spec, st)

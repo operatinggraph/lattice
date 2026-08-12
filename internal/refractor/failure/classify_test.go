@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,6 +37,25 @@ func TestClassify_Structural(t *testing.T) {
 	for _, err := range structuralErrors {
 		assert.Equal(t, CatStructural, Classify(err), "expected CatStructural for: %v", err)
 	}
+}
+
+// TestClassify_BareBucketNotFoundSentinel_NotHelper pins that Classify matches
+// the BARE substrate.ErrBucketNotFound sentinel via errors.Is (classify.go),
+// not the substrate.IsBucketNotFound helper. The helper additionally matches
+// the raw jetstream.ErrBucketNotFound / jetstream.ErrStreamNotFound sentinels
+// that Conn.KVGet on the eval read path can surface directly — swapping in the
+// helper would silently widen the structural tier from "KVStatus explicitly
+// classified this as absent" to "any raw jetstream not-found from a read",
+// which no §2 ledger row nor §4.2's per-adapter opt-in framing accounts for.
+func TestClassify_BareBucketNotFoundSentinel_NotHelper(t *testing.T) {
+	assert.Equal(t, CatStructural, Classify(substrate.ErrBucketNotFound),
+		"the bare substrate sentinel itself must classify structural")
+
+	rawJS := fmt.Errorf("kv get: %w", jetstream.ErrBucketNotFound)
+	require.True(t, substrate.IsBucketNotFound(rawJS),
+		"sanity: substrate.IsBucketNotFound DOES match a raw jetstream sentinel")
+	assert.Equal(t, CatTransient, Classify(rawJS),
+		"a raw jetstream.ErrBucketNotFound (not the substrate sentinel) must NOT classify as CatStructural")
 }
 
 func TestClassify_Transient(t *testing.T) {
@@ -90,6 +110,23 @@ func TestClassify_Transient_PgError_OtherCode(t *testing.T) {
 	// Serialization failure is retryable — must NOT be CatStructural.
 	err := &pgconn.PgError{Code: "40001", Message: "serialization failure"}
 	assert.Equal(t, CatTransient, Classify(err), "non-structural PgError must fall through to CatTransient")
+}
+
+func TestClassify_Structural_PgError_NoArbiterIndex(t *testing.T) {
+	// 42P10 invalid_column_reference is what Postgres raises for an
+	// ON CONFLICT target with no matching unique index — the failure a table
+	// re-provisioned without its unique constraint produces on every write
+	// (adapter.hasExactUniqueConstraint documents Postgres's exact-match rule).
+	// Without this in the structural set it falls through to CatTransient — an
+	// unbounded Nak loop while health reads active (§4.2e).
+	err := &pgconn.PgError{Code: "42P10", Message: `there is no unique or exclusion constraint matching the ON CONFLICT specification`}
+	assert.Equal(t, CatStructural, Classify(err), "42P10 invalid_column_reference must be CatStructural")
+}
+
+func TestClassify_Structural_PgError_NoArbiterIndex_Wrapped(t *testing.T) {
+	inner := &pgconn.PgError{Code: "42P10", Message: "no unique or exclusion constraint matching the ON CONFLICT specification"}
+	err := fmt.Errorf("adapter: %w", inner)
+	assert.Equal(t, CatStructural, Classify(err), "wrapped 42P10 must still classify as CatStructural")
 }
 
 // ── Terminal classification tests ─────────────────────────────────────────────

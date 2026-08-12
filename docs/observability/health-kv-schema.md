@@ -534,10 +534,10 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
     }
   },
   "issues": [
@@ -547,13 +547,17 @@ currently reserved-but-unemitted.
     {"code": "CapabilityRepairFailing", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilitySweepStalled", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityLensStructuralPauseAutoRecovered", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensCoverageDivergence", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRepairFailing", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensSweepStalled", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensAuditUnverified", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensRepairBlocked", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensSecureRedaction", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensStructuralPauseAutoRecovered", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
@@ -917,6 +921,9 @@ above).
   "sweepCursor": "<anchorVertexKey>",
   "sweepReconciled": <uint64>,
   "secureRedactions": <uint64>,
+  "structuralAutoRecoveredAt": "<RFC3339>",
+  "structuralAutoRecoveredCause": "<string>",
+  "structuralAutoRecoveryAttempts": <int>,
   "filterMode": "narrowed-relation | narrowed-label | broad",
   "filterLabelCount": <int>,
   "filterBroadReason": "not-eligible | non-exhaustive | label-cap | taxonomy-unarmed | taxonomy-unresolvable | install-incomplete | registration-failed"
@@ -944,13 +951,85 @@ happens — the null stays in the read model until the cause is fixed and the le
 
 `pauseReason` is `null` when active; `"infra"`, `"structural"`, or `"manual"` when paused.
 `lastError` is `null` when no error has occurred. On a **structural** pause it is not merely the
-last error but the pause's **diagnosis** — the lens is held until a human reconciles the cause, so
-that text is the whole of what the operator has to act on. It is therefore guaranteed for the life
-of the pause: the clean-registration clear that retires a stale message on every other lens skips a
-structurally paused one, and a second pause raised over it (an operator `pause`, which carries no
-cause of its own) preserves it rather than nulling it. Read it with `lattice lens health <lensId>`,
-which renders `pauseReason` and `lastError` together; the `LensProjectionPaused` issue message
-carries it truncated, so a health summary names the failing column or table, not only the tier.
+last error but the pause's **diagnosis** — the lens projects nothing until the condition is
+reconciled, so that text is the whole of what anyone has to act on. It is therefore guaranteed for
+the life of the pause: the clean-registration clear that retires a stale message on every other lens
+skips a structurally paused one, and a second pause raised over it (an operator `pause`, which
+carries no cause of its own) preserves it rather than nulling it. Read it with
+`lattice lens health <lensId>`, which renders `pauseReason` and `lastError` together; the
+`LensProjectionPaused` issue message carries it truncated, so a health summary names the failing
+column or table, not only the tier. **Who** reconciles it depends on the lens: a protected or
+grant-table Postgres lens adjudicates the condition itself and can resume with no operator, which is
+what the three `structuralAutoRecovered*` fields below record; every other lens waits for
+`lattice lens resume`.
+
+`structuralAutoRecoveredAt` / `structuralAutoRecoveredCause` / `structuralAutoRecoveryAttempts`
+record the one recovery a health entry could not otherwise express: a **structural pause that
+cleared with nobody involved**. A protected or grant-table lens's probe is a full posture
+verification of its target — table, columns, RLS state, the unique constraint its writes need — so a
+pass genuinely settles the condition that raised the pause, and the consumer resumes on its own
+(`structural-pause-recovery-design.md` §4.2). Every field the entry carries then reads exactly like
+a lens that never faulted: `status: "active"`, `pauseReason: null`, and `lastError` gone with the
+pause. These three are what survives it. Absent for a lens that has never self-healed, which is the
+entire corpus until one does.
+
+They are not a state, they are a **record of an event**, and they persist: every wholesale writer of
+this entry (`SetActive`, `SetPaused`, `SetRebuilding`) carries all three forward, which matters
+because a self-heal that does not hold re-pauses within about one probe interval — so a stamp any of
+them dropped would be observed by no heartbeat at all, and the attempt count would be unreadable in
+exactly the flapping case it exists to report.
+
+`structuralAutoRecoveredCause` is what says whether anything is still **owed**, and the answer is not
+always "a rebuild". The pause's own backlog **does** replay: the failing message was never acked, the
+ack floor never advanced, and everything published while the lens was dark is still pending when it
+resumes. So a cause an operator fixed in the schema — a dropped column, a dropped unique constraint —
+leaves every row intact and owes nothing. What is genuinely at risk is what the *recovery itself*
+destroyed: if the condition was cleared by **re-provisioning or restoring** the target, the rows that
+predate the pause were acked long ago, will never redeliver, and a rebuild is owed whose scope is the
+**whole lens, not the outage window**. Reading this backwards in either direction is expensive — one
+way cries wolf on the common case, the other scopes the repair too narrowly and leaves it half done.
+On the likeliest recovery of
+all — a lens that was already paused when Refractor restarted, healed by its probe on the way back
+up — that cause comes from the entry's own `lastError`, read at restore: the process that resumes
+the lens is not the one that paused it and holds no diagnosis of its own. It is readable at all
+because a structurally-paused entry keeps its `lastError` for the life of the pause, so that
+guarantee is load-bearing for this field, not only for the paused entry itself.
+`structuralAutoRecoveryAttempts`
+is which self-heal attempt lifted the pause, from 1: it is the lens's distance from the consumer's
+relapse latch, which stops probing altogether once a run of self-heals has each failed to hold and
+hands the lens back to a human. A recovery reported at 1 healed cleanly; one reported near the limit
+is a lens flapping.
+
+The derived `LensStructuralPauseAutoRecovered` issue is the announcement for a business lens, and it
+and its auth-plane sibling below are the only codes that fire on a lens whose read model is
+**healthy at the moment they fire** — which is precisely why they exist. An auto-heal nobody can see is how a frozen row comes to render
+green. It is `warning` (⇒ `degraded`) and deliberately short-lived: raised only while
+`structuralAutoRecoveredAt` is younger than **two heartbeat intervals**, carrying the lens name, the
+cause and the attempt count. Two rather than one because the recovery is stamped at an arbitrary
+point inside a cycle, and a strict one-cycle window can be straddled and emit *nothing* — the silent
+self-heal the signal exists to refuse; two guarantees at least one emission and at most two. The
+`alert` token `structural-pause-auto-recovered` is the quietest in the table, below `lagging`:
+it reports a window that has already closed, so anything currently wrong outranks it in the
+single-valued `alert` field — but both issues are still raised, because a lens that healed once and
+is down again is a shape an operator needs to see whole. The stamp itself outlives the issue: the
+issue answers "did this just happen", the fields answer "what happened and is a rebuild owed".
+
+`CapabilityLensStructuralPauseAutoRecovered` is its auth-plane sibling — same fields, same window,
+same `alert` token — and it is the reason this signal is not optional. Every grant-table lens is auth-plane by
+definition (a `postgres` target with `grantTable` set), and a grant-table lens is exactly the class
+whose probe verifies its own posture — so the lenses that project `actor_read_grants`, the read-path
+authorization source of truth, are the ones most able to clear a structural pause unattended. The
+conditional above is the whole of it for them: a schema fix replays its own backlog and owes nothing,
+but a grant table that was **re-provisioned or restored** has lost every grant written before the
+pause, and those never redeliver — a persistent **under**-grant, which is the safe direction (reads
+fail closed, never open) and exactly what a manual resume would have produced, but silent. This issue
+is the only thing that says so. Its severity stays `warning` there too,
+where every other capability code escalates to `error`: those describe an authorization read model
+that is frozen, stale or wrong *now*, while this one describes a lens that **successfully
+recovered**. Taking the instance `unhealthy` for a self-heal that worked is a false alarm, and a
+signal that cries wolf on the working path is one operators learn to skip — which would restore the
+silence by another route.
+
 `lastProjectedAt` is the wall-clock of the
 lens's last successful target write — `""` until its first projection (design:
 lens-projection-liveness-design.md §3.2); a freshness signal, never an alert input on its own

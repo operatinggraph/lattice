@@ -563,3 +563,118 @@ func TestReporter_StatusTransitions_PreserveTheConsumerFilterFootprint(t *testin
 	assert.Equal(t, health.FilterModeBroad, entry.FilterMode)
 	assert.Equal(t, health.FilterBroadReasonTaxonomyUnresolvable, entry.FilterBroadReason)
 }
+
+// The recorder for a structural pause that cleared under the lens's own probe.
+// All three fields are load-bearing and none of them can be reconstructed later:
+// the entry the supervisor writes on either side of the recovery reads `active`,
+// and the pause's diagnosis leaves LastError the moment the pause clears.
+func TestReporter_RecordStructuralAutoRecovery(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.SetPaused(ctx, "structural", `column "discharged_at" does not exist`))
+	require.NoError(t, r.SetActive(ctx))
+	require.NoError(t, r.RecordStructuralAutoRecovery(ctx, `column "discharged_at" does not exist`, 2))
+
+	entry, err := r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, `column "discharged_at" does not exist`, entry.StructuralAutoRecoveredCause)
+	assert.Equal(t, 2, entry.StructuralAutoRecoveryAttempts)
+	_, parseErr := time.Parse(time.RFC3339, entry.StructuralAutoRecoveredAt)
+	assert.NoError(t, parseErr, "structuralAutoRecoveredAt must be valid RFC3339")
+	// It records the recovery ONLY. The supervisor owns the status, and has
+	// already written it by the time this is called.
+	assert.Equal(t, "active", entry.Status)
+	assert.Equal(t, "my-rule", entry.RuleID)
+}
+
+// Read-modify-write like every other setter, so it cannot blank the counters and
+// the footprint an operator reads beside it. A recovery is the one moment those
+// values matter most — the errorCount is what says how bad the outage was.
+func TestReporter_RecordStructuralAutoRecovery_PreservesTheRestOfTheEntry(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(ctx, "first failure"))
+	require.NoError(t, r.SetFilterState(ctx, health.FilterModeNarrowedRelation, 4, ""))
+	require.NoError(t, r.RecordStructuralAutoRecovery(ctx, "table absent", 1))
+
+	entry, err := r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), entry.ErrorCount)
+	assert.Equal(t, health.FilterModeNarrowedRelation, entry.FilterMode)
+	assert.Equal(t, 4, entry.FilterLabelCount)
+}
+
+// Last-writer-wins on a second recovery: the fields describe the LATEST
+// self-heal, not the first. A lens that heals, relapses and heals again must
+// present its current distance from the relapse latch, or an operator reading a
+// stale attempt count would think the lens had more headroom than it has.
+func TestReporter_RecordStructuralAutoRecovery_LatestRecoveryWins(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordStructuralAutoRecovery(ctx, "table absent", 1))
+	require.NoError(t, r.RecordStructuralAutoRecovery(ctx, "constraint absent", 2))
+
+	entry, err := r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "constraint absent", entry.StructuralAutoRecoveredCause)
+	assert.Equal(t, 2, entry.StructuralAutoRecoveryAttempts)
+}
+
+// The sibling of TestReporter_StatusTransitions_PreserveTheConsumerFilterFootprint
+// for the auto-recovery record, and the sharper case of the same class: the
+// footprint is re-derived by a rebuild, while this is written ONCE and by
+// nothing else. A status transition that dropped it would not reset a value, it
+// would delete the event — and the pause it describes is already gone from
+// pauseReason and lastError by then, so nothing else on the entry could
+// reconstruct it.
+//
+// The erasure would land exactly where the record matters most. A self-heal that
+// does not hold re-pauses within one probe interval (10s, the same order as the
+// heartbeat), so a stamp dropped by the next SetPaused is observed by no beat at
+// all: the attempt count would be unreadable in precisely the flapping case it
+// exists to report, and a lens that flapped to its relapse latch would end
+// carrying no record of ever having self-healed.
+func TestReporter_StatusTransitions_PreserveTheStructuralAutoRecoveryRecord(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "recovery-rule")
+
+	require.NoError(t, r.RecordStructuralAutoRecovery(ctx, `column "discharged_at" does not exist`, 2))
+	stampedAt := func() string {
+		entry, err := r.GetStatus(ctx)
+		require.NoError(t, err)
+		return entry.StructuralAutoRecoveredAt
+	}()
+	require.NotEmpty(t, stampedAt)
+
+	assertRecord := func(t *testing.T, stage string) {
+		t.Helper()
+		entry, err := r.GetStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, stampedAt, entry.StructuralAutoRecoveredAt, "recovery stamp must survive %s", stage)
+		assert.Equal(t, `column "discharged_at" does not exist`, entry.StructuralAutoRecoveredCause,
+			"recovery cause must survive %s", stage)
+		assert.Equal(t, 2, entry.StructuralAutoRecoveryAttempts, "attempt count must survive %s", stage)
+	}
+
+	// The relapse sequence, in order: a self-heal that did not hold re-pauses
+	// within one probe interval, which is the transition that would erase it.
+	require.NoError(t, r.SetPaused(ctx, "structural", "the same fault again"))
+	assertRecord(t, "SetPaused")
+	require.NoError(t, r.SetActive(ctx))
+	assertRecord(t, "SetActive")
+
+	// And the rebuild pair, which an operator runs BECAUSE the recovery told
+	// them one might be owed — the operation that would otherwise erase the
+	// reason it was run.
+	require.NoError(t, r.SetRebuilding(ctx))
+	assertRecord(t, "SetRebuilding")
+	require.NoError(t, r.SetActive(ctx))
+	assertRecord(t, "SetActive after rebuild")
+}

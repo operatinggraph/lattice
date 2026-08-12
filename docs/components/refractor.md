@@ -219,13 +219,22 @@ The read-path primitives live in `adapter/rls.go`:
   the platform types (`authz_anchors` is exactly `text[]`, `projection_seq` is `bigint`, every
   key + body column present); and the deterministically-named **`FOR SELECT` set-membership
   policy** is present and intact (its `USING` references `authz_anchors` against the grant table
-  — a permissive `USING(true)` policy is rejected, not just any SELECT policy). Failures are
+  — a permissive `USING(true)` policy is rejected, not just any SELECT policy); and a **unique
+  index exactly covering the `ON CONFLICT` key columns** exists. Failures are
   plain (recoverable) errors so the lens auto-resumes once the operator provisions the table.
 - **`VerifyGrantTable()`** (on `PostgresGrantWriter`) is the same read-only check for the shared
-  **`actor_read_grants`** table — it asserts the expected columns + types so the seq-guarded
+  **`actor_read_grants`** table — it asserts the expected columns + types, and the unique index
+  covering `(actor_id, anchor_id, grant_source)`, so the seq-guarded
   writes and every protected policy's membership subquery have the shape they depend on. The
   grant table is the read-auth source of truth, not a protected business table, so it is not
   itself RLS-locked — only its shape is verified.
+- **The arbiter-index check is not shape pedantry.** Every write on both paths is an
+  `INSERT … ON CONFLICT`, and Postgres infers its arbiter from the unique indexes whose key
+  columns match the conflict target *exactly* as a set — so a table re-provisioned without its
+  primary key raises `42P10` on every single write. `42P10` is in the structural set, so the lens
+  pauses dark rather than Naking forever while its health entry reads `active`. The emitted DDL
+  always creates the matching `PRIMARY KEY`; what this catches is a table re-provisioned by hand
+  from a subset of it.
 - **`BuildProtectedTableDDL(table, keyCols, body)`** / **`BuildGrantTableDDL()`** generate the
   exact DDL each table expects (key + body columns plus the platform `authz_anchors text[]` /
   `projection_seq bigint`; `ENABLE` **and** `FORCE ROW LEVEL SECURITY`; the `FOR SELECT`
@@ -265,10 +274,21 @@ The read-path primitives live in `adapter/rls.go`:
 - **`public: true`** → the auditable opt-out; no RLS, provisioned out-of-band like any plain
   SQL-target lens. A lens may not be both `protected` and `public`.
 
-**Continuous re-verification.** Because the `Probe` is on the periodic supervisor heartbeat, a
-posture turned off *after* activation (e.g. `ALTER TABLE … NO FORCE ROW LEVEL SECURITY`)
-re-pauses the lens within a heartbeat — stronger than create-once provisioning, which never
-re-checks drift.
+**Re-verification after activation.** The `Probe` runs while a lens is *paused*, not while it is
+draining, so a posture turned off after activation (e.g. `ALTER TABLE … NO FORCE ROW LEVEL
+SECURITY`, a dropped column, a re-provision that lost the primary key) is caught by the **write**
+that then fails: `42P01` / `42703` / `42P10` classify structural and pause the lens. That is still
+stronger than create-once provisioning, which never re-checks drift at all — but the detection is
+write-triggered, so a lens with no traffic can hold a drifted posture until its next projection.
+
+Both protected and grant lenses then set `substrate.ConsumerSpec.StructuralProbe`, which lets that
+structural pause **re-run its own probe and resume when the posture verifies clean** — the same
+fail-closed gate, with no operator required, bounded by a three-attempt relapse latch and announced
+on the heartbeat — as `CapabilityLensStructuralPauseAutoRecovered` for a **grant** lens (every one
+is auth-plane by `projection.IsAuthPlane`) and `LensStructuralPauseAutoRecovered` for a protected
+business lens. See
+[refractor-failure-tiers.md](./refractor-failure-tiers.md) for the tier semantics, the exclusions
+(the plain Postgres adapter's `pool.Ping` probe cannot adjudicate its own condition), and the latch.
 
 **Operator runbook (out-of-band provisioning).** The DDL is emitted, never hand-written:
 
@@ -1021,7 +1041,10 @@ shapes undercount* (`label_derivation_corpus_census_test.go`, `grouping_reductio
 *turning on a behaviour an existing predicate gated hands it the complement*
 (`TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation`), *a label narrows the binder, not
 necessarily the consumer filter* (`label_derivation_corpus_census_test.go`'s per-lens
-`(labels, exhaustive, filterMode)` pin).
+`(labels, exhaustive, filterMode)` pin), *a new health `Entry` field ships with no carry-forward line, so the
+next status transition silently zeroes it* (`health/entry_carry_forward_completeness_test.go` — reflects over
+`Entry`, drives all three wholesale writers, and fails by field AND writer name unless the field is carried
+forward or allow-listed as writer-owned with a reason).
 
 **Standing rule, not a finding class:** a new per-lens analysis **ships its corpus census in the same
 fire**, reusing `forEachCorpusCypher` rather than sweeping its own way — enumerate every parseable corpus
@@ -1067,8 +1090,18 @@ rows.
   `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
   (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
   second sighting.
-- **Lens lag is not read-model incompleteness** — anti-join / field-diff against the source before designing
-  any drain or backfill. Minted: capability-projection reconciliation. Check: none yet.
+- **A two-layer seam can be green at each layer and broken across it — the interposed step is where it dies**
+  — a restored structural pause's diagnosis was stashed by the health sink and read back at the announcement,
+  and both halves had passing tests: the substrate side drove `Load → probe → announce`, the Refractor side
+  drove `Load → SetActive → Record`. Neither included the step that actually runs between them —
+  `runPump`'s `InitialPause` re-seed calling `SetPaused(infra, "")`, which discarded the stash — so the
+  operator got a self-heal with no cause on the single likeliest recovery path. The substrate test even
+  *pinned that step* in its own lifecycle assertion without either side recognising it as the eraser. Minted:
+  structural-pause Inc 2, found independently by two cold reviewers and by neither layer's author. Check: for
+  any value handed across a component boundary, write the seam test with the **real** intervening sequence —
+  enumerate what the other side does between the write and the read, and interpose it. Pinned by
+  `TestHealthSink_RestoredStructuralCauseSurvivesTheReseededInfraGate`. (Displaced *"lens lag is not
+  read-model incompleteness"*, which the capability-projection-reconciliation design still carries.)
 - **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
   over-grant. Minted: negative/retraction design pass (designer SKILL §2). Check: none yet (the retraction
   primitive is its own backlog item).

@@ -178,7 +178,13 @@ func Classify(err error) Category {
 			"42703", // undefined_column — column does not exist (sibling of 42P01: undefined_table)
 			"23502", // not_null_violation — NULL into NOT NULL column (FR38)
 			"42804", // datatype_mismatch — column type incompatible with value (FR38)
-			"22P02": // invalid_text_representation — e.g. non-numeric string → INTEGER (FR38)
+			"22P02", // invalid_text_representation — e.g. non-numeric string → INTEGER (FR38)
+			"42P10": // invalid_column_reference — an ON CONFLICT target with no matching
+			// arbiter index (adapter.hasExactUniqueConstraint documents the exact-match
+			// rule Postgres applies). A table re-provisioned without the unique
+			// constraint the write path assumes fails every upsert this way; without
+			// this case it falls to the CatTransient default below and Naks forever
+			// while health reads active, instead of pausing the lens dark (§4.2e).
 			return CatStructural
 		}
 	}

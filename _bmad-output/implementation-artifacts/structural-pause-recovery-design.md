@@ -315,6 +315,27 @@ over-retract either: `GrantWriterAdapter.ListKeys` refuses an unscoped enumerati
 (`read_path_adapters.go:144-149`) and otherwise reads the empty table. The `structural-pause-auto-recovered` issue
 (f) is what tells the operator a rebuild is still owed.
 
+**Amended 2026-08-11 (build, capability-plane review): the paragraph above proves ONE recovery mode, and was
+written as though it covered all of them.** The empty-table argument was re-verified live against the deployed
+policy SQL and holds exactly as stated — but it is a proof about a table that came back **empty**, not a general
+"auto-resume never over-grants" theorem. The mode it does not cover: an operator resolves the structural pause by
+**restoring `actor_read_grants` from a dump or PITR** taken before the pause. Rows return with `is_deleted =
+false` for grants revoked after the backup point, whose revocation CDC messages were acked long ago and never
+redeliver. `VerifyGrantTable` is a **shape** check — table, columns, types, and now the arbiter index — and
+verifies nothing about content, so the posture passes, the lens resumes, and every revoked-but-restored grant is
+live until someone rebuilds. That is an **over-grant** on the read-auth source of truth. The same shape applies to
+a restored *protected* table whose rows carry stale-wide `authz_anchors`.
+
+Two things keep this from blocking §4.2, and both matter. First, the vector is **not introduced here**: a manual
+`lattice lens resume` after the same restore produces the identical outcome today. Second, no probe can fix it —
+a shape check cannot distinguish a correctly-populated table from a stale-but-well-formed one, and a lens cannot
+know its table's provenance. What §4.2 genuinely changes is that it **removes the human who had just run the
+restore** — the one party positioned to know a rebuild was owed. So the mitigation is operational, not
+mechanical, and it is written down where an operator will meet it: `refractor-failure-tiers.md` now states that a
+structural pause resolved by re-provisioning or restoring data requires a rebuild, and that the auto-resume
+cannot know that. The claim above is narrowed accordingly — it says the drop-and-recreate mode fails closed, and
+no longer implies the restore mode does.
+
 ### 4.3 Increment 3 — `lattice lens pause | resume | rebuild | health`
 
 Four subcommands in `cmd/lattice/lens`, mirroring `cmd/lattice/loom`'s shape and reusing `reproject.go`'s
@@ -458,6 +479,17 @@ the table is genuinely still wrong — the correct outcome, now legible.
   legitimate — without it the test would have to wait out a 5-minute `AckWait`). Then the negative: leave the
   column dropped, and assert the lens is latched, still paused, and carrying the latch message after the third
   relapse.
+
+  **Amended 2026-08-11 (build): the negative as written above cannot happen, and the reason is G6b.** A dropped
+  **declared** column makes `VerifyProtectedTable` *fail*, so the probe never passes, no self-heal attempt is
+  ever spent, and the lens probes forever without latching — the latch counts relapses after a **successful**
+  probe-driven resume, not failed probes. Reaching the latch requires the probe to **pass while the write still
+  fails**, which is precisely the residual incompleteness G6b names: the probe verifies the *declared* schema
+  while the write path's column set comes from the *runtime row*. So the shipped negative uses an **undeclared**
+  column — emitted by the lens's RETURN, present in the table, absent from the adapter's `body` — which is the
+  one fault class the probe provably cannot see. The correction strengthens rather than weakens §4.2(c): the
+  latch is now demonstrated against exactly the class it was designed as a backstop for, instead of against a
+  fault the probe already catches.
 - *Inc 3* (`cmd/lattice/lens/lens_test.go`): mirrors `loom_test.go` — a stub responder asserts the subject, the
   `Lattice-Actor` header, and the rendered output for each verb, plus lens-id validation.
 - *Gates:* `go build ./...`, `make vet`, `golangci-lint run ./...`, all `scripts/lint-*.go` gates,
@@ -762,3 +794,59 @@ Two **narrowings**, both recorded above: the e2e is scoped to the real-probe/rea
 full stack (gotcha 3), and the issue code follows the codebase's naming convention rather than the design's
 prose (gotcha 4). Declared dependencies re-verified both ways: Inc 1 and Inc 3 are shipped (`bb027dc5`) and
 neither is load-bearing for this green bar; no unlisted dependency surfaced.
+
+---
+
+## 13. CHECKPOINT — Inc 2 shipped; the item is complete
+
+**Shipped** (see the Done-log entry for the SHA): §4.2 (a)–(h) in full, plus the e2e §8 asks for. With Inc 1
+and Inc 3 (`bb027dc5`) this closes the item — a structural pause on a **protected** or **grant** lens now
+re-runs its own posture probe and resumes with no operator, bounded by a three-attempt relapse latch, with the
+recovery announced on the heartbeat. Every other consumer of the shared supervisor — Loom, Weaver, Bridge, the
+Processor, and every non-posture lens — is byte-identical; two independent reviewers verified that claim
+against every production `ConsumerSpec` construction site rather than taking it.
+
+**Deviations from §4.2, each decided in-fire and argued at the site.** The health issue takes the codebase's
+naming split (`LensStructuralPauseAutoRecovered`, and `CapabilityLensStructuralPauseAutoRecovered` for the
+auth plane) rather than the design's lowercase prose, which survives as the per-lens `alert` token. The
+freshness window is **two** heartbeat cycles, not one: a strict single cycle can be straddled by jitter and
+emit nothing, which is the silent auto-heal (f) exists to refuse. `CatPrivacyCritical` maps to
+`ClassTerminal` — the one class of the four that never enters the pause-then-probe machinery, so this fire's
+own auto-recovery cannot reach it.
+
+**What the fire found that the design had wrong.** Three things, each amended where it stood rather than
+noted here: §8's e2e negative was **impossible as written** (a dropped *declared* column fails the probe, so
+the lens can never latch — the latch needs a probe that passes over a still-failing write, which is G6b's
+residual incompleteness, so the shipped test uses an **undeclared** column); §4.2's grant-lens "never
+over-grant" paragraph **proved one recovery mode and read as though it covered all** (a table restored from a
+backup passes a shape check and resurrects revoked grants — pre-existing, unfixable by any probe, now an
+operator runbook line in `refractor-failure-tiers.md`); and §12's own gotcha 2 got the restart-path ordering
+backwards, which the builder caught and reported rather than building to.
+
+**The find that mattered most, and it was nobody's increment.** (d) opts in `Protected || GrantTable`, and
+`projection.IsAuthPlane` counts **every** grant-table lens as auth-plane — so the seven live `GrantTable`
+lenses were opted into self-heal by (d) while (f)'s `!authPlane` filter made them structurally incapable of
+raising the issue. The composition of two correct increments gave the read-path **authorization** lenses the
+ability to clear a structural pause completely silently, which is the exact failure (f) exists to prevent,
+landed on the most sensitive lens class in the system. §4.2's own grant-lens paragraph had already said the
+issue is what tells the operator a rebuild is owed. Closed in-fire with the capability-plane mirror.
+
+**Review, and what it cost to skip nothing.** Three cold reviewers over the item's whole diff: capability
+plane, state machine, test integrity. Four blockers, all fixed in-fire — the three new `Entry` fields were
+not carried across status transitions, so the stamp was erased before any heartbeat could read it (and
+unobservable in exactly the flapping case the attempt count exists for); the restored-cause fallback was
+dead on the one path it was built for, because the `InitialPause` re-gate's `SetPaused(infra, "")` ate the
+stash — **found independently by two reviewers**, with each layer's own tests passing while the composition
+was broken; an operator `Resume` racing an in-flight probe fabricated a recovery and stole a relapse; and a
+failed announcement was consumed before it was attempted, so the record of a self-heal was destroyed by
+whatever outage caused it. Plus: the opt-in wiring was proven by nothing — flipping one line shipped the
+feature dead with a green suite and a green e2e — now closed by extracting `lensConsumerSpec` and pinning it.
+
+**Classification (item close).** Design-gap ×3 (the impossible e2e, the over-broad safety claim, the
+auth-plane blind spot — all three about *composition*, not mechanism). Implementation-bug ×6, of which four
+are state-lifetime or ordering. Brief-gap ×1 (the restart ordering). Test-gap ×2 (wiring untested; a
+two-layer seam tested at each layer but never across the interposed step). No review over-reach. The
+carry-forward class is its **second** sighting in Refractor, so it is mechanized rather than re-documented —
+a reflection-based completeness test over `Entry` now fails until a new field is either carried forward or
+allow-listed with a reason. Two new Substrate dossier entries (a verdict computed outside the lock; a
+pending flag consumed before the work it gates succeeds) and one new Refractor entry (the two-layer seam).

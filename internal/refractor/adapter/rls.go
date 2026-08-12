@@ -505,6 +505,16 @@ func ProvisionProtectedTable(ctx context.Context, pool *pgxpool.Pool, table stri
 //     trusted operator adding a SECOND permissive policy alongside is outside the
 //     threat model (same class as deliberately disabling FORCE); this gate catches
 //     the realistic mistake of a missing or hand-wrong membership policy.
+//   - a unique index/constraint exactly covering keyCols — the same columns the
+//     write path's ON CONFLICT (postgres.go) targets. Postgres's arbiter-index
+//     inference requires an exact set match (see hasExactUniqueConstraint), so a
+//     table re-provisioned without it would otherwise pass every check above and
+//     then fail every write with SQLSTATE 42P10 — a table-shape defect indexes
+//     and columns don't catch. This check must FAIL when the constraint is
+//     missing, never pass: the lens stays dark and re-verifies until the operator
+//     restores it, which is what keeps the re-provisioned-table scenario this
+//     design exists for from becoming an unbounded transient Nak loop under a
+//     health entry that reads active (§4.2e).
 //
 // Every failure is a plain (untagged) error so failure.Classify treats it as
 // recoverable (the default transient tier), not a structural pg error that would
@@ -588,6 +598,21 @@ func VerifyProtectedTable(ctx context.Context, pool *pgxpool.Pool, table string,
 		return fmt.Errorf("rls: verify %q: %s must be timestamptz, found %q", table, DeletedAtColumn, dt)
 	}
 
+	// 2b. The write path's postgres.go builds `ON CONFLICT (<keyCols>)`; Postgres
+	// can only honor that against a unique index/constraint whose columns are
+	// EXACTLY keyCols, so a table missing one — most concretely the design's own
+	// motivating scenario, dropped and re-provisioned without it — fails every
+	// write at SQLSTATE 42P10, which is not visible from the columns/types check
+	// above. Checked here, before the write ever happens, so it keeps the lens
+	// dark instead of live-but-broken.
+	hasUnique, err := hasExactUniqueConstraint(ctx, pool, table, keyCols)
+	if err != nil {
+		return fmt.Errorf("rls: verify %q: %w", table, err)
+	}
+	if !hasUnique {
+		return fmt.Errorf("rls: verify %q: no unique index/constraint exactly covering key columns %v — the write path's ON CONFLICT target has no arbiter index", table, keyCols)
+	}
+
 	// 3. The §6.14 membership policy is present and intact: the deterministically
 	// named SELECT policy exists (polcmd 'r' = SELECT, '*' = ALL) and its USING
 	// expression filters on the authz-anchors column against the grant table — so
@@ -612,7 +637,9 @@ func VerifyProtectedTable(ctx context.Context, pool *pgxpool.Pool, table string,
 
 // VerifyGrantTable performs the read-only posture verification for the shared
 // actor_read_grants table (Contract #6 §6.14). It issues no DDL: it asserts the
-// table exists with the expected columns and types, so the seq-guarded
+// table exists with the expected columns and types, and a unique index/
+// constraint exactly covering (actor_id, anchor_id, grant_source) — the
+// UpsertGrant/RevokeGrant ON CONFLICT target — so the seq-guarded
 // Upsert/RevokeGrant writes and every protected policy's membership subquery have
 // the shape they depend on. Like VerifyProtectedTable it returns plain
 // (recoverable) errors so a grant lens auto-resumes once the operator provisions
@@ -644,6 +671,21 @@ func (w *PostgresGrantWriter) VerifyGrantTable(ctx context.Context) error {
 		if dt != typ {
 			return fmt.Errorf("grant writer: verify: %q column %q must be %s, found %q", GrantTable, col, typ, dt)
 		}
+	}
+	// UpsertGrant and RevokeGrant both write
+	// `ON CONFLICT (actor_id, anchor_id, grant_source)`; Postgres can only honor
+	// that against a unique index/constraint whose columns are exactly this set
+	// (hasExactUniqueConstraint), so a table re-provisioned without it passes
+	// every check above and then fails every write with SQLSTATE 42P10. This
+	// check must fail (never pass) when that constraint is absent, so the grant
+	// lens stays dark instead of live-but-broken.
+	grantConflictCols := []string{"actor_id", "anchor_id", "grant_source"}
+	hasUnique, err := hasExactUniqueConstraint(ctx, w.pool, GrantTable, grantConflictCols)
+	if err != nil {
+		return fmt.Errorf("grant writer: verify: %w", err)
+	}
+	if !hasUnique {
+		return fmt.Errorf("grant writer: verify: %q has no unique index/constraint exactly covering %v — the write path's ON CONFLICT target has no arbiter index", GrantTable, grantConflictCols)
 	}
 	return nil
 }
@@ -677,4 +719,99 @@ func tableColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[st
 		return nil, fmt.Errorf("iterate columns: %w", err)
 	}
 	return cols, nil
+}
+
+// hasExactUniqueConstraint reports whether table carries a unique index that
+// Postgres will actually accept as an ON CONFLICT(cols) arbiter — not merely
+// one whose key columns happen to match cols as a set.
+//
+// "Exactly" is not a stricter-than-needed check: it is what Postgres itself
+// requires to honor an ON CONFLICT(cols) target. Per the PostgreSQL 16 docs
+// (INSERT, "Conflict Target" — our pin is postgres:16-alpine,
+// docker-compose.yml): "All table_name unique indexes that, without regard to
+// order, contain exactly the conflict_target-specified columns/expressions are
+// inferred (chosen) as arbiter indexes." A unique index on a superset (e.g. one
+// extra column) or a subset of cols does not arbitrate that target and must not
+// satisfy this check either — a looser "covers" check would pass a table whose
+// write path still fails at SQLSTATE 42P10. Verified live against a pinned
+// Postgres 16 instance: a PRIMARY KEY on exactly cols passes; the same
+// constraint dropped, narrowed to a subset, or widened to a superset all
+// correctly fail (each pinned by a test in rls_verify_test.go); a covering
+// index's INCLUDE columns and the indexed columns' declaration order are both
+// correctly ignored (Postgres's own "without regard to order" rule, also
+// pinned by a test); a partial unique index (indpred IS NOT NULL) is excluded
+// — it arbitrates only an ON CONFLICT target that names a matching
+// index_predicate, which neither write path here (postgres.go, rls.go
+// UpsertGrant/RevokeGrant) does.
+//
+// Three further conditions gate real Postgres arbiter eligibility beyond the
+// plain column-set match, each verified live against postgres:16-alpine
+// (docker-compose.yml) and each pinned by its own test:
+//
+//   - indimmediate: a UNIQUE constraint declared DEFERRABLE backs an index
+//     with indimmediate = false, and Postgres refuses it as an arbiter — live:
+//     `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE ... DEFERRABLE INITIALLY
+//     DEFERRED` then an ON CONFLICT against those columns raises "ON CONFLICT
+//     does not support deferrable unique constraints/exclusion constraints as
+//     arbiters" (SQLSTATE 55000 — object_not_in_prerequisite_state, distinct
+//     from the 42P10 "no matching arbiter" case below; failure/classify.go
+//     does not need a 55000 case, because this gate now refuses the table at
+//     probe time before any write is attempted). Doc citation: PostgreSQL 16
+//     docs, INSERT, "Conflict Target" — "In all cases, only NOT DEFERRABLE
+//     constraints and unique indexes are supported as arbiters."
+//   - indisvalid: an index left INVALID by an interrupted `CREATE INDEX
+//     CONCURRENTLY` is not inferable — live: creating one over duplicate data
+//     (indisvalid = false, indisunique/indimmediate still true) and then
+//     issuing the same ON CONFLICT raises SQLSTATE 42P10, "there is no unique
+//     or exclusion constraint matching the ON CONFLICT specification" — the
+//     identical error a wholly absent constraint produces, confirming Postgres
+//     treats an invalid index as not present for arbitration. Source:
+//     postgres/postgres REL_16_STABLE src/backend/optimizer/util/plancat.c,
+//     infer_arbiter_indexes: "if (!idxForm->indisvalid) goto next;" (skips the
+//     candidate before any column comparison).
+//   - Expression key columns: unnest(indkey) yields attnum = 0 for an
+//     expression (e.g. lower(x)), and a plain JOIN to pg_attribute silently
+//     drops that position — so a 4-key unique index on
+//     (actor_id, anchor_id, grant_source, lower(x)) previously matched a
+//     3-column plain target after the join dropped the expression key,
+//     though Postgres sees 4 key columns and refuses to arbitrate a
+//     3-column target (live: SQLSTATE 42P10). Source: same function,
+//     infer_arbiter_indexes compares BOTH a per-column attribute bitmap AND
+//     (via RelationGetIndexExpressions + list_difference) the expression
+//     list — a target naming only plain columns can never satisfy an index
+//     that includes an expression key. This check refuses outright whenever
+//     any key position (ord <= indnkeyatts) is attnum 0, rather than
+//     matching a narrowed column set silently.
+func hasExactUniqueConstraint(ctx context.Context, pool *pgxpool.Pool, table string, cols []string) (bool, error) {
+	var ok bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_index i
+			WHERE i.indrelid = to_regclass($1)
+				AND i.indisunique
+				AND i.indimmediate
+				AND i.indisvalid
+				AND i.indpred IS NULL
+				AND NOT EXISTS (
+					SELECT 1
+					FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+					WHERE k.ord <= i.indnkeyatts AND k.attnum = 0
+				)
+				AND (
+					SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+					FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+					JOIN pg_attribute a
+						ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+					WHERE k.ord <= i.indnkeyatts
+				) = (
+					SELECT array_agg(c ORDER BY c) FROM unnest($2::text[]) AS c
+				)
+		)`,
+		table, cols,
+	).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("read unique constraint: %w", err)
+	}
+	return ok, nil
 }

@@ -374,11 +374,17 @@ func TestProtectedAdapter_SeqGuard_Integration(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	// t.Cleanup, not defer: a deferred Close runs when this function returns,
+	// which is BEFORE any t.Cleanup, so the drop below would execute against a
+	// closed pool and fail. Registered first, LIFO runs it last — after the drop.
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_seqguard_" + sanitize(t.Name())
 	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS "`+tbl+`"`)
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) })
+	t.Cleanup(func() {
+		_, cerr := pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`)
+		require.NoError(t, cerr, "drop this test's own scratch table")
+	})
 	require.NoError(t, ProvisionProtectedTable(ctx, pool, tbl,
 		[]string{"id"}, []ColumnDef{{Name: "status", Type: "text"}}, 10*time.Second))
 

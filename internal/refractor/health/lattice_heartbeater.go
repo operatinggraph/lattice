@@ -63,6 +63,21 @@ const (
 	// indistinguishable from one that was never installed, which is the
 	// monitoring equivalent of reporting healthy.
 	issueCapabilityLensUnreadable = "CapabilityLensUnreadable"
+	// issueCapabilityLensStructuralPauseAutoRecovered is the auth-plane sibling
+	// of issueLensStructuralPauseAutoRecovered: an auth-plane lens cleared a
+	// structural pause under its own probe, with no operator involved.
+	//
+	// A separate code from the business one, not a shared code raised twice.
+	// Every capability condition here already has its own code even where the
+	// business path carries an exactly parallel one (Paused, Lagging,
+	// Unreadable), and the parallel case is precisely the case that convention
+	// answers. Two reasons of its own: the messages are materially different —
+	// this one names a rebuild obligation that exists only for grants — and the
+	// two planes reconcile through independent open-issue state keyed by code,
+	// so one code written by both reconcilers would be two `since` clocks
+	// disagreeing about when one issue began. They are two identities; this
+	// makes them two codes.
+	issueCapabilityLensStructuralPauseAutoRecovered = "CapabilityLensStructuralPauseAutoRecovered"
 	// issueCapabilityAuditUnverified is raised when the sweep examined an
 	// anchor and could reach NO conclusion about it. It covers the blind spot
 	// the divergence and repair codes share: both are inferred from what the
@@ -107,20 +122,25 @@ const (
 //     is stale by construction.
 //   - unverified: the detector ran and could reach no conclusion.
 //   - lagging: the read model is merely behind, and will catch up.
+//   - structural-pause-auto-recovered: the quietest token, and the only one
+//     that describes a lens which is fine RIGHT NOW — it reports a window that
+//     has already closed, so anything currently wrong outranks it. It is not
+//     "ok" because the recovery may have left the read model owing a rebuild.
 //
 // Nothing displaced is lost: each condition raises its own issue, and the
 // underlying counters travel in the same metrics map.
 var alertRank = map[string]int{
-	"secure-redaction": 8,
-	"paused":           7,
-	"unreadable":       6,
-	"repair-failing":   5,
-	"repair-blocked":   4,
-	"sweep-stalled":    3,
-	"unverified":       2,
-	"lagging":          1,
-	"ok":               0,
-	"":                 0,
+	"secure-redaction":                9,
+	"paused":                          8,
+	"unreadable":                      7,
+	"repair-failing":                  6,
+	"repair-blocked":                  5,
+	"sweep-stalled":                   4,
+	"unverified":                      3,
+	"lagging":                         2,
+	"structural-pause-auto-recovered": 1,
+	"ok":                              0,
+	"":                                0,
 }
 
 // raiseAlert returns whichever of the two alerts ranks worse, so a caller never
@@ -235,7 +255,35 @@ const (
 	issueLensSweepStalled       = "LensSweepStalled"
 	issueLensAuditUnverified    = "LensAuditUnverified"
 	issueLensRepairBlocked      = "LensRepairBlocked"
+	// issueLensStructuralPauseAutoRecovered is raised when a business lens
+	// cleared a structural pause on its own — its probe re-verified the condition
+	// and the consumer resumed with nobody involved. It and its auth-plane
+	// sibling (CapabilityLensStructuralPauseAutoRecovered) are the only codes
+	// that fire on a lens whose read model is healthy at the moment they fire:
+	// the lens was DARK for the length of the pause, the resume replays nothing
+	// from that window, and the entry it leaves behind reads `active` exactly
+	// like a lens that never faulted. Without this the operator's only evidence
+	// that a rebuild may be owed is a log line. It is deliberately short-lived
+	// (structuralAutoRecoveredFreshnessCycles) — a recovery is an event, not a
+	// condition, and an issue that never clears stops being read.
+	issueLensStructuralPauseAutoRecovered = "LensStructuralPauseAutoRecovered"
 )
+
+// structuralAutoRecoveredFreshnessCycles is how many heartbeat cycles a
+// probe-driven structural recovery stays raised for. Two, not one: the pump
+// stamps the recovery at an arbitrary point inside a cycle, so a strict
+// one-cycle window can be straddled — the stamp lands just after one beat has
+// read the entry and has already aged out by the next — and emit NOTHING, which
+// is exactly the silent self-heal this signal exists to refuse. Two guarantees
+// at least one emission and at most two. Mirrors
+// capabilitySweepSuppressionFreshnessCycles, which bounds a recorded value
+// against the same cadence for the same kind of reason.
+const structuralAutoRecoveredFreshnessCycles = 2
+
+// minHeartbeatInterval is the NFR-O1 heartbeat floor. Every cadence-derived
+// window is measured against at least this much, so a heartbeater assembled
+// without NewLatticeHeartbeater never computes a zero-length one.
+const minHeartbeatInterval = 10 * time.Second
 
 // issueLensRegistryIncomplete is the registry-reconciliation-probe issue
 // code (refractor-lens-registry-restart-integrity-design.md §4 Fire B): a
@@ -326,6 +374,23 @@ type CapabilityLensStatus struct {
 	// RebuildProgressAt means no rebuild has reported yet — unknown, not stalled.
 	RebuildOutstanding uint64
 	RebuildProgressAt  time.Time
+	// The lens's last probe-driven structural recovery: when it cleared, the
+	// diagnosis it cleared from, and which self-heal attempt lifted it. Zero
+	// time for a lens that has never self-healed.
+	//
+	// Every grant-table lens is auth-plane by definition (projection.IsAuthPlane
+	// returns true for postgres+GrantTable), and a grant-table lens is exactly
+	// the class whose Probe verifies its own posture — so the lenses that feed
+	// actor_read_grants, the read-path authorization source of truth, are the
+	// ones most able to clear a structural pause with nobody watching. The
+	// pause's own backlog replays on resume, so a schema fix owes nothing; but a
+	// condition cleared by re-provisioning or restoring the table leaves every
+	// grant written BEFORE the pause gone and unreplayable — a persistent
+	// under-grant, safe in direction (reads fail closed) but silent, and these
+	// fields are the only thing that says which of the two happened.
+	StructuralAutoRecoveredAt      time.Time
+	StructuralAutoRecoveredCause   string
+	StructuralAutoRecoveryAttempts int
 }
 
 // LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
@@ -376,6 +441,17 @@ type LensLivenessStatus struct {
 	// writing rows, and those rows carry nulls where plaintext belongs. A
 	// legitimate shred is not counted, so any nonzero value is a defect.
 	SecureRedactions uint64
+	// The lens's last probe-driven structural recovery: when it cleared, the
+	// diagnosis it cleared from, and which self-heal attempt lifted it. Zero
+	// time for a lens that has never self-healed. They are the only inputs here
+	// that describe a lens which is CURRENTLY fine — every other field is a
+	// present-tense condition — and they are carried for exactly that reason: a
+	// pause that heals itself leaves an entry indistinguishable from one that
+	// never faulted, so nothing would tell an operator that a window of events
+	// went unprojected and a rebuild may still be owed.
+	StructuralAutoRecoveredAt      time.Time
+	StructuralAutoRecoveredCause   string
+	StructuralAutoRecoveryAttempts int
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -618,8 +694,8 @@ type LensLatencySnapshot struct {
 // across the lifetime of the process (Contract #5 §5.1 convention:
 // rfx-<NanoID>).
 func NewLatticeHeartbeater(conn *substrate.Conn, bucket, instance string, interval time.Duration, logger *slog.Logger) *LatticeHeartbeater {
-	if interval < 10*time.Second {
-		interval = 10 * time.Second
+	if interval < minHeartbeatInterval {
+		interval = minHeartbeatInterval
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -834,7 +910,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 
 	snaps := h.CapabilityLensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging, diverging, unrepaired, stalled, unreadable, blocked, unverified []string
+	var paused, lagging, diverging, unrepaired, stalled, unreadable, blocked, unverified, recovered []string
 	divergenceSeverity := ""
 	repairSeverity := ""
 	stallSeverity := ""
@@ -873,6 +949,13 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 				h.resetLagState(name)
 			}
 		}
+		// Placed outside the unreadable branch above, so it is evaluated on
+		// every cycle: the recovery reaches this snapshot from a status read
+		// that SUCCEEDED (the provider transfers it before the pending read that
+		// can fail on its own), and the cycle a reader most needs to be told
+		// that an authorization lens healed itself is the one where something
+		// else about it could not be observed.
+		alert = raiseAlert(alert, h.evalStructuralAutoRecovery(name, now, s.structuralRecovery(), &recovered))
 		// The sweep's coverage verdict is independent of the consumer's own
 		// state: a lens can be active and caught-up while its projection has a
 		// hole, which is exactly the class the sweep exists to detect.
@@ -1050,6 +1133,28 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			severity: "warning",
 			message: fmt.Sprintf("capability lens consumer lag exceeds threshold %d; authorization reads may be stale: %s",
 				threshold, strings.Join(lagging, ", ")),
+		}
+	}
+	if len(recovered) > 0 {
+		// `warning`, not `error` — the one place this path's severity ladder is
+		// deliberately NOT mirrored, so do not "fix" it upward. Every other
+		// capability code escalates to `error` (⇒ instance `unhealthy`) because
+		// it describes an authorization read model that is frozen, stale or
+		// wrong RIGHT NOW. This one describes a lens that SUCCESSFULLY
+		// recovered: raising `error` would take the whole instance unhealthy for
+		// a self-heal that worked, which is a false alarm, and a signal that
+		// cries wolf on the working path is one operators learn to skip — the
+		// silence this issue exists to break, restored by another route.
+		// `warning` ⇒ degraded, for at most two cycles, is the honest shape:
+		// something was dark, it is back, and a rebuild may still be owed.
+		active[issueCapabilityLensStructuralPauseAutoRecovered] = capIssue{
+			severity: "warning",
+			message: "capability lens cleared a structural pause under its own probe, with no operator involved. " +
+				"The pause's own backlog replays on resume (the failing message was never acked), so a schema fix " +
+				"that left the rows intact owes nothing. But if the condition was cleared by RE-PROVISIONING or " +
+				"RESTORING the grant table, grants written before the pause are gone from it and never redeliver: " +
+				"the read model stays under-granted — reads fail closed, not open — until a rebuild: " +
+				strings.Join(recovered, ", "),
 		}
 	}
 	if len(diverging) > 0 {
@@ -1297,7 +1402,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	snaps := h.LensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
 	var paused, lagging, unreadable, blocked, unverified []string
-	var diverging, unrepaired, stalled, redacting []string
+	var diverging, unrepaired, stalled, redacting, recovered []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
@@ -1327,6 +1432,12 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			// read). A known count of nulls being served is not made unknown by
 			// a fault observing something else.
 			alert = raiseAlert(alert, evalSecureRedaction(name, s, &redacting))
+			// The recovery stamp reaches this snapshot from the same successful
+			// status read the redaction count does, so it survives an unreadable
+			// cycle for the same reason: a lens that healed itself is a fact in
+			// hand, and the one cycle a reader most needs to be told is the one
+			// where something else about the lens could not be observed.
+			alert = raiseAlert(alert, h.evalStructuralAutoRecovery(name, now, s.structuralRecovery(), &recovered))
 			m := map[string]any{
 				"status":          s.Status,
 				"projectionLag":   nil,
@@ -1362,6 +1473,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
 		}
 		alert = raiseAlert(alert, evalSecureRedaction(name, s, &redacting))
+		alert = raiseAlert(alert, h.evalStructuralAutoRecovery(name, now, s.structuralRecovery(), &recovered))
 		m := map[string]any{
 			"status":          s.Status,
 			"projectionLag":   s.ProjectionLag,
@@ -1397,6 +1509,16 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			message: "lens projected a secure column as null because it could not resolve the value; the row renders " +
 				"as if the record were erased, and only this counter distinguishes that from a real erasure: " +
 				strings.Join(redacting, ", "),
+		}
+	}
+	if len(recovered) > 0 {
+		active[issueLensStructuralPauseAutoRecovered] = capIssue{
+			severity: "warning",
+			message: "lens cleared a structural pause under its own probe, with no operator involved. The pause's own " +
+				"backlog replays on resume (the failing message was never acked), so a schema fix that left the rows " +
+				"intact owes nothing. But if the condition was cleared by RE-PROVISIONING or RESTORING the target, " +
+				"rows written before the pause are gone from it and never redeliver — a rebuild is owed, and its " +
+				"scope is the whole lens, not the outage window: " + strings.Join(recovered, ", "),
 		}
 	}
 	if len(unreadable) > 0 {
@@ -1467,6 +1589,87 @@ func evalSecureRedaction(name string, s LensLivenessStatus, redacting *[]string)
 	}
 	*redacting = append(*redacting, fmt.Sprintf("%s (%d)", name, s.SecureRedactions))
 	return "secure-redaction"
+}
+
+// structuralAutoRecoveryWindow is how long after a probe-driven structural
+// recovery the issue stays raised — scaled off the heartbeat's own cadence
+// rather than being a second independently-tuned duration, so a deployment that
+// beats slowly still gets its emissions. Floored at minHeartbeatInterval: a zero
+// window raises nothing, which on this signal is indistinguishable from the
+// recovery never having happened.
+func (h *LatticeHeartbeater) structuralAutoRecoveryWindow() time.Duration {
+	interval := h.interval
+	if interval < minHeartbeatInterval {
+		interval = minHeartbeatInterval
+	}
+	return structuralAutoRecoveredFreshnessCycles * interval
+}
+
+// structuralRecovery is one lens's last probe-driven structural recovery, in the
+// shape both evaluators read it. It exists so the freshness window and the label
+// are written exactly once: the business and auth-plane paths are deliberately
+// separate evaluators, but "did this lens heal itself, and how recently" has one
+// right answer, and two copies of a time comparison is how the two planes come
+// to disagree about what "recently" means.
+type structuralRecovery struct {
+	at       time.Time
+	cause    string
+	attempts int
+}
+
+func (s LensLivenessStatus) structuralRecovery() structuralRecovery {
+	return structuralRecovery{
+		at:       s.StructuralAutoRecoveredAt,
+		cause:    s.StructuralAutoRecoveredCause,
+		attempts: s.StructuralAutoRecoveryAttempts,
+	}
+}
+
+func (s CapabilityLensStatus) structuralRecovery() structuralRecovery {
+	return structuralRecovery{
+		at:       s.StructuralAutoRecoveredAt,
+		cause:    s.StructuralAutoRecoveredCause,
+		attempts: s.StructuralAutoRecoveryAttempts,
+	}
+}
+
+// evalStructuralAutoRecovery returns the alert token for a lens that has
+// recovered from a structural pause under its own probe within the freshness
+// window, appending its label to the report list.
+//
+// Raised on the AGE of the recovery, not on its presence: the stamp persists on
+// the health entry for the life of the lens (it is the record of what was wrong
+// and whether a rebuild was ever owed), while the issue is an announcement of
+// something that just happened. Left unbounded it would sit open forever on a
+// lens that is fine, and an issue that never clears is one nobody reads.
+func (h *LatticeHeartbeater) evalStructuralAutoRecovery(name string, now time.Time, rec structuralRecovery, recovered *[]string) string {
+	if rec.at.IsZero() {
+		return ""
+	}
+	if now.Sub(rec.at) >= h.structuralAutoRecoveryWindow() {
+		return ""
+	}
+	*recovered = append(*recovered, structuralRecoveryLabel(name, rec))
+	return "structural-pause-auto-recovered"
+}
+
+// structuralRecoveryLabel renders one self-healed lens for the issue message:
+// the lens name, which self-heal attempt lifted the pause, and the cause it
+// recovered from — truncated on the same cap as pausedLabel, since it is the
+// same operator-facing diagnosis and several lenses can heal in one cycle. The
+// attempt count is what separates a clean one-shot recovery from a lens
+// flapping toward its relapse latch, and the cause is the only surviving
+// statement of what the read model missed while it was dark.
+func structuralRecoveryLabel(name string, rec structuralRecovery) string {
+	if rec.cause == "" {
+		return fmt.Sprintf("%s (attempt %d)", name, rec.attempts)
+	}
+	const causeCap = 160
+	cause := strings.TrimSpace(rec.cause)
+	if len(cause) > causeCap {
+		cause = cause[:causeCap] + "..."
+	}
+	return fmt.Sprintf("%s (attempt %d, recovered from: %s)", name, rec.attempts, cause)
 }
 
 func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {

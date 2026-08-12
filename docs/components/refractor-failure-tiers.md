@@ -13,7 +13,7 @@ Refractor inherits the 4-tier failure model from Materializer
 | Tier | Source | Lattice meaning | Route |
 |---|---|---|---|
 | **Infrastructure** | `failure.Infrastructure` | NATS / Postgres / target store outage | fetch-loop pause, buffer in NATS |
-| **Structural** | `failure.Structural` | DDL validation failure, lens spec invalid, schema mismatch | pause the affected Lens until reconciled |
+| **Structural** | `failure.Structural` | DDL validation failure, lens spec invalid, schema mismatch | pause the affected Lens until reconciled — self-adjudicated where the lens's own Probe decides the condition (below), operator-cleared otherwise |
 | **Terminal** | `failure.Terminal` | Atomic-batch rejection, malformed Core KV event | DLQ for forensics |
 | **Transient** | `failure.Transient` | Retryable target write (e.g. transient Postgres error) | deferred retry queue |
 
@@ -78,13 +78,80 @@ stamping whichever actor `--actor` (or `--actor-token`) names. The grant require
 implicitly permitted; on the dev and demo stacks `make dev-seed-console-operator` provisions an
 identity holding `consoleOperator`'s grants and persists its key.
 
-A **structural** pause is the one an operator must reach by hand, since nothing in the platform
-retires it: the pause survives a process cycle, and re-registration at boot clears a stale lens
+A **structural** pause survives a process cycle, and re-registration at boot clears a stale lens
 *fault* without clearing the pause. Its recorded cause is preserved for the life of the pause (see
-`docs/observability/health-kv-schema.md`), so the recovery sequence is `lattice lens health` to read
+`docs/observability/health-kv-schema.md`), so the operator sequence is `lattice lens health` to read
 what failed, fix that — for the common case, a lens that gained a body column and needs
 `make provision-readpath` re-run — then `lattice lens resume`. Resuming without fixing the cause
 just re-pauses the lens on its next write.
+
+## A structural pause that can adjudicate itself
+
+"Until reconciled" is a claim about a *condition*, not about a person, and for some lenses the
+platform already owns the check that decides it. A **protected** or **grant** lens pauses
+structurally on `42P01` / `42703` / `42P10` — a table, column or arbiter index that is absent — and
+`VerifyProtectedTable` / `VerifyGrantTable` answer exactly that question, read-only and fail-closed.
+Those lenses therefore re-run their own probe while paused and resume when it passes, with no
+operator involved (`substrate.ConsumerSpec.StructuralProbe`, set in `cmd/refractor/main.go` from the
+same `Into` shape as `InitialPause`).
+
+The asymmetry this removes is the one that read as a bug: the *same* absent table at **activation**
+was already an infra pause that self-healed the moment someone ran `make provision-readpath`, while
+the same table dropped *after* activation stayed dark through restarts and through the operator
+fixing it.
+
+Three properties bound it.
+
+- **The opt-in is narrow, and the exclusions are deliberate.** Only protected and grant lenses. The
+  plain Postgres adapter's probe is `pool.Ping`, which passes while the condition holds — opting it
+  in would produce resume/re-pause churn, not recovery — and a plain lens declares no body columns,
+  so completing that probe is not a refactor. NATS-KV and NATS-subject lenses have a real structural
+  class that has never been observed live. Omission keeps the operator-only behaviour, so every
+  other consumer of the supervisor — Loom, Weaver, Bridge, the Processor — is unchanged.
+- **The probe is the security gate, at the same polarity.** A protected lens can only resume by
+  passing RLS `ENABLE`+`FORCE`, the §6.14 set-membership policy, the declared columns, and the
+  unique index the write path's `ON CONFLICT` depends on. A regressed posture keeps the lens dark.
+  A dropped-and-recreated `actor_read_grants` is *empty*, so every protected table's membership
+  subquery matches nothing and reads fail closed — under-grant, never over-grant, and exactly what a
+  manual resume produces today.
+- **If you fixed it by restoring or re-provisioning DATA, you still owe a rebuild — and the
+  auto-resume cannot know that.** The probe is a *shape* check: table, columns, types, RLS posture,
+  arbiter index. It says nothing about contents. So a pause resolved by restoring
+  `actor_read_grants` (or a protected table) from a dump or PITR passes verification and resumes
+  with rows as of the backup — including grants revoked since, whose revocations were acked long ago
+  and never redeliver. That is an over-grant that persists until someone rebuilds the lens. Resolve a
+  structural pause by fixing the **schema** and the resume needs nothing further; resolve it by
+  restoring **data** and run `lattice lens rebuild` after. This is not new to self-healing — a manual
+  resume after the same restore does the same thing — but self-healing removes the person who just
+  ran the restore and would have known.
+- **Self-healing is bounded by a relapse latch.** A probe verifies the provisioned schema; it cannot
+  see a row-data fault (`23502`, `42804`, `22P02`) or a column the evaluator emits that the lens
+  never declared. So after three structural pauses that each followed a probe-driven resume, the
+  worker latches: the pause becomes operator-only for the rest of that process, and the recorded
+  cause is prefixed `structural pause latched after 3 self-heal attempts:` — the diagnosis *and* the
+  fact that the platform tried. An operator `resume` clears the latch. The latch is in-process and
+  per-worker, so a restart re-arms it; that is deliberate, since a restart is a deploy or an
+  operator act.
+
+A failing structural message is `Nak`ed with the probe interval as its delay rather than left
+pending, so a resume is re-tested in ~10s instead of waiting out the 5-minute `AckWait`. Without
+that, a lens would publish `active` and learn nothing about whether the fix took for five minutes at
+a time. Consumers that do not opt in keep the leave-pending behaviour unchanged.
+
+A recovery that no one can see is how a read model starts rendering green while it is wrong, so a
+self-heal raises a heartbeat issue carrying the cause it recovered from and which attempt it was.
+**Which code depends on the plane, and a grant lens is not on the plane you might expect:**
+`projection.IsAuthPlane` counts every `GrantTable` lens as auth-plane, so all seven of them raise
+**`CapabilityLensStructuralPauseAutoRecovered`**, while protected business lenses raise
+**`LensStructuralPauseAutoRecovered`**. An operator alerting on only the second one misses exactly
+the class that feeds read-path authorization. Both are `warning`: a lens that successfully
+recovered is not unhealthy, and raising `error` would turn a working self-heal into a false alarm.
+
+The issue is emitted once the lens has cleared every gate and is about to project — not at the
+structural clear, which on the restart path is still one verification short of the truth. The issue
+is the *alert*, live for two heartbeat cycles; the durable record is the entry's own
+`structuralAutoRecovered*` fields, which survive later status transitions and are what
+`lattice lens health` reads.
 
 ## Privacy / security supersession tiers
 

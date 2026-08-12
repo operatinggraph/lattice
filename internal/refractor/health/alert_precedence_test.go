@@ -17,6 +17,10 @@ func TestAlertRank_TotalOrder(t *testing.T) {
 	// Worst first. Each neighbour pair is asserted, so the whole chain is
 	// pinned without asserting every combination.
 	order := []string{
+		// A read model that is CONFIDENTLY wrong outranks one that is merely
+		// frozen: a paused lens misleads nobody, a null indistinguishable from a
+		// lawful erasure misleads everybody.
+		"secure-redaction",
 		"paused",
 		"unreadable",
 		"repair-failing",
@@ -24,6 +28,11 @@ func TestAlertRank_TotalOrder(t *testing.T) {
 		"sweep-stalled",
 		"unverified",
 		"lagging",
+		// The quietest token, and the only one that describes a lens which is
+		// fine right now: it reports a window that has already closed, so
+		// anything currently wrong displaces it. Still above "ok", because the
+		// recovery skipped the events the pause window swallowed.
+		"structural-pause-auto-recovered",
 		"ok",
 	}
 	for i := 0; i+1 < len(order); i++ {

@@ -7,6 +7,8 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestIsOperationRoleIndexLens asserts the role-index routing predicate fires
@@ -426,4 +428,160 @@ func TestHolderTypeRebuildTargets_NoDeclarers(t *testing.T) {
 	if got := holderTypeRebuildTargets(registry, "retentionclass"); len(got) != 0 {
 		t.Fatalf("a type nothing declares must yield no targets, got %v", got)
 	}
+}
+
+// TestVerifiesReadPathPosture pins the set of lenses whose Probe adjudicates
+// their structural condition — the single predicate behind BOTH the fail-closed
+// InitialPause gate and the StructuralProbe opt-in
+// (structural-pause-recovery-design.md §4.2d).
+//
+// The EXCLUSIONS are the half that matters. Nothing fails when a lens is opted
+// in wrongly: a plain Postgres lens's Probe is pool.Ping, which passes while the
+// structural condition still holds, so it would resume, re-pause and resume
+// again with the health entry reading `active` for a share of every cycle —
+// churn dressed as recovery, and strictly worse than the honest structural pause
+// it replaced. A NATS-KV or NATS-subject lens would be opted into a recovery
+// path with no live consumer at all. Neither shows up as a test failure anywhere
+// else, which is why the boundary is asserted here rather than left to the
+// comment beside the call.
+func TestVerifiesReadPathPosture(t *testing.T) {
+	tests := []struct {
+		name string
+		into lens.IntoConfig
+		want bool
+	}{
+		{
+			name: "protected postgres lens — Probe is VerifyProtectedTable",
+			into: lens.IntoConfig{Target: "postgres", Table: "clinic_encounters", Protected: true},
+			want: true,
+		},
+		{
+			name: "grant-table lens — Probe is VerifyGrantTable",
+			into: lens.IntoConfig{Target: "postgres", Table: "actor_read_grants", GrantTable: true},
+			want: true,
+		},
+		{
+			name: "both flags set",
+			into: lens.IntoConfig{Target: "postgres", Protected: true, GrantTable: true},
+			want: true,
+		},
+		{
+			name: "plain postgres lens — Probe is pool.Ping, which passes while the fault holds",
+			into: lens.IntoConfig{Target: "postgres", Table: "loftspace_listings"},
+			want: false,
+		},
+		{
+			name: "explicitly public postgres lens — no RLS, same pool.Ping probe",
+			into: lens.IntoConfig{Target: "postgres", Table: "loftspace_listings", Public: true},
+			want: false,
+		},
+		{
+			name: "nats_kv lens — structural class real but no live consumer",
+			into: lens.IntoConfig{Target: "nats_kv", Bucket: "weaver-targets"},
+			want: false,
+		},
+		{
+			name: "nats_subject lens — same",
+			into: lens.IntoConfig{Target: "nats_subject", SubjectPrefix: "personal", Stream: "PERSONAL"},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := verifiesReadPathPosture(tc.into); got != tc.want {
+				t.Fatalf("verifiesReadPathPosture = %v, want %v — this predicate gates BOTH the "+
+					"verify-before-first-projection pause and the structural self-heal opt-in", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLensConsumerSpec_PauseWiring is the gate the rest of this item did not
+// have. Before the spec was a named function, setting `StructuralProbe: false`
+// in the literal shipped the feature DEAD in the binary with every test in the
+// change still green: TestVerifiesReadPathPosture exercises the predicate in
+// isolation, and the e2e sets the flag on its own spec by hand. Nothing
+// connected the predicate to what the production consumer actually registers.
+//
+// It asserts both fields together on purpose. They are licensed by one property
+// — the Probe adjudicates the condition — so a lens that verifies before its
+// first projection but cannot probe out of a structural pause, or the reverse,
+// is incoherent rather than merely different.
+func TestLensConsumerSpec_PauseWiring(t *testing.T) {
+	filters := []string{"$KV.core-kv.vtx.encounter.>"}
+
+	t.Run("a protected lens verifies before projecting AND probes its way back", func(t *testing.T) {
+		spec := lensConsumerSpec(&lens.Rule{
+			ID:   "lns0000000000000001a",
+			Into: lens.IntoConfig{Target: "postgres", Table: "clinic_encounters", Protected: true},
+		}, "core-kv", filters, "")
+
+		if spec.InitialPause != substrate.PauseInfra {
+			t.Fatalf("InitialPause = %q, want infra — the RLS posture must be verified before the first projection", spec.InitialPause)
+		}
+		if !spec.StructuralProbe {
+			t.Fatal("StructuralProbe = false — the feature is wired dead: a protected lens can never self-heal a structural pause")
+		}
+	})
+
+	t.Run("a grant-table lens likewise", func(t *testing.T) {
+		spec := lensConsumerSpec(&lens.Rule{
+			ID:   "lns0000000000000002a",
+			Into: lens.IntoConfig{Target: "postgres", Table: "actor_read_grants", GrantTable: true},
+		}, "core-kv", filters, "")
+
+		if spec.InitialPause != substrate.PauseInfra || !spec.StructuralProbe {
+			t.Fatalf("grant lens spec = {InitialPause:%q StructuralProbe:%v}, want {infra true}", spec.InitialPause, spec.StructuralProbe)
+		}
+	})
+
+	t.Run("a plain lens gets neither — its Probe is pool.Ping and would churn", func(t *testing.T) {
+		spec := lensConsumerSpec(&lens.Rule{
+			ID:   "lns0000000000000003a",
+			Into: lens.IntoConfig{Target: "postgres", Table: "loftspace_listings"},
+		}, "core-kv", filters, "")
+
+		if spec.InitialPause != "" {
+			t.Fatalf("InitialPause = %q, want the zero value — a plain lens drains immediately", spec.InitialPause)
+		}
+		if spec.StructuralProbe {
+			t.Fatal("StructuralProbe = true on a plain lens: a pool.Ping probe passes while the condition holds, which is resume/re-pause churn")
+		}
+	})
+
+	t.Run("a nats_kv lens gets neither", func(t *testing.T) {
+		spec := lensConsumerSpec(&lens.Rule{
+			ID:   "lns0000000000000004a",
+			Into: lens.IntoConfig{Target: "nats_kv", Bucket: "weaver-targets"},
+		}, "core-kv", filters, "")
+
+		if spec.InitialPause != "" || spec.StructuralProbe {
+			t.Fatalf("nats_kv spec = {InitialPause:%q StructuralProbe:%v}, want {\"\" false}", spec.InitialPause, spec.StructuralProbe)
+		}
+	})
+
+	// The rest of the spec is carried through unchanged — the extraction moved
+	// the literal, it did not re-decide anything in it.
+	t.Run("the surrounding spec is unchanged", func(t *testing.T) {
+		spec := lensConsumerSpec(&lens.Rule{
+			ID:   "lns0000000000000005a",
+			Into: lens.IntoConfig{Target: "nats_kv", Bucket: "weaver-targets"},
+		}, "core-kv", filters, "$KV.core-kv.>")
+
+		if spec.Name != subjects.LensDurable("lns0000000000000005a") || spec.DeliverGroup != spec.Name {
+			t.Fatalf("durable/queue group = %q/%q", spec.Name, spec.DeliverGroup)
+		}
+		if spec.Stream != subjects.CoreKVStream("core-kv") {
+			t.Fatalf("Stream = %q", spec.Stream)
+		}
+		if spec.DeliverPolicy != substrate.DeliverLastPerSubject {
+			t.Fatalf("DeliverPolicy = %v", spec.DeliverPolicy)
+		}
+		if spec.AckWait != lensAckWait {
+			t.Fatalf("AckWait = %s, want %s", spec.AckWait, lensAckWait)
+		}
+		if len(spec.FilterSubjects) != 1 || spec.FilterSubject != "$KV.core-kv.>" {
+			t.Fatalf("filters = %v / %q", spec.FilterSubjects, spec.FilterSubject)
+		}
+	})
 }

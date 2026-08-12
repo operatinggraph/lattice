@@ -87,6 +87,27 @@ type HealthSink interface {
 	Load(ctx context.Context) (HealthStatus, PauseReason, error)
 }
 
+// StructuralRecoveryAnnouncer is the optional half of HealthSink. A health
+// implementation that satisfies it is told when a structural pause cleared
+// because the consumer's own Probe adjudicated the condition, with no operator
+// involved — the one recovery a health entry cannot otherwise distinguish from
+// a human having fixed it. Implementations that do not satisfy it are told
+// nothing and behave identically.
+//
+// cause is the diagnosis the pause was carrying; attempts is which self-heal
+// attempt lifted it, counting from 1. The supervisor calls it exactly once per
+// recovery, immediately before the pump resumes projecting — after every gate,
+// including a re-run InitialPause verification, has cleared. An error is logged
+// and never fatal, like every other sink call.
+//
+// cause is EMPTY for a pause restored from a previous process: Load returns the
+// status and reason and never the recorded cause, so the supervisor has no
+// diagnosis in memory for a pause it did not itself enter. An implementation
+// that wants the string there reads its own persisted entry, which it owns.
+type StructuralRecoveryAnnouncer interface {
+	RecordStructuralAutoRecovery(ctx context.Context, cause string, attempts int) error
+}
+
 // SupervisedHandler processes one delivered message and returns an ack Decision
 // plus an optional error. The two channels are orthogonal:
 //
@@ -96,10 +117,13 @@ type HealthSink interface {
 //     Deferred disposition (the retry-queue case) is modelled by returning Ack
 //     after the handler has taken ownership of the eventual write.
 //   - A non-nil error is routed through the spec's Classify hook. ClassInfra and
-//     ClassStructural pause the pump and leave the message UN-acked / UN-naked so
-//     JetStream redelivers it when the pump resumes (mirrors the pipeline's "do
-//     NOT ack/nak on infra/structural" contract). ClassTransient and ClassTerminal
-//     fall back to the returned Decision.
+//     ClassStructural pause the pump and leave the message UN-acked so JetStream
+//     redelivers it when the pump resumes (mirrors the pipeline's "do NOT ack on
+//     infra/structural" contract). It is also left un-naked, so redelivery waits
+//     out AckWait — except a ClassStructural failure on a StructuralProbe
+//     consumer, which is Nak'd with a delay to bring the retest forward to the
+//     probe's own cadence. ClassTransient and ClassTerminal fall back to the
+//     returned Decision.
 //
 // The handler MUST be idempotent: at-least-once delivery means the same message
 // can arrive again after a Nak, a pause/resume, or a crash-before-ack.
@@ -113,6 +137,11 @@ type ClassifyFunc func(err error) FailureClass
 // returns nil when healthy. A probe error that Classify maps to ClassStructural
 // escalates the pump from PauseInfra to PauseStructural. A nil ProbeFunc makes
 // an infra pause behave like a structural one (no automatic recovery).
+//
+// A spec that also sets StructuralProbe puts the same hook in charge of a
+// structural pause, where a pass clears the pause and a structural error means
+// the condition simply still holds — there being no tier above structural to
+// escalate to.
 type ProbeFunc func(ctx context.Context) error
 
 // ConsumerSpec is the full, caller-supplied description of one supervised
@@ -180,6 +209,25 @@ type ConsumerSpec struct {
 	// Probe checks infra-recovery during a probe loop (optional; nil = no
 	// automatic recovery from an infra pause).
 	Probe ProbeFunc
+	// StructuralProbe lets a structural-only pause run the recovery probe loop
+	// instead of blocking until an operator Resume. Set it ONLY when Probe
+	// adjudicates the same condition Classify calls structural for this consumer —
+	// a probe that can pass while the condition holds produces resume/re-pause
+	// churn instead of recovery. Omission keeps the operator-only behaviour.
+	//
+	// Self-healing is bounded: structuralRelapseLimit consecutive structural
+	// pauses that each followed a probe-driven resume latch the pump into the
+	// operator-only behaviour for the rest of the worker's life. It also changes
+	// the disposition of the message that failed structurally — see processMsg.
+	//
+	// Not supported with Workers > 1: the relapse count and the latch are
+	// per-worker, so N workers would give one durable N independent self-healing
+	// budgets and announce a recovery apiece.
+	//
+	// Set it at Add. Changing it through UpdateSpec reaches the message path and
+	// the pause path at different moments, because they sample the spec
+	// separately (drain reads the updated one, waitWhilePaused the one Add saw).
+	StructuralProbe bool
 	// InitialPause, when non-empty, seeds the pump's pause set at activation
 	// (before its first drain) on a fresh start — i.e. when restoreState found no
 	// persisted paused state. The zero value (unpaused) is every existing

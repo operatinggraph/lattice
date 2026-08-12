@@ -232,4 +232,30 @@ type Entry struct {
 	// that happened to hold: a lens can be both non-exhaustive and over the
 	// label cap, and the reason is the one that decided the outcome.
 	FilterBroadReason string `json:"filterBroadReason,omitempty"`
+	// StructuralAutoRecoveredAt is when this lens last cleared a STRUCTURAL
+	// pause without an operator — its own probe re-verified the condition the
+	// pause was raised on and the consumer resumed. RFC3339 UTC; "" for a lens
+	// that has never self-healed, which is the whole corpus until one does.
+	//
+	// A timestamp rather than a flag because the recovery is an EVENT and the
+	// entry it lands on reads `active` like any other: only the age of this
+	// stamp separates "healed a moment ago" from "healed last week", and a
+	// reader that wants to alert on the former needs the difference.
+	StructuralAutoRecoveredAt string `json:"structuralAutoRecoveredAt,omitempty"`
+	// StructuralAutoRecoveredCause is the diagnosis the pause was carrying when
+	// it cleared — the lastError an operator would have read while the lens was
+	// dark, kept after the pause itself is gone. It is what decides whether
+	// anything is still owed: the pause's own backlog replays on resume, so a
+	// cause an operator fixed in the schema costs nothing, while one cleared by
+	// re-provisioning or restoring the target left every earlier row
+	// unreplayable and owes a full rebuild. Nothing else survives the recovery
+	// to tell those apart.
+	StructuralAutoRecoveredCause string `json:"structuralAutoRecoveredCause,omitempty"`
+	// StructuralAutoRecoveryAttempts is which self-heal attempt lifted the
+	// pause, counting from 1. It is the lens's distance from the consumer's
+	// relapse latch, which stops probing altogether once a run of self-heals has
+	// each failed to hold — so a recovery reported at 1 healed cleanly, and one
+	// reported near the limit is a lens flapping, whose next relapse hands
+	// control back to a human.
+	StructuralAutoRecoveryAttempts int `json:"structuralAutoRecoveryAttempts,omitempty"`
 }
