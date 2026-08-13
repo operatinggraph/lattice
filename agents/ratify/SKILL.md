@@ -68,7 +68,17 @@ redirect / probe). `AskUserQuestion` is acceptable only for a genuinely orthogon
 
 Headline = **clickable design-doc link** (so he never has to dig in the repo). Then: two-line
 what-it-does · DD verdict (what you verified, what you corrected — with file:line) · the
-decision(s)/fork(s) crisply with your recommendation · fire plan after standing-rule collapse. If a block/product question needs another lens, run **vertical-po /
+decision(s)/fork(s) crisply with your recommendation · fire plan after standing-rule collapse.
+
+**Fork altitude — adjudicate implementation-level forks YOURSELF; only Andrew-altitude forks reach him**
+(Andrew, 2026-08-13, after the plain-lens detection-vs-repair fork was escalated: *"this looks like
+implementation detail I need not to be involved in"*). The test is the standing escalation doctrine:
+a fork is Andrew's when it is **product judgement** (what a capability is *for* — e.g. "may a
+non-package op be grantable"), **frozen-contract**, **final-architecture**, or **scope/capacity**
+("build now vs shelve"). A fork that is mechanism selection inside one component — which licence
+conjunct, which index shape, which entry point — is Winston's: decide it in the presentation, record
+the decision in the banner as your adjudication, and do not put it in the ask. A design doc whose
+"fork for Andrew" section is implementation-level gets the fork resolved during DD, not forwarded. If a block/product question needs another lens, run **vertical-po /
 fe-engineer / owner as READ-ONLY analysis sub-agents** (no builds, no commits, no filing) and fold their
 findings. Answer Andrew's probes by GROUNDING (read the code/vault), never by defending the draft —
 when he pushes back, re-derive from "what does it need".

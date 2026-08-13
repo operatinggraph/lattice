@@ -1,6 +1,16 @@
 # A plain lens's neighbour event derives its affected anchors
 
-**Status: 📐 awaiting-Andrew (ratification).** Board row: *[Refractor] A plain lens's neighbour event
+**Status: ✅ RATIFIED — 2026-08-13.** Presented to Andrew; the §9.1 fork was adjudicated by **Winston**
+under the standing escalation doctrine (only frozen-contract / final-architecture forks are Andrew's —
+this one is a Refractor licensing mechanism, auth plane excluded under both branches, fail-closed with an
+alarm): **Option A — detection is a sufficient licence.** Narrowing is licensed on an enrolled Auditor +
+the §5 conjuncts; Increment 5 (the `retained`-class repair) stays un-built behind
+`lens-projection-divergence-audit-design.md` §8.1's own trigger (a sustained non-zero `retained` count,
+which Inc 4 is what first produces). **Sequencing:** Incs 1+2 (one fire, shadow) buildable now; Inc 3+
+behind the divergence design's Fire 2 (the Auditor — ratified, unbuilt, `📋 ready` on the board).
+DD folded at ratification: `executor.go` pin drift from `59441252` noted in §15 (mechanisms re-verified
+intact); Phase 0 re-pins against merged `main`.
+Board row: *[Refractor] A plain lens's neighbour event
 recomputes its whole row set* (★★, L) — `_bmad-output/planning-artifacts/backlog/lattice.md`.
 
 **Frozen contracts: no change proposed.** Nothing here needs an edit to `docs/contracts/*`; §7 states why,
@@ -18,8 +28,9 @@ root, alongside the `$actorKey` anchor it already has), so the shipped affected-
 anchors this neighbour event can move* and the pipeline runs that many seeded evaluations instead of one
 whole-corpus rescan. For the named victim, `clinicProviders`, it is **N + 1 → 1**.
 
-**The one fork, and it is a platform-posture question, not a mechanism one: is DETECTION a sufficient
-licence to narrow, where the actor-aware arm required REPAIR?** Narrowing removes an *accidental* healer —
+**The one fork — RESOLVED at ratification (Winston, 2026-08-13): Option A, detection is a sufficient
+licence.** The question as originally framed: is DETECTION a sufficient licence to narrow, where the
+actor-aware arm required REPAIR? Narrowing removes an *accidental* healer —
 today every neighbour event re-evaluates the lens's whole row set, so a row that drifted gets silently
 re-written the next time any neighbour moves. The ratified actor-aware precedent refuses to narrow a lens
 with no **standing healer** (`anchor_derivation_mode.go:224-226` — *"A lens with no installed plan must not
@@ -350,7 +361,7 @@ consumers are named (`duplicateCandidates`, `identityCredentialBindingsRead`). B
 because the consumer is nameable and the fix is a call-site change. Sequenced after 4a so the flip and this
 correction are separately attributable in the measurement.
 
-### 4.5 Increment 5 — the `retained`-class repair, only if Andrew rules for it
+### 4.5 Increment 5 — the `retained`-class repair, deferred behind its own trigger (fork resolved: not pre-built)
 
 Not built by default. §9.1 states the case and recommends against pre-building it: the trigger
 `lens-projection-divergence-audit-design.md` §8.1 wrote for its own deferred repair — *a plain lens reporting
@@ -691,7 +702,7 @@ licence consumes. Increments 1–2 do not depend on it and may be built first.
 | **3** | The licence (§5): closure, `RowReader`, `ReferencesParam`, secure, **and threading `projection.IsAuthPlane` onto the plain pipeline** so its conjunct can fire. Tests install through activation. Still not acting | ✅ | No |
 | **4a** | Flip to `act`; §6's zero-row probe; the four e2es; the measured before/after | ✅ | **Yes** — full review depth |
 | **4b** | The seeded branch's multi-position gap (§4.4), two named live lenses | ✅ | **Yes** — full review depth |
-| **5** | The `retained`-class repair, **only on Andrew's ratification of the fork** | ✅ | **Yes** — full review depth |
+| **5** | The `retained`-class repair — **fork resolved: not pre-built**; revives on §8.1's own trigger (a sustained non-zero `retained` count) | ✅ | **Yes** — full review depth |
 
 Increments 1+2 are deliberately one fire: Increment 1 alone realizes nothing but a census (the
 dead-scaffolding test), while paired with the shadow consumer it produces the measurement the rest is
@@ -724,8 +735,8 @@ against merged `main` at admit rather than trusting this sentence.
 ## 14. Pre-build gate
 
 This design self-flags **no** deferred gate. The adversarial pass §15 records was run **during** this fire and
-its findings are folded in below; the design is build-ready on ratification, subject only to Andrew's ruling
-on the §9.1 fork (which gates Increment 5 alone).
+its findings are folded in below; the design is build-ready — the §9.1 fork was resolved at ratification
+(Option A; it gated Increment 5 alone, which stays deferred behind its own trigger).
 
 ## 15. Adversarial pass
 
@@ -754,5 +765,12 @@ had not checked; `walkToAnchors`' non-expansion soundness under a root terminus,
 same-label patterns, self-hops and equal-distance seeds; §9.2's rejection of widening `Anchor`; §10's
 lifetime claims; and every conjunct of the `clinicProviders` payoff trace.
 
-A separate mechanical pass verified all 30+ `file:line` citations against HEAD; two were corrected
+A separate mechanical pass verified all 30+ `file:line` citations against HEAD; two were corrected.
+
+> **Pin drift, 2026-08-13 (ratification DD):** the branch-decomposition commit `59441252` landed in
+> `full/executor.go` three hours after this design was saved, shifting its `executor.go` line pins by
+> ~+126 (e.g. the whole-bucket listing seam `:724-725` → `:850`; `pointCandidate` `:679-681` → `:897`).
+> The mechanisms were re-verified intact at the new locations; `hopindex.go`, `anchor_derivation*.go`,
+> `reproject.go`, `plan.go` and `anchor_delete.go` pins are unmoved. The build's Phase 0 re-pins
+> `executor.go` citations against merged `main`, exactly as §12's contention note already instructs.
 (`plan.go:82` → `:94-96`, and a comment/code off-by-one).

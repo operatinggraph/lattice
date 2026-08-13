@@ -798,6 +798,12 @@ greenfield redesign. Cover, as the feature warrants:
     population mid-draft, re-ask whether the mechanism still clears the bar). Where the design hedges with an "interim/fallback," **check
     whether a stronger committed stance is cleaner** before defaulting to optionality or incrementalism —
     especially on the security plane, where a forgeable interim that gets reworked is worse than doing it once.
+  - **A "fork for Andrew" section is reserved for Andrew-altitude questions** — product judgement (what
+    a capability is *for*), frozen-contract, final-architecture, or scope/capacity. A mechanism-level
+    fork (which licence conjunct, which index shape, which entry point) is resolved IN the design with
+    grounded reasoning and a decision, not forwarded (Andrew, 2026-08-13: an escalated
+    detection-vs-repair licensing fork — auth plane excluded under both branches — drew *"implementation
+    detail I need not to be involved in"*).
   - **A handed-down FORK may be a false fork — before you weigh the branches, check whether they all
     need the same missing primitive.** When a build note, a prior design, or your own earlier turn hands
     you "direction 1 vs direction 2", the framing has already assumed each branch *would work*. Test that
