@@ -81,6 +81,38 @@ designator; it retains only its anti-brick meaning (the step-8 update/tombstone 
 - **Absent `rbac-domain`**, the derivation degrades to `cap.<actor>` for all actors (floor only;
   ordinary actors deny by absence).
 
+**Grant provenance — a permission vertex declares its origin, and origin bounds what it may confer
+(grant-provenance-runtime-permission-minting-design.md).** The contract-contribution model above governs
+who *projects* a grant; this clause governs who may *author* one. Every `vtx.permission.<id>` carries
+`data.origin`: **`package`** when minted by the installer (deterministic id
+`entityNanoID(packageName, permTag(operationType, scope))`, declared in the package's manifest, retracted
+by `UninstallPackage`, and additionally carrying `data.declaredBy`), or **`runtime`** when minted by an
+operation. `capabilityRoles` projects `origin` onto each `platformPermissions` entry (§6.4).
+
+Three rules follow, all fail-closed:
+
+1. **Origin is write-once.** No granted operation may rewrite a permission vertex's `data`. A vertex whose
+   body can be re-targeted after authoring carries no reliable origin, so the platform grants no
+   body-rewriting operation on the permission class; the `lint-package-standard` grant-authoring gate
+   default-denies any package that grants one.
+2. **An absent `origin` reads as `runtime`.** Omission never confers the broader treatment — a vertex
+   predating this clause, or one whose stamp was forgotten, is governed rather than exempted.
+3. **A `runtime`-origin entry may never confer a core-reserved operationType.** The reserved set is a
+   Processor constant (core owns the policy, mirroring `privilegedLaneAllowlist` below); step 3 refuses
+   such an entry, **continues the scan** so a `package`-origin entry for the same operationType still
+   authorizes, and raises a Health issue (Contract #5 §5.5 alert convention). A **package** MAY grant a
+   reserved operationType — that is the explicit, manifest-recorded, uninstallable deployment decision the
+   reservation exists to force.
+
+The **one core-owned exception** to origin is the primordial anchor's literal grant set (§6.1 above),
+which is seeded rather than authored. Any future runtime grant channel MUST stamp origin and MUST enforce
+that a grant cannot exceed the granting actor's own held scope (the `validateGrantArtifact` precedent).
+
+*Transitional: the origin stamps, the §6.4 `origin` projection, and the step-3 reserved-set refusal land
+with the grant-provenance design's Inc 3 (behind the upgrade-un-tombstone prerequisite and Inc 1's
+`UpdatePermission` withdrawal, which establishes rule 1's write-once precondition). Until Inc 3 lands this
+clause is the build-to target; this note dies with that increment.*
+
 **Privileged lanes are core-policy-owned, not anchor-exclusive (scoped-privileged-lane-grants-design.md,
 mechanism C1).** A `cap.roles.<actor>` entry MAY carry a privileged (`meta`/`urgent`/`system`) per-op
 `lanes` value (§6.4) — honored **only** when `{operationType, lane}` is on the core-owned allowlist (a

@@ -1,8 +1,19 @@
 # Grant provenance — closing the runtime permission-minting channel
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer: Winston (architect) · 2026-08-11
+**Status: ✅ RATIFIED — Branch A (grantable, with provenance)** · Andrew, 2026-08-13 ·
+**low priority** — build after higher-priority ratified work · Designer: Winston (architect) · 2026-08-11
+
+**Ratification record.** §5.4 resolved: **Branch A** — an op authored outside the package plane stays
+grantable via `CreatePermission`+`GrantPermission`, stamped `data.origin: "runtime"`; the core reserved
+set refuses runtime-origin grants of reserved verbs while a package manifest may still grant them.
+The Contract #6 §6.1 provenance clause **committed at ratification** with a transitional note (the note
+dies with Inc 3). Fire order unchanged and binding: un-tombstone prerequisite (§9 row 1) → Inc 1+2 →
+Inc 3. DD corrections folded 2026-08-13 pre-ratification: the prerequisite re-pinned to the
+surviving-key arm (`upgrade.go:324-331` via `build.go:1006`, `step8_commit.go:435-439`; the re-add arm
+revives by design), and census C4 corrected seven→nine specs.
+
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Security & trust boundary* →
-"[rbac] Any `operator` can self-grant the verb no package grants them".
+"[rbac] A second grant channel mints capability grants outside the package plane".
 Named demand: `packages/privacy-base/permissions.go:59-67` — the maintainers' own filed obligation.
 
 ---
@@ -38,26 +49,26 @@ op — so this channel is the *only* route to grant an ad-hoc op to anyone. With
 have broken a required gate and removed a capability with no replacement. My own census caused this: it
 filtered `_test.go`, and that exclusion was doing the load-bearing work (§8 C1, corrected).
 
-**The one architectural fork for you — §5.4.** Should an operationType authored outside the package
-plane (via `CreateMetaVertex`) be grantable at all? **My recommendation: yes, with provenance** — it
-preserves the tutorial and the exploratory path, and provenance turns the ungoverned channel into a
-governed one. The alternative (ad-hoc ops become permanently ungrantable, tutorial rewritten onto
-packages) is cleaner in principle and cheaper to build, but it deletes a working capability to close an
-*audit* gap that provenance closes without loss. Your call.
+**The one architectural fork — §5.4, RESOLVED: Branch A (Andrew, 2026-08-13).** Should an operationType
+authored outside the package plane (via `CreateMetaVertex`) be grantable at all? **Yes, with
+provenance** — it preserves the tutorial and the exploratory path, and provenance turns the ungoverned
+channel into a governed one. The alternative (ad-hoc ops become permanently ungrantable, tutorial
+rewritten onto packages) was cleaner in principle and cheaper to build, but it deletes a working
+capability to close an *audit* gap that provenance closes without loss.
 
-**One frozen-contract edit, staged UNCOMMITTED** — see below.
+**One frozen-contract edit — committed at ratification** (Contract #6 §6.1, with a transitional note
+until Inc 3 lands the enforcement) — see §9.
 
 **No architectural fork.** The one fork I expected — "is `operator`-can-make-`operator` an escalation?" —
 was already settled: **`root-identity-designation-design.md` Fork A (ratified 2026-07-02)** established
 root = `holdsRole → operator` topology and that *"you must already be root to grant root."* I am not
 reopening it, and this design does **not** touch `AssignRole`, `CreateRole`, or the role plane (§5.2).
 
-**Frozen-contract edit, staged UNCOMMITTED** — `docs/contracts/06-capability-kv.md` §6.1: a short
+**Frozen-contract edit — committed at ratification** — `docs/contracts/06-capability-kv.md` §6.1: a short
 normative clause requiring every permission vertex to carry its **origin**, and reserving to core the
-policy of which operationTypes a *runtime-provenanced* grant may never confer. §6.1 today specifies who
-*projects* grants but is silent on who may *author* them, which is the gap this whole item lives in. Diff
-is in `main`, unstaged, for your review. (Two unrelated contract edits from prior designs were already in
-the tree; I left them untouched.)
+policy of which operationTypes a *runtime-provenanced* grant may never confer. §6.1 previously specified
+who *projects* grants but was silent on who may *author* them, which is the gap this whole item lives in.
+The clause carries a transitional note (build lands with Inc 3; the note dies with it).
 
 **Also worth your attention (§5.1, found by the adversarial pass):** a deliberate `RevokePermission`
 against a **package-installed** grant is **not durable** — the next routine `lattice-pkg` upgrade or
@@ -308,11 +319,15 @@ literal grant set, and `SystemActorKeys`' predicate — all Fork A's ratified mo
 a grant without an uninstall.
 
 **The retraction they provide is not durable, and that is a real defect — just not this design's.** The
-adversarial pass traced it: for a key present in **both** the old and new declared sets,
-`internal/pkgmgr/upgrade.go:292-332` emits an **`update`** when the committed doc differs from the rebuilt
-one — and a tombstoned doc always differs. Step 8's update arm (`internal/processor/step8_commit.go:407-447`)
-has **no aliveness guard**, so the update silently un-tombstones. Permission keys are version-independent
-(`installer.go:411-420`, `:473-481`), so the condition holds forever. **Net: a deliberately revoked
+adversarial pass traced it, and a later scout re-pinned the arm: for a key present in **both** the old and
+new declared sets, the **surviving-key** arm (`internal/pkgmgr/upgrade.go:324-331`) emits an **`update`**
+when the committed doc differs from the rebuilt one — and it differs *because* `docLink` stamps
+`isDeleted:false` explicitly (`build.go:1006`), which `logicalDocEqual` (comparing only the fields the NEW
+document carries) sees diverge from the tombstone. Step 8's update arm
+(`internal/processor/step8_commit.go:435-439`) has **no aliveness guard**, so the update silently
+un-tombstones. (The nearby re-add arm, `upgrade.go:298-315` — a package dropping an entity and adding it
+back — revives **by design**, with a test asserting it; the bug is only the surviving-key arm.) Permission
+keys are version-independent (`installer.go:411-420`, `:473-481`), so the condition holds forever. **Net: a deliberately revoked
 package grant is silently restored by the next `lattice-pkg` upgrade or `make reinstall-package`
 (`Makefile:1496-1501`)** — no `GrantPermission` call, no restoration event.
 
@@ -343,12 +358,13 @@ Yes, and it is the fork in §5.4: *withdraw `CreatePermission`/`GrantPermission`
 tutorial onto packages.* It is cheaper (no lens change, no step-3 change, no contract clause about
 origin) and it yields a stronger one-sentence invariant. It loses on capability, not on cost — see §5.4.
 
-### 5.4 The fork for Andrew — may an op authored outside the package plane be granted at all?
+### 5.4 The fork — may an op authored outside the package plane be granted at all? RESOLVED: Branch A
 
-The two branches are coherent end-states, and the choice is a product judgement about what
-`CreateMetaVertex` is *for*, which is why it is yours rather than mine.
+**Resolved by Andrew at ratification, 2026-08-13: Branch A.** The two branches were coherent end-states,
+and the choice was a product judgement about what `CreateMetaVertex` is *for*. Branch B is recorded below
+as the rejected alternative.
 
-**Branch A — grantable, with provenance (recommended; this design).** Ad-hoc DDL authoring stays a real
+**Branch A — grantable, with provenance (ratified; this design).** Ad-hoc DDL authoring stays a real
 capability: author with `CreateMetaVertex`, grant with `CreatePermission`+`GrantPermission`, and the grant
 is now marked `origin: runtime`, visible to the auditor and refusable for reserved verbs. Tutorial and the
 NFR-P3 probe survive untouched. Cost: the lens projects one more field, step 3 gains one check, and the
@@ -356,17 +372,16 @@ contract gains a clause. **Why I prefer it:** the audit gap is closed *without* 
 capability, and the exploratory path — author a type, grant it, try it — is a genuine part of what makes
 the platform pleasant to learn.
 
-**Branch B — not grantable; packages are the only grant surface.** Withdraw all three, rewrite
+**Branch B — not grantable; packages are the only grant surface (rejected).** Withdraw all three, rewrite
 hello-lattice Milestones 3 and 5 to ship `CreateBook` as a small package, re-home the NFR-P3 probe onto an
 op that already exists, and accept that `CreateMetaVertex`-authored ops are authorable-but-uninvokable.
 The invariant becomes a single sentence with no exceptions, which is worth real money on a security plane.
 Cost: a working capability is deleted, and the tutorial's "here is how you grant a capability" lesson
 becomes "install a package," which is correct but a heavier first experience.
 
-**What does not change either way:** Move 1 (withdraw `UpdatePermission`) is right under both branches —
-it is uncalled under both, and under Branch B it is simply included in the withdrawal. **If you pick B,
-Moves 2–3 fall away** and the design collapses back to a scoped version of my first draft, with the
-hello-lattice rework as its real cost. Inc 1 is written so it is common to both (§7).
+**What did not depend on the fork:** Move 1 (withdraw `UpdatePermission`) was right under both branches —
+it is uncalled under both. With Branch A ratified, Moves 2–3 proceed as specified; Inc 1 was written
+branch-independent (§7) and stays as written.
 
 ---
 
@@ -422,10 +437,10 @@ literal** — the same reason C2 resolves helper-built specs by hand rather than
 
 ## 7. Decomposition for the Steward
 
-Three increments plus a **prerequisite**. Inc 1 and Inc 2 are common to both branches of §5.4 and can be
-built before Andrew picks; **Inc 3 is Branch-A-only** and must not start until he does. Inc 1 and Inc 3
-change an authorization surface and take the **full review pass**; Inc 2 is a lint gate at the Steward's
-normal sizing (`agents/steward/SKILL.md` §4).
+Three increments plus a **prerequisite**. Inc 1 and Inc 2 are branch-independent; **Inc 3 is the
+Branch-A enforcement, unblocked by the 2026-08-13 ratification**. Inc 1 and Inc 3 change an
+authorization surface and take the **full review pass**; Inc 2 is a lint gate at the Steward's normal
+sizing (`agents/steward/SKILL.md` §4).
 
 > **Prerequisite (§9 row 1, `seq:` before Inc 1) — fix the tombstone-revive on package upgrade.** Inc 1
 > ships a mandatory version bump, and an upgrade currently un-tombstones any surviving key an operator
@@ -464,10 +479,10 @@ plus its unit test. The test needs a **positive vector first**: a fixture `Defin
 through the indirection that defeats a source scan; the same spec with the sanction declaration must PASS.
 A literal-only fixture would let a text-scanning implementation pass the test vacuously. No new CI wiring.
 
-### Increment 3 — provenance + the reserved set *(Branch A only; posture-changing: full review pass)*
+### Increment 3 — provenance + the reserved set *(posture-changing: full review pass)*
 
-Do not start before Andrew resolves §5.4. Three sub-steps, in order, because each is the next one's
-precondition:
+§5.4 resolved (Branch A, 2026-08-13) — this increment is unblocked once the prerequisite and Inc 1 land.
+Three sub-steps, in order, because each is the next one's precondition:
 
 1. **Stamp origin.** `CreatePermission` writes `data.origin: "runtime"`
    (`packages/rbac-domain/ddls.go:306-322`); `internal/pkgmgr/build.go:357-368` writes
@@ -544,32 +559,36 @@ Core KV `vtx.permission.*` and compares against a manifest, other than
 grep -rn "vtx.permission" --include="*.go" internal/ scripts/ | grep -v "_test.go"
 ```
 
-**C4 (pins Inc 1) — after the change, exactly seven specs.** A package test, not a grep:
-`len(Permissions()) == 7` and the set contains none of the three withdrawn ops.
+**C4 (pins Inc 1) — after the change, exactly nine specs.** A package test, not a grep:
+`len(Permissions()) == 9` and the set does not contain `UpdatePermission`. (An earlier draft of this
+census expected seven — a residue of the falsified withdraw-all-three shape; nine is Inc 1's number.)
 
 ---
 
 ## 9. Contract surface, board, and spawned rows
 
-**Frozen-contract edit — `docs/contracts/06-capability-kv.md` §6.1, staged UNCOMMITTED in `main`.**
-§6.1 specifies who *projects* grants ("core owns the bucket + the step-3 reader; packages project the
-grant types they own") but is silent on who may *author* the permission vertices those projections walk —
-the exact gap this item occupies. The edit adds one short normative paragraph carrying the §6 invariant:
-origin is declared and write-once, origin decides what may be conferred, and any future runtime grant
-channel must also enforce `requesterHolds`. Affected consumers: `rbac-domain` (Inc 1 + Inc 3 step 1), the
-`capabilityRoles` lens (Inc 3 step 2), step 3 (Inc 3 step 3), and the `lint-package-standard` gate.
-**Under Branch B the clause shortens** to the package-only sentence — I will re-stage it if Andrew picks
-B, so the diff he ratifies matches the branch he chooses.
+**Frozen-contract edit — `docs/contracts/06-capability-kv.md` §6.1, committed at ratification
+(2026-08-13), carrying a transitional note until Inc 3 lands.** §6.1 previously specified who *projects*
+grants ("core owns the bucket + the step-3 reader; packages project the grant types they own") but was
+silent on who may *author* the permission vertices those projections walk — the exact gap this item
+occupies. The edit adds one short normative paragraph carrying the §6 invariant: origin is declared and
+write-once, origin decides what may be conferred, and any future runtime grant channel must also enforce
+`requesterHolds`. Affected consumers: `rbac-domain` (Inc 1 + Inc 3 step 1), the `capabilityRoles` lens
+(Inc 3 step 2), step 3 (Inc 3 step 3), and the `lint-package-standard` gate. Inc 3 removes the
+transitional note and adds the `origin` row to the §6.4 field table.
 
-**Board row** — 📐 awaiting-Andrew pointing here, with the row's own text corrected per §2 (three ops, not
-two; `ShredRetentionClassKey`, not "the shred verbs").
+**Board row** — ✅ ratified Branch A (2026-08-13), low priority per Andrew, `seq:` behind the
+un-tombstone row; row text carries §2's corrections (three ops, not two; `ShredRetentionClassKey`, not
+"the shred verbs").
 
 **Spawned rows** (filed, not folded — each is a different mechanism):
 
 1. **[Pkgmgr] A package upgrade silently un-tombstones a deliberately revoked grant** (§5.2) — the
-   surviving-key branch emits an `update` (`upgrade.go:292-332`) and step 8's update arm has no aliveness
-   guard (`step8_commit.go:407-447`), so `make reinstall-package` or any version bump revives what
-   `RevokePermission` retracted. **`seq:` before Inc 1**, which ships exactly such a bump. ★★ · S–M.
+   surviving-key branch emits an `update` (`upgrade.go:324-331`, via `docLink`'s explicit `isDeleted:false`,
+   `build.go:1006`) and step 8's update arm has no aliveness guard (`step8_commit.go:435-439`), so
+   `make reinstall-package` or any version bump revives what `RevokePermission` retracted. The re-add arm
+   (`:298-315`) revives by design and is not the bug. **`seq:` before Inc 1**, which ships exactly such a
+   bump. ★★ · S–M.
 2. **[Processor] The root actor set is a boot snapshot of a live topology** (§3.3) — four binaries
    snapshot `SystemActorKeys` independently at boot; a newly-granted operator is unread until restart and
    the binaries can disagree. Revocation is fail-closed, so this is grant-latency + cross-binary
@@ -639,7 +658,7 @@ Named here rather than left implicit, because the containment currently reads as
 - **A future admin UI wants runtime granting.** That is now *supported* rather than forbidden — it stamps
   `origin: runtime`, inherits the reserved-set refusal, and per the contract clause must also enforce
   `requesterHolds`. This is a strictly better position than Branch B leaves us in.
-- **Branch B's risk, if Andrew picks it:** hello-lattice Milestones 3 and 5 plus the NFR-P3 probe must be
-  re-authored, and the probe in particular depends on minting a *fresh uncached* operationType per
-  iteration — re-homing it onto a package-declared op changes what it measures. That rework is the real
-  cost of B and should be scoped before choosing it.
+- **Branch B's risk (moot — B rejected at ratification):** hello-lattice Milestones 3 and 5 plus the
+  NFR-P3 probe would have needed re-authoring, and the probe in particular depends on minting a *fresh
+  uncached* operationType per iteration — re-homing it onto a package-declared op changes what it
+  measures. That rework was the real cost of B, and part of why A won.
