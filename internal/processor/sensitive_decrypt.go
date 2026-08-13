@@ -137,7 +137,7 @@ func (t *deferredMissTracker) missed() string {
 // requestID is the minting operation's request ID, bound into the egress
 // marker's MAC (splice-resistance, §3.2); ignored for the non-egress
 // disposition.
-func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket string, ddls *DDLCache, v vault.Vault, doc *VertexDoc, egress bool, tracker *sensitiveReadTracker, requestID string) error {
+func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket string, ddls *DDLCache, v vault.Vault, doc *VertexDoc, egress bool, tracker *sensitiveReadTracker, requestID string, memo *ddlResolutionMemo) error {
 	if ddls == nil || doc == nil {
 		return nil
 	}
@@ -146,7 +146,12 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		resolver.linkReader = &connInstanceOfReader{conn: conn, coreBucket: bucket}
 		resolver.classReader = &connVertexClassReader{conn: conn, coreBucket: bucket}
 	}
-	ref, ok := resolver.resolveGoverningDDL(ctx, doc.Class, doc.Key, substrate.ClassifyKey(doc.Key), ScriptResult{}, HydratedState{})
+	// A committed doc has no in-flight batch or hydrated working set to
+	// consult — only Context.DDLResolutionMemo carries anything here, shared
+	// with the execution's other decrypt-on-read calls (Fire 1 Inc 2b) so
+	// nine reads of nine aspects sharing a walk node resolve it once, not
+	// nine times.
+	ref, ok := resolver.resolveGoverningDDL(ctx, doc.Class, doc.Key, substrate.ClassifyKey(doc.Key), ScriptResult{}, HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}})
 	if !ok || !ref.Sensitive {
 		return nil
 	}

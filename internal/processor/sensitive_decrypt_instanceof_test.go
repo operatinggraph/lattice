@@ -38,7 +38,7 @@ func TestDecryptSensitiveDoc_InstanceOfChainedSensitiveClass_MarksPlaintext(t *t
 		Data:  map[string]interface{}{"value": "123-45-6789"},
 	}
 	tracker := &sensitiveReadTracker{}
-	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1"); err != nil {
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1", nil); err != nil {
 		t.Fatalf("decryptSensitiveDoc: %v", err)
 	}
 	if _, ok := tracker.plaintextKeys[doc.Key]; !ok {
@@ -65,7 +65,7 @@ func TestDecryptSensitiveDoc_UnresolvableClass_NeverMarksPlaintext(t *testing.T)
 		Data:  map[string]interface{}{"value": "plain"},
 	}
 	tracker := &sensitiveReadTracker{}
-	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1"); err != nil {
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1", nil); err != nil {
 		t.Fatalf("decryptSensitiveDoc: %v", err)
 	}
 	if _, ok := tracker.plaintextKeys[doc.Key]; ok {
@@ -115,7 +115,7 @@ func TestDecryptSensitiveDoc_MutualInstanceOfCycle_DoesNotRecurse(t *testing.T) 
 		Data:  map[string]interface{}{"value": "plain"},
 	}
 	tracker := &sensitiveReadTracker{}
-	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1"); err != nil {
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, nil, doc, false, tracker, "req1", nil); err != nil {
 		t.Fatalf("decryptSensitiveDoc: %v", err)
 	}
 	if _, ok := tracker.plaintextKeys[doc.Key]; ok {

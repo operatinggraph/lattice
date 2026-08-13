@@ -412,6 +412,12 @@ type connKVReader struct {
 	egressKeys map[string]struct{}
 	tracker    *sensitiveReadTracker
 	requestID  string
+	// memo is the execution's ddlResolutionMemo (Fire 1 Inc 2b), the same
+	// pointer step 4's own contextHint decrypt calls populate — shared so a
+	// script's lazy kv.Read of a sibling aspect reuses a hydration-time
+	// resolution instead of re-walking. Nil-safe: a reader without one
+	// (most test harnesses) behaves as before.
+	memo *ddlResolutionMemo
 }
 
 // ReadVertex implements ScriptKVReader.
@@ -429,7 +435,7 @@ func (r connKVReader) ReadVertex(ctx context.Context, key string) (*VertexDoc, e
 	}
 	doc.Revision = entry.Revision
 	_, egress := r.egressKeys[key]
-	if err := decryptSensitiveDoc(ctx, r.conn, r.bucket, r.ddls, r.vault, &doc, egress, r.tracker, r.requestID); err != nil {
+	if err := decryptSensitiveDoc(ctx, r.conn, r.bucket, r.ddls, r.vault, &doc, egress, r.tracker, r.requestID, r.memo); err != nil {
 		return nil, err
 	}
 	return &doc, nil

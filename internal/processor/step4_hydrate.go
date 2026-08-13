@@ -282,6 +282,11 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		delete(requiredAbsent, key)
 	}
 	tracker := &sensitiveReadTracker{}
+	// memo backs the execution's governing-DDL resolution (Fire 1 Inc 2b) —
+	// shared by pointer across every decrypt call below AND the script's
+	// later lazy kv.Read seam (connKVReader), so a walk node reached by more
+	// than one declared/lazy read this execution resolves once.
+	memo := &ddlResolutionMemo{}
 	var egressKeys map[string]struct{}
 	for _, key := range readKeys {
 		entry, ok := snapshot[key]
@@ -294,7 +299,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
 		}
 		doc.Revision = entry.Revision
-		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid, memo); err != nil {
 			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 		}
 		markHydrated(key, doc)
@@ -325,7 +330,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
 		}
 		doc.Revision = entry.Revision
-		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid, memo); err != nil {
 			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 		}
 		markHydrated(key, doc)
@@ -370,7 +375,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
 		}
 		doc.Revision = entry.Revision
-		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, true, tracker, rid); err != nil {
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, true, tracker, rid, memo); err != nil {
 			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 		}
 		markHydrated(key, doc)
@@ -399,12 +404,13 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			// Back the script's lazy kv.Read() (§2.5) with a single-key reader
 			// over the same Conn + Core bucket used for hydration. A read of a
 			// key not pre-fetched via contextHint falls through to this.
-			KVReader: connKVReader{conn: h.Conn, bucket: h.CoreBucket, ddls: h.DDLs, vault: h.Vault, egressKeys: egressKeys, tracker: tracker, requestID: rid},
+			KVReader: connKVReader{conn: h.Conn, bucket: h.CoreBucket, ddls: h.DDLs, vault: h.Vault, egressKeys: egressKeys, tracker: tracker, requestID: rid, memo: memo},
 			// Back the script's kv.Links() (§2.5.1) with a bounded link lister
 			// over the same Conn + Core bucket — the op-time set-valued enumeration.
-			LinkLister:     connLinkLister{conn: h.Conn, bucket: h.CoreBucket},
-			SensitiveReads: tracker,
-			LiveReads:      &liveReadBudgetTracker{budget: DefaultLiveReadBudget},
+			LinkLister:        connLinkLister{conn: h.Conn, bucket: h.CoreBucket},
+			SensitiveReads:    tracker,
+			LiveReads:         &liveReadBudgetTracker{budget: DefaultLiveReadBudget},
+			DDLResolutionMemo: memo,
 		},
 	}, nil
 }

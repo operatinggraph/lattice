@@ -665,3 +665,163 @@ func TestConnInstanceOfReader_AgainstCoreKV(t *testing.T) {
 		t.Errorf("target = %q, want %q", edges[0].target, want)
 	}
 }
+
+// --- Fire 1 Inc 2b: ddlResolutionMemo collapses repeat walks within one
+// execution. countingLinkReader fakes instanceOfTargetReader and counts
+// LiveInstanceOfTargets calls PER NODE, so a test can assert a shared
+// intermediate node is only ever asked once.
+
+type countingLinkReader struct {
+	edges map[string][]instanceOfEdge
+	calls map[string]int
+}
+
+func (f *countingLinkReader) LiveInstanceOfTargets(_ context.Context, vtxRoot string, _ *liveReadBudgetTracker) ([]instanceOfEdge, error) {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[vtxRoot]++
+	return f.edges[vtxRoot], nil
+}
+
+func mustNanoID(t *testing.T) string {
+	t.Helper()
+	id, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	return id
+}
+
+// TestDDLResolutionMemo_SharedIntermediateNodeResolvedOnce pins the payoff
+// claim directly: two roots whose walk shares an intermediate node (the
+// self-pay shape — eight distinct transaction aspects all instanceOf the
+// SAME template) resolve that shared node's live read exactly once across
+// two resolutions in one execution, while each root's own (distinct) hop is
+// still read once each. Mutation-verified by hand: a nil memo (today's
+// behavior) makes the shared node's call count 2, not 1.
+func TestDDLResolutionMemo_SharedIntermediateNodeResolvedOnce(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root1, root2, shared, metaID := mustNanoID(t), mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	root1Key := "vtx.widget." + root1
+	root2Key := "vtx.widget." + root2
+	sharedKey := "vtx.widget." + shared
+	seedVertexTypeDDLAs(t, ctx, conn, metaID, "sharedType", `["X"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		root1Key:  {{linkKey: "lnk.widget." + root1 + ".instanceOf.widget." + shared, target: sharedKey}},
+		root2Key:  {{linkKey: "lnk.widget." + root2 + ".instanceOf.widget." + shared, target: sharedKey}},
+		sharedKey: {{linkKey: "lnk.widget." + shared + ".instanceOf.meta." + metaID, target: "vtx.meta." + metaID}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class.a", root1Key, substrate.KindVertex, ScriptResult{}, state)
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class.b", root2Key, substrate.KindVertex, ScriptResult{}, state)
+
+	if !ok1 || ref1.CanonicalName != "sharedType" {
+		t.Fatalf("root1 resolve: ok=%v ref=%+v, want sharedType", ok1, ref1)
+	}
+	if !ok2 || ref2.CanonicalName != "sharedType" {
+		t.Fatalf("root2 resolve: ok=%v ref=%+v, want sharedType", ok2, ref2)
+	}
+	if fake.calls[sharedKey] != 1 {
+		t.Fatalf("calls[shared] = %d, want 1 — the shared intermediate node must resolve once across two walks", fake.calls[sharedKey])
+	}
+	if fake.calls[root1Key] != 1 || fake.calls[root2Key] != 1 {
+		t.Fatalf("calls[root1]=%d calls[root2]=%d, want 1 each — each walk's own distinct first hop is unavoidable", fake.calls[root1Key], fake.calls[root2Key])
+	}
+}
+
+// TestDDLResolutionMemo_SameClassDifferentEdgesResolveDifferently pins that
+// the memo is keyed on the WALK NODE, never the class: two vertices sharing
+// one class but pointing at different instanceOf targets must resolve to
+// DIFFERENT governing DDLs in the same execution — a class-keyed memo would
+// collapse them incorrectly.
+func TestDDLResolutionMemo_SameClassDifferentEdgesResolveDifferently(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	vtxA, vtxB, targetX, targetY := mustNanoID(t), mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	vtxAKey := "vtx.widget." + vtxA
+	vtxBKey := "vtx.widget." + vtxB
+	targetXKey := "vtx.meta." + targetX
+	targetYKey := "vtx.meta." + targetY
+	seedVertexTypeDDLAs(t, ctx, conn, targetX, "typeX", `["X"]`)
+	seedVertexTypeDDLAs(t, ctx, conn, targetY, "typeY", `["Y"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		vtxAKey: {{linkKey: "lnk.widget." + vtxA + ".instanceOf.meta." + targetX, target: targetXKey}},
+		vtxBKey: {{linkKey: "lnk.widget." + vtxB + ".instanceOf.meta." + targetY, target: targetYKey}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: &ddlResolutionMemo{}}}
+
+	refA, okA := resolver.resolveGoverningDDL(ctx, "shared.class", vtxAKey, substrate.KindVertex, ScriptResult{}, state)
+	refB, okB := resolver.resolveGoverningDDL(ctx, "shared.class", vtxBKey, substrate.KindVertex, ScriptResult{}, state)
+
+	if !okA || refA.CanonicalName != "typeX" {
+		t.Fatalf("vtxA (shared.class) resolve: ok=%v ref=%+v, want typeX", okA, refA)
+	}
+	if !okB || refB.CanonicalName != "typeY" {
+		t.Fatalf("vtxB (shared.class) resolve: ok=%v ref=%+v, want typeY — must NOT collapse to vtxA's typeX", okB, refB)
+	}
+}
+
+// TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms pins the
+// ordering row: the batch/working-set layers are re-consulted FRESH on
+// every call, memo hit or not. A first resolution warms the memo with a
+// live edge; a second resolution of the SAME node, now carrying a batch
+// mutation that tombstones that exact link, must NOT reuse the warm memo's
+// positive answer — the fresh batchDead exclusion must still apply.
+func TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root, metaID := mustNanoID(t), mustNanoID(t)
+	rootKey := "vtx.widget." + root
+	targetKey := "vtx.meta." + metaID
+	linkKey := "lnk.widget." + root + ".instanceOf.meta." + metaID
+	seedVertexTypeDDLAs(t, ctx, conn, metaID, "typeZ", `["Z"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		rootKey: {{linkKey: linkKey, target: targetKey}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+
+	// First call: no batch, resolves live and warms the memo.
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, ScriptResult{}, state)
+	if !ok1 || ref1.CanonicalName != "typeZ" {
+		t.Fatalf("first resolve: ok=%v ref=%+v, want typeZ", ok1, ref1)
+	}
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] after first resolve = %d, want 1", fake.calls[rootKey])
+	}
+
+	// Second call: SAME node, but the batch now tombstones the very link the
+	// memo cached. The memo must not short-circuit past this.
+	tombstoningBatch := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: linkKey}}}
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoningBatch, state)
+	if ok2 {
+		t.Fatalf("second resolve: ok=%v ref=%+v, want no resolution — the batch tombstone must win even with a warm memo", ok2, ref2)
+	}
+	// The tombstone resolves from the batch layer alone (checked BEFORE the
+	// memo/live layers), so the fake must not be re-consulted.
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] after second resolve = %d, want still 1 — no live re-read needed once the batch names the tombstone", fake.calls[rootKey])
+	}
+}

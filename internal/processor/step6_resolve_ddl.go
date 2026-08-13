@@ -111,6 +111,58 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	return edges, nil
 }
 
+// ddlResolutionMemo caches the on-demand instanceOf-edge answer per walk node
+// within one execution (Fire 1 Inc 2b), collapsing G10's defect: a fresh
+// ddlResolver per read otherwise re-walks the SAME shared nodes (e.g. a
+// template vertex every sibling aspect's chain passes through) once per read.
+//
+// It caches ONLY the live-read layer's raw answer — the edges
+// LiveInstanceOfTargets returned, before any in-flight-batch exclusion —
+// never the batch/working-set layers or the final soleTarget disposition:
+// those are re-derived from THIS call's result.Mutations every time, memo
+// hit or not (instanceOfTargetOf below), so a batch tombstone landing after
+// the memo warms is still honored. Keyed on the walk node (the vertex being
+// asked "what do you point at"), not on the class or the read that started
+// the walk: two vertices of the same class can resolve differently if their
+// own instanceOf edges differ, and the root varies per read (defeating
+// reuse) while an intermediate/terminal node is what siblings actually
+// share.
+//
+// Lifetime: created lazily on the first on-demand resolution in an
+// execution; owned by ScriptContext (never the resolver, which may outlive
+// one execution); never reset within an execution; never carried across
+// executions, a redelivery, or a derive_reads pre-pass into the main pass —
+// one ScriptContext, one memo, it dies with the context. Nil-safe = "no
+// memoization", the same convention as liveReadBudgetTracker.
+type ddlResolutionMemo struct {
+	edges map[string][]instanceOfEdge
+}
+
+// get returns the memoized live-read edges for vtxRoot and whether this
+// execution has already resolved that node on-demand — found=false means
+// "never asked Core KV this execution", NOT "asked and got nothing" (that is
+// found=true with a nil/empty slice, a memoized negative).
+func (m *ddlResolutionMemo) get(vtxRoot string) (edges []instanceOfEdge, found bool) {
+	if m == nil {
+		return nil, false
+	}
+	edges, found = m.edges[vtxRoot]
+	return edges, found
+}
+
+// set records vtxRoot's live-read edges, including nil/empty (a node with no
+// live instanceOf link), so a later hop that reaches the same node this
+// execution does not re-pay the round trip.
+func (m *ddlResolutionMemo) set(vtxRoot string, edges []instanceOfEdge) {
+	if m == nil {
+		return
+	}
+	if m.edges == nil {
+		m.edges = make(map[string][]instanceOfEdge)
+	}
+	m.edges[vtxRoot] = edges
+}
+
 // ddlResolver carries the DDL cache + the on-demand instanceOf reader behind
 // the shared governing-DDL resolution below. Step 6 (ValidatorImpl embeds
 // one), step 6.5's encrypt, and decrypt-on-read each hold their own
@@ -286,6 +338,17 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 	if edges := workingSetInstanceOfEdges(vtxRoot, state.Context.Hydrated, batchDead); len(edges) > 0 {
 		return soleTarget(edges)
 	}
+	// Fire 1 Inc 2b: a memo hit skips ONLY the Core KV round trip below — the
+	// batch/working-set layers above already ran fresh for THIS call, and the
+	// batchDead exclusion below re-runs against THIS call's batch too, so a
+	// tombstone the batch adds after the memo warms is still honored.
+	memo := state.Context.DDLResolutionMemo
+	if edges, found := memo.get(vtxRoot); found {
+		if edges = excludeDead(edges, batchDead); len(edges) > 0 {
+			return soleTarget(edges)
+		}
+		return "", false
+	}
 	if r.linkReader != nil {
 		edges, err := r.linkReader.LiveInstanceOfTargets(ctx, vtxRoot, state.Context.LiveReads)
 		if err != nil {
@@ -293,12 +356,18 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 			// DDL on a read fault. A read error degrades to today's behavior.
 			// The fault is RECORDED, not acted on, so a caller that cannot
 			// tolerate a degraded resolution (step 6.5) can tell this apart
-			// from a genuine "no DDL".
+			// from a genuine "no DDL". NOT memoized: a transient fault must
+			// not calcify into a permanent negative for the rest of the
+			// execution — the next hop that reaches vtxRoot should retry.
 			recordResolveFault(fault, err)
 			r.logger().Warn("step 6: instanceOf on-demand read failed; resolving to permissive default",
 				"vtxRoot", vtxRoot, "error", err)
 			return "", false
 		}
+		// Memoize the RAW read (pre-exclusion) — the answer Core KV gave for
+		// this node — not the post-batchDead disposition, so a later call
+		// with a different batch still filters correctly against its own.
+		memo.set(vtxRoot, edges)
 		if edges = excludeDead(edges, batchDead); len(edges) > 0 {
 			return soleTarget(edges)
 		}
