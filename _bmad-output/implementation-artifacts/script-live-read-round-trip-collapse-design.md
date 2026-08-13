@@ -495,3 +495,76 @@ None. The one fork (§8.1) was resolved with a live measurement and ratified as 
 question (§7/§5 Fire 3) is resolved against G17–G18; the increment ordering has a Phase-0 gate that cannot
 change the increments themselves. Ratified 2026-08-13 — Fire 1 build-ready, Fires 2–3 shelved with named
 revive triggers (see the status banner).
+
+### Fire 1 fire brief (build note, 2026-08-13)
+
+**Scope sentence (verbatim, §5 Fire 1):** Inc 1 batched page read + Inc 2a batched instanceOf read + Inc 2b
+resolution memo + Inc 3 blocking lint gate — collapse the round trips on both live-read paths
+(`connLinkLister.ListLinks`, `LiveInstanceOfTargets`) with `KVGetMulti`.
+
+**Verified touch-list (re-checked live, three read-only haiku scouts, this fire — all citations hold, zero
+drift):**
+- `internal/processor/starlark_kv.go:310-334` — the per-key `KVGet` loop (`:317`), Inc 1's target.
+- `internal/processor/starlark_kv.go:214-221` — the "one charge unit == at most one round trip" comment to
+  update.
+- `internal/processor/starlark_kv.go:250` — `maxLinkPageLimit = 1024`.
+- `internal/processor/starlark_kv.go:338-347` — `parseLinkDoc`.
+- `internal/substrate/kv_multi.go:192-194` — `func (c *Conn) KVGetMulti(ctx, bucket string, keys []string) (map[string]*KVEntry, error)`.
+- `internal/processor/step6_resolve_ddl.go:67-109` — `LiveInstanceOfTargets`: `:76` prefix list, `:80` charge,
+  `:84-89` per-key GET loop. Inc 2a's target.
+- `internal/processor/step6_resolve_ddl.go:309-314` — `soleTarget`, the ambiguity guard Inc 2a must not weaken.
+- `internal/processor/step6_resolve_ddl.go:279-301` — batch → working-set → live fallback order Inc 2b must
+  preserve.
+- `internal/processor/step6_resolve_ddl.go:20,234` — `maxInstanceOfHops = 4`, the hop loop Inc 2b memoizes.
+- `internal/processor/sensitive_decrypt.go:144` — `resolver := &ddlResolver{DDLs: ddls}`, the fresh-per-read
+  construction Inc 2b's memo must sit beside, not replace.
+- `internal/processor/script_context.go:64,85,91` — `DeferredMiss`/`SensitiveReads`/`LiveReads` field
+  declarations, the shape Inc 2b's `ddlResolutionMemo` field mirrors.
+- `internal/processor/starlark_runner.go:84-93`, `internal/processor/live_read_budget.go:31-47` — the
+  nil-safe, shared-by-pointer construction pattern.
+- `scripts/lint-conventions.go` — `checkReadPosture` (regex-based `kvCall`/`readPosture` matchers,
+  `annotationSpans()` default-deny coverage resolution) is the shape Inc 3's gate mirrors; `postureScoped`
+  (scoped to `packages/`) is the directory-scoping precedent for scoping Inc 3 to
+  `internal/processor/**`+`internal/substrate/**`. Tests live in-file (`selfTest()`), no separate `_test.go`.
+- Inc 3 census (non-test, in scope): `internal/processor/step6_resolve_ddl.go:76` (`KVListKeysPrefix`),
+  `internal/processor/starlark_kv.go:305` (`KVListKeysFilter`) — exactly 2 list-then-get sites exist today,
+  both already fixed by Inc 1/2a, so Inc 3 ships with the annotation already in place at both (or the sites
+  restructured such that no bare list-then-loop pattern remains).
+
+**Precedents mirrored:** `step4_hydrate.go:252`'s `KVGetMulti` adoption (Inc 1, 2a); `deferredMissTracker` /
+`liveReadBudgetTracker`'s nil-safe shared-by-pointer `ScriptContext` field shape (Inc 2b); `checkReadPosture`'s
+default-deny + author-declares regex-annotation shape (Inc 3).
+
+**Census re-run live, this fire (all match the design's stated counts exactly):**
+```
+grep -rn "kv\.Links(" packages/ | wc -l                    → 76
+grep -rn "# read-posture: (e)" packages/ | wc -l            → 149 (21 files)
+grep -rn "func.*ListLinks(" internal cmd | grep -v _test    → 1 (connLinkLister, starlark_kv.go:304)
+grep -rn "KVGetMulti(" internal cmd | grep -v _test         → 5 sites, none on the Starlark read path
+grep -rl "ScriptFailed" internal/weaver internal/loom       → 0
+```
+
+**Increment order + green checks:**
+1. Inc 1 — `go test ./internal/processor/... -run ListLinks` (new call-counter test); mutation-verify by
+   reverting.
+2. Inc 2a — `go test ./internal/processor/... -run LiveInstanceOfTargets`.
+3. Inc 2b — `go test ./internal/processor/... -run ResolutionMemo`; mutation-verify; full adversarial pass
+   (posture-changing per §9.1).
+4. Inc 3 — `go run ./scripts/lint-conventions.go` reds a planted list-then-get, greens with annotation.
+5. Fire close — `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`, all
+   `scripts/lint-*.go`, `go test ./internal/processor/... ./internal/substrate/...`, full `go test ./...`.
+   Live e2e (self-credit on all four ledgers at the production 250ms wall) run against a stack this fire
+   brings up, since none was running at fire start.
+
+**In-scope gotchas:** Phase-0 measurement (§9.1) is a gate on *ordering* only per the design — both fixes
+ship regardless of which dominates, so this fire builds Inc 1 then Inc 2 without blocking on a separate
+profiling pass. `internal/testutil`'s `init()` widens the wall to 5s for any binary linking it (`e2f01a16`) —
+the live e2e must pin `PROCESSOR_SCRIPT_WALL_MS=250` explicitly or it proves nothing. No stack was running at
+fire start; bring one up from the main checkout only (never a worktree), reuse for verification, leave running.
+
+**Adjacent finds:** none yet — census matched exactly, no drift found by the scouts.
+
+**Non-goals:** Fire 2 (multi-page listing snapshot) and Fire 3 (named round-trip budget) are ratified-and-
+shelved — not this fire. The ~85-site `[Perf]` corpus row (`cmd/loupe`, vertical apps, pkgmgr installer,
+weaver/loom scans, rule-engine scans) is untouched; Inc 3's gate is scoped to
+`internal/processor/**`+`internal/substrate/**` only.
