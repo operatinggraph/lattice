@@ -55,12 +55,22 @@ type instanceOfTargetReader interface {
 	LiveInstanceOfTargets(ctx context.Context, vtxRoot string, liveReads *liveReadBudgetTracker) ([]instanceOfEdge, error)
 }
 
+// instanceOfConnReader is the narrow substrate.Conn surface connInstanceOfReader
+// needs. Named so a test can fake it with a call counter without an embedded
+// NATS server. *substrate.Conn satisfies it structurally.
+type instanceOfConnReader interface {
+	KVGetMulti(ctx context.Context, bucket string, keys []string) (map[string]*substrate.KVEntry, error)
+}
+
 // connInstanceOfReader is the production instanceOfTargetReader, backed by the
-// Processor's substrate connection. It performs one bounded prefix list over the
-// source-anchored `lnk.<root>.instanceOf.` keyspace plus a per-key GET to honor
-// tombstones — never an unbounded scan.
+// Processor's substrate connection. It reads the source-anchored
+// `lnk.<root>.instanceOf.>` wildcard in ONE atomic KVGetMulti call — safe here
+// (unlike kv.Links' paged enumeration) because there is no paging contract to
+// honor and the set is structurally tiny: a vertex carries at most one live
+// instanceOf by design (§9 F1's ambiguity guard is what makes more than one a
+// no-op, not a crash). Tombstones are honored from the returned envelope.
 type connInstanceOfReader struct {
-	conn       *substrate.Conn
+	conn       instanceOfConnReader
 	coreBucket string
 }
 
@@ -72,26 +82,19 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	if !liveReads.charge(1) {
 		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
-	prefix := "lnk." + vt + "." + id + "." + instanceOfRelation + "."
-	keys, err := r.conn.KVListKeysPrefix(ctx, r.coreBucket, prefix)
+	filter := "lnk." + vt + "." + id + "." + instanceOfRelation + ".>"
+	entries, err := r.conn.KVGetMulti(ctx, r.coreBucket, []string{filter})
 	if err != nil {
 		return nil, err
 	}
-	if !liveReads.charge(len(keys)) {
+	if !liveReads.charge(len(entries)) {
 		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
 	var edges []instanceOfEdge
-	for _, k := range keys {
+	for k, entry := range entries {
 		_, _, _, t2, id2, ok := substrate.ParseLinkKey(k)
 		if !ok {
 			continue
-		}
-		entry, err := r.conn.KVGet(ctx, r.coreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // hard-tombstoned between list and get → no link
-			}
-			return nil, err
 		}
 		var d struct {
 			IsDeleted bool `json:"isDeleted"`
@@ -106,6 +109,58 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	}
 	sortEdges(edges)
 	return edges, nil
+}
+
+// ddlResolutionMemo caches the on-demand instanceOf-edge answer per walk node
+// within one execution (Fire 1 Inc 2b), collapsing G10's defect: a fresh
+// ddlResolver per read otherwise re-walks the SAME shared nodes (e.g. a
+// template vertex every sibling aspect's chain passes through) once per read.
+//
+// It caches ONLY the live-read layer's raw answer — the edges
+// LiveInstanceOfTargets returned, before any in-flight-batch exclusion —
+// never the batch/working-set layers or the final soleTarget disposition:
+// those are re-derived from THIS call's result.Mutations every time, memo
+// hit or not (instanceOfTargetOf below), so a batch tombstone landing after
+// the memo warms is still honored. Keyed on the walk node (the vertex being
+// asked "what do you point at"), not on the class or the read that started
+// the walk: two vertices of the same class can resolve differently if their
+// own instanceOf edges differ, and the root varies per read (defeating
+// reuse) while an intermediate/terminal node is what siblings actually
+// share.
+//
+// Lifetime: created lazily on the first on-demand resolution in an
+// execution; owned by ScriptContext (never the resolver, which may outlive
+// one execution); never reset within an execution; never carried across
+// executions, a redelivery, or a derive_reads pre-pass into the main pass —
+// one ScriptContext, one memo, it dies with the context. Nil-safe = "no
+// memoization", the same convention as liveReadBudgetTracker.
+type ddlResolutionMemo struct {
+	edges map[string][]instanceOfEdge
+}
+
+// get returns the memoized live-read edges for vtxRoot and whether this
+// execution has already resolved that node on-demand — found=false means
+// "never asked Core KV this execution", NOT "asked and got nothing" (that is
+// found=true with a nil/empty slice, a memoized negative).
+func (m *ddlResolutionMemo) get(vtxRoot string) (edges []instanceOfEdge, found bool) {
+	if m == nil {
+		return nil, false
+	}
+	edges, found = m.edges[vtxRoot]
+	return edges, found
+}
+
+// set records vtxRoot's live-read edges, including nil/empty (a node with no
+// live instanceOf link), so a later hop that reaches the same node this
+// execution does not re-pay the round trip.
+func (m *ddlResolutionMemo) set(vtxRoot string, edges []instanceOfEdge) {
+	if m == nil {
+		return
+	}
+	if m.edges == nil {
+		m.edges = make(map[string][]instanceOfEdge)
+	}
+	m.edges[vtxRoot] = edges
 }
 
 // ddlResolver carries the DDL cache + the on-demand instanceOf reader behind
@@ -283,6 +338,17 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 	if edges := workingSetInstanceOfEdges(vtxRoot, state.Context.Hydrated, batchDead); len(edges) > 0 {
 		return soleTarget(edges)
 	}
+	// Fire 1 Inc 2b: a memo hit skips ONLY the Core KV round trip below — the
+	// batch/working-set layers above already ran fresh for THIS call, and the
+	// batchDead exclusion below re-runs against THIS call's batch too, so a
+	// tombstone the batch adds after the memo warms is still honored.
+	memo := state.Context.DDLResolutionMemo
+	if edges, found := memo.get(vtxRoot); found {
+		if edges = excludeDead(edges, batchDead); len(edges) > 0 {
+			return soleTarget(edges)
+		}
+		return "", false
+	}
 	if r.linkReader != nil {
 		edges, err := r.linkReader.LiveInstanceOfTargets(ctx, vtxRoot, state.Context.LiveReads)
 		if err != nil {
@@ -290,12 +356,18 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 			// DDL on a read fault. A read error degrades to today's behavior.
 			// The fault is RECORDED, not acted on, so a caller that cannot
 			// tolerate a degraded resolution (step 6.5) can tell this apart
-			// from a genuine "no DDL".
+			// from a genuine "no DDL". NOT memoized: a transient fault must
+			// not calcify into a permanent negative for the rest of the
+			// execution — the next hop that reaches vtxRoot should retry.
 			recordResolveFault(fault, err)
 			r.logger().Warn("step 6: instanceOf on-demand read failed; resolving to permissive default",
 				"vtxRoot", vtxRoot, "error", err)
 			return "", false
 		}
+		// Memoize the RAW read (pre-exclusion) — the answer Core KV gave for
+		// this node — not the post-batchDead disposition, so a later call
+		// with a different batch still filters correctly against its own.
+		memo.set(vtxRoot, edges)
 		if edges = excludeDead(edges, batchDead); len(edges) > 0 {
 			return soleTarget(edges)
 		}
@@ -366,12 +438,17 @@ func workingSetInstanceOfEdges(vtxRoot string, hydrated map[string]VertexDoc, de
 	return edges
 }
 
-// excludeDead drops edges whose link key the batch tombstoned.
+// excludeDead drops edges whose link key the batch tombstoned. Allocates a
+// fresh slice rather than compacting in place (Fire 1 Inc 2b review finding):
+// a caller may hold the same backing array elsewhere — ddlResolutionMemo
+// stores the exact slice a live read returns, and an in-place compaction here
+// would silently corrupt the memoized entry for every later call, including
+// ones with a DIFFERENT (or no) batch tombstone.
 func excludeDead(edges []instanceOfEdge, dead map[string]bool) []instanceOfEdge {
 	if len(dead) == 0 {
 		return edges
 	}
-	out := edges[:0]
+	out := make([]instanceOfEdge, 0, len(edges))
 	for _, e := range edges {
 		if !dead[e.linkKey] {
 			out = append(out, e)

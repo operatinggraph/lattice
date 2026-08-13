@@ -582,3 +582,304 @@ func TestResolveGoverningDDL_ClassOfBatchTombstoneWins(t *testing.T) {
 		t.Fatalf("a terminal the batch tombstones must resolve to no governing DDL, got %q", ref.CanonicalName)
 	}
 }
+
+// --- Fire 1 Inc 2a: connInstanceOfReader.LiveInstanceOfTargets issues one
+// KVGetMulti wildcard call, not one KVListKeysPrefix + N KVGet.
+
+// fakeInstanceOfConnReader is an in-memory instanceOfConnReader that counts
+// calls, proving connInstanceOfReader's round-trip collapse (Fire 1 Inc 2a).
+type fakeInstanceOfConnReader struct {
+	entries       map[string]*substrate.KVEntry
+	getMultiCalls int
+	getMultiKeys  [][]string
+}
+
+func (f *fakeInstanceOfConnReader) KVGetMulti(_ context.Context, _ string, keys []string) (map[string]*substrate.KVEntry, error) {
+	f.getMultiCalls++
+	f.getMultiKeys = append(f.getMultiKeys, append([]string{}, keys...))
+	out := make(map[string]*substrate.KVEntry, len(f.entries))
+	// keys is the single wildcard filter Inc 2a issues; a fake real enough to
+	// prove the call SHAPE returns every seeded entry, mirroring what a real
+	// KVGetMulti would match against that filter.
+	for k, e := range f.entries {
+		out[k] = e
+	}
+	return out, nil
+}
+
+// TestConnInstanceOfReader_OneGetMultiCallReplacesListPlusPerKeyGets pins the
+// round-trip collapse itself. Mutation-verified by hand against the
+// pre-Fire-1 list-then-loop implementation, which issued 1 (list) + N (gets)
+// calls here.
+func TestConnInstanceOfReader_OneGetMultiCallReplacesListPlusPerKeyGets(t *testing.T) {
+	root := "vtx.widget." + instID
+	live1 := "lnk.widget." + instID + ".instanceOf.widget." + tplID
+	live2 := "lnk.widget." + instID + ".instanceOf.widget." + svcTypeID
+	fake := &fakeInstanceOfConnReader{entries: map[string]*substrate.KVEntry{
+		live1: {Value: []byte(`{"class":"instanceOf","isDeleted":false}`)},
+		live2: {Value: []byte(`{"class":"instanceOf","isDeleted":false}`)},
+	}}
+	reader := &connInstanceOfReader{conn: fake, coreBucket: testCoreBucket}
+	edges, err := reader.LiveInstanceOfTargets(context.Background(), root, &liveReadBudgetTracker{budget: 100})
+	if err != nil {
+		t.Fatalf("LiveInstanceOfTargets: %v", err)
+	}
+	if fake.getMultiCalls != 1 {
+		t.Fatalf("getMultiCalls = %d, want 1 (was 1+N per-key GETs before Fire 1 Inc 2a)", fake.getMultiCalls)
+	}
+	if len(fake.getMultiKeys) != 1 || len(fake.getMultiKeys[0]) != 1 {
+		t.Fatalf("want the single call to carry exactly one wildcard filter, got %v", fake.getMultiKeys)
+	}
+	if got := fake.getMultiKeys[0][0]; got != "lnk.widget."+instID+".instanceOf.>" {
+		t.Errorf("filter = %q, want the source-anchored instanceOf wildcard", got)
+	}
+	// Batching must not merge or drop edges: a multi-edge root still surfaces
+	// BOTH live edges here, so the caller's soleTarget ambiguity guard
+	// (§9 F1) still sees two and refuses to resolve — proven at the
+	// resolver level by TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous.
+	if len(edges) != 2 {
+		t.Fatalf("got %d edges, want 2 — batching must not silently merge multi-edge roots", len(edges))
+	}
+}
+
+// TestConnInstanceOfReader_AgainstCoreKV exercises the production
+// connInstanceOfReader against a real embedded Core KV: a tombstoned
+// instanceOf link is excluded, a live one is returned with its target parsed
+// correctly from the link key.
+func TestConnInstanceOfReader_AgainstCoreKV(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root := "vtx.widget." + instID
+	seedCommittedLink(t, ctx, conn, "lnk.widget."+instID+".instanceOf.widget."+tplID, false)
+	seedCommittedLink(t, ctx, conn, "lnk.widget."+instID+".instanceOf.widget."+cycBID, true)
+
+	reader := &connInstanceOfReader{conn: conn, coreBucket: testCoreBucket}
+	edges, err := reader.LiveInstanceOfTargets(ctx, root, &liveReadBudgetTracker{budget: 100})
+	if err != nil {
+		t.Fatalf("LiveInstanceOfTargets: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1 (tombstoned link must be excluded)", len(edges))
+	}
+	if want := "vtx.widget." + tplID; edges[0].target != want {
+		t.Errorf("target = %q, want %q", edges[0].target, want)
+	}
+}
+
+// --- Fire 1 Inc 2b: ddlResolutionMemo collapses repeat walks within one
+// execution. countingLinkReader fakes instanceOfTargetReader and counts
+// LiveInstanceOfTargets calls PER NODE, so a test can assert a shared
+// intermediate node is only ever asked once.
+
+type countingLinkReader struct {
+	edges map[string][]instanceOfEdge
+	calls map[string]int
+}
+
+func (f *countingLinkReader) LiveInstanceOfTargets(_ context.Context, vtxRoot string, _ *liveReadBudgetTracker) ([]instanceOfEdge, error) {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[vtxRoot]++
+	return f.edges[vtxRoot], nil
+}
+
+func mustNanoID(t *testing.T) string {
+	t.Helper()
+	id, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	return id
+}
+
+// TestDDLResolutionMemo_SharedIntermediateNodeResolvedOnce pins the payoff
+// claim directly: two roots whose walk shares an intermediate node (the
+// self-pay shape — eight distinct transaction aspects all instanceOf the
+// SAME template) resolve that shared node's live read exactly once across
+// two resolutions in one execution, while each root's own (distinct) hop is
+// still read once each. Mutation-verified by hand: a nil memo (today's
+// behavior) makes the shared node's call count 2, not 1.
+func TestDDLResolutionMemo_SharedIntermediateNodeResolvedOnce(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root1, root2, shared, metaID := mustNanoID(t), mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	root1Key := "vtx.widget." + root1
+	root2Key := "vtx.widget." + root2
+	sharedKey := "vtx.widget." + shared
+	seedVertexTypeDDLAs(t, ctx, conn, metaID, "sharedType", `["X"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		root1Key:  {{linkKey: "lnk.widget." + root1 + ".instanceOf.widget." + shared, target: sharedKey}},
+		root2Key:  {{linkKey: "lnk.widget." + root2 + ".instanceOf.widget." + shared, target: sharedKey}},
+		sharedKey: {{linkKey: "lnk.widget." + shared + ".instanceOf.meta." + metaID, target: "vtx.meta." + metaID}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class.a", root1Key, substrate.KindVertex, ScriptResult{}, state)
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class.b", root2Key, substrate.KindVertex, ScriptResult{}, state)
+
+	if !ok1 || ref1.CanonicalName != "sharedType" {
+		t.Fatalf("root1 resolve: ok=%v ref=%+v, want sharedType", ok1, ref1)
+	}
+	if !ok2 || ref2.CanonicalName != "sharedType" {
+		t.Fatalf("root2 resolve: ok=%v ref=%+v, want sharedType", ok2, ref2)
+	}
+	if fake.calls[sharedKey] != 1 {
+		t.Fatalf("calls[shared] = %d, want 1 — the shared intermediate node must resolve once across two walks", fake.calls[sharedKey])
+	}
+	if fake.calls[root1Key] != 1 || fake.calls[root2Key] != 1 {
+		t.Fatalf("calls[root1]=%d calls[root2]=%d, want 1 each — each walk's own distinct first hop is unavoidable", fake.calls[root1Key], fake.calls[root2Key])
+	}
+}
+
+// TestDDLResolutionMemo_SameClassDifferentEdgesResolveDifferently pins that
+// the memo is keyed on the WALK NODE, never the class: two vertices sharing
+// one class but pointing at different instanceOf targets must resolve to
+// DIFFERENT governing DDLs in the same execution — a class-keyed memo would
+// collapse them incorrectly.
+func TestDDLResolutionMemo_SameClassDifferentEdgesResolveDifferently(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	vtxA, vtxB, targetX, targetY := mustNanoID(t), mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	vtxAKey := "vtx.widget." + vtxA
+	vtxBKey := "vtx.widget." + vtxB
+	targetXKey := "vtx.meta." + targetX
+	targetYKey := "vtx.meta." + targetY
+	seedVertexTypeDDLAs(t, ctx, conn, targetX, "typeX", `["X"]`)
+	seedVertexTypeDDLAs(t, ctx, conn, targetY, "typeY", `["Y"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		vtxAKey: {{linkKey: "lnk.widget." + vtxA + ".instanceOf.meta." + targetX, target: targetXKey}},
+		vtxBKey: {{linkKey: "lnk.widget." + vtxB + ".instanceOf.meta." + targetY, target: targetYKey}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: &ddlResolutionMemo{}}}
+
+	refA, okA := resolver.resolveGoverningDDL(ctx, "shared.class", vtxAKey, substrate.KindVertex, ScriptResult{}, state)
+	refB, okB := resolver.resolveGoverningDDL(ctx, "shared.class", vtxBKey, substrate.KindVertex, ScriptResult{}, state)
+
+	if !okA || refA.CanonicalName != "typeX" {
+		t.Fatalf("vtxA (shared.class) resolve: ok=%v ref=%+v, want typeX", okA, refA)
+	}
+	if !okB || refB.CanonicalName != "typeY" {
+		t.Fatalf("vtxB (shared.class) resolve: ok=%v ref=%+v, want typeY — must NOT collapse to vtxA's typeX", okB, refB)
+	}
+}
+
+// TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms pins the
+// ordering row: the batch/working-set layers are re-consulted FRESH on
+// every call, memo hit or not. A first resolution warms the memo with a
+// live edge; a second resolution of the SAME node, now carrying a batch
+// mutation that tombstones that exact link, must NOT reuse the warm memo's
+// positive answer — the fresh batchDead exclusion must still apply.
+func TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root, metaID := mustNanoID(t), mustNanoID(t)
+	rootKey := "vtx.widget." + root
+	targetKey := "vtx.meta." + metaID
+	linkKey := "lnk.widget." + root + ".instanceOf.meta." + metaID
+	seedVertexTypeDDLAs(t, ctx, conn, metaID, "typeZ", `["Z"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		rootKey: {{linkKey: linkKey, target: targetKey}},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+
+	// First call: no batch, resolves live and warms the memo.
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, ScriptResult{}, state)
+	if !ok1 || ref1.CanonicalName != "typeZ" {
+		t.Fatalf("first resolve: ok=%v ref=%+v, want typeZ", ok1, ref1)
+	}
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] after first resolve = %d, want 1", fake.calls[rootKey])
+	}
+
+	// Second call: SAME node, but the batch now tombstones the very link the
+	// memo cached. The memo must not short-circuit past this.
+	tombstoningBatch := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: linkKey}}}
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoningBatch, state)
+	if ok2 {
+		t.Fatalf("second resolve: ok=%v ref=%+v, want no resolution — the batch tombstone must win even with a warm memo", ok2, ref2)
+	}
+	// A tombstone-only mutation leaves batchLive empty (reconcileBatchInstanceOf
+	// only returns a NET-LIVE edge there), so this resolves via the memo HIT
+	// at the live layer, filtered by THIS call's fresh excludeDead — not via
+	// the batch-layer early-return at the top of instanceOfTargetOf. Either
+	// way the fake must not be re-consulted: the round trip is what the memo
+	// exists to skip.
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] after second resolve = %d, want still 1 — no live re-read needed once the batch names the tombstone", fake.calls[rootKey])
+	}
+}
+
+// TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges is a regression
+// test for a review finding on this fire: excludeDead used to compact its
+// input slice IN PLACE (out := edges[:0]), and the memo hands out the exact
+// slice a live read returned — so filtering it against a batch tombstone
+// silently overwrote the memo's own backing array. Two live edges, tombstone
+// ONE of them, resolve twice with the SAME batch: the first call filters and
+// resolves cleanly to the survivor; if that filter corrupted the memo's
+// array, the identical second call sees a duplicated/wrong edge set and
+// resolves AMBIGUOUS instead of the same clean answer — the exact divergence
+// that would silently disable a step 6.5 sensitivity gate on a repeat call.
+func TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root, metaA, metaB := mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	rootKey := "vtx.widget." + root
+	linkA := "lnk.widget." + root + ".instanceOf.meta." + metaA
+	linkB := "lnk.widget." + root + ".instanceOf.meta." + metaB
+	seedVertexTypeDDLAs(t, ctx, conn, metaA, "typeA", `["A"]`)
+	seedVertexTypeDDLAs(t, ctx, conn, metaB, "typeB", `["B"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		rootKey: {
+			{linkKey: linkA, target: "vtx.meta." + metaA},
+			{linkKey: linkB, target: "vtx.meta." + metaB},
+		},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+	tombstoneA := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: linkA}}}
+
+	// Call 1: cold memo, live read returns [A,B]; the batch tombstones A →
+	// filtered to just B → resolves cleanly. This is the call whose
+	// excludeDead invocation used to corrupt the memo's backing array.
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoneA, state)
+	if !ok1 || ref1.CanonicalName != "typeB" {
+		t.Fatalf("call 1: ok=%v ref=%+v, want typeB (linkA tombstoned, only B live)", ok1, ref1)
+	}
+
+	// Call 2: the IDENTICAL batch tombstone again, warm memo. A correct memo
+	// resolves to typeB again; a corrupted one resolves ambiguous instead.
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoneA, state)
+	if !ok2 || ref2.CanonicalName != "typeB" {
+		t.Fatalf("call 2: ok=%v ref=%+v, want typeB again — a memo corrupted by call 1's excludeDead would resolve ambiguous here", ok2, ref2)
+	}
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] = %d, want 1 — both calls must share the one memoized read", fake.calls[rootKey])
+	}
+}

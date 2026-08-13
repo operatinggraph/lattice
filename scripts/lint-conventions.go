@@ -383,7 +383,38 @@ var (
 	// only appears outside the package, which is exactly where SpecParser is
 	// left nil unless the caller wires it by hand.
 	pkgmgrNewInstallerCall = regexp.MustCompile(`\bpkgmgr\.NewInstaller\(`)
+
+	// kvListAssign / kvGetCall / kvBatchShape — Fire 1 Inc 3's list-then-get
+	// gate (script-live-read-round-trip-collapse-design.md), scoped to
+	// internal/processor/** + internal/substrate/**: a KVListKeysPrefix/
+	// KVListKeysFilter result fed to a per-key KVGet inside a range loop is
+	// one round trip per matched key (the shape Fire 1 removed on both the
+	// live-read paths it touched — KVGetMulti batches the value reads
+	// instead). kvListAssign captures the LHS keys variable off either
+	// call's short-var-decl/assignment; kvGetCall anchors the per-key GET
+	// (deliberately NOT matching KVGetMulti — the "(" right after "KVGet"
+	// excludes it); kvBatchShape is the declaration a site that genuinely
+	// cannot batch must carry.
+	kvListAssign = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*:?=\s*[^=\n]*\.(?:KVListKeysPrefix|KVListKeysFilter)\(`)
+	kvGetCall    = regexp.MustCompile(`\.KVGet\(`)
+	kvBatchShape = regexp.MustCompile(`//\s*kv-batch:\s*\(([a-z-]+)\)(.*)$`)
 )
+
+// kvBatchShapes are the declarable reasons a listed key set is read one key
+// at a time instead of batched with KVGetMulti.
+var kvBatchShapes = map[string]bool{
+	// (single): the loop reads at most one key in practice (an already-bounded
+	// set, e.g. a page known to hold 0 or 1 entries) — a batch call would cost
+	// the same round trip for no benefit.
+	"single": true,
+	// (ordered): the loop's per-key reads must observe each other's writes in
+	// sequence (a dependent chain) — KVGetMulti's one-snapshot semantics
+	// would change what the loop can see.
+	"ordered": true,
+	// (bounded-1): the matched set is provably at most one key by construction
+	// (a uniqueness-guarded lookup), so "batch" has no plural case to serve.
+	"bounded-1": true,
+}
 
 // nanoidAlphabetShapes are the declarable exceptions to the NanoID-alphabet
 // gate: (reject) is the only one — a deliberately invalid id used to prove
@@ -856,6 +887,17 @@ func scanSource(path string, data []byte) []finding {
 		authCtxAt = annotationSpans(lines, authCtxTargetShape)
 		workplaceAt = annotationSpans(lines, workplaceExemptShape)
 	}
+	// kv-batch scope: the Starlark write path's own list-then-get sites Fire
+	// 1 collapsed (script-live-read-round-trip-collapse-design.md §5 Inc 3)
+	// — internal/processor + internal/substrate, non-test. NOT the wider
+	// ~85-site corpus (cmd/loupe, the vertical apps, the pkgmgr installer,
+	// weaver/loom state scans, the rule-engine anchor scans): that is the
+	// standing `[Perf]` row's own migration to do before this gate could
+	// widen (design §10).
+	kvBatchScoped := !isTest && (strings.HasPrefix(slash, "internal/processor/") || strings.HasPrefix(slash, "internal/substrate/"))
+	if kvBatchScoped {
+		out = append(out, checkListThenGet(path, string(data), annotationSpans(strings.Split(string(data), "\n"), kvBatchShape))...)
+	}
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
@@ -1087,6 +1129,89 @@ func checkMaxReconnectsDeclared(path, src string) []finding {
 		}
 		line := strings.Count(src[:pos], "\n") + 1
 		out = append(out, finding{file: path, line: line, msg: "max-reconnects: substrate.Connect in cmd/** does not set MaxReconnects — omitting it inherits nats.go's own default (60 reconnect attempts, ~2s apart) instead of a value anyone chose, and once that budget is exhausted the connection closes PERMANENTLY (nats.go never retries a closed connection); a long-running component then keeps running as a zombie holding a dead NATS handle. Set MaxReconnects: -1 for a daemon that must reconnect indefinitely, or an explicit small finite value (with a comment on why fail-fast is correct here) for a short-lived CLI"})
+	}
+	return out
+}
+
+// kvBatchScanWindow bounds how far checkListThenGet looks forward from a
+// KVListKeysPrefix/KVListKeysFilter call for a `for range <keys>` loop whose
+// body issues a per-key KVGet — a safety cap well beyond any real hydration
+// loop's size (mirrors lensScanWindow's role for checkLensProtectedByDefault).
+const kvBatchScanWindow = 4000
+
+// checkListThenGet flags a KVListKeysPrefix/KVListKeysFilter result fed to a
+// per-key KVGet inside a `for range` loop over that result — one round trip
+// per matched key, the shape Fire 1 collapsed with KVGetMulti on both
+// live-read paths it touched (script-live-read-round-trip-collapse-design.md
+// §5 Inc 3). Scoped by the caller to internal/processor/** +
+// internal/substrate/** non-test files.
+//
+// For each list-call assignment, it captures the LHS keys variable, then
+// walks forward for a `for ... := range <keysVar>` header and, from that
+// header's own opening brace, walks the loop body via balanced-brace
+// counting (the same technique checkLensProtectedByDefault uses for a
+// LensSpec entry) — correct regardless of the loop body's own formatting or
+// nested blocks. A body containing `.KVGet(` (never `.KVGetMulti(` — the "("
+// immediately after "KVGet" excludes the longer name) is the finding, unless
+// the list-call's own line carries a `// kv-batch: (single|ordered|
+// bounded-1) <why>` declaration.
+func checkListThenGet(path, src string, kvBatchAt map[int]annotation) []finding {
+	var out []finding
+	for _, m := range kvListAssign.FindAllStringSubmatchIndex(src, -1) {
+		pos := m[0]
+		lineStart := strings.LastIndexByte(src[:pos], '\n') + 1
+		if strings.HasPrefix(strings.TrimSpace(src[lineStart:pos]), "//") {
+			continue
+		}
+		callLine := strings.Count(src[:pos], "\n") + 1
+		keysVar := src[m[2]:m[3]]
+		if keysVar == "" || keysVar == "_" {
+			continue
+		}
+		if a, ok := kvBatchAt[callLine]; ok {
+			if !kvBatchShapes[a.shape] {
+				out = append(out, finding{file: path, line: callLine, msg: "kv-batch: unknown shape (" + a.shape + ") — the declarable reasons a listed key set is read one key at a time are (single), (ordered), (bounded-1)"})
+			}
+			continue
+		}
+		fwdLimit := m[1] + kvBatchScanWindow
+		if fwdLimit > len(src) {
+			fwdLimit = len(src)
+		}
+		window := src[m[1]:fwdLimit]
+		rangeRe := regexp.MustCompile(`\bfor\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*)?\s*:?=\s*range\s+` + regexp.QuoteMeta(keysVar) + `\b`)
+		rm := rangeRe.FindStringIndex(window)
+		if rm == nil {
+			continue
+		}
+		openRel := strings.IndexByte(window[rm[1]:], '{')
+		if openRel == -1 {
+			continue
+		}
+		blockStart := rm[1] + openRel
+		blockEnd := -1
+		balance := 1
+		for i := blockStart + 1; i < len(window); i++ {
+			switch window[i] {
+			case '{':
+				balance++
+			case '}':
+				balance--
+				if balance == 0 {
+					blockEnd = i
+				}
+			}
+			if blockEnd != -1 {
+				break
+			}
+		}
+		if blockEnd == -1 {
+			continue
+		}
+		if !kvGetCall.MatchString(window[blockStart:blockEnd]) {
+			continue
+		}
+		out = append(out, finding{file: path, line: callLine, msg: "kv-batch: " + keysVar + " is listed via KVListKeysPrefix/KVListKeysFilter then read with a per-key KVGet in a loop — one round trip per matched key; batch the value reads with KVGetMulti (script-live-read-round-trip-collapse-design.md Fire 1), or declare `// kv-batch: (single|ordered|bounded-1) <why>` on this line if a batch genuinely does not apply here"})
 	}
 	return out
 }
@@ -1762,6 +1887,71 @@ func selfTest() []string {
 			"max-reconnects: substrate.Connect in cmd/** does not set MaxReconnects"},
 		{"prose mentioning the call in a comment is not a use of it", "cmd/refractor/main.go",
 			"\t// substrate.Connect(ctx, opts) needs MaxReconnects set\n", ""},
+		{"KVListKeysPrefix feeding a per-key KVGet loop is denied", "internal/processor/self_test_fixture.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n",
+			"kv-batch: keys is listed via KVListKeysPrefix/KVListKeysFilter then read with a per-key KVGet"},
+		{"KVListKeysFilter (3-return form) feeding a per-key KVGet loop is denied", "internal/processor/self_test_fixture.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, cursor, err := conn.KVListKeysFilter(ctx, bucket, filter, \"\", 256)\n" +
+				"\t_ = cursor\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n",
+			"kv-batch: keys is listed via KVListKeysPrefix/KVListKeysFilter then read with a per-key KVGet"},
+		{"a batched KVGetMulti in the loop is not a finding", "internal/processor/self_test_fixture.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tentries, _ := conn.KVGetMulti(ctx, bucket, keys)\n" +
+				"\t_ = entries\n" +
+				"}\n", ""},
+		{"a declared kv-batch: (single) reason is not a finding", "internal/processor/self_test_fixture.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix) // kv-batch: (single) at most one key by construction\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n", ""},
+		{"an unknown kv-batch shape is denied", "internal/processor/self_test_fixture.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix) // kv-batch: (parallel) not applicable\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n",
+			"kv-batch: unknown shape (parallel)"},
+		{"kv-batch scope excludes test files", "internal/processor/self_test_fixture_test.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n", ""},
+		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
+			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
+				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
+				"\tif err != nil {\n\t\treturn\n\t}\n" +
+				"\tfor _, k := range keys {\n" +
+				"\t\tentry, _ := conn.KVGet(ctx, bucket, k)\n" +
+				"\t\t_ = entry\n" +
+				"\t}\n" +
+				"}\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -1773,7 +1963,8 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "read-posture:") &&
 				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") &&
 				!strings.HasPrefix(fd.msg, "derived-key:") &&
-				!strings.HasPrefix(fd.msg, "max-reconnects:") {
+				!strings.HasPrefix(fd.msg, "max-reconnects:") &&
+				!strings.HasPrefix(fd.msg, "kv-batch:") {
 				continue
 			}
 			hits++

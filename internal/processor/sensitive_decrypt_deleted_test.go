@@ -109,7 +109,7 @@ func TestDecryptSensitiveDoc_DeletedNonEgress_DeliversScrubbed(t *testing.T) {
 	assertNeedleFires(t, doc, ctB64)
 
 	tracker := &sensitiveReadTracker{}
-	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, v, doc, false, tracker, "req1"); err != nil {
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, v, doc, false, tracker, "req1", nil); err != nil {
 		t.Fatalf("decryptSensitiveDoc on a deleted sensitive aspect must deliver, not error: %v", err)
 	}
 	if !doc.IsDeleted {
@@ -139,7 +139,7 @@ func TestDecryptSensitiveDoc_DeletedEgress_Refuses(t *testing.T) {
 		Data:      body,
 	}
 	tracker := &sensitiveReadTracker{}
-	err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, v, doc, true, tracker, "req1")
+	err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, v, doc, true, tracker, "req1", nil)
 	if err == nil {
 		t.Fatalf("egress disposition returned nil for a deleted sensitive aspect; doc.Data = %+v", doc.Data)
 	}

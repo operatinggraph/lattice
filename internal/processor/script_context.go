@@ -89,6 +89,16 @@ type ScriptContext struct {
 	// Populated by step 4 (Hydrate); the runner defaults it if left nil
 	// (starlark_runner.go), the same trust posture as DeferredMiss.
 	LiveReads *liveReadBudgetTracker
+	// DDLResolutionMemo caches, per execution, the LIVE-READ layer's answer
+	// to "what are vtxRoot's live instanceOf edges" (step6_resolve_ddl.go's
+	// governing-DDL walk, Contract #1 §1.5) — never the batch/working-set
+	// layers, which are re-consulted fresh on every call regardless of a
+	// memo hit (they change as mutations accumulate). Populated lazily by
+	// the first resolution that reaches the on-demand layer; shared by
+	// pointer across step 4's contextHint decrypt calls, the lazy kv.Read()
+	// seam (connKVReader), and steps 6/6.5's own resolver calls — the same
+	// shared-by-pointer, nil-safe, dies-with-the-context shape as LiveReads.
+	DDLResolutionMemo *ddlResolutionMemo
 }
 
 // ScriptKVReader performs a single on-demand Core KV read for a Starlark
