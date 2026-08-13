@@ -1,9 +1,27 @@
 # The write path's live reads cost a round trip each — collapse them, then name the budget that binds
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-08-11 · Winston
+**Status: ✅ RATIFIED — Fire 1 build-ready · Fires 2–3 ratified-and-shelved** · Andrew, 2026-08-13 ·
+Designer fire 2026-08-11 · Winston
 **Board row:** `[Processor] A class-(e) enumeration has no budget of its own — the 250ms wall binds first`
 (lattice.md, ★★★ / M) · **Blocks:** `verticals.md` — *No resident, member, patient or tenant can actually
-pay their own balance* (★★★, cross-vertical, `🚧 blocked-on` this row)
+pay their own balance* (★★★, cross-vertical, `🚧 blocked-on` this row; clears when Fire 1 ships)
+
+**Ratification record (2026-08-13).** **Fire 1** (Inc 1 batched page read + Inc 2a batched instanceOf
+read + Inc 2b resolution memo + Inc 3 blocking lint gate) is ratified **build-ready** — it alone closes
+the verticals self-pay blocker. The §8.1 fork is settled as designed: keep the lister, batch the values
+(the wildcard shape cannot honor paging — verified against the pinned `nats-server@v2.14.0` source).
+**Fires 2–3 are ratified-and-shelved** — sound designs whose consumers are not yet pressing. Revive
+Fire 2 when a deep-walk consumer's wall cost bites (the erasure seal's up-to-160-page sweep,
+`MergeIdentity` / `role_has_open_tasks` at up to 64 — the quadratic re-listing term Fire 1 does not
+touch). Revive Fire 3 when the named-refusal ask is picked up (the board row's original framing;
+`erasure-orchestration-design.md` residual 1) — with or after Fire 2, since its budget sizing wants the
+post-collapse measured page cost. **Contract disposition:** the §2.5 charge-model correction committed at
+ratification with a transitional note (the lazy-read correction is true today; the batched-call sentence
+lands with Fire 1 and the note dies with it); the §2.5.1 snapshot sentence was **discarded** — a
+deferred-by-choice addition that rides Fire 2's revive fire and is re-staged then. DD corrections folded
+pre-ratification: the CI wall-widening moved to `internal/testutil`'s `init()` (`e2f01a16`, 2026-08-09,
+before this design was authored — same 20× effect, different mechanism); Fire 1's payoff e2e must pin the
+production 250 ms wall explicitly or testutil's widening vacates it; census expected-count fixes.
 
 ---
 
@@ -41,9 +59,8 @@ kept only where there is no paging contract to honour (the instanceOf resolution
    corrects it and re-states the charge model Fire 1 changes.
 2. **§2.5.1** — one sentence for Fire 2's per-execution key-set snapshot. §2.5.1 already says `kv.Links` is
    *not* a serialization point and that a paged enumeration may observe an add/remove between pages, so the
-   snapshot **narrows** what a caller may observe rather than promising anything new; it still deserves to be
-   written down. **This edit only earns its place if you ratify Fire 2** — if you ratify Fires 1+3 only,
-   discard it.
+   snapshot **narrows** what a caller may observe rather than promising anything new. **Discarded at
+   ratification** (Fire 2 shelved) — re-staged by Fire 2's revive fire.
 
 Neither edit changes the closed error enumeration (§2.6). §7.3 explains why Fire 3 refuses through
 `ScriptFailed` + `details` rather than a new code: I checked, and no engine branches on the wire code
@@ -58,8 +75,11 @@ Four verticals cannot let a resident, member, patient or tenant pay their own ba
 self-credit branch recomputes the owed balance from the account's own `postedTo` transaction history rather
 than trusting a payload amount — the right design, and the reason it fails closed rather than open. Live,
 Café and Wellness both reject `ScriptTimeout` 3/3 over an **8-row account**, while the same operation
-submitted without a self-scope target commits. CI cannot see it: both the Makefile and `ci.yml` set
-`PROCESSOR_SCRIPT_WALL_MS=5000`, a 20× widening of the 250 ms production budget.
+submitted without a self-scope target commits. CI cannot see it: every test binary linking
+`internal/testutil` runs at a 5 s wall — the widening moved from Makefile/`ci.yml` env into
+`internal/testutil/script_wall_budget.go`'s package `init()` on 2026-08-09 (`e2f01a16`), so the fixture
+owns the budget rather than the invocation. Same 20× effect; only the wall-asserting packages
+(`internal/processor`, `internal/starlarksandbox`), which do not link testutil, still run at 250 ms.
 
 The same wall is the erasure spine's ceiling. `erasure-orchestration-design.md` §residuals-1 records that
 `SealIdentityForErasureComplete` dies as `ScriptTimeout` rather than its own named
@@ -126,7 +146,7 @@ Every row cites the code that **does** the thing.
 
 | # | Fact | Citation |
 |---|---|---|
-| G15 | The production wall is **250 ms** (`defaultScriptWallBudgetMs`), overridable by `PROCESSOR_SCRIPT_WALL_MS`; CI and the Makefile both set 5000. | `starlark_runner.go:20,28-37` |
+| G15 | The production wall is **250 ms** (`defaultScriptWallBudgetMs`), overridable by `PROCESSOR_SCRIPT_WALL_MS`; test binaries linking `internal/testutil` are widened to 5 s by that package's `init()` (`script_wall_budget.go:30-50`, since `e2f01a16` 2026-08-09). | `starlark_runner.go:20,28-37` |
 | G16 | `Budget.Wall` covers **Init + Call** — compile is excluded, but `Init` re-runs the module's whole top level on every execution. | `starlarksandbox/sandbox.go:25-29` |
 | G17 | A wall breach reaches the wire as `ScriptFailed`; `ScriptTimeout` exists only as an internal detail string. The wire enumeration is closed. | `opwire/opwire.go:166`; `script_context.go:247`; `starlark_runner.go:76` |
 | G18 | **No engine branches on the wire error code.** `grep -rl ScriptFailed internal/weaver internal/loom` → zero files; `grep -rn '\.Error\.Code' internal/weaver` → zero hits. Weaver's dispatch is mark-lease/anti-storm, not code-driven. | live grep, this fire |
@@ -237,7 +257,7 @@ migration leaves **zero debt** there and the gate ships **blocking**, not warn-f
   why a batch is not applicable. The gate does not classify; the author declares, and forgetting fails
   closed.
 
-### Fire 2 — the multi-page listing term (G2)
+### Fire 2 — the multi-page listing term (G2) *(ratified-and-shelved; revive: a deep-walk consumer's wall cost — erasure seal / MergeIdentity / role_has_open_tasks)*
 
 After Fire 1 a page costs two round trips, but a *deep* walk still re-drains the hub's whole matched key set
 on every page — 31 ms per page measured against a 3,919-degree hub, whichever page. The erasure seal pages up
@@ -261,7 +281,7 @@ of the same filter cursor-slice the held set and pay only their `KVGetMulti`. A 
 - **Contract:** one sentence in §2.5.1 recording the snapshot. Staged uncommitted; **discard it if Fire 2 is
   not ratified.**
 
-### Fire 3 — the budget that binds is the budget that is named
+### Fire 3 — the budget that binds is the budget that is named *(ratified-and-shelved; revive: the named-refusal ask, with or after Fire 2)*
 
 Only now are the post-fix costs stable enough to denominate a budget in them.
 
@@ -313,10 +333,11 @@ writer and the sanctioned Core-KV reader). No engine gains a Core-KV read; no ap
 | § | Change | Why | Affected consumers |
 |---|---|---|---|
 | §2.5 "Live-read budget" | **Correct a false statement** — the lazy fallthrough is not "one GET" (G10–G13) — and re-state the charge model after Fire 1 | The clause is the platform's documented cost model for the write path; it is wrong today, before this design | Every op author reasoning about read cost; the `read-posture` lint's rationale |
-| §2.5.1 | One sentence for Fire 2's per-execution key-set snapshot | An observable narrowing, even a permitted one, belongs in the contract | `kv.Links` authors; the Edge mirror-coverage gate (unaffected — `enumerations` metadata is untouched) |
+| §2.5.1 | One sentence for Fire 2's per-execution key-set snapshot — **discarded at ratification (Fire 2 shelved); re-staged by the revive fire** | An observable narrowing, even a permitted one, belongs in the contract | `kv.Links` authors; the Edge mirror-coverage gate (unaffected — `enumerations` metadata is untouched) |
 | §2.6 | **No change** | G17–G18: no dispatcher branches on the wire code, so a new closed-enum value buys nothing | — |
 
-Both edits are staged **uncommitted** in `main`. The §2.5.1 edit is conditional on Fire 2's ratification.
+The §2.5 edit **committed at ratification** (2026-08-13) with a transitional note that dies with Fire 1;
+the §2.5.1 edit was discarded with Fire 2's shelving.
 
 ## 8. Alternatives considered
 
@@ -381,7 +402,7 @@ Either way both ship in this fire.
 ```bash
 grep -rn "kv\.Links(" packages/ | wc -l                    # 76 matches; 75 real calls + 1 in a comment
 grep -rn "# read-posture: (e)" packages/ | wc -l           # 149, across 21 files
-grep -rn "func.*ListLinks(" internal cmd | grep -v _test   # exactly 2: the interface + connLinkLister
+grep -rn "func.*ListLinks(" internal cmd | grep -v _test   # exactly 1: connLinkLister (the ScriptLinkLister interface method carries no func keyword)
 grep -rn "KVGetMulti(" internal cmd | grep -v _test        # 5 sites; none on the Starlark read path
 grep -rln "ScriptFailed" internal/weaver internal/loom     # 0 — G18
 ```
@@ -400,7 +421,7 @@ grep -rln "ScriptFailed" internal/weaver internal/loom     # 0 — G18
 | A mutation tombstoning an instanceOf link mid-execution is still honoured (batch layer consulted per call) | Inc 2b | The ordering row of the lifetime table |
 | `LiveInstanceOfTargets` issues one read call for a multi-edge root, and still refuses to resolve on >1 live edge | Inc 2a | Batching did not weaken the ambiguity guard |
 | The lint gate reds a newly-introduced list-then-get in `internal/processor` and greens with the annotation | Inc 3 | The gate default-denies and the declaration clears it |
-| **Live e2e:** a self-credit on each of the four ledgers commits at the production 250 ms wall | Fire 1 | The payoff claim. This is the gate that closes the verticals row |
+| **Live e2e:** a self-credit on each of the four ledgers commits at the production 250 ms wall | Fire 1 | The payoff claim. This is the gate that closes the verticals row. **The harness must pin the wall to 250 ms explicitly** — `internal/testutil`'s `init()` widens any binary linking it to 5 s, and an e2e inheriting that widening proves nothing |
 
 **Verification gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`, **all**
 `scripts/lint-*.go`, and `go test ./internal/processor/... ./internal/substrate/...` plus a full
@@ -411,14 +432,14 @@ radius through packages the fire never edits.
 sensitive-aspect decryption) and takes the full adversarial pass. Inc 1, 2a and 3 are sized by the Steward
 per `agents/steward/SKILL.md` §4.
 
-### 9.2 Fire 2 — the enumeration snapshot
+### 9.2 Fire 2 — the enumeration snapshot *(shelved; owned by the revive fire)*
 
 Owns: the snapshot + its lifetime table's tests (created once per filter; not carried across executions; the
 size cap falls back to per-page listing; bodies still read fresh per page — pinned by a test that mutates a
 link's `isDeleted` between pages and asserts page 2 sees the new state while the key set is unchanged). Owns
 the §2.5.1 contract sentence. **Posture-changing** — full pass.
 
-### 9.3 Fire 3 — the named budget
+### 9.3 Fire 3 — the named budget *(shelved; owned by the revive fire)*
 
 Owns: the round-trip counter, the retained links-examined ceiling, the `details` payload, the §2.5 charge-model
 edit, and a test that a walk exceeding the round-trip budget refuses with the named reason **before** the wall
@@ -470,6 +491,7 @@ sentence in an earlier draft of this document.
 
 ## 13. Open questions
 
-None. The one fork (§8.1) is resolved with a live measurement and a recommendation; the error-code question
-(§7/§5 Fire 3) is resolved against G17–G18; the increment ordering has a Phase-0 gate that cannot change the
-increments themselves. Ratification needs only the two staged contract edits and the fork in §8.1.
+None. The one fork (§8.1) was resolved with a live measurement and ratified as recommended; the error-code
+question (§7/§5 Fire 3) is resolved against G17–G18; the increment ordering has a Phase-0 gate that cannot
+change the increments themselves. Ratified 2026-08-13 — Fire 1 build-ready, Fires 2–3 shelved with named
+revive triggers (see the status banner).
