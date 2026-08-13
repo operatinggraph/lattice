@@ -1,8 +1,9 @@
 # The credential-binding plane — one lifecycle for "credential A signs in as person U"
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-08-03 · owners: privacy-base,
-identity-domain, identity-hygiene, edge-manifest, Gateway · Size **M–L** (Inc 1 S–M · Inc 2 M · Inc 3a XS) ·
-Imp **★★** · adversarial pass run and folded (§12)
+**Status: ratified 2026-08-06 — Inc 2 + Inc 3a ✅ shipped (2026-08-08) · Inc 1 🗄️ held-and-redirected ·
+Inc 3b deferred** (full record in the Ratification section below) · Designer fire 2026-08-03 · owners:
+privacy-base, identity-domain, identity-hygiene, edge-manifest, Gateway · Size **M–L** (Inc 1 S–M ·
+Inc 2 M · Inc 3a XS) · Imp **★★** · adversarial pass run and folded (§12)
 
 ## Ratification (ratify session 2026-08-06)
 
