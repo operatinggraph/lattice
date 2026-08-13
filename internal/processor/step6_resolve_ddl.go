@@ -438,12 +438,17 @@ func workingSetInstanceOfEdges(vtxRoot string, hydrated map[string]VertexDoc, de
 	return edges
 }
 
-// excludeDead drops edges whose link key the batch tombstoned.
+// excludeDead drops edges whose link key the batch tombstoned. Allocates a
+// fresh slice rather than compacting in place (Fire 1 Inc 2b review finding):
+// a caller may hold the same backing array elsewhere — ddlResolutionMemo
+// stores the exact slice a live read returns, and an in-place compaction here
+// would silently corrupt the memoized entry for every later call, including
+// ones with a DIFFERENT (or no) batch tombstone.
 func excludeDead(edges []instanceOfEdge, dead map[string]bool) []instanceOfEdge {
 	if len(dead) == 0 {
 		return edges
 	}
-	out := edges[:0]
+	out := make([]instanceOfEdge, 0, len(edges))
 	for _, e := range edges {
 		if !dead[e.linkKey] {
 			out = append(out, e)

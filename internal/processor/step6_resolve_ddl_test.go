@@ -819,9 +819,67 @@ func TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms(t *testing.T) {
 	if ok2 {
 		t.Fatalf("second resolve: ok=%v ref=%+v, want no resolution — the batch tombstone must win even with a warm memo", ok2, ref2)
 	}
-	// The tombstone resolves from the batch layer alone (checked BEFORE the
-	// memo/live layers), so the fake must not be re-consulted.
+	// A tombstone-only mutation leaves batchLive empty (reconcileBatchInstanceOf
+	// only returns a NET-LIVE edge there), so this resolves via the memo HIT
+	// at the live layer, filtered by THIS call's fresh excludeDead — not via
+	// the batch-layer early-return at the top of instanceOfTargetOf. Either
+	// way the fake must not be re-consulted: the round trip is what the memo
+	// exists to skip.
 	if fake.calls[rootKey] != 1 {
 		t.Fatalf("calls[root] after second resolve = %d, want still 1 — no live re-read needed once the batch names the tombstone", fake.calls[rootKey])
+	}
+}
+
+// TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges is a regression
+// test for a review finding on this fire: excludeDead used to compact its
+// input slice IN PLACE (out := edges[:0]), and the memo hands out the exact
+// slice a live read returned — so filtering it against a batch tombstone
+// silently overwrote the memo's own backing array. Two live edges, tombstone
+// ONE of them, resolve twice with the SAME batch: the first call filters and
+// resolves cleanly to the survivor; if that filter corrupted the memo's
+// array, the identical second call sees a duplicated/wrong edge set and
+// resolves AMBIGUOUS instead of the same clean answer — the exact divergence
+// that would silently disable a step 6.5 sensitivity gate on a repeat call.
+func TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root, metaA, metaB := mustNanoID(t), mustNanoID(t), mustNanoID(t)
+	rootKey := "vtx.widget." + root
+	linkA := "lnk.widget." + root + ".instanceOf.meta." + metaA
+	linkB := "lnk.widget." + root + ".instanceOf.meta." + metaB
+	seedVertexTypeDDLAs(t, ctx, conn, metaA, "typeA", `["A"]`)
+	seedVertexTypeDDLAs(t, ctx, conn, metaB, "typeB", `["B"]`)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fake := &countingLinkReader{edges: map[string][]instanceOfEdge{
+		rootKey: {
+			{linkKey: linkA, target: "vtx.meta." + metaA},
+			{linkKey: linkB, target: "vtx.meta." + metaB},
+		},
+	}}
+	resolver := &ddlResolver{DDLs: cache, linkReader: fake}
+	memo := &ddlResolutionMemo{}
+	state := HydratedState{Context: ScriptContext{DDLResolutionMemo: memo}}
+	tombstoneA := ScriptResult{Mutations: []MutationOp{{Op: "tombstone", Key: linkA}}}
+
+	// Call 1: cold memo, live read returns [A,B]; the batch tombstones A →
+	// filtered to just B → resolves cleanly. This is the call whose
+	// excludeDead invocation used to corrupt the memo's backing array.
+	ref1, ok1 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoneA, state)
+	if !ok1 || ref1.CanonicalName != "typeB" {
+		t.Fatalf("call 1: ok=%v ref=%+v, want typeB (linkA tombstoned, only B live)", ok1, ref1)
+	}
+
+	// Call 2: the IDENTICAL batch tombstone again, warm memo. A correct memo
+	// resolves to typeB again; a corrupted one resolves ambiguous instead.
+	ref2, ok2 := resolver.resolveGoverningDDL(ctx, "unregistered.class", rootKey, substrate.KindVertex, tombstoneA, state)
+	if !ok2 || ref2.CanonicalName != "typeB" {
+		t.Fatalf("call 2: ok=%v ref=%+v, want typeB again — a memo corrupted by call 1's excludeDead would resolve ambiguous here", ok2, ref2)
+	}
+	if fake.calls[rootKey] != 1 {
+		t.Fatalf("calls[root] = %d, want 1 — both calls must share the one memoized read", fake.calls[rootKey])
 	}
 }
