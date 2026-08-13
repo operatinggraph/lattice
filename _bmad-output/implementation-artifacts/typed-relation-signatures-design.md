@@ -1,7 +1,28 @@
 # Typed relation signatures — a relation declares its endpoint types, and the narrowing derivation can read them
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire, 2026-08-11 · Lattice lane
-Board row: *Typed relation signatures — `containedIn: location→location`* (★★, L, Read-model / projection maturity)
+**Status: 🗄️ HELD at ratification — Andrew, 2026-08-13.** The demand does not justify the platform
+surface. The design's own census corrections shrank the payoff to **two** lenses — and both convert by a
+**single-hop rewrite with zero platform machinery**, because every live containment wiring is
+unit→building at depth 1 (`scripts/seed-showcase.go:316`, `scripts/seed-edge-demo.go:97`; the taxonomy
+declares no intermediate level), making `containedIn*1..` semantically identical to `containedIn` on every
+deployment. The `*0..` majority converts under neither shape (§9.5 needed the rejected §10.3 rule or
+explicit labels regardless). The integrity half is a theoretical hole with one careful sole writer and no
+incident. **The miss this hold teaches:** §10 priced five alternatives and never the demand-side one —
+*rewrite the N consumers* — and with a census of 2, per-consumer wins.
+
+**Replacement row filed:** verticals lane, LoftSpace — rewrite the two `*1..` lenses to single-hop (both
+narrow under existing machinery); then assess the `*0..` `coveringLocations` family per lens.
+**Contract edit reverted** (the staged §1.7 paragraph was withdrawn from the tree at hold).
+
+**Revive triggers, any of:** (a) an intermediate containment level (`floor`/`room`) is declared in the
+taxonomy — the moment fixed-depth rewrites silently under-deliver ancestor anchors (fail-closed direction,
+but wrong); (b) a conversion census shows a varlength population per-lens rewrites cannot reach; (c) a
+second relation needs endpoint typing as an *integrity* guarantee (a real second consumer of the gate).
+The grounding below (censuses, mechanism pins, §3.3's state table, §5's verification discipline) remains
+valid and is the starting point for the revive.
+
+Designer fire, 2026-08-11 · Lattice lane
+Board row: *Typed relation signatures — `containedIn: location→location`* (was ★★, L, Read-model / projection maturity)
 Origin: [dynamic-type-taxonomy-design.md](dynamic-type-taxonomy-design.md) §14 Fire C item 12 (C5.12), extracted and filed 2026-08-10 · absorbs C4.8
 
 ---
@@ -284,7 +305,8 @@ appear at each position it touches — its two endpoint node positions and, for 
 intermediate node it traverses.*
 
 Intermediates are the easier half and the one that matters most. In `traverseRel`
-(`executor.go:976-1050`) an intermediate is never matched against a node pattern — `nodeMatches`/`admit` run
+(`executor.go:1112` after the 2026-08-11 branch-group refactor `59441252`, which left `labels.go` and this
+mechanism untouched) an intermediate is never matched against a node pattern — `nodeMatches`/`admit` run
 against the pattern's `to` node only, and the walk itself follows adjacency edges filtered on
 `e.Name != rel.Type` with the other endpoint reconstructed from `e.OtherType`. So an intermediate's type comes
 **purely from link keys**, which is exactly what §3.2's gate constrains. Each intermediate is simultaneously

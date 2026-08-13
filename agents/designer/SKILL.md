@@ -790,7 +790,12 @@ greenfield redesign. Cover, as the feature warrants:
     for a narrow reason (trialed 2026-06-27: a Weaver reclaim *probe* was recommended while the cleaner answer
     — back off using the mark state Weaver already writes — sat *rejected* in the alternatives for a narrow
     storage reason; Andrew's one question surfaced it). **Quantify a benefit with its bounding constraint**
-    (TTL / lease / cap), not the headline number. Where the design hedges with an "interim/fallback," **check
+    (TTL / lease / cap), not the headline number. **A platform mechanism needs demand breadth — when the
+    consumer census is single-digit, "rewrite the N consumers directly" is a mandatory alternative and
+    usually wins** (held at ratification 2026-08-13: typed-relation-signatures priced five alternatives but
+    never the demand-side fix; its own census had shrunk the payoff to 2 lenses, and a single-hop cypher
+    rewrite delivered the entire payoff with zero platform surface — if your census correction shrinks the
+    population mid-draft, re-ask whether the mechanism still clears the bar). Where the design hedges with an "interim/fallback," **check
     whether a stronger committed stance is cleaner** before defaulting to optionality or incrementalism —
     especially on the security plane, where a forgeable interim that gets reworked is worse than doing it once.
   - **A handed-down FORK may be a false fork — before you weigh the branches, check whether they all
