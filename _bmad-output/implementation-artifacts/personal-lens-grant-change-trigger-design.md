@@ -1,7 +1,11 @@
 # The personal plane's D1 gate gets a trigger — and the convergence sweep it never had
 
-**Status: 📐 awaiting-Andrew (ratification). §13 adversarial pass ✅ RUN + findings FOLDED (2026-08-11) — four
-blocking, all closed in place.** Author: Winston (Designer fire, 2026-08-11).
+**Status: ✅ RATIFIED — Andrew, 2026-08-13 · low priority** (build after higher-priority ratified work).
+Build as **one fire, internal order Inc 1 → Inc 2** (fewer-larger-fires; §11's internal cut available if
+the worktree gets heavy); Inc 1 is posture-changing → full review pass. No contract change. DD folded at
+ratification: the orphan-expiry precondition for §4.3's future narrowing is now **shipped** (`b9bf84ef`).
+§13 adversarial pass ✅ RUN + findings FOLDED (2026-08-11) — four blocking, all closed in place.
+Author: Winston (Designer fire, 2026-08-11).
 **Component:** Refractor — `internal/refractor/{adapter,pipeline,projection,capabilityread}` + `cmd/refractor` wiring.
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Component maintenance →
 *[Refractor] A personal row goes stale when its own D1 grant flips* (★★, M).
@@ -412,11 +416,12 @@ not the shape to inherit.
 **Population.** The `identity` vertex population, which is what `AnchorType` means for the existing sweep.
 A tighter bound exists — only identities with a live device matter — but the Interest Set registration is
 explicitly optional (an unregistered device still receives: `docs/components/refractor.md`, Interest Set), so
-registration is not a sound census. The sound one is the live SYNC durable set, which becomes trustworthy only
-once [edge-sync-orphan-expiry-design.md](edge-sync-orphan-expiry-design.md) lands its `InactiveThreshold`
-(ratified, building). **Named future narrowing with a named trigger:** when a cell's identity population
-materially exceeds its device population, narrow the sweep to the live SYNC durable set. Not built now — the
-batch knob already bounds the cost, and the narrowing buys nothing until that ratio bites.
+registration is not a sound census. The sound one is the live SYNC durable set, made trustworthy by
+[edge-sync-orphan-expiry-design.md](edge-sync-orphan-expiry-design.md)'s `InactiveThreshold` — **shipped**
+(`b9bf84ef`, 2026-08-12), so the precondition is already met. **Named future narrowing with a named
+trigger:** when a cell's identity population materially exceeds its device population, narrow the sweep to
+the live SYNC durable set. Not built now — the batch knob already bounds the cost, and the narrowing buys
+nothing until that ratio bites.
 
 ---
 
