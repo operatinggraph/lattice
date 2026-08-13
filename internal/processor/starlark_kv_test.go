@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Tests for the Contract #2 §2.5 lazy on-demand `kv.Read()` Starlark builtin
@@ -903,5 +905,176 @@ func TestConnLinkLister_AgainstCoreKV(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatalf("paging covered %d distinct links, want 3", len(seen))
+	}
+}
+
+// --- Fire 1 Inc 1: connLinkLister.ListLinks issues KVGetMulti, not one KVGet
+// per key. fakeLinkListerReader fakes only the narrow linkListerReader surface
+// (KVListKeysFilter + KVGetMulti) so these tests prove the round-trip shape
+// without an embedded NATS server.
+
+type fakeLinkListerReader struct {
+	keys          []string
+	nextCursor    string
+	entries       map[string]*substrate.KVEntry
+	listCalls     int
+	getMultiCalls int
+	getMultiKeys  [][]string
+	getMultiErr   error
+}
+
+func (f *fakeLinkListerReader) KVListKeysFilter(_ context.Context, _, _, _ string, _ int) ([]string, string, error) {
+	f.listCalls++
+	return f.keys, f.nextCursor, nil
+}
+
+func (f *fakeLinkListerReader) KVGetMulti(_ context.Context, _ string, keys []string) (map[string]*substrate.KVEntry, error) {
+	f.getMultiCalls++
+	got := append([]string{}, keys...)
+	f.getMultiKeys = append(f.getMultiKeys, got)
+	if f.getMultiErr != nil {
+		return nil, f.getMultiErr
+	}
+	out := make(map[string]*substrate.KVEntry, len(keys))
+	for _, k := range keys {
+		if e, ok := f.entries[k]; ok {
+			out[k] = e
+		}
+	}
+	return out, nil
+}
+
+func mustLinkKey(t *testing.T, relation string) string {
+	t.Helper()
+	srcID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	tgtID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	return "lnk.provider." + srcID + "." + relation + ".appointment." + tgtID
+}
+
+// TestConnLinkLister_ListLinks_OneGetMultiCallPerPage pins the round-trip
+// collapse itself (Fire 1 Inc 1): a page well under listLinksGetChunkSize
+// issues exactly one KVGetMulti call, not one KVGet per key. Mutation-verified
+// by hand against the pre-Fire-1 per-key-loop implementation, which issued
+// len(keys) calls here.
+func TestConnLinkLister_ListLinks_OneGetMultiCallPerPage(t *testing.T) {
+	keys := make([]string, 5)
+	entries := make(map[string]*substrate.KVEntry, 5)
+	for i := range keys {
+		keys[i] = mustLinkKey(t, "hasBooking")
+		entries[keys[i]] = &substrate.KVEntry{Value: []byte(`{"class":"hasBooking","isDeleted":false,"data":{}}`), Revision: uint64(i + 1)}
+	}
+	fake := &fakeLinkListerReader{keys: keys, entries: entries}
+	lister := connLinkLister{conn: fake, bucket: testCoreBucket}
+
+	links, _, err := lister.ListLinks(context.Background(), "lnk.provider.x.hasBooking.>", "", 256)
+	if err != nil {
+		t.Fatalf("ListLinks: %v", err)
+	}
+	if fake.listCalls != 1 {
+		t.Errorf("listCalls = %d, want 1", fake.listCalls)
+	}
+	if fake.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (was len(keys)=%d before Fire 1 Inc 1)", fake.getMultiCalls, len(keys))
+	}
+	if len(links) != 5 {
+		t.Fatalf("got %d links, want 5", len(links))
+	}
+}
+
+// TestConnLinkLister_ListLinks_ChunksAt512 pins G7's cap boundary: a maximal
+// legal page (maxLinkPageLimit=1,024 keys) sits exactly on the vendored NATS
+// server's matched-subject gate, so it must be chunked strictly below it.
+// 1,024 keys chunked at listLinksGetChunkSize=512 must issue 2 KVGetMulti
+// calls, neither exceeding 512 keys, and return all 1,024 links.
+func TestConnLinkLister_ListLinks_ChunksAt512(t *testing.T) {
+	const n = maxLinkPageLimit
+	keys := make([]string, n)
+	entries := make(map[string]*substrate.KVEntry, n)
+	for i := range keys {
+		keys[i] = mustLinkKey(t, "hasBooking")
+		entries[keys[i]] = &substrate.KVEntry{Value: []byte(`{"class":"hasBooking","isDeleted":false,"data":{}}`), Revision: 1}
+	}
+	fake := &fakeLinkListerReader{keys: keys, entries: entries}
+	lister := connLinkLister{conn: fake, bucket: testCoreBucket}
+
+	links, _, err := lister.ListLinks(context.Background(), "lnk.provider.x.hasBooking.>", "", n)
+	if err != nil {
+		t.Fatalf("ListLinks: %v", err)
+	}
+	if fake.getMultiCalls != 2 {
+		t.Fatalf("getMultiCalls = %d, want 2 for a %d-key page chunked at %d", fake.getMultiCalls, n, listLinksGetChunkSize)
+	}
+	for i, chunk := range fake.getMultiKeys {
+		if len(chunk) > listLinksGetChunkSize {
+			t.Errorf("chunk %d has %d keys, want <= %d", i, len(chunk), listLinksGetChunkSize)
+		}
+	}
+	if len(links) != n {
+		t.Fatalf("got %d links, want %d", len(links), n)
+	}
+}
+
+// TestConnLinkLister_ListLinks_RevisionFromKVGetMulti pins that LinkDoc.Revision
+// still comes off the KVGetMulti-returned entry, not a per-key KVGet.
+func TestConnLinkLister_ListLinks_RevisionFromKVGetMulti(t *testing.T) {
+	key := mustLinkKey(t, "hasBooking")
+	fake := &fakeLinkListerReader{
+		keys: []string{key},
+		entries: map[string]*substrate.KVEntry{
+			key: {Value: []byte(`{"class":"hasBooking","isDeleted":false,"data":{}}`), Revision: 42},
+		},
+	}
+	lister := connLinkLister{conn: fake, bucket: testCoreBucket}
+	links, _, err := lister.ListLinks(context.Background(), "lnk.provider.x.hasBooking.>", "", 10)
+	if err != nil {
+		t.Fatalf("ListLinks: %v", err)
+	}
+	if len(links) != 1 || links[0].Revision != 42 {
+		t.Fatalf("got %+v, want one link with Revision=42", links)
+	}
+}
+
+// TestConnLinkLister_ListLinks_HardDeletedBetweenListAndGet pins the
+// ErrKeyNotFound-equivalent disposition under batching: a key present in the
+// list but absent from the KVGetMulti response map (hard-deleted between the
+// two calls) is skipped, not treated as an error.
+func TestConnLinkLister_ListLinks_HardDeletedBetweenListAndGet(t *testing.T) {
+	live := mustLinkKey(t, "hasBooking")
+	racedAway := mustLinkKey(t, "hasBooking")
+	fake := &fakeLinkListerReader{
+		keys: []string{live, racedAway},
+		entries: map[string]*substrate.KVEntry{
+			live: {Value: []byte(`{"class":"hasBooking","isDeleted":false,"data":{}}`), Revision: 1},
+			// racedAway intentionally absent: simulates a hard delete that
+			// landed between the list call and the batched get.
+		},
+	}
+	lister := connLinkLister{conn: fake, bucket: testCoreBucket}
+	links, _, err := lister.ListLinks(context.Background(), "lnk.provider.x.hasBooking.>", "", 10)
+	if err != nil {
+		t.Fatalf("ListLinks: %v", err)
+	}
+	if len(links) != 1 || links[0].Key != live {
+		t.Fatalf("got %+v, want exactly the live key %q", links, live)
+	}
+}
+
+// TestConnLinkLister_ListLinks_GetMultiErrorPropagates pins that a genuine
+// KVGetMulti failure (not per-key absence) still fails the whole call.
+func TestConnLinkLister_ListLinks_GetMultiErrorPropagates(t *testing.T) {
+	fake := &fakeLinkListerReader{
+		keys:        []string{mustLinkKey(t, "hasBooking")},
+		getMultiErr: errors.New("boom-getmulti"),
+	}
+	lister := connLinkLister{conn: fake, bucket: testCoreBucket}
+	_, _, err := lister.ListLinks(context.Background(), "lnk.provider.x.hasBooking.>", "", 10)
+	if err == nil || !strings.Contains(err.Error(), "boom-getmulti") {
+		t.Fatalf("err = %v, want it to contain %q", err, "boom-getmulti")
 	}
 }

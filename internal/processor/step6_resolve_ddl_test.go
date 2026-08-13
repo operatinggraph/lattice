@@ -582,3 +582,86 @@ func TestResolveGoverningDDL_ClassOfBatchTombstoneWins(t *testing.T) {
 		t.Fatalf("a terminal the batch tombstones must resolve to no governing DDL, got %q", ref.CanonicalName)
 	}
 }
+
+// --- Fire 1 Inc 2a: connInstanceOfReader.LiveInstanceOfTargets issues one
+// KVGetMulti wildcard call, not one KVListKeysPrefix + N KVGet.
+
+// fakeInstanceOfConnReader is an in-memory instanceOfConnReader that counts
+// calls, proving connInstanceOfReader's round-trip collapse (Fire 1 Inc 2a).
+type fakeInstanceOfConnReader struct {
+	entries       map[string]*substrate.KVEntry
+	getMultiCalls int
+	getMultiKeys  [][]string
+}
+
+func (f *fakeInstanceOfConnReader) KVGetMulti(_ context.Context, _ string, keys []string) (map[string]*substrate.KVEntry, error) {
+	f.getMultiCalls++
+	f.getMultiKeys = append(f.getMultiKeys, append([]string{}, keys...))
+	out := make(map[string]*substrate.KVEntry, len(f.entries))
+	// keys is the single wildcard filter Inc 2a issues; a fake real enough to
+	// prove the call SHAPE returns every seeded entry, mirroring what a real
+	// KVGetMulti would match against that filter.
+	for k, e := range f.entries {
+		out[k] = e
+	}
+	return out, nil
+}
+
+// TestConnInstanceOfReader_OneGetMultiCallReplacesListPlusPerKeyGets pins the
+// round-trip collapse itself. Mutation-verified by hand against the
+// pre-Fire-1 list-then-loop implementation, which issued 1 (list) + N (gets)
+// calls here.
+func TestConnInstanceOfReader_OneGetMultiCallReplacesListPlusPerKeyGets(t *testing.T) {
+	root := "vtx.widget." + instID
+	live1 := "lnk.widget." + instID + ".instanceOf.widget." + tplID
+	live2 := "lnk.widget." + instID + ".instanceOf.widget." + svcTypeID
+	fake := &fakeInstanceOfConnReader{entries: map[string]*substrate.KVEntry{
+		live1: {Value: []byte(`{"class":"instanceOf","isDeleted":false}`)},
+		live2: {Value: []byte(`{"class":"instanceOf","isDeleted":false}`)},
+	}}
+	reader := &connInstanceOfReader{conn: fake, coreBucket: testCoreBucket}
+	edges, err := reader.LiveInstanceOfTargets(context.Background(), root, &liveReadBudgetTracker{budget: 100})
+	if err != nil {
+		t.Fatalf("LiveInstanceOfTargets: %v", err)
+	}
+	if fake.getMultiCalls != 1 {
+		t.Fatalf("getMultiCalls = %d, want 1 (was 1+N per-key GETs before Fire 1 Inc 2a)", fake.getMultiCalls)
+	}
+	if len(fake.getMultiKeys) != 1 || len(fake.getMultiKeys[0]) != 1 {
+		t.Fatalf("want the single call to carry exactly one wildcard filter, got %v", fake.getMultiKeys)
+	}
+	if got := fake.getMultiKeys[0][0]; got != "lnk.widget."+instID+".instanceOf.>" {
+		t.Errorf("filter = %q, want the source-anchored instanceOf wildcard", got)
+	}
+	// Batching must not merge or drop edges: a multi-edge root still surfaces
+	// BOTH live edges here, so the caller's soleTarget ambiguity guard
+	// (§9 F1) still sees two and refuses to resolve — proven at the
+	// resolver level by TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous.
+	if len(edges) != 2 {
+		t.Fatalf("got %d edges, want 2 — batching must not silently merge multi-edge roots", len(edges))
+	}
+}
+
+// TestConnInstanceOfReader_AgainstCoreKV exercises the production
+// connInstanceOfReader against a real embedded Core KV: a tombstoned
+// instanceOf link is excluded, a live one is returned with its target parsed
+// correctly from the link key.
+func TestConnInstanceOfReader_AgainstCoreKV(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	root := "vtx.widget." + instID
+	seedCommittedLink(t, ctx, conn, "lnk.widget."+instID+".instanceOf.widget."+tplID, false)
+	seedCommittedLink(t, ctx, conn, "lnk.widget."+instID+".instanceOf.widget."+cycBID, true)
+
+	reader := &connInstanceOfReader{conn: conn, coreBucket: testCoreBucket}
+	edges, err := reader.LiveInstanceOfTargets(ctx, root, &liveReadBudgetTracker{budget: 100})
+	if err != nil {
+		t.Fatalf("LiveInstanceOfTargets: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1 (tombstoned link must be excluded)", len(edges))
+	}
+	if want := "vtx.widget." + tplID; edges[0].target != want {
+		t.Errorf("target = %q, want %q", edges[0].target, want)
+	}
+}

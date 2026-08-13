@@ -55,12 +55,22 @@ type instanceOfTargetReader interface {
 	LiveInstanceOfTargets(ctx context.Context, vtxRoot string, liveReads *liveReadBudgetTracker) ([]instanceOfEdge, error)
 }
 
+// instanceOfConnReader is the narrow substrate.Conn surface connInstanceOfReader
+// needs. Named so a test can fake it with a call counter without an embedded
+// NATS server. *substrate.Conn satisfies it structurally.
+type instanceOfConnReader interface {
+	KVGetMulti(ctx context.Context, bucket string, keys []string) (map[string]*substrate.KVEntry, error)
+}
+
 // connInstanceOfReader is the production instanceOfTargetReader, backed by the
-// Processor's substrate connection. It performs one bounded prefix list over the
-// source-anchored `lnk.<root>.instanceOf.` keyspace plus a per-key GET to honor
-// tombstones — never an unbounded scan.
+// Processor's substrate connection. It reads the source-anchored
+// `lnk.<root>.instanceOf.>` wildcard in ONE atomic KVGetMulti call — safe here
+// (unlike kv.Links' paged enumeration) because there is no paging contract to
+// honor and the set is structurally tiny: a vertex carries at most one live
+// instanceOf by design (§9 F1's ambiguity guard is what makes more than one a
+// no-op, not a crash). Tombstones are honored from the returned envelope.
 type connInstanceOfReader struct {
-	conn       *substrate.Conn
+	conn       instanceOfConnReader
 	coreBucket string
 }
 
@@ -72,26 +82,19 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	if !liveReads.charge(1) {
 		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
-	prefix := "lnk." + vt + "." + id + "." + instanceOfRelation + "."
-	keys, err := r.conn.KVListKeysPrefix(ctx, r.coreBucket, prefix)
+	filter := "lnk." + vt + "." + id + "." + instanceOfRelation + ".>"
+	entries, err := r.conn.KVGetMulti(ctx, r.coreBucket, []string{filter})
 	if err != nil {
 		return nil, err
 	}
-	if !liveReads.charge(len(keys)) {
+	if !liveReads.charge(len(entries)) {
 		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
 	var edges []instanceOfEdge
-	for _, k := range keys {
+	for k, entry := range entries {
 		_, _, _, t2, id2, ok := substrate.ParseLinkKey(k)
 		if !ok {
 			continue
-		}
-		entry, err := r.conn.KVGet(ctx, r.coreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // hard-tombstoned between list and get → no link
-			}
-			return nil, err
 		}
 		var d struct {
 			IsDeleted bool `json:"isDeleted"`

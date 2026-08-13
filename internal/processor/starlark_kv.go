@@ -211,14 +211,17 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		if err != nil {
 			return nil, errBuiltin("kv.Links: " + err.Error())
 		}
-		// Charge the clamped LIMIT, not len(links): connLinkLister issues one
-		// KVGet per listed key regardless of outcome, so a key that races a
-		// concurrent hard-delete between the list and the GET (skipped from
-		// links, starlark_kv.go's ListLinks) still cost a real round trip. Limit
-		// is the deterministic upper bound on that per-page cost; charging it
-		// keeps "one charge unit == at most one round trip" true even when the
-		// page comes back sparse, at the cost of over-charging a page that
-		// returns fewer live links than it asked for.
+		// Charge the clamped LIMIT, not len(links): connLinkLister examines
+		// every listed key regardless of outcome, so a key that races a
+		// concurrent hard-delete between the list and the batched get
+		// (skipped from links, starlark_kv.go's ListLinks) still cost real
+		// work. Limit is the deterministic upper bound on that per-page cost.
+		// This charges LINKS EXAMINED, not round trips — connLinkLister
+		// batches its value reads into ~1-2 KVGetMulti calls per page
+		// (listLinksGetChunkSize), so "one charge unit" no longer means "one
+		// round trip"; a round-trip-denominated budget is a separate,
+		// currently-unshipped mechanism (script-live-read-round-trip-collapse
+		// design.md Fire 3).
 		if !sc.LiveReads.charge(limit) {
 			return nil, errBuiltin("kv.Links: live-read budget exceeded")
 		}
@@ -287,24 +290,57 @@ func linkDocToStarlark(l LinkDoc) starlarklib.Value {
 	})
 }
 
+// linkListerReader is the narrow substrate.Conn surface connLinkLister needs.
+// Named so a test can fake it with a call counter (proving the round-trip
+// collapse below) without standing up an embedded NATS server for every
+// ListLinks invariant. *substrate.Conn satisfies it structurally.
+type linkListerReader interface {
+	KVListKeysFilter(ctx context.Context, bucket, filter, cursor string, limit int) (keys []string, nextCursor string, err error)
+	KVGetMulti(ctx context.Context, bucket string, keys []string) (map[string]*substrate.KVEntry, error)
+}
+
 // connLinkLister adapts a substrate.Conn + Core bucket to ScriptLinkLister — the
 // production backing for kv.Links, wired by the Hydrator (step 4). It lists the
 // hub's link keys via the server-side subject-filtered KVListKeysFilter (paged),
-// then single-key-GETs each to load its envelope. SourceVertex/TargetVertex are
+// then batches the value reads in one or more atomic KVGetMulti calls (chunked
+// below the server's matched-subject gate). SourceVertex/TargetVertex are
 // derived from the link KEY (Contract #1 §1.1, source first), never trusted from
-// the body. A key that races a hard-delete between list and GET is skipped
-// (it left the set). Never reads the Refractor Adjacency KV or a lens — Core KV
-// canonical links only (P5 / §2.5.1).
+// the body. A key missing from a KVGetMulti response — hard-deleted or absent,
+// raced between the list and the get — is skipped (it left the set). Never
+// reads the Refractor Adjacency KV or a lens — Core KV canonical links only
+// (P5 / §2.5.1).
 type connLinkLister struct {
-	conn   *substrate.Conn
+	conn   linkListerReader
 	bucket string
 }
+
+// listLinksGetChunkSize bounds the keys per KVGetMulti call within one page.
+// maxLinkPageLimit (1,024) can land exactly on the vendored NATS server's
+// matched-subject gate (evaluated as len(seqs) > 1024, live-measured against
+// nats-server@v2.14.0); chunking well below that avoids depending on a
+// strict inequality in code this repo doesn't own. At most one extra round
+// trip on the largest legal page.
+const listLinksGetChunkSize = 512
 
 // ListLinks implements ScriptLinkLister.
 func (r connLinkLister) ListLinks(ctx context.Context, keyFilter, cursor string, limit int) ([]LinkDoc, string, error) {
 	keys, nextCursor, err := r.conn.KVListKeysFilter(ctx, r.bucket, keyFilter, cursor, limit)
 	if err != nil {
 		return nil, "", err
+	}
+	entries := make(map[string]*substrate.KVEntry, len(keys))
+	for start := 0; start < len(keys); start += listLinksGetChunkSize {
+		end := start + listLinksGetChunkSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		chunk, err := r.conn.KVGetMulti(ctx, r.bucket, keys[start:end])
+		if err != nil {
+			return nil, "", err
+		}
+		for k, v := range chunk {
+			entries[k] = v
+		}
 	}
 	links := make([]LinkDoc, 0, len(keys))
 	for _, key := range keys {
@@ -314,14 +350,13 @@ func (r connLinkLister) ListLinks(ctx context.Context, keyFilter, cursor string,
 			// rather than mis-parse if the keyspace ever surprises us.
 			continue
 		}
-		entry, err := r.conn.KVGet(ctx, r.bucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				// Raced a concurrent hard-delete between the key-list and the
-				// value-read — treat as absent (it is no longer in the set).
-				continue
-			}
-			return nil, "", err
+		entry, ok := entries[key]
+		if !ok {
+			// Absent from the batch response: hard-deleted or never existed,
+			// raced between the key-list and the value-read — treat as
+			// absent (it is no longer in the set), same disposition as
+			// today's per-key ErrKeyNotFound.
+			continue
 		}
 		doc, err := parseLinkDoc(entry.Value, key)
 		if err != nil {
