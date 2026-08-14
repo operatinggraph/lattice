@@ -106,7 +106,7 @@ func newAuditFixture(t *testing.T, spec string, wrap func(adapter.Adapter) adapt
 // divergence test below depend on the enrolment actually granting a plan.
 func (f *auditFixture) installAudit(t *testing.T, batch int) *Auditor {
 	t.Helper()
-	enrolled, refusal := f.p.InstallAudit()
+	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
 	require.True(t, enrolled, "the fixture lens must enrol; refusal: %s", refusal)
 	require.Equal(t, "unit", f.p.Auditor().AnchorLabel())
 	f.p.SetAuditPlan(AuditPlan{AnchorLabel: "unit", Batch: batch, Interval: time.Hour})
@@ -509,4 +509,204 @@ func TestAudit_UnderCoverageIsPublishedNotAssumedAway(t *testing.T) {
 	require.Equal(t, 1, st.ListingSize, "and it is not counted in the listing either")
 	require.Equal(t, AuditCoverageBasisKeyType, st.CoverageBasis,
 		"the bound must be PUBLISHED — a clean verdict over an unenumerable anchor is an over-claim otherwise")
+}
+
+// seedRoomsSpec is seedUnitsSpec's twin over a DIFFERENT anchor type — the
+// shape a MATCH hot-reload can turn the fixture's lens into.
+const seedRoomsSpec = `
+MATCH (r:room)
+WHERE r.listing.data.status <> null
+RETURN r.key AS key, r.name AS name, r.listing.data.status AS status
+`
+
+// TestAudit_AnchorLabelChangeIsAdoptedNotSuppressedForever pins the recovery a
+// frozen install-time plan cannot make. InstallAudit runs ONCE, at activation;
+// nothing re-invokes it. So an auditor that merely compared each pass against
+// its installed label would self-suppress from the first hot-reload onward,
+// publish a stale reason forever, and eventually raise an LensAuditStalled that
+// only a process restart could clear.
+func TestAudit_AnchorLabelChangeIsAdoptedNotSuppressedForever(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	a := f.installAudit(t, 10)
+	ctx := context.Background()
+
+	f.project(t, auditUnitA, "Loft A", 1)
+	a.pass(ctx)
+	require.Equal(t, 1, a.Status().Audited)
+	require.Equal(t, "unit", a.AnchorLabel())
+
+	// A MATCH hot-reload moves the lens's anchor to another type.
+	eng := full.New()
+	cr, err := eng.Parse(seedRoomsSpec)
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull)
+	fullCR.KeyColumns = []string{"key"}
+	require.NoError(t, f.p.UseFullEngine(eng, cr))
+
+	roomKey := "vtx.room.AudtroomAAAAAAAAAAAA"
+	putBody(t, f.coreKV, roomKey, map[string]any{
+		"key": roomKey, "class": "room", "isDeleted": false, "name": "Room One",
+		"createdAt": "2026-08-13T10:00:00Z", "lastModifiedAt": "2026-08-13T10:00:00Z",
+		"data": map[string]any{},
+	})
+	putBody(t, f.coreKV, roomKey+".listing",
+		aspectBody(roomKey, "listing", map[string]any{"status": "active"}, false))
+
+	a.pass(ctx)
+	st := a.Status()
+	require.Equal(t, "room", a.AnchorLabel(), "the auditor must adopt the lens's new anchor, not freeze against the old one")
+	require.Empty(t, st.Suppression, "adopting a moved anchor is not a suppression — a suppression here never clears")
+	require.Equal(t, 1, st.Audited, "and it must resume auditing under the new shape without a restart")
+	require.Equal(t, 1, st.ListingSize)
+}
+
+// TestAudit_RuleSwapMidPassDiscardsTheVerdict mirrors the sweep's own
+// ErrRuleSuperseded disposition. A pass takes real time, and a rule swap landing
+// inside it makes every comparison in hand a comparison against a rule no longer
+// in force. The sweep withholds its write; the audit, having none, withholds the
+// VERDICT — publishing one would bank a finding derived from a retired rule.
+func TestAudit_RuleSwapMidPassDiscardsTheVerdict(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	a := f.installAudit(t, 10)
+	ctx := context.Background()
+
+	keyA := f.project(t, auditUnitA, "Loft A", 1)
+	corruptStoredRow(t, f.targetKV, keyA)
+
+	// The swap lands while the pass is in flight. Driving it from a hook inside
+	// the target read is what makes the ordering deterministic — no sleep, no
+	// racing goroutine.
+	swapped := false
+	f.p.adapterMu.Lock()
+	f.p.adpt = hookedRowReader{Adapter: f.p.adpt, before: func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		eng := full.New()
+		cr, perr := eng.Parse(seedUnitsSpec)
+		require.NoError(t, perr)
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.True(t, isFull)
+		fullCR.KeyColumns = []string{"key"}
+		require.NoError(t, f.p.UseFullEngine(eng, cr))
+	}}
+	f.p.adapterMu.Unlock()
+
+	a.pass(ctx)
+	st := a.Status()
+	require.True(t, swapped, "the fixture must actually have swapped the rule mid-pass")
+	require.Equal(t, "rule swapped mid-pass", st.Suppression)
+	require.Zero(t, st.DivergentTotal, "a verdict derived from a retired rule must not be banked")
+	require.True(t, st.LastPassAt.IsZero(), "and the pass must not claim the freshness of one that concluded")
+}
+
+// hookedRowReader runs before each read-back, so a test can land a concurrent
+// mutation at an exact point INSIDE a pass without a sleep or a second
+// goroutine. It overrides GetRow on the concrete type rather than relying on
+// promotion through the embedded adapter.
+type hookedRowReader struct {
+	adapter.Adapter
+	before func()
+}
+
+func (h hookedRowReader) GetRow(ctx context.Context, keys map[string]any) (map[string]any, bool, error) {
+	h.before()
+	reader, ok := h.Adapter.(adapter.RowReader)
+	if !ok {
+		return nil, false, nil
+	}
+	return reader.GetRow(ctx, keys)
+}
+
+// TestAudit_PauseStartingMidPassDiscardsTheVerdict is the other mid-pass
+// condition, and the one with a concrete false finding attached: a rebuild or a
+// pause starting mid-batch leaves the remaining anchors compared against a
+// target being truncated underneath them, which reads as a run of `missing`
+// divergences that were never divergent.
+func TestAudit_PauseStartingMidPassDiscardsTheVerdict(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	a := f.installAudit(t, 10)
+	ctx := context.Background()
+
+	keyA := f.project(t, auditUnitA, "Loft A", 1)
+	require.NoError(t, f.targetKV.Delete(ctx, keyA))
+
+	paused := false
+	f.p.adapterMu.Lock()
+	f.p.adpt = hookedRowReader{Adapter: f.p.adpt, before: func() {
+		if paused {
+			return
+		}
+		paused = true
+		require.NoError(t, f.reporter.SetPaused(ctx, "operator", "held mid-pass"))
+	}}
+	f.p.adapterMu.Unlock()
+
+	a.pass(ctx)
+	st := a.Status()
+	require.True(t, paused)
+	require.Contains(t, st.Suppression, "started mid-pass")
+	require.Contains(t, st.Suppression, "lens status is paused")
+	require.Zero(t, st.DivergentTotal,
+		"a row read while the target was being frozen underneath the pass is not a proven divergence")
+}
+
+// TestAudit_EmptyAnchorTypeEarnsNoCycleCompletion pins the honesty of the
+// coverage stamp. A pass that reaches the end of an EMPTY listing has verified
+// nothing, and stamping it would publish `divergentTotal: 0` beside a fresh
+// completion timestamp — which reads as "the whole lens was audited and is
+// clean". A lens with no enumerable anchors must stay visibly unsubstantiated.
+func TestAudit_EmptyAnchorTypeEarnsNoCycleCompletion(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	a := f.installAudit(t, 10)
+	ctx := context.Background()
+
+	a.pass(ctx)
+	st := a.Status()
+	require.Zero(t, st.Audited)
+	require.Zero(t, st.ListingSize)
+	require.True(t, st.CycleCompletedAt.IsZero(),
+		"a tick that compared nothing must not read as a completed cycle")
+	require.Zero(t, st.CycleAudited)
+
+	// And the positive vector: one real anchor, and the stamp is earned.
+	f.project(t, auditUnitA, "Loft A", 1)
+	a.pass(ctx)
+	st = a.Status()
+	require.False(t, st.CycleCompletedAt.IsZero())
+	require.Equal(t, 1, st.CycleAudited, "the stamp travels with what the cycle actually compared")
+}
+
+// TestAudit_CycleTotalsSpanTheWholeWalk is the other half of the same property:
+// a cycle's finding is accumulated across every pass of that cycle, so a
+// divergence found in the first batch is still readable when the last one
+// closes. Keyed on the per-pass count alone, a divergence on a corpus wider than
+// one batch would flap in and out of the issue list once per rotation.
+func TestAudit_CycleTotalsSpanTheWholeWalk(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	const batch = 2
+	a := f.installAudit(t, batch)
+	ctx := context.Background()
+
+	ids := []string{
+		"AudtspanAAAAAAAAAAA1", "AudtspanAAAAAAAAAAA2", "AudtspanAAAAAAAAAAA3",
+		"AudtspanAAAAAAAAAAA4",
+	}
+	var keys []string
+	for i, id := range ids {
+		keys = append(keys, f.project(t, id, "Loft "+id, uint64(i+1)))
+	}
+	corruptStoredRow(t, f.targetKV, keys[0])
+
+	a.pass(ctx)
+	require.Equal(t, 1, a.Status().DivergentTotal, "the first batch finds it")
+
+	a.pass(ctx)
+	st := a.Status()
+	require.Zero(t, st.DivergentTotal, "the second batch re-examines different anchors, so the PASS count is zero")
+	require.Equal(t, 1, st.CycleDivergentTotal,
+		"but the cycle's finding stands until a new cycle re-derives it — a pass must never clear a verdict it did not re-derive")
+	require.Equal(t, 4, st.CycleAudited)
 }

@@ -559,12 +559,28 @@ func retractionVerdict(evidenced bool) (Verdict, string) {
 // would read those as divergent for byte-identical documents and turn every
 // reconciliation into a write.
 func rowsEquivalent(stored, computed map[string]any) bool {
+	equal, _ := rowsComparable(stored, computed)
+	return equal
+}
+
+// rowsComparable is rowsEquivalent with its one failure mode separated out:
+// comparable reports whether both sides could be rendered at all, and equal is
+// meaningful only when it is true.
+//
+// rowsEquivalent folds "these differ" and "I could not render one of them"
+// (a value JSON cannot express — NaN, +Inf, a cycle) into a single false,
+// which is the right answer for a REPAIR path: a row it cannot compare is a
+// row it should rewrite. It is the wrong answer for the divergence audit,
+// which writes nothing and must report an unrenderable row as unverified
+// rather than as a divergence it has proven — the same rule §4.3 states for
+// evaluation and read errors.
+func rowsComparable(stored, computed map[string]any) (equal, comparable bool) {
 	a, aerr := canonicalJSON(stored)
 	b, berr := canonicalJSON(computed)
 	if aerr != nil || berr != nil {
-		return false
+		return false, false
 	}
-	return bytes.Equal(a, b)
+	return bytes.Equal(a, b), true
 }
 
 // canonicalJSON renders a row without its volatile fields, plus any extra

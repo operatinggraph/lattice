@@ -100,7 +100,7 @@ func TestRefractor_PlainLensDivergenceAudit_DetectsWithoutRepairing_E2E(t *testi
 
 	// Enrolment through the REAL gate: what is under test includes the decision
 	// that this lens may be audited at all.
-	enrolled, refusal := p.InstallAudit()
+	enrolled, refusal := p.InstallAudit(pipeline.AuditOptions{})
 	require.True(t, enrolled, "an ordinary plain NATS-KV lens must enrol; refusal: %s", refusal)
 	require.Equal(t, pipeline.DefaultAuditInterval, p.Auditor().Interval())
 	// Compress the clock so the test exercises real passes rather than waiting
@@ -176,23 +176,26 @@ func TestRefractor_PlainLensDivergenceAudit_DetectsWithoutRepairing_E2E(t *testi
 	hb.LensProvider = func() []health.LensLivenessStatus {
 		as := auditor.Status()
 		return []health.LensLivenessStatus{{
-			CanonicalName:         canonicalName,
-			RuleID:                ruleID,
-			Status:                "active",
-			AuditEnrolled:         as.Enrolled,
-			AuditRefusal:          as.Refusal,
-			Audited:               as.Audited,
-			DivergentRows:         as.Divergent,
-			DivergentTotal:        as.DivergentTotal,
-			AuditUnverified:       as.Unverified,
-			AuditLastUnverified:   as.LastUnverified,
-			AuditLastPassAt:       as.LastPassAt,
-			AuditCycleCompletedAt: as.CycleCompletedAt,
-			AuditCoverageBasis:    as.CoverageBasis,
-			AuditListingSize:      as.ListingSize,
-			AuditSuppression:      as.Suppression,
-			AuditSuppressionAt:    as.SuppressionAt,
-			AuditInterval:         auditor.Interval(),
+			CanonicalName:            canonicalName,
+			RuleID:                   ruleID,
+			Status:                   "active",
+			AuditEnrolled:            as.Enrolled,
+			AuditRefusal:             as.Refusal,
+			Audited:                  as.Audited,
+			DivergentRows:            as.Divergent,
+			DivergentTotal:           as.DivergentTotal,
+			AuditUnverified:          as.Unverified,
+			AuditLastUnverified:      as.LastUnverified,
+			AuditLastPassAt:          as.LastPassAt,
+			AuditCycleCompletedAt:    as.CycleCompletedAt,
+			AuditCycleAudited:        as.CycleAudited,
+			AuditCycleDivergentTotal: as.CycleDivergentTotal,
+			AuditCycleUnverified:     as.CycleUnverified,
+			AuditCoverageBasis:       as.CoverageBasis,
+			AuditListingSize:         as.ListingSize,
+			AuditSuppression:         as.Suppression,
+			AuditSuppressionAt:       as.SuppressionAt,
+			AuditInterval:            auditor.Interval(),
 		}}
 	}
 	hbCtx, hbCancel := context.WithCancel(ctx)

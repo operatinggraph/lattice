@@ -384,6 +384,7 @@ requirement read off already-shipped predicates, not a heuristic:
 
 | Conjunct | Why | Source |
 |---|---|---|
+| **not on the auth plane** (`projection.IsAuthPlane`) | **Added at build time (Fire 2).** The table below excludes every auth-plane lens *shipped today* only by accident of two other conjuncts — actor-aggregate covers the capability-kv envelope lenses, `RowReader` covers the Postgres grant tables — but a **plain-kind** lens declaring `nats_kv` into `capability-kv` is neither, and would enrol. `capabilityRoleIndex` is that shape and is excluded today only by an envelope installed for an unrelated reason plus a `$projectedAt` reference in its cypher; removing either would make it enrol. A per-row verdict on the authorization read model belongs to the plane that has a severity ladder and an escalation for it, not to a detector built for business read models. | `projection/plan.go:110-115` |
 | `p.seedAnchorLabel != ""` | Single-branch, full-engine, derivable anchor pattern. A multi-walk lens has N anchors and one seed cannot speak for all of them. | `pipeline.go:481-493` |
 | `actorEnumerator == nil && envelopeFn == nil && multiEnvelopeFn == nil` | An actor-aware/personal evaluation's "anchor" is the actor, not the event vertex; seeding it evaluates the wrong entity. Actor-aggregate lenses are the sweep's, not the audit's. | `seedAnchorFor`, `pipeline.go:496-498` |
 | `!p.diffRetraction` | A single-anchor row set reads as "every other anchor's rows are gone" to `applyDiffRetraction`. The audit never writes, but it must not *compute* under a shape whose semantics it would misread. | `pipeline.go:500-502` |
@@ -502,11 +503,24 @@ const (
 )
 ```
 
-Interval and batch are deployment-overridable through the same env path the sweep's interval takes; a zero
-`AuditPlan.Interval`/`Batch` selects the default, exactly as `SweepPlan`'s do. **The kill switch is
-`AuditEnabledByDefault`, not a zero batch** — a zero batch would resolve back to the default and disable nothing.
-Flipping it to `false` is the one-constant "default off" lever the For-Andrew block offers, and because it routes
-through `auditEnrolment` the disabled state is still visible per lens rather than looking like a clean audit.
+A zero `AuditPlan.Interval`/`Batch` selects the default, exactly as `SweepPlan`'s do. **The kill switch is the
+arming flag, not a zero batch** — a zero batch resolves back to the default and disables nothing. Because the
+flag routes through `auditEnrolment`, a disarmed deployment publishes `auditEnrolled: false` with reason
+`"disabled by deployment"` on every lens rather than looking like a corpus that audits clean.
+
+**Correction (build time, Fire 2).** This section originally said interval and batch were *"deployment-overridable
+through the same env path the sweep's interval takes"*, and offered `AuditEnabledByDefault` as a one-constant
+lever. Both claims were wrong when written: **the sweep has no env path** — `DefaultSweepInterval`/`DefaultSweepBatch`
+are plain constants and `projection.BusinessSweepInterval` is hard-coded — so there was no path to share, and a
+constant is not a lever a deployment can pull without a rebuild. What shipped instead, read once at Refractor boot
+in `cmd/refractor/main.go` beside the other `REFRACTOR_*` knobs and threaded into `Pipeline.InstallAudit` through
+`pipeline.AuditOptions`:
+
+| Env var | Effect |
+|---|---|
+| `REFRACTOR_AUDIT_ENABLED` | `false` disarms the corpus via `pipeline.SetAuditEnabled`, producing the published `"disabled by deployment"` refusal on every lens. `AuditEnabledByDefault` remains the compiled default the flag starts from. |
+| `REFRACTOR_AUDIT_INTERVAL` | A Go duration overriding `DefaultAuditInterval`. Non-positive is REJECTED and logged, never accepted — `AuditPlan` resolves a zero back to the default, so accepting one would log an override that did not happen. |
+| `REFRACTOR_AUDIT_BATCH` | A positive integer overriding `DefaultAuditBatch`, rejected on the same terms and with the same reasoning: a zero batch is not a kill switch, the flag above is. |
 
 ---
 
@@ -517,8 +531,9 @@ through `auditEnrolment` the disabled state is still visible per lens rather tha
 built without Increment 2 simply publishes `auditEnrolled: false` for every lens.
 
 **Rollback** is symmetric for both increments: Increment 1 changes accounting only, Increment 2 adds a component
-that performs no writes. Setting `DefaultAuditBatch = 0` (or the env override) is a full disable with no residue —
-in deliberate contrast to the D1 narrowing, whose revert is asymmetric.
+that performs no writes. `REFRACTOR_AUDIT_ENABLED=false` is a full disable with no residue — in deliberate
+contrast to the D1 narrowing, whose revert is asymmetric. (This paragraph originally named `DefaultAuditBatch = 0`
+as the disable; it is not one — see §6.3's correction.)
 
 **Tests.**
 

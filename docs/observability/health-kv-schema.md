@@ -537,7 +537,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
     }
   },
   "issues": [
@@ -688,7 +688,16 @@ wrong business read model degrades the instance rather than failing it.
 target was rejected (§8.1), so the row stays wrong until an operator drives the control-plane
 `reproject` RPC or a `Rebuild`. Read `divergentTotal` against `auditCycleCompletedAt` before
 concluding anything from a zero: one pass covers at most one batch, so a clean number is a
-claim about *those* anchors until a cycle has closed over the lens. `auditListingSize` is how
+claim about *those* anchors until a cycle has closed over the lens. That is what
+`auditCycleAudited` / `auditCycleDivergentTotal` / `auditCycleUnverified` carry — the LAST
+COMPLETED cycle's totals, stamped with `auditCycleCompletedAt` and describing the same walk.
+A cycle is recorded as completed **only when it actually compared anchors**, so a fresh
+timestamp always means "this many anchors were compared" and never "a tick happened"; a lens
+with no enumerable anchors therefore never earns one, and its `divergentTotal: 0` stays
+visibly unsubstantiated. `auditCycleDivergentTotal` is also what keeps a finding from
+self-erasing: the per-pass count reads zero on every pass that did not re-examine the
+divergent anchor, so `LensProjectionDiverged` is raised on either number and only a NEW cycle
+over the same anchors supersedes a cycle's verdict. `auditListingSize` is how
 many anchor keys the type filter matched (a pathologically large anchor type is visible
 rather than merely expensive), and `auditCoverageBasis` is always `"key-type"` — a real
 boundary, not a formality: the executor also admits a vertex whose *body* `class`/`label`
@@ -704,7 +713,13 @@ self-suppresses with the reason instead. Most of the corpus refuses by design: a
 actor-aggregate lens is the sweep's, a Postgres or subject target cannot read a row back, a
 Secure Lens must not have plaintext re-derived by a background job outside a request context,
 and a query returning `$now` or `$projectedAt` would read divergent forever because a
-recomputation cannot reproduce either. A refused lens publishes its reason, raises no verdict,
+recomputation cannot reproduce either. A lens on the **auth plane** is refused outright
+(`projection.IsAuthPlane` — `nats_kv` into `capability-kv`, or a Postgres grant table): its
+per-row verdicts belong to the convergence sweep and to the `Capability*` codes, which carry
+an escalation this detector deliberately does not. `CapabilityProjectionDiverged` /
+`CapabilityAuditStalled` exist on the capability path as defence in depth for that refusal
+being wrong — a proven divergence on the authorization read model must reach an issue with a
+severity and a `since` clock, never sit in the metric map as a number nothing alerts on. A refused lens publishes its reason, raises no verdict,
 and can never read as audit-stalled — *not audited* must stay distinguishable from *audited,
 clean*.
 

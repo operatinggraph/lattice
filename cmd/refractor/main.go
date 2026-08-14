@@ -841,6 +841,9 @@ func main() {
 				snap.AuditLastUnverified = status.LastUnverified
 				snap.AuditLastPassAt = status.LastPassAt
 				snap.AuditCycleCompletedAt = status.CycleCompletedAt
+				snap.AuditCycleAudited = status.CycleAudited
+				snap.AuditCycleDivergentTotal = status.CycleDivergentTotal
+				snap.AuditCycleUnverified = status.CycleUnverified
 				snap.AuditCoverageBasis = status.CoverageBasis
 				snap.AuditListingSize = status.ListingSize
 				snap.AuditSuppression = status.Suppression
@@ -971,6 +974,9 @@ func main() {
 				snap.AuditLastUnverified = status.LastUnverified
 				snap.AuditLastPassAt = status.LastPassAt
 				snap.AuditCycleCompletedAt = status.CycleCompletedAt
+				snap.AuditCycleAudited = status.CycleAudited
+				snap.AuditCycleDivergentTotal = status.CycleDivergentTotal
+				snap.AuditCycleUnverified = status.CycleUnverified
 				snap.AuditCoverageBasis = status.CoverageBasis
 				snap.AuditListingSize = status.ListingSize
 				snap.AuditSuppression = status.Suppression
@@ -1129,6 +1135,54 @@ func main() {
 		} else {
 			fullEngine = fullEngine.WithMaxBindings(n)
 			logger.Info("binding-set cap overridden", "cap", n)
+		}
+	}
+
+	// The divergence audit's deployment levers (lens-projection-divergence-
+	// audit-design.md §6.3). Read here, once, rather than per lens: two places
+	// build pipelines and one of them could be missed — the same reason the
+	// derivation knobs below are read here.
+	//
+	// REFRACTOR_AUDIT_ENABLED is the kill switch, and it routes through
+	// enrolment rather than skipping installation, so a disarmed deployment
+	// publishes `auditEnrolled: false` with reason "disabled by deployment" on
+	// every lens instead of looking like a corpus that audits clean.
+	auditOpts := pipeline.AuditOptions{}
+	if v := os.Getenv("REFRACTOR_AUDIT_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_AUDIT_ENABLED; keeping the default", "value", v, "err", err)
+		} else {
+			pipeline.SetAuditEnabled(enabled)
+			logger.Info("divergence audit arming overridden", "enabled", enabled)
+		}
+	}
+	// A zero/negative interval or batch is REJECTED rather than accepted,
+	// because AuditPlan resolves either back to its default — accepting one
+	// would log an override that did not happen, and (for the batch) offer a
+	// kill switch that disables nothing. The switch is the flag above.
+	if v := os.Getenv("REFRACTOR_AUDIT_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			logger.Error("invalid REFRACTOR_AUDIT_INTERVAL; keeping the default", "value", v, "err", err)
+		case d <= 0:
+			logger.Error("invalid REFRACTOR_AUDIT_INTERVAL; must be a positive duration, keeping the default", "value", v)
+		default:
+			auditOpts.Interval = d
+			logger.Info("divergence audit interval overridden", "interval", d)
+		}
+	}
+	if v := os.Getenv("REFRACTOR_AUDIT_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		switch {
+		case err != nil:
+			logger.Error("invalid REFRACTOR_AUDIT_BATCH; keeping the default", "value", v, "err", err)
+		case n <= 0:
+			logger.Error("invalid REFRACTOR_AUDIT_BATCH; must be a positive integer (use REFRACTOR_AUDIT_ENABLED=false to disable), keeping the default", "value", v)
+		default:
+			auditOpts.Batch = n
+			logger.Info("divergence audit batch overridden", "batch", n)
 		}
 	}
 
@@ -1637,7 +1691,17 @@ func main() {
 		// sweep's, a Postgres target cannot read a row back), and it is
 		// published per lens as auditEnrolled/auditRefusal — the log line is
 		// the operator's local copy, not the record.
-		if enrolled, refusal := p.InstallAudit(); enrolled {
+		// projection.IsAuthPlane is the ONE canonical derivation of the lens's
+		// plane (nats_kv into the capability bucket, or a Postgres grant
+		// table), and it is passed in rather than read off the pipeline:
+		// Pipeline.authPlane is set only by InstallActorAggregate, so it is
+		// false by construction on exactly the plain-kind capability-kv lens
+		// this conjunct exists to refuse.
+		if enrolled, refusal := p.InstallAudit(pipeline.AuditOptions{
+			AuthPlane: projection.IsAuthPlane(r),
+			Interval:  auditOpts.Interval,
+			Batch:     auditOpts.Batch,
+		}); enrolled {
 			census.record(r.ID, true, "")
 			logger.Info("divergence audit enrolled", "lensId", r.ID,
 				"anchorLabel", p.Auditor().AnchorLabel(), "interval", p.Auditor().Interval())

@@ -839,11 +839,16 @@ cannot prove it owns the keyspace it would write into, and coupling this detecto
 writer would rebuild the exact structure whose collapse produced the twelve-day silence.
 The remediation path is the operator's control-plane `reproject` RPC and `Rebuild`.
 
-Enrolment is fail-closed on six conjuncts (`auditEnrolment`, §4.4), and — unlike the
+Enrolment is fail-closed, and — unlike the
 sweep's, which is decided once at install — **every one is re-checked at the top of every
 pass**: they are all mutable pipeline state, so a hot reload could otherwise leave a lens
 auditing under a shape it no longer has. A failed re-check self-suppresses with the reason
-rather than auditing. The conjuncts: a single derivable anchor pattern
+rather than auditing. The conjuncts, in order: **not on the auth plane** (`projection.IsAuthPlane` — `nats_kv` into
+`capability-kv`, or a Postgres grant table), which is the only thing keeping a *plain-kind*
+capability-bucket lens out (the actor-aggregate and `RowReader` conjuncts below cover every
+auth-plane lens shipped today, but neither covers that shape, and a per-row verdict on the
+authorization read model belongs to the plane that has an escalation ladder for it); a single
+derivable anchor pattern
 (`seedAnchorLabels`, exactly one label — a multi-walk lens has N anchors and one seed
 cannot speak for all of them, and a `*` taxonomy anchor resolves to a subtype *set* one
 key-type listing cannot enumerate); no actor enumerator and no envelope (an actor-aware
@@ -879,9 +884,23 @@ over the whole lens, `auditListingSize` how large that lens's anchor type is, an
 `auditCoverageBasis: "key-type"` names the real boundary — the executor also admits a vertex
 whose *body* `class`/`label` equals the pattern label, and such an anchor is never
 enumerated and never audited. That is under-coverage, never a wrong verdict, and it is
-published rather than assumed away. Suppression (rebuild in flight, paused lens, unreadable
+published rather than assumed away. Coverage claims are earned, not stamped: `auditCycleCompletedAt` and the
+`auditCycle*` totals beside it are recorded only when a cycle actually compared anchors, so a
+lens with none never earns a completion and its clean number stays visibly unsubstantiated;
+and `auditCycleDivergentTotal` is what stops a finding self-erasing on the next pass, since a
+pass that did not re-examine the divergent anchor reports zero.
+
+Suppression (rebuild in flight, paused lens, unreadable
 health entry, failed enrolment re-check) records its reason and leaves `auditLastPassAt`
-ageing, so a held audit cannot republish a clean verdict forever; past **10 audit
+ageing, so a held audit cannot republish a clean verdict forever. Both mid-pass conditions are
+re-derived AFTER the batch as well as before it: a rule swap landing inside a pass makes every
+comparison in hand a comparison against a retired rule (the sweep withholds its write for this;
+the audit, having none, withholds the verdict), and a rebuild or pause starting mid-batch
+leaves the remaining anchors compared against a target being truncated underneath them, which
+would read as `missing` divergences that were never divergent. A hot-reload that MOVES the
+lens's anchor is adopted rather than suppressed — the walk restarts under the new label with a
+reset cursor — because `InstallAudit` runs once at activation and nothing re-invokes it, so
+suppressing there would hold until the process restarted. past **10 audit
 intervals** with no verdict the heartbeat raises `LensAuditStalled` and `alert` reads
 `audit-stalled`. The cursor and the last completed cycle persist on the lens's own health
 entry (`health.Reporter.SetAuditProgress` — the audit's only write anywhere), so a redeploy

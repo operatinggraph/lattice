@@ -251,3 +251,122 @@ func TestEvalLenses_AuditUnverifiedRaisesTheAlertWithoutTheSweepsIssue(t *testin
 		t.Fatalf("auditUnverifiedReason = %v", m["auditUnverifiedReason"])
 	}
 }
+
+func TestEvalLenses_DivergedAndAuditStalledCombine(t *testing.T) {
+	// The `alert` field is single-valued and both conditions can hold at once —
+	// an audit that found a divergence and then stopped ticking. The precedence
+	// between them is real policy: a halted detector makes the divergence count
+	// itself stale, so `audit-stalled` must win, and BOTH issues must still be
+	// raised so neither finding is lost to the other.
+	interval := 15 * time.Minute
+	snap := lensAuditSnap("listedUnits", interval)
+	snap.Audited = 4
+	snap.DivergentRows = map[string]int{"stale": 1}
+	snap.DivergentTotal = 1
+	h := &LatticeHeartbeater{}
+	start := time.Now()
+	held := time.Duration(defaultCapabilitySweepStallCycles+1) * interval
+
+	metric, issues := auditedThenHeld(h, start, held, snap)
+	if _, ok := issueByCode(issues, issueLensProjectionDiverged); !ok {
+		t.Fatalf("the divergence must still be raised: %v", issues)
+	}
+	if _, ok := issueByCode(issues, issueLensAuditStalled); !ok {
+		t.Fatalf("the stall must still be raised: %v", issues)
+	}
+	if got := metric["listedUnits"]["alert"]; got != "audit-stalled" {
+		t.Fatalf("alert = %v, want audit-stalled — a halted detector makes the divergence count stale", got)
+	}
+}
+
+func TestEvalLenses_CycleDivergenceOutlivesAPassThatDidNotReExamineIt(t *testing.T) {
+	// A pass examines at most one batch, so the per-pass count reads zero on
+	// every pass that did not re-examine the divergent anchor. Keyed on it
+	// alone, a divergence on a corpus wider than one batch would flap in and out
+	// of the issue list once per rotation. Only a NEW cycle supersedes it.
+	snap := lensAuditSnap("listedUnits", 15*time.Minute)
+	snap.Audited = 10
+	snap.DivergentTotal = 0
+	snap.AuditCycleAudited = 240
+	snap.AuditCycleDivergentTotal = 3
+	h := &LatticeHeartbeater{}
+	metric, issues := beat(h, time.Now(), snap)
+
+	is, ok := issueByCode(issues, issueLensProjectionDiverged)
+	if !ok {
+		t.Fatalf("a cycle's finding must stand until a new cycle re-derives it: %v", issues)
+	}
+	if !strings.Contains(is.Message, "last completed cycle") {
+		t.Fatalf("the message must say the finding is the cycle's, not this pass's: %q", is.Message)
+	}
+	if metric["listedUnits"]["alert"] != "diverged" {
+		t.Fatalf("alert = %v, want diverged", metric["listedUnits"]["alert"])
+	}
+	if metric["listedUnits"]["auditCycleAudited"] != 240 {
+		t.Fatalf("the cycle's coverage must travel with its verdict: %v", metric["listedUnits"])
+	}
+}
+
+func TestEvalCapabilityLenses_AuditDivergenceIsAlertedNotSilentlyMetriced(t *testing.T) {
+	// Defence in depth. auditEnrolment refuses the auth plane outright, so
+	// nothing here can be enrolled today — but if that conjunct is ever wrong, a
+	// proven divergence on the authorization read model must reach an ISSUE with
+	// a severity and a `since` clock. Publishing it as a bare metric nothing
+	// alerts on is the exact detection-with-no-transport failure this whole
+	// design exists to end, reinstated on the highest-value plane.
+	snap := CapabilityLensStatus{
+		CanonicalName:      "capabilityRoleIndex",
+		RuleID:             "lns-capabilityRoleIndex",
+		Status:             "active",
+		AuditEnrolled:      true,
+		AuditInterval:      15 * time.Minute,
+		AuditCoverageBasis: "key-type",
+		Audited:            5,
+		DivergentRows:      map[string]int{"stale": 1},
+		DivergentTotal:     1,
+	}
+	h := &LatticeHeartbeater{CapabilityLensProvider: func() []CapabilityLensStatus {
+		return []CapabilityLensStatus{snap}
+	}}
+	metric, issues := h.evalCapabilityLenses(time.Now())
+
+	is, ok := issueByCode(issues, issueCapabilityProjectionDiverged)
+	if !ok {
+		t.Fatalf("expected %s, got %v", issueCapabilityProjectionDiverged, issues)
+	}
+	if is.Severity != "error" {
+		t.Fatalf("severity = %q; on this plane a wrong row is a permission set the graph no longer grants", is.Severity)
+	}
+	if metric["capabilityRoleIndex"]["alert"] != "diverged" {
+		t.Fatalf("alert = %v, want diverged", metric["capabilityRoleIndex"]["alert"])
+	}
+}
+
+func TestEvalCapabilityLenses_RefusedAuditPublishesTheReasonAndRaisesNothing(t *testing.T) {
+	// The shape every auth-plane lens actually has today: refused, with the
+	// reason readable. The GrantTable producers and the Protected secure lens
+	// must show as REFUSED rather than absent, or "not audited" is
+	// indistinguishable from "audited, clean".
+	snap := CapabilityLensStatus{
+		CanonicalName: "actorReadGrants",
+		RuleID:        "lns-actorReadGrants",
+		Status:        "active",
+		AuditEnrolled: false,
+		AuditRefusal:  "its target adapter cannot read a row back",
+	}
+	h := &LatticeHeartbeater{CapabilityLensProvider: func() []CapabilityLensStatus {
+		return []CapabilityLensStatus{snap}
+	}}
+	metric, issues := h.evalCapabilityLenses(time.Now())
+
+	m := metric["actorReadGrants"]
+	if m["auditEnrolled"] != false || m["auditRefusal"] != "its target adapter cannot read a row back" {
+		t.Fatalf("the refusal must be published per lens: %v", m)
+	}
+	if _, ok := issueByCode(issues, issueCapabilityProjectionDiverged); ok {
+		t.Fatalf("a refused lens raises no audit verdict: %v", issues)
+	}
+	if _, ok := issueByCode(issues, issueCapabilityAuditStalled); ok {
+		t.Fatalf("a refused lens has no cadence to be late against: %v", issues)
+	}
+}

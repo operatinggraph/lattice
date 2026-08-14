@@ -37,10 +37,20 @@ const (
 	AuditEnabledByDefault = true
 )
 
-// auditArmed is the live reading of AuditEnabledByDefault. It is a var rather
-// than the constant itself so the refusal it produces is exercisable: a
-// published refusal nobody has ever seen produced is a claim, not a mechanism.
+// auditArmed is the live reading of AuditEnabledByDefault, moved by
+// SetAuditEnabled. It is a var rather than the constant itself for two reasons:
+// the refusal it produces has to be exercisable (a published refusal nobody has
+// ever seen produced is a claim, not a mechanism), and a deployment needs the
+// kill switch without a recompile.
 var auditArmed = AuditEnabledByDefault
+
+// SetAuditEnabled arms or disarms the divergence audit corpus-wide. Disarming
+// makes auditEnrolment refuse every lens with reason "disabled by deployment",
+// which is a published refusal like any other — the disabled state stays
+// visible PER LENS rather than looking like a clean audit. Call before any
+// pipeline activates; the process's own boot is the only sanctioned caller,
+// mirroring SetDefaultPlainDerivedAnchorCap.
+func SetAuditEnabled(enabled bool) { auditArmed = enabled }
 
 // The divergence classes an audit pass can report, per §4.3 step 2. They are
 // carried as a MAP keyed by these names rather than as three counters so a class
@@ -75,9 +85,25 @@ const AuditCoverageBasisKeyType = "key-type"
 // the audit cannot ask the target whether that row is still there.
 const auditReasonUndrivableKey = "tombstoned anchor whose row key is not derivable"
 
+// AuditOptions are the deployment-supplied inputs to InstallAudit: the lens's
+// plane, and the interval/batch overrides. Zero Interval/Batch select the
+// defaults, exactly as SweepPlan's do.
+//
+// AuthPlane is passed IN rather than read off the pipeline because
+// Pipeline.authPlane is set only by the actor-aggregate installer, so it is
+// false by construction on every plain pipeline — precisely the shape this
+// conjunct has to catch. The caller supplies projection.IsAuthPlane(rule), the
+// one canonical derivation (nats_kv into the capability bucket, or a Postgres
+// grant table), rather than a second reading of it here.
+type AuditOptions struct {
+	AuthPlane bool
+	Interval  time.Duration
+	Batch     int
+}
+
 // AuditPlan is the per-lens data the divergence audit needs. Installing a plan
-// is what opts a pipeline into auditing, and only auditEnrolment's six
-// fail-closed conjuncts produce one.
+// is what opts a pipeline into auditing, and only auditEnrolment's fail-closed
+// conjuncts produce one.
 type AuditPlan struct {
 	// AnchorLabel is the single vertex type the lens's seedable anchor pattern
 	// binds — the key type whose Core KV population the audit walks. Singular
@@ -126,6 +152,20 @@ type AuditStatus struct {
 	// listing — the only field that says what a clean verdict is worth.
 	Cursor           string
 	CycleCompletedAt time.Time
+	// The last COMPLETED cycle's totals, stamped together with
+	// CycleCompletedAt and describing the same walk. They are what makes that
+	// timestamp mean something: a cycle is only recorded as completed when it
+	// actually compared anchors, so a fresh CycleCompletedAt beside
+	// CycleAudited > 0 says "this many anchors were compared", never "a tick
+	// happened".
+	//
+	// CycleDivergentTotal also fixes the per-pass counters' blind spot: a pass
+	// examines at most Batch anchors, so DivergentTotal reads zero on every
+	// pass that did not re-examine a divergent one. Only a NEW cycle over the
+	// same anchors may supersede a cycle's finding.
+	CycleAudited        int
+	CycleDivergentTotal int
+	CycleUnverified     int
 	// ListingSize is how many anchor keys the type filter matched this pass, so
 	// a pathologically large anchor type is visible rather than merely
 	// expensive. CoverageBasis is always AuditCoverageBasisKeyType.
@@ -166,15 +206,30 @@ type Auditor struct {
 	p    *Pipeline
 	plan AuditPlan
 
-	interval time.Duration
-	batch    int
+	interval  time.Duration
+	batch     int
+	authPlane bool
 
-	mu     sync.Mutex
-	status AuditStatus
+	mu sync.Mutex
+	// anchorLabel is the key type the walk currently enumerates. It lives here
+	// rather than in plan because a MATCH hot-reload or a taxonomy reload can
+	// move the lens's anchor under an installed plan, and InstallAudit runs
+	// once at activation — so the auditor re-derives it every pass and ADOPTS a
+	// changed one (resetting the cursor, which addressed the old keyspace)
+	// rather than suppressing itself against a frozen copy forever.
+	anchorLabel string
+	status      AuditStatus
+	// The in-progress cycle's running totals. They are separate from the
+	// status counters, which describe the last PASS: a cycle spans
+	// ceil(anchors/batch) passes, and it is the cycle — not the pass — whose
+	// completion licenses a claim about the whole lens.
+	cycleAudited    int
+	cycleDivergent  int
+	cycleUnverified int
 }
 
 // newAuditor builds the auditor for an installed plan, applying the defaults.
-func newAuditor(p *Pipeline, plan AuditPlan) *Auditor {
+func newAuditor(p *Pipeline, plan AuditPlan, authPlane bool) *Auditor {
 	iv := plan.Interval
 	if iv <= 0 {
 		iv = DefaultAuditInterval
@@ -184,11 +239,13 @@ func newAuditor(p *Pipeline, plan AuditPlan) *Auditor {
 		batch = DefaultAuditBatch
 	}
 	return &Auditor{
-		p:        p,
-		plan:     plan,
-		interval: iv,
-		batch:    batch,
-		status:   AuditStatus{Enrolled: true, CoverageBasis: AuditCoverageBasisKeyType},
+		p:           p,
+		plan:        plan,
+		interval:    iv,
+		batch:       batch,
+		authPlane:   authPlane,
+		anchorLabel: plan.AnchorLabel,
+		status:      AuditStatus{Enrolled: true, CoverageBasis: AuditCoverageBasisKeyType},
 	}
 }
 
@@ -221,14 +278,20 @@ func (a *Auditor) Status() AuditStatus {
 // refused lens from ever reporting as audit-stalled.
 func (a *Auditor) Interval() time.Duration { return a.interval }
 
-// AnchorLabel is the vertex type this audit walks, and "" for a refused lens.
-func (a *Auditor) AnchorLabel() string { return a.plan.AnchorLabel }
+// AnchorLabel is the vertex type this audit currently walks, and "" for a
+// refused lens. Read under the lock because a pass may adopt a new one after a
+// hot-reload moved the lens's anchor.
+func (a *Auditor) AnchorLabel() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.anchorLabel
+}
 
 // SetAuditPlan installs the divergence-audit plan for this pipeline. Only
 // auditEnrolment's conjuncts may produce a plan; InstallAudit is the production
 // entry point that runs them. Must be called before RunAudit.
 func (p *Pipeline) SetAuditPlan(plan AuditPlan) {
-	p.auditor = newAuditor(p, plan)
+	p.auditor = newAuditor(p, plan, false)
 }
 
 // Auditor returns this pipeline's divergence auditor, or nil when InstallAudit
@@ -243,13 +306,14 @@ func (p *Pipeline) Auditor() *Auditor { return p.auditor }
 // conjuncts read is installed (the envelope/enumerator switch, SetDiffRetraction,
 // SetSecureDecryptor, the compiled rule), because a conjunct evaluated against a
 // half-built pipeline reads as satisfied for a lens that must never audit.
-func (p *Pipeline) InstallAudit() (enrolled bool, refusal string) {
-	plan, refusal := auditEnrolment(p)
+func (p *Pipeline) InstallAudit(opts AuditOptions) (enrolled bool, refusal string) {
+	plan, refusal := auditEnrolment(p, p.ruleState(), p.currentAdapter(), opts.AuthPlane)
 	if refusal != "" {
 		p.auditor = newRefusedAuditor(p, refusal)
 		return false, refusal
 	}
-	p.SetAuditPlan(plan)
+	plan.Interval, plan.Batch = opts.Interval, opts.Batch
+	p.auditor = newAuditor(p, plan, opts.AuthPlane)
 	return true, ""
 }
 
@@ -322,35 +386,42 @@ func (a *Auditor) restore(ctx context.Context) {
 	a.mu.Unlock()
 }
 
-// suppressed reports why this tick must be skipped, or "" to run it.
+// suppressed reports why this tick must be skipped, or "" to run it, against
+// the ONE rule snapshot and adapter the whole pass is judged under.
 //
-// The first check is the ENROLMENT RE-CHECK, and it is the reason this is not a
-// copy of the sweep's suppression. Every conjunct auditEnrolment reads is a
-// mutable pipeline field, and a lens hot-reload or an adapter swap can move any
-// of them under an installed plan; an auditor that trusted its install-time plan
-// would keep auditing under a shape the lens no longer has. This is the same
-// posture RequireGuardedAdapter takes — the requirement outlives this adapter
-// instance — and it costs a few field reads per tick.
+// Both are passed in rather than re-read here, because this package's own
+// contract says so: a rule snapshot is taken once at the top of an operation
+// and threaded down, since two snapshots in one operation can straddle a
+// hot-reload (Pipeline.ruleState). Re-reading here would make the check
+// answerable about a DIFFERENT rule than the one the evaluation runs — the
+// enrolment could prove the old rule free of $now while the new one returns it,
+// which is precisely the divergence-forever the conjunct exists to prevent.
 //
-// A hot-reload that moves the ANCHOR LABEL is included: the persisted cursor is
-// a key inside the old label's keyspace and means nothing in the new one, so the
-// audit holds (fail-closed, never a wrong verdict) rather than walking a
-// keyspace its cursor does not address.
+// The first check is the ENROLMENT RE-CHECK. Every conjunct auditEnrolment
+// reads is mutable pipeline state, and a lens hot-reload or an adapter swap can
+// move any of them under an installed plan; an auditor that trusted its
+// install-time plan would keep auditing under a shape the lens no longer has.
+// This is the same posture RequireGuardedAdapter takes — the requirement
+// outlives this adapter instance.
 //
-// The remaining two mirror the sweep verbatim: a rebuild is a superset of the
-// audit (truncate + full rescan), and a paused pipeline is operator intent the
-// audit must not quietly speak over. The reason is returned rather than a bare
-// bool because every cause is held by something external to the audit, so
-// "skipped" is not a transient the next tick clears and the operator needs the
-// cause.
-func (a *Auditor) suppressed(ctx context.Context) string {
-	plan, refusal := auditEnrolment(a.p)
-	switch {
-	case refusal != "":
+// A changed ANCHOR LABEL is not a suppression: the auditor adopts it (see
+// adoptAnchorLabel). Suppressing on it instead would hold forever, because
+// InstallAudit runs once at activation and nothing re-invokes it — the lens
+// would publish a stale reason until the process restarted, and eventually
+// raise an LensAuditStalled nobody could clear.
+//
+// The rest mirror the sweep verbatim: a rebuild is a superset of the audit
+// (truncate + full rescan), a paused pipeline is operator intent the audit must
+// not quietly speak over, and an unreadable health entry fails closed. The
+// reason is returned rather than a bare bool because every cause is held by
+// something external to the audit, so "skipped" is not a transient the next
+// tick clears and the operator needs the cause.
+func (a *Auditor) suppressed(ctx context.Context, rs ruleState, adpt adapter.Adapter) string {
+	plan, refusal := auditEnrolment(a.p, rs, adpt, a.authPlane)
+	if refusal != "" {
 		return "enrolment no longer holds: " + refusal
-	case plan.AnchorLabel != a.plan.AnchorLabel:
-		return "anchor label changed from " + a.plan.AnchorLabel + " to " + plan.AnchorLabel
 	}
+	a.adoptAnchorLabel(plan.AnchorLabel)
 	if a.p.RebuildInFlight() {
 		return "rebuild in flight"
 	}
@@ -371,18 +442,41 @@ func (a *Auditor) suppressed(ctx context.Context) string {
 	return ""
 }
 
+// adoptAnchorLabel moves the walk to a freshly-derived anchor label, resetting
+// the cursor and the in-progress cycle. Both are scoped to the OLD keyspace: a
+// cursor is a key inside it, and a cycle's coverage claim is about its anchors,
+// so carrying either into a new label would let the audit resume mid-walk
+// through a type it has never seen and stamp a completion over it.
+func (a *Auditor) adoptAnchorLabel(label string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if label == a.anchorLabel {
+		return
+	}
+	slog.Info("pipeline: audit: the lens's anchor moved; restarting the walk",
+		"ruleId", a.p.ruleID, "from", a.anchorLabel, "to", label)
+	a.anchorLabel = label
+	a.status.Cursor = ""
+	a.cycleAudited, a.cycleDivergent, a.cycleUnverified = 0, 0, 0
+}
+
 // pass runs one bounded audit tick: page the anchor listing from the persisted
 // cursor, re-derive each anchor's rows, compare them against what is stored, and
 // publish the verdict. Nothing in it writes to the target.
 func (a *Auditor) pass(ctx context.Context) {
-	if reason := a.suppressed(ctx); reason != "" {
+	// One rule snapshot and one adapter for the whole pass — the enrolment
+	// re-check, the evaluation and the read-back all answer about the same
+	// rule, so a hot-reload landing mid-pass cannot desync them.
+	rs := a.p.ruleState()
+	adpt := a.p.currentAdapter()
+
+	if reason := a.suppressed(ctx, rs, adpt); reason != "" {
 		a.noteSuppressed(reason)
 		return
 	}
 	a.noteSuppressed("")
 
-	rs := a.p.ruleState()
-	reader, canRead := a.p.currentAdapter().(adapter.RowReader)
+	reader, canRead := adpt.(adapter.RowReader)
 	if rs.engine == nil || !canRead {
 		// Unreachable: the enrolment re-check above proved both. Reported as a
 		// suppression rather than assumed away, because the alternative is a
@@ -392,23 +486,50 @@ func (a *Auditor) pass(ctx context.Context) {
 	}
 
 	a.mu.Lock()
-	cursor := a.status.Cursor
+	cursor, label := a.status.Cursor, a.anchorLabel
 	a.mu.Unlock()
 
-	page, listingSize, next, err := a.page(ctx, cursor)
+	page, listingSize, next, err := a.page(ctx, label, cursor)
 	if err != nil {
 		// A pass that could not enumerate its anchors verified nothing, so it
 		// must not stamp the liveness clock or publish a verdict — the same
 		// disposition a suppressed tick takes, for the same reason.
 		slog.Warn("pipeline: audit: anchor listing failed; retrying next tick",
-			"ruleId", a.p.ruleID, "anchorLabel", a.plan.AnchorLabel, "err", err)
+			"ruleId", a.p.ruleID, "anchorLabel", label, "err", err)
 		a.noteSuppressed("anchor listing failed: " + err.Error())
 		return
 	}
 
 	var t auditTally
 	for _, key := range page {
-		a.auditAnchor(ctx, rs, reader, key, &t)
+		a.auditAnchor(ctx, rs, reader, label, key, &t)
+	}
+
+	// Re-derived after the batch, never before it. A pass takes real time —
+	// one seeded evaluation and one or more target reads per anchor — and both
+	// conditions below arise DURING it:
+	//
+	//   - A rule swap (a MATCH edit, an async taxonomy rebuild) makes every
+	//     comparison in hand a comparison against a rule no longer in force.
+	//     The sweep abandons its pass for this exact reason (ErrRuleSuperseded);
+	//     the audit has no write to withhold, so what it withholds is the
+	//     VERDICT.
+	//   - A rebuild or a pause starting mid-batch means the later anchors were
+	//     compared against a target being truncated underneath them, which
+	//     reads as a run of `missing` divergences that were never divergent.
+	//
+	// Either way the pass reached no trustworthy verdict, so it publishes the
+	// reason and leaves the liveness clock ageing rather than banking a finding.
+	switch {
+	case a.p.supersededRule(rs):
+		slog.Info("pipeline: audit: pass discarded — rule swapped mid-pass", "ruleId", a.p.ruleID)
+		a.noteSuppressed("rule swapped mid-pass")
+		return
+	default:
+		if reason := a.suppressed(ctx, rs, adpt); reason != "" {
+			a.noteSuppressed("started mid-pass: " + reason)
+			return
+		}
 	}
 	a.record(ctx, t, next, listingSize)
 }
@@ -425,8 +546,8 @@ func (a *Auditor) pass(ctx context.Context) {
 // anchor type, which a pre-sliced page cannot do without silently shrinking the
 // batch. Paging here also yields the honest ListingSize the pass publishes —
 // a server-side page reports only its own length.
-func (a *Auditor) page(ctx context.Context, cursor string) (page []string, listingSize int, next string, err error) {
-	filter := substrate.VertexPrefix + "." + a.plan.AnchorLabel + ".*"
+func (a *Auditor) page(ctx context.Context, label, cursor string) (page []string, listingSize int, next string, err error) {
+	filter := substrate.VertexPrefix + "." + label + ".*"
 	keys, _, err := a.p.coreKV.ListKeysFilter(ctx, filter, "", 0)
 	if err != nil {
 		return nil, 0, "", err
@@ -436,7 +557,7 @@ func (a *Auditor) page(ctx context.Context, cursor string) (page []string, listi
 		// The filter already excludes the four-segment aspect keys; this admits
 		// only a well-formed root of the anchor type the plan names.
 		vtxType, _, ok := substrate.ParseVertexKey(k)
-		if !ok || vtxType != a.plan.AnchorLabel {
+		if !ok || vtxType != label {
 			continue
 		}
 		anchors = append(anchors, k)
@@ -498,7 +619,7 @@ func (t *auditTally) noteDivergent(class string) {
 // as audited (with zero or more divergent rows) or books it as unverified, and
 // an anchor whose check faults partway discards the classes it had already found
 // — a partially-checked anchor is not a divergent one, it is an unknown one.
-func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.RowReader, key string, t *auditTally) {
+func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.RowReader, label, key string, t *auditTally) {
 	props, live, err := a.anchorBody(ctx, key)
 	if err != nil {
 		t.noteUnverified("anchor vertex read failed: " + err.Error())
@@ -517,7 +638,7 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 			t.noteUnverified(auditReasonUndrivableKey)
 			return
 		}
-		keys, ok := rs.engine.AnchorDeleteResult(rs.cr, key, a.plan.AnchorLabel, props)
+		keys, ok := rs.engine.AnchorDeleteResult(rs.cr, key, label, props)
 		if !ok {
 			t.noteUnverified(auditReasonUndrivableKey)
 			return
@@ -538,7 +659,7 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 	// has proved the event is a mutation of this anchor, with the anchor key
 	// supplied as the seed. It is what makes a per-anchor audit cost one
 	// anchor's walk instead of the corpus-wide scan a full re-execute would be.
-	results, err := a.p.executeFullForActor(ctx, rs, key, props, key)
+	results, err := a.p.executeFullForAudit(ctx, rs, key, props, key)
 	if err != nil {
 		t.noteUnverified("evaluation failed: " + err.Error())
 		return
@@ -555,10 +676,20 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 			t.noteUnverified("target row read failed: " + rerr.Error())
 			return
 		}
-		switch {
-		case !present:
+		if !present {
 			classes = append(classes, AuditClassMissing)
-		case !rowsEquivalent(stored, res.Row):
+			continue
+		}
+		equal, comparable := rowsComparable(stored, res.Row)
+		switch {
+		case !comparable:
+			// One side could not be rendered at all (a value JSON cannot
+			// express). The audit has NOT proven a divergence — it has failed
+			// to make the comparison — and reporting the two identically would
+			// alarm on a fault in the observation.
+			t.noteUnverified("row could not be rendered for comparison")
+			return
+		case !equal:
 			classes = append(classes, AuditClassStale)
 		}
 	}
@@ -569,7 +700,7 @@ func (a *Auditor) auditAnchor(ctx context.Context, rs ruleState, reader adapter.
 	// multi-row lens) the anchor is simply not checked in this direction —
 	// exactly as the CDC path is not — which is why the class counts travel
 	// per-class rather than as one number.
-	if owned, ok := rs.engine.AnchorProjectionKey(rs.cr, key, a.plan.AnchorLabel, props); ok &&
+	if owned, ok := rs.engine.AnchorProjectionKey(rs.cr, key, label, props); ok &&
 		!resultsContainKeys(results, owned) {
 		_, present, rerr := reader.GetRow(ctx, owned)
 		if rerr != nil {
@@ -640,24 +771,38 @@ func (a *Auditor) noteSuppressed(reason string) {
 // (the architecture's operational-self-reporting exception), never in Core KV
 // and never in the target.
 func (a *Auditor) record(ctx context.Context, t auditTally, next string, listingSize int) {
+	total := 0
+	for _, n := range t.divergent {
+		total += n
+	}
+
 	a.mu.Lock()
 	a.status.Audited = t.audited
 	a.status.Unverified = t.unverified
 	a.status.LastUnverified = truncateFailure(t.lastUnverified)
 	a.status.Divergent = t.divergent
-	total := 0
-	for _, n := range t.divergent {
-		total += n
-	}
 	a.status.DivergentTotal = total
 	a.status.ListingSize = listingSize
 	a.status.CoverageBasis = AuditCoverageBasisKeyType
 	a.status.Cursor = next
-	if next == "" {
-		// The walk reached the end of the listing: this cycle covered the whole
-		// anchor type, which is the only thing that makes a clean verdict a
-		// claim about the LENS rather than about ten of its anchors.
+
+	a.cycleAudited += t.audited
+	a.cycleDivergent += total
+	a.cycleUnverified += t.unverified
+	// A cycle is recorded as COMPLETED only when the walk reached the end of
+	// the listing AND actually compared something. The guard is the whole point
+	// of the field: a pass over an empty page — an emptied anchor type, or a
+	// cursor left past every live key — reaches the end having verified
+	// nothing, and stamping it would publish `divergentTotal: 0` beside a fresh
+	// completion timestamp, which reads as "the whole lens was audited and is
+	// clean". A lens with no enumerable anchors therefore never earns a
+	// completion stamp, and its clean number stays visibly unsubstantiated.
+	if next == "" && a.cycleAudited > 0 {
 		a.status.CycleCompletedAt = time.Now()
+		a.status.CycleAudited = a.cycleAudited
+		a.status.CycleDivergentTotal = a.cycleDivergent
+		a.status.CycleUnverified = a.cycleUnverified
+		a.cycleAudited, a.cycleDivergent, a.cycleUnverified = 0, 0, 0
 	}
 	a.status.LastPassAt = time.Now()
 	snapshot := a.status
@@ -665,7 +810,7 @@ func (a *Auditor) record(ctx context.Context, t auditTally, next string, listing
 
 	if snapshot.DivergentTotal > 0 {
 		slog.Warn("pipeline: audit: the projection disagrees with the graph",
-			"ruleId", a.p.ruleID, "anchorLabel", a.plan.AnchorLabel,
+			"ruleId", a.p.ruleID, "coverageBasis", snapshot.CoverageBasis,
 			"divergentRows", snapshot.DivergentTotal, "classes", snapshot.Divergent,
 			"audited", snapshot.Audited)
 	}
@@ -690,12 +835,22 @@ func (a *Auditor) record(ctx context.Context, t auditTally, next string, listing
 // The gate is fail-closed throughout: a refused lens publishes its refusal and
 // raises no verdict, because "not audited" reading as "audited, clean" is the
 // exact silence the audit exists to end.
-func auditEnrolment(p *Pipeline) (AuditPlan, string) {
+func auditEnrolment(p *Pipeline, rs ruleState, adpt adapter.Adapter, authPlane bool) (AuditPlan, string) {
 	if !auditArmed {
 		return AuditPlan{}, "disabled by deployment"
 	}
+	// The auth plane is the sweep's, and this refusal is the only thing that
+	// keeps it so. The actor-aggregate conjunct below excludes every auth-plane
+	// lens SHIPPED today, and the RowReader conjunct excludes the Postgres
+	// grant tables — but a plain-kind lens declaring nats_kv into the
+	// capability bucket is neither, and would enrol. A divergence found there
+	// is an authorization finding, and it must be raised by a plane that has a
+	// code, a severity ladder and an escalation for it rather than published as
+	// a bare number by a detector built for business read models.
+	if authPlane {
+		return AuditPlan{}, "it projects onto the auth plane, whose per-row verdicts are the convergence sweep's"
+	}
 
-	rs := p.ruleState()
 	if rs.engineKind != ruleengine.EngineFull || rs.engine == nil {
 		return AuditPlan{}, "the audit's seeded evaluation is a full-engine mechanism and this lens does not run on it"
 	}
@@ -736,7 +891,7 @@ func auditEnrolment(p *Pipeline) (AuditPlan, string) {
 	}
 	// Without read-back there is nothing to compare against, and an audit that
 	// cannot compare would report clean.
-	if _, ok := p.currentAdapter().(adapter.RowReader); !ok {
+	if _, ok := adpt.(adapter.RowReader); !ok {
 		return AuditPlan{}, "its target adapter cannot read a row back, so there is nothing to compare a recomputation against"
 	}
 	// A Secure Lens's declared columns are decrypted before the results reach

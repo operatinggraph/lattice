@@ -391,8 +391,35 @@ const maxFootprintRetries = 1
 // is a mutation of that anchor may pass it — pipeline.seedAnchorFor is that
 // proof; "" is always the safe, whole-row-set evaluation.
 func (p *Pipeline) executeFullForActor(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, error) {
+	return p.executeFullForActorCosted(ctx, rs, actorKey, nodeProps, seedAnchor, true)
+}
+
+// executeFullForAudit is executeFullForActor for the background divergence
+// audit: the same evaluation, deliberately kept OUT of the cost observability
+// the projection path feeds.
+//
+// The gauge it stays out of is peakBindingRows — a rolling MAX over the last
+// DefaultPeakRowsBufferSize evaluations, published as the early warning that a
+// lens is approaching the engine's binding-set cap (peakrows.go). The audit's
+// samples are systematically the SMALLEST a lens ever produces (one seeded
+// anchor, never the whole type) and, on a low-traffic lens, far more numerous
+// than the projection's own — so recording them would refill the whole window
+// with the cheapest evaluations the lens can make and drive the published peak
+// DOWN, masking exactly the approach-to-cap the gauge exists to catch. A
+// background observer must not move a gauge about production load, least of all
+// in the reassuring direction.
+//
+// Latency is excluded for the same reason and already is by construction: a
+// plain pipeline carries no latency ring (SetLatencyBuffer is called only on the
+// actor-aggregate and operation-aggregate paths), so the wrapper below skips it
+// explicitly rather than relying on that remaining true.
+func (p *Pipeline) executeFullForAudit(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, error) {
+	return p.executeFullForActorCosted(ctx, rs, actorKey, nodeProps, seedAnchor, false)
+}
+
+func (p *Pipeline) executeFullForActorCosted(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string, recordCost bool) ([]ruleengine.EvalResult, error) {
 	start := time.Now()
-	results, err := p.executeFullForActorAttempt(ctx, rs, actorKey, nodeProps, seedAnchor, 0)
+	results, err := p.executeFullForActorAttempt(ctx, rs, actorKey, nodeProps, seedAnchor, 0, recordCost)
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +428,7 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, rs ruleState, actorK
 	// so calling it on every fan-out actor is fine. Measured across every
 	// attempt (including a drift retry), so a validated lens's latency
 	// honestly reflects the doubled cost the design's perf gate measures.
-	if p.latencyBuf != nil {
+	if p.latencyBuf != nil && recordCost {
 		p.latencyBuf.Record(time.Since(start))
 	}
 	return results, nil
@@ -428,8 +455,8 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, rs ruleState, actorK
 // rows" (design §4.3). The caller's existing transient-failure handling
 // (dispositionEvalErr's retry-enqueue, the sweep's repair-failure accounting)
 // takes it from there.
-func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string, attempt int) ([]ruleengine.EvalResult, error) {
-	results, footprint, err := p.executeFullForActorOnce(ctx, rs, actorKey, nodeProps, seedAnchor)
+func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string, attempt int, recordCost bool) ([]ruleengine.EvalResult, error) {
+	results, footprint, err := p.executeFullForActorOnce(ctx, rs, actorKey, nodeProps, seedAnchor, recordCost)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +493,7 @@ func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, rs ruleState,
 	if ferr != nil {
 		return nil, fmt.Errorf("pipeline: re-fetch %q after drift: %w", actorKey, ferr)
 	}
-	return p.executeFullForActorAttempt(ctx, rs, actorKey, freshProps, seedAnchor, attempt+1)
+	return p.executeFullForActorAttempt(ctx, rs, actorKey, freshProps, seedAnchor, attempt+1, recordCost)
 }
 
 // needsFootprintValidation reports whether this pipeline's evaluations must
@@ -600,7 +627,7 @@ func (p *Pipeline) currentNodeRevision(ctx context.Context, key string) (uint64,
 // executeFullForActor so the footprint-validation retry
 // (executeFullForActorAttempt) can re-run exactly this step against fresh
 // state without duplicating the envelope/collision-guard/retraction logic.
-func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
+func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string, recordCost bool) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
 	now := time.Now().UTC()
 	projectedAt, perr := projectedAtFromProvenance(nodeProps)
 	if perr != nil {
@@ -617,7 +644,13 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, ac
 	// attempt boundary that sees every evaluation exactly once — a
 	// footprint-drift re-execution re-enters here and contributes its own
 	// sample, as does each retry-queue redelivery.
-	p.recordPeakBindingRows(stats)
+	//
+	// recordCost is false for the background divergence audit alone: its
+	// samples describe a one-anchor observation, not the lens's production
+	// load, and folding them in would drive the gauge DOWN (executeFullForAudit).
+	if recordCost {
+		p.recordPeakBindingRows(stats)
+	}
 	// Per-evaluation detail for an operator who has turned Debug on; the health
 	// entry's rolling gauge is the always-on surface, and a cap refusal logs its
 	// own Warn from the engine. The Enabled check is what keeps this off the hot

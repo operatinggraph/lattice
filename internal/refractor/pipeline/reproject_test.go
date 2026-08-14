@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -226,4 +227,31 @@ func TestRowsEquivalent_EmptyAndNil(t *testing.T) {
 	require.True(t, rowsEquivalent(map[string]any{}, map[string]any{}))
 	require.True(t, rowsEquivalent(nil, map[string]any{}))
 	require.False(t, rowsEquivalent(nil, map[string]any{"key": "x"}))
+}
+
+// TestRowsComparable_SeparatesUnrenderableFromDifferent pins the one distinction
+// rowsEquivalent deliberately collapses. For a REPAIR path, a row that cannot be
+// rendered is a row to rewrite, so folding it into "differs" is right. For the
+// divergence audit, which writes nothing, it is the difference between a proven
+// divergence and a failed comparison — and §4.3 requires the second to be
+// counted as unverified, never as a finding.
+func TestRowsComparable_SeparatesUnrenderableFromDifferent(t *testing.T) {
+	same := map[string]any{"key": "vtx.unit.x", "name": "Loft"}
+	other := map[string]any{"key": "vtx.unit.x", "name": "Loft renamed"}
+
+	equal, comparable := rowsComparable(same, map[string]any{"key": "vtx.unit.x", "name": "Loft"})
+	require.True(t, comparable)
+	require.True(t, equal)
+
+	equal, comparable = rowsComparable(same, other)
+	require.True(t, comparable, "two renderable rows that differ ARE comparable — they simply differ")
+	require.False(t, equal)
+
+	// A value JSON cannot express. rowsEquivalent reports these as "not equal",
+	// which is a claim; rowsComparable reports that no claim can be made.
+	unrenderable := map[string]any{"key": "vtx.unit.x", "score": math.NaN()}
+	_, comparable = rowsComparable(same, unrenderable)
+	require.False(t, comparable)
+	require.False(t, rowsEquivalent(same, unrenderable),
+		"the repair path's collapse is unchanged: an unrenderable row is one it should rewrite")
 }

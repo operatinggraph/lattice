@@ -479,3 +479,30 @@ func TestContributingSources_OmitsAbsentRevisions(t *testing.T) {
 		t.Fatalf("expected no entries when revisionOf returns 0, got %v", got)
 	}
 }
+
+// TestIsAuthPlane_PlainKindLensOnTheCapabilityBucket pins the derivation the
+// divergence audit's auth-plane refusal is fed from
+// (lens-projection-divergence-audit-design.md §4.4, cmd/refractor's
+// InstallAudit call).
+//
+// The audit refuses a lens whose plane this reports true for, and the case that
+// matters is precisely the one no OTHER conjunct catches: a lens that is NOT
+// actor-aggregate (so it installs no envelope) targeting NATS KV (so its adapter
+// reads rows back), pointed at the capability bucket. `capabilityRoleIndex` is
+// this shape today. IsAuthPlane keys on the target and bucket alone, never on
+// projection kind, which is exactly why it — and not Pipeline.authPlane, which
+// only the actor-aggregate installer ever sets — is the input the refusal takes.
+func TestIsAuthPlane_PlainKindLensOnTheCapabilityBucket(t *testing.T) {
+	plainOnAuthPlane := &lens.Rule{
+		ProjectionKind: "",
+		Into:           lens.IntoConfig{Target: "nats_kv", Bucket: AuthPlaneBucket},
+	}
+	if !IsAuthPlane(plainOnAuthPlane) {
+		t.Fatal("a plain-kind lens targeting the capability bucket is on the auth plane; " +
+			"the divergence audit's refusal reads this, and a false here enrols it")
+	}
+	if IsActorAggregate(plainOnAuthPlane) {
+		t.Fatal("the case is only interesting because it is NOT actor-aggregate — " +
+			"if it were, the audit's envelope conjunct would already exclude it")
+	}
+}
