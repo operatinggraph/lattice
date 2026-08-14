@@ -16,6 +16,7 @@ import (
 // Compile-time check that NatsKVAdapter satisfies Adapter, Truncater and KeyLister.
 var _ Adapter = (*NatsKVAdapter)(nil)
 var _ Truncater = (*NatsKVAdapter)(nil)
+var _ OutcomeTruncater = (*NatsKVAdapter)(nil)
 var _ KeyLister = (*NatsKVAdapter)(nil)
 var _ PrefixKeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
@@ -37,6 +38,19 @@ const (
 	// write was dropped fail-closed before any stored watermark was consulted.
 	guardDroppedNoToken
 )
+
+// guardOutcome is how one guardedWrite call ended when it did not error: the
+// watermark verdict, and the liveness transition the write made to the key.
+//
+// The two are separate fields because they answer different questions and one
+// is not derivable from the other — the verdict says whether the write landed,
+// the transition says whether what the key HOLDS changed kind. Its zero value
+// is the correct err-first classification (committed, no transition), so every
+// error exit can return it unchanged.
+type guardOutcome struct {
+	verdict    guardVerdict
+	transition GrantTransition
+}
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the
@@ -182,11 +196,16 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 		// stale replay of a DIFFERENT row at a lower (but still-unseen-by-this-
 		// key) seq could then pass the monotonic guard that watermark exists
 		// to block.
-		verdict, err := a.guardedWrite(ctx, key, row, projectionSeq, false)
+		out, err := a.guardedWrite(ctx, key, row, projectionSeq, false)
 		if err != nil {
 			return UpsertOutcome{}, err
 		}
-		return UpsertOutcome{Wrote: true, DeclinedByWatermark: verdict == guardDeclinedByWatermark}, nil
+		return UpsertOutcome{
+			Wrote:               true,
+			DeclinedByWatermark: out.verdict == guardDeclinedByWatermark,
+			Key:                 key,
+			Transition:          out.transition,
+		}, nil
 	}
 	data, err := json.Marshal(row)
 	if err != nil {
@@ -204,12 +223,12 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 	// it falls through to the unconditional Put — the same behavior this
 	// method had before it compared anything.
 	if current, getErr := a.kv.Get(ctx, key); getErr == nil && bytes.Equal(current.Value, data) {
-		return UpsertOutcome{Wrote: false}, nil
+		return UpsertOutcome{Wrote: false, Key: key}, nil
 	}
 	if _, err := a.kv.Put(ctx, key, data); err != nil {
 		return UpsertOutcome{}, fmt.Errorf("natskv upsert: put %s: %w", key, err)
 	}
-	return UpsertOutcome{Wrote: true}, nil
+	return UpsertOutcome{Wrote: true, Key: key}, nil
 }
 
 // Delete projects a Core KV deletion into the target KV bucket. The behavior is
@@ -252,7 +271,7 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 		// regardless of the lens's deleteMode: the high-water mark must survive
 		// physical absence so a lower-seq replay still loses. Absence and an
 		// isDeleted tombstone are equivalent for authorization (Contract #6 §6.8).
-		verdict, gerr := a.guardedWrite(ctx, key, nil, projectionSeq, true)
+		out, gerr := a.guardedWrite(ctx, key, nil, projectionSeq, true)
 		if gerr != nil {
 			return DeleteOutcome{}, gerr
 		}
@@ -260,8 +279,10 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 		// sequence-less drop retracted nothing either, so it must not be
 		// reported as a write just because it was not a watermark conflict.
 		return DeleteOutcome{
-			Wrote:               verdict == guardCommitted,
-			DeclinedByWatermark: verdict == guardDeclinedByWatermark,
+			Wrote:               out.verdict == guardCommitted,
+			DeclinedByWatermark: out.verdict == guardDeclinedByWatermark,
+			Key:                 key,
+			Transition:          out.transition,
 		}, nil
 	}
 	if a.deleteMode == DeleteModeSoft {
@@ -276,7 +297,7 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 		if _, err := a.kv.Put(ctx, key, data); err != nil {
 			return DeleteOutcome{}, fmt.Errorf("natskv delete: put tombstone %s: %w", key, err)
 		}
-		return DeleteOutcome{Wrote: true}, nil
+		return DeleteOutcome{Wrote: true, Key: key}, nil
 	}
 	// Hard delete: physically remove the key. Deleting an absent key is a no-op.
 	if err := a.kv.Delete(ctx, key); err != nil {
@@ -284,11 +305,11 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 			// Deleting an absent key is idempotent and not an error, but it
 			// retracted nothing — reporting a write here would let a caller
 			// book a repair for a row that was never there.
-			return DeleteOutcome{}, nil
+			return DeleteOutcome{Key: key}, nil
 		}
 		return DeleteOutcome{}, fmt.Errorf("natskv delete: delete %s: %w", key, err)
 	}
-	return DeleteOutcome{Wrote: true}, nil
+	return DeleteOutcome{Wrote: true, Key: key}, nil
 }
 
 // guardedWrite performs a monotonic, conditional write under the projection
@@ -313,23 +334,35 @@ func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, proj
 // ordering token. Folding the two drops together would report an absent token
 // as a conflict with a stored one, which is a different fault with a different
 // fix.
-func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) (guardVerdict, error) {
+//
+// The returned GrantTransition is the second, orthogonal half: whether the key
+// changed LIVENESS, i.e. came to hold a live row or stopped holding one. This
+// is the only place in the platform where both bodies are in hand at once — the
+// stored entry is already read for the CAS precondition, and the outgoing body
+// is built here — so it is the only place the distinction is derivable. A
+// watcher on the target bucket cannot make it: the guarded path deliberately
+// rewrites an unchanged body on every evaluation to advance the watermark, so
+// every write looks alike from the outside.
+func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) (guardOutcome, error) {
 	if incomingSeq == 0 {
 		slog.Warn("natskv guarded write: dropping sequence-less write (no ordering token)",
 			"key", key, "delete", delete)
-		return guardDroppedNoToken, nil
+		// Unknown, not None: this returns before any Get, so no stored body was
+		// ever read and no comparison was ever made. Reporting "no transition"
+		// would be a claim this branch has no evidence for.
+		return guardOutcome{verdict: guardDroppedNoToken, transition: TransitionUnknown}, nil
 	}
 	body := a.guardedBody(row, incomingSeq, delete)
 	data, err := json.Marshal(body)
 	if err != nil {
-		return guardCommitted, fmt.Errorf("natskv guarded write: marshal %s: %w", key, err)
+		return guardOutcome{}, fmt.Errorf("natskv guarded write: marshal %s: %w", key, err)
 	}
 
 	for attempt := 0; attempt < guardCASMaxAttempts; attempt++ {
 		entry, getErr := a.kv.Get(ctx, key)
 		if getErr != nil {
 			if !errors.Is(getErr, substrate.ErrKeyNotFound) {
-				return guardCommitted, fmt.Errorf("natskv guarded write: get %s: %w", key, getErr)
+				return guardOutcome{}, fmt.Errorf("natskv guarded write: get %s: %w", key, getErr)
 			}
 			// Key absent: create it. A concurrent create wins the revision and
 			// we re-read on the next iteration.
@@ -337,29 +370,90 @@ func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[st
 				if errors.Is(createErr, substrate.ErrRevisionConflict) {
 					continue
 				}
-				return guardCommitted, fmt.Errorf("natskv guarded write: create %s: %w", key, createErr)
+				return guardOutcome{}, fmt.Errorf("natskv guarded write: create %s: %w", key, createErr)
 			}
-			return guardCommitted, nil
+			return guardOutcome{transition: transitionFrom(nil, false, data)}, nil
 		}
 
 		if storedSeq, ok := storedProjectionSeq(entry.Value); ok && storedSeq >= incomingSeq {
 			// A write with an equal-or-higher watermark already landed; this is
-			// an idempotent no-op (a stale lower-seq replay loses).
-			return guardDeclinedByWatermark, nil
+			// an idempotent no-op (a stale lower-seq replay loses). No write
+			// happened, so nothing transitioned.
+			return guardOutcome{verdict: guardDeclinedByWatermark}, nil
 		}
 
 		if _, updErr := a.kv.Update(ctx, key, data, entry.Revision); updErr != nil {
 			if errors.Is(updErr, substrate.ErrRevisionConflict) {
 				continue
 			}
-			return guardCommitted, fmt.Errorf("natskv guarded write: update %s: %w", key, updErr)
+			return guardOutcome{}, fmt.Errorf("natskv guarded write: update %s: %w", key, updErr)
 		}
-		return guardCommitted, nil
+		return guardOutcome{transition: transitionFrom(entry.Value, true, data)}, nil
 	}
 
 	slog.Warn("natskv guarded write: CAS loop exhausted under contention",
 		"key", key, "attempts", guardCASMaxAttempts, "projectionSeq", incomingSeq)
-	return guardCommitted, fmt.Errorf("natskv guarded write: %s: revision conflict not resolved after %d attempts", key, guardCASMaxAttempts)
+	return guardOutcome{}, fmt.Errorf("natskv guarded write: %s: revision conflict not resolved after %d attempts", key, guardCASMaxAttempts)
+}
+
+// transitionFrom classifies the liveness change between what a key held and
+// what a guarded write just put there. storedFound distinguishes an absent key
+// from one holding an empty body — they classify differently in the one
+// direction that matters, since a tombstone created over an absent key revoked
+// nothing (nothing was ever granted) while a tombstone written over an empty
+// body cannot be proven not to have.
+//
+// A stored body that does not parse is treated as a transition in whichever
+// direction the incoming body points, rather than as "no change". The choice is
+// deliberate and one-sided: an extra signal costs one re-evaluation, a missed
+// one leaves a revoked grant honoured until the standing healer next runs, and
+// this classifier is read by a security filter's change edge.
+func transitionFrom(stored []byte, storedFound bool, outgoing []byte) GrantTransition {
+	incomingLive, _ := bodyIsLive(outgoing)
+	if !storedFound {
+		if incomingLive {
+			return TransitionGranted
+		}
+		// A tombstone body created over an absent key: reachable, because
+		// deleteRow routes every retraction through guardedWrite regardless of
+		// whether the key exists. Nothing was granted, so nothing was revoked.
+		return TransitionNone
+	}
+	storedLive, known := bodyIsLive(stored)
+	if !known {
+		if incomingLive {
+			return TransitionGranted
+		}
+		return TransitionRevoked
+	}
+	switch {
+	case storedLive == incomingLive:
+		return TransitionNone
+	case incomingLive:
+		return TransitionGranted
+	default:
+		return TransitionRevoked
+	}
+}
+
+// bodyIsLive reports whether a persisted or outgoing guarded body represents a
+// LIVE row rather than a soft tombstone, and whether that could be determined
+// at all. A body carrying no isDeleted field is live — that is the ordinary
+// projected row, and the perEntry envelope refuses an entry field named
+// isDeleted precisely so a row can never impersonate a tombstone
+// (projection/driver.go's EntryEnvelopeFn reserved-field check). An empty or
+// unparseable body is unknown, never silently "live".
+func bodyIsLive(data []byte) (live, known bool) {
+	if len(data) == 0 {
+		return false, false
+	}
+	var doc struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return false, false
+	}
+	return !doc.IsDeleted, true
 }
 
 // guardedBody builds the persisted document for a guarded write: a soft
@@ -531,18 +625,36 @@ func (a *NatsKVAdapter) GetRow(ctx context.Context, keys map[string]any) (map[st
 // shared (read_path_adapters.go). Without a prefix the whole bucket is purged,
 // which is what a lens owning its target outright needs.
 func (a *NatsKVAdapter) Truncate(ctx context.Context) error {
+	_, err := a.truncate(ctx)
+	return err
+}
+
+// TruncateWithKeys is Truncate plus the list of keys it removed
+// (adapter.OutcomeTruncater). A purge writes through none of the per-key guard,
+// so this list is the only account a caller reacting to retractions ever gets
+// of what a truncating rebuild withdrew.
+//
+// The keys are returned even when the purge fails partway: everything before
+// the failure is already gone, and a caller that reacts to retractions must
+// hear about those rather than have them swallowed by the error.
+func (a *NatsKVAdapter) TruncateWithKeys(ctx context.Context) ([]string, error) {
+	return a.truncate(ctx)
+}
+
+// truncate is the shared implementation behind Truncate and TruncateWithKeys.
+func (a *NatsKVAdapter) truncate(ctx context.Context) ([]string, error) {
 	keys, err := a.truncateKeys(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, key := range keys {
+	for i, key := range keys {
 		// Purge is idempotent: a key deleted out from under us between the list
 		// and the purge is not an error.
 		if err := a.kv.Purge(ctx, key); err != nil {
-			return fmt.Errorf("natskv truncate: purge %s: %w", key, err)
+			return keys[:i], fmt.Errorf("natskv truncate: purge %s: %w", key, err)
 		}
 	}
-	return nil
+	return keys, nil
 }
 
 // truncateKeys returns the keys Truncate is allowed to purge: the lens's own

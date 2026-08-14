@@ -29,6 +29,23 @@ type Truncater interface {
 	Truncate(ctx context.Context) error
 }
 
+// OutcomeTruncater is a Truncater that also reports which keys it removed.
+//
+// A bulk purge is a bulk retraction, and it is the one write path that never
+// reaches the row-by-row guard: Truncate lists its keys and Purges them
+// directly, so no per-key outcome (and no GrantTransition) is produced for any
+// row it clears. A caller that reacts to retractions — the D1 grant-change
+// edge, which owes a re-evaluation to every actor whose grant was withdrawn —
+// would therefore go silent on exactly the operation that revokes the most at
+// once: a truncating rebuild of a read-grant producer, which a narrowing MATCH
+// hot-reload triggers on its own with no operator involved.
+//
+// The key list is the same one Truncate purges, so a caller gets ownership
+// scoping (SetKeyPrefix) for free and never has to re-enumerate the target.
+type OutcomeTruncater interface {
+	TruncateWithKeys(ctx context.Context) ([]string, error)
+}
+
 // KeyLister is an optional interface for adapters that support enumerating
 // every key currently live in the target, each rendered as the same
 // field-name-to-value map shape Upsert/Delete accept as `keys`. Implemented
@@ -112,6 +129,47 @@ type KeySetPublisher interface {
 	PublishKeySet(ctx context.Context, actorID string, keys []map[string]any, revision uint64) error
 }
 
+// GrantTransition reports the LIVENESS change one write made to the key it
+// addressed: whether that key came to hold a live row, stopped holding one, or
+// neither. On the D1 read-grant plane a live row IS a grant and a tombstone IS
+// its revocation (Contract #6 §6.8, §6.14), so this is the fact a consumer of
+// that projection needs and the only one that distinguishes a real grant flip
+// from the watermark rewrite a guarded upsert performs on every evaluation.
+//
+// It is deliberately INDEPENDENT of UpsertOutcome.Wrote. The guarded upsert
+// path reports Wrote unconditionally — advancing or deliberately holding the
+// projectionSeq watermark is its job on every call (natskv.go's upsert) — so a
+// transition derived from Wrote would read every watermark advance as a grant
+// landing. The transition is derived instead from the stored body's isDeleted
+// flag against the outgoing body's, which only the write path itself has both
+// halves of.
+//
+// Classification is err-first: every error exit reports TransitionNone, so a
+// failed write can never be read as a transition.
+type GrantTransition uint8
+
+const (
+	// TransitionNone means the write changed no liveness: a live row rewritten
+	// over a live row (the watermark advance), a tombstone over a tombstone, a
+	// tombstone created over an absent key (nothing was ever granted), or any
+	// write that did not happen at all — a watermark-declined one, an
+	// unguarded one, or an error exit.
+	TransitionNone GrantTransition = iota
+	// TransitionGranted means the key came to hold a live row where it
+	// previously held none: created from absent, or written live over a
+	// tombstone (a re-grant).
+	TransitionGranted
+	// TransitionRevoked means a live row was tombstoned.
+	TransitionRevoked
+	// TransitionUnknown means the write path ended before both bodies were in
+	// hand, so no claim either way is available. The guarded path's
+	// sequence-less drop is the one producer: it returns before any Get, so
+	// there is no stored body to compare against. It is NOT TransitionNone —
+	// "we did not look" and "we looked and nothing changed" are different
+	// facts, and only the latter licenses a consumer to skip its healer.
+	TransitionUnknown
+)
+
 // UpsertOutcome reports what one OutcomeUpserter.UpsertWithOutcome call
 // actually did to the target store.
 type UpsertOutcome struct {
@@ -133,6 +191,19 @@ type UpsertOutcome struct {
 	// repair provably did not land, instead of booking the guard's silent nil
 	// as a heal and reporting a frozen row as converged on every pass.
 	DeclinedByWatermark bool
+	// Key is the target key this call addressed, as the adapter itself
+	// rendered it. A caller routing the write onward — the D1 grant-change
+	// edge inverts it through OutputDescriptor.AnchorFromKey to recover the
+	// owning actor — needs the exact string that was written, and the
+	// key-field map it passed in is not that string: the adapter owns the
+	// rendering (buildKey), and re-deriving it at the call site is a second
+	// implementation of a key shape that must never disagree with the first.
+	// Empty when the call errored before a key could be built.
+	Key string
+	// Transition is the liveness change this write made to Key. Always
+	// TransitionNone for an unguarded adapter, which does not read the stored
+	// body's liveness at all.
+	Transition GrantTransition
 }
 
 // OutcomeUpserter is an optional interface for adapters whose Upsert can
@@ -198,6 +269,13 @@ type DeleteOutcome struct {
 	// not land leaves the pre-edit permission set live, which is the state
 	// Contract #6 §6.2's guard exists to keep subordinate — not to conceal.
 	DeclinedByWatermark bool
+	// Key is the target key this call addressed, rendered by the adapter
+	// itself — see UpsertOutcome.Key for why the caller does not re-derive it.
+	Key string
+	// Transition is the liveness change this retraction made to Key:
+	// TransitionRevoked when it tombstoned a live row, TransitionNone when the
+	// row was already a tombstone or never existed.
+	Transition GrantTransition
 }
 
 // OutcomeDeleter is the retraction sibling of OutcomeUpserter, for adapters

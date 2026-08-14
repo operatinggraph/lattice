@@ -125,10 +125,10 @@ func TestGuardedWrite_CreateRetriesThroughRevisionConflictThenSucceeds(t *testin
 	}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
+	out, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
 
 	require.NoError(t, err)
-	assert.Equal(t, guardCommitted, verdict, "a create that committed is not a watermark decline")
+	assert.Equal(t, guardCommitted, out.verdict, "a create that committed is not a watermark decline")
 	assert.Equal(t, 4, store.calls, "must retry Create through 3 conflicts then succeed on the 4th attempt")
 }
 
@@ -139,10 +139,10 @@ func TestGuardedWrite_UpdateRetriesThroughRevisionConflictThenSucceeds(t *testin
 	}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
+	out, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
 
 	require.NoError(t, err)
-	assert.Equal(t, guardCommitted, verdict, "an update that committed is not a watermark decline")
+	assert.Equal(t, guardCommitted, out.verdict, "an update that committed is not a watermark decline")
 	assert.Equal(t, 3, store.calls, "must retry Update through 2 conflicts then succeed on the 3rd attempt")
 }
 
@@ -317,10 +317,10 @@ func TestGuardedWrite_SequenceLessDropIsNotAWatermarkDecline(t *testing.T) {
 	store := &watermarkStore{stored: []byte(`{"projectionSeq":9}`)}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 0, false)
+	out, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 0, false)
 
 	require.NoError(t, err)
-	assert.Equal(t, guardDroppedNoToken, verdict,
+	assert.Equal(t, guardDroppedNoToken, out.verdict,
 		"a sequence-less drop is its own condition — neither a commit nor a watermark decline")
 	assert.Zero(t, store.writeAttempt)
 }
