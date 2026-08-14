@@ -277,10 +277,28 @@ package — so it survives unchanged under §5's shape and would have had to be 
 
 **Move 1 — withdraw `UpdatePermission` (and only it).** Remove `mk("UpdatePermission")` from
 `packages/rbac-domain/permissions.go`; nine grants remain. It has no invoking caller (§8 C1) and it is
-the sole op that can **mutate an existing** permission vertex's body — the integrity hole of §1.2 and the
-one thing that would make any provenance marker forgeable. With it gone, a permission vertex's `data` is
-**write-once**: authored either by `CreatePermission` or by the installer, never rewritten. Everything
-below depends on that.
+the sole **rbac-domain** op that can mutate an existing permission vertex's body — the integrity hole of
+§1.2 and the one thing that would make any provenance marker forgeable through the RBAC op surface. With
+it gone, a permission vertex's `data` is write-once **through that surface**: authored either by
+`CreatePermission` or by the installer, never rewritten by any granted rbac-domain op.
+
+**Falsified 2026-08-14, Inc 1+2 close review (Blind Hunter, cold).** "Everything below depends on that"
+overstated the guarantee: `UpgradePackageDDLScript` (`internal/bootstrap/install_ddl.go:197-261`) is a
+*separate*, pre-existing bootstrap primitive that accepts a client-supplied `mutations` list against any
+`vtx.*` key with only a shape check — no DDL is registered under canonical name `permission` or `role`, so
+step 6's `permittedCommands` enforcement is skipped entirely for `class:"permission"`/`class:"role"`
+documents (`step6_validate.go:202`, `step6_resolve_ddl.go:278`), and an `update` there is a full body
+replacement. `consoleOperator` — whose own doc comment states it "does not confer root" — holds
+`UpgradePackage` at the meta lane (`packages/console-operator/permissions.go:73-82`) and can use it to
+rewrite any `vtx.permission.*`/`vtx.role.*` body, including forging the `data.origin` stamp Move 2 mints
+and self-granting any operationType. **Write-once holds against the package-declared grant channel this
+design closes (Inc 1+2) and, once it lands, against the runtime-mint channel's reserved-set refusal
+(Inc 3) — it does not yet hold against `UpgradePackage`.** That gap is real, pre-existing, cross-cutting
+(every package upgrades through this primitive, not just rbac-domain), and out of THIS design's scope to
+fix inline — filed to `lattice.md` for a Designer pass:
+"[bootstrap] `UpgradePackage` accepts unvalidated mutations against permission/role vertex classes."
+Inc 3 (not yet built) should not be read as closing this; its "everything below depends on Move 1" claim
+carries the same correction.
 
 **Move 2 — mark the origin.** `CreatePermission` stamps `data.origin: "runtime"` on the vertex it mints;
 `internal/pkgmgr/build.go:357-368` stamps `data.origin: "package"` plus `data.declaredBy: <packageName>`.
@@ -397,7 +415,12 @@ fingers-crossed state the fire exists to end).
 A `package`-origin vertex may grant any operationType its package declares; a `runtime`-origin vertex may
 never confer a core-reserved operationType. Origin is write-once — no operation may rewrite a permission
 vertex's body — and an absent origin reads as `runtime`. The kernel anchor's literal grant set
-(`internal/bootstrap/lenses.go:135-148`) is the one core-owned exception, being seeded, not authored.*
+(`internal/bootstrap/lenses.go:135-148`) is the one core-owned exception, being seeded, not authored.
+**Write-once as stated here binds the rbac-domain op surface and, once Inc 3 lands, the reserved-set
+refusal; `internal/bootstrap`'s `UpgradePackage` primitive is a known, separately-filed gap this
+invariant does not yet cover (§5.1 close-review correction, 2026-08-14) — treat the invariant as
+"write-once against every op this design governs," not "write-once against every write path in the
+kernel."***
 
 The gate below binds the first clause's precondition — that no package re-grants a body-rewriting op.
 (Under Branch B, §5.4, the invariant simplifies to *"a capability grant is authored by a package
