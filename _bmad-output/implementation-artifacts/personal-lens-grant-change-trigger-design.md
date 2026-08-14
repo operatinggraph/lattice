@@ -943,20 +943,27 @@ Built on branch `steward-refractor-personal-sweep-inc2`, on top of Increment 1's
 | 4. **T6** | `internal/refractor/personal_lens_grant_change_e2e_test.go` — both directions, over T4's own sink-disabled mutation fixture |
 | 5. Dossier entry | already present and still accurate (seeded at Increment 1's close); unchanged |
 
-**Two things the build decided that §4.3 left open, both stated in-code:**
+**Three things the build decided that §4.3 left open, all stated in-code:**
 
 1. **An empty population is never cached.** The cache is invalidated by a cycle *wrapping*, and a
    walk over nothing never wraps — so caching the empty answer would leave a cell that boots
    before its first identity exists unswept for the life of the process. It re-lists per tick
    while empty, which is the cheapest listing there is.
-2. **T6 drives ticks rather than running the ticker.** An authoritative frame is republished for
+2. **A tick with no registered personal lens spends nothing.** It would reproject nobody and
+   publish to nobody, yet still pay the cycle's whole-population listing — one unpaged
+   enumeration a minute, forever, on any Refractor carrying no Personal Lens. Checked per tick
+   rather than latched, and deliberately NOT the drain's registry-*completeness* gate: a lens
+   that registers late is one of the cases this sweep exists to heal, so waiting for a complete
+   registry would be the mechanism waiting on the thing it repairs.
+3. **T6 drives ticks rather than running the ticker.** An authoritative frame is republished for
    every swept identity on every tick, by construction, so a drain-until-quiet against a
    free-running sweeper never goes quiet. The ticker is unit-tested (`Run` respects its context);
    T6 proves the *cycle* converges, which is its actual claim.
 
 **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), all nine
 `scripts/lint-*.go` under `STRICT=1`, and `go test ./internal/refractor/... ./cmd/refractor/...
--count=1` — all clean. `make verify-kernel` was **not** run: it needs a live stack
+-count=1`, plus a full `go test ./... -p 4 -count=1` (the wire struct `healthwire.Entry` gained
+fields, which is a shared-blast-radius change) — all clean. `make verify-kernel` was **not** run: it needs a live stack
 (`lattice.bootstrap.json`), which this fire's scope excludes.
 
 **Residuals, precisely:**
