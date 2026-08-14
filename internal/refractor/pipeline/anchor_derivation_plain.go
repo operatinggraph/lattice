@@ -127,6 +127,52 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 	return rs.rootHops, true
 }
 
+// seedMultiPosition reports whether a plain lens's anchor label — the type a
+// seeded event narrows to (seedAnchorFor's contract, pipeline.go) — ALSO
+// binds a pattern position other than the anchor itself (§4.4 of the
+// design, §1.1's gap). seedAnchorFor's engine-level seed only ever narrows
+// the query's ANCHOR pattern (full/executor.go's anchorPattern: the first
+// MATCH clause's first node), never a second position the SAME label binds —
+// so a lens shaped like `(b:identity)-[:duplicateOf]->(a:identity)`, with a
+// column reading `a`'s DATA, silently drops every row where the event
+// vertex sits at the OTHER position, because the seeded call only ever asks
+// "does this vertex, AS the anchor, satisfy the pattern", never "as the
+// other position". identity-domain's identityCredentialBindingsRead is a
+// live example of the STRUCTURAL shape (identity bound at two positions),
+// though not of the consequence: every one of its columns is key-derived,
+// so this predicate reports true for it but no property change at the far
+// position can ever move its row (the design doc's build note).
+//
+// False — including when plainDerivationIndex itself is not ready, meaning
+// this derivation has nothing authoritative to say about the lens at all —
+// means the narrow seeded call is exactly right and stays untouched: this
+// predicate only WIDENS which events route through the derivation, never
+// narrows it, so a lens this derivation cannot reason about keeps its
+// pre-existing (already correct, for a single-position anchor label)
+// behaviour.
+func (p *Pipeline) seedMultiPosition(rs ruleState, vertexType string) bool {
+	idx, ready := p.plainDerivationIndex(rs)
+	if !ready {
+		return false
+	}
+	return len(idx.PositionsBinding(vertexType)) > 1
+}
+
+// plainDerivedAnchorReentryKey marks ctx, for the duration of
+// evaluatePlainDerivedAnchors' per-anchor loop, as a re-entrant call rather
+// than a fresh top-level event — see that function's own "THE REENTRANCY
+// SEAM" note for why a lens with a multi-position anchor label would
+// otherwise recurse forever through evaluateForEntryRaw's seeded-
+// multi-position dispatch (evaluate.go).
+type plainDerivedAnchorReentryKey struct{}
+
+// isPlainDerivedAnchorReentry reports whether ctx was marked by
+// evaluatePlainDerivedAnchors.
+func isPlainDerivedAnchorReentry(ctx context.Context) bool {
+	v, _ := ctx.Value(plainDerivedAnchorReentryKey{}).(bool)
+	return v
+}
+
 // plainDerivationLicence reports whether this plain lens may let a derived
 // anchor set DECIDE a neighbour event's outcome — §5 of the design — and, when
 // it may not, the reason. Every conjunct is fail-closed, and the refusal is
@@ -468,7 +514,20 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 // pipeline the act gate admits, both invocations are no-ops rather than a
 // decrypt and a re-decrypt. Any change that makes the licence's Secure
 // conjunct advisory re-opens this seam.
+//
+// THE REENTRANCY SEAM (§4.4). Every anchor in anchors is, by walkToAnchors'
+// own construction, of the SAME anchorLabel type — so seedAnchorFor
+// (pipeline.go) always finds a seed for the re-entrant evaluateForEntryRaw
+// call evaluatePlainFromVertex/evaluateForEntry makes below. On a lens whose
+// anchorLabel ALSO binds a second pattern position, that re-entry would
+// itself qualify for the seeded-multi-position derivation
+// (seedMultiPosition) — deriving the identical anchor set and recursing
+// forever. plainDerivedAnchorReentry marks ctx for exactly the duration of
+// this loop so evaluateForEntryRaw treats the re-entry as the narrow
+// single-seed case it already is: this changes only how many times the
+// question is asked, never the answer.
 func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState, anchors []string, anchorLabel string) ([]ruleengine.EvalResult, error) {
+	ctx = context.WithValue(ctx, plainDerivedAnchorReentryKey{}, true)
 	var combined []ruleengine.EvalResult
 	seen := make(map[string]bool, len(anchors))
 	for _, anchorKey := range anchors {
@@ -541,35 +600,80 @@ func (p *Pipeline) recordPlainProbeUnreadable() {
 	p.derivShadow.mu.Unlock()
 }
 
-// evaluatePlainNeighbourEvent decides how to answer a plain lens's neighbour
-// event — one whose vertex / aspect-owner / link-endpoint is not the lens's
-// own anchor type, so seedAnchorFor (evaluate.go) returned "" and today's
-// shipped behaviour recomputes the lens's whole row set via an unseeded
-// evaluation. It is the plain arm's own producer into the SAME three-way
-// derivation-mode switch the actor-aware arm's affectedAnchors already uses
-// (anchor_derivation_mode.go) — off/shadow/act govern both arms identically,
-// and the shadow counters are the SAME derivationShadow struct (a pipeline is
-// one lens and is either plain or actor-anchored, never both, so the fields
-// cannot collide between the two measurements).
-//
-// `off` and `shadow` both return EXACTLY what calling executeFullForActor with
-// an empty seed returns — the shadow's measurement decides nothing about the
-// event it observes. Only `act`, and only on a lens plainDerivationIndexForAct
-// admits, substitutes the K seeded per-anchor evaluations for that one rescan;
-// every refusal below it falls back to the same unseeded call.
+// evaluatePlainNeighbourEvent decides how to answer a genuine neighbour
+// event — the vertex / aspect-owner / link-endpoint is not the lens's own
+// anchor type, so seedAnchorFor returned "". Its declined answer, at every
+// exit below, is the unseeded whole-corpus re-scan: that IS today's shipped
+// behaviour for a neighbour event, which never had a narrower option before
+// Increment 1 existed at all. See plainDerivationDecide for the shared
+// three-way mode switch + §4.2/§5 gate both this and
+// evaluateSeededMultiPosition run through.
 func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
 	unseeded := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
 	}
+	return p.plainDerivationDecide(ctx, rs, entry, unseeded)
+}
+
+// evaluateSeededMultiPosition decides how to answer a SEEDED event whose own
+// type ALSO binds a second pattern position (seedMultiPosition, §4.4): a
+// single engine-level seed can only ever narrow to the ANCHOR pattern
+// position, so it silently misses every row where this vertex sits at the
+// OTHER position. Its declined answer is the NARROW single-seed call — NOT
+// the unseeded rescan evaluatePlainNeighbourEvent declines to — because
+// that narrow call IS today's shipped answer for a seeded event (the very
+// thing seedAnchorFor already computes); an operator running `off` mode, or
+// any lens without a fresh licence, must pay exactly what it pays today,
+// never a whole-corpus rescan it never asked for. Only `act` mode on a
+// licensed lens substitutes the derived K-seeded answer, matching
+// evaluatePlainNeighbourEvent's own act path exactly (same
+// plainDerivationDecide call, different declined closure).
+//
+// On EVERY path here, entry.NodeLabel is the lens's own anchor label (that
+// is what made it seed in the first place) — so evaluateForEntryRaw's outer
+// filter-retraction check, which runs unconditionally after this dispatch
+// returns, always finds an AnchorProjectionKey answer and may append its own
+// Delete for entry's own key. That Delete is NOT run through §6's
+// derivedRowIsLive probe (evaluatePlainDerivedAnchors' own zero-row-probe
+// note) — it never has been, for any seeded-typed entry, on the narrow path
+// this branch replaces just as much as on this one. Harmless in practice (a
+// vertex genuinely at the far position has no row of its own to begin with,
+// so the Delete lands on an already-absent or already-tombstoned key), but
+// worth stating rather than leaving implicit.
+func (p *Pipeline) evaluateSeededMultiPosition(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
+	narrowSeed := func() ([]ruleengine.EvalResult, error) {
+		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, entry.CoreKVKey)
+	}
+	return p.plainDerivationDecide(ctx, rs, entry, narrowSeed)
+}
+
+// plainDerivationDecide is the three-way derivation-mode switch shared by
+// evaluatePlainNeighbourEvent and evaluateSeededMultiPosition — the plain
+// arm's own producer into the SAME off/shadow/act switch the actor-aware
+// arm's affectedAnchors already uses (anchor_derivation_mode.go), and the
+// SAME derivationShadow counters (a pipeline is one lens and is either
+// plain or actor-anchored, never both, so the fields cannot collide between
+// the two measurements).
+//
+// declined is the caller's OWN "today's shipped answer" — what runs
+// unconditionally under `off`, is measured-but-not-decided-by under
+// `shadow`, and is every `act`-path refusal's fallback. The two callers
+// differ ONLY in what that answer is (a neighbour event's unseeded rescan,
+// a seeded event's narrow single-seed call); every other decision — the
+// mode switch itself, the §4.2/§5 gate, the derived-anchor cap, the
+// K-seeded evaluation — is identical and shared here so the two cannot
+// silently drift apart.
+func (p *Pipeline) plainDerivationDecide(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry,
+	declined func() ([]ruleengine.EvalResult, error)) ([]ruleengine.EvalResult, error) {
 	derive := func() ([]string, bool, error) {
 		return p.deriveAnchorsForPlainVertex(ctx, rs, entry.CoreKVKey, entry.NodeLabel)
 	}
 
 	switch p.derivationMode() {
 	case DerivationModeOff:
-		return unseeded()
+		return declined()
 	case DerivationModeShadow:
-		results, err := unseeded()
+		results, err := declined()
 		if err != nil {
 			return nil, err
 		}
@@ -578,9 +682,9 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 	case DerivationModeAct:
 		// fall through to the act path below
 	default:
-		slog.Warn("pipeline: unknown anchor-derivation mode; using today's unseeded evaluation",
+		slog.Warn("pipeline: unknown anchor-derivation mode; using today's declined evaluation",
 			"ruleId", p.ruleID, "mode", int(p.derivationMode()))
-		return unseeded()
+		return declined()
 	}
 
 	idx, ready, licenceRefusal := p.plainDerivationIndexForAct(rs)
@@ -590,32 +694,32 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 		// event, and counting it every event would drown the ratio the tally
 		// exists to report — the per-event walk failures and cap overflows.
 		p.noteStaticPlainDerivationRefusal(rs, licenceRefusal)
-		return unseeded()
+		return declined()
 	}
 	anchorLabel := idx.Labels[idx.Anchor]
 	anchors, ok, err := derive()
 	if err != nil {
 		// A walk that errored says nothing about the event: adjacency is the
-		// same store the unseeded evaluation is about to read, so the honest
+		// same store the declined evaluation is about to read, so the honest
 		// response is to run it and let ITS error, if any, be the event's
 		// outcome — mirroring affectedAnchors' own disposition.
-		slog.Warn("pipeline: plain anchor derivation failed; falling back to today's unseeded evaluation",
+		slog.Warn("pipeline: plain anchor derivation failed; falling back to today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "err", err)
 		p.recordDerivationFellBack()
-		return unseeded()
+		return declined()
 	}
 	if !ok {
 		p.recordDerivationFellBack()
-		return unseeded()
+		return declined()
 	}
 	if cap := p.plainDerivedAnchorCap(); len(anchors) > cap {
 		// A fallback, not a truncation (§4.2's caps, plural): the derived set
 		// is real and correct, but K seeded evaluations this large cost more
-		// than the one whole-corpus rescan they would replace.
-		slog.Warn("pipeline: plain anchor derivation exceeded the derived-anchor cap; using today's unseeded evaluation",
+		// than the declined answer they would replace.
+		slog.Warn("pipeline: plain anchor derivation exceeded the derived-anchor cap; using today's declined evaluation",
 			"ruleId", p.ruleID, "eventKey", entry.CoreKVKey, "derivedCount", len(anchors), "cap", cap)
 		p.recordDerivationFellBack()
-		return unseeded()
+		return declined()
 	}
 	p.recordDerivationActed(len(anchors))
 	return p.evaluatePlainDerivedAnchors(ctx, rs, anchors, anchorLabel)

@@ -62,6 +62,28 @@ WHERE id.data.status = 'active'
 RETURN pr.key AS key, id.data.name AS holderName
 `
 
+// plainActDuplicateSpec is a SYNTHETIC shape built to exercise §4.4's gap
+// directly — it does not mirror any live lens. (identity-hygiene's real
+// duplicateCandidates sets DiffRetraction, so seedAnchorFor never seeds it
+// at all; identity-domain's real identityCredentialBindingsRead binds the
+// identity label at two positions the same way, but every one of its
+// columns is key-derived, so no property of the far position can ever make
+// its row stale — see the design doc's build note.) The gap this proves is
+// general, over the SAME label bound at two pattern positions — `b`, the
+// anchor position seedAnchorFor's engine-level seed can narrow to, and `a`,
+// a position no engine-level seed can ever reach. The row's own value comes
+// from `a`, so an event on the vertex playing that role is the shape that
+// exposes the gap: seedAnchorFor sees the event vertex's own type
+// (identity) IS the anchor label and seeds it, but the engine can only ever
+// narrow the ANCHOR pattern position (`b`) — so before this increment, an
+// event on the vertex playing `a` asked "does this vertex, as `b`, have an
+// outgoing duplicateOf edge", found none, and the row keyed on `b` never
+// learned `a`'s new value at all.
+const plainActDuplicateSpec = `
+MATCH (b:identity)-[:duplicateOf]->(a:identity)
+RETURN b.key AS key, a.key AS dupOf, a.data.name AS dupName
+`
+
 // plainActAuditInterval is the subject lens's audit cadence, compressed from the
 // production default so the licence's staleness conjunct is satisfied by a real
 // ticking auditor within the test's own lifetime rather than by a hand-written
@@ -552,4 +574,140 @@ func TestPlainDerivationAct_UnenrolledLensStillRescans_E2E(t *testing.T) {
 	require.Zero(t, control.pipeline.AnchorDerivationShadow().Acted,
 		"the un-enrolled lens's derived set never decided one of its events")
 	require.Greater(t, subject.pipeline.AnchorDerivationShadow().Acted, int64(0))
+}
+
+// TestPlainDerivationSeeded_MultiPositionUnlicensedKeepsTodaysNarrowSeed_E2E
+// is Increment 4b's declined path (§4.4) end to end, built UNLICENSED (no
+// Auditor): a seeded event whose vertex plays the pattern's SECOND identity
+// position (`a`) must NOT update the row that depends on it — the SAME gap
+// §4.4 names, left exactly as it is until a licence admits the correction.
+//
+// This is deliberately the mirror of what an earlier version of this test
+// asserted. evaluateSeededMultiPosition's declined answer is the NARROW
+// single-seed call (executeFullForActor with the event vertex as the seed)
+// — NOT the unseeded whole-corpus rescan evaluatePlainNeighbourEvent's own
+// declined path uses — because a seeded event's shipped answer, before this
+// increment existed at all, was already that narrow call: an operator
+// running `off` mode, or any lens without a fresh licence, must pay exactly
+// what it paid before this fire, never a rescan it never asked for (a real
+// per-event cost regression on any high-volume identity-typed lens, found
+// during this fire's own adversarial review — see the design doc's build
+// note). The correction is licensed-`act`-only; its own twin test below
+// proves that half.
+func TestPlainDerivationSeeded_MultiPositionUnlicensedKeepsTodaysNarrowSeed_E2E(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	lens := installPlainActLens(t, env, "plain-act-seeded-multipos", "plain-act-seeded-multipos-target",
+		plainActDuplicateSpec, adapter.DeleteModeHard, false)
+
+	bID, aID := narrowedID(t, "SmpDupB"), narrowedID(t, "SmpDupA")
+	bKey := substrate.VertexKey("identity", bID)
+	aKey := substrate.VertexKey("identity", aID)
+
+	putIdentity(t, env, bKey, "duplicate-of-someone", "active", "2026-01-01T00:00:00Z")
+	putIdentity(t, env, aKey, "alice", "active", "2026-01-01T00:00:00Z")
+	putLink(t, env.coreKV, "identity", bID, "duplicateOf", "identity", aID)
+
+	dupName := func(key string) string {
+		row := lens.row(t, key)
+		if row == nil {
+			return ""
+		}
+		s, _ := row["dupName"].(string)
+		return s
+	}
+	pollUntil(t, 30*time.Second, func() bool { return dupName(bKey) == "alice" })
+
+	// The seeded event: a property write on `a` itself. `a`'s own type IS
+	// the lens's anchor label ("identity"), so seedAnchorFor narrows to it —
+	// exactly the shape §4.4 names, and the one the narrow engine-level seed
+	// alone cannot answer.
+	putIdentity(t, env, aKey, "alice-renamed", "active", "2026-01-02T00:00:00Z")
+
+	// The fence: a BRAND NEW pair, created after the rename event above. Its
+	// own initial population goes through the LINK arm's normal endpoint
+	// evaluation (evalPlainLinkReprojection), which narrows correctly on the
+	// b-position endpoint regardless of this fire's fix — so waiting for it
+	// proves every prior event on this single in-order consumer, the rename
+	// included, has already been fully applied. A poll on bKey's OWN value
+	// could not serve as this fence: under the declined path it is
+	// EXPECTED never to move, which is exactly what is under test.
+	fenceB, fenceA := narrowedID(t, "SmpFenceB"), narrowedID(t, "SmpFenceA")
+	fenceBKey := substrate.VertexKey("identity", fenceB)
+	putIdentity(t, env, fenceBKey, "fence-b", "active", "2026-01-03T00:00:00Z")
+	putIdentity(t, env, substrate.VertexKey("identity", fenceA), "fence-a", "active", "2026-01-03T00:00:00Z")
+	putLink(t, env.coreKV, "identity", fenceB, "duplicateOf", "identity", fenceA)
+	pollUntil(t, 30*time.Second, func() bool { return dupName(fenceBKey) == "fence-a" })
+
+	require.Equal(t, "alice", dupName(bKey),
+		"unlicensed, the seeded multi-position event must keep today's narrow single-seed answer — never a whole-corpus rescan it never asked for")
+}
+
+// TestPlainDerivationSeeded_MultiPositionNarrowsViaTheDerivedSet_E2E is the
+// licensed twin: with an enrolled, ticking Auditor, the SAME seeded event is
+// decided by the derived anchor set — deriveAnchorsForPlainVertex seeds BOTH
+// positions the identity label binds, `a` itself (a self-only derivation
+// that finds no outgoing duplicateOf edge, so no row for it and no bearing
+// on the assertions below) and `b` by walking the incoming duplicateOf edge
+// — rather than the unseeded rescan, and a bystander pair is left untouched.
+//
+// It is also the reentrancy seam's own positive vector, though not by an
+// assertion: `a` and `b` are both identity-typed and so both otherwise
+// eligible for this SAME branch, and evaluatePlainDerivedAnchors re-enters
+// evaluateForEntryRaw for each. Without plainDerivedAnchorReentryKey that
+// re-entry would re-derive the identical {a, b} set and recurse forever; the
+// test's own completion, not a hang or a stack overflow, is what proves the
+// guard held.
+func TestPlainDerivationSeeded_MultiPositionNarrowsViaTheDerivedSet_E2E(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	subject := installPlainActLens(t, env, "plain-act-seeded-multipos-narrow", "plain-act-seeded-multipos-narrow-target",
+		plainActDuplicateSpec, adapter.DeleteModeSoft, true)
+
+	b1, a1 := narrowedID(t, "SmnDupB1"), narrowedID(t, "SmnDupA1")
+	b2, a2 := narrowedID(t, "SmnDupB2"), narrowedID(t, "SmnDupA2")
+	b1Key, b2Key := substrate.VertexKey("identity", b1), substrate.VertexKey("identity", b2)
+	a1Key, a2Key := substrate.VertexKey("identity", a1), substrate.VertexKey("identity", a2)
+
+	putIdentity(t, env, b1Key, "dup-b1", "active", "2026-01-01T00:00:00Z")
+	putIdentity(t, env, b2Key, "dup-b2", "active", "2026-01-01T00:00:00Z")
+	putIdentity(t, env, a1Key, "alice", "active", "2026-01-01T00:00:00Z")
+	putIdentity(t, env, a2Key, "carol", "active", "2026-01-01T00:00:00Z")
+	putLink(t, env.coreKV, "identity", b1, "duplicateOf", "identity", a1)
+	putLink(t, env.coreKV, "identity", b2, "duplicateOf", "identity", a2)
+
+	dupName := func(key string) string {
+		row := subject.row(t, key)
+		if row == nil {
+			return ""
+		}
+		s, _ := row["dupName"].(string)
+		return s
+	}
+	pollUntil(t, 30*time.Second, func() bool { return dupName(b1Key) == "alice" })
+	pollUntil(t, 30*time.Second, func() bool { return dupName(b2Key) == "carol" })
+	subject.awaitPlainActVerdict(t)
+
+	// `a1` is itself identity-typed — the lens's own anchor label — so its
+	// initial write already left the SAME idempotent no-op marker any
+	// never-matched anchor does (evaluateForEntryRaw's filter-retraction
+	// check, unconditional and pre-dating this design entirely; pinned by
+	// TestPlainDerivationAct_NeverProjectedAnchorGetsNoTombstone_E2E). held()
+	// alone cannot tell that marker apart from a genuine row — both leave a
+	// non-empty entry under DeleteModeSoft — so what this test's own event
+	// must not do is asked directly instead: a1's key must never carry
+	// CONTENT, i.e. dupName must stay empty. A real row there (dupName
+	// non-empty) would mean the a-position's self-derivation was mistaken
+	// for a genuine anchor.
+	require.Empty(t, dupName(a1Key), "a1's own key must never carry content before this test's event")
+	acted := subject.pipeline.AnchorDerivationShadow().Acted
+
+	putIdentity(t, env, a1Key, "alice-renamed", "active", "2026-01-02T00:00:00Z")
+	pollUntil(t, 30*time.Second, func() bool { return dupName(b1Key) == "alice-renamed" })
+
+	require.Equal(t, "carol", dupName(b2Key), "the derived set must not touch the bystander pair")
+	require.Empty(t, dupName(a1Key),
+		"the a-position's own self-derivation finds no row of its own and must never acquire content")
+	require.Greater(t, subject.pipeline.AnchorDerivationShadow().Acted, acted,
+		"the seeded multi-position event must be decided by the derived set, not the unseeded rescan")
 }

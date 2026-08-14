@@ -260,20 +260,44 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	// as the entry, so each arm seeds precisely when its own vertex is an
 	// anchor.
 	seed := p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey)
+	plain := p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil
+	// reentrant is true only while evaluatePlainDerivedAnchors is re-entering
+	// this dispatch for one of ITS OWN derived anchors (anchor_derivation_
+	// plain.go's "THE REENTRANCY SEAM"). Both derivation-eligible cases below
+	// are excluded for it: a derived anchor is always of the anchor-labelled
+	// type either case exists to answer, so evaluating it in HALF instead of
+	// as the narrow single-seed case below would re-derive the identical set
+	// and never terminate.
+	reentrant := isPlainDerivedAnchorReentry(ctx)
 	var results []ruleengine.EvalResult
 	var err error
-	if seed == "" && p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil {
+	switch {
+	case seed == "" && plain && !reentrant:
 		// A plain lens's neighbour event: seedAnchorFor found no seed because
 		// entry's own type is not the lens's anchor pattern, so the shipped
 		// answer is an unseeded whole-corpus re-scan — the same call the
-		// else-branch below makes for every other (already-seeded, or
+		// default case below makes for every other (already-seeded, or
 		// non-plain) event. evaluatePlainNeighbourEvent
 		// (anchor_derivation_plain.go) is this branch's producer into the
 		// derivation-mode switch: it returns exactly that re-scan except in
 		// `act` mode on a lens the narrowing licence admits, where it
 		// substitutes one seeded evaluation per derived anchor.
 		results, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
-	} else {
+	case seed != "" && plain && !reentrant && p.seedMultiPosition(rs, entry.NodeLabel):
+		// Increment 4b (§4.4): entry's own type IS the lens's anchor pattern,
+		// but that same label ALSO binds a second pattern position — the
+		// engine-level seed (seedAnchorFor's contract) only ever narrows the
+		// ANCHOR position, so it silently misses every row where this vertex
+		// sits at the OTHER position. seedMultiPosition proves the second
+		// position exists; evaluateSeededMultiPosition's own derive() seeds
+		// BOTH (the anchor position as a zero-hop terminus, the other by
+		// walking from it). Its declined answer is the SAME narrow seeded
+		// call the default case below makes — never the neighbour case's
+		// whole-corpus rescan above — so `off` mode or an unlicensed lens
+		// pays exactly today's cost, and only a licensed `act` lens gets the
+		// correction.
+		results, err = p.evaluateSeededMultiPosition(ctx, rs, entry)
+	default:
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
 	}
 	if err != nil {

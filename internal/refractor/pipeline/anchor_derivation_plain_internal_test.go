@@ -926,3 +926,72 @@ func writeAndReturnVertex(t *testing.T, coreKV *substrate.KV, key, class string,
 	require.NoError(t, err)
 	return props
 }
+
+// multiPositionAnchorSpec is a SYNTHETIC shape, NOT a mirror of any live
+// lens (plain-lens-neighbour-anchor-derivation-design.md's build note: the
+// real identity-hygiene duplicateCandidates sets DiffRetraction, so it
+// never seeds at all, and identity-domain's identityCredentialBindingsRead
+// binds the same label at two positions but every column is key-derived, so
+// no property change at the far position can ever move its row). It exists
+// to exercise §4.4's gap directly: the SAME label, identity, bound at TWO
+// pattern positions — `b`, the anchor position seedAnchorFor's engine-level
+// seed can narrow to, and `a`, a position no engine-level seed can ever
+// reach. The row's own value comes from `a`, so an event on the vertex
+// playing that role is the shape §4.4 exists for.
+const multiPositionAnchorSpec = `
+MATCH (b:identity)-[:duplicateOf]->(a:identity)
+RETURN b.key AS key, a.key AS dupOf, a.data.name AS dupName
+`
+
+// TestSeedMultiPosition is a negative test paired with a positive vector
+// (§11's own instruction): the shape whose anchor label binds a second
+// position reports true, and the ordinary single-position shape — the
+// overwhelming majority of the corpus — reports false, so a lens this
+// predicate does not concern stays on today's narrow seeded call unchanged.
+func TestSeedMultiPosition(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+
+	t.Run("positive vector: the anchor label bound at a second position reports true", func(t *testing.T) {
+		p := plainDerivationPipeline(t, adjKV, multiPositionAnchorSpec)
+		rs := p.ruleState()
+		require.True(t, rs.rootHops.Complete, "must be scan-root-indexable: %s", rs.rootHops.Incomplete)
+		idx, ready := p.plainDerivationIndex(rs)
+		require.True(t, ready)
+		require.Len(t, idx.PositionsBinding("identity"), 2, "both b and a bind the identity label")
+		require.True(t, p.seedMultiPosition(rs, "identity"))
+	})
+
+	t.Run("the common shape: an anchor label bound at ONE position reports false", func(t *testing.T) {
+		p := plainDerivationPipeline(t, adjKV, providerSpec)
+		rs := p.ruleState()
+		require.False(t, p.seedMultiPosition(rs, "provider"),
+			"clinicProviders' anchor label binds only the anchor position")
+	})
+
+	t.Run("a type the pattern never binds at all reports false", func(t *testing.T) {
+		p := plainDerivationPipeline(t, adjKV, multiPositionAnchorSpec)
+		rs := p.ruleState()
+		require.False(t, p.seedMultiPosition(rs, "provider"))
+	})
+
+	t.Run("a not-ready index reports false rather than guessing", func(t *testing.T) {
+		p := plainDerivationPipeline(t, adjKV, multiPositionAnchorSpec)
+		p.SetActorEnumerator(NewActorEnumerator(adjKV, nil, "identity"))
+		rs := p.ruleState()
+		_, ready := p.plainDerivationIndex(rs)
+		require.False(t, ready)
+		require.False(t, p.seedMultiPosition(rs, "identity"))
+	})
+}
+
+// TestIsPlainDerivedAnchorReentry pins the reentrancy marker
+// evaluatePlainDerivedAnchors sets and evaluateForEntryRaw's seeded-multi-
+// position dispatch reads — the seam that keeps a multi-position anchor
+// label (multiPositionAnchorSpec's own shape) from recursing forever
+// through its own derived anchors.
+func TestIsPlainDerivedAnchorReentry(t *testing.T) {
+	require.False(t, isPlainDerivedAnchorReentry(context.Background()),
+		"an ordinary context is never marked")
+	marked := context.WithValue(context.Background(), plainDerivedAnchorReentryKey{}, true)
+	require.True(t, isPlainDerivedAnchorReentry(marked))
+}
