@@ -303,3 +303,25 @@ func keysOf(ids []string) []string {
 	}
 	return out
 }
+
+func TestPersonalSweep_WithNoRegisteredLensItSpendsNothing(t *testing.T) {
+	_, keys := sweepActors(3)
+	lister := &fakeLister{keys: keys}
+	r := grantchange.New()
+	s := grantchange.NewPersonalSweeper(r, lister)
+	s.SetBounds(10, 0)
+	ctx := context.Background()
+
+	s.Sweep(ctx)
+	s.Sweep(ctx)
+	assert.Zero(t, lister.callCount(),
+		"with no personal lens registered every reprojection is a no-op, so the whole-population listing is bought for nothing")
+
+	// And a lens registering later simply resumes the walk — the check is per
+	// tick, not latched, because THIS is the case the sweep exists for.
+	lens := &fakePersonal{}
+	r.RegisterPersonal("lens-1", lens)
+	s.Sweep(ctx)
+	assert.Len(t, lens.seen(), 3)
+	assert.Equal(t, 1, lister.callCount())
+}

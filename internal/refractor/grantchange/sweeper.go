@@ -148,6 +148,17 @@ func (s *PersonalSweeper) Run(ctx context.Context) {
 // to every registered personal lens's health entry. Exported so a test can
 // drive a deterministic pass instead of waiting on a ticker.
 func (s *PersonalSweeper) Sweep(ctx context.Context) {
+	if !s.r.hasPersonal() {
+		// Nothing registered: every reprojection would be a no-op and every
+		// health write would have nobody to land on, so the tick would be a
+		// whole-population Core-KV listing bought for nothing. Checked per tick
+		// rather than latched, because a lens registering later — during boot,
+		// or on a hot install — must simply resume the walk. Deliberately NOT
+		// the drain's registry-COMPLETENESS gate: this sweep is the healer for
+		// the lens that registers late, so holding it until every lens is
+		// present would be the mechanism waiting on the thing it repairs.
+		return
+	}
 	if !s.ensurePopulation(ctx) {
 		// Either the listing failed — already logged, and the next tick retries
 		// — or this cell has no identities. Neither publishes progress: a cursor

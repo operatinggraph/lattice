@@ -500,6 +500,14 @@ func (r *Reprojector) registeredRuleIDs() []string {
 	return out
 }
 
+// hasPersonal reports whether any personal lens is registered — what a caller
+// asks before spending I/O on work that would have nowhere to land.
+func (r *Reprojector) hasPersonal() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.personal) > 0
+}
+
 // snapshotPersonal copies the registry for callers that need the pipelines
 // themselves rather than a walk order.
 func (r *Reprojector) snapshotPersonal() map[string]PersonalPipeline {
