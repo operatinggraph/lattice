@@ -761,3 +761,102 @@ publish/notify path for a **retraction** inherits that path's freshness posture 
 revision is safe for a snapshot and fatal for a retraction.* The same words ("publish the authoritative
 frame") describe two different jobs, exactly like the RLS-anchor and "guard" precedent-transfer failures
 before it. Ask what the *reader* does with the number, not what the writer meant by it.
+
+---
+
+## 14. Increment 1 fire brief (build note, 2026-08-14)
+
+Phase-0 scout re-verified every G1–G16 citation and all four censuses live against `main` (1 day post-
+ratification): all four censuses match exactly (15 / 4 / structural / 1), no proposed symbol
+(`GrantChangeSink`, `ReprojectPersonalActor`, `PersonalSweeper`) is pre-built, and `guardVerdict` is
+pre-existing infrastructure the design extends, not new. A handful of line numbers drifted (routine edits to
+`evaluate.go`/`driver.go`/`pipeline.go`/`main.go` since ratification) — corrected below; no cited *fact* was
+false.
+
+**1. Scope sentence (verbatim, §11 Inc 1).** *"Increment 1 — the notification edge (M). Posture-changing: yes
+(security plane) ⇒ full review depth."* Intent (§1.4): a `cap-read` grant transition re-drives the affected
+actor's personal pipelines promptly; `IsReadable` stays the boundary, it simply stops being asked only at
+arbitrary CDC-driven times.
+
+**2. Verified touch-list (corrected `file:line`, checked live this fire):**
+
+| File | What | Corrected anchor |
+|---|---|---|
+| `internal/refractor/adapter/natskv.go` | `guardedWrite` gains the liveness-transition verdict | `:316-363` (unchanged) — insert the stored/incoming `isDeleted` parse after the `Get` at `:329`, before the create/decline/update branches |
+| … | `storedProjectionSeq` — model for the new `storedIsDeleted`-shaped parse | `:388-412` (unchanged) |
+| … | `Truncate` / `truncateKeys` — the fourth signal arm | `:533-546` / `:548-563` (unchanged) |
+| `internal/refractor/adapter/adapter.go` | `OutcomeUpserter` / `OutcomeDeleter` interfaces — **already defined**, `DeleteWithOutcome` **already implemented** on `NatsKVAdapter` (`natskv.go:23-24`, `:240-242`) | `:174-176`, `:221-223` |
+| `internal/refractor/pipeline/pipeline.go` | `writeResults` — delete arm calls plain `adpt.Delete` (discards outcome); `wrote` stays hard-`true` for every delete | `:3428` (fn), delete arm `:3448-3450` (was cited `:3372/:3382`, drifted) |
+| `internal/refractor/pipeline/hydrate.go` | `Hydrate` — the mirror pattern for `ReprojectPersonalActor` | `:33-95` (was `:35-95`, off by 2) |
+| `internal/refractor/pipeline/evaluate.go` | Personal lens D1-skip is the **single-`envelopeFn`** arm (personal lenses use `SetEnvelopeFn`, not `SetMultiEnvelopeFn`) — skip-continue `:712-713`, append `:729-732`; `emitPersonalFrames` | `:712-732` (was cited `:639-641/657`, wrong arm — multiEnvelopeFn's arm is `:696-708`, not personal's); `emitPersonalFrames` fn at `:1190-1219` (was `:1118-1147`) |
+| … | called from | `pipeline.go:3576` (`p.emitPersonalFrames(ctx, adpt, enumeratedActors, results, msg.Sequence)`) |
+| `internal/refractor/capabilityread/capabilityread.go` | `perAnchorBaseKey`/`perAnchorDomainFilter` build `"cap-read."` inline — **no exported prefix constant exists yet**; step 5 must add one | `:44-49` |
+| `internal/refractor/projection/driver.go` | `InstallActorAggregate` — `authPlane := plan.AuthPlane` (`:356-357`) is the classification site; `sweepEnrolment` def `:309` (was `:425`), sole call site `:426` (was `:425`) | `:336-386` install body |
+| `internal/refractor/projection/personal.go` | `InstallPersonalLens` (never calls `SetSweepPlan`); `personalEnvelopeFn`'s D1 gate | `:106-135`; gate `:157-184`, `IsReadable` call `:177` (Census 4 confirmed: only call site) |
+| `internal/refractor/projection/output.go` | `AnchorFromKey` (recovers the owning actor's full Contract #1 vertex key, e.g. `vtx.identity.<id>` — NOT the bare NanoID `ReprojectPersonalActor` takes; caller must `substrate.ParseVertexKey` it) / `KeyPrefix` | `:359-389` / `:287-299` |
+| `cmd/refractor/main.go` | `controlSvc.RegisterPersonalHydrator(r.ID, p)` — the sibling site where the reprojector's own per-ruleID registry populates | `:1556` (was cited `:1401`, drifted) |
+| `cmd/refractor/reload.go` | `matchShrank` narrowing detection feeds `markTaxonomyRebuildPending` | `:502`, `:572` (was `:462-473`); the `Truncate` call itself is `pipeline.go:2775` inside `resolveTruncate`/rebuild (`:2720`, `:2758`) (was `:2669/2707`) |
+| `internal/refractor/health/reporter.go` | Health-signal precedent for the overflow/error issue and (Inc 2) sweep progress | `SetSweepProgress` `:753-780` is the Inc 2 precedent; `RecordError`/`SetFilterState` (`:411-505`) are the precedent shape for a new per-actor-drain-error / overflow signal — **no existing "raise an issue" call in Refractor's own Reporter today; this is a new method on the same Reporter, not a new subsystem** |
+| new file (greenfield) | `GrantChangeSink`, `ReprojectPersonalActor`, the reprojector (registry, coalescing dirty-actor set, drain worker, keyed `(lens,actor)` mutex) | no existing file owns this; mirrors `hydrate.go`'s shape + `sweep.go`'s ticker/cursor shape (Inc 2 only for the latter) |
+
+**3. Precedents to mirror.** `ReprojectPersonalActor` mirrors `Hydrate` clause-by-clause per §4.1's table
+(revision-after is the one deliberate divergence, §4.1.1). The drain worker's per-actor error posture (log +
+Health signal + continue, no re-enqueue) mirrors `writeResults`' own `CatTransient`/`CatTerminal` handling
+shape (`pipeline.go:3428+`) without reusing its retry queue. The registry-not-reusing-hydrator-registry
+decision is already grounded (G-noted in §4.2): `control.Hydrator` is one-method/unexported by deliberate
+boundary (`service.go:161-163`, `:312`).
+
+**4. Increment order (design §11 Inc 1, steps 1→9), green check per step:**
+
+1. `guardedWrite` liveness verdict (parse stored + incoming `isDeleted`, err-first, independent of `Wrote`) →
+   **T1**: `go test ./internal/refractor/adapter/... -run TestGuardedWrite` (new/extended), all 9 table rows.
+2. `writeResults` gains an `OutcomeDeleter` consultation alongside `OutcomeUpserter` — **this is the same
+   code the already-filed board row "[Refractor] The CDC write path audits a retraction the ordering guard
+   declined" (`lattice.md` Component maintenance) needs fixed; fold it in now** (`wrote` for the delete arm
+   becomes `outcome.Wrote` instead of hard-`true`) → close that row in the same commit, don't file it
+   separately.
+3. `GrantChangeSink` interface + `AnchorFromKey`-routed write-path signal, installed by `driver.go`'s
+   classification → **T2**.
+4. `Truncate` fourth arm (purged keys → `AnchorFromKey` → enqueue) → **T8**, incl. the automatic
+   `matchShrank` path (`reload.go:502`).
+5. `capabilityread` exports the `"cap-read."` prefix constant; `driver.go` classifies from `plan.AuthPlane &&
+   desc.EntryKeyColumn != "" && strings.HasPrefix(prefix, capabilityread.KeyPrefix)` → **T2** (full).
+6. `Pipeline.ReprojectPersonalActor` (§4.1), revision captured **after** reprojection, under the keyed
+   `(lens, actor)` mutex (§4.1.1) → **T3, T5, T5b**.
+7. The reprojector: own per-ruleID registry populated from `cmd/refractor/main.go:1556`'s call site;
+   coalescing set + bound (§5) + Health overflow signal; drain worker; per-actor error posture → **T10**.
+8. `lint-conventions` gate — default-deny an unannotated `capabilityread.IsReadable(` call site (Census 4
+   pins today's single site) → **T7**: `go run ./scripts/lint-conventions.go` self-test.
+9. **T4** (mutation-tested: disable the sink, confirm T4 fails) + **T9** (invariant: no `Delete`-shaped
+   `EvalResult` reaches a `KeySetPublisher` target); **M1** (drain-queue depth / reactions-per-minute,
+   recorded live at close).
+
+**5. In-scope gotchas.** Standing checklist (all six apply): **(1)** new state → the §5 lifetime table is
+already written in the design, build to it verbatim (dirty-actor set, bound, drain worker, publish mutex —
+none skip the crash/restart row). **(2)** every census is a premise — Census 1–4 re-pinned above; re-run
+Census 4's grep again right before step 8's gate lands (a second `IsReadable` site added mid-fire would
+change the gate's "zero debt" claim). **(3)** T4 must be mutation-tested (disable the sink, confirm failure)
+— do not accept a T4 that passes for the wrong reason. **(4)** removal/replacement — N/A, this is additive.
+**(5)** one deterministic key, one writer — the keyed `(lens,actor)` mutex is exactly this: three publishers
+(drain worker, sweeper, `Hydrate`) must serialize through it, never write around it. **(6)** precedent may
+carry debt — `Hydrate` is *not* itself a precedent for concurrent execution against the same pipeline (§5
+states this explicitly); verify every piece of per-pipeline state the design's own concurrency table lists
+is actually lock-protected before assuming `Hydrate`'s shape is safe to run concurrently. Refractor's
+"Review keeps catching" dossier is currently **empty** (all entries retired into mechanized gates) — nothing
+to copy forward; this fire's own close pass may seed a new entry per §11 Inc 2 step 5.
+
+**6. Adjacent finds.** One, and it is **absorbed into this run** (not filed): the `writeResults` delete-arm
+audit bug (item 2 above) — same function, same lines, fixed by the same `OutcomeDeleter` consultation this
+increment needs anyway. No other adjacent finds surfaced during grounding.
+
+**7. Non-goals (design §"What I am NOT proposing", restated as the drift fence).** No change to what
+`IsReadable` admits. No change to the frame wire format. No change to the D1 contract. No widening of
+`Reproject` (`reproject.go:291-302` stays byte-for-byte). No `anchorType`-based routing (audit-only,
+Contract #6 §6.14). No persisted/durable signal queue (§8.2 — the sweep is the durability story, and that is
+Increment 2, not this one).
+
+**Scope-diff gate: PASS.** Every touch-list entry traces to §11 Inc 1's nine steps; no substitution, no
+widening. The one declared dependency (Increment 2's sweep as the durability backstop) is correctly *not*
+load-bearing for Increment 1's own green bar (T1–T10, M1) — Increment 1 is independently shippable per
+§11's own "yes" answer, confirmed by re-reading the code: nothing in the touch-list above requires
+`PersonalSweeper` to exist first.
