@@ -1054,3 +1054,90 @@ designer-gated.
 📐 needs designer pass). Widening the reserved set beyond `ShredRetentionClassKey` (v1 only, §5.1 Move 3
 — "adding to it is a Processor constant edit and a test," not this fire's job to pre-populate). The
 live-vs-declared permission reconciler (§9 spawned row 4, filed, not a precondition).
+
+## 15. Increment 3 — shipped (build note, 2026-08-14, `f464c7a5` merged from `fire/grant-provenance-inc3`)
+
+Built as briefed (§14): every `vtx.permission.*` vertex now carries `data.origin` (`runtime` via
+`CreatePermission`, `package` + `declaredBy` via the installer), `capabilityRoles` projects it, and
+`matchPlatformPermission` refuses a `runtime`-origin grant of a reserved operationType while a
+`package`-origin grant of the same op still authorizes. v1 reserved set:
+**`ShredRetentionClassKey`, `UpdatePermission`** — one member wider than §7's spec; see below.
+
+**Full 3-layer adversarial review (Blind Hunter / Edge-Case Hunter / Acceptance Auditor, all cold) found
+two real, confirmed bypasses of this fire's own mechanism before it landed — both fixed, both re-reviewed
+by the lead directly against the code (not just the fix report) before merge:**
+
+1. **The capability-author grant-proposal path could launder a refused runtime grant into an authorized
+   package-origin one.** `cmd/loupe/review.go`'s and `cmd/lattice/capability/capability.go`'s
+   `heldPermissions*` helpers built `pkgmgr.HeldPermission` from the raw `capabilityRoles` projection with
+   no origin/reserved filter, so a refused `runtime`-origin `ShredRetentionClassKey` entry still counted
+   as "held" for `requesterHolds`'s no-escalation check — letting an operator mint the refused grant,
+   propose+approve a `grant`-kind capability artifact for the same op (approval trusts the record-time
+   scope check and never re-validates), and have `Installer.Apply` unconditionally stamp the result
+   `origin: "package"`. Closed by exporting `processor.WouldRefuseReservedGrant(operationType, origin)`
+   and gating `pkgmgr.HeldPermission.covers()` on it, so the single enforcement point (`covers`, `
+   requesterHolds`'s only caller) can't be bypassed by a second `HeldPermission` construction site — traced
+   live: exactly two sites, both fixed; `CapabilityApplyPlanForProposal` never re-checks scope, confirming
+   `covers()` is the only gate.
+2. **`UpdatePermission` was outside the reserved set.** `CreatePermission` takes `operationType` as a free
+   string, so an operator could re-mint `UpdatePermission` at runtime (origin `runtime`, not reserved,
+   therefore authorized) and use it to rewrite any permission vertex's body — including stripping
+   `origin` from a package's declared grant, silently downgrading it to unstamped→runtime→refused. This
+   defeated Inc 1's write-once precondition through the exact channel this fire builds. Closed by adding
+   `UpdatePermission` to `reservedOperationTypes` (verified against the "before adding" kernel-seed check:
+   not seeded, no package declares it).
+
+Also from review: capped the reserved-grant Health alert to one per `Authorize()` call (unbounded
+`CreatePermission` could otherwise charge every submission of a reserved op N sequential blocking KV
+writes on the auth hot path); corrected the Contract #6 §6.4 `origin` field's `Required` from `yes` to
+`no` (the anchor lens never projects it); updated a stale lens-shape doc comment; noted (comment only,
+not a behavior change) that `internal/aiagent/traversal.go`'s client-side permission merge drops `origin`
+and must never be used for an authorization decision.
+
+**Contract #6 §6.1 scope note.** Beyond §9's two ratified edits (remove the transitional note, add the
+`origin` field row), the "core-owned exception" paragraph was widened to also name the six kernel-seeded
+permission vertices (`internal/bootstrap/primordial.go` — `CreateMetaVertex`/`UpdateMetaVertex`/
+`TombstoneMetaVertex`/`InstallPackage`/`UninstallPackage`/`UpgradePackage`) as unstamped and reading
+`runtime`, with a standing rule that none may be added to the reserved set without stamping the seed
+first. This is a factual correction of the design's own "one core-owned exception" claim (grounded live:
+these six *are* real, unstamped `vtx.permission.*` bodies the `capabilityRoles` lens walks), not a new
+policy choice, so it shipped in this commit rather than staying uncommitted for Andrew — flagged here for
+visibility. Guarded by `TestReservedOperationTypes_V1Set`, which fails if any of the six is ever added.
+
+**Migration — landed in this fire, on the running dev stack.** All **28** packages declaring
+`PermissionSpec`s (§14's 27-item census plus `augur`, checked separately) were confirmed installed
+(`lattice-pkg list`) and force-reinstalled (`lattice-pkg install --force`) to backfill `origin`. 17
+packages committed real updates (`augur`, `cafe-domain`, `capability-author`, `clinic-domain`,
+`clinic-ledger`, `clinic-reminders`, `identity-domain`, `lease-signing`, `objects-base`,
+`orchestration-base`, `privacy-base`, `rbac-domain`, `semantic-contracts`, `service-location`,
+`wellness-domain`, `wellness-ledger`, `wellness-reminders`); 11 (`cafe-ledger`, `console-operator`,
+`control-authz`, `demo-operator`, `identity-hygiene`, `location-domain`, `loftspace-domain`,
+`loftspace-ledger`, `maintenance-domain`, `privacy-operator-grant`, `service-domain`) reported "no
+changes" — already converged, most plausibly via other concurrent activity on this shared dev stack
+picking up `main` after the merge (fleet + interactive sessions routinely run `refresh-<vertical>` /
+package installs). Verified, not assumed: sampled all 263 live `vtx.permission.*` vertices post-migration
+— 239 carry `origin`, 24 don't, and every one of the 24 is accounted for: the 6 kernel-seeded ops above,
+plus 18 pre-existing **runtime**-minted vertices from historical `hello-lattice` tutorial runs
+(`CreateAccount`/`CreditAccount`/`DebitAccount`/`CreateBook`/`CreateBookProbe1`) and one leftover
+`UpdatePermission` mint from prior exploration of this exact gap — all correctly read as `runtime` per
+the fail-closed rule (none is a package-declared grant misrepresented as anything else); the leftover
+`UpdatePermission` vertex is now inert under this fire's reservation, a live confirmation the fix works
+against real residue, not just the test suite.
+
+**Live verification, in order:** `make cycle-processor` (picks up the new `step3_auth_capability.go`);
+migration re-apply above; `make verify-package-rbac` — **62/62 OK**, including the new assertion "no live
+`vtx.permission.*` carries `operationType=UpdatePermission`"; `make verify-kernel` — clean. The
+`capabilityRoles` lens spec change (adding the `origin` projection) triggered Refractor to rebuild that
+lens from scratch (`status=rebuilding`, `consumerLag` peaked ~1241) — a mechanical, self-resolving cost of
+changing a widely-used lens spec, not a defect; confirmed by first running `make test-hello-lattice`
+mid-rebuild (Milestone 5 failed on "capability doc never reprojected," gate5 `passed:false`), then waiting
+for `capabilityRoles.status == active` and re-running clean: **all 6 milestones + gate5 + NFR-P3 pass**
+(`best drained per-event projection latency = 1.66ms`). Full `go test ./... -p 4`: 123 packages, zero
+failures, run independently by the lead in addition to the builder's own run. `golangci-lint`, all 9
+`scripts/lint-*.go` under `STRICT=1`, and `go vet -tags integration ./...` all clean.
+
+**Item complete.** Prerequisite + Inc 1 + Inc 2 + Inc 3 all shipped. The design's own §5.1 close-review
+finding (`UpgradePackage` accepts unvalidated permission/role-class mutations, ★★★, 📐 needs designer
+pass) and the §9 spawned rows 2–4 (root-actor boot-snapshot latency, stale "kernel-seeded" prose,
+live-vs-declared reconciler) remain as their own already-filed `lattice.md` rows — not this item's to
+carry further.
