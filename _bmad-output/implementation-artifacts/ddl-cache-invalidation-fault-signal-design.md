@@ -42,14 +42,19 @@ So a class whose DDL genuinely exists and says `sensitive: true` can resolve as 
 reason that has nothing to do with Contract #1 §1.6's permissive default — the class IS declared, the
 declaration just hasn't reached this process's cache — and step 6.5 currently cannot tell the two apart.
 
-**Non-goal, confirmed by re-reading Contract #1 §1.6 this fire:** the OTHER arm the board row named — an
-**empty `class`** field (`step65_encrypt.go:60`) — mirrors step 6's own identical posture
-(`step6_validate.go:190-196`, "for tombstones the document is optional — if absent, skip DDL lookups") and
-is Contract #1 §1.6's permissive-by-design behavior verbatim ("A vertex that is neither a declared type nor
-`instanceOf`-linked to one remains undeclared and bypasses ... enforcement, consistent with the permissive
-model"). Diverging step 6.5 from step 6 here would be a contract-adjacent behavior change with no ratification
-— out of scope for this fire. **This fire narrows the board row to the cache-staleness arm only** and updates
-the row's text to say so at admit.
+**Non-goal, RETRACTED — the OTHER arm the board row named is a real, still-open gap, not a sanctioned one.**
+This section originally claimed the empty-`class` arm (`step65_encrypt.go:60`) was Contract #1 §1.6's
+permissive-by-design behavior verbatim. The security review (§6) read §1.6 more carefully and found the
+claim doesn't hold: §1.6's permissive clause is about a class with **no DDL declared** and about "undeclared
+aspects have no enforced sensitivity" — neither addresses a mutation document that **omits or misstates**
+`class` for a key whose DDL-declared localName **is** sensitive. Nothing checks a document's self-reported
+`class` against its own key's localName, at step 6 or step 6.5 — so a script that omits `class`, or names an
+unrelated one, on a sensitive aspect's key commits PHI plaintext regardless of cache health. This is real and
+out of scope for THIS fire (it needs a genuinely new class-integrity check, not a mirror of an existing
+pattern — a Designer-lane item, not an in-line Winston decision), but it is **filed**, not closed:
+`lattice.md` → *[Processor] Sensitive-aspect resolution trusts a mutation's self-reported `class`, never the
+key's own localName* (📐 needs designer pass). **This fire narrows the board row to the cache-staleness arm
+only** — the arm this doc actually fixes — and the filed row above carries the other one forward.
 
 ## 2. The fix
 
