@@ -10,12 +10,14 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -337,25 +339,56 @@ RETURN pr.key AS key, org.key AS orgKey
 	})
 }
 
-// TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire pins the shadow-only
-// invariant in code: the act-mode gate can never answer ready, on any lens,
-// including the licensed-shape positive vector below. (The licence itself is
-// answerable and answers true for such a lens — see
-// TestPlainDerivationLicence_DoesNotReachTheActGate, which pins the two facts
-// together.)
-func TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire(t *testing.T) {
-	adjKV := newActorEnumeratorAdjKV(t)
-	f := newEnumFixture(t, adjKV)
-	f.vertex("pr1", "provider")
-	f.vertex("id1", "identity")
-	f.edge("identifiedBy", "pr1", "id1")
+// TestPlainDerivationIndexForAct_RequiresBothTheIndexAndTheLicence pins the act
+// gate as the conjunction it is: §4.2's index must be ready AND §5's licence
+// must admit the lens. Each half gets its own negative, and both sit beside a
+// positive — a gate that declined every lens outright would satisfy either
+// negative on its own and prove nothing about the conjunction.
+func TestPlainDerivationIndexForAct_RequiresBothTheIndexAndTheLicence(t *testing.T) {
+	t.Run("positive vector: an indexable, licensed lens is admitted", func(t *testing.T) {
+		f := licenceFixture(t, seedUnitsSpec)
+		rs := f.p.ruleState()
+		idx, ready, licenceRefusal := f.p.plainDerivationIndexForAct(rs)
+		require.True(t, ready)
+		require.Equal(t, rs.rootHops, idx,
+			"the gate hands back the lens's own scan-root index, never a second derivation of it")
+		require.Empty(t, licenceRefusal, "an admitted lens carries no refusal to report")
+	})
 
-	p := plainDerivationPipeline(t, adjKV, providerSpec)
-	rs := p.ruleState()
-	require.True(t, rs.rootHops.Complete, "positive vector: a shape the licence would otherwise consider")
+	t.Run("an indexable lens the licence refuses is declined", func(t *testing.T) {
+		adjKV := newActorEnumeratorAdjKV(t)
+		f := newEnumFixture(t, adjKV)
+		f.vertex("pr1", "provider")
+		f.vertex("id1", "identity")
+		f.edge("identifiedBy", "pr1", "id1")
 
-	_, ready := p.plainDerivationIndexForAct(rs)
-	require.False(t, ready, "acting is not wired; act mode must never decide a plain lens's event")
+		p := plainDerivationPipeline(t, adjKV, providerSpec)
+		rs := p.ruleState()
+		_, indexReady := p.plainDerivationIndex(rs)
+		require.True(t, indexReady,
+			"the INDEX half must hold here, or the refusal below says nothing about the licence")
+		licensed, refusal := p.plainDerivationLicence(rs)
+		require.False(t, licensed)
+		require.Contains(t, refusal, "no divergence audit is enrolled")
+
+		_, ready, licenceRefusal := p.plainDerivationIndexForAct(rs)
+		require.False(t, ready, "an unlicensed lens keeps today's unseeded whole-corpus rescan")
+		require.Equal(t, refusal, licenceRefusal,
+			"the gate hands the licence's own reason back rather than making its caller recompute it")
+	})
+
+	t.Run("a licensed lens the index refuses is declined", func(t *testing.T) {
+		f := licenceFixture(t, seedUnitsSpec)
+		rs := f.p.ruleState()
+		licensed, refusal := f.p.plainDerivationLicence(rs)
+		require.True(t, licensed, "the LICENCE half must hold here; refusal: %s", refusal)
+
+		rs.branches = make([]ruleengine.CompiledRule, 2)
+		_, ready, licenceRefusal := f.p.plainDerivationIndexForAct(rs)
+		require.False(t, ready, "a multi-walk lens has no single derived set for a licence to admit")
+		require.Empty(t, licenceRefusal,
+			"the index refused first, so the licence was never asked and has nothing to report")
+	})
 }
 
 // TestPlainDerivedAnchorCap_ZeroMeansUnset mirrors
@@ -582,19 +615,20 @@ RETURN pr.key AS key
 	require.Error(t, err, "the second anchor's evaluation failure must abort the whole call")
 }
 
-// TestEvaluatePlainNeighbourEvent_NoModeChangesTheResultThisFire is the
-// fire's own invariant, pinned directly against evaluatePlainNeighbourEvent
-// rather than only inferred from the regression suite staying green: for
-// EVERY mode — including `act`, which is builtinDerivationMode
-// (anchor_derivation_mode.go) and therefore what a live Refractor runs today
-// with no env var set — and an out-of-range mode, the returned results are
-// byte-identical to calling executeFullForActor with an empty seed directly,
-// with a genuinely indexable (and therefore, once acting is wired,
-// act-eligible) lens shape. `act` stays a no-op only
-// because plainDerivationIndexForAct always declines
-// (TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire pins that
-// separately); this test proves the outcome, not just the gate.
-func TestEvaluatePlainNeighbourEvent_NoModeChangesTheResultThisFire(t *testing.T) {
+// TestEvaluatePlainNeighbourEvent_AnUnlicensedLensIsModeIndependent pins the
+// blast radius of the act flip on the OUTCOME rather than only on the gate: a
+// lens §5's licence refuses returns byte-identical results under every mode —
+// `off`, `shadow`, `act` (which is builtinDerivationMode, anchor_derivation_mode.go,
+// and therefore what a live Refractor runs with no env var set) and an
+// out-of-range one — namely what calling executeFullForActor with an empty seed
+// returns.
+//
+// The lens shape is genuinely INDEXABLE, asserted below, so the invariant is
+// carried by the licence alone and not by a lens the walk could never have
+// derived from. The refusal is asserted too: without that, a future change that
+// licensed this fixture would leave the test comparing the derived path against
+// itself and reporting green.
+func TestEvaluatePlainNeighbourEvent_AnUnlicensedLensIsModeIndependent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")
 	}
@@ -606,6 +640,11 @@ func TestEvaluatePlainNeighbourEvent_NoModeChangesTheResultThisFire(t *testing.T
 	p.UseFullEngine(eng, cr)
 	rs := p.ruleState()
 	require.True(t, rs.rootHops.Complete)
+	_, indexReady := p.plainDerivationIndex(rs)
+	require.True(t, indexReady, "an unindexable lens would carry this invariant for the wrong reason")
+	licensed, refusal := p.plainDerivationLicence(rs)
+	require.False(t, licensed)
+	require.NotEmpty(t, refusal)
 	ctx := context.Background()
 
 	prKey := "vtx.provider.AAAAAAAAAAAAAAAAAAAA"
@@ -629,8 +668,178 @@ func TestEvaluatePlainNeighbourEvent_NoModeChangesTheResultThisFire(t *testing.T
 
 		gotJSON, _ := json.Marshal(got)
 		wantJSON, _ := json.Marshal(want)
-		require.JSONEq(t, string(wantJSON), string(gotJSON), "mode %v must not change the outcome — shadow decides nothing", mode)
+		require.JSONEq(t, string(wantJSON), string(gotJSON),
+			"mode %v must not change an unlicensed lens's outcome", mode)
 	}
+}
+
+// probeUnitNever is the anchor of the §6 probe's negative arm: a unit whose
+// listing aspect never existed, so seedUnitsSpec's WHERE has never once matched
+// it and the target holds no row for it.
+const probeUnitNever = "PrbunitNeverrrrrrrrr"
+
+// TestEvaluatePlainDerivedAnchors_ZeroRowDeleteProbe is §6's presence probe,
+// pinned as a pair on ONE lens and ONE evaluation: both anchors below have just
+// dropped out of the matched set, and the only thing that differs between them
+// is whether the target actually holds a row.
+//
+// The first half of the test is the more important one, and it pins the probe's
+// PLACEMENT: the genuine top-level anchor event goes through
+// evaluatePlainFromVertex — exactly as the vertex, aspect and link arms reach it
+// — and must emit its Delete for an anchor with no live row, because that is
+// evaluateForEntryRaw's own idempotent filter-retraction and every plain lens
+// depends on it, licensed or not. The probe belongs to the walk-derived re-entry
+// alone. Sited in evaluate.go's general retraction check instead, it would
+// quietly narrow retraction for the whole plain corpus — and this half is what
+// would fail.
+func TestEvaluatePlainDerivedAnchors_ZeroRowDeleteProbe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	ctx := context.Background()
+
+	// The anchor with a LIVE row: projected through the lens's own write path,
+	// then dropped out of the matched set by tombstoning the aspect its WHERE
+	// reads.
+	liveKey := f.project(t, auditUnitA, "Loft A", 1)
+	require.NotZero(t, targetRevision(t, f.targetKV, liveKey),
+		"the positive arm needs a row that really exists")
+	putBody(t, f.coreKV, liveKey+".listing",
+		aspectBody(liveKey, "listing", map[string]any{"status": "active"}, true))
+
+	// The anchor that never projected at all.
+	neverKey := "vtx.unit." + probeUnitNever
+	seedVertexBody(t, f.coreKV, neverKey, "unit", nil)
+	_, err := f.targetKV.Get(ctx, neverKey)
+	require.ErrorIs(t, err, substrate.ErrKeyNotFound,
+		"the negative arm needs an anchor the target has no row for")
+
+	rs := f.p.ruleState()
+
+	// The genuine top-level anchor event, un-probed and unchanged: BOTH anchors
+	// retract, the never-projected one included — an idempotent Delete against
+	// an absent key, which is what this path has always emitted.
+	for _, anchorKey := range []string{liveKey, neverKey} {
+		results, verr := f.p.evaluatePlainFromVertex(ctx, rs, anchorKey, "unit")
+		require.NoError(t, verr)
+		require.Len(t, results, 1, "anchor %s", anchorKey)
+		require.True(t, results[0].Delete, "anchor %s", anchorKey)
+		require.Equal(t, anchorKey, results[0].Keys["key"])
+	}
+
+	// The walk-derived re-entry, probed: the live row's retraction survives, and
+	// the never-projected anchor's is dropped rather than manufacturing a
+	// tombstone for a row that never existed.
+	derived, err := f.p.evaluatePlainDerivedAnchors(ctx, rs, []string{liveKey, neverKey}, "unit")
+	require.NoError(t, err)
+	require.Len(t, derived, 1, "exactly one of the two Deletes may survive the presence probe")
+	require.True(t, derived[0].Delete)
+	require.Equal(t, liveKey, derived[0].Keys["key"],
+		"the surviving Delete must be the one whose row the target actually holds")
+}
+
+// erringRowReader is a target that CAN be asked for a row and always fails to
+// answer — the transient read fault the §6 probe must decline on rather than
+// read as a confirmed absence. Written by delegation rather than embedding,
+// matching notARowReader (audit_enrolment_test.go), so its surface is exactly
+// the Adapter interface plus the one RowReader method under test.
+type erringRowReader struct {
+	inner adapter.Adapter
+	err   error
+}
+
+func (a erringRowReader) Upsert(ctx context.Context, keys, row map[string]any, seq uint64) error {
+	return a.inner.Upsert(ctx, keys, row, seq)
+}
+func (a erringRowReader) Delete(ctx context.Context, keys map[string]any, seq uint64) error {
+	return a.inner.Delete(ctx, keys, seq)
+}
+func (a erringRowReader) Probe(ctx context.Context) error { return a.inner.Probe(ctx) }
+func (a erringRowReader) Close() error                    { return a.inner.Close() }
+func (a erringRowReader) GetRow(context.Context, map[string]any) (map[string]any, bool, error) {
+	return nil, false, a.err
+}
+
+// TestDerivedRowIsLive_DeclinesWhatItCannotConfirm walks all four answers the
+// probe can give, because three of them drop the Delete and only one of those
+// three is a fact about the ROW. Only a positively confirmed live row earns a
+// retraction; a confirmed absence, an unanswerable read and a target that cannot
+// be asked at all decline, mirroring zeroRowDeleteKey.
+//
+// The counter is what separates them afterwards. A confirmed absence and a
+// failed read leave the target in precisely the same state, so without
+// PlainProbeUnreadable a target having a bad minute would be indistinguishable
+// from a lens with nothing to retract — and the retraction dropped in the
+// meantime may have been a real one. The two arms that are facts about the row
+// must NOT move that counter, which is asserted here too, or it would report
+// noise instead of faults.
+func TestDerivedRowIsLive_DeclinesWhatItCannotConfirm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	ctx := context.Background()
+	liveKey := f.project(t, auditUnitA, "Loft A", 1)
+
+	require.True(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
+		"positive vector: a row the lens really wrote must read live")
+	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": "vtx.unit." + probeUnitNever}),
+		"an absent row must not earn a Delete")
+	require.Zero(t, f.p.AnchorDerivationShadow().PlainProbeUnreadable,
+		"a probe the target ANSWERED is not an unreadable one, whichever way it answered")
+
+	require.NoError(t, f.p.HotReloadInto(erringRowReader{inner: f.p.currentAdapter(), err: errors.New("target unavailable")}))
+	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
+		"an unanswerable probe declines, exactly as a confirmed absence does")
+	require.Equal(t, int64(1), f.p.AnchorDerivationShadow().PlainProbeUnreadable,
+		"and unlike a confirmed absence it is counted, because the retraction it dropped may have been a real one")
+
+	require.NoError(t, f.p.HotReloadInto(notARowReader{inner: f.p.currentAdapter()}))
+	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
+		"a target that cannot be asked answers no, never yes")
+	require.Equal(t, int64(1), f.p.AnchorDerivationShadow().PlainProbeUnreadable,
+		"a target with no read-back at all is a lens-shape fact the licence already excludes, not a read fault")
+}
+
+// TestNoteStaticPlainDerivationRefusal_NamesTheGoverningConjunct pins what an
+// operator actually reads when a lens cannot act. The switch has to answer with
+// the conjunct that GOVERNS — the one the gate itself refused on — and the gate
+// asks the index before the licence, so an index conjunct must win even while a
+// licence refusal is also in hand.
+func TestNoteStaticPlainDerivationRefusal_NamesTheGoverningConjunct(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	p := plainDerivationPipeline(t, adjKV, providerSpec)
+
+	staticRefusal := func() string {
+		p.derivShadow.mu.Lock()
+		defer p.derivShadow.mu.Unlock()
+		return p.derivShadow.staticRefusal
+	}
+
+	// The licence branch: every §4.2 index conjunct holds on this lens, so the
+	// reason is the string the gate handed over, verbatim and unrecomputed.
+	rs := p.ruleState()
+	_, ready, licenceRefusal := p.plainDerivationIndexForAct(rs)
+	require.False(t, ready)
+	require.Contains(t, licenceRefusal, "no divergence audit is enrolled")
+	p.noteStaticPlainDerivationRefusal(rs, licenceRefusal)
+	require.Equal(t, licenceRefusal, staticRefusal())
+
+	// An index conjunct takes precedence over it, with the same licence refusal
+	// still supplied: the index is what the gate refused on, so that is what the
+	// operator is told.
+	multiWalk := rs
+	multiWalk.branches = make([]ruleengine.CompiledRule, 2)
+	p.noteStaticPlainDerivationRefusal(multiWalk, licenceRefusal)
+	require.Equal(t, "it is a multi-walk lens, and one scan-root graph cannot speak for N independent queries",
+		staticRefusal())
+
+	// The default: nothing refuses by the time the note is written, which is the
+	// live-field race the gate's own answer can lose to and the only case with no
+	// reason of its own to report.
+	p.noteStaticPlainDerivationRefusal(rs, "")
+	require.Contains(t, staticRefusal(), "moved between the act gate's answer and this one")
 }
 
 // writeAndReturnVertex writes a Contract #1 vertex body and returns its

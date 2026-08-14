@@ -264,15 +264,14 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	var err error
 	if seed == "" && p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil {
 		// A plain lens's neighbour event: seedAnchorFor found no seed because
-		// entry's own type is not the lens's anchor pattern, so today's
-		// shipped behaviour is the unseeded whole-corpus re-scan below.
-		// plain-lens-neighbour-anchor-derivation-design.md Increment 2 gives
-		// this branch its own producer into the derivation-mode switch
-		// (evaluatePlainNeighbourEvent, anchor_derivation_plain.go) — shadow
-		// -only, because its act gate declines every lens, so the outcome here
-		// is always identical to calling executeFullForActor with an empty seed
-		// directly, the same call the else-branch below makes for every other
-		// (already-seeded, or non-plain) event.
+		// entry's own type is not the lens's anchor pattern, so the shipped
+		// answer is an unseeded whole-corpus re-scan — the same call the
+		// else-branch below makes for every other (already-seeded, or
+		// non-plain) event. evaluatePlainNeighbourEvent
+		// (anchor_derivation_plain.go) is this branch's producer into the
+		// derivation-mode switch: it returns exactly that re-scan except in
+		// `act` mode on a lens the narrowing licence admits, where it
+		// substitutes one seeded evaluation per derived anchor.
 		results, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
 	} else {
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)

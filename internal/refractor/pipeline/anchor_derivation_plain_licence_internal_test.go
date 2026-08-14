@@ -373,21 +373,97 @@ func TestPlainDerivationLicence_IsReadOffLiveFields(t *testing.T) {
 	require.True(t, licensed, "and removing it must restore the licence, not leave a latched refusal")
 }
 
-// TestPlainDerivationLicence_DoesNotReachTheActGate is the load-bearing
-// invariant stated as a test: the licence exists, is answerable, and answers
-// TRUE for the fixture lens — and the act gate still declines that same lens.
-// Acting is the posture-changing increment (§12, Inc 4a), which owns the flip
-// together with the zero-row Delete probe and the e2es; a licence wired in
-// ahead of them would change write behaviour with none of that proof, and
-// builtinDerivationMode is `act`, so nothing an operator does would be needed
-// to reach it.
-func TestPlainDerivationLicence_DoesNotReachTheActGate(t *testing.T) {
+// TestPlainDerivationLicence_StaleRefusalIsStableAcrossTheWindow pins the
+// precondition the caller's dedup latch rests on, in the one place it is easy to
+// lose: a refusal string must be the SAME string at every moment of the
+// condition it reports.
+//
+// noteStaticPlainDerivationRefusal logs at most once per DISTINCT reason, keyed
+// on the string. A staleness window lasts hours by construction (auditorStaleCycles
+// intervals), so a reason carrying an elapsed duration would be a new reason on
+// every tick of whatever unit it rendered, and the latch would emit a line per
+// neighbour event for as long as the condition persisted — the case it exists to
+// prevent. The window is walked here at two wildly different depths and the
+// string compared byte for byte.
+func TestPlainDerivationLicence_StaleRefusalIsStableAcrossTheWindow(t *testing.T) {
+	f := licenceFixture(t, seedUnitsSpec)
+	a := f.p.Auditor()
+	rs := f.p.ruleState()
+
+	// The positive twin first: inside the window this lens is licensed, so the
+	// refusals compared below are the staleness conjunct's own and not a gate
+	// that refuses everything.
+	licensed, refusal := f.p.plainDerivationLicence(rs)
+	require.True(t, licensed, "refusal: %s", refusal)
+
+	ageLastPass(a, (auditorStaleCycles+1)*a.Interval())
+	licensed, justStale := f.p.plainDerivationLicence(rs)
+	require.False(t, licensed)
+	require.Contains(t, justStale, "has not reached a verdict")
+
+	ageLastPass(a, 3*time.Hour)
+	licensed, longStale := f.p.plainDerivationLicence(rs)
+	require.False(t, licensed)
+	require.Equal(t, justStale, longStale,
+		"three hours deeper into the same window is the same refusal, or the once-per-reason latch fires on every event")
+
+	// And the gate hands that same stable string to the note, so the latch really
+	// does see one reason rather than a new one each time.
+	_, _, gateRefusal := f.p.plainDerivationIndexForAct(rs)
+	require.Equal(t, longStale, gateRefusal)
+}
+
+// TestPlainDerivationLicence_NeverAuditedRefusalCarriesNoDuration is the zero
+// LastPassAt arm of the same rule. An auditor that has never completed a pass has
+// no elapsed anyone can read — measured from the zero time it renders as a span
+// of decades — so its refusal states what is true in words instead of computing
+// one.
+func TestPlainDerivationLicence_NeverAuditedRefusalCarriesNoDuration(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
+	require.True(t, enrolled, "refusal: %s", refusal)
+	require.True(t, f.p.Auditor().Status().LastPassAt.IsZero(), "no pass has run")
+
+	_, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+	require.Contains(t, refusal, "has not reached a verdict since it was installed")
+	require.NotRegexp(t, `\d+h\d+m`, refusal,
+		"a duration measured from the zero time must never reach an operator")
+
+	// The positive twin: one pass, and this arm is no longer the one answering.
+	f.p.Auditor().pass(context.Background())
+	licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
+	require.True(t, licensed, "refusal: %s", refusal)
+}
+
+// TestPlainDerivationLicence_GatesTheActPath is the licence's load-bearing
+// consequence stated as a test: the act gate admits a lens exactly while the
+// licence does. The INDEX half is held ready across both halves of the pair and
+// asserted at each, so the only thing that moves between "admitted" and
+// "declined" is one licence conjunct — and the one chosen, the auth plane, is
+// the licence's alone (plainDerivationIndex has no opinion about the plane).
+func TestPlainDerivationLicence_GatesTheActPath(t *testing.T) {
 	f := licenceFixture(t, seedUnitsSpec)
 	rs := f.p.ruleState()
 
 	licensed, refusal := f.p.plainDerivationLicence(rs)
 	require.True(t, licensed, "positive vector: this lens satisfies every conjunct; refusal: %s", refusal)
+	_, ready, gateRefusal := f.p.plainDerivationIndexForAct(rs)
+	require.True(t, ready, "a licensed, indexable lens is what the act gate exists to admit")
+	require.Empty(t, gateRefusal)
 
-	_, ready := f.p.plainDerivationIndexForAct(rs)
-	require.False(t, ready, "a licensed lens must STILL be declined by the act gate")
+	f.p.SetAuthPlane(true)
+	licensed, refusal = f.p.plainDerivationLicence(rs)
+	require.False(t, licensed)
+	require.Contains(t, refusal, "auth plane")
+	_, indexReady := f.p.plainDerivationIndex(rs)
+	require.True(t, indexReady, "the index half is untouched, so the gate's refusal below is the licence's")
+	_, ready, gateRefusal = f.p.plainDerivationIndexForAct(rs)
+	require.False(t, ready, "an auth-plane lens keeps today's unseeded whole-corpus rescan")
+	require.Equal(t, refusal, gateRefusal, "and the gate reports the licence's own reason")
+
+	// And the refusal lifts with the conjunct: the gate reads the licence per
+	// event off live fields, never a verdict latched at the first answer.
+	f.p.SetAuthPlane(false)
+	_, ready, _ = f.p.plainDerivationIndexForAct(rs)
+	require.True(t, ready)
 }
