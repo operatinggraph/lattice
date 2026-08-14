@@ -355,12 +355,15 @@ var (
 	derivedKeyCall  = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
 	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 
-	// grantChangePostureCall anchors an EXECUTABLE call site of the D1
-	// read-grant gate. The trailing "(" is what makes it a call: without it the
-	// pattern also matches the four doc comments that name the function in
-	// prose (internal/pkgmgr/anchorwalk.go, refractor/pipeline/evaluate.go,
-	// refractor/pipeline/actor_enumerator.go), which consume nothing.
-	grantChangePostureCall = regexp.MustCompile(`\bcapabilityread\.IsReadable\(`)
+	// grantChangePostureImport matches the import spec for the capabilityread
+	// package, capturing any local alias. A gate whose whole job is
+	// default-deny must not be evadable by `import cr ".../capabilityread"`, so
+	// the qualifier it looks for is RESOLVED from the file's own imports rather
+	// than hardcoded. The dot-import form is captured too — its calls carry no
+	// qualifier at all.
+	grantChangePostureImport = regexp.MustCompile(`^\s*(?:([A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"github\.com/operatinggraph/lattice/internal/refractor/capabilityread"`)
+	// grantChangePostureBare anchors a dot-imported (unqualified) call.
+	grantChangePostureBare = regexp.MustCompile(`(^|[^.\w])IsReadable\(`)
 	// grantChangePostureShape is the author's declaration of how THIS consumer
 	// learns that a grant it already admitted has changed. The capture is the
 	// justification a none-justified declaration owes.
@@ -891,8 +894,11 @@ func scanSource(path string, data []byte) []finding {
 	// fixtures below carry the very call shape the gate denies.
 	grantChangeScoped := !isTest && !strings.HasPrefix(slash, "scripts/lint-")
 	var grantChangeLines []string
+	var grantChangeCall *regexp.Regexp
 	if grantChangeScoped {
 		grantChangeLines = strings.Split(string(data), "\n")
+		grantChangeCall = grantChangeCallPattern(grantChangeLines)
+		grantChangeScoped = grantChangeCall != nil
 	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
@@ -968,7 +974,7 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, checkDerivedKey(path, ln, derivedKeyLines)...)
 		}
 		if grantChangeScoped {
-			out = append(out, checkGrantChangePosture(path, ln, grantChangeLines)...)
+			out = append(out, checkGrantChangePosture(path, ln, line, grantChangeCall, grantChangeLines)...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -1680,9 +1686,8 @@ var grantChangePostureShapes = map[string]bool{
 // with nothing after it does not say subscribed to WHAT, which is the fact the
 // next reader needs. That follows the shipped authcontext-target gate rather
 // than the design's looser schema sketch.
-func checkGrantChangePosture(path string, ln int, lines []string) []finding {
-	line := lines[ln-1]
-	if isCommentLine(line) || !grantChangePostureCall.MatchString(line) {
+func checkGrantChangePosture(path string, ln int, line string, call *regexp.Regexp, lines []string) []finding {
+	if call == nil || isCommentLine(line) || !call.MatchString(line) {
 		return nil
 	}
 	shape, why, declared := grantChangePosture(lines, ln-1)
@@ -1697,6 +1702,33 @@ func checkGrantChangePosture(path string, ln int, lines []string) []finding {
 	if strings.TrimSpace(why) == "" {
 		return []finding{{file: path, line: ln,
 			msg: "grant-change-posture: (" + shape + ") declaration carries no `<why>` — name the mechanism (or the accepted staleness), so the next reader need not re-derive whether anything re-asks this gate"}}
+	}
+	return nil
+}
+
+// grantChangeCallPattern resolves how THIS file would spell a call to
+// capabilityread.IsReadable, from its own import spec, and returns the pattern
+// that matches it — or nil when the file does not import the package at all,
+// which is the common case and short-circuits the whole check.
+//
+// Resolving rather than hardcoding "capabilityread." is the difference between
+// a default-deny gate and a default-deny-unless-you-rename-the-import gate. An
+// alias (`import cr ".../capabilityread"`) is the ordinary evasion; a
+// dot-import removes the qualifier entirely and is matched by its own pattern.
+func grantChangeCallPattern(lines []string) *regexp.Regexp {
+	for _, line := range lines {
+		m := grantChangePostureImport.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		switch m[1] {
+		case "":
+			return regexp.MustCompile(`\bcapabilityread\.IsReadable\(`)
+		case ".":
+			return grantChangePostureBare
+		default:
+			return regexp.MustCompile(`\b` + regexp.QuoteMeta(m[1]) + `\.IsReadable\(`)
+		}
 	}
 	return nil
 }
@@ -2047,43 +2079,59 @@ func selfTest() []string {
 		// these fixtures are the only thing that keeps the deny path honest —
 		// a clean tree and a broken gate look identical.
 		{"an undeclared IsReadable call site is denied", "internal/refractor/projection/personal.go",
-			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"undeclared capabilityread.IsReadable call site"},
 		{"a subscribed declaration above the call passes", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (subscribed) the cap-read producer's edge re-drives it\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) the cap-read producer's edge re-drives it\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
 		{"a swept declaration passes", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (swept) the personal convergence sweep re-asks\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (swept) the personal convergence sweep re-asks\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
 		{"a none-justified declaration with a reason passes", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (none-justified) one-shot admin check, re-run per request\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (none-justified) one-shot admin check, re-run per request\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
 		{"an on-the-line declaration passes", "internal/refractor/projection/personal.go",
-			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor) // grant-change-posture: (subscribed) producer edge\n}\n", ""},
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor) // grant-change-posture: (subscribed) producer edge\n}\n", ""},
 		{"a declaration with no why is denied", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (subscribed)\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed)\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"carries no `<why>`"},
 		{"an unknown shape is denied", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (exempt) staff are trusted\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (exempt) staff are trusted\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"unknown shape (exempt)"},
 		{"a declaration separated by a blank line covers nothing", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (subscribed) producer edge\n\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) producer edge\n\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"undeclared capabilityread.IsReadable call site"},
 		{"a declaration does NOT reach the next sibling call", "internal/refractor/projection/personal.go",
-			"func f() {\n\t// grant-change-posture: (subscribed) producer edge\n" +
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\t// grant-change-posture: (subscribed) producer edge\n" +
 				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, a1)\n" +
 				"\tok2, err := capabilityread.IsReadable(ctx, capKV, at, aid, a2)\n}\n",
 			"undeclared capabilityread.IsReadable call site"},
 		{"prose naming the function is not a call site", "internal/refractor/projection/personal.go",
-			"// personalEnvelopeFn gates every row on capabilityread.IsReadable, the D1 boundary.\nfunc f() {}\n", ""},
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n// personalEnvelopeFn gates every row on capabilityread.IsReadable, the D1 boundary.\nfunc f() {}\n", ""},
 		{"the gate reaches a NEW consumer outside the refractor packages", "cmd/loupe/handlers.go",
-			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"undeclared capabilityread.IsReadable call site"},
+		{"an ALIASED import does not evade the gate", "internal/refractor/projection/personal.go",
+			"import (\n\tcr \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +
+				"func f() {\n\tok, err := cr.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"an aliased call carrying a declaration passes", "internal/refractor/projection/personal.go",
+			"import (\n\tcr \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +
+				"func f() {\n\t// grant-change-posture: (subscribed) the cap-read producer edge\n" +
+				"\tok, err := cr.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"a DOT import does not evade the gate", "internal/refractor/projection/personal.go",
+			"import (\n\t. \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +
+				"func f() {\n\tok, err := IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"the unaliased qualifier does not fire in a file that never imports the package", "internal/refractor/projection/personal.go",
+			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"a same-named method on an unrelated receiver is not a call site", "internal/refractor/projection/personal.go",
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok := gate.IsReadable(anchor)\n}\n", ""},
 		{"a test file is out of scope", "internal/refractor/capabilityread/capabilityread_test.go",
-			"func TestX(t *testing.T) {\n\tok, err := capabilityread.IsReadable(ctx, kv, at, aid, anchor)\n}\n", ""},
+			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc TestX(t *testing.T) {\n\tok, err := capabilityread.IsReadable(ctx, kv, at, aid, anchor)\n}\n", ""},
 		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
 			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
 				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +

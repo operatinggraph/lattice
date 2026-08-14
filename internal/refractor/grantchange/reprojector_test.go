@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +21,11 @@ type fakePersonal struct {
 	mu          sync.Mutex
 	reprojected []string
 	issues      []string
+	details     []string
 	failWith    error
+	// issueErr makes the Health write itself fail, which is how the overflow
+	// counter's "never clear what was not reported" rule is exercised.
+	issueErr error
 }
 
 func (f *fakePersonal) ReprojectPersonalActor(ctx context.Context, identityID string) error {
@@ -30,10 +35,21 @@ func (f *fakePersonal) ReprojectPersonalActor(ctx context.Context, identityID st
 	return f.failWith
 }
 
-func (f *fakePersonal) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) {
+func (f *fakePersonal) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.issueErr != nil {
+		return f.issueErr
+	}
 	f.issues = append(f.issues, kind)
+	f.details = append(f.details, detail)
+	return nil
+}
+
+func (f *fakePersonal) reportedDetails() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.details...)
 }
 
 func (f *fakePersonal) seen() []string {
@@ -232,4 +248,198 @@ func TestDrain_StopsOnContextCancel(t *testing.T) {
 	r.Drain(ctx)
 
 	assert.Empty(t, lens.seen(), "a cancelled drain abandons the in-flight set rather than racing shutdown")
+}
+
+// TestDrain_OverflowIsReportedDuringASustainedStorm covers the scenario the
+// bound exists for, and the one a report fired only on entry to Drain would go
+// silent through: signals keep being dropped WHILE the drain is running, and
+// the drain does not return until the storm ends.
+//
+// A report only at the top of the pass would produce exactly one Health issue
+// for the whole storm — an operator watching a mass grant change would see the
+// first drop and nothing after it, which is indistinguishable from a storm that
+// stopped.
+func TestDrain_OverflowIsReportedDuringASustainedStorm(t *testing.T) {
+	r := grantchange.New()
+	// A bound of 1 makes the storm deterministic: each reprojection refills the
+	// single slot and its second enqueue is refused.
+	r.SetBounds(1, 0)
+	witness := &fakePersonal{}
+
+	const stormLength = 130 // > 2 x the in-loop report interval
+	fired := 0
+	storm := &reenqueueingPersonal{onReproject: func(string) {
+		if fired >= stormLength {
+			return
+		}
+		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2)))
+		r.GrantChanged(substrate.VertexKey("identity", stormActor(fired*2+1)))
+		fired++
+	}}
+	r.RegisterPersonal("a-storm", storm)
+	r.RegisterPersonal("b-witness", witness)
+
+	r.GrantChanged(substrate.VertexKey("identity", stormActor(9000)))
+	r.Drain(context.Background())
+
+	raised := witness.raised()
+	require.Greater(t, len(raised), 1,
+		"a sustained overflow must be reported repeatedly while the drain runs, not once on entry")
+	for _, kind := range raised {
+		assert.Equal(t, "overflow", kind)
+	}
+	// The count is cumulative and rising, which is what tells an operator the
+	// storm is ongoing rather than a single past event.
+	details := witness.reportedDetails()
+	require.NotEmpty(t, details)
+	assert.Contains(t, details[len(details)-1], "cumulative")
+	assert.NotEqual(t, details[0], details[len(details)-1],
+		"successive reports must carry a growing count, not repeat one number")
+}
+
+// stormActor builds a distinct valid 20-char NanoID for index i. The digits are
+// encoded in the platform alphabet rather than base 10, which excludes "0".
+func stormActor(i int) string {
+	alphabet := substrate.Alphabet
+	out := []byte("StormActorAAAAAAAAAA")
+	n := i
+	for pos := len(out) - 1; pos >= 10; pos-- {
+		out[pos] = alphabet[n%len(alphabet)]
+		n /= len(alphabet)
+	}
+	return string(out)
+}
+
+// TestReportDropped_KeepsTheCountWhenTheHealthWriteFails pins the compounding
+// half of the same finding: a delta cleared before the write lands is a count
+// gone forever, and the next pass then reports nothing — a silent overflow.
+func TestReportDropped_KeepsTheCountWhenTheHealthWriteFails(t *testing.T) {
+	r := grantchange.New()
+	r.SetBounds(1, 0)
+	failing := &fakePersonal{issueErr: errors.New("health kv unavailable")}
+	r.RegisterPersonal("lens-1", failing)
+
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.GrantChanged(substrate.VertexKey("identity", actorB)) // dropped at the bound
+
+	r.Drain(context.Background())
+	require.Empty(t, failing.raised(), "the Health write failed, so nothing was reported")
+
+	// The write recovers; the count must still be there to report.
+	failing.mu.Lock()
+	failing.issueErr = nil
+	failing.mu.Unlock()
+
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.Drain(context.Background())
+
+	assert.Equal(t, []string{"overflow"}, failing.raised(),
+		"a drop the Health write lost must still be reported on the next pass, not cleared into silence")
+}
+
+// TestDrain_HoldsUntilTheLensRegistryIsComplete is the fix for the one drop
+// path that had no observability at all.
+//
+// A signal is consumed exactly once. Personal lenses register one at a time as
+// their rules activate, while the producers are already emitting, so an actor
+// dirtied before the last lens registers would be reprojected against a short
+// registry and the frames the missing lenses owed it would be gone silently.
+func TestDrain_HoldsUntilTheLensRegistryIsComplete(t *testing.T) {
+	r := grantchange.New()
+	early, late := &fakePersonal{}, &fakePersonal{}
+	r.RegisterPersonal("early", early)
+
+	complete := false
+	r.SetRegistryReady(func(context.Context) error {
+		if complete {
+			return nil
+		}
+		return errors.New("1 lens(es) are in Core KV but not yet registered")
+	})
+
+	// A producer signals while the registry is still loading.
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.Drain(context.Background())
+
+	assert.Empty(t, early.seen(), "the drain must not consume a signal against a partial registry")
+	assert.Equal(t, 1, r.QueueDepth(), "the signal is HELD, not dropped")
+
+	// The last lens registers and the registry reports complete.
+	r.RegisterPersonal("late", late)
+	complete = true
+	r.Drain(context.Background())
+
+	assert.Equal(t, []string{actorA}, early.seen())
+	assert.Equal(t, []string{actorA}, late.seen(),
+		"the lens that registered late must still receive the actor dirtied before it did")
+	assert.Zero(t, r.QueueDepth())
+}
+
+// TestDrain_RegistryHoldIsNotPermanent pins the bound on that wait. A lens that
+// fails activation outright never registers, and prevention must not become a
+// permanent stall that holds the whole edge closed forever.
+func TestDrain_RegistryHoldIsNotPermanent(t *testing.T) {
+	r := grantchange.New()
+	lens := &fakePersonal{}
+	r.RegisterPersonal("lens-1", lens)
+	r.SetRegistryReady(func(context.Context) error {
+		return errors.New("1 lens(es) are in Core KV but not yet registered")
+	})
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+
+	r.Drain(context.Background())
+	require.Empty(t, lens.seen(), "held while inside the bound")
+
+	// Shrink the bound so the hold this pass started is already past it.
+	r.SetRegistryHoldMax(time.Nanosecond)
+	r.Drain(context.Background())
+
+	assert.Equal(t, []string{actorA}, lens.seen(),
+		"past the bound the drain proceeds rather than holding the edge closed forever")
+}
+
+// TestDrain_ReadinessIsSkippedWhileNothingIsQueued pins the cost bound: the
+// check is a Core KV enumeration and the drain ticks every second, so an idle
+// boot must not spend one per tick to say it has nothing to lose.
+func TestDrain_ReadinessIsSkippedWhileNothingIsQueued(t *testing.T) {
+	r := grantchange.New()
+	r.RegisterPersonal("lens-1", &fakePersonal{})
+	checks := 0
+	r.SetRegistryReady(func(context.Context) error {
+		checks++
+		return nil
+	})
+
+	for i := 0; i < 5; i++ {
+		r.Drain(context.Background())
+	}
+
+	assert.Zero(t, checks, "an empty queue has no signal to lose, so it must not pay for the check")
+}
+
+// TestReprojectActor_SkipsALensDeregisteredMidWalk closes the race between the
+// registry snapshot and the serial walk over it.
+//
+// Walking one actor across every personal lens is a window seconds wide under
+// load. A lens deleted inside it has had its run context cancelled and its
+// Health entry removed — so calling it fails, and the failure path's
+// read-modify-PUT would RE-CREATE the entry the deleter just deleted, leaving
+// an orphan "degraded lens" row with no lens behind it.
+func TestReprojectActor_SkipsALensDeregisteredMidWalk(t *testing.T) {
+	r := grantchange.New()
+	doomed := &fakePersonal{failWith: errors.New("pipeline torn down")}
+	// The first lens deregisters the second from inside its own reprojection,
+	// which is the mid-walk window made deterministic.
+	first := &reenqueueingPersonal{onReproject: func(string) { r.DeregisterPersonal("b-doomed") }}
+	// The walk is sorted by rule ID, so "a-first" is visited before "b-doomed"
+	// deterministically — no reliance on map order.
+	r.RegisterPersonal("a-first", first)
+	r.RegisterPersonal("b-doomed", doomed)
+
+	r.GrantChanged(substrate.VertexKey("identity", actorA))
+	r.Drain(context.Background())
+
+	assert.Empty(t, doomed.seen(), "a lens deregistered mid-walk must not be reprojected")
+	assert.Empty(t, doomed.raised(),
+		"and must not have a Health entry re-created for it — the deleter just removed that entry")
 }

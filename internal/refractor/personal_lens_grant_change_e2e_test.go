@@ -30,26 +30,38 @@ type grantEdgeFixture struct {
 	h            *pl2Harness
 	reprojector  *grantchange.Reprojector
 	personalLens string
+	personal     *pipeline.Pipeline
 	producer     *pipeline.Pipeline
 	identityID   string
 	leaseID      string
 	capReadKey   string
+	stopPersonal func()
 }
 
 // newGrantEdgeFixture wires the two pipelines. withSink is the mutation switch:
 // false installs the producer WITHOUT the grant-change sink, which is the only
 // difference between the two halves of T4.
 //
-// The Personal Lens is deliberately wired WITHOUT its own Core KV consumer.
-// That is not a shortcut, it is the whole point of the test: Refractor's
+// The Personal Lens runs its own Core KV consumer through the SEED phase and is
+// then STOPPED, before any grant exists. Both halves of that matter.
+//
+// Running it first is what gives the pipeline a real ordering token: a pipeline
+// that has applied no event holds none, and ReprojectPersonalActor refuses to
+// publish a frame at revision 0 because the client discards such a frame
+// outright. A fixture that never ran the consumer would be testing that refusal
+// instead of the edge.
+//
+// Stopping it before the grant is what removes the confound. Refractor's
 // reaction model is one shared Core-KV CDC subscription, and the link that
-// grants a read touches the identity's adjacency — so a running personal
-// consumer would re-evaluate that identity for reasons entirely unrelated to
-// the grant edge, and the sink-disabled half would pass whether or not the edge
-// exists. Removing that confound is what makes the mutation meaningful: with
-// the personal consumer off, the ONLY route from "a grant lands in
-// capability-kv" to "a frame on the device's SYNC subject" is the mechanism
-// under test.
+// grants a read touches the identity's adjacency — so a live personal consumer
+// would re-evaluate that identity for reasons entirely unrelated to the grant
+// edge, and the sink-disabled half would pass whether or not the edge exists.
+// With it stopped, the ONLY route from "a grant lands in capability-kv" to "a
+// frame on the device's SYNC subject" is the mechanism under test.
+//
+// The combination is also the realistic shape: a device whose lens pipeline has
+// been running and holds an ack floor, with no fresh event on its own subgraph
+// at the moment its grants change.
 func newGrantEdgeFixture(t *testing.T, name string, withSink bool) *grantEdgeFixture {
 	t.Helper()
 	h := newPL2Harness(t)
@@ -86,6 +98,7 @@ RETURN l.key AS anchor, "lease" AS kind, l.id AS entityId
 	require.True(t, projection.InstallPersonalLens(personalPipe, personalRule,
 		h.adjKV, h.coreKV, h.interestKV, h.capKV, false, h.logger))
 	f.reprojector.RegisterPersonal(f.personalLens, personalPipe)
+	f.personal = personalPipe
 
 	// --- the producer: a real per-entry cap-read lens, guarded, auth-plane,
 	// driven by real Core KV CDC.
@@ -142,6 +155,23 @@ RETURN identity.key AS actorKey,
 	go func() { defer close(producerDone); f.producer.Run(producerCtx) }()
 	t.Cleanup(func() { producerCancel(); <-producerDone })
 
+	// The personal pipeline consumes CDC for the seed phase only — see this
+	// function's doc for why it must run at all, and why it must then stop.
+	personalPipe.RunOn(h.conn, e2eSpec(f.personalLens, "core-kv"))
+	personalCtx, personalCancel := context.WithCancel(h.ctx)
+	personalDone := make(chan struct{})
+	go func() { defer close(personalDone); personalPipe.Run(personalCtx) }()
+	stopped := false
+	f.stopPersonal = func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		personalCancel()
+		<-personalDone
+	}
+	t.Cleanup(f.stopPersonal)
+
 	// The identity's own subgraph for the personal lens, seeded before any
 	// grant exists.
 	writePL2Vertex(t, h, substrate.VertexKey("identity", f.identityID), "identity", map[string]any{"name": "tech"})
@@ -150,6 +180,19 @@ RETURN identity.key AS actorKey,
 	writePL2Link(t, h, "identity", f.identityID, "holds", "lease", f.leaseID)
 
 	return f
+}
+
+// settle waits until the personal pipeline has applied CDC (so it holds a real
+// ordering token), then stops its consumer and clears the seed traffic off the
+// device's subject.
+func (f *grantEdgeFixture) settle(t *testing.T, cons jetstream.Consumer) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return f.personal.Progress().LastAppliedSeq > 0
+	}, 20*time.Second, 100*time.Millisecond,
+		"the personal pipeline must apply its seed events before it can publish a frame at a usable revision")
+	f.stopPersonal()
+	drainUntilQuiet(t, cons)
 }
 
 func mustParse(t *testing.T, cypher string) ruleengine.CompiledRule {
@@ -216,9 +259,11 @@ func TestPersonalLensGrantChange_T4_GrantLandsAndIsRevoked(t *testing.T) {
 	f := newGrantEdgeFixture(t, "t4-live", true)
 	cons := pl3Consumer(t, f.h, f.identityID)
 
-	// Nothing has granted anything yet, and the personal lens has no consumer
-	// of its own — so the device has heard nothing at all.
-	require.Empty(t, drainBriefly(t, cons), "no grant, no signal, no frame")
+	// Seed traffic settles, the personal consumer stops, and the device's
+	// subject is drained — so anything that arrives after this point arrived
+	// because of the grant edge and nothing else.
+	f.settle(t, cons)
+	require.Empty(t, drainBriefly(t, cons), "no grant yet, so nothing further")
 
 	// --- the growth direction.
 	f.grant(t)
@@ -260,6 +305,7 @@ func TestPersonalLensGrantChange_T4_MutationSinkDisabled(t *testing.T) {
 	}
 	f := newGrantEdgeFixture(t, "t4-mutation", false)
 	cons := pl3Consumer(t, f.h, f.identityID)
+	f.settle(t, cons)
 	require.Empty(t, drainBriefly(t, cons))
 
 	f.grant(t)

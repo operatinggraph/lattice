@@ -348,7 +348,7 @@ func WithGrantChangeSink(sink pipeline.GrantChangeSink) InstallOption {
 // rows — the projection a Personal Lens consults through
 // capabilityread.IsReadable to decide every row it publishes.
 //
-// Three conjuncts, all read off the compiled plan and the output descriptor,
+// Four conjuncts, all read off the compiled plan and the output descriptor,
 // never off a canonical-name list — the same posture SetGuarded and
 // SetSweepPlan already take:
 //
@@ -357,11 +357,23 @@ func WithGrantChangeSink(sink pipeline.GrantChangeSink) InstallOption {
 //   - it is per-entry (EntryKeyColumn set), so it writes one guarded key per
 //     granted anchor, which is what makes a per-key liveness transition mean
 //     "this one grant flipped" rather than "this actor's document changed";
-//   - and its key prefix begins with the literal capabilityread itself builds
-//     its reader filter from. The write-plane producers sharing that bucket —
+//   - its key prefix begins with the literal capabilityread itself builds its
+//     reader filter from. The write-plane producers sharing that bucket —
 //     cap.roles.*, cap.role-by-operation.* — fail here, which is the point: a
 //     write-authorization change is consumed synchronously by the Processor at
-//     commit and needs no push edge at all.
+//     commit and needs no push edge at all;
+//   - and the key pattern ROUND-TRIPS through AnchorFromKey. The edge names its
+//     actor by inverting the key the lens just wrote, so a descriptor whose two
+//     halves disagree wires an edge that emits nothing for its entire life. The
+//     pattern grammar permits such shapes — the placeholder may appear more than
+//     once, and BuildKey substitutes every occurrence while the inverse brackets
+//     the first — so this is a real class, not a defensive nicety.
+//
+// The round-trip conjunct is checked HERE rather than inherited from
+// sweepEnrolment. That gate runs later and governs only SetSweepPlan; a lens it
+// refuses still installs, and a sink installed on the strength of the other
+// three conjuncts would then be silently dead with only the sweep's own warning
+// — about a different mechanism — as the trace.
 func IsReadGrantProducer(desc OutputDescriptor, plan *ProjectionPlan) bool {
 	if plan == nil || !plan.AuthPlane || desc.EntryKeyColumn == "" {
 		return false
@@ -370,7 +382,10 @@ func IsReadGrantProducer(desc OutputDescriptor, plan *ProjectionPlan) bool {
 	if !ok {
 		return false
 	}
-	return strings.HasPrefix(prefix, capabilityread.KeyPrefix)
+	if !strings.HasPrefix(prefix, capabilityread.KeyPrefix) {
+		return false
+	}
+	return desc.KeyOwnershipRoundTrips()
 }
 
 // InstallActorAggregate wires an actor-aggregate lens through the compiled
@@ -425,7 +440,9 @@ func InstallActorAggregate(
 	// with, whose failure mode is a MISSING signal. The alternative the design
 	// refuses is routing on the entry body's anchorType, which Contract #6
 	// §6.14 makes audit-only and whose failure mode is a signal delivered
-	// somewhere wrong.
+	// somewhere wrong. IsReadGrantProducer's fourth conjunct is what makes the
+	// inverse trustworthy here: it probes the pattern's round trip, so an edge
+	// is never wired onto a descriptor whose inverse could not name an actor.
 	if options.grantSink != nil && IsReadGrantProducer(desc, plan) {
 		p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
 		logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)

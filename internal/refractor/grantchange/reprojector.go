@@ -25,6 +25,7 @@ package grantchange
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -64,8 +65,10 @@ type PersonalPipeline interface {
 	// publishes the authoritative keyset frame.
 	ReprojectPersonalActor(ctx context.Context, identityID string) error
 	// RecordGrantReprojectIssue raises this lens's Health fault for a
-	// reprojection that did not happen.
-	RecordGrantReprojectIssue(ctx context.Context, kind, detail string)
+	// reprojection that did not happen. It returns the write's own error so a
+	// caller tracking what has actually been REPORTED (rather than what it
+	// tried to report) can tell a landed issue from a lost one.
+	RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error
 }
 
 // Reprojector is the process-level consumer of read-grant transitions: one
@@ -81,11 +84,24 @@ type Reprojector struct {
 	// deliberately NOT carried across a restart — the sweep is the recovery for
 	// a process that died holding signals.
 	dirty map[string]struct{}
-	// dropped counts signals refused since the last drain tick reported them.
-	// It is a counter rather than a flag so the Health issue can say how much
-	// was lost, and it is reported from the drain worker rather than from the
-	// producer's write path so raising it never blocks a write.
-	dropped int
+	// dropped counts signals refused, CUMULATIVELY for the process's life, and
+	// droppedReported is the high-water of that count which has actually been
+	// written to Health. The two are separate so a failed Health write loses
+	// nothing: the delta stays visible to the next attempt instead of being
+	// cleared into a silence the bound's contract forbids. Reported from the
+	// drain worker rather than the producer's write path, so raising an issue
+	// never blocks a write.
+	dropped         int
+	droppedReported int
+
+	// registryReady, when set, reports nil once the in-process lens registry is
+	// complete against Core KV; registryLatched records that it has said so at
+	// least once. See registryIsReady for what this gates and why it latches.
+	registryReady   func(context.Context) error
+	registryLatched bool
+	holdSince       time.Time
+	holdLogged      bool
+	holdMax         time.Duration
 	// personal is the per-ruleID registry, populated at boot from the same
 	// site that registers the control-plane hydrator.
 	personal map[string]PersonalPipeline
@@ -101,7 +117,103 @@ func New() *Reprojector {
 		personal: make(map[string]PersonalPipeline),
 		maxDirty: DefaultMaxDirtyActors,
 		interval: DefaultDrainInterval,
+		holdMax:  RegistryHoldMax,
 	}
+}
+
+// RegistryHoldMax bounds how long the drain will wait for the lens registry to
+// finish loading before draining anyway.
+//
+// The wait is prevention, not correctness, and prevention must never become a
+// permanent stall: a lens that fails activation outright never registers, and
+// without a bound one such lens would hold the whole grant-change edge closed
+// forever. Past the bound the drain proceeds and says loudly that it is doing so.
+const RegistryHoldMax = 2 * time.Minute
+
+// SetRegistryReady installs the completeness check the drain waits on.
+//
+// A signal is consumed exactly once: Drain takes an actor off the dirty set and
+// reprojects it across whatever lenses are registered AT THAT MOMENT. Personal
+// lenses register one at a time as their rules activate, while the drain ticker
+// and the read-grant producers are already live — so an actor dirtied before the
+// last personal lens registers would be reprojected against a short registry,
+// and the frames its unregistered lenses owed it would be gone with no log, no
+// Health issue, and (until the convergence sweep lands) no healer.
+//
+// The check is the same one internal/classkeyshredded's readiness gate uses, for
+// a hazard cmd/refractor's own wiring already states in those words: over a
+// registry still loading, a SHORT answer is indistinguishable from a complete
+// one. nil (tests, harnesses) means no gate.
+// SetRegistryHoldMax overrides how long the drain waits for the lens registry
+// to finish loading before proceeding anyway. Zero or negative leaves the
+// default. Like SetBounds it exists so a test can reach the bounded-fallback
+// branch without waiting out the production window.
+func (r *Reprojector) SetRegistryHoldMax(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d > 0 {
+		r.holdMax = d
+	}
+}
+
+func (r *Reprojector) SetRegistryReady(fn func(context.Context) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registryReady = fn
+}
+
+// registryIsReady reports whether the drain may consume signals yet.
+//
+// It latches: once the registry has been observed complete, the check stops
+// running. That bounds its cost — it is a Core KV enumeration, and the drain
+// ticks every second — and it is sound for what the gate is FOR, which is the
+// boot window. A lens hot-added later reopens a far smaller window (between its
+// activation and its RegisterPersonal call), which is the sweep's to close.
+//
+// It is also skipped entirely while nothing is queued: an idle boot has no
+// signal to lose, so it should not spend an enumeration per tick to say so.
+func (r *Reprojector) registryIsReady(ctx context.Context) bool {
+	r.mu.Lock()
+	if r.registryLatched || r.registryReady == nil {
+		r.mu.Unlock()
+		return true
+	}
+	if len(r.dirty) == 0 {
+		r.mu.Unlock()
+		return false
+	}
+	check := r.registryReady
+	if r.holdSince.IsZero() {
+		r.holdSince = time.Now()
+	}
+	held, logged, holdMax := time.Since(r.holdSince), r.holdLogged, r.holdMax
+	r.holdLogged = true
+	r.mu.Unlock()
+
+	err := check(ctx)
+	if err == nil {
+		r.latchRegistry()
+		slog.Info("grantchange: lens registry is complete — draining the grant changes queued during boot",
+			"heldFor", held.String())
+		return true
+	}
+	if held > holdMax {
+		r.latchRegistry()
+		slog.Warn("grantchange: lens registry never reported complete within the hold bound — draining anyway; signals for a lens that is still missing will be lost until the convergence sweep covers them",
+			"heldFor", held.String(), "bound", holdMax.String(), "reason", err)
+		return true
+	}
+	if !logged {
+		slog.Info("grantchange: holding grant changes until the lens registry finishes loading — reprojecting now would silently skip the lenses that have not registered yet",
+			"reason", err)
+	}
+	return false
+}
+
+func (r *Reprojector) latchRegistry() {
+	r.mu.Lock()
+	r.registryLatched = true
+	r.mu.Unlock()
 }
 
 // SetBounds overrides the dirty-set bound and the drain interval. Zero or
@@ -153,10 +265,15 @@ func (r *Reprojector) GrantChanged(actorKey string) {
 	// silently accepts nothing.
 	actorType, actorID, ok := substrate.ParseVertexKey(actorKey)
 	if !ok || actorType != projection.PersonalActorType || actorID == "" {
-		// A read-grant producer anchored on something other than an identity
-		// has no personal lens keyed off it, so there is nothing to re-drive.
-		// Dropping is the fail-slow direction and it is silent by design: a
-		// deployment that adds such a producer would otherwise log per write.
+		// A read-grant producer anchored on something other than an identity has
+		// no personal lens keyed off it, so there is nothing to re-drive.
+		// Dropping is the fail-slow direction, but it must not be SILENT: a
+		// deployment that adds such a producer would otherwise have a wired,
+		// permanently-dead edge with nothing anywhere to say so. Debug rather
+		// than Warn because a correct deployment never reaches it, and one that
+		// does reaches it on every write.
+		slog.Debug("grantchange: grant change names a non-identity anchor — no personal lens is keyed off it, so no reprojection is owed",
+			"actorKey", actorKey, "actorType", actorType, "want", projection.PersonalActorType)
 		return
 	}
 
@@ -210,18 +327,38 @@ func (r *Reprojector) Run(ctx context.Context) {
 // transition that lands mid-drain for an actor already processed re-dirties it
 // and is picked up rather than silently folded into the pass that already ran.
 func (r *Reprojector) Drain(ctx context.Context) {
-	r.reportDropped(ctx)
+	if !r.registryIsReady(ctx) {
+		return
+	}
+	drained := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		// Reported from INSIDE the loop, not once at the top. The scenario the
+		// bound exists for is a mass grant change that outpaces the drain — and
+		// in exactly that scenario this loop does not return for a long time, so
+		// a report fired only on entry would leave an operator with no evidence
+		// for the whole storm. Every dropReportEvery actors is frequent enough
+		// to be visible and rare enough not to write Health KV per actor.
+		if drained%dropReportEvery == 0 {
+			r.reportDropped(ctx)
+		}
 		actorID, ok := r.take()
 		if !ok {
+			// One last report on the way out, so a drop that landed after the
+			// final in-loop check is not held until the next tick.
+			r.reportDropped(ctx)
 			return
 		}
 		r.reprojectActor(ctx, actorID)
+		drained++
 	}
 }
+
+// dropReportEvery is how many actors the drain processes between overflow
+// reports while a storm is in progress.
+const dropReportEvery = 50
 
 // take removes and returns one dirty actor. Map iteration order makes the
 // choice arbitrary, which is the right property here: every dirty actor is owed
@@ -246,18 +383,60 @@ func (r *Reprojector) take() (string, bool) {
 // and the actor has a standing healer behind it. The Health fault is what keeps
 // that from being a silent handoff.
 func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
-	for ruleID, p := range r.snapshotPersonal() {
+	for _, ruleID := range r.registeredRuleIDs() {
+		// Re-read the registry immediately before each call rather than trusting
+		// the snapshot. Walking one actor across every personal lens is a window
+		// seconds wide under load, and a lens deleted inside it is gone: its run
+		// context is cancelled and its Health entry already removed. Calling it
+		// anyway would fail, and the failure path does a read-modify-PUT that
+		// RE-CREATES the entry the deleter just deleted — leaving an orphan
+		// "degraded lens" row in Health KV with no lens behind it.
+		p, live := r.registered(ruleID)
+		if !live {
+			continue
+		}
 		if err := p.ReprojectPersonalActor(ctx, actorID); err != nil {
 			slog.Warn("grantchange: reprojection failed for one lens — continuing with this actor's remaining lenses; the convergence sweep is its healer",
 				"ruleId", ruleID, "actorId", actorID, "err", err)
-			p.RecordGrantReprojectIssue(ctx, "reproject", "actor "+actorID+": "+err.Error())
+			// Checked again after the call, for the same reason: the
+			// reprojection itself spans the window, and a lens deregistered
+			// DURING it fails precisely because it was torn down.
+			if _, stillLive := r.registered(ruleID); stillLive {
+				p.RecordGrantReprojectIssue(ctx, "reproject", "actor "+actorID+": "+err.Error())
+			}
 		}
 	}
 }
 
-// snapshotPersonal copies the registry so a reprojection pass never holds the
-// lock across a cypher evaluation — a producer's GrantChanged call must not
+// registered reports the pipeline currently registered under ruleID, if any.
+func (r *Reprojector) registered(ruleID string) (PersonalPipeline, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.personal[ruleID]
+	return p, ok
+}
+
+// registeredRuleIDs lists the registry's lens IDs, sorted, without holding the
+// lock across the walk that follows — a producer's GrantChanged call must not
 // block behind the drain it feeds.
+//
+// Sorted rather than map order so one actor's lenses are always visited in the
+// same sequence: a partial pass (a cancelled context, a lens that failed
+// halfway) then covers a reproducible prefix, which is the difference between a
+// bug that reproduces and one that does not.
+func (r *Reprojector) registeredRuleIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.personal))
+	for id := range r.personal {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// snapshotPersonal copies the registry for callers that need the pipelines
+// themselves rather than a walk order.
 func (r *Reprojector) snapshotPersonal() map[string]PersonalPipeline {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -278,18 +457,37 @@ func (r *Reprojector) snapshotPersonal() map[string]PersonalPipeline {
 // storm costs one report per tick rather than one per dropped signal.
 func (r *Reprojector) reportDropped(ctx context.Context) {
 	r.mu.Lock()
-	dropped := r.dropped
-	r.dropped = 0
-	bound := r.maxDirty
+	dropped, reported, bound := r.dropped, r.droppedReported, r.maxDirty
 	r.mu.Unlock()
-	if dropped == 0 {
+	if dropped == reported {
 		return
 	}
 
 	slog.Warn("grantchange: dirty-actor set is at its bound — grant-change signals were dropped; those actors converge only on the sweep",
-		"dropped", dropped, "bound", bound)
-	detail := "dropped " + strconv.Itoa(dropped) + " signal(s) at the " + strconv.Itoa(bound) + "-actor bound"
+		"dropped", dropped, "sinceLastReport", dropped-reported, "bound", bound)
+	detail := "dropped " + strconv.Itoa(dropped) + " signal(s) cumulative at the " + strconv.Itoa(bound) + "-actor bound"
+
+	// The counter is CUMULATIVE and is never reset; what advances is a separate
+	// high-water of what has been reported, and only after a report actually
+	// landed. Clearing a delta before the Health write — the shape this
+	// replaced — loses the count outright whenever that write fails, and the
+	// next pass then reports nothing at all: a silent overflow, which is the
+	// one outcome the bound's whole contract forbids.
+	landed := false
 	for _, p := range r.snapshotPersonal() {
-		p.RecordGrantReprojectIssue(ctx, "overflow", detail)
+		if p.RecordGrantReprojectIssue(ctx, "overflow", detail) == nil {
+			landed = true
+		}
 	}
+	if !landed {
+		// Nothing recorded it — either there are no personal lenses registered
+		// yet or every Health write failed. Leave the high-water where it is so
+		// the next pass tries again with the full count.
+		return
+	}
+	r.mu.Lock()
+	if dropped > r.droppedReported {
+		r.droppedReported = dropped
+	}
+	r.mu.Unlock()
 }

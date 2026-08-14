@@ -3,19 +3,21 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// actorPublishLock is one (lens, actor) publish slot. waiters is what keeps the
-// map bounded: the slot is dropped as soon as nobody holds or wants it, so a
-// cell with a large identity population never accumulates a mutex per identity.
-// It is guarded by the pipeline's own personalPublishMu, never by itself.
+// actorPublishLock is one (lens, actor) publish slot. ch is a 1-buffered
+// channel rather than a sync.Mutex so an acquire can be abandoned on context
+// cancellation — a control-plane Hydrate answering a device attach must not
+// block past its own RPC deadline behind a stalled drain-worker reprojection
+// for the same actor. waiters is what keeps the map bounded: the slot is
+// dropped as soon as nobody holds or wants it. The map that holds these is
+// guarded by the pipeline's own personalPublishMu, never by the slot itself.
 type actorPublishLock struct {
-	mu      sync.Mutex
+	ch      chan struct{}
 	waiters int
 }
 
@@ -44,23 +46,31 @@ type actorPublishLock struct {
 // It lives here rather than in the reprojector on purpose: a lock a caller has
 // to remember to take is one a caller can forget, and this one is load-bearing
 // for a security filter's retraction.
-func (p *Pipeline) lockPersonalActor(actorID string) func() {
+//
+// The acquire is abandonable. A reprojection holds this slot across a cypher
+// evaluation, a write and a publish, which under load is a window seconds wide
+// — and one of the three publishers is a control-plane RPC answering a device
+// attach, with a deadline of its own. Waiting on ctx as well as on the slot
+// lets that caller give up and report a timeout rather than block
+// un-cancellably behind a drain worker. Returns a non-nil release func only
+// when the slot was actually acquired.
+func (p *Pipeline) lockPersonalActor(ctx context.Context, actorID string) (func(), error) {
 	p.personalPublishMu.Lock()
 	if p.personalPublishLocks == nil {
 		p.personalPublishLocks = make(map[string]*actorPublishLock)
 	}
 	l, ok := p.personalPublishLocks[actorID]
 	if !ok {
-		l = &actorPublishLock{}
+		l = &actorPublishLock{ch: make(chan struct{}, 1)}
 		p.personalPublishLocks[actorID] = l
 	}
 	l.waiters++
 	p.personalPublishMu.Unlock()
 
-	l.mu.Lock()
-
-	return func() {
-		l.mu.Unlock()
+	// drop retires this caller's interest in the slot, reclaiming it once
+	// nobody holds or wants it. Called on both the acquired and abandoned
+	// paths, so an abandoned acquire cannot leak the entry.
+	drop := func() {
 		p.personalPublishMu.Lock()
 		l.waiters--
 		if l.waiters == 0 {
@@ -68,6 +78,18 @@ func (p *Pipeline) lockPersonalActor(actorID string) func() {
 		}
 		p.personalPublishMu.Unlock()
 	}
+
+	select {
+	case l.ch <- struct{}{}:
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
+
+	return func() {
+		<-l.ch
+		drop()
+	}, nil
 }
 
 // ReprojectPersonalActor re-evaluates this personal pipeline for one actor and
@@ -121,7 +143,10 @@ func (p *Pipeline) lockPersonalActor(actorID string) func() {
 func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string) error {
 	actorKey := substrate.VertexKey("identity", identityID)
 
-	unlock := p.lockPersonalActor(identityID)
+	unlock, err := p.lockPersonalActor(ctx, identityID)
+	if err != nil {
+		return fmt.Errorf("pipeline: reproject personal actor %q: awaiting the publish slot: %w", identityID, err)
+	}
 	defer unlock()
 
 	// This entry point runs off the consumer goroutine, so it takes its own
@@ -150,6 +175,23 @@ func (p *Pipeline) ReprojectPersonalActor(ctx context.Context, identityID string
 	// above for why "after" is the whole point, and lockPersonalActor for why
 	// the lock has to span it.
 	revision := p.Progress().LastAppliedSeq
+	if revision == 0 {
+		// The same refusal Reproject makes with ErrNoOrderingToken, for the
+		// same reason and in the same direction. A frame at revision 0 is not a
+		// weaker frame, it is a frame the client discards: frameHW drops any
+		// frame below the last one applied for the lens, and collectAttributed
+		// exempts from pruning every key whose attribution revision exceeds the
+		// frame's — which at 0 is all of them. Publishing one would report a
+		// retraction that provably cannot retract, silently, in the over-grant
+		// direction this whole mechanism exists to close.
+		//
+		// Reachable, not theoretical: the drain worker's ticker runs before
+		// every personal pipeline's consumer has seeded its ack floor, and
+		// seedAppliedSeqFromAckFloor leaves the token at zero when that read
+		// fails outright. Refusing hands it to the caller, which logs it and
+		// raises the lens's Health fault instead of serving a doomed frame.
+		return fmt.Errorf("pipeline: reproject personal actor %q: %w", identityID, ErrNoOrderingToken)
+	}
 
 	adpt := p.currentAdapter()
 	var frameKeys []map[string]any

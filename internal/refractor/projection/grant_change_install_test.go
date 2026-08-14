@@ -77,6 +77,19 @@ func TestInstallActorAggregate_GrantChangeSinkClassification(t *testing.T) {
 			want:           false,
 		},
 		{
+			// The pattern grammar permits a repeated placeholder, and BuildKey
+			// substitutes EVERY occurrence while AnchorFromKey brackets only
+			// the first — so the inverse can never recover the actor from a key
+			// this lens wrote. Wiring the edge onto it would install something
+			// that emits nothing for its entire life, with no trace anywhere
+			// that names the edge.
+			name:           "a lens whose key pattern does not round-trip is refused",
+			bucket:         projection.AuthPlaneBucket,
+			keyPattern:     "cap-read.{actorSuffix}.{actorSuffix}",
+			entryKeyColumn: "anchorId",
+			want:           false,
+		},
+		{
 			name:           "a business-plane lens is refused",
 			bucket:         "weaver-targets",
 			keyPattern:     "cap-read.{actorSuffix}",

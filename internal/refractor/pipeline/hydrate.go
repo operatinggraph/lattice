@@ -43,7 +43,13 @@ import (
 // lock is what stops the two captures from being interleaved with the two
 // publishes.
 func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, error) {
-	unlock := p.lockPersonalActor(identityID)
+	// Abandonable on ctx: this call answers a device-attach RPC with a deadline
+	// of its own, and the slot it wants can be held across a drain worker's
+	// whole evaluate-write-publish for the same actor.
+	unlock, err := p.lockPersonalActor(ctx, identityID)
+	if err != nil {
+		return 0, fmt.Errorf("pipeline: hydrate %q: awaiting the publish slot: %w", identityID, err)
+	}
 	defer unlock()
 
 	highWater := p.Progress().LastAppliedSeq

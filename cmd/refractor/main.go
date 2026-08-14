@@ -1315,8 +1315,11 @@ func main() {
 	// own classification decides which lenses it is actually wired onto. The
 	// consumer side registers below, beside the control-plane hydrator, which
 	// is where the concrete personal pipeline is in hand.
+	// Its drain worker starts later, once the registry-completeness gate it
+	// waits on exists — see SetRegistryReady below. The object has to exist
+	// here because startPipeline both offers it to every actor-aggregate
+	// install and registers every personal lens on it.
 	grantReprojector := grantchange.New()
-	go grantReprojector.Run(ctx)
 
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
@@ -2053,6 +2056,34 @@ func main() {
 	registryProbe := health.NewRegistryProbe(conn, coreKVBucket, registeredLensIDs, logger)
 	go registryProbe.Run(ctx)
 	hb.RegistryReconciliationProvider = registryProbe.Missing
+
+	// The grant-change drain's readiness gate, and only now its worker.
+	//
+	// A grant-change signal is consumed exactly once: the drain takes an actor
+	// off its dirty set and reprojects it across whatever personal lenses are
+	// registered at that moment. Lenses register one at a time as their rules
+	// activate, while the read-grant producers are already running, so a drain
+	// that ran during boot would reproject an actor against a SHORT registry and
+	// the frames its unregistered lenses owed would be gone — no log, no Health
+	// issue, and no healer until the convergence sweep lands.
+	//
+	// That is the same hazard, and the same answer, as the retention-class
+	// consumer's readiness gate above: over a registry still loading, a short
+	// answer is indistinguishable from a complete one, and Core KV — the
+	// persistent lens registry — is what makes the two separable. The
+	// reprojector holds its signals (bounded and coalescing) until this reports
+	// complete, then drains them against a full registry.
+	grantReprojector.SetRegistryReady(func(ctx context.Context) error {
+		missing, err := registryProbe.ReconcileNow(ctx)
+		if err != nil {
+			return fmt.Errorf("reconcile declared lenses against the registry: %w", err)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("%d lens(es) are in Core KV but not yet registered: %v", len(missing), missing)
+		}
+		return nil
+	})
+	go grantReprojector.Run(ctx)
 
 	// Taxonomy currency on this instance's own entry. Without it the only
 	// trace of a resolver that never arms is a per-lens filterBroadReason,

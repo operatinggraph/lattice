@@ -116,6 +116,12 @@ RETURN l.key AS anchor, "lease" AS kind, l.id AS entityId
 		return row, out, nil
 	})
 	p.SetActorEnumerator(NewActorEnumerator(adjKV, coreKV, "identity"))
+	// A running pipeline has applied at least one event, so it holds an
+	// ordering token. Seeded here because ReprojectPersonalActor REFUSES to
+	// publish without one (a frame at revision 0 is one the client discards) —
+	// a fixture left at zero would exercise that refusal instead of whatever it
+	// meant to test.
+	p.recordAppliedSeq(1)
 	return p, coreKV
 }
 
@@ -275,7 +281,8 @@ func TestPersonalPublishLock_SerializesTwoPublishersForOneActor(t *testing.T) {
 func TestPersonalPublishLock_ReleasesItsSlot(t *testing.T) {
 	p := &Pipeline{ruleID: "lock-lifetime"}
 
-	unlock := p.lockPersonalActor(personalActorA)
+	unlock, err := p.lockPersonalActor(context.Background(), personalActorA)
+	require.NoError(t, err)
 	p.personalPublishMu.Lock()
 	require.Len(t, p.personalPublishLocks, 1, "a held slot is present")
 	p.personalPublishMu.Unlock()
@@ -284,6 +291,66 @@ func TestPersonalPublishLock_ReleasesItsSlot(t *testing.T) {
 	p.personalPublishMu.Lock()
 	require.Empty(t, p.personalPublishLocks, "a released slot nobody wants is dropped")
 	p.personalPublishMu.Unlock()
+}
+
+// TestPersonalPublishLock_AcquireIsAbandonableOnContext pins that a caller
+// waiting for a held slot can give up.
+//
+// The slot is held across a cypher evaluation, a write and a publish — seconds
+// wide under load — and one of the publishers contending for it is a
+// control-plane RPC answering a device attach, with a deadline of its own. An
+// un-cancellable acquire would make that RPC block past its own deadline behind
+// a drain worker's reprojection for the same actor.
+func TestPersonalPublishLock_AcquireIsAbandonableOnContext(t *testing.T) {
+	p := &Pipeline{ruleID: "lock-ctx"}
+
+	held, err := p.lockPersonalActor(context.Background(), personalActorA)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unlock, err := p.lockPersonalActor(ctx, personalActorA)
+
+	require.ErrorIs(t, err, context.Canceled, "a cancelled waiter must give up rather than block")
+	require.Nil(t, unlock, "an abandoned acquire returns no release func")
+
+	held()
+	p.personalPublishMu.Lock()
+	require.Empty(t, p.personalPublishLocks,
+		"an abandoned acquire must still retire its interest, or the slot leaks")
+	p.personalPublishMu.Unlock()
+}
+
+// TestReprojectPersonalActor_RefusesWithoutAnOrderingToken pins the boot
+// window. A pipeline that has applied no event holds no ordering token, so a
+// frame it published would carry revision 0 — which the client does not treat
+// as a weak frame but as one to discard: frameHW drops it, and
+// collectAttributed exempts every key from pruning. A grant-triggered
+// retraction would then silently fail to retract.
+//
+// The drain worker's ticker runs before every personal pipeline's consumer has
+// seeded its ack floor, so this is a live boot condition, not a theoretical one.
+func TestReprojectPersonalActor_RefusesWithoutAnOrderingToken(t *testing.T) {
+	target := &fakePersonalTarget{}
+	p, coreKV := newPersonalTestPipeline(t, target)
+	putPersonalVertex(t, coreKV, substrate.VertexKey("identity", personalActorA), "identity", nil)
+	// A pipeline that has applied nothing yet — the cold-boot state the drain
+	// worker's first ticks can genuinely catch a personal lens in.
+	p.recordAppliedSeq(0)
+
+	err := p.ReprojectPersonalActor(context.Background(), personalActorA)
+
+	require.ErrorIs(t, err, ErrNoOrderingToken,
+		"the same refusal Reproject makes, for the same reason")
+	assert.Empty(t, target.snapshot(),
+		"no frame may be published at revision 0 — the client would discard it and the revocation would silently not land")
+
+	// And once the pipeline has applied an event, the same call proceeds.
+	p.recordAppliedSeq(7)
+	require.NoError(t, p.ReprojectPersonalActor(context.Background(), personalActorA))
+	frames := target.snapshot()
+	require.Len(t, frames, 1)
+	assert.Equal(t, uint64(7), frames[0].revision)
 }
 
 // TestPersonalTarget_ProducesNoDeleteShapedResult is T9 — an invariant that

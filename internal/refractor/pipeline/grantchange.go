@@ -61,19 +61,23 @@ func (p *Pipeline) SetGrantChangeSink(sink GrantChangeSink, anchorFromKey func(t
 // entry of the lens that is actually degraded rather than on some process-level
 // aggregate an operator would have to correlate back.
 //
-// A nil reporter (a directly-constructed pipeline, every harness) silently does
-// nothing, the same posture every other reporter call on this type takes. The
-// write failing is logged, not returned: the caller is a drain worker whose job
-// is to keep draining, and it has nothing better to do with the error than what
-// this does with it.
-func (p *Pipeline) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) {
+// A nil reporter (a directly-constructed pipeline, every harness) silently
+// succeeds, the same posture every other reporter call on this type takes.
+//
+// The write's error is both logged AND returned. The log is for the operator;
+// the return is for the drain worker, which tracks what has actually been
+// REPORTED rather than what it attempted — a lost Health write must not let an
+// overflow count be cleared into silence.
+func (p *Pipeline) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error {
 	if p.reporter == nil {
-		return
+		return nil
 	}
 	if err := p.reporter.RecordGrantReprojectIssue(ctx, kind, detail); err != nil {
 		slog.Warn("pipeline: grant change: could not record the reprojection issue on health",
 			"ruleId", p.ruleID, "kind", kind, "detail", detail, "err", err)
+		return err
 	}
+	return nil
 }
 
 // HasGrantChangeSink reports whether the read-grant change edge is wired on
@@ -104,15 +108,29 @@ func (p *Pipeline) notifyGrantChange(targetKey string, transition adapter.GrantT
 	if p.grantSink == nil || p.grantAnchorFromKey == nil || targetKey == "" {
 		return
 	}
-	if transition != adapter.TransitionGranted && transition != adapter.TransitionRevoked {
+	switch transition {
+	case adapter.TransitionGranted, adapter.TransitionRevoked:
+	case adapter.TransitionUnknown:
+		// "We did not look" is not "we looked and nothing changed", and the two
+		// must not collapse into the same silent no-op just because neither
+		// signals. A sequence-less guarded write returns before reading any
+		// stored body, so this key's liveness is genuinely unclassified and the
+		// standing healer — not this edge — is what covers it. Saying so is the
+		// only way the distinction the type draws is observable at all.
+		slog.Info("pipeline: grant change: write carried no ordering token, so its liveness is unclassified — no signal emitted; the convergence sweep covers this key",
+			"ruleId", p.ruleID, "key", targetKey)
+		return
+	default:
 		return
 	}
 	actorKey, ok := p.grantAnchorFromKey(targetKey)
 	if !ok {
-		// The install gate probes this inverse before wiring the sink
-		// (projection.sweepEnrolment's KeyOwnershipRoundTrips), so reaching
-		// here means a key this lens wrote does not invert through the pattern
-		// it wrote it with — worth saying out loud rather than dropping.
+		// projection.IsReadGrantProducer probes this inverse against a
+		// synthetic key of the lens's own pattern before wiring the sink, so a
+		// well-formed key this lens wrote always inverts. Reaching here means
+		// the key does not belong to this lens's pattern at all — the
+		// fail-closed case the inversion exists for — which is worth saying out
+		// loud rather than dropping in silence.
 		slog.Warn("pipeline: grant change: written key does not invert to an anchor — no signal emitted",
 			"ruleId", p.ruleID, "key", targetKey)
 		return
