@@ -857,4 +857,31 @@ already-filed reconciler follow-on (§5.3, seq'd behind Inc 3). Nothing new surf
 **Non-goals:** Increment 3 (provenance stamp + reserved set) is explicitly out of scope for this fire — it
 depends on Inc 1's write-once precondition but is its own posture-changing unit, sized M, and follows as a
 separate fire. The `UpdatePermission` DDL dispatch branch, `permittedCommands` list entry, and doc comments
-in `ddls.go` are untouched per §5.2 (Starlark stays; only the grant is withdrawn).
+in `ddls.go` are untouched per §5.2 (Starlark stays; only the grant is withdrawn). Already-minted
+`UpdatePermission` vertices from before this fire are out of scope — nothing here sweeps them; the current
+stack carries none (confirmed live below).
+
+**Shipped (build note, 2026-08-14, `7ca94096` merged `1208e638`).** Built as briefed. Full 3-layer
+adversarial review (Blind Hunter / Edge-Case Hunter / Acceptance Auditor, all cold) found the diff
+correctly scoped and mechanically sound, plus four real issues fixed before merge: (1) the lint gate's
+sanction-marker regex could be tricked into admitting an unterminated declaration when the Note contained
+an unrelated later `]` — the prose class now excludes `[` as well as `]`, forcing an unterminated marker
+to fail closed; (2) only the first of multiple sanction markers in a Note was validated — now any Note
+carrying more than one is refused as ambiguous; (3) `verify-package-rbac` asserted presence of the nine
+granted ops but nothing asserted the tenth's *absence* — the whole security property of this fire is
+denial-by-absence, and nothing live proved it — added an explicit scan that fails on any live
+`UpdatePermission` permission vertex or `grantedBy` link, derived from the same two op-lists so it can't
+drift from them; ran live post-fix: `ALL ASSERTIONS PASSED (62 OK)`, up from 61. (4) the "write-once"
+claim in `permissions.go`, `README.md`, `grantauthoring.go`, and the e2e test's doc comment overclaimed —
+Blind Hunter found `internal/bootstrap`'s `UpgradePackage` primitive still reaches a permission vertex's
+body by a route no rbac-domain grant governs, reachable today by `consoleOperator` (non-root); every
+write-once comment now scopes the claim to the operation channel this fire actually closes, and §5.1/§6
+above carry the same correction. That finding is filed separately (`lattice.md`, "[bootstrap]
+`UpgradePackage` accepts unvalidated mutations against permission/role vertex classes", 📐 needs designer
+pass) — cross-cutting, every package upgrades through it, not rbac-domain's to fix inline.
+
+`make test-hello-lattice` run explicitly, all six milestones + NFR-P3 green. `make verify-kernel` clean.
+Full `go test ./... -p 4`: 123 packages, zero failures. Increment 3 (provenance + reserved set) remains,
+sized M, as its own fire — this item's checkpoint: Inc 1+2 shipped, Inc 3 not started, no worktree held
+(each increment lands on `main` independently per §7's ordering, so there is nothing to resume from a
+held branch).
