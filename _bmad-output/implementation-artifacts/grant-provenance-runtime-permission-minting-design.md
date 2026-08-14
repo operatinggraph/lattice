@@ -885,3 +885,172 @@ Full `go test ./... -p 4`: 123 packages, zero failures. Increment 3 (provenance 
 sized M, as its own fire — this item's checkpoint: Inc 1+2 shipped, Inc 3 not started, no worktree held
 (each increment lands on `main` independently per §7's ordering, so there is nothing to resume from a
 held branch).
+
+## 14. Increment 3 fire brief (build note, 2026-08-14)
+
+**Scope sentence.** Ship §7 Increment 3 (§5.1 Moves 2–3): stamp `data.origin` on every permission vertex
+at mint (`runtime` via `CreatePermission`, `package` + `declaredBy` via the installer), project `origin`
+onto each `capabilityRoles` `platformPermissions` entry, and refuse a `runtime`-origin grant of a
+core-reserved operationType at step 3 while a `package`-origin grant of the same op still authorizes —
+posture-changing (new enforcement point), full 3-layer adversarial review at admit.
+
+**Verified touch-list** (re-scouted live this fire, zero divergence from the design's citations beyond
+±1 line drift):
+
+1. **Stamp `runtime`.** `packages/rbac-domain/ddls.go:306-323` — the `CreatePermission` dispatch branch.
+   Currently builds `data = {"operationType": opt, "scope": scope}` + optional `note`. Add
+   `data["origin"] = "runtime"`.
+2. **Stamp `package`.** `internal/pkgmgr/build.go:354-368` — the installer's permission-vertex mint loop
+   (`for idx, p := range def.Permissions`). Currently writes `operationType`/`scope`/optional
+   `note`/`lanes`. Add `data["origin"] = "package"` and `data["declaredBy"] = def.CanonicalName` (confirm
+   the exact field name on `def` — `PackageDefinition.CanonicalName` or equivalent; the installer already
+   has the package's own identity in scope here, this is not a new lookup).
+3. **Project it.** `packages/rbac-domain/lenses.go:80-91` — `capabilityRolesSpec`'s Cypher `RETURN`.
+   Insert `origin: perm.data.origin,` into the `collect(DISTINCT {...})` map, alongside `operationType`/
+   `scope`/`lanes`.
+4. **Struct field.** `internal/capabilitykv/doc.go:45-53` — `PlatformPermission` struct carries
+   `OperationType`, `Scope`, `Lanes` only. Add `Origin string \`json:"origin,omitempty"\`` (decode-side
+   struct; no Go-side literal writer exists for this type — it's populated entirely from the lens's
+   projected JSON, confirmed by census: no `PlatformPermission{` composite literal anywhere in
+   non-test `.go`).
+5. **Reserve on it.** `internal/processor/step3_auth_capability.go`'s `matchPlatformPermission`
+   (currently lines 503-586). Insert the reserved-set check **inside the loop, immediately after the
+   `if p.OperationType != env.OperationType { continue }` guard (line ~512-514) and before the
+   `switch p.Scope` block** — not before the operationType filter (the origin/reserved check is
+   per-*matching*-entry, mirroring `disallowedPrivilegedLanes`'s per-entry shape, not a whole-doc gate).
+   Absent origin reads as `runtime` (design §Move-2, fail-closed). Shape to mirror —
+   `privilegedLaneAllowlist` + `disallowedPrivilegedLanes` (`:426-451`) and its call site inside
+   `platformLaneGate` (`:468-489`): a package-level `var reservedOperationTypes = map[string]bool{...}`
+   (core-owned constant, v1 = `{"ShredRetentionClassKey": true}`), a helper or inline check, `deny(...)`
+   + `continue` (never `return` — a package-origin entry for the same op later in the scan must still be
+   able to authorize), and `a.emitter.EmitAlert(context.Background(), AlertCodeReservedOperationGrantRejected, map[string]any{"actor": env.Actor, "requestId": env.RequestID, "operationType": env.OperationType, "origin": p.Origin})`.
+6. **Alert code.** `internal/processor/step3_auth_capability.go:437` (right after
+   `AlertCodePrivilegedLaneGrantRejected`) — add
+   `const AlertCodeReservedOperationGrantRejected = "reserved-operation-grant-rejected"` (PascalCase
+   `code` value per `docs/contracts/05-health-kv.md:89-109`'s convention is `ReservedOperationGrantRejected`
+   — confirm which casing the alert-code **constant's string value** actually uses elsewhere, e.g.
+   `AlertCodePrivilegedLaneGrantRejected = "privileged-lane-grant-rejected"` is kebab-case; mirror that
+   exactly, not the Health-issue JSON `code` field's PascalCase, which is a different serialization).
+7. **Contract.** `docs/contracts/06-capability-kv.md` — remove the transitional note (lines 111-114,
+   "*Transitional: … this note dies with that increment.*") and add an `origin` row to the §6.4 field
+   table (after the `scope` row, currently line 255): required, values `package`/`runtime`, write-once,
+   absence reads as `runtime`, one-line pointer to the §6.1 clause above rather than restating it.
+8. **Privacy-base comment.** `packages/privacy-base/permissions.go:59-67` — rewrite the obligation
+   comment. It currently says the gap "needs a core-owned never-self-grantable operationType set, which
+   is filed, not assumed here." Rewrite to describe what Inc 3 actually ships: the reserved set now
+   exists (`step3_auth_capability.go`'s `reservedOperationTypes`), `ShredRetentionClassKey` is in it, and
+   a runtime mint of it is refused at step 3 + Health-alerted; a package (this one) remains free to grant
+   it deliberately, which is why privacy-base still withholds the grant by choice, not by platform
+   inability.
+
+**Also owned by this increment (§10, the privileged-lane obligation — verify, likely no new logic):**
+`platformLaneGate`'s `disallowedPrivilegedLanes` check (`:472`) already fires on **any** entry carrying a
+non-empty `p.Lanes`, unconditional on origin (confirmed live, `:465-467`'s own comment: "unconditional on
+any non-empty p.Lanes"). Neither `CreatePermission` nor `UpdatePermission` accepts a `lanes` parameter
+today (`ddls.go:306-341` — unchanged by this increment), so a `runtime`-origin entry cannot currently
+carry `Lanes` at all. §10's obligation is therefore **already structurally satisfied**, not a new gate to
+build — but it must be made **legible**, not left as an accident: add a code comment at the
+`reservedOperationTypes` check cross-referencing `platformLaneGate` ("a runtime-origin entry cannot
+currently claim a privileged lane — no `lanes` param exists yet — and if one is ever added,
+`disallowedPrivilegedLanes` already gates it unconditionally of origin; do not add a redundant origin
+check here"), and add one test case constructing a `PlatformPermission{Origin: "runtime", Lanes: [...]}`
+fixture directly (bypassing the DDL, which is legitimate — the struct itself has no origin-conditioned
+path) to prove `platformLaneGate` still strips an unlisted privileged lane regardless of origin. If the
+builder finds this claim false while writing that test, that is itself a real Inc-3-blocking finding, not
+a residual — fix it in this fire.
+
+**Migration population (§11 Risk 1 — must land in this fire, not deferred).** A live core stack is up on
+this box (`lattice-nats`, `lattice-postgres` confirmed running). Existing permission vertices minted
+before this increment carry no `origin` and read as `runtime` (fail-closed) until their owning package is
+re-applied. Per Contract #8 §8.1, a package's permission-vertex body now differs from its last-committed
+body (the new `origin`/`declaredBy` fields), so `make reinstall-package PKG=<dir>` emits an `update`, not
+a no-op — the diff-apply mechanism the migration relies on already exists; no new tooling. **27 packages
+declare `PermissionSpec`s** (live census this fire — every dir under `packages/` containing a
+`PermissionSpec{` literal): `augur`, `cafe-domain`, `cafe-ledger`, `capability-author`, `clinic-domain`,
+`clinic-ledger`, `clinic-reminders`, `console-operator`, `control-authz`, `demo-operator`,
+`identity-domain`, `identity-hygiene`, `lease-signing`, `location-domain`, `loftspace-domain`,
+`loftspace-ledger`, `maintenance-domain`, `objects-base`, `orchestration-base`, `privacy-base`,
+`privacy-operator-grant`, `rbac-domain`, `semantic-contracts`, `service-domain`, `service-location`,
+`wellness-domain`, `wellness-ledger`, `wellness-reminders`. **Re-apply only the ones actually installed
+on this stack** — check via `vtx.package.*` live (or `lattice-pkg list`/equivalent if one exists) before
+`reinstall-package`-ing each; installing a package not currently present would be a scope-creeping side
+effect, not a migration. The build note must name the exact set re-applied (and, separately, the set
+found declared-but-not-installed, skipped). `ShredRetentionClassKey` currently ships **no** grant from any
+package (`privacy-base/permissions.go:51-57`, deliberate), so there is no live over-deny risk for the v1
+reserved set specifically — the re-apply is still required so `origin` is populated platform-wide, not
+just for newly-minted vertices, which is the whole point of the audit trail this design exists to create.
+
+**Tests (§7 Inc-3 spec + §8 C1b):**
+- Package test: `capabilityRolesSpec`/`CreatePermission` mint asserts `data.origin == "runtime"`;
+  installer mint asserts `data.origin == "package"` + `data.declaredBy == <name>`.
+- Table-driven `step3_auth_capability_test.go` additions: the 4-cell matrix (origin ∈
+  {package, runtime} × reserved ∈ {yes, no}) plus the mixed case — one actor holding both a
+  `runtime`-origin and a `package`-origin entry for the **same reserved** operationType, asserting the
+  package entry still authorizes (the case a first-match/short-circuit implementation gets wrong, and
+  why the scan must `continue` rather than `return` on refusal). **Absent-origin tested as `runtime`**,
+  not skipped — the fail-closed default is the safety property. Assert the emitted alert's code +
+  fields on the refusal path via the existing `recordingEmitter` fixture (`:64-76`).
+- `internal/bypass` capadv vector (new file, mirroring `capadv_projection_resurrection_test.go`'s
+  harness shape): mint `ShredRetentionClassKey` via `CreatePermission`+`GrantPermission` at runtime,
+  assert the operation is refused **and** the Health alert fires — the adversarial proof that the
+  audit-not-deny-list distinction actually holds end to end, not just at the unit level.
+- Positive vector first (standing checklist #3): a `package`-origin grant of the reserved op (privacy-base
+  could, in principle, grant `ShredRetentionClassKey` — assert that path allowed) before the `runtime`
+  refusal is asserted, so the refusal can't pass on a fixture that denies everything.
+
+**Increment order + runnable green checks:**
+1. Struct + stamps (moves 4, 1, 2 above) → `go build ./packages/rbac-domain/... ./internal/pkgmgr/...
+   ./internal/capabilitykv/...`.
+2. Projection (move 3) → no Go build target; verified live once the reserved-set tests run against a
+   real lens projection, or via `make verify-package-rbac` if it asserts lens output shape.
+3. Reserved-set enforcement + alert code (moves 5-6) → `go build ./internal/processor/...`, then the
+   table-driven tests: `go test ./internal/processor/... -run 'TestMatchPlatformPermission|TestCapability'
+   -v`.
+4. capadv vector → `go test ./internal/bypass/... -v`.
+5. Contract + privacy-base comment (moves 7-8) — docs, no build gate, but `STRICT=1 go run
+   ./scripts/lint-conventions.go` must stay clean.
+6. Migration re-apply on the live stack (census above) → verify live: read a re-applied package's
+   permission vertex from KV (nats CLI, per `reference_read_a_readmodel_row_live`) and confirm `origin`
+   is now present.
+7. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+   ./scripts/lint-conventions.go`, `make verify-package-rbac`, `make verify-kernel`,
+   `go test ./packages/rbac-domain/... ./internal/processor/... ./internal/pkgmgr/...
+   ./internal/capabilitykv/... ./internal/bypass/... -p 4`, `make test-hello-lattice` (build-tagged
+   `integration`, C1b — verify `CreatePermission`/`GrantPermission` still work for hello-lattice's
+   non-reserved ops, unaffected by this change but must be proven, not assumed).
+
+**Precedents to mirror:** `privilegedLaneAllowlist` + `disallowedPrivilegedLanes` +
+`AlertCodePrivilegedLaneGrantRejected` (`step3_auth_capability.go:419-451`) for the whole shape of moves
+5-6 — core-owned map constant, refuse-and-continue, Health alert with actor/requestId/operationType
+context. `capadv_projection_resurrection_test.go`'s harness for the new bypass vector. The Inc-1 e2e's
+`AuthDenied` assertion shape for the table-driven step-3 tests' negative cases.
+
+**In-scope gotchas (standing checklist + component dossiers, copied in):**
+- Capability/security-plane change, new enforcement point → full 3-layer adversarial review at admit
+  regardless of size (steward SKILL.md §4) — this is the textbook case the rule names.
+- Standing checklist #3 (negative test needs its positive vector first) — binds both the reserved-set
+  refusal test (package-origin-allowed before runtime-origin-refused) and, if built, the privileged-lane
+  obligation test.
+- `docs/components/processor.md` dossier: a silently-rejected op logs at Info, not Warn — if any test
+  needs to inspect *why* a runtime-origin reserved grant was refused, raise the test logger or assert on
+  the alert emitter, not on log output.
+- The `deny(...)` closure records only the **first** denial per §501-509's own doc comment — if the
+  reserved-set check is the first matching entry and denies, but a later package-origin entry for the
+  same op *authorizes*, the function returns `Authorized: true` before ever reading `firstDenial` (the
+  `return` inside the `switch p.Scope` "any"/"self" success arms short-circuits the loop) — this is
+  correct and is exactly the mixed-case test's point; don't "fix" the early return.
+- Do not condition the reserved-set check on `p.Scope` — it must fire for `any`/`self`/`specific`/`owned`
+  alike, before the scope switch, since the design reserves the *operationType under runtime origin*,
+  not any particular scope of it.
+
+**Adjacent finds:** none expected beyond what §5.1's close-review already filed (the `UpgradePackage`
+gap, ★★★, 📐 needs designer pass, already on `lattice.md` — not this fire's to fix, cross-cutting and
+needs a design pass per that row's own state). If the builder surfaces anything new, fix it in this fire
+per steward SKILL.md §4's "what a fire discovers, this run fixes" unless it is genuinely Andrew- or
+designer-gated.
+
+**Non-goals:** `AssignRole`/`CreateRole`/`RevokeRole`/root topology (§5.2, untouched). The
+`UpgradePackage` permission/role-class validation gap (§5.1 close-review finding, separately filed,
+📐 needs designer pass). Widening the reserved set beyond `ShredRetentionClassKey` (v1 only, §5.1 Move 3
+— "adding to it is a Processor constant edit and a test," not this fire's job to pre-populate). The
+live-vs-declared permission reconciler (§9 spawned row 4, filed, not a precondition).
