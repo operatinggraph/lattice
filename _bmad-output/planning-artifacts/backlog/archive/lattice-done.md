@@ -1,5 +1,13 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-10 · `e107083a` · [Refractor/Substrate] C2.6 — every rebuild starter shares one bound and the slot covers the pump's reopen; the non-atomic durable delete-recreate that paused a healthy lens is fixed
+- 2026-08-10 · `208409f0` · [Refractor/Substrate] adjacency Shape B — the 1 MiB-jammed hub latches an overflow mark and its reads enumerate Core KV; live: 30,245 payload errors → 0, NATS 7.6 GiB OOM → 800 MiB steady, Refractor runs again
+- 2026-08-10 · `d8cc803c` · [Substrate] `KVGetMulti` — batched, atomic multi-subject KV read (`multi_last`), adopted by step-4 hydration + `personalinterest.IsRelevant`; 3-layer adversarial review folded, incl. a wildcard-injection fix
+- 2026-08-10 · `4b846e82` · [Weaver] a gap's external class is read from its pattern's step kinds, not its action name — the timed-out vendor call retries again, and its legs are gated (§10.3 ratified)
+- 2026-08-10 · `a951b258` · [Substrate] `CredsFile` is pre-flighted like `NKeySeedFile` already was, closing the retry-loop asymmetry review found
+- 2026-08-10 · `d592a2c8` · [Substrate] `Connect`'s initial NATS handshake gets its own timeout + bounded, ctx-aware retry budget that skips permanent auth failures
+- 2026-08-09 · `59933666` · [Pkgmgr] secure-column guard reserves all four platform RLS columns, matching Refractor's activation-time check
+- 2026-08-09 · `e2f01a16` · [CI] Whetstone — four flakes root-caused to tests depending on what they do not control: the Starlark wall budget, ack redelivery, Weaver's sweep cadence, and the NATS handshake
 - 2026-08-08 · `b71be85d` · [identity] A credential must exist before it can be bound to a person — Inc 2 · [design](../../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) §13
 - 2026-08-08 · `6c4ca0e4` · [edge-manifest] The sign-in methods pane stops telling a signed-in person they cannot sign in — Inc 3a
 - 2026-08-08 · `392ead03` · Retention-class key custody — clinic + lease-signing records custodied, read back, and name-shreddable · [design](../../../implementation-artifacts/retention-class-key-custody-design.md) §27

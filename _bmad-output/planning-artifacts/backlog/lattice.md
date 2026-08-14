@@ -155,6 +155,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-14 · `0bb6daea` · [Pkgmgr] un-tombstone prerequisite CLOSED — a revoked grant/role key no longer silently revives on the next upgrade; Contract #8 §8.6 edit staged uncommitted for Andrew
 - 2026-08-14 · `63f53d67` · [Refractor] personal-lens D1 grant-change trigger CLOSED — Inc 1 `b69487ef` (notification edge) + Inc 2 `63f53d67` (convergence sweep); adversarial pass caught a Health-entry resurrection, fixed same commit
 - 2026-08-14 · `afdbc5f4` · [Processor] a degraded DDL cache no longer trusts a stale-or-chain-walked answer; empty-class arm re-filed as its own gap
 
@@ -182,12 +183,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-08-10 · `fef53ea7` · [Refractor] 4a-1 — the affected-anchor index narrows its WITH refusal, and walks the WITH clause its builder had been skipping
 - 2026-08-10 · `33b7e49b` · [Refractor/Pkgmgr] dynamic type taxonomy — abstract types declared, resolved and gated; Fires A/B/C complete, C4/C5 adjudicated, narrowing re-homed to typed relation signatures
 - 2026-08-10 · `98f83f5d` · [Refractor/Substrate] the taxonomy barrier reads the connection loss instead of waiting to be told — a verdict straddling a drop armed a `*` lens against a dead feed; 3/20 → 0/20
-- 2026-08-10 · `e107083a` · [Refractor/Substrate] C2.6 — every rebuild starter shares one bound and the slot covers the pump's reopen; the non-atomic durable delete-recreate that paused a healthy lens is fixed
-- 2026-08-10 · `208409f0` · [Refractor/Substrate] adjacency Shape B — the 1 MiB-jammed hub latches an overflow mark and its reads enumerate Core KV; live: 30,245 payload errors → 0, NATS 7.6 GiB OOM → 800 MiB steady, Refractor runs again
-- 2026-08-10 · `d8cc803c` · [Substrate] `KVGetMulti` — batched, atomic multi-subject KV read (`multi_last`), adopted by step-4 hydration + `personalinterest.IsRelevant`; 3-layer adversarial review folded, incl. a wildcard-injection fix
-- 2026-08-10 · `4b846e82` · [Weaver] a gap's external class is read from its pattern's step kinds, not its action name — the timed-out vendor call retries again, and its legs are gated (§10.3 ratified)
-- 2026-08-10 · `a951b258` · [Substrate] `CredsFile` is pre-flighted like `NKeySeedFile` already was, closing the retry-loop asymmetry review found
-- 2026-08-10 · `d592a2c8` · [Substrate] `Connect`'s initial NATS handshake gets its own timeout + bounded, ctx-aware retry budget that skips permanent auth failures
-- 2026-08-09 · `59933666` · [Pkgmgr] secure-column guard reserves all four platform RLS columns, matching Refractor's activation-time check
-- 2026-08-09 · `e2f01a16` · [CI] Whetstone — four flakes root-caused to tests depending on what they do not control: the Starlark wall budget, ack redelivery, Weaver's sweep cadence, and the NATS handshake
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `b71be85d`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `e107083a`)*
