@@ -1098,14 +1098,20 @@ from inside `startPipeline` (`main.go:1690`) would not be caught by any test tod
 `startPipeline`). Whoever next has cause to touch `startPipeline` for an unrelated reason should consider
 extracting it then, when the blast radius is already open rather than freshly incurred.
 
-### Increment 4a Part 2 — checkpoint (not started; hard-stopped before any edit)
+### Increment 4a Part 2 — build note
 
-**Why stopped here.** Four consecutive attempts to spawn the Part 2 builder failed on `API Error: 529
-Overloaded` before making a single edit (worktree confirmed clean each time) — a platform-level infra
-condition, not a task problem. Per the unattended-fire protocol this is a hard stop, not a pacing choice: no
-code exists to review or commit, so there is nothing to leave half-built. The design below is fully resolved
-and grounded against merged `main` at `4088d19a` — the next fire should build straight from it with a fresh
-delta-scout to re-verify line numbers, not re-derive the design.
+Built as scoped below (2a the flip, 2b the §6 probe, 2c the four e2es), reviewed by three independent cold
+adversarial passes (Blind Hunter, Edge Case Hunter, Acceptance Auditor) over the combined Part 1 + Part 2 diff,
+then one fix round. Two reviewers independently caught the same defect: the licence's staleness refusal string
+interpolated an elapsed duration, defeating its own once-per-reason dedup latch during the hours-long stale
+window it exists to stay quiet through — fixed by making every refusal string stable (a cadence-interval count,
+not an elapsed duration; the duration moved to a structured log field). Also fixed in the same round: the
+licence was evaluated twice per refused event (the gate discarded its own refusal, then re-derived it for the
+log) — now threaded through once; the §6 probe's `GetRow` error arm dropped a Delete with zero visibility — now
+logged and counted, disposition unchanged; the e2e suite's audit-staleness tolerance was a 2.5s flake risk under
+host contention — raised to 10s. `plainDerivationIndexForAct` now performs the flip exactly as scoped below;
+`derivedRowIsLive` mirrors `zeroRowDeleteKey`'s exact GetRow shape and error disposition as mandated. The
+measured before/after (§11, live `derivShadow` stats pre/post-flip) is a post-landing step, not attempted here.
 
 **Scope (design §12 Inc 4a, in full — Part 1 above already closed the two preconditions):** flip
 `plainDerivationIndexForAct` to consult the licence; §6's zero-row `RowReader.GetRow` presence probe on the
