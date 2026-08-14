@@ -1070,6 +1070,9 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 	if err := ddls.Refresh(context.Background()); err != nil {
 		return nil, nil, fmt.Errorf("ddl cache refresh: %w", err)
 	}
+	// A failed invalidation leaves the cache diverged from committed Core KV for
+	// the life of the process; the heartbeat is what makes that observable.
+	hb.AttachDDLCache(ddls)
 
 	// Wire DenialResponseBuilder (FR22) when capability mode is active.
 	var denialBuilder *DenialResponseBuilder

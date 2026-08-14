@@ -307,6 +307,50 @@ type DDLCache struct {
 	// tombstoned root can no longer say which operationType it carried, and
 	// this map still can.
 	byOpMetaRoot map[string]opMetaDescriptor
+
+	// degraded latches the fact that an Invalidate failed, with the moment it
+	// first did, the root it failed on, and why. Invalidate is the ONLY thing
+	// that carries a committed meta-vertex into this process after startup, so
+	// once one has failed the indexes above are no longer known to match what
+	// Core KV durably holds — and an absence in them stops being evidence that
+	// the DDL does not exist.
+	//
+	// It is per-CACHE rather than per-root, and Invalidate never clears it,
+	// because a per-root record could not answer the question consumers
+	// actually ask. The failed root's canonicalName is precisely what was
+	// never read, so nothing can say which class's absence that failure
+	// explains; only "this cache cannot vouch for itself" is a claim the
+	// failure supports. A later root's successful Invalidate proves Core KV
+	// answers again — it does not load the root that was missed — so the only
+	// event that re-establishes full trust is a fresh Refresh: a full rescan
+	// that either loads every root cleanly (and Refresh clears this latch) or
+	// fails outright (§ its own widening comment), never a partial answer.
+	// Today Refresh runs only at construction, so that event is a restart; a
+	// future periodic Refresh (§8.2's named revisit) inherits the same clear
+	// for free.
+	degraded      bool
+	degradedSince time.Time
+	degradedKey   string
+	degradedErr   error
+	// degradedStaleRoots maps a root whose Invalidate failed to the
+	// canonicalName its SURVIVING entry is still served under. The latch above
+	// answers "an absence may be a lie"; this answers the sharper question an
+	// absence cannot raise — a failing Invalidate returns before touching
+	// byRoot, so an existing root's OLD entry survives intact, and a package
+	// upgrade flipping that DDL's `sensitive` to true (Contract #8 §8.1 keeps
+	// the meta-vertex NanoID across upgrades, so this is an UPDATE to a root
+	// already in the index) leaves Lookup answering ok=true with the stale
+	// `false`.
+	//
+	// Keyed by ROOT although consumers ask by NAME, for the two things only the
+	// root can settle. A name two roots claim is stranded by whichever of them
+	// failed, so one root's later success must not clear a flag the other still
+	// owns; and a root whose canonicalName CHANGED between the failed and the
+	// successful load would, under name-keying, leave the old name flagged
+	// forever with nothing left able to name it. Accumulated across failures
+	// rather than replaced: a second failed root does not make the first one's
+	// entry fresh again.
+	degradedStaleRoots map[string]string
 }
 
 // opMetaDescriptor is one op-meta root's own contribution to an operation's
@@ -445,6 +489,16 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 	c.byCommand = buildByCommand(byName, c.logger)
 	c.byOpMetaRoot = byOpMetaRoot
 	c.byOpType = floorsByOpType(byOpMetaRoot, c.logger)
+	// Reaching this line means every root loaded cleanly (any loader error
+	// above returns first, per the widening comment) — the exact event the
+	// degraded latch's own doc names as what re-establishes full trust. A
+	// future periodic Refresh must not keep refusing writes for a staleness
+	// this rebuild just resolved.
+	c.degraded = false
+	c.degradedSince = time.Time{}
+	c.degradedKey = ""
+	c.degradedErr = nil
+	c.degradedStaleRoots = nil
 	c.mu.Unlock()
 
 	c.logger.Info("ddl cache: refreshed", "entries", len(byName), "opDescriptors", len(byOpMetaRoot))
@@ -848,7 +902,14 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		metaRootKey = strings.Join(parts[:3], ".")
 	}
 	if !strings.HasPrefix(metaRootKey, "vtx.meta.") {
-		return fmt.Errorf("ddl cache: invalidate: key %q is not a meta-vertex key", metaRootKey)
+		// No caller reaches this today (step 8 filters on the `vtx.meta.>`
+		// prefix before invalidating), and it latches anyway: whatever key this
+		// was, a commit asked to be reflected in the cache and was not, and a
+		// future caller that got its filter wrong must not be able to open the
+		// same silent divergence the two paths below are latched against.
+		ierr := fmt.Errorf("ddl cache: invalidate: key %q is not a meta-vertex key", metaRootKey)
+		c.markDegraded(metaRootKey, ierr)
+		return ierr
 	}
 
 	// Serialize invalidations against each other, and hold the CACHE lock only
@@ -880,7 +941,13 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		// see and report the failure, so there is nothing to gain by
 		// swallowing a read that did not answer and re-deriving the floor
 		// around a root whose current shape is unknown.
-		return fmt.Errorf("ddl cache: invalidate op-meta %s: %w", metaRootKey, oerr)
+		//
+		// The commit this invalidation followed is already durable, so the caller
+		// cannot undo it and does not retry — which is what makes the latch, not
+		// the returned error, the lasting record of the divergence.
+		ierr := fmt.Errorf("ddl cache: invalidate op-meta %s: %w", metaRootKey, oerr)
+		c.markDegraded(metaRootKey, ierr)
+		return ierr
 	}
 
 	// A TOMBSTONED root can no longer say which operationType it carried, which
@@ -927,7 +994,12 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 
 	ref, ok, err := c.loadMetaVertex(ctx, metaRootKey, nil)
 	if err != nil {
-		return fmt.Errorf("ddl cache: invalidate %s: %w", metaRootKey, err)
+		// The DDL entry this root would have contributed is the one a consumer
+		// reading "no such class" is most likely to be missing, so the latch is
+		// set here for the same reason as on the op-meta path above.
+		ierr := fmt.Errorf("ddl cache: invalidate %s: %w", metaRootKey, err)
+		c.markDegraded(metaRootKey, ierr)
+		return ierr
 	}
 
 	c.mu.Lock()
@@ -937,6 +1009,15 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 	} else {
 		delete(c.byRoot, metaRootKey)
 	}
+	// This root's entry has just been rebuilt from Core KV, so whatever an
+	// earlier failure stranded here is stranded no longer — drop its flag, by
+	// ROOT, which is what makes a renamed canonicalName withdraw the name that
+	// was actually flagged rather than the one now being served. The process-wide
+	// latch is deliberately NOT cleared: another root may still be unresolved,
+	// and only a full Refresh can speak for the whole projection. Without this,
+	// one transient blip would refuse this class's sensitive writes until a
+	// restart even after its own reload proved the entry current.
+	delete(c.degradedStaleRoots, metaRootKey)
 	c.byName, c.byMetaPK = indexByCanonicalName(c.byRoot, c.logger)
 	// The ambiguity guard is GLOBAL (it counts how many vertexType DDLs admit
 	// each op across the whole set), so a single-entry edit can change which
@@ -953,6 +1034,92 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 	c.logger.Info("ddl cache: invalidated",
 		"metaKey", metaRootKey, "canonicalName", loggedName, "present", ok)
 	return nil
+}
+
+// markDegraded latches an Invalidate failure. Called from Invalidate's error
+// returns, where invalidateMu is held and c.mu is free — the same
+// invalidateMu-then-mu order every other write in that method takes, so it adds
+// no new lock ordering.
+//
+// The two halves of the state are recorded on different rules. The onset
+// (timestamp, root, error) is FIRST-failure-wins: it answers "how long has this
+// process been serving a cache that cannot vouch for itself", which only the
+// first failure dates, and letting a later one overwrite it would silently
+// shorten that window. The possibly-stale name set ACCUMULATES: each failure
+// strands a different entry, and none of them is refreshed by the next.
+//
+// The stale name is read from byRoot here rather than passed in, because the
+// entry that is about to go stale is by definition the one this failed load was
+// replacing — the caller has nothing better to say. A root with no prior entry
+// contributes no name: nothing is stale, the entry is simply missing, which is
+// what the latch itself already covers.
+func (c *DDLCache) markDegraded(metaRootKey string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	staleName := c.byRoot[metaRootKey].CanonicalName
+	if staleName != "" {
+		if c.degradedStaleRoots == nil {
+			c.degradedStaleRoots = map[string]string{}
+		}
+		c.degradedStaleRoots[metaRootKey] = staleName
+	}
+	if c.degraded {
+		return
+	}
+	c.degraded = true
+	c.degradedSince = time.Now()
+	c.degradedKey = metaRootKey
+	c.degradedErr = err
+	if c.logger != nil {
+		c.logger.Error("ddl cache: degraded — an invalidation failed and the cache no longer matches committed Core KV",
+			"metaKey", metaRootKey, "staleCanonicalName", staleName, "error", err)
+	}
+}
+
+// Degraded reports whether an Invalidate has failed in this process and, if so,
+// when it first failed, on which meta root, and why.
+//
+// It is what separates the two answers Lookup collapses into one. A miss from a
+// cache that is NOT degraded is Contract #1 §1.6's permissive default — the
+// class is genuinely ungoverned. A miss from a degraded cache carries no such
+// claim: the declaration may exist and simply never have reached this process,
+// which is why step 6.5 refuses to commit an unresolved class as plaintext
+// while this holds. Invalidate never clears it; only a fresh Refresh does —
+// see the field doc.
+func (c *DDLCache) Degraded() (bool, time.Time, string, error) {
+	if c == nil {
+		return false, time.Time{}, "", nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.degraded, c.degradedSince, c.degradedKey, c.degradedErr
+}
+
+// PossiblyStale reports whether canonicalName is served from an entry a failed
+// Invalidate may have left behind its committed document.
+//
+// It is the half of the degraded state a miss cannot express. Degraded says a
+// LOOKUP MISS is no longer evidence of absence; this says a lookup HIT is no
+// longer evidence of currency — the failed reload was of this very entry, so
+// what it serves is whatever was true before the commit it never read. A hit on
+// any other name is untouched by that failure and stays fully trustworthy,
+// which is what keeps the fail-closed reaction narrow.
+//
+// The scan is over the FAILED roots, not over the cache: it is bounded by how
+// many invalidations have failed in this process — normally none, and a handful
+// in the state this exists for.
+func (c *DDLCache) PossiblyStale(canonicalName string) bool {
+	if c == nil || canonicalName == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, name := range c.degradedStaleRoots {
+		if name == canonicalName {
+			return true
+		}
+	}
+	return false
 }
 
 // Size returns the number of cached entries (for tests and metrics).

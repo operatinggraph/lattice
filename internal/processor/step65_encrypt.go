@@ -80,6 +80,20 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 			// redelivering into the same exhausted budget.
 			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s came back empty after a live-read fault; refusing to treat it as non-sensitive: %w", m.Key, fault)
 		}
+		// Only an ASPECT can carry sensitivity — the install refuses `sensitive`
+		// on every other DDL class (internal/pkgmgr/sensitivescope.go) — so a
+		// cache that cannot adjudicate a vertex or link mutation is withholding
+		// an answer that could not have changed this step's behavior anyway.
+		// Scoping the refusal to aspects is therefore not leniency, it is the
+		// blast radius the risk actually has: vertexRootForResolve returns no
+		// root for a link, so EVERY link whose class is not itself a DDL
+		// resolves empty, and rejecting those would take out ordinary link
+		// writes across every package for no protection at all.
+		if kind == substrate.KindAspect {
+			if err := degradedCacheRefusal(resolver.DDLs, m.Key, class, ref, ok); err != nil {
+				return nil, false, err
+			}
+		}
 		if !ok || !ref.Sensitive {
 			continue
 		}
@@ -135,6 +149,60 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 		m.Document = doc
 	}
 	return append(out, extra...), len(extra) > 0, nil
+}
+
+// degradedCacheRefusal reports the reason a DDL cache that has failed an
+// invalidation cannot be trusted to answer THIS aspect mutation's sensitivity,
+// or nil when it can. Called only for aspects, the sole kind an install lets
+// declare `sensitive`.
+//
+// Three distinct failures of the same cause, each needing its own test because
+// they present as different lookup results. A committed DDL reaches this process
+// only through Invalidate:
+//
+//   - resolved=false: the class may be declared sensitive in Core KV and the
+//     declaration simply never arrived. The missed root's canonicalName is
+//     exactly what was never read, so nothing about THIS class can rule it out,
+//     and Contract #1 §1.6's permissive default — sound over a cache that knows
+//     itself complete — cannot be invoked here.
+//   - resolved only by the instanceOf-chain FALLBACK: the exact lookup on the
+//     mutation's own class missed, and the walk then terminated on an ancestor
+//     type whose DDL is perfectly fresh. That answer is about the ANCESTOR, and
+//     a coarse parent type is rarely itself sensitive, so a missed fine-grained
+//     DDL is silently answered "not sensitive" by a name nothing flagged. The
+//     exact-hit requirement is deliberately broader than the stale-name test: a
+//     resolution that never consulted this class's own entry cannot be checked
+//     against it, so while degraded the walk is not trusted at all.
+//   - an EXACT hit on a possibly-stale name: a failing Invalidate returns before
+//     it touches byRoot, so the PRIOR entry survives whole. A package upgrade
+//     flipping `sensitive` false→true on an existing DDL is an update to a root
+//     already indexed, and the cache keeps answering with the old `false` — a hit
+//     that would commit the aspect as plaintext just as surely as a miss would.
+//     Custody travels with the same entry, so a stale hit that still says
+//     sensitive is no safer: it would encrypt under whatever holder the
+//     pre-upgrade declaration named.
+//
+// All three are TERMINAL, like the live-read-fault refusal above: nothing in a
+// redelivery re-reads Core KV for these classes, so it would land on the
+// identical state and only an operator restart can change the answer.
+func degradedCacheRefusal(cache *DDLCache, mutationKey, class string, ref MetaVertexRef, resolved bool) error {
+	degraded, since, failedKey, cacheErr := cache.Degraded()
+	if !degraded {
+		return nil
+	}
+	if !resolved {
+		return fmt.Errorf("step 6.5: resolve DDL for %s came back empty from a DDL cache degraded since %s (invalidate of %s failed: %v); refusing to treat it as non-sensitive",
+			mutationKey, substrate.FormatTimestamp(since), failedKey, cacheErr)
+	}
+	if _, exact := cache.Lookup(class); !exact {
+		return fmt.Errorf("step 6.5: class %q on %s resolved only through the instanceOf chain, from a DDL cache degraded since %s (invalidate of %s failed: %v); refusing to adjudicate its sensitivity from an ancestor's DDL",
+			class, mutationKey, substrate.FormatTimestamp(since), failedKey, cacheErr)
+	}
+	if cache.PossiblyStale(ref.CanonicalName) {
+		return fmt.Errorf("step 6.5: DDL %q governing %s may be stale — its invalidation failed and the cache has been degraded since %s (invalidate of %s failed: %v); refusing to adjudicate sensitivity from an entry that may predate a committed change",
+			ref.CanonicalName, mutationKey, substrate.FormatTimestamp(since), failedKey, cacheErr)
+	}
+	return nil
 }
 
 // keyHolderFor resolves WHICH vertex custodies this mutation's DEK

@@ -3,7 +3,9 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -274,6 +276,245 @@ func TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts(t *t
 	}
 	if !found {
 		t.Fatalf("aspect mutation missing from output: %+v", out)
+	}
+}
+
+// TestEncryptSensitiveMutations_UnresolvedClass_HealthyCache_PassesThrough is
+// the positive vector for the degraded-cache rejection below, and the guard on
+// Contract #1 §1.6's permissive default: a class NO DDL declares, resolved
+// against a cache that can vouch for itself, is genuinely ungoverned and must
+// commit unchanged.
+func TestEncryptSensitiveMutations_UnresolvedClass_HealthyCache_PassesThrough(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	identityKey := "vtx.identity." + testNanoID2
+	in := []MutationOp{sensitiveMutation(identityKey+".undeclared", "undeclaredclass", "plain")}
+
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err != nil {
+		t.Fatalf("encryptSensitiveMutations: %v", err)
+	}
+	if minted {
+		t.Fatalf("mintedPiiKey = true, want false (nothing sensitive resolved)")
+	}
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1 (unchanged)", len(out))
+	}
+	data, ok := out[0].Document["data"].(map[string]interface{})
+	if !ok || data["value"] != "plain" {
+		t.Fatalf("data = %+v, want the plaintext left unchanged", out[0].Document["data"])
+	}
+}
+
+// TestEncryptSensitiveMutations_UnresolvedClass_DegradedCache_Rejects: the same
+// mutation, against a cache that has missed an invalidation, must be REJECTED.
+// The class may well be declared sensitive in Core KV — the declaration simply
+// never reached this process — and committing it would write PHI as plaintext
+// under a permissive default that only holds over a complete cache.
+func TestEncryptSensitiveMutations_UnresolvedClass_DegradedCache_Rejects(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+	cp.deps.DDLs.markDegraded("vtx.meta.Bb2Cc3Dd4Ee5Ff6Gg7H", errors.New("core kv unreachable"))
+
+	identityKey := "vtx.identity." + testNanoID2
+	in := []MutationOp{sensitiveMutation(identityKey+".undeclared", "undeclaredclass", "plain")}
+
+	if _, _, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{}); err == nil {
+		t.Fatalf("an unresolved class against a degraded DDL cache must be rejected, not committed as plaintext")
+	} else if !strings.Contains(err.Error(), "came back empty from a DDL cache degraded since") {
+		// Wording specific to THIS branch: the pre-existing live-read-fault
+		// refusal ends in the same "non-sensitive" phrase, so asserting on that
+		// alone could not tell the two branches apart.
+		t.Fatalf("rejection = %v, want the degraded-cache empty-resolution refusal", err)
+	}
+}
+
+// TestEncryptSensitiveMutations_DegradedCache_NonAspectKindsPassThrough is the
+// bound on the refusal above. Only an aspectType DDL can declare `sensitive`
+// (the install refuses it on every other class), so withholding an answer about
+// a link or vertex class costs this step nothing it could have acted on. The
+// link case is the load-bearing one: a link has no vertex root to walk, so EVERY
+// link whose class is not itself a DDL resolves empty — rejecting those would
+// stop ordinary link writes across every package for no protection at all.
+func TestEncryptSensitiveMutations_DegradedCache_NonAspectKindsPassThrough(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+	cp.deps.DDLs.markDegraded("vtx.meta.Bb2Cc3Dd4Ee5Ff6Gg7H", errors.New("core kv unreachable"))
+
+	in := []MutationOp{
+		{
+			Op:  "create",
+			Key: fmt.Sprintf("lnk.identity.%s.forPatient.widget.%s", testNanoID2, tplID),
+			Document: map[string]interface{}{
+				"class": "forPatient", "isDeleted": false,
+				"data": map[string]interface{}{"note": "plain"},
+			},
+		},
+		{
+			Op:  "create",
+			Key: "vtx.widget." + tplID,
+			Document: map[string]interface{}{
+				"class": "undeclaredvertex", "isDeleted": false,
+				"data": map[string]interface{}{"note": "plain"},
+			},
+		},
+	}
+
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err != nil {
+		t.Fatalf("a degraded cache must not reject non-aspect mutations: %v", err)
+	}
+	if minted {
+		t.Fatalf("mintedPiiKey = true, want false")
+	}
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2 (both unchanged)", len(out))
+	}
+	for _, m := range out {
+		data, ok := m.Document["data"].(map[string]interface{})
+		if !ok || data["note"] != "plain" {
+			t.Fatalf("%s data = %+v, want the plaintext unchanged", m.Key, m.Document["data"])
+		}
+	}
+}
+
+// TestEncryptSensitiveMutations_StaleResolvedClass_Rejects is the package-UPGRADE
+// case, the one a lookup MISS cannot express. A failing Invalidate returns before
+// it touches byRoot, so the prior entry survives whole and goes on being served:
+// an upgrade flipping that DDL's `sensitive` to true (Contract #8 §8.1 keeps the
+// meta-vertex NanoID, so it is an UPDATE to a root already indexed) commits
+// durably while the cache still answers with the old declaration. Resolution
+// SUCCEEDS, and the answer it succeeds with is exactly the one that would commit
+// the aspect as plaintext.
+func TestEncryptSensitiveMutations_StaleResolvedClass_Rejects(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	// The invalidation of the already-cached `nickname` DDL fails, leaving the
+	// pre-upgrade entry in place — the hazard, reproduced through the real path.
+	staleRoot := "vtx.meta.nickname"
+	if _, err := conn.KVPut(ctx, testCoreBucket, staleRoot, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cp.deps.DDLs.Invalidate(ctx, staleRoot); err == nil {
+		t.Fatalf("Invalidate must fail — the fixture never stranded an entry")
+	}
+	if ref, ok := cp.deps.DDLs.Lookup("nickname"); !ok || ref.Sensitive {
+		t.Fatalf("the pre-failure entry must still be SERVED (ok=%v sensitive=%v) — that is the hazard under test", ok, ref.Sensitive)
+	}
+
+	identityKey := "vtx.identity." + testNanoID2
+	in := []MutationOp{sensitiveMutation(identityKey+".nickname", "nickname", "Andy")}
+	if _, _, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{}); err == nil {
+		t.Fatalf("a resolved-but-possibly-stale governing DDL must be rejected, not read as non-sensitive")
+	} else if !strings.Contains(err.Error(), "may be stale") {
+		t.Fatalf("rejection = %v, want the stale-entry refusal", err)
+	}
+}
+
+// TestEncryptSensitiveMutations_DegradedCache_ChainResolvedClass_Rejects closes
+// the fallback the other two arms leave open. The exact lookup on a fine-grained
+// class MISSES exactly as it does when that class's DDL never loaded — but
+// resolution does not stop there: it walks the aspect's parent up its instanceOf
+// chain and can terminate on a perfectly fresh ANCESTOR type, whose name nothing
+// flagged and whose `sensitive` is typically false. So ok=true, no stale name,
+// and the aspect commits in the clear. While degraded, an answer that never
+// consulted this class's own entry cannot be checked against it, so the walk is
+// not trusted at all.
+func TestEncryptSensitiveMutations_DegradedCache_ChainResolvedClass_Rejects(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	identityKey := "vtx.identity." + testNanoID2
+	aspectKey := identityKey + ".chained"
+	targetKey := "vtx.widget." + tplID
+	// `nickname.v2` has no DDL of its own; the chain terminates on the coarse,
+	// perfectly fresh `nickname` DDL, which declares sensitive:false.
+	in := []MutationOp{
+		sensitiveMutation(aspectKey, "nickname.v2", "Andy"),
+		{
+			Op:  "create",
+			Key: targetKey,
+			Document: map[string]interface{}{
+				"class": "nickname", "isDeleted": false, "data": map[string]interface{}{},
+			},
+		},
+		{
+			Op:  "create",
+			Key: fmt.Sprintf("lnk.identity.%s.instanceOf.widget.%s", testNanoID2, tplID),
+			Document: map[string]interface{}{
+				"class": "instanceOf", "isDeleted": false,
+			},
+		},
+	}
+
+	// Control: with a healthy cache this same batch resolves through the chain and
+	// passes through, so the rejection below is the degraded state talking rather
+	// than the fixture failing to resolve at all.
+	out, _, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err != nil {
+		t.Fatalf("healthy cache must accept the chain-resolved mutation: %v", err)
+	}
+	for _, m := range out {
+		if m.Key != aspectKey {
+			continue
+		}
+		if _, ciphertext := m.Document["data"].(vault.Ciphertext); ciphertext {
+			t.Fatalf("the ancestor DDL is non-sensitive; the control run must not encrypt")
+		}
+	}
+
+	cp.deps.DDLs.markDegraded("vtx.meta.Bb2Cc3Dd4Ee5Ff6Gg7H", errors.New("core kv unreachable"))
+	if _, _, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{}); err == nil {
+		t.Fatalf("a chain-resolved class must be rejected while degraded, not adjudicated from an ancestor's DDL")
+	} else if !strings.Contains(err.Error(), "resolved only through the instanceOf chain") {
+		t.Fatalf("rejection = %v, want the chain-resolution refusal", err)
+	}
+}
+
+// TestEncryptSensitiveMutations_DegradedCache_ResolvedClassesUnaffected: the
+// refusal is scoped to the entries the failure actually touched. A class the
+// cache resolves — sensitive or not — is trustworthy UNLESS it is one the latch
+// flagged as possibly stale (the test above); a failure on some OTHER root
+// leaves this class's entry exactly as fresh as it was, so a degraded cache must
+// not fail these writes.
+func TestEncryptSensitiveMutations_DegradedCache_ResolvedClassesUnaffected(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+	cp.deps.DDLs.markDegraded("vtx.meta.Bb2Cc3Dd4Ee5Ff6Gg7H", errors.New("core kv unreachable"))
+
+	identityKey := "vtx.identity." + testNanoID2
+	in := []MutationOp{
+		sensitiveMutation(identityKey+".ssn", "ssn", "123-45-6789"),
+		sensitiveMutation(identityKey+".nickname", "nickname", "Andy"),
+	}
+
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err != nil {
+		t.Fatalf("encryptSensitiveMutations: %v", err)
+	}
+	if !minted {
+		t.Fatalf("mintedPiiKey = false, want true (the resolved sensitive class still encrypts)")
+	}
+	for _, m := range out {
+		switch m.Key {
+		case identityKey + ".ssn":
+			if _, ok := m.Document["data"].(vault.Ciphertext); !ok {
+				t.Fatalf("ssn data = %T, want ciphertext", m.Document["data"])
+			}
+		case identityKey + ".nickname":
+			data, ok := m.Document["data"].(map[string]interface{})
+			if !ok || data["value"] != "Andy" {
+				t.Fatalf("nickname data = %+v, want the plaintext unchanged", m.Document["data"])
+			}
+		}
 	}
 }
 
