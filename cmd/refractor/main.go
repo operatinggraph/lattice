@@ -1676,6 +1676,19 @@ func main() {
 			logger.Info("secure lens decryptor installed", "lensId", r.ID, "columns", len(cols))
 		}
 
+		// The lens's authorization plane, recorded on the pipeline for EVERY
+		// lens kind. It sits below the switch above for the same ordering
+		// reason the audit does, and it is a no-op re-assertion for an
+		// actor-aggregate lens, whose installer already set the identical value
+		// (projection.InstallActorAggregate → plan.AuthPlane, itself
+		// projection.IsAuthPlane). What it closes is every OTHER kind: a
+		// plain-kind lens declaring nats_kv into the capability bucket, or a
+		// Postgres grant table, projects an authorization surface with no
+		// actor-aggregate installer to say so, and the plain arm's narrowing
+		// licence (pipeline.Pipeline's authPlane field doc) has to be able to
+		// refuse it.
+		installLensPlane(p, r)
+
 		// The plain-lens divergence audit (lens-projection-divergence-audit-
 		// design.md §4.3/§4.4). It gives a plain lens its first per-row
 		// correctness verdict — a background recompute-and-compare that NEVER
@@ -1691,12 +1704,11 @@ func main() {
 		// sweep's, a Postgres target cannot read a row back), and it is
 		// published per lens as auditEnrolled/auditRefusal — the log line is
 		// the operator's local copy, not the record.
-		// projection.IsAuthPlane is the ONE canonical derivation of the lens's
-		// plane (nats_kv into the capability bucket, or a Postgres grant
-		// table), and it is passed in rather than read off the pipeline:
-		// Pipeline.authPlane is set only by InstallActorAggregate, so it is
-		// false by construction on exactly the plain-kind capability-kv lens
-		// this conjunct exists to refuse.
+		// The plane is passed in rather than read back off the pipeline so
+		// enrolment never depends on whether an earlier stage happened to
+		// record it — projection.IsAuthPlane is the one canonical derivation
+		// (nats_kv into the capability bucket, or a Postgres grant table), and
+		// both this call and installLensPlane above take it from there.
 		if enrolled, refusal := p.InstallAudit(pipeline.AuditOptions{
 			AuthPlane: projection.IsAuthPlane(r),
 			Interval:  auditOpts.Interval,
@@ -2181,6 +2193,20 @@ func verifiesReadPathPosture(into lens.IntoConfig) bool {
 // Derived from the lens's Into descriptor, never from a canonical name.
 func isOperationRoleIndexLens(r *lens.Rule) bool {
 	return len(r.Into.Key) == 1 && r.Into.Key[0] == "operationType" && projection.IsAuthPlane(r)
+}
+
+// installLensPlane records on the pipeline which plane its lens projects onto,
+// from projection.IsAuthPlane — the one canonical derivation, covering BOTH of
+// its arms (nats_kv into the capability bucket, and a Postgres grant table).
+// Every mechanism that must treat an authorization surface differently from a
+// business read model reads that one flag, so a lens kind whose installer never
+// declared it would be judged as an ordinary business lens by all of them.
+//
+// It is a function rather than an inline call so the activation path's own
+// derivation is reachable from a test: the flag is otherwise only observable
+// after a whole refractor has booted.
+func installLensPlane(p *pipeline.Pipeline, r *lens.Rule) {
+	p.SetAuthPlane(projection.IsAuthPlane(r))
 }
 
 // threadsKeyColumns reports whether r's Into.Key may be threaded onto its

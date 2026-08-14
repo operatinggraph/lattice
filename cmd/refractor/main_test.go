@@ -4,9 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -64,6 +69,153 @@ func TestIsOperationRoleIndexLens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInstallLensPlane is the derivation table for what the activation path
+// records on every pipeline — the lens's authorization plane, across both of
+// projection.IsAuthPlane's arms and both negatives. The claim that ACTIVATION
+// actually records it, on a real pipeline built the way activation builds one,
+// is TestActivationRecordsTheLensPlane below; this one is the cheap shape
+// enumeration behind it.
+func TestInstallLensPlane(t *testing.T) {
+	tests := []struct {
+		name string
+		rule *lens.Rule
+		want bool
+	}{
+		{
+			name: "nats_kv into the capability bucket is auth-plane",
+			rule: &lens.Rule{
+				Into: lens.IntoConfig{Target: "nats_kv", Bucket: projection.AuthPlaneBucket, Key: lens.KeyField{"operationType"}},
+			},
+			want: true,
+		},
+		{
+			name: "a postgres grant table is auth-plane",
+			rule: &lens.Rule{
+				Into: lens.IntoConfig{Target: "postgres", Table: "actor_read_grants", GrantTable: true, Key: lens.KeyField{"actor_id"}},
+			},
+			want: true,
+		},
+		{
+			name: "an ordinary nats_kv business lens is not",
+			rule: &lens.Rule{
+				Into: lens.IntoConfig{Target: "nats_kv", Bucket: "weaver-targets", Key: lens.KeyField{"key"}},
+			},
+			want: false,
+		},
+		{
+			name: "an ordinary postgres lens with no grant table is not",
+			rule: &lens.Rule{
+				Into: lens.IntoConfig{Target: "postgres", Table: "listings", Key: lens.KeyField{"key"}},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &pipeline.Pipeline{}
+			installLensPlane(p, tc.rule)
+			if got := p.AuthPlane(); got != tc.want {
+				t.Fatalf("AuthPlane() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// activateLens runs the plane-relevant stretch of startPipeline's activation
+// sequence — compile, thread the key columns through the production helper,
+// build the pipeline, record the plane — against a REAL pipeline rather than a
+// bare struct, in the order main.go's closure runs them. That closure is not
+// callable from a test (it captures a whole booted process), so this is the
+// longest run of it a test can drive, and it is what makes the assertions below
+// claims about activation rather than about projection.IsAuthPlane a second
+// time.
+func activateLens(t *testing.T, r *lens.Rule, spec string, adpt adapter.Adapter) *pipeline.Pipeline {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err)
+	if threadsKeyColumns(r) {
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.True(t, isFull)
+		require.NoError(t, projection.ThreadKeyColumns(fullCR, nil, r.Into.Key))
+	}
+	p, err := pipeline.New(r.ID, r.Into.Target, "CORE", nil, nil, adpt, nil)
+	require.NoError(t, err)
+	require.NoError(t, p.UseFullEngine(eng, cr))
+	installLensPlane(p, r)
+	return p
+}
+
+// TestActivationRecordsTheLensPlane is the pin behind the one line this
+// increment adds to the activation path. Before it, pipeline.authPlane was
+// written by exactly one installer — projection.InstallActorAggregate — so a
+// PLAIN lens projecting an authorization surface carried false by
+// construction, and every guard reading that field was inert for the one shape
+// it most needed to catch. A test that set the field by hand would assert
+// nothing about that; each case here activates a lens from its RULE and reads
+// back what activation recorded.
+//
+// One case per projection.IsAuthPlane arm, plus the negative — without which a
+// green result could equally come from an activation that marks everything.
+func TestActivationRecordsTheLensPlane(t *testing.T) {
+	const unitSpec = `MATCH (u:unit) RETURN u.key AS key, u.name AS name`
+
+	t.Run("a plain nats_kv lens into the capability bucket activates ON the plane", func(t *testing.T) {
+		r := &lens.Rule{
+			ID:             "plane-test-capability",
+			CanonicalName:  "planeTestCapability",
+			ResolvedEngine: ruleengine.EngineFull,
+			Into:           lens.IntoConfig{Target: "nats_kv", Bucket: projection.AuthPlaneBucket, Key: lens.KeyField{"key"}},
+		}
+		require.False(t, projection.IsActorAggregate(r),
+			"precondition: no actor-aggregate installer runs for this lens, so nothing else would record its plane")
+
+		p := activateLens(t, r, unitSpec, newKVAdapter(t))
+		require.True(t, p.AuthPlane(), "activation must record the capability bucket as the auth plane")
+
+		// The neighbouring activation call agrees, in the order startPipeline
+		// makes them: the audit refuses the plane rather than auditing an
+		// authorization read model as a business one.
+		enrolled, refusal := p.InstallAudit(pipeline.AuditOptions{AuthPlane: projection.IsAuthPlane(r)})
+		require.False(t, enrolled)
+		require.Contains(t, refusal, "auth plane")
+	})
+
+	t.Run("a plain postgres grant-table lens activates ON the plane", func(t *testing.T) {
+		// The other IsAuthPlane arm. The audit step is left out rather than run
+		// against a stand-in target: this harness has no Postgres adapter, and
+		// the plane is derived from the RULE and never from the adapter, so the
+		// activation claim is unchanged.
+		r := &lens.Rule{
+			ID:             "plane-test-grants",
+			CanonicalName:  "planeTestGrants",
+			ResolvedEngine: ruleengine.EngineFull,
+			Into: lens.IntoConfig{
+				Target: "postgres", Table: "actor_read_grants", GrantTable: true,
+				GrantSource: "loftspace.residence", Key: lens.KeyField{"key"},
+			},
+		}
+		p := activateLens(t, r, unitSpec, unguardableAdapter{})
+		require.True(t, p.AuthPlane(), "activation must record a grant table as the auth plane")
+	})
+
+	t.Run("an ordinary business lens activates OFF the plane", func(t *testing.T) {
+		r := &lens.Rule{
+			ID:             "plane-test-business",
+			CanonicalName:  "planeTestBusiness",
+			ResolvedEngine: ruleengine.EngineFull,
+			Into:           lens.IntoConfig{Target: "nats_kv", Bucket: "weaver-targets", Key: lens.KeyField{"key"}},
+		}
+		p := activateLens(t, r, unitSpec, newKVAdapter(t))
+		require.False(t, p.AuthPlane(),
+			"activation must not mark a business read model as an authorization surface")
+
+		enrolled, refusal := p.InstallAudit(pipeline.AuditOptions{AuthPlane: projection.IsAuthPlane(r)})
+		require.True(t, enrolled, "the same lens off the plane enrols; refusal: %s", refusal)
+	})
 }
 
 // TestThreadsKeyColumns pins the exemption set both the activation path and

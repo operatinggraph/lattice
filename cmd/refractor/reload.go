@@ -146,6 +146,30 @@ func hotReloadRefusal(entry *pipelineEntry, newLens *lens.Rule) string {
 		entry.grantSource != newLens.Into.GrantSource) {
 		return "guarded lens update changes its write surface — not hot-reloadable (the guard binds to the surface the lens already wrote); " + reactivateRemedy
 	}
+	// A lens's PLANE — whether it projects an authorization surface
+	// (projection.IsAuthPlane: nats_kv into the capability bucket, or a Postgres
+	// grant table) — is decided once, at activation, and recorded in three
+	// places a swap re-derives none of: pipeline.authPlane (installLensPlane,
+	// main.go), this entry's own authPlane (which routes the heartbeat between
+	// the Capability-Lens and the business-lens severity tier), and the
+	// Auditor's captured copy (whose enrolment refuses the plane outright). An
+	// INTO edit moving a lens ONTO the plane leaves all three reading "business
+	// read model" for an authorization surface — a monitoring tier, a divergence
+	// detector and a narrowing licence each judging it as something it no longer
+	// is — and one moving it OFF strands every capability row it wrote, which no
+	// producer addresses afterwards.
+	//
+	// The remedy is a refusal rather than a re-derivation, deliberately: those
+	// three holders are read from the handler and audit goroutines while a
+	// reload runs on the dispatch goroutine, so re-assigning them here would be
+	// a data race — whereas a deactivate-and-reactivate re-derives all three
+	// through the one path that owns them. grantTable and protected are pinned
+	// above for their own reasons; this closes the arm neither reaches, an
+	// UNGUARDED lens moving its nats_kv bucket, which the guarded-surface pin
+	// above lets through by design.
+	if entry.authPlane != projection.IsAuthPlane(newLens) {
+		return "lens update changes its authorization plane — not hot-reloadable (the plane is recorded at activation by the pipeline, its health entry and its auditor alike); " + reactivateRemedy
+	}
 	return ""
 }
 

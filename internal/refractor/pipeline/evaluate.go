@@ -269,10 +269,10 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 		// plain-lens-neighbour-anchor-derivation-design.md Increment 2 gives
 		// this branch its own producer into the derivation-mode switch
 		// (evaluatePlainNeighbourEvent, anchor_derivation_plain.go) — shadow
-		// -only this fire (Increment 3's licence is unbuilt), so the outcome
-		// here is always identical to calling executeFullForActor with an
-		// empty seed directly, the same call the else-branch below makes for
-		// every other (already-seeded, or non-plain) event.
+		// -only, because its act gate declines every lens, so the outcome here
+		// is always identical to calling executeFullForActor with an empty seed
+		// directly, the same call the else-branch below makes for every other
+		// (already-seeded, or non-plain) event.
 		results, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
 	} else {
 		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)

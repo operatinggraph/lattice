@@ -156,6 +156,10 @@ func runningEntry() *pipelineEntry {
 		guarded: true,
 		target:  "nats_kv",
 		bucket:  "capability-kv",
+		// The capability bucket IS the auth plane, so this is what
+		// newPipelineEntry records for such a lens; an entry saying otherwise
+		// would be a shape activation never produces.
+		authPlane: true,
 		output: &lens.OutputDescriptorSpec{
 			AnchorType:       "identity",
 			OutputKeyPattern: "cap.{actorSuffix}",
@@ -176,6 +180,9 @@ func runningGrantEntry() *pipelineEntry {
 		table:       "actor_read_grants",
 		grantSource: "loftspace.residence",
 		grantTable:  true,
+		// A grant table is the auth plane's other arm, and newPipelineEntry
+		// records it as such.
+		authPlane: true,
 	}
 }
 
@@ -381,12 +388,66 @@ func TestHotReloadRefusal_GuardedBucketChange(t *testing.T) {
 func TestHotReloadRefusal_UnguardedLensMayMoveItsTarget(t *testing.T) {
 	entry := runningEntry()
 	entry.guarded = false
+	// An ordinary business bucket, on both sides: this entry is the shape
+	// activation records for a weaver-targets lens, plane included, and the
+	// move below stays inside that plane.
 	entry.bucket = "weaver-targets"
+	entry.authPlane = false
 	newLens := authPlaneRule(t)
 	newLens.Into.Bucket = "other-targets"
 	newLens.Output = entry.output
 	assert.Empty(t, hotReloadRefusal(entry, newLens),
 		"an unguarded lens strands nothing it cannot re-derive")
+}
+
+// The move the pin above lets through by design is the one that changes the
+// lens's PLANE: an unguarded business lens edited onto the capability bucket
+// keeps three activation-time records — the pipeline's own authPlane, this
+// entry's (which picks the heartbeat's severity tier), and the auditor's
+// captured copy — all reading "business read model" for what is now an
+// authorization surface.
+func TestHotReloadRefusal_UnguardedLensMayNotMoveOntoTheAuthPlane(t *testing.T) {
+	entry := runningEntry()
+	entry.guarded = false
+	entry.bucket = "weaver-targets"
+	entry.authPlane = false
+
+	newLens := authPlaneRule(t)
+	newLens.Into.Bucket = projection.AuthPlaneBucket
+	newLens.Output = entry.output
+
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "authorization plane")
+}
+
+// And the reverse: moving OFF the plane strands every capability row the lens
+// wrote, since no producer addresses them afterwards — the same argument the
+// grantTable pin makes for its own family.
+func TestHotReloadRefusal_UnguardedLensMayNotMoveOffTheAuthPlane(t *testing.T) {
+	entry := runningEntry()
+	entry.guarded = false
+
+	newLens := authPlaneRule(t)
+	newLens.Into.Bucket = "weaver-targets"
+	newLens.Output = entry.output
+
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "authorization plane")
+}
+
+// The entry's own record is what the pin reads, and newPipelineEntry is what
+// writes it — so the two must agree, or the pin compares against a plane the
+// lens was never activated with.
+func TestNewPipelineEntry_RecordsThePlaneThePinReads(t *testing.T) {
+	onPlane := newPipelineEntry(grantRule(), unguardableAdapter{}, nil, nil, nil, nil, nil)
+	assert.True(t, onPlane.authPlane, "a grant table is the auth plane")
+
+	business := grantRule()
+	business.Into.GrantTable = false
+	business.Into.Table = "residence_read_model"
+	offPlane := newPipelineEntry(business, unguardableAdapter{}, nil, nil, nil, nil, nil)
+	assert.False(t, offPlane.authPlane)
+
+	assert.Contains(t, hotReloadRefusal(onPlane, business), "grantTable",
+		"the grantTable pin answers this family first; the plane pin is what covers the nats_kv arm")
 }
 
 // The baseline is the RUNNING pipeline's activated value, never the last-seen

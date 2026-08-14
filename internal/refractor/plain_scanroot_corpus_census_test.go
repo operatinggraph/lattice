@@ -253,6 +253,33 @@ func deriveScanRootVerdict(t *testing.T, eng *full.Engine, name, spec string, ru
 	if closureOK {
 		v.closure = closureHolds
 	}
+
+	// This column's verdict and the narrowing licence's own closure conjunct
+	// must stay the same answer. Three routes reach it, and they agree across
+	// the whole corpus today:
+	//
+	//   - AnchorProjectionKey (this column) resolves an EVENT's key, so it
+	//     also evaluates the key columns;
+	//   - HasAnchorOnlyKeyColumns is the structural half a per-LENS caller can
+	//     ask with no event, and is strictly weaker — a key column that is
+	//     anchor-only but evaluates to nil, or needs an aspect read no root
+	//     body carries, passes it and fails the evaluation;
+	//   - ProjectsOneRowPerAnchor is what the WRITE licence reads, and is
+	//     strictly stronger — it also requires a key column that IDENTIFIES
+	//     the anchor, without which several anchors group into one row that an
+	//     evaluation seeded at a single anchor would truncate.
+	//
+	// A divergence is a lens ARRIVING at (or leaving) the set a future
+	// increment acts on while this column still reads its old verdict — the
+	// direction §2's header says needs an argument, caught at the lens rather
+	// than left to be noticed later.
+	require.Equalf(t, closureOK, fullCR.HasAnchorOnlyKeyColumns(),
+		"%s: the structural closure predicate and this census's per-event closure verdict disagree — "+
+			"decide which one this column should pin before recording a verdict for it", name)
+	require.Equalf(t, closureOK, fullCR.ProjectsOneRowPerAnchor(),
+		"%s: the write licence's closure conjunct (ProjectsOneRowPerAnchor) and this census's closure verdict "+
+			"disagree — the licensed set has moved away from what this column pins, so review the lens before "+
+			"recording a verdict for it", name)
 	return v
 }
 

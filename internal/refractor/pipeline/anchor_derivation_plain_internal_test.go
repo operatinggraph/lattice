@@ -337,10 +337,12 @@ RETURN pr.key AS key, org.key AS orgKey
 	})
 }
 
-// TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire pins the increment's
-// own shadow-only invariant in code: Increment 3's licence is unbuilt, so the
-// act-mode gate can never answer ready, on any lens, including the licensed
-// -shape positive vector below.
+// TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire pins the shadow-only
+// invariant in code: the act-mode gate can never answer ready, on any lens,
+// including the licensed-shape positive vector below. (The licence itself is
+// answerable and answers true for such a lens — see
+// TestPlainDerivationLicence_DoesNotReachTheActGate, which pins the two facts
+// together.)
 func TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
 	f := newEnumFixture(t, adjKV)
@@ -353,7 +355,7 @@ func TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire(t *testing.T) {
 	require.True(t, rs.rootHops.Complete, "positive vector: a shape the licence would otherwise consider")
 
 	_, ready := p.plainDerivationIndexForAct(rs)
-	require.False(t, ready, "Increment 3 is not built by this fire; act mode must never decide a plain lens's event")
+	require.False(t, ready, "acting is not wired; act mode must never decide a plain lens's event")
 }
 
 // TestPlainDerivedAnchorCap_ZeroMeansUnset mirrors
@@ -587,8 +589,8 @@ RETURN pr.key AS key
 // (anchor_derivation_mode.go) and therefore what a live Refractor runs today
 // with no env var set — and an out-of-range mode, the returned results are
 // byte-identical to calling executeFullForActor with an empty seed directly,
-// with a genuinely indexable (and therefore, in a build with Increment 3,
-// eventually act-eligible) lens shape. `act` stays a no-op THIS fire only
+// with a genuinely indexable (and therefore, once acting is wired,
+// act-eligible) lens shape. `act` stays a no-op only
 // because plainDerivationIndexForAct always declines
 // (TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire pins that
 // separately); this test proves the outcome, not just the gate.

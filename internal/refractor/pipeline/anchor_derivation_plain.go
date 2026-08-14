@@ -11,17 +11,18 @@
 // already use — once per derived anchor instead of running the unseeded
 // evaluation.
 //
-// This fire (§12: Incs 1+2) does NOT build Increment 3's licence (§5:
-// per-anchor closure, an enrolled Auditor, no $now/$projectedAt, no secure
-// decryptor, the auth-plane exclusion). plainDerivationIndexForAct below
-// therefore always declines, so `act` mode can never let this derivation
-// decide an event's outcome — only `shadow` mode's measurement runs the walk
-// at all, through the SAME three-way mode switch and the SAME
-// derivationShadow counters the actor-aware arm's affectedAnchors already
-// uses (anchor_derivation_mode.go, anchor_derivation_shadow.go). A pipeline
-// is one lens and is either plain or actor-anchored, never both, so sharing
-// that counter state introduces no new state and cannot let the two
-// measurements collide.
+// The narrowing LICENCE (§5: per-anchor closure, an enrolled Auditor, no
+// $now/$projectedAt, no secure decryptor, the auth-plane exclusion) lives
+// here too, as plainDerivationLicence — a standalone predicate no write path
+// consults yet, because plainDerivationIndexForAct declines unconditionally
+// (see its own doc). So `act` mode cannot let this derivation decide an
+// event's outcome: only `shadow` mode's measurement runs the walk at all,
+// through the SAME three-way mode switch and the SAME derivationShadow
+// counters the actor-aware arm's affectedAnchors already uses
+// (anchor_derivation_mode.go, anchor_derivation_shadow.go). A pipeline is one
+// lens and is either plain or actor-anchored, never both, so sharing that
+// counter state introduces no new state and cannot let the two measurements
+// collide.
 package pipeline
 
 import (
@@ -29,6 +30,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -123,23 +125,145 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 	return rs.rootHops, true
 }
 
-// plainDerivationIndexForAct is plainDerivationIndex plus Increment 3's
-// licence (§5 of the design: per-anchor closure via AnchorProjectionKey's ok
-// contract, an enrolled Auditor, ReferencesParam excluding $now/$projectedAt,
-// no secure decryptor, and projection.IsAuthPlane threaded onto the plain
-// pipeline). That licence is a separate, not-yet-built increment — this fire
-// is §12's "Incs 1+2" row alone, sequenced ahead of the divergence Auditor
-// the licence depends on.
+// plainDerivationLicence reports whether this plain lens may let a derived
+// anchor set DECIDE a neighbour event's outcome — §5 of the design — and, when
+// it may not, the reason. Every conjunct is fail-closed, and the refusal is
+// returned rather than logged here so the caller decides whether it is a
+// once-per-lens note or a per-event fact.
 //
-// It therefore ALWAYS declines, unconditionally, until Increment 3 lands and
-// rewrites this function to consult the real licence. Consequently `act`
-// mode can never let the plain derivation decide an event's outcome this
-// fire — only `shadow` mode's measurement (shadowPlainDerivation) runs the
-// walk at all, through plainDerivationIndex directly, which carries none of
-// these extra conjuncts. This is what makes the fire shadow-only by
-// construction rather than by a mode default an operator could override:
-// REFRACTOR_ANCHOR_DERIVATION=act changes nothing for a plain lens until
-// Increment 3 ships.
+// It is evaluated per event off LIVE pipeline fields rather than snapshotted at
+// install, for the reason seedAnchorFor and actorAwareNarrowingLabels already
+// state (pipeline.go): activation installs components in stages, so a snapshot
+// taken during installation reads a later stage's component as absent — and for
+// a licence, absent reads as satisfied, which is the fail-open direction.
+//
+// The conjuncts, cheapest first (auditEnrolment's own ordering discipline —
+// the field reads before the two expression walks):
+//
+//   - not auth-plane. An auth-plane lens projects an authorization surface, so
+//     a stale row is an over-grant in one direction or the other. The
+//     actor-aware precedent required a repair-capable healer proven end to end
+//     before narrowing that plane; this mechanism gives detection only, so the
+//     plane is excluded. p.authPlane is the activation path's record of
+//     projection.IsAuthPlane (cmd/refractor's startPipeline), which is what
+//     makes this conjunct able to fire on a plain pipeline at all.
+//   - an enrolled Auditor that is RUNNING. The ratified actor-aware licence
+//     requires a Sweeper — "something standing will re-test this row". For a
+//     plain lens the only standing thing that can is the divergence Auditor, so
+//     that is the conjunct: after narrowing, a diverged row is detected, named
+//     and alarmed rather than maybe-silently rewritten by the next neighbour
+//     event. Enrolled alone is not enough, and reading only it would be
+//     fail-open: it is the INSTALL-TIME verdict, fixed by InstallAudit and never
+//     revised, while every pass re-runs the enrolment conjuncts and the pause /
+//     rebuild checks (Auditor.suppressed) and publishes the outcome as
+//     AuditStatus.Suppression. A lens whose audit is suppressed indefinitely —
+//     an operator pause, a hot-reload that moved its anchor to an expanded set,
+//     the deployment kill switch thrown after activation — still reads
+//     Enrolled, and nothing is re-testing its rows. So both are read, from ONE
+//     status snapshot: no auditor at all, a refused one, and a suppressed one
+//     all refuse. Suppression is "" before the first pass, which is the honest
+//     reading of a freshly activated auditor: enrolled, running, nothing
+//     reported.
+//   - a full-engine compiled rule, without which neither closure nor the
+//     parameter walk can be asked at all.
+//   - a target that can read a row back (adapter.RowReader). Required twice
+//     over: the Auditor's own enrolment needs it, and so does the zero-row
+//     Delete probe the derived retraction class rests on (§6) — so it is a
+//     conjunct of the mechanism, not merely inherited from enrolment.
+//   - no secure decryptor. A Secure Lens's columns are decrypted before results
+//     reach any write path, and evaluatePlainDerivedAnchors re-enters an
+//     evaluation path that decrypts on its own results while itself running
+//     inside the outer wrapper that decrypts again — this conjunct is what
+//     keeps that double-decrypt unreachable (see that function's own note).
+//   - no $now / $projectedAt. $now is wall-clock and $projectedAt derives from
+//     the EVENT vertex's provenance, so a per-anchor re-evaluation produces a
+//     different value for them than the whole-corpus rescan it replaces. A
+//     non-exhaustive walk is a REFUSAL, never a pass: (referenced=false,
+//     exhaustive=false) means the accessor could not rule the parameter out,
+//     and reading that as absence is the read-the-declaration-not-the-matcher
+//     mistake the exhaustive flag exists to prevent.
+//   - per-anchor closure (§5.1): the lens's rows PARTITION by anchor,
+//     full.CompiledRule.ProjectsOneRowPerAnchor — every key column resolves from
+//     the anchor's binding alone AND one of them identifies WHICH anchor the row
+//     is for. This is the conjunct the audit's read-only enrolment does NOT have
+//     and a WRITE licence cannot do without: a lens grouping on a non-root
+//     variable, or on a key several anchors share, computes a TRUNCATED row
+//     under a seeded evaluation. Both halves are load-bearing — a literal key
+//     column is anchor-only by vacuity, so the first half alone would license a
+//     `RETURN 'all' AS key, collect(...)` lens whose every row aggregates across
+//     roots. It is deliberately sufficient rather than necessary: a
+//     neighbour-keyed lens whose rows happen to be partitionable by anchor is
+//     refused too, and keeps today's behaviour.
+//
+// The five conjuncts the audit shares are asked in auditEnrolment's own order,
+// and the closure conjunct — the one with no counterpart there — is asked last,
+// so a lens the audit also refuses reports the same reason both predicates
+// publish, and "not keyed by its anchor alone" is reported only for a lens that
+// is otherwise fully eligible, which is the reading an operator can act on.
+//
+// The §4.2 conjuncts (plain pipeline, single branch, complete and resolved
+// rootHops, no diffRetraction) are plainDerivationIndex's, not restated here:
+// this predicate answers "may a derived set be acted on", the index answers
+// "is there a derived set at all".
+func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal string) {
+	if p.authPlane {
+		return false, "it projects onto the auth plane, which narrows only behind a repair-capable healer proven end to end"
+	}
+	auditor := p.Auditor()
+	if auditor == nil {
+		return false, "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
+	}
+	switch st := auditor.Status(); {
+	case !st.Enrolled:
+		reason := "no divergence audit is enrolled on it, so nothing standing would re-test a row a narrowed reprojection left behind"
+		if st.Refusal != "" {
+			reason += " (" + st.Refusal + ")"
+		}
+		return false, reason
+	case st.Suppression != "":
+		return false, "its divergence audit is suppressed (" + st.Suppression + "), so nothing is re-testing its rows while that holds"
+	}
+	fullCR, isFull := rs.cr.(*full.CompiledRule)
+	if !isFull || fullCR == nil {
+		return false, "its compiled rule is not a full-engine rule, so its closure and parameters cannot be derived"
+	}
+	if _, ok := p.currentAdapter().(adapter.RowReader); !ok {
+		return false, "its target adapter cannot read a row back, which both the audit and the derived path's own presence probe require"
+	}
+	if p.secureDecryptor != nil {
+		return false, "it is a Secure Lens, whose columns a per-anchor re-entry would decrypt twice over"
+	}
+	for _, param := range []string{"now", "projectedAt"} {
+		referenced, exhaustive := fullCR.ReferencesParam(param)
+		if !exhaustive {
+			return false, "its query shape could not be proven free of $" + param + ", which a per-anchor evaluation reproduces differently"
+		}
+		if referenced {
+			return false, "it returns $" + param + ", which a per-anchor evaluation reproduces differently from the whole-corpus rescan it replaces"
+		}
+	}
+	if !fullCR.ProjectsOneRowPerAnchor() {
+		return false, "its rows do not partition by anchor (no key column both resolves from the anchor alone and identifies it), so a per-anchor evaluation would compute a truncated row"
+	}
+	return true, ""
+}
+
+// plainDerivationIndexForAct is the gate `act` mode consults before letting a
+// derived anchor set decide a plain lens's neighbour event. It ALWAYS declines,
+// unconditionally: acting is the posture-changing increment (§4.4/§12, Inc 4a),
+// which owns the flip together with §6's zero-row Delete probe, its e2es and the
+// measured before/after. Consulting plainDerivationLicence from here without
+// them would start changing write behaviour for every lens that happens to
+// satisfy the licence, silently — builtinDerivationMode is `act`
+// (anchor_derivation_mode.go), so no operator action would be needed to reach
+// it.
+//
+// Consequently `act` mode changes nothing for a plain lens today: only `shadow`
+// mode's measurement (shadowPlainDerivation) runs the walk at all, through
+// plainDerivationIndex directly, which carries none of the licence's conjuncts.
+// The derivation is shadow-only by construction rather than by a mode default an
+// operator could override — REFRACTOR_ANCHOR_DERIVATION=act reaches this
+// function and is declined here.
 func (p *Pipeline) plainDerivationIndexForAct(rs ruleState) (full.HopIndex, bool) {
 	return full.HopIndex{}, false
 }
@@ -216,10 +340,10 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 
 // evaluatePlainDerivedAnchors re-enters evaluatePlainFromVertex once per
 // derived anchor — the same entry point the anchor-typed arms already use —
-// and returns the combined, deduplicated result set. Unreachable this fire
-// (plainDerivationIndexForAct always declines above), built and unit-tested
-// directly so Increment 3 has a working, proven re-entry path to license
-// rather than a stub to write from scratch.
+// and returns the combined, deduplicated result set. No live path reaches it
+// (plainDerivationIndexForAct declines every lens above); it is unit-tested
+// directly, so the re-entry path the licence governs is proven rather than
+// assumed.
 //
 // Dedupe is hoisted here (§4.2 obligation i): today only the link arm dedupes
 // across its two endpoint evaluations (evalPlainLinkReprojection's own
@@ -234,18 +358,20 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 // plain evaluation through the pipeline's normal write path (upsert, or the
 // presence-check Delete, itself idempotent against an already-absent key).
 //
-// FOR INCREMENT 3: evaluatePlainFromVertex calls the OUTER evaluateForEntry
-// wrapper, which runs applySecureDecrypt on its own results. If this
-// function is ever reached from evaluateForEntryRaw's own neighbour-event
-// path (which is itself inside that same outer wrapper), a Secure Lens's
-// columns would be decrypted once per derived anchor here AND AGAIN by the
-// outer wrapper on return — a double-decrypt. It is genuinely unreachable
-// THIS fire (plainDerivationIndexForAct always declines, so evaluatePlainNeighbourEvent
-// never calls this from within evaluateForEntryRaw), and Increment 3's own
-// §5.1 licence is supposed to exclude Secure lenses before anything can
-// reach `act` — but verify that exclusion actually blocks this path (not
-// just the licence's stated conjunct list) before flipping any mode that
-// makes this function reachable from inside evaluateForEntryRaw.
+// THE DOUBLE-DECRYPT SEAM: evaluatePlainFromVertex calls the OUTER
+// evaluateForEntry wrapper, which runs applySecureDecrypt on its own results.
+// Reached from evaluateForEntryRaw's neighbour-event path — itself inside
+// that same outer wrapper — a Secure Lens's columns would be decrypted once
+// per derived anchor here AND AGAIN by the outer wrapper on return. Two
+// independent things hold it shut, and the second is what will still hold it
+// when the first is lifted: plainDerivationIndexForAct declines
+// unconditionally, so evaluatePlainNeighbourEvent never calls this from
+// within evaluateForEntryRaw at all; and plainDerivationLicence refuses any
+// pipeline carrying a secureDecryptor, which is the ONLY thing
+// applySecureDecrypt acts on (it returns immediately when the field is nil,
+// evaluate.go) — so on every pipeline the licence admits, both invocations
+// are no-ops rather than a decrypt and a re-decrypt. Any change that makes
+// the licence's Secure conjunct advisory re-opens this seam.
 func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState, anchors []string, anchorLabel string) ([]ruleengine.EvalResult, error) {
 	var combined []ruleengine.EvalResult
 	seen := make(map[string]bool, len(anchors))
@@ -277,12 +403,11 @@ func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState
 // one lens and is either plain or actor-anchored, never both, so the fields
 // cannot collide between the two measurements).
 //
-// Because plainDerivationIndexForAct always declines this fire (Increment
-// 3's licence is unbuilt), `act` mode never lets this derivation decide an
-// event's outcome — every path below that is not the shadow measurement
-// itself returns EXACTLY what calling executeFullForActor with an empty seed
-// would have returned before this increment existed. That is the fire's own
-// invariant, stated in code: shadow decides nothing.
+// Because plainDerivationIndexForAct declines every lens, `act` mode never
+// lets this derivation decide an event's outcome — every path below that is
+// not the shadow measurement itself returns EXACTLY what calling
+// executeFullForActor with an empty seed returns. That is the invariant,
+// stated in code: shadow decides nothing.
 func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
 	unseeded := func() ([]ruleengine.EvalResult, error) {
 		return p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, "")
@@ -312,10 +437,10 @@ func (p *Pipeline) evaluatePlainNeighbourEvent(ctx context.Context, rs ruleState
 	idx, ready := p.plainDerivationIndexForAct(rs)
 	if !ready {
 		// NOT counted as a fall-back, mirroring affectedAnchors' own static-
-		// refusal treatment: this refusal is a property of the LENS (or, this
-		// fire, of every lens — Increment 3 is unbuilt), fixed for the life
-		// of a ruleState, and counting it every event would drown the ratio
-		// the tally exists to report.
+		// refusal treatment: this refusal is a property of the LENS (today, of
+		// every lens — the act gate declines unconditionally), fixed for the
+		// life of a ruleState, and counting it every event would drown the
+		// ratio the tally exists to report.
 		p.noteStaticPlainDerivationRefusal(rs)
 		return unseeded()
 	}
@@ -474,7 +599,7 @@ func (p *Pipeline) logPlainSummaryIfDue(st DerivationShadowStats) {
 // (derivShadow.staticRefusal), safe for the same reason every other shared
 // field is: a pipeline is one lens, never both.
 func (p *Pipeline) noteStaticPlainDerivationRefusal(rs ruleState) {
-	reason := "increment 3's licence (closure/RowReader/auditor/auth-plane) is not built by this fire — the plain derivation observes in shadow only, and never acts"
+	reason := "acting on a derived anchor set is not wired: the act gate declines every lens, so the plain derivation observes in shadow only and never acts"
 	p.derivShadow.mu.Lock()
 	repeat := p.derivShadow.staticRefusal == reason
 	p.derivShadow.staticRefusal = reason

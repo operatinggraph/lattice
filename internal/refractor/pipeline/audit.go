@@ -89,12 +89,14 @@ const auditReasonUndrivableKey = "tombstoned anchor whose row key is not derivab
 // plane, and the interval/batch overrides. Zero Interval/Batch select the
 // defaults, exactly as SweepPlan's do.
 //
-// AuthPlane is passed IN rather than read off the pipeline because
-// Pipeline.authPlane is set only by the actor-aggregate installer, so it is
-// false by construction on every plain pipeline — precisely the shape this
-// conjunct has to catch. The caller supplies projection.IsAuthPlane(rule), the
-// one canonical derivation (nats_kv into the capability bucket, or a Postgres
-// grant table), rather than a second reading of it here.
+// AuthPlane is passed IN rather than read off the pipeline so enrolment cannot
+// depend on whether an earlier activation stage happened to record the plane —
+// a conjunct that reads as "not auth-plane" because the field was not written
+// yet is the fail-open direction, and this conjunct exists to catch exactly the
+// lens kind (plain, into the capability bucket) no actor-aggregate installer
+// speaks for. The caller supplies projection.IsAuthPlane(rule), the one
+// canonical derivation (nats_kv into the capability bucket, or a Postgres grant
+// table), rather than a second reading of it here.
 type AuditOptions struct {
 	AuthPlane bool
 	Interval  time.Duration

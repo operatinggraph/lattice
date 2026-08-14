@@ -358,12 +358,33 @@ type Pipeline struct {
 	patternClosedOutput bool
 
 	// authPlane reports whether this lens projects an authorization surface
-	// (projection.IsAuthPlane). Combined with actorAggregate (envelopeFn or
-	// multiEnvelopeFn installed) and requiresFootprintValidation, it is the
-	// scope predicate for footprint validation (executeFullForActor,
-	// refractor-evaluation-consistency-design.md §13.3): only a lens
-	// matching all three pays the re-read cost. False by default — every
-	// lens installed without SetAuthPlane gets no validation.
+	// (projection.IsAuthPlane). It has two readers, and both treat it as the
+	// lens's PLANE rather than as a lens kind:
+	//
+	//   - footprint validation (needsFootprintValidation, executeFullForActor,
+	//     refractor-evaluation-consistency-design.md §13.3), combined with
+	//     actorAggregate (envelopeFn or multiEnvelopeFn installed) and
+	//     requiresFootprintValidation — only a lens matching all three pays the
+	//     re-read cost;
+	//   - the plain arm's narrowing licence (plainDerivationLicence), which
+	//     refuses the plane outright, so a plain auth-plane lens keeps today's
+	//     whole-corpus reprojection.
+	//
+	// False by default — a lens installed without SetAuthPlane gets no
+	// validation. The activation path sets it for EVERY lens, not only through
+	// the actor-aggregate installer, because a plain-kind lens declaring
+	// nats_kv into the capability bucket is exactly the shape the licence must
+	// refuse and is not actor-aggregate.
+	//
+	// Marking those lenses does not widen footprint validation, and the
+	// conjunct that keeps them out is requiresFootprintValidation below, whose
+	// only setter is projection.InstallActorAggregate — false by construction
+	// for every lens that installer never runs for. The envelope conjunct is
+	// NOT what does that work: the operation-role-index lens targets the
+	// capability bucket (so it is auth-plane) and installs an envelope through
+	// its own activation branch, never reaching that installer. Giving any
+	// other path a way to set requiresFootprintValidation arms validation for
+	// that family, so the two move together.
 	authPlane bool
 
 	// requiresFootprintValidation reports whether this lens's compiled cypher
@@ -2070,12 +2091,18 @@ func (p *Pipeline) SetTaxonomyResolver(r *taxonomy.Resolver) {
 }
 
 // SetAuthPlane records whether this lens projects an authorization surface
-// (projection.IsAuthPlane). Combined with actorAggregate and
-// requiresFootprintValidation, it gates footprint validation (see the
-// authPlane field doc). Must be called before Run.
+// (projection.IsAuthPlane) — the gate on footprint validation and the plain
+// arm's narrowing licence alike (see the authPlane field doc). Must be called
+// before Run.
 func (p *Pipeline) SetAuthPlane(v bool) {
 	p.authPlane = v
 }
+
+// AuthPlane reports what SetAuthPlane recorded, so a test can pin which
+// activation paths declare the lens's plane without reaching into the
+// pipeline's internals — the same reasoning PatternClosedOutput documents for
+// its own flag.
+func (p *Pipeline) AuthPlane() bool { return p.authPlane }
 
 // SetRequiresFootprintValidation records whether this lens's compiled cypher
 // emits a multi-binding conjunct unit (projection.ProjectionPlan's derived

@@ -58,30 +58,27 @@ func (e *Engine) AnchorDeleteResult(
 // multi-row lens (a key column bound to a non-anchor variable, or needing a
 // Core-KV read) returns ok == false, so a caller can never derive — and never
 // delete — a key it cannot prove is the anchor's single row.
+//
+// The contract has two halves, and only the second needs the event: the
+// structural half (no WITH, a labeled anchor, every key column anchor-only) is
+// answered by anchorProjectionShape, which a caller holding a compiled rule
+// alone can ask directly (HasAnchorOnlyKeyColumns).
 func (*Engine) AnchorProjectionKey(
 	cr ruleengine.CompiledRule, eventKey, eventType string, eventProps map[string]any,
 ) (keys map[string]any, ok bool) {
 	compiled, isFull := cr.(*CompiledRule)
-	if !isFull || compiled == nil || compiled.Query == nil {
+	if !isFull {
 		return nil, false
 	}
-	q := compiled.Query
-
-	// A WITH clause can re-project or re-bind variables (`WITH y AS u`), so a
-	// RETURN expression's variable NAME no longer proves it binds the anchor —
-	// the name-based scope check below would be defeated. No live plain lens
-	// uses WITH (the WITH lenses are actor-aggregates, excluded upstream);
-	// reject wholesale rather than model re-binding.
-	for _, c := range q.Clauses {
-		if _, isWith := c.(*With); isWith {
-			return nil, false
-		}
+	shape, structural := compiled.anchorProjectionShape()
+	if !structural {
+		return nil, false
 	}
 
-	// Anchor = the first MATCH pattern's first node. Its label discriminates an
-	// anchor tombstone (retract) from a secondary-node tombstone (re-execute):
-	// a provider/appointment tombstone is the anchor; a patient tombstone
-	// reaching the appointment lens via forPatient is a secondary node.
+	// The anchor's label discriminates an anchor tombstone (retract) from a
+	// secondary-node tombstone (re-execute): a provider/appointment tombstone
+	// is the anchor; a patient tombstone reaching the appointment lens via
+	// forPatient is a secondary node.
 	//
 	// When the anchor pattern carries the `*` taxonomy-expansion sigil, the
 	// discriminator is set membership against the resolved downward closure
@@ -89,42 +86,14 @@ func (*Engine) AnchorProjectionKey(
 	// dangerous of the four: left as equality, an abstract-anchored lens
 	// whose anchor tombstones as a leaf type never matches anchorLabel, so
 	// the retraction never fires and the row goes stale — a grant that never
-	// revokes, on a grant-producing lens. A LabelExpand anchor whose label
-	// has no entry in LabelExpansion refuses (fail closed) rather than
-	// falling back to the bare-label reading.
-	anchorVar, anchorLabel, anchorExpand, found := anchorNode(q)
-	if !found || anchorLabel == "" {
+	// revokes, on a grant-producing lens.
+	if shape.anchorExpand {
+		if _, hit := shape.expandedSet[eventType]; !hit {
+			return nil, false
+		}
+	} else if eventType != shape.anchorLabel {
 		return nil, false
 	}
-	if anchorExpand {
-		set, hasSet := compiled.LabelExpansion[anchorLabel]
-		if !hasSet {
-			return nil, false
-		}
-		if _, hit := set[eventType]; !hit {
-			return nil, false
-		}
-	} else if eventType != anchorLabel {
-		return nil, false
-	}
-
-	// Key columns: the threaded Into.Key (multi-column composite), else the
-	// legacy first-RETURN-item alias (single-key behaviour, unchanged for any
-	// un-threaded caller). Mirrors applyReturn's key construction.
-	cols := compiled.KeyColumns
-	if len(cols) == 0 {
-		first, ok := firstReturnItem(q)
-		if !ok {
-			return nil, false
-		}
-		alias := first.Alias
-		if alias == "" {
-			alias = projectionAutoAlias(first.Expr, 0)
-		}
-		cols = []string{alias}
-	}
-
-	exprByAlias := returnExprByAlias(q)
 
 	// A read-free executor binding the anchor var to its tombstoned vertex. A nil
 	// coreKV makes any key expression that needs an aspect point-read report
@@ -132,26 +101,11 @@ func (*Engine) AnchorProjectionKey(
 	// vertex; every other shape (literal, anchor .key / root field, pure function
 	// over them — e.g. nanoIdFromKey) resolves exactly as the upsert path does.
 	ex := &executor{ctx: context.Background()}
-	b := binding{anchorVar: &nodeRef{key: eventKey, props: eventProps}}
+	b := binding{shape.anchorVar: &nodeRef{key: eventKey, props: eventProps}}
 
-	out := make(map[string]any, len(cols))
-	for _, col := range cols {
-		expr, present := exprByAlias[col]
-		if !present {
-			// A key column that is not a RETURN alias is an anti-pattern caught at
-			// activation; defensively fall through rather than emit a partial key.
-			return nil, false
-		}
-		if !exprReferencesOnlyVariable(expr, anchorVar) {
-			// A key column bound to a NON-anchor variable (a neighbor-keyed /
-			// multi-row lens, e.g. landlord_id off a manages walk) is not
-			// derivable from the anchor alone. The evaluator would silently
-			// resolve the unbound variable to nil (the OPTIONAL-MATCH
-			// contract) and yield a WRONG partial key, so reject
-			// structurally before evaluating.
-			return nil, false
-		}
-		v, err := ex.evalExpr(b, expr)
+	out := make(map[string]any, len(shape.cols))
+	for _, col := range shape.cols {
+		v, err := ex.evalExpr(b, shape.keyExprs[col])
 		if err != nil {
 			// Needs a Core-KV read (aspect access) or otherwise unresolvable —
 			// conservative fall-through to a re-execute, never a wrong Delete.
@@ -178,6 +132,209 @@ func (*Engine) AnchorProjectionKey(
 		return nil, false
 	}
 	return out, true
+}
+
+// anchorProjectionShape is the half of AnchorProjectionKey's ok contract that
+// is decidable from the compiled rule alone: no WITH clause, a labeled anchor
+// pattern (carrying a resolved expansion set when it bears the `*` sigil), and
+// every key column a RETURN alias whose expression references no variable but
+// the anchor's. It carries the anchor descriptors and the resolved key-column
+// expressions on, so the per-event half evaluates exactly what the structural
+// half admitted.
+type anchorProjectionShape struct {
+	// anchorVar and anchorLabel are the anchor pattern's variable and label —
+	// the binding a key column may reference, and the type an event must carry
+	// to BE this anchor.
+	anchorVar   string
+	anchorLabel string
+	// anchorExpand is the `*` taxonomy-expansion sigil on the anchor pattern,
+	// and expandedSet the resolved downward closure LabelExpansion holds for
+	// anchorLabel. They travel together because the sigil alone decides which
+	// reading applies: an expanding anchor is answered by set membership even
+	// when its resolved set is empty, never by falling back to string equality
+	// against the abstract label, which would admit an event no leaf-typed
+	// anchor can ever be.
+	anchorExpand bool
+	expandedSet  map[string]struct{}
+	// cols are this rule's key columns — the threaded Into.Key composite, else
+	// the legacy first-RETURN-item alias — and keyExprs the RETURN expression
+	// producing each one.
+	cols     []string
+	keyExprs map[string]Expr
+}
+
+// anchorProjectionShape resolves the structural half of the ok contract, or
+// reports false when the rule cannot satisfy it under ANY event.
+func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
+	if cr == nil || cr.Query == nil {
+		return anchorProjectionShape{}, false
+	}
+	q := cr.Query
+
+	// A WITH clause can re-project or re-bind variables (`WITH y AS u`), so a
+	// RETURN expression's variable NAME no longer proves it binds the anchor —
+	// the name-based scope check below would be defeated. No live plain lens
+	// uses WITH (the WITH lenses are actor-aggregates, excluded upstream);
+	// reject wholesale rather than model re-binding.
+	for _, c := range q.Clauses {
+		if _, isWith := c.(*With); isWith {
+			return anchorProjectionShape{}, false
+		}
+	}
+
+	// Anchor = the first MATCH pattern's first node.
+	anchorVar, anchorLabel, anchorExpand, found := anchorNode(q)
+	if !found || anchorLabel == "" {
+		return anchorProjectionShape{}, false
+	}
+	// A LabelExpand anchor whose label has no entry in LabelExpansion refuses
+	// (fail closed) rather than falling back to the bare-label reading.
+	var expandedSet map[string]struct{}
+	if anchorExpand {
+		set, hasSet := cr.LabelExpansion[anchorLabel]
+		if !hasSet {
+			return anchorProjectionShape{}, false
+		}
+		expandedSet = set
+	}
+
+	// Key columns: the threaded Into.Key (multi-column composite), else the
+	// legacy first-RETURN-item alias (single-key behaviour, unchanged for any
+	// un-threaded caller). Mirrors applyReturn's key construction.
+	cols := cr.KeyColumns
+	if len(cols) == 0 {
+		first, ok := firstReturnItem(q)
+		if !ok {
+			return anchorProjectionShape{}, false
+		}
+		alias := first.Alias
+		if alias == "" {
+			alias = projectionAutoAlias(first.Expr, 0)
+		}
+		cols = []string{alias}
+	}
+
+	exprByAlias := returnExprByAlias(q)
+	keyExprs := make(map[string]Expr, len(cols))
+	for _, col := range cols {
+		expr, present := exprByAlias[col]
+		if !present {
+			// A key column that is not a RETURN alias is an anti-pattern caught at
+			// activation; defensively fall through rather than emit a partial key.
+			return anchorProjectionShape{}, false
+		}
+		if !exprReferencesOnlyVariable(expr, anchorVar) {
+			// A key column bound to a NON-anchor variable (a neighbor-keyed /
+			// multi-row lens, e.g. landlord_id off a manages walk) is not
+			// derivable from the anchor alone. The evaluator would silently
+			// resolve the unbound variable to nil (the OPTIONAL-MATCH
+			// contract) and yield a WRONG partial key, so reject
+			// structurally before evaluating.
+			return anchorProjectionShape{}, false
+		}
+		keyExprs[col] = expr
+	}
+
+	return anchorProjectionShape{
+		anchorVar:    anchorVar,
+		anchorLabel:  anchorLabel,
+		anchorExpand: anchorExpand,
+		expandedSet:  expandedSet,
+		cols:         cols,
+		keyExprs:     keyExprs,
+	}, true
+}
+
+// HasAnchorOnlyKeyColumns reports whether this rule keys its output on its
+// anchor alone: no WITH clause, a labeled anchor pattern, and every key column
+// an expression over that anchor's binding and nothing else
+// (exprReferencesOnlyVariable, which refuses aggregates and every traversal
+// form). That is per-anchor closure — the lens projects at most one row per
+// anchor, keyed by the anchor — asked of the compiled rule alone, with no
+// event to bind.
+//
+// It is AnchorProjectionKey's own structural half, shared rather than
+// restated, so the two can never answer the closure question differently. It
+// is deliberately WEAKER than a full AnchorProjectionKey call: whether a
+// particular event's key columns EVALUATE read-free to non-nil scalars is a
+// property of that event's stored body, not of the lens, and a caller asking
+// per-lens (the plain arm's narrowing licence,
+// plain-lens-neighbour-anchor-derivation-design.md §5.1) has no event to
+// evaluate against. A caller that needs the key itself must still call
+// AnchorProjectionKey and honour its ok.
+func (cr *CompiledRule) HasAnchorOnlyKeyColumns() bool {
+	_, ok := cr.anchorProjectionShape()
+	return ok
+}
+
+// ProjectsOneRowPerAnchor reports whether this rule's output rows PARTITION by
+// anchor: every output row belongs to exactly one anchor, and every value in it
+// is computed from that anchor's own bindings.
+//
+// It is HasAnchorOnlyKeyColumns plus the conjunct closure alone does not carry
+// — that a key column IDENTIFIES which anchor the row is for. The second half
+// is what a per-anchor re-evaluation actually depends on: the executor groups a
+// projection by its non-aggregating items (projectItems), and the key columns
+// are part of every row's grouping key. A key unique per anchor confines each
+// group to ONE root binding, so an aggregate inside that row
+// (collect/count/max/min) spans only that anchor's own matches. A key that is
+// NOT unique per anchor — a literal, or a non-identifying property such as a
+// name or a status — merges several roots into one group, and an evaluation
+// seeded at a single anchor computes that row from a fraction of its inputs: a
+// TRUNCATED row, silently narrower than the whole-corpus evaluation's.
+//
+// Identity is read syntactically and conservatively: a key column identifies
+// the anchor when it is the anchor's own Contract #1 key (`anchor.key`), or
+// nanoIdFromKey over it — the engine's one key-preserving derivation
+// (evalFunctionCall), and the shape the grant-table lenses key on. Every other
+// function the engine has is either an aggregate or lossy (levenshteinDist,
+// levenshteinRatio, type), so admitting a call by its argument alone would call
+// a distance a key. A new injective key derivation must be named here to be
+// recognized; until it is, a lens using it is refused, which costs breadth and
+// never soundness.
+//
+// This is the WRITE licence's closure conjunct
+// (plain-lens-neighbour-anchor-derivation-design.md §5.1). It is deliberately
+// stronger than AnchorProjectionKey's ok contract, which answers a different
+// question — "can this event's row key be derived read-free" — for a retraction
+// already scoped to a single anchor by its caller, and so needing no claim
+// about how rows group.
+func (cr *CompiledRule) ProjectsOneRowPerAnchor() bool {
+	shape, ok := cr.anchorProjectionShape()
+	if !ok {
+		return false
+	}
+	for _, col := range shape.cols {
+		if exprIdentifiesVariable(shape.keyExprs[col], shape.anchorVar) {
+			return true
+		}
+	}
+	return false
+}
+
+// exprIdentifiesVariable reports whether e resolves to a value unique to the
+// vertex bound to v — v's own Contract #1 key, or nanoIdFromKey over it (which
+// strips the `vtx.<type>.` prefix and stays unique within a type). Every other
+// shape reports false: an unrecognized future node type, a lossy function, and
+// a property that merely happens to be distinct in today's data alike.
+func exprIdentifiesVariable(e Expr, v string) bool {
+	switch x := e.(type) {
+	case *PropertyAccess:
+		ref, isVar := x.Target.(*VariableRef)
+		return isVar && ref.Name == v && x.Key == "key"
+	case *FunctionCall:
+		if strings.ToLower(x.Name) != "nanoidfromkey" {
+			return false
+		}
+		for _, a := range x.Args {
+			if exprIdentifiesVariable(a, v) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // exprReferencesOnlyVariable reports whether every variable an expression
