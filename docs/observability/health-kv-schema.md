@@ -110,7 +110,9 @@ caller. The gate sits *below* the claim-secret comparison precisely so that a wr
 against a sealed identity still counts as `invalid-key` — the counter an operator watches for brute
 force — instead of being diverted here.
 
-**`<alertCode>` enum** (known Phase 1 codes): `stub-auth-active`, `privileged-lane-grant-rejected`.
+**`<alertCode>` enum** (known Phase 1 codes): `stub-auth-active`, `privileged-lane-grant-rejected`,
+`reserved-operation-grant-rejected` (a runtime-authored grant named a core-reserved operationType and was
+refused at step 3 — Contract #6 §6.1).
 
 **Event-driven keys** (only present when the described event occurs — not asserted by the
 completeness test):

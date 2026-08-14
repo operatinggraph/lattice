@@ -358,6 +358,17 @@ func (i *Installer) buildInstallBatch(
 		data := map[string]any{
 			"operationType": p.OperationType,
 			"scope":         p.Scope,
+			// Provenance (Contract #6 §6.1). `package` says this grant is a
+			// declared, manifest-recorded, uninstallable deployment decision
+			// — the authoring act the reserved-set refusal in step 3
+			// deliberately permits, and which a runtime mint
+			// (rbac-domain's CreatePermission, origin `runtime`) is refused.
+			// `declaredBy` names the declaring package so an auditor reading a
+			// permission vertex, or a projected platformPermissions entry, can
+			// go straight to the manifest that put it there instead of
+			// grepping the corpus for the operationType.
+			"origin":     "package",
+			"declaredBy": def.Name,
 		}
 		if p.Note != "" {
 			data["note"] = p.Note

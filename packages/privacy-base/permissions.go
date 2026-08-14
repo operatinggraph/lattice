@@ -56,15 +56,25 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // and may have no idea the class exists. It is the widest-blast-radius verb in
 // this package, and a deployment should have to say so on purpose.
 //
-// Be precise about what withholding the grant buys, because it is less than it
-// looks: it is a DEFAULT, not a boundary. `operator` already holds
-// CreatePermission and GrantPermission at scope:any (packages/rbac-domain), and
-// CreatePermission takes operationType as a free string with no allow-list — so
-// an operator can grant themselves this verb in two ops and then call it. What
-// the missing grant actually buys is that doing so is an explicit, separately
-// committed act with its own audit trail, rather than authority that arrives
-// silently with the role. Closing the gap properly needs a core-owned
-// never-self-grantable operationType set, which is filed, not assumed here.
+// Withholding the grant is a DEFAULT, and the platform now supplies the
+// boundary underneath it. `operator` holds CreatePermission and
+// GrantPermission at scope:any (packages/rbac-domain), and CreatePermission
+// takes operationType as a free string with no allow-list, so an operator can
+// still mint themselves a ShredRetentionClassKey permission in two ops — but
+// the resulting vertex is stamped `data.origin: "runtime"` at mint, the
+// capabilityRoles lens projects that stamp onto the grant entry, and
+// ShredRetentionClassKey is in the core-owned reserved set
+// (`reservedOperationTypes`, internal/processor/step3_auth_capability.go).
+// Step 3 refuses any runtime-origin entry naming it and raises a
+// `reserved-operation-grant-rejected` Health alert, so the self-mint route
+// does not reach the verb and does not go unseen.
+//
+// What the reservation does NOT do is forbid the verb: a package remains free
+// to declare a PermissionSpec for it, because an installer-minted vertex is
+// stamped `origin: "package"` and passes the same check. That asymmetry is the
+// point — reaching this verb should be a deliberate, manifest-recorded,
+// uninstallable deployment decision, and privacy-base withholds the grant by
+// choice rather than by platform inability.
 //
 // Its finalization sibling above IS granted: recording that an
 // already-committed destruction finished confers no authority to start one.

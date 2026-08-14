@@ -116,6 +116,18 @@ func (f *rbacFixture) grants(t *testing.T, permName, roleName, opType, scope str
 	f.edge(t, "grantedBy", permName, roleName)
 }
 
+// grantsWithOrigin is `grants` plus the Contract #6 §6.1 provenance stamp the
+// installer / CreatePermission write. Separate from `grants` on purpose: the
+// unstamped helper keeps exercising the pre-stamp vertex shape, which is what
+// a live graph is full of until every package is re-applied.
+func (f *rbacFixture) grantsWithOrigin(t *testing.T, permName, roleName, opType, scope, origin string) {
+	t.Helper()
+	f.vtx(t, permName, "permission", map[string]any{
+		"operationType": opType, "scope": scope, "origin": origin,
+	})
+	f.edge(t, "grantedBy", permName, roleName)
+}
+
 func (f *rbacFixture) project(t *testing.T, spec, actorKey string) []ruleengine.ProjectionResult {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -208,6 +220,8 @@ func TestCapabilityRoles_RolelessActorYieldsTheDegenerateEntry(t *testing.T) {
 		"RealnessFilter:\"operationType\" is what turns this entry into an empty projection — a non-null operationType here means a revoked actor keeps a live capability key")
 	require.Nil(t, entry["scope"])
 	require.Nil(t, entry["lanes"])
+	require.Nil(t, entry["origin"],
+		"the provenance field must join the degenerate entry as null like every other — a non-null constant here would make the entry look real to RealnessFilter")
 
 	// The two collects behave differently on a null binding, and the descriptor
 	// depends on which: collecting a MAP LITERAL yields one all-null entry (the
@@ -217,6 +231,49 @@ func TestCapabilityRoles_RolelessActorYieldsTheDegenerateEntry(t *testing.T) {
 	// and could never mark the row unreal.
 	require.Empty(t, row["roles"].([]any),
 		"a bare-property collect over a null binding is empty, not [null]")
+}
+
+// The provenance stamp is only a discriminator if it survives the projection.
+// Contract #6 §6.1 puts the reserved-operationType refusal on the PROJECTED
+// entry, not on the vertex, so a stamp the cypher drops is a stamp that does
+// not exist as far as step 3 is concerned — and, since absence reads as
+// `runtime`, a dropped `package` stamp would silently reclassify every
+// package-declared grant as a self-mint.
+//
+// Three shapes have to come through distinctly, because the consuming
+// predicate treats exactly one of them as exempt:
+//
+//	package  → the declared, uninstallable deployment decision (exempt)
+//	runtime  → the self-mint (governed)
+//	absent   → a vertex minted before the stamp existed (governed, fail-closed)
+func TestCapabilityRoles_ProjectsPermissionOrigin(t *testing.T) {
+	f := newRbacFixture(t)
+	f.role(t, "opRole", "operator")
+	f.vtx(t, "op", "identity", nil)
+	f.edge(t, "holdsRole", "op", "opRole")
+
+	f.grantsWithOrigin(t, "permDeclared", "opRole", "ShredRetentionClassKey", "any", "package")
+	f.grantsWithOrigin(t, "permMinted", "opRole", "CreateRole", "any", "runtime")
+	// No stamp at all — the pre-migration vertex shape.
+	f.grants(t, "permLegacy", "opRole", "ArchiveLease", "any", nil)
+
+	rows := f.project(t, capabilityRolesSpec, f.key("op"))
+	require.Len(t, rows, 1)
+
+	byOp := map[string]map[string]any{}
+	for _, p := range rows[0].Values["platformPermissions"].([]any) {
+		e := p.(map[string]any)
+		op, _ := e["operationType"].(string)
+		byOp[op] = e
+	}
+	require.Len(t, byOp, 3, "all three grants must project; got %v", byOp)
+
+	require.Equal(t, "package", byOp["ShredRetentionClassKey"]["origin"],
+		"a package-declared grant must project its stamp verbatim — this is the entry step 3 exempts from the reserved-operationType refusal, and losing the stamp denies a legitimate deployment decision")
+	require.Equal(t, "runtime", byOp["CreateRole"]["origin"],
+		"a runtime mint must project as runtime, or the refusal has nothing to key on")
+	require.Nil(t, byOp["ArchiveLease"]["origin"],
+		"an unstamped vertex must project null rather than borrowing a neighbouring entry's origin — the consuming side reads null as `runtime` (fail-closed), which is only safe if null actually arrives")
 }
 
 func TestCapabilityRoleIndex_CollapsesRolesPerOperation(t *testing.T) {

@@ -50,6 +50,19 @@ type PlatformPermission struct {
 	// overriding the doc-level Lanes fallback for a matched op (scoped-
 	// privileged-lane-grants-design.md). Absent/empty defers to Doc.Lanes.
 	Lanes []string `json:"lanes,omitempty"`
+
+	// Origin is the granting permission vertex's provenance (Contract #6
+	// §6.1): `package` for a vertex the installer minted from a declared
+	// PermissionSpec, `runtime` for one an actor minted through
+	// rbac-domain's CreatePermission. Decode-side only — the value arrives
+	// entirely from the projecting lens, never from a Go-side literal.
+	//
+	// EMPTY MEANS `runtime`, not "unknown". A vertex authored before the
+	// stamp existed, or a projection that dropped the field, must be
+	// governed by the reserved-set refusal rather than exempted from it,
+	// so the consuming check reads absence as the restricted value. Do not
+	// "fix" this by defaulting it to `package` on decode.
+	Origin string `json:"origin,omitempty"`
 }
 
 // ServiceAccessEntry — Contract #6 §6.5. The actor's resolved access to

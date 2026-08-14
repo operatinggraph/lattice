@@ -104,14 +104,14 @@ Three rules follow, all fail-closed:
    reserved operationType — that is the explicit, manifest-recorded, uninstallable deployment decision the
    reservation exists to force.
 
-The **one core-owned exception** to origin is the primordial anchor's literal grant set (§6.1 above),
-which is seeded rather than authored. Any future runtime grant channel MUST stamp origin and MUST enforce
-that a grant cannot exceed the granting actor's own held scope (the `validateGrantArtifact` precedent).
-
-*Transitional: the origin stamps, the §6.4 `origin` projection, and the step-3 reserved-set refusal land
-with the grant-provenance design's Inc 3 (behind the upgrade-un-tombstone prerequisite and Inc 1's
-`UpdatePermission` withdrawal, which establishes rule 1's write-once precondition). Until Inc 3 lands this
-clause is the build-to target; this note dies with that increment.*
+The **core-owned exception** to origin is what the kernel *seeds* rather than what any party *authors*:
+the primordial anchor's literal grant set (§6.1 above), and the kernel-seeded permission vertices behind
+it (the meta-vertex and package-install permissions, `internal/bootstrap/primordial.go`), which carry no
+`origin` and therefore read as `runtime` under rule 2. None of the seeded operationTypes is reserved, so
+the exception costs nothing today; **an operationType granted by a kernel seed must not be added to the
+reserved set** without stamping that seed first, or the reservation locks the operator out of the kernel's
+own verbs. Any future runtime grant channel MUST stamp origin and MUST enforce that a grant cannot exceed
+the granting actor's own held scope (the `validateGrantArtifact` precedent).
 
 **Privileged lanes are core-policy-owned, not anchor-exclusive (scoped-privileged-lane-grants-design.md,
 mechanism C1).** A `cap.roles.<actor>` entry MAY carry a privileged (`meta`/`urgent`/`system`) per-op
@@ -253,6 +253,7 @@ Each entry describes a system-level operation not scoped to any service.
 |-------|----------|---------|
 | `operationType` | yes | Operation-type identifier, matched by **exact string equality** (no casing constraint is enforced). **Business** operations are conventionally PascalCase verb-noun (Contract #2 §2.1 — `CreateIdentity`, `ClaimIdentity`). **Platform control** operations use the reserved **`ctrl.<comp>.<verb>`** namespace (e.g. `ctrl.weaver.disable`, `ctrl.refractor.rebuild`, `ctrl.loom.pause`) — mirroring the `lattice.ctrl.<comp>.<verb>` control subject taxonomy and keeping control grants unmistakably distinct from business ops. |
 | `scope` | yes | One of `any`, `self`, `owned`, `specific`. See §6.7. (Platform control ops use `any` — blanket per-verb grants; platform-path `specific` is a deny-stub, §6.7, so per-target control scoping is deferred to when `specific` is implemented.) |
+| `origin` | no | Provenance of the granting permission vertex, projected verbatim from `data.origin`: `package` (installer-minted from a declared `PermissionSpec`) or `runtime` (minted by an operation). **Write-once**, and **absence reads as `runtime`** (rule 2) — the field is optional *by design*, not merely tolerated: the primordial anchor lens never projects it at all, and a vertex minted before the stamp existed carries none. See §6.1 for the reserved-operationType rule this field exists to enforce and for the kernel-seed exception. |
 | `lanes` | no | Optional array of lanes this grant authorizes (default `["default"]` when absent). The step-3 lane gate checks `env.Lane` against the **matched permission's** `lanes` on the platform path (falling back to the doc-level `lanes`, §6.3, for entries without their own) — **landed**. A **privileged** lane (`meta`/`urgent`/`system`) in a package-projected (`cap.roles`) grant is honored **only if** `{operationType, lane}` is on the core privileged-lane allowlist (a Processor constant); otherwise it is stripped to `default` and a `PrivilegedLaneGrantRejected` Health issue is raised (§6.1). The **anchor** doc's lanes are unaffected (root keeps all four). |
 
 Processor dispatch (when `authContext.service` is null AND `authContext.task` is null):
