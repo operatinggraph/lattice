@@ -662,3 +662,62 @@ Named here rather than left implicit, because the containment currently reads as
   NFR-P3 probe would have needed re-authoring, and the probe in particular depends on minting a *fresh
   uncached* operationType per iteration — re-homing it onto a package-declared op changes what it
   measures. That rework was the real cost of B, and part of why A won.
+
+---
+
+## 12. Un-tombstone prerequisite (§9 row 1) — fire brief (build note, 2026-08-14)
+
+**Scope sentence.** Fix `diffManifest`'s surviving-key branch so an out-of-band tombstone
+(`RevokePermission`/`TombstonePermission`) on a key the package continues to declare is respected across
+the next upgrade, instead of being silently revived by the body-diff update path (§5.2).
+
+**Verified touch-list** (checked live, this fire):
+- `internal/pkgmgr/upgrade.go:317-332` — `diffManifest`'s surviving-key branch (`survives == true`). After
+  the `committed == nil` re-create check and before `logicalDocEqual`, add: if `committed["isDeleted"] ==
+  true`, `continue` (skip — do not emit an update). This key can only be tombstoned while surviving by an
+  out-of-band op: the package's own diff tombstones exclusively `old \ new` (line 358), never a key present
+  in both sets, so `committed.isDeleted==true` here is unambiguous evidence of a deliberate external
+  revocation, not a partial upgrade state.
+- `internal/pkgmgr/upgrade.go:204-225` (`diffSummary`) — add a `revocationsRespected int` counter,
+  incremented on the new skip branch, mirroring the existing `revived`/`reactivation` fields' purpose:
+  making a silent-by-default outcome visible to the operator.
+- `internal/pkgmgr/upgrade.go:95-105` (`UpgradeResult`) — surface as
+  `RevocationsRespected int`, same pattern as `ReactivationRequired`.
+- `internal/pkgmgr/apply.go:28-` (`ApplyResult`) and `:117-129` (`Apply`'s in-place branch) — same field,
+  since `Apply` shares `computeDeltaAgainst` → `diffManifest` and hits the identical path on
+  `make reinstall-package` / `refresh-<vertical>`.
+- `internal/pkgmgr/upgrade_test.go` — new test asserting the fix; mirror `TestUpgrade_ReAddsRemovedEntity`'s
+  harness shape (`newInstallerHarness`, `sampleDef`, `kvDoc`) but tombstone the surviving permission
+  out-of-band via `conn.KVUpdate` (pattern: `TestUpgrade_RaceOnTombstonedKeyRejected:358-404` for the
+  direct-KV-write technique) *before* running an upgrade that still declares the same permission
+  unchanged, then assert it is still tombstoned after and `RevocationsRespected == 1`. Also re-run
+  `TestUpgrade_ReAddsRemovedEntity` and `TestUpgrade_DiffCreateUpdateTombstone` (unchanged expectations —
+  the fix must not touch the `!survives` re-add arm or the tombstone-emission arm) and
+  `TestUpgrade_DeltaCarriesExpectedRevision` to confirm OCC conditioning is untouched by the new skip.
+
+**Precedents mirrored:** the skip-without-counter shape already exists one branch below
+(`logicalDocEqual` body-equality skip, `upgrade.go:324-326`) — the new check is the same shape, checked
+first. The `RevocationsRespected` field mirrors `ReactivationRequired`'s "success needs a visible caveat"
+convention (`upgrade.go:39-43`).
+
+**Increment order (one increment, XS–S in practice):**
+1. `diffManifest` skip + `diffSummary`/`UpgradeResult`/`ApplyResult` field — `go build ./internal/pkgmgr/...`.
+2. New test + the three regression re-runs — `go test ./internal/pkgmgr/... -run 'TestUpgrade|TestApply' -v`.
+3. Full gates (below).
+
+**In-scope gotchas (standing checklist + component dossier):**
+- Capability/security-plane change (permission durability) → full 3-layer adversarial review at admit,
+  regardless of size (steward SKILL.md §4), never lead-review-only.
+- **One deterministic key, one writer** (checklist #5): this fix does not add a second writer — it removes
+  a spurious one (the surviving-key arm should never have written this key while it is tombstoned).
+- **Every census is a premise** (checklist #2): "the package's own diff tombstones exclusively `old \ new`"
+  is re-verified live above at `upgrade.go:334-367` — confirmed: the only other `Op: "tombstone"` emission
+  site in `diffManifest`.
+- No `docs/components/pkgmgr.md` dossier file exists yet to copy from (checked); nothing to carry forward.
+
+**Adjacent finds:** none surfaced beyond the three already-spawned sibling rows (§9 rows 2–4), which are
+explicitly not blockers for this row and stay filed as-is.
+
+**Non-goals:** the re-add arm (`!survives`, `:298-315`) is untouched — its revive is intended and tested.
+Provenance (`origin` field, Inc 2–3 of this design) is not part of this prerequisite; it lands after,
+per the ratified sequencing (§9).
