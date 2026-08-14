@@ -918,3 +918,136 @@ Fire 2 (the plain-lens Auditor) and `ReferencesParam`; any remediation for a blo
 it (supersession §8's boundary — Inc 1 removes the mechanism that manufactures them); the Contract #6 §6.2
 tie-rule (**held by Andrew**, staged edit reverted — nothing here touches guard semantics); merging the
 `auth-latency-inc2` worktree (the *next* fire, gated on this one); Increment 3 of the auth-plane design.
+
+---
+
+## 12. Fire brief — Fire 2 (build note, 2026-08-13)
+
+**1. Scope sentence (verbatim, §10).** *"`full.CompiledRule.ReferencesParam` … `pipeline.Auditor` + `AuditPlan`
++ `Pipeline.SetAuditPlan`/`Auditor()` … cursor persistence + restore … `projection.auditEnrolment` +
+installation in the driver's plain-registration path … Health-KV fields … issue codes `LensProjectionDiverged`
+and `LensAuditStalled` … alert precedence written down once … startup census log line … tests per §7's
+Increment-2 list."* Green bar: full suite passes, the e2e raises `LensProjectionDiverged` on a hand-corrupted
+row with **no target write**, startup census reports a non-zero enrolled count on the dev stack.
+
+**2. Verified touch-list (re-pinned against merged `main`, `ba0a7757`, by four Phase-0 scouts).**
+
+- `internal/refractor/pipeline/sweep.go` — `SweepPlan` (41–58), `Sweeper` struct (181–214), `pass()` (416),
+  `restore()` (370), `SetSweepPlan`/`Sweeper()` accessors (311–313, 321), `SweepStatus` (73–131), `record()`
+  (1131–1180). **Drift from an earlier reading of this design:** suppression lives at **394–412**
+  (`suppressed(ctx) string` — rebuild-in-flight / unreadable-status / not-active), not 441–454 as a stale
+  citation implied; that region is the prefilter-hint loop. Mirror `suppressed` verbatim for `Auditor`.
+- `internal/refractor/projection/driver.go` — `sweepEnrolment` (309–324, three conjuncts: key prefix,
+  `KeyOwnershipRoundTrips`, `adapter.PrefixKeyLister`), called at **426** inside `InstallActorAggregate()`.
+  **There is no separate "plain-lens registration function"** — plain lenses simply never reach the call that
+  installs a sweep plan. `auditEnrolment`'s installation point is therefore wherever the plain pipeline is
+  built and activated (main.go's plain branch, item below), not a mirror of a nonexistent driver function.
+  `RequireGuardedAdapter` (pipeline.go:2212–2220, doc comment 2206–2211) — precedent for "the requirement
+  outlives this adapter instance", to mirror for the auditor's per-pass conjunct re-check discipline.
+- `internal/refractor/pipeline/pipeline.go` — the six enrolment-conjunct fields, confirmed live:
+  **`seedAnchorLabels` (plural — set, not the design's singular `seedAnchorLabel`) at line 214**,
+  `actorEnumerator` (280), `envelopeFn` (81), `multiEnvelopeFn` (113), `diffRetraction` (274),
+  `secureDecryptor` (331). Setters: `SetActorEnumerator` (2015), `SetEnvelopeFn` (1962), `SetMultiEnvelopeFn`
+  (1973), `SetDiffRetraction` (2001), `SetSecureDecryptor` (2049). `seedAnchorFor` (1233–1247) — the exact
+  three-conjunct shape to mirror in `auditEnrolment`. `evaluatePlainFromVertex` (3245–3264) confirms the
+  seed-vertex claim in §2: the CDC entry is the **neighbor** vertex, not the anchor.
+- `internal/refractor/pipeline/evaluate.go` — `fetchVertexProps` (1236–1259), `executeFullForActor`
+  (393–408, call shape from `reprojectActors` at 1102 passes `seedAnchor=""`; the Auditor passes the anchor
+  key), `zeroRowDeleteKey` (1271–1294, presence-check-proves-absence pattern to mirror for the `retained`
+  direction's `GetRow` probe).
+- `internal/refractor/ruleengine/full/labels.go` — `ReferencedLabels()` (48–278): nested `addExpr` closure
+  switching over `PropertyAccess`/`BinaryOp`/`AndOr`/`Not`/`PatternExpr`/`PatternComprehension`/
+  `FunctionCall`/`MapLiteral`/`ListLiteral`/`CaseExpr`/`Literal`/`ParameterRef`/`VariableRef` — the exact walk
+  shape `ReferencesParam` mirrors, swapping the label-collection for a `ParameterRef.Name == name` test and
+  keeping the same `exhaustive` discipline (any unmodelled node kind ⇒ `exhaustive=false`).
+- `internal/refractor/ruleengine/full/anchor_delete.go` — `AnchorDeleteResult` (40–44, delegates to
+  `AnchorProjectionKey`), `AnchorProjectionKey` (61–181) — `ok` contract confirmed: anchor-label match, no
+  `WITH`, every key column resolves read-free from the anchor binding to a scalar.
+- `internal/refractor/adapter/adapter.go:85–87` — `RowReader` interface (`GetRow(ctx, keys) (row, ok, err)`,
+  note the design's `(row, ok, err)` order — confirmed the shipped `NatsKVAdapter.GetRow`
+  (natskv.go:490–514) matches: strips `projectionSeqField` (512), reports `isDeleted` as the boolean absence
+  signal, not a stored field). Only implementor, confirmed by repo-wide grep.
+- `internal/substrate/kv.go` — `KVListKeysFilter` (256–306, `Conn.KVListKeysFilter`, not a bare `KV` method as
+  an earlier citation implied) — confirmed client-side paging: `ListKeysFiltered` streams the full matching
+  set from JetStream, `pageFilteredKeys` sorts/dedupes/slices client-side. The listing-cost caveat in §4.3
+  step 1 and §6.1 holds exactly as written.
+- `internal/refractor/health/reporter.go` — `SetSweepProgress` (737–756, read-modify-write under `writeMu`,
+  `readExisting` → mutate → `put`) — the exact shape `SetAuditProgress` mirrors.
+- `internal/refractor/health/lattice_heartbeater.go` — **Fire 1 is confirmed live**: `VerdictUnverified`
+  (reproject.go:64–69), `SweepStatus.Unverified/UnverifiedStreak/LastUnverified`, issue codes
+  `issueCapabilityAuditUnverified`/`issueLensAuditUnverified` (lines 90, 256) already shipped and raising.
+  **The alert-precedence mechanism is a live `alertRank` map** (132–144), not an informal ordering:
+  `secure-redaction:9, paused:8, unreadable:7, repair-failing:6, repair-blocked:5, sweep-stalled:4,
+  unverified:3, lagging:2, structural-pause-auto-recovered:1, ok:0, "":0`. This is a superset of both this
+  design's §4.2 precedence line and `health-kv-schema.md:669`'s documented table — neither mentions
+  `secure-redaction`, `repair-blocked`, or `structural-pause-auto-recovered`, which shipped in an
+  intervening fire. **Decision (Winston, this fire):** insert `diverged` between `unverified` and `lagging`
+  (the design's explicit clause) and `audit-stalled` between `sweep-stalled` and `unverified` (the audit's
+  own stall is a mechanism-halt signal, same tier as the sweep's, ranked just below it because the audit is
+  read-only and a stalled audit is strictly less urgent than a stalled repair loop) — every existing
+  relative order preserved, nothing renumbered out of its current position class. Fold the doc-table
+  staleness (missing `secure-redaction`/`structural-pause-auto-recovered`) into the same edit since this fire
+  already touches that exact table.
+- `cmd/refractor/main.go` — `CapabilityLensProvider` (779–881, sweep fields populated 809–826) and
+  `LensProvider` (889–989, mirrored 915–931) — the two sites Fire 1 already extended; Fire 2's Auditor fields
+  join the same two functions in parallel.
+- **Loupe finding — a design premise does not hold, verify before building to it.** §10 Fire 2's bullet says
+  "a check that `cmd/loupe/health.go`'s lens row renders the two new `alert` values rather than falling
+  through to a blank cell." The scout found **no such read**: `cmd/loupe/renderedstate.go:81–118`'s
+  `lensRenderedState()` derives its own state from `status`/`pauseReason`/`consumerLag`/`errorCount`/
+  `lastError` and never reads the Health-KV `alert` field at all — `cmd/loupe/health.go` doesn't either. The
+  premise the design item was building to (Loupe reads `alert` and needs a fallthrough guard) is false as
+  written. **This fire does not touch Loupe** — there is nothing there to fall through, and inventing a new
+  Loupe read to satisfy a stale design bullet would be scope the ratified item never asked for. Noted here so
+  the close pass isn't surprised by an "unbuilt" bullet that was never buildable.
+
+**3. Precedents to mirror.** `Auditor` mirrors `Sweeper` structurally (own file, `pipeline/audit.go`, or
+appended to `sweep.go` if the package prefers one file per mechanism — builder's call, follow whichever the
+package's existing file-per-mechanism convention actually is). `auditEnrolment` mirrors `sweepEnrolment`'s
+shape (conjuncts → `(plan, refusal)`) but with its own six conjuncts (§4.4). `ReferencesParam` mirrors
+`ReferencedLabels`'s walker. `SetAuditProgress` mirrors `SetSweepProgress`. The e2e mirrors whichever existing
+`internal/refractor` e2e already stands up an ephemeral stack + a plain lens + a hand-corrupted row (grep for
+the sweep's own e2e as the nearest shape).
+
+**4. Increment order + green checks.**
+- `ReferencesParam` + its exhaustive-flag unit tests (`WHERE`/`RETURN`/`CASE`/`WITH`/property-map/`NOT`) —
+  `go test ./internal/refractor/ruleengine/full/... -run ReferencesParam -count=1`.
+- `auditEnrolment` unit tests, one per conjunct + a positive case — `go test
+  ./internal/refractor/projection/... -run AuditEnrolment -count=1`.
+- `Auditor`/`AuditPlan` unit tests: both divergence directions (`missing`/`stale`/`retained`), tombstoned
+  anchor, `Unverified` on error, determinism pin, cursor/cycle, per-pass re-check, under-coverage honesty —
+  `go test ./internal/refractor/pipeline/... -run Audit -count=1`.
+- Health-KV field wiring + alert precedence table test — `go test ./internal/refractor/health/... -count=1`.
+- e2e: register a plain lens, corrupt a row behind the pipeline's back, assert `LensProjectionDiverged` +
+  `divergentRows:1` + **no write occurred** — `go test ./internal/refractor/... -run Divergence -count=1`
+  (ephemeral stack).
+- Whole-fire: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+  `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/refractor/... ./internal/health/...
+  ./cmd/refractor/...`.
+
+**5. In-scope gotchas — standing checklist + dossier entries copied in.**
+- **New state needs a LIFETIME** (checklist #1): the audit cursor + counters — create at install, reset at
+  cycle completion, carry across passes, order at replay/restart (resume from persisted cursor, never the
+  head), tombstone on lens uninstall. Table it explicitly before writing `Auditor`, mirroring §10 of this
+  same design (the lifetime table this design already wrote for `ruleState.rootHops`-style state elsewhere —
+  actually this design's own §6.2/§6.3 IS that table for the audit cursor; implement to it, don't diverge).
+- **Every census is a premise** (checklist #2): "35 candidate lenses" (§4.4) is explicitly **not predicted** —
+  the startup census log line is the instrument; don't hand-assert a count in a test.
+- **A negative test needs its positive vector first** (checklist #3): each enrolment refusal test is paired
+  with the positive (enrolling) case; the determinism pin (§7) proves the positive vector for divergence
+  detection before the divergence tests run.
+- **Precedent may carry debt** (checklist #6): `Sweeper`'s divergent-streak escalation logic is auth-plane
+  specific (capability-only `capabilitySweepStallErrorMultiplier`) — do not carry an error-severity escalation
+  into the plain-lens Auditor; §4.2 already states business lenses stay `warning` at every streak length.
+- Dossier (`docs/components/refractor.md`): confirm/update its sweep-liveness section once the two new codes
+  ship — this fire is exactly the kind of "system's model shifted" trigger the dossier refresh rule names.
+
+**6. Adjacent finds.** The Loupe-premise finding above (item 2's last bullet) — not a defect, a stale design
+bullet; recorded here, no board row needed (nothing to fix, nothing to file). The `health-kv-schema.md:669`
+precedence-table staleness (missing two already-shipped tokens) is folded into this fire's own precedence
+edit, not filed separately, since this fire already owns that exact table.
+
+**7. Non-goals.** Everything Fire 1 already shipped (not re-touched except where Fire 2 extends the same
+struct/table); any repair capability (§8.1, permanently rejected pending a `retained`-streak trigger); a new
+Loupe read of the `alert` field (see item 2 — the design premise for this doesn't hold); widening anchor
+enumeration beyond key-type (§4.3 step 1, §8.4 risk table — the honest-boundary decision stands).
