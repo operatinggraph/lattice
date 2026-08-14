@@ -383,3 +383,77 @@ func upsertHappened(envs []map[string]any, lens string) bool {
 	}
 	return false
 }
+
+// TestPersonalLensGrantChange_T6_SweepConvergesWithoutTheEdge is Increment 2's
+// headline (design §10, T6): with the notification edge absent, a flipped grant
+// still converges — within one sweep cycle — because the personal plane now has
+// the standing healer it never had.
+//
+// The fixture is T4's own MUTATION control, reused deliberately: the producer
+// installs with no grant-change sink, so nothing enqueues, nothing drains, and
+// the assertions T4's mutation half makes about silence are exactly what this
+// test starts from. The only thing added is the sweeper. That is what makes the
+// claim honest — the sweep is not being credited for a frame the fast path
+// published, because in this fixture the fast path is not wired at all.
+//
+// It is also the crash case, faithfully: a signal lost with the process is
+// indistinguishable, from the sweeper's side, from a signal never emitted.
+func TestPersonalLensGrantChange_T6_SweepConvergesWithoutTheEdge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in -short mode")
+	}
+	f := newGrantEdgeFixture(t, "t6-sweep", false)
+	cons := pl3Consumer(t, f.h, f.identityID)
+	f.settle(t, cons)
+	require.Empty(t, drainBriefly(t, cons), "no grant yet, so nothing further")
+
+	// The sweep as cmd/refractor starts it, with the batch widened to cover the
+	// harness's whole identity population in one tick. Its ticks are driven from
+	// the test rather than by its own ticker, and not for speed: an
+	// authoritative frame is republished for every swept identity on every tick,
+	// by construction, so a drain-until-quiet against a free-running sweeper
+	// never goes quiet and could not tell the frame under test from the next
+	// tick's. The ticker is unit-tested; what this proves is that ONE CYCLE
+	// converges, which is exactly T6's claim.
+	sweeper := grantchange.NewPersonalSweeper(f.reprojector, f.h.coreKV)
+	sweeper.SetBounds(100, 0)
+	sweepOneCycle := func(t *testing.T) {
+		t.Helper()
+		before := sweeper.CycleCompletedAt()
+		for range 20 {
+			sweeper.Sweep(f.h.ctx)
+			if sweeper.CycleCompletedAt().After(before) {
+				return
+			}
+		}
+		t.Fatal("the sweep did not close a cycle over the identity population within 20 ticks")
+	}
+
+	// --- the growth direction: a grant lands with nothing to announce it.
+	f.grant(t)
+	f.awaitCapReadLiveness(t, true)
+	require.Zero(t, f.reprojector.QueueDepth(),
+		"the edge is not wired in this fixture — anything that reaches the device below reached it through the sweep")
+	require.Empty(t, drainBriefly(t, cons),
+		"and nothing reaches the device on its own: this is the staleness window the sweep exists to close")
+
+	sweepOneCycle(t)
+	granted := drainUntilQuiet(t, cons)
+	assert.True(t, frameNames(granted, f.personalLens, "lease-grant-edge"),
+		"the sweep must publish a frame naming the newly-readable row, with no signal and no event on the lens's own subgraph")
+	assert.True(t, upsertHappened(granted, f.personalLens),
+		"and the row itself must reach the device")
+
+	// --- the shrink direction, the one that fails open.
+	f.revoke(t)
+	f.awaitCapReadLiveness(t, false)
+	require.Zero(t, f.reprojector.QueueDepth(), "still no edge, still only the sweep")
+
+	sweepOneCycle(t)
+	revoked := drainUntilQuiet(t, cons)
+	require.NotEmpty(t, revoked, "the sweep must publish a frame after the revocation")
+	assert.False(t, frameNames(revoked, f.personalLens, "lease-grant-edge"),
+		"the frame the sweep publishes after the revocation must OMIT the key, which is what prunes it on the device")
+	assert.True(t, sawEmptyFrame(revoked, f.personalLens),
+		"an actor who may now read nothing is framed with no keys")
+}
