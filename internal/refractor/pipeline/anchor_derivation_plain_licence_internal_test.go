@@ -50,21 +50,59 @@ RETURN 'all' AS key, collect(u.name) AS names
 // production enrolment path, so the licence is asked of a pipeline in the state
 // a real activation leaves behind.
 //
-// It then runs one real pass, because a licensed lens is one whose audit is
-// actually TICKING and the staleness conjunct reads that off the verdict clock:
-// an auditor that has never completed a pass carries a zero LastPassAt and is
-// stale by construction. The pass is driven rather than the timestamp written,
-// for the same reason the suppression vector below drives a pause: the clock the
-// licence reads must be the one the auditor itself stamps.
+// It then seeds ONE anchor and runs one real pass, because a licensed lens is
+// one whose audit is actually TICKING and the staleness conjunct reads that off
+// the verdict clock. Both halves are load-bearing: a pass that compares no anchor
+// reaches no verdict and leaves LastPassAt at zero (audit.go's record), so an
+// unseeded fixture would be stale by construction and every licence below would
+// refuse for a reason the test never named. The pass is driven rather than the
+// timestamp written, for the same reason the suppression vector below drives a
+// pause: the clock the licence reads must be the one the auditor itself stamps.
 func licenceFixture(t *testing.T, spec string) *auditFixture {
 	t.Helper()
 	f := newAuditFixture(t, spec, nil)
 	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
 	require.True(t, enrolled, "the fixture lens must enrol; refusal: %s", refusal)
+	seedLicenceAnchor(t, f)
 	f.p.Auditor().pass(context.Background())
 	require.False(t, f.p.Auditor().Status().LastPassAt.IsZero(),
 		"the fixture's audit must have reached a verdict, or every licence below refuses as stale")
 	return f
+}
+
+// The fixture's own anchor and its landlord, distinct from auditUnitA so a test
+// that seeds that one for its own purposes adds to the corpus rather than
+// colliding with the fixture's.
+const (
+	licenceAnchor   = "LicenceanchorAAAAAAA"
+	licenceLandlord = "LicenceLandLordAAAAA"
+)
+
+// seedLicenceAnchor puts one auditable anchor of the audited type into the
+// corpus, so the auditor's pass has something to compare and can reach a
+// verdict.
+//
+// It seeds the LANDLORD and the managedBy edge too, which every spec here binds
+// even though only licenceNeighbourKeyedSpec keys on it. That spec's row key IS
+// the landlord's key, so without the edge the audit's read-back is asked for a
+// nil key, fails, and books the anchor unverified — leaving the pass with nothing
+// verified and the verdict clock unstamped, which would refuse the licence as
+// stale long before the closure conjunct that subtest exists to reach.
+//
+// The graph is written directly rather than through auditFixture.project: project
+// drives a CDC event through the pipeline's write path, and two of these specs
+// exist precisely because their rows do not key by this anchor. What the audit
+// needs is an anchor it can enumerate and compare, which is a graph fact rather
+// than a projected one.
+func seedLicenceAnchor(t *testing.T, f *auditFixture) {
+	t.Helper()
+	key := "vtx.unit." + licenceAnchor
+	seedVertexBody(t, f.coreKV, key, "unit", map[string]any{"name": "Licence anchor"})
+	putBody(t, f.coreKV, key+".listing", aspectBody(key, "listing", map[string]any{"status": "active"}, false))
+
+	landlordKey := "vtx.landlord." + licenceLandlord
+	seedVertexBody(t, f.coreKV, landlordKey, "landlord", map[string]any{"name": "Licence landlord"})
+	buildCollisionEdge(t, f.adjKV, "managedBy", "unit", licenceAnchor, "landlord", licenceLandlord)
 }
 
 // ageLastPass backdates the auditor's verdict clock by d. Written directly under
@@ -345,7 +383,9 @@ func TestPlainDerivationLicence_NeverAuditedRefuses(t *testing.T) {
 	require.False(t, licensed, "an audit that has proven nothing yet licenses nothing yet")
 	require.Contains(t, refusal, "has not reached a verdict")
 
-	// The positive twin: one pass, and the same lens is licensed.
+	// The positive twin: one pass over an anchor it can actually compare, and the
+	// same lens is licensed.
+	seedLicenceAnchor(t, f)
 	f.p.Auditor().pass(context.Background())
 	licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
 	require.True(t, licensed, "refusal: %s", refusal)
@@ -429,7 +469,9 @@ func TestPlainDerivationLicence_NeverAuditedRefusalCarriesNoDuration(t *testing.
 	require.NotRegexp(t, `\d+h\d+m`, refusal,
 		"a duration measured from the zero time must never reach an operator")
 
-	// The positive twin: one pass, and this arm is no longer the one answering.
+	// The positive twin: one pass over an anchor it can actually compare, and this
+	// arm is no longer the one answering.
+	seedLicenceAnchor(t, f)
 	f.p.Auditor().pass(context.Background())
 	licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
 	require.True(t, licensed, "refusal: %s", refusal)

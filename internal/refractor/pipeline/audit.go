@@ -193,9 +193,10 @@ type AuditStatus struct {
 	ListingSize   int
 	CoverageBasis string
 	// LastPassAt is when a pass last reached a verdict — never a suppressed
-	// one. It is the audit's liveness clock: every counter above describes the
-	// last pass that ran, so an audit that stops running keeps publishing its
-	// final verdict forever, and only this timestamp says the verdict is old.
+	// one, and never one that compared no anchor. It is the audit's liveness
+	// clock: every counter above describes the last pass that ran, so an audit
+	// that stops running keeps publishing its final verdict forever, and only
+	// this timestamp says the verdict is old.
 	LastPassAt time.Time
 	// Suppression names why the most recent tick verified nothing ("" when it
 	// ran), and SuppressionAt when that was recorded. The timestamp is what
@@ -857,7 +858,26 @@ func (a *Auditor) record(ctx context.Context, t auditTally, next string, listing
 		a.status.CycleUnverified = a.cycleUnverified
 		a.cycleAudited, a.cycleDivergent, a.cycleUnverified = 0, 0, 0
 	}
-	a.status.LastPassAt = time.Now()
+	// The liveness clock takes the same guard one step earlier, and for a
+	// stronger reason. LastPassAt means "a pass reached a verdict", and a pass
+	// that compared no anchor reached none — whether the page was empty or every
+	// anchor on it hit noteUnverified, which one target-read outage produces for
+	// a whole page at once. Stamped unconditionally it would publish
+	// `divergentTotal: 0` beside a fresh clock off a pass that verified literally
+	// nothing, which is the same over-claim the cycle stamp above refuses.
+	//
+	// Downstream it is worse than a misleading number. plainDerivationLicence
+	// (anchor_derivation_plain.go) reads this field through Auditor.Stale to
+	// decide whether a plain lens's narrowing WRITE licence still holds, and that
+	// conjunct exists precisely so an audit loop that is no longer reaching
+	// verdicts cannot keep licensing narrowed writes. A blind loop stamping the
+	// clock is that same fail-open reached by a loop that runs rather than one
+	// that died — and during a target-read outage it is reached alongside the §6
+	// presence probe dropping every derived retraction, so the one detector that
+	// would catch the consequence is the detector reporting clean.
+	if t.audited > 0 {
+		a.status.LastPassAt = time.Now()
+	}
 	snapshot := a.status
 	a.mu.Unlock()
 

@@ -104,12 +104,12 @@ type DerivationShadowStats struct {
 	PlainOverCapSize  int64 // sum of derived-set sizes that triggered PlainOverCap — the tail §11's distribution needs
 
 	// PlainProbeUnreadable counts §6 presence probes the target could not answer
-	// (derivedRowIsLive's failed-read arm), each of which dropped a derived
-	// anchor's Delete fail-safe. Unlike the four above it is an ACT-mode counter,
-	// not a sampled one, and it is the only way to tell a retraction the target
-	// confirmed unnecessary from one it could not be asked about: the two leave
-	// the target in the same state, so a persistent read fault would otherwise
-	// read as a lens with nothing to retract.
+	// (derivedRowIsLive's failed-read arm), each of which failed its whole event
+	// rather than deciding a derived anchor's Delete either way. Unlike the four
+	// above it is an ACT-mode counter, not a sampled one, and it is the only
+	// standing record that the target could not be asked at all: the event is
+	// redelivered and eventually succeeds, so without this a target's bad minute
+	// would leave no trace in the lens's own numbers.
 	PlainProbeUnreadable int64
 }
 

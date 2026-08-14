@@ -64,6 +64,7 @@ func newAuditKVs(t *testing.T) (coreKV, adjKV, targetKV, healthKV *substrate.KV)
 type auditFixture struct {
 	p        *Pipeline
 	coreKV   *substrate.KV
+	adjKV    *substrate.KV
 	targetKV *substrate.KV
 	healthKV *substrate.KV
 	reporter *health.Reporter
@@ -97,7 +98,7 @@ func newAuditFixture(t *testing.T, spec string, wrap func(adapter.Adapter) adapt
 	p, err := New("audit-rule", "nats_kv", "CORE", adjKV, coreKV, adpt, reporter)
 	require.NoError(t, err)
 	require.NoError(t, p.UseFullEngine(eng, cr))
-	return &auditFixture{p: p, coreKV: coreKV, targetKV: targetKV, healthKV: healthKV, reporter: reporter}
+	return &auditFixture{p: p, coreKV: coreKV, adjKV: adjKV, targetKV: targetKV, healthKV: healthKV, reporter: reporter}
 }
 
 // installAudit arms the auditor through the production enrolment path, then
@@ -677,6 +678,92 @@ func TestAudit_EmptyAnchorTypeEarnsNoCycleCompletion(t *testing.T) {
 	st = a.Status()
 	require.False(t, st.CycleCompletedAt.IsZero())
 	require.Equal(t, 1, st.CycleAudited, "the stamp travels with what the cycle actually compared")
+}
+
+// TestAudit_APassThatVerifiedNothingLeavesTheClockAgeing is the liveness clock's
+// half of the same honesty the cycle stamp above keeps. A pass that reached the
+// end of its loop having compared no anchor reached no verdict, and there are two
+// ways to get there: an empty page, and a page on which EVERY anchor went
+// unverified — which one target-read outage produces in a single pass.
+//
+// The second is the one with teeth. Nothing about the tick loop looks wrong: it
+// runs, it enumerates, it publishes `divergentTotal: 0`. Stamping the clock on
+// top of that would make a blind audit read exactly like a clean one, and
+// plainDerivationLicence reads this very field (through Auditor.Stale) to decide
+// whether a plain lens's narrowing write licence still holds — so the stamp would
+// keep the licence live for the whole outage, which is the fail-open the
+// staleness conjunct was added to close.
+func TestAudit_APassThatVerifiedNothingLeavesTheClockAgeing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("every anchor unverified", func(t *testing.T) {
+		// Only GetRow fails, so the corpus below is genuinely converged: the
+		// pass's verdict is nothing but the read fault.
+		f := newAuditFixture(t, seedUnitsSpec, func(a adapter.Adapter) adapter.Adapter {
+			return failingRowReader{Adapter: a, err: context.DeadlineExceeded}
+		})
+		f.project(t, auditUnitA, "Loft A", 1)
+		a := f.installAudit(t, 10)
+
+		a.pass(ctx)
+		st := a.Status()
+		require.Equal(t, 1, st.Unverified, "the pass really did try, and really did fail to conclude")
+		require.Zero(t, st.Audited)
+		require.Empty(t, st.Suppression, "nothing suppressed this tick — it ran, and that is the whole hazard")
+		require.True(t, st.LastPassAt.IsZero(),
+			"a pass that compared no anchor must leave the liveness clock ageing — that ageing is the only thing "+
+				"that distinguishes an audit gone blind from one that is clean and quiet")
+	})
+
+	t.Run("an empty page", func(t *testing.T) {
+		f := newAuditFixture(t, seedUnitsSpec, nil)
+		a := f.installAudit(t, 10)
+
+		a.pass(ctx)
+		require.Zero(t, a.Status().Audited)
+		require.True(t, a.Status().LastPassAt.IsZero(),
+			"a lens with no enumerable anchor has proven nothing, so its clock has nothing to stamp")
+	})
+
+	t.Run("the healthy path still advances it", func(t *testing.T) {
+		// The positive vector, and the regression the guard must not cause: a pass
+		// that compared something stamps, and a LATER one re-stamps rather than
+		// latching on the first.
+		f := newAuditFixture(t, seedUnitsSpec, nil)
+		a := f.installAudit(t, 10)
+		f.project(t, auditUnitA, "Loft A", 1)
+
+		a.pass(ctx)
+		first := a.Status().LastPassAt
+		require.Equal(t, 1, a.Status().Audited)
+		require.False(t, first.IsZero(), "a pass that audited an anchor reached a verdict")
+
+		a.pass(ctx)
+		require.True(t, a.Status().LastPassAt.After(first),
+			"and each subsequent verdict re-stamps, or a running audit would age into staleness")
+	})
+
+	t.Run("an outage stops the clock a running lens was relying on", func(t *testing.T) {
+		// The consequence stated end to end: the clock advances while the target
+		// answers, and stops the moment the target stops answering — WITHOUT the
+		// auditor reporting anything else wrong. That is what lets Stale, and so
+		// the narrowing licence, see an outage the counters cannot show.
+		f := newAuditFixture(t, seedUnitsSpec, nil)
+		a := f.installAudit(t, 10)
+		f.project(t, auditUnitA, "Loft A", 1)
+
+		a.pass(ctx)
+		stamped := a.Status().LastPassAt
+		require.False(t, stamped.IsZero())
+
+		require.NoError(t, f.p.HotReloadInto(failingRowReader{Adapter: f.p.currentAdapter(), err: context.DeadlineExceeded}))
+		a.pass(ctx)
+		st := a.Status()
+		require.Equal(t, 1, st.Unverified)
+		require.Zero(t, st.DivergentTotal, "the blind pass publishes a clean-looking number, exactly as before")
+		require.Equal(t, stamped, st.LastPassAt,
+			"but the clock behind it does not move, so the licence reading it can age out of the narrowing")
+	})
 }
 
 // TestAudit_CycleTotalsSpanTheWholeWalk is the other half of the same property:

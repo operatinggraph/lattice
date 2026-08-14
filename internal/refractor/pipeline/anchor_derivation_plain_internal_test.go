@@ -762,16 +762,20 @@ func (a erringRowReader) GetRow(context.Context, map[string]any) (map[string]any
 }
 
 // TestDerivedRowIsLive_DeclinesWhatItCannotConfirm walks all four answers the
-// probe can give, because three of them drop the Delete and only one of those
-// three is a fact about the ROW. Only a positively confirmed live row earns a
-// retraction; a confirmed absence, an unanswerable read and a target that cannot
-// be asked at all decline, mirroring zeroRowDeleteKey.
+// probe can give. Only a positively confirmed live row earns a retraction; the
+// other three all withhold it, and the whole point of the test is that they do
+// so in TWO different ways.
 //
-// The counter is what separates them afterwards. A confirmed absence and a
+// A confirmed absence and a target that cannot be asked at all are facts about
+// the ROW: they answer (false, nil), the caller drops the Delete, and the event
+// acks. An unanswerable READ is not a fact about anything — it says the probe
+// could not tell — so it answers an error, which its caller makes the event's
+// outcome rather than acking a retraction it never resolved.
+//
+// The counter separates the first two afterwards. A confirmed absence and a
 // failed read leave the target in precisely the same state, so without
 // PlainProbeUnreadable a target having a bad minute would be indistinguishable
-// from a lens with nothing to retract — and the retraction dropped in the
-// meantime may have been a real one. The two arms that are facts about the row
+// from a lens with nothing to retract. The two arms that are facts about the row
 // must NOT move that counter, which is asserted here too, or it would report
 // noise instead of faults.
 func TestDerivedRowIsLive_DeclinesWhatItCannotConfirm(t *testing.T) {
@@ -782,24 +786,73 @@ func TestDerivedRowIsLive_DeclinesWhatItCannotConfirm(t *testing.T) {
 	ctx := context.Background()
 	liveKey := f.project(t, auditUnitA, "Loft A", 1)
 
-	require.True(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
-		"positive vector: a row the lens really wrote must read live")
-	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": "vtx.unit." + probeUnitNever}),
-		"an absent row must not earn a Delete")
+	live, err := f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey})
+	require.NoError(t, err)
+	require.True(t, live, "positive vector: a row the lens really wrote must read live")
+
+	live, err = f.p.derivedRowIsLive(ctx, map[string]any{"key": "vtx.unit." + probeUnitNever})
+	require.NoError(t, err, "a confirmed absence is an ANSWER, so it must not fail the event")
+	require.False(t, live, "an absent row must not earn a Delete")
 	require.Zero(t, f.p.AnchorDerivationShadow().PlainProbeUnreadable,
 		"a probe the target ANSWERED is not an unreadable one, whichever way it answered")
 
-	require.NoError(t, f.p.HotReloadInto(erringRowReader{inner: f.p.currentAdapter(), err: errors.New("target unavailable")}))
-	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
-		"an unanswerable probe declines, exactly as a confirmed absence does")
+	readErr := errors.New("target unavailable")
+	require.NoError(t, f.p.HotReloadInto(erringRowReader{inner: f.p.currentAdapter(), err: readErr}))
+	live, err = f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey})
+	require.ErrorIs(t, err, readErr,
+		"an unanswerable probe cannot decide a retraction, so it must fail the event rather than drop one")
+	require.False(t, live)
 	require.Equal(t, int64(1), f.p.AnchorDerivationShadow().PlainProbeUnreadable,
-		"and unlike a confirmed absence it is counted, because the retraction it dropped may have been a real one")
+		"and it is counted, because redelivery alone never makes a target's bad minute visible")
 
 	require.NoError(t, f.p.HotReloadInto(notARowReader{inner: f.p.currentAdapter()}))
-	require.False(t, f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey}),
-		"a target that cannot be asked answers no, never yes")
+	live, err = f.p.derivedRowIsLive(ctx, map[string]any{"key": liveKey})
+	require.NoError(t, err, "a lens-shape fact the licence already excludes is not a read fault to fail an event on")
+	require.False(t, live, "a target that cannot be asked answers no, never yes")
 	require.Equal(t, int64(1), f.p.AnchorDerivationShadow().PlainProbeUnreadable,
 		"a target with no read-back at all is a lens-shape fact the licence already excludes, not a read fault")
+}
+
+// TestEvaluatePlainDerivedAnchors_UnreadableProbeFailsTheEvent is the
+// disposition that finding rests on, at the level the disposition actually
+// matters: the caller's. §6's probe fires on a non-anchor-incident neighbour
+// event, which for the derived anchor it names is a ONE-SHOT event — nothing
+// re-derives that anchor later the way an actor's own next event would. So a
+// Delete dropped on an unreadable probe has no second chance and leaves a
+// permanent orphan, while the same evaluation's upsert half would have been
+// retried. The error is what makes the two halves symmetric: it propagates out
+// of evaluateForEntryRaw and Naks (dispositionEvalErr), so the event comes back.
+//
+// The positive vector is the same probe on the same lens one line earlier, with
+// a target that CAN answer: without it a green error here could equally come
+// from an evaluation that fails on everything.
+func TestEvaluatePlainDerivedAnchors_UnreadableProbeFailsTheEvent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	ctx := context.Background()
+
+	// One anchor with a live row, dropped out of the matched set — so the derived
+	// re-entry produces a Delete the probe has to rule on.
+	liveKey := f.project(t, auditUnitA, "Loft A", 1)
+	putBody(t, f.coreKV, liveKey+".listing",
+		aspectBody(liveKey, "listing", map[string]any{"status": "active"}, true))
+	rs := f.p.ruleState()
+
+	derived, err := f.p.evaluatePlainDerivedAnchors(ctx, rs, []string{liveKey}, "unit")
+	require.NoError(t, err, "positive vector: a target that can answer resolves the retraction")
+	require.Len(t, derived, 1)
+	require.True(t, derived[0].Delete)
+
+	readErr := errors.New("target unavailable")
+	require.NoError(t, f.p.HotReloadInto(erringRowReader{inner: f.p.currentAdapter(), err: readErr}))
+
+	derived, err = f.p.evaluatePlainDerivedAnchors(ctx, rs, []string{liveKey}, "unit")
+	require.ErrorIs(t, err, readErr,
+		"an unresolvable retraction must become the EVENT's outcome — acking here drops it forever")
+	require.Nil(t, derived,
+		"and no partial result may be returned, or the write path would ack the half it did resolve")
 }
 
 // TestNoteStaticPlainDerivationRefusal_NamesTheGoverningConjunct pins what an
@@ -835,10 +888,22 @@ func TestNoteStaticPlainDerivationRefusal_NamesTheGoverningConjunct(t *testing.T
 	require.Equal(t, "it is a multi-walk lens, and one scan-root graph cannot speak for N independent queries",
 		staticRefusal())
 
-	// The default: nothing refuses by the time the note is written, which is the
-	// live-field race the gate's own answer can lose to and the only case with no
-	// reason of its own to report.
-	p.noteStaticPlainDerivationRefusal(rs, "")
+	// The default arm, posed as the ONLY state that reaches it. An empty
+	// licenceRefusal on a gate that answered "not ready" cannot mean the licence
+	// refused — every plainDerivationLicence refusal carries a reason — so it
+	// means the INDEX refused and the licence was never asked. Reaching the
+	// default from there needs that index conjunct to have moved back before the
+	// note was written, which is the live-field race, and it is driven here rather
+	// than simulated by handing the note an empty string it could not have got.
+	p.SetActorEnumerator(&ActorEnumerator{})
+	_, ready, raceRefusal := p.plainDerivationIndexForAct(rs)
+	require.False(t, ready, "an actor-aware pipeline has no plain derived set to license")
+	require.Empty(t, raceRefusal, "the index refused first, so the licence was never asked for a reason")
+
+	p.SetActorEnumerator(nil)
+	p.noteStaticPlainDerivationRefusal(rs, raceRefusal)
+	require.Contains(t, staticRefusal(), "an index conjunct it reads live",
+		"the empty refusal came from the INDEX half, so blaming a licence conjunct would misdirect the operator")
 	require.Contains(t, staticRefusal(), "moved between the act gate's answer and this one")
 }
 

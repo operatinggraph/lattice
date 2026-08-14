@@ -92,6 +92,9 @@ type plainActLens struct {
 // control: with an enrolled, ticking Auditor §5's licence admits the lens and
 // its neighbour events narrow to the derived anchors; without one the licence
 // refuses and the lens keeps the unseeded whole-corpus rescan.
+//
+// It enrols and STARTS the audit but does not wait for its verdict — see
+// awaitPlainActVerdict, which each test calls once its corpus exists.
 func installPlainActLens(t *testing.T, env *pipelineEnv, ruleID, bucket, spec string,
 	mode adapter.DeleteMode, audited bool) *plainActLens {
 	t.Helper()
@@ -116,14 +119,7 @@ func installPlainActLens(t *testing.T, env *pipelineEnv, ruleID, bucket, spec st
 	return &plainActLens{ruleID: ruleID, pipeline: p, targetKV: targetKV}
 }
 
-// runPlainActAudit starts the lens's divergence audit and waits for its first
-// verdict.
-//
-// The wait is the licence's own precondition, not a convenience: the staleness
-// conjunct reads AuditStatus.LastPassAt, and an auditor that has never completed
-// a pass carries a zero one and is stale by construction. Until the first
-// verdict lands the subject lens is no more licensed than the control, and every
-// narrowing assertion below would be measuring the wrong thing.
+// runPlainActAudit starts the lens's divergence audit for the test's lifetime.
 func runPlainActAudit(t *testing.T, p *pipeline.Pipeline) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -131,9 +127,29 @@ func runPlainActAudit(t *testing.T, p *pipeline.Pipeline) {
 	wg.Add(1)
 	go func() { defer wg.Done(); p.RunAudit(ctx) }()
 	t.Cleanup(func() { cancel(); wg.Wait() })
+}
 
-	pollUntil(t, 30*time.Second, func() bool { return !p.Auditor().Status().LastPassAt.IsZero() })
-	require.Empty(t, p.Auditor().Status().Suppression,
+// awaitPlainActVerdict blocks until the lens's audit has COMPARED an anchor and
+// published the verdict — the licence's own precondition, and the reason it
+// cannot be waited out at install time.
+//
+// The staleness conjunct reads AuditStatus.LastPassAt, and a pass that compared
+// no anchor never stamps it (audit.go's record): a pass over an empty anchor
+// listing, or one where every anchor's read-back failed, verified nothing and
+// must leave the clock ageing. Every lens here is installed BEFORE its corpus
+// exists, so its first ticks are exactly that empty-listing case. Until an
+// anchor has actually been compared the subject is no more licensed than the
+// control, and every narrowing assertion would be measuring the wrong thing —
+// so each test calls this once its graph is in place and its rows have landed.
+func (l *plainActLens) awaitPlainActVerdict(t *testing.T) {
+	t.Helper()
+	a := l.pipeline.Auditor()
+	require.NotNil(t, a, "only an audited lens has a verdict to wait for")
+	pollUntil(t, 30*time.Second, func() bool {
+		st := a.Status()
+		return !st.LastPassAt.IsZero() && st.Audited > 0
+	})
+	require.Empty(t, a.Status().Suppression,
 		"a suppressed audit refuses the licence just as a missing one does")
 }
 
@@ -246,6 +262,10 @@ func TestPlainDerivationAct_NarrowsToTheAffectedAnchor_E2E(t *testing.T) {
 		pollUntil(t, 30*time.Second, func() bool { return l.name(t, pr2Key) == "bob" })
 	}
 
+	// The corpus now exists, so the subject's audit can reach a verdict over it —
+	// which is what licenses the narrowing every assertion below reads.
+	subject.awaitPlainActVerdict(t)
+
 	// A settling event on the anchor-affecting neighbour, waited out on both
 	// lenses, is what makes the purge below safe: one consumer applies its
 	// messages in order and writes every result of a message before acking it,
@@ -334,6 +354,7 @@ func TestPlainDerivationAct_RetractsOnANonIncidentLinkRemoval_E2E(t *testing.T) 
 		pollUntil(t, 30*time.Second, func() bool { return city(l, pr1Key) == "Bristol" })
 		pollUntil(t, 30*time.Second, func() bool { return city(l, pr2Key) == "Leeds" })
 	}
+	subject.awaitPlainActVerdict(t)
 
 	// The removal: a soft tombstone on the org→location link. No event in this
 	// step names a provider, and neither endpoint of the link is one.
@@ -412,6 +433,7 @@ func TestPlainDerivationAct_NeverProjectedAnchorGetsNoTombstone_E2E(t *testing.T
 		return s
 	}
 	pollUntil(t, 30*time.Second, func() bool { return holder(prLiveKey) == "alice" })
+	subject.awaitPlainActVerdict(t)
 
 	// The excluded provider's OWN vertex event already left a marker: an
 	// anchor-typed event on a never-matched anchor emits an idempotent Delete
@@ -492,6 +514,7 @@ func TestPlainDerivationAct_UnenrolledLensStillRescans_E2E(t *testing.T) {
 			pollUntil(t, 30*time.Second, func() bool { return l.name(t, key) == names[i] })
 		}
 	}
+	subject.awaitPlainActVerdict(t)
 
 	// Both bystanders' rows are removed out of band, behind a settled fence, so
 	// "was this anchor evaluated" has an observable answer on each lens.

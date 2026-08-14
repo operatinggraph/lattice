@@ -139,8 +139,8 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 // taken during installation reads a later stage's component as absent — and for
 // a licence, absent reads as satisfied, which is the fail-open direction.
 //
-// The conjuncts, cheapest first (auditEnrolment's own ordering discipline —
-// the field reads before the two expression walks):
+// The conjuncts, in the order the body asks them (auditEnrolment's own ordering
+// discipline — the field reads before the two expression walks):
 //
 //   - not auth-plane. An auth-plane lens projects an authorization surface, so
 //     a stale row is an over-grant in one direction or the other. The
@@ -218,13 +218,16 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 // The conjuncts the audit shares are asked in auditEnrolment's own order, so a
 // lens the audit also refuses reports the same reason both predicates publish.
 // The conjuncts with no counterpart there sit outside that ordering, at the two
-// ends and for opposite reasons. The auditor's own health — enrolled,
-// unsuppressed, not stale — is asked FIRST because it is the cheapest (field reads
-// off one status snapshot and a clock) and because it is the conjunct most likely
-// to move under a lens that is otherwise permanently eligible. Closure is asked
-// LAST because it is a fixed property of the query: reporting "not keyed by its
-// anchor alone" only for a lens that is otherwise fully eligible is the reading
-// an operator can act on.
+// ends and for opposite reasons. The auth plane is asked FIRST because it is a
+// single bool and because it is the one exclusion no other conjunct can stand in
+// for — a lens on that plane is refused whatever its audit is doing, and reading
+// any other reason for it would misdirect an operator. The auditor's own health
+// — enrolled, unsuppressed, not stale — follows, ahead of everything derived from
+// the rule, because it is the next-cheapest (field reads off one status snapshot
+// and a clock) and is the conjunct most likely to MOVE under a lens that is
+// otherwise permanently eligible. Closure is asked LAST because it is a fixed
+// property of the query: reporting "not keyed by its anchor alone" only for a
+// lens that is otherwise fully eligible is the reading an operator can act on.
 //
 // The §4.2 conjuncts (plain pipeline, single branch, complete and resolved
 // rootHops, no diffRetraction) are plainDerivationIndex's, not restated here:
@@ -250,7 +253,12 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 		return false, "its divergence audit is suppressed (" + st.Suppression + "), so nothing is re-testing its rows while that holds"
 	}
 	// Every refusal string below is STABLE for as long as the state producing it
-	// holds — no elapsed duration is interpolated into one. The caller latches on
+	// holds — no elapsed duration is interpolated into one. The rule is stated for
+	// what follows because the two arms above interpolate the AUDITOR's own
+	// published reason (st.Refusal, st.Suppression) rather than a string this
+	// function composes: those are only as stable as the auditor makes them, and a
+	// suppression reason carrying a live err.Error() is the auditor's to keep
+	// steady (audit.go's noteSuppressed). The caller latches on
 	// the reason string to log a refusal at most once (noteStaticPlainDerivationRefusal),
 	// and a staleness window lasts hours, so a reason carrying a per-second
 	// elapsed would defeat that latch precisely where it matters most and emit a
@@ -413,8 +421,28 @@ func (p *Pipeline) deriveAnchorsForPlainLink(ctx context.Context, rs ruleState, 
 // derive an anchor whose row the lens has never once projected — and an
 // unconditional Delete for one is a spurious tombstone, durable under
 // soft-delete. So every derived anchor's Delete is asked of the target first
-// (derivedRowIsLive) and dropped when the row is absent. Dropping is silent
-// rather than an error: absence is the answer, not a failure.
+// (derivedRowIsLive) and dropped when the row is CONFIRMED absent. Dropping on
+// that answer is silent rather than an error: absence is the answer, not a
+// failure.
+//
+// A probe the target could not ANSWER is the opposite disposition, and the
+// difference is the event's second chance. This probe fires on a non-anchor-
+// incident neighbour event — for the derived anchor it names, a one-shot event
+// that will never recur — so a Delete dropped here has nothing behind it: the
+// row becomes an orphan only the detect-only audit will ever name, and only if
+// the audit is not itself blind to the same outage. So an unreadable probe ends
+// the WHOLE event with its error, exactly as derive()'s own failed walk hands
+// the event's outcome to the call it falls back to (evaluatePlainNeighbourEvent),
+// and exactly as the upsert half of this same evaluation already behaves on a
+// write failure. evaluateForEntryRaw propagates it (evaluate.go) and
+// dispositionEvalErr Naks it (pipeline.go), so the event is redelivered rather
+// than acked with its retraction silently missing.
+//
+// Discarding the results already collected from earlier anchors is correct, not
+// a loss: redelivery re-runs the whole evaluation from scratch — every derived
+// anchor's seeded evaluation again — and each of those is idempotent (an upsert,
+// or the probed Delete). Returning a partial set would be the lossy option,
+// because it would ack.
 //
 // Dedupe is hoisted here (§4.2 obligation i): today only the link arm dedupes
 // across its two endpoint evaluations (evalPlainLinkReprojection's own
@@ -449,8 +477,14 @@ func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState
 			return nil, err
 		}
 		for _, r := range results {
-			if r.Delete && !p.derivedRowIsLive(ctx, r.Keys) {
-				continue
+			if r.Delete {
+				live, perr := p.derivedRowIsLive(ctx, r.Keys)
+				if perr != nil {
+					return nil, perr
+				}
+				if !live {
+					continue
+				}
 			}
 			id := dedupeKeyFor(r)
 			if seen[id] {
@@ -467,37 +501,40 @@ func (p *Pipeline) evaluatePlainDerivedAnchors(ctx context.Context, rs ruleState
 // names — the §6 presence probe a walk-derived anchor's Delete must pass
 // before it is written.
 //
-// Its disposition mirrors zeroRowDeleteKey's (evaluate.go), the other place a
-// retraction is gated on a read-back: an adapter that cannot read its own rows
-// back, a failed read, and a confirmed absence all answer false, so only a
-// positively confirmed live row earns the Delete. The first of those is
-// unreachable on a licensed lens — plainDerivationLicence requires
-// adapter.RowReader, and this path runs only behind that licence — but it is
-// still the fail-safe answer rather than a panic on the assertion.
+// Only a positively confirmed live row earns the Delete, so the two answers
+// that are FACTS ABOUT THE ROW — a confirmed absence, and an adapter that
+// cannot be asked at all — return (false, nil) and the caller drops the Delete
+// silently, mirroring zeroRowDeleteKey's own disposition (evaluate.go). The
+// second is unreachable on a licensed lens (plainDerivationLicence requires
+// adapter.RowReader, and this path runs only behind that licence) but is still
+// answered fail-safe rather than asserted away.
 //
-// The FAILED READ is the one arm that does not speak for itself. A confirmed
-// absence and an unanswerable probe drop the same Delete, and from the target
-// alone they are indistinguishable afterwards — so a target having a bad minute
-// would look exactly like a lens with nothing to retract. It is therefore the
-// one arm that logs and counts (PlainProbeUnreadable): the retraction it dropped
-// may have been a real one, and only this pair says so.
-func (p *Pipeline) derivedRowIsLive(ctx context.Context, keys map[string]any) bool {
+// The FAILED READ is neither, and it is why this returns an error at all. It is
+// not a fact about the row: the probe could not tell whether the retraction it
+// is gating is a real one, and dropping it would ack an event that will never
+// come back for this anchor (see evaluatePlainDerivedAnchors on why the
+// zeroRowDeleteKey precedent stops here — that one fires on an evaluation the
+// actor gets again). So it is returned for the caller to make the event's
+// outcome, and it is ALSO logged and counted (PlainProbeUnreadable): the
+// telemetry says a target had a bad minute, which no amount of redelivery makes
+// visible on its own.
+func (p *Pipeline) derivedRowIsLive(ctx context.Context, keys map[string]any) (bool, error) {
 	reader, ok := p.currentAdapter().(adapter.RowReader)
 	if !ok {
-		return false
+		return false, nil
 	}
 	_, present, err := reader.GetRow(ctx, keys)
 	if err != nil {
-		slog.Warn("pipeline: plain derived anchor: could not read the row back; dropping its retraction",
+		slog.Warn("pipeline: plain derived anchor: could not read the row back; failing the event rather than dropping its retraction",
 			"ruleId", p.ruleID, "keys", keys, "err", err)
 		p.recordPlainProbeUnreadable()
-		return false
+		return false, fmt.Errorf("plain derived anchor: presence probe could not read the row back: %w", err)
 	}
-	return present
+	return present, nil
 }
 
 // recordPlainProbeUnreadable tallies a §6 presence probe the target could not
-// answer, whose Delete was dropped fail-safe.
+// answer, which fails its event rather than deciding a retraction.
 func (p *Pipeline) recordPlainProbeUnreadable() {
 	p.derivShadow.mu.Lock()
 	p.derivShadow.stats.PlainProbeUnreadable++
@@ -746,7 +783,15 @@ func (p *Pipeline) noteStaticPlainDerivationRefusal(rs ruleState, licenceRefusal
 	case licenceRefusal != "":
 		reason = licenceRefusal
 	default:
-		reason = "a licence conjunct it reads live moved between the act gate's answer and this one"
+		// Reachable only through the INDEX half, never the licence's. Every
+		// plainDerivationLicence refusal returns a non-empty reason, so an empty
+		// licenceRefusal on a gate that answered "not ready" means the index
+		// refused first and the licence was never asked. The index conjuncts read
+		// off the ruleState (branches, rootHops) cannot have moved — it is the
+		// same value the gate was handed — so what moved is one of the ones read
+		// live off the pipeline: its actor/envelope shape, or target-diff
+		// retraction.
+		reason = "an index conjunct it reads live — its actor or envelope shape, or target-diff retraction — moved between the act gate's answer and this one"
 	}
 
 	p.derivShadow.mu.Lock()
