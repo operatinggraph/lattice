@@ -41,11 +41,24 @@ type perAnchorEntry struct {
 	IsDeleted bool `json:"isDeleted"`
 }
 
+// KeyPrefix is the literal every D1 read-grant key in Capability KV starts
+// with — the base lens's own "cap-read.<actorSuffix>.<anchorId>" and every
+// domain producer's "cap-read.<domain>.<actorSuffix>.<anchorId>" alike
+// (cap-read-per-anchor-grant-keys-design.md §3.1).
+//
+// It is exported so the READER's key construction below and the PRODUCER-side
+// classification that decides which lenses announce a grant change
+// (projection.InstallActorAggregate) consume the same literal. That is the
+// whole point of exporting it: a producer classified by a copy of this string
+// could drift from the reader that has to find the key, and the failure mode of
+// that drift is a security filter whose change edge silently covers nothing.
+const KeyPrefix = "cap-read."
+
 func perAnchorBaseKey(actorSuffix, anchorID string) string {
-	return "cap-read." + actorSuffix + "." + anchorID
+	return KeyPrefix + actorSuffix + "." + anchorID
 }
 func perAnchorDomainFilter(actorSuffix, anchorID string) string {
-	return "cap-read.*." + actorSuffix + "." + anchorID
+	return KeyPrefix + "*." + actorSuffix + "." + anchorID
 }
 
 // IsReadable reports whether the actor (actorType, actorID — a Contract #1

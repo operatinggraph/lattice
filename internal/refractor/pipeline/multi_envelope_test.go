@@ -373,16 +373,31 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_LegacyParentTombstoned(t
 // embedded adapter. Embeds the CONCRETE *adapter.NatsKVAdapter (not the
 // adapter.Adapter interface) so GetRow/ListKeysPrefix promote automatically —
 // multiEntryRetractions needs both.
+//
+// Delete and DeleteWithOutcome both route through one shared method: they are
+// separate methods on the embedded adapter, so overriding only Delete would
+// leave DeleteWithOutcome promoted straight through and a caller preferring the
+// outcome form (writeResults does) would silently bypass the injection
+// (adapter.OutcomeDeleter's own doc names this trap).
 type failOnDeleteKeyAdapter struct {
 	*adapter.NatsKVAdapter
 	failKey string
 }
 
 func (a *failOnDeleteKeyAdapter) Delete(ctx context.Context, keys map[string]any, seq uint64) error {
+	_, err := a.deleteRecording(ctx, keys, seq)
+	return err
+}
+
+func (a *failOnDeleteKeyAdapter) DeleteWithOutcome(ctx context.Context, keys map[string]any, seq uint64) (adapter.DeleteOutcome, error) {
+	return a.deleteRecording(ctx, keys, seq)
+}
+
+func (a *failOnDeleteKeyAdapter) deleteRecording(ctx context.Context, keys map[string]any, seq uint64) (adapter.DeleteOutcome, error) {
 	if k, _ := keys["key"].(string); k == a.failKey {
-		return errors.New("injected: transient delete failure for " + k)
+		return adapter.DeleteOutcome{}, errors.New("injected: transient delete failure for " + k)
 	}
-	return a.NatsKVAdapter.Delete(ctx, keys, seq)
+	return a.NatsKVAdapter.DeleteWithOutcome(ctx, keys, seq)
 }
 
 // TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands

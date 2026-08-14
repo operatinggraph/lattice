@@ -387,6 +387,15 @@ type Pipeline struct {
 	// that family, so the two move together.
 	authPlane bool
 
+	// grantSink receives the actor behind every D1 read-grant liveness
+	// transition this lens's writes make, and grantAnchorFromKey is the
+	// lens's own target-key → anchor-vertex-key inversion used to name that
+	// actor. Both nil (the default) means this lens carries no grant-change
+	// edge — the fail-slow posture SetGrantChangeSink documents. They move
+	// together and are only ever set at construction time.
+	grantSink          GrantChangeSink
+	grantAnchorFromKey func(targetKey string) (string, bool)
+
 	// requiresFootprintValidation reports whether this lens's compiled cypher
 	// emits at least one multi-binding conjunct unit (projection.Compile's
 	// derived ProjectionPlan.RequiresFootprintValidation,
@@ -2770,14 +2779,8 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 				"pipeline: rebuild: consumer %q is not managed — refusing to truncate a target that cannot be re-derived",
 				p.consumerCfg.Name))
 		}
-		adpt := p.currentAdapter()
-		if t, ok := adpt.(adapter.Truncater); ok {
-			if err := t.Truncate(ctx); err != nil {
-				return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: truncate: %w", err))
-			}
-		} else {
-			slog.Warn("pipeline: rebuild: truncate=true but adapter does not implement Truncater; skipping",
-				"ruleId", p.ruleID)
+		if err := p.truncateTarget(ctx, p.currentAdapter()); err != nil {
+			return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: truncate: %w", err))
 		}
 	}
 
@@ -3433,8 +3436,17 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	}
 	adpt := p.currentAdapter()
 	// Resolved once per call — adpt itself is captured once above, so whether
-	// it reports upsert outcomes cannot change across this call's loop.
+	// it reports write outcomes cannot change across this call's loop.
 	outcomeAdpt, reportsOutcome := adpt.(adapter.OutcomeUpserter)
+	// The retraction direction needs its own outcome channel, and needs it for
+	// two independent reasons. The audit skip below reads `wrote`, and a plain
+	// Delete discards whether the guard actually committed — so a retraction
+	// the ordering guard DECLINED was still audited as a write that happened.
+	// And the D1 grant-change edge's revocation half is derived from the
+	// delete's transition, which the plain call throws away with everything
+	// else: without this the edge would ship a working grant-lands trigger and
+	// a dead grant-revoked one.
+	deleteOutcomeAdpt, reportsDeleteOutcome := adpt.(adapter.OutcomeDeleter)
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
 	transientActorRetry := false
@@ -3448,12 +3460,20 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	for _, result := range results {
 		var writeErr error
 		wrote := true
+		writtenKey := ""
+		transition := adapter.TransitionNone
 		if result.Delete {
-			writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
+			if reportsDeleteOutcome {
+				var outcome adapter.DeleteOutcome
+				outcome, writeErr = deleteOutcomeAdpt.DeleteWithOutcome(ctx, result.Keys, result.ProjectionSeq)
+				wrote, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
+			} else {
+				writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
+			}
 		} else if reportsOutcome {
 			var outcome adapter.UpsertOutcome
 			outcome, writeErr = outcomeAdpt.UpsertWithOutcome(ctx, result.Keys, result.Row, result.ProjectionSeq)
-			wrote = outcome.Wrote
+			wrote, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
 		} else {
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 		}
@@ -3510,6 +3530,7 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		}
 
 		p.recordProjected()
+		p.notifyGrantChange(writtenKey, transition)
 		if wrote {
 			p.writeAudit(ctx, key, result)
 		}

@@ -3,9 +3,11 @@ package projection
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/capabilityread"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -323,6 +325,54 @@ func sweepEnrolment(desc OutputDescriptor, adpt adapter.Adapter) (prefix, refusa
 	return prefix, ""
 }
 
+// InstallOption customizes an actor-aggregate installation with a capability
+// only some deployments wire. It is variadic rather than a parameter so a
+// facility a handful of lenses use does not force every installer call site —
+// production, and a corpus of harnesses that exercise other mechanisms
+// entirely — to name it.
+type InstallOption func(*installOptions)
+
+type installOptions struct {
+	grantSink pipeline.GrantChangeSink
+}
+
+// WithGrantChangeSink offers the D1 read-grant change edge to the installation.
+// The sink is wired only onto a lens IsReadGrantProducer admits; every other
+// lens ignores it. cmd/refractor passes the process's one reprojector for every
+// actor-aggregate lens and lets the classification decide.
+func WithGrantChangeSink(sink pipeline.GrantChangeSink) InstallOption {
+	return func(o *installOptions) { o.grantSink = sink }
+}
+
+// IsReadGrantProducer reports whether a compiled lens produces D1 read-grant
+// rows — the projection a Personal Lens consults through
+// capabilityread.IsReadable to decide every row it publishes.
+//
+// Three conjuncts, all read off the compiled plan and the output descriptor,
+// never off a canonical-name list — the same posture SetGuarded and
+// SetSweepPlan already take:
+//
+//   - the lens projects an authorization surface (plan.AuthPlane: it writes
+//     the capability bucket);
+//   - it is per-entry (EntryKeyColumn set), so it writes one guarded key per
+//     granted anchor, which is what makes a per-key liveness transition mean
+//     "this one grant flipped" rather than "this actor's document changed";
+//   - and its key prefix begins with the literal capabilityread itself builds
+//     its reader filter from. The write-plane producers sharing that bucket —
+//     cap.roles.*, cap.role-by-operation.* — fail here, which is the point: a
+//     write-authorization change is consumed synchronously by the Processor at
+//     commit and needs no push edge at all.
+func IsReadGrantProducer(desc OutputDescriptor, plan *ProjectionPlan) bool {
+	if plan == nil || !plan.AuthPlane || desc.EntryKeyColumn == "" {
+		return false
+	}
+	prefix, ok := desc.KeyPrefix()
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(prefix, capabilityread.KeyPrefix)
+}
+
 // InstallActorAggregate wires an actor-aggregate lens through the compiled
 // ProjectionPlan: the §6.13 Output descriptor drives the on-wire envelope, the
 // per-actor cross-vertex fan-out, the empty/delete-key behavior, and the §6.2
@@ -340,7 +390,12 @@ func InstallActorAggregate(
 	projectionRevision func(string) uint64,
 	adjKV, coreKV *substrate.KV,
 	logger *slog.Logger,
+	opts ...InstallOption,
 ) bool {
+	var options installOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	desc, err := ParseOutputDescriptor(r.Output)
 	if err != nil {
 		logger.Error("actor-aggregate output descriptor invalid — refusing registration",
@@ -356,6 +411,25 @@ func InstallActorAggregate(
 	authPlane := plan.AuthPlane
 	p.SetAuthPlane(authPlane)
 	p.SetRequiresFootprintValidation(plan.RequiresFootprintValidation)
+
+	// The D1 read-grant change edge (personal-lens-grant-change-trigger-
+	// design.md §4.2). A Personal Lens gates every row on this lens's output,
+	// read live, with no ordering between the two pipelines — so without this
+	// the consumer only re-decides when some unrelated Core-KV event happens to
+	// re-drive the actor. Installed here, from the same plan/descriptor data
+	// every other installation decision above reads, and only for the lenses
+	// the classification admits.
+	//
+	// The inversion handed over is the descriptor's own AnchorFromKey — the
+	// declared, per-lens structural inverse of the key pattern this lens writes
+	// with, whose failure mode is a MISSING signal. The alternative the design
+	// refuses is routing on the entry body's anchorType, which Contract #6
+	// §6.14 makes audit-only and whose failure mode is a signal delivered
+	// somewhere wrong.
+	if options.grantSink != nil && IsReadGrantProducer(desc, plan) {
+		p.SetGrantChangeSink(options.grantSink, desc.AnchorFromKey)
+		logger.Info("read-grant change edge installed", "lensId", r.ID, "outputKeyPattern", desc.OutputKeyPattern)
+	}
 
 	// A perEntry descriptor (entryKeyColumn set) projects through
 	// EntryEnvelopeFn's per-anchor keys instead of EnvelopeFn's one document
