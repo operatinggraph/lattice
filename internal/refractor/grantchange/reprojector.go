@@ -128,22 +128,12 @@ func New() *Reprojector {
 // permanent stall: a lens that fails activation outright never registers, and
 // without a bound one such lens would hold the whole grant-change edge closed
 // forever. Past the bound the drain proceeds and says loudly that it is doing so.
+//
+// This bound is doing more work than a fallback normally does — see
+// SetRegistryReady on why the corpus-global check makes it load-bearing rather
+// than theoretical.
 const RegistryHoldMax = 2 * time.Minute
 
-// SetRegistryReady installs the completeness check the drain waits on.
-//
-// A signal is consumed exactly once: Drain takes an actor off the dirty set and
-// reprojects it across whatever lenses are registered AT THAT MOMENT. Personal
-// lenses register one at a time as their rules activate, while the drain ticker
-// and the read-grant producers are already live — so an actor dirtied before the
-// last personal lens registers would be reprojected against a short registry,
-// and the frames its unregistered lenses owed it would be gone with no log, no
-// Health issue, and (until the convergence sweep lands) no healer.
-//
-// The check is the same one internal/classkeyshredded's readiness gate uses, for
-// a hazard cmd/refractor's own wiring already states in those words: over a
-// registry still loading, a SHORT answer is indistinguishable from a complete
-// one. nil (tests, harnesses) means no gate.
 // SetRegistryHoldMax overrides how long the drain waits for the lens registry
 // to finish loading before proceeding anyway. Zero or negative leaves the
 // default. Like SetBounds it exists so a test can reach the bounded-fallback
@@ -156,6 +146,41 @@ func (r *Reprojector) SetRegistryHoldMax(d time.Duration) {
 	}
 }
 
+// SetRegistryReady installs the completeness check the drain waits on. nil
+// (tests, harnesses) means no gate.
+//
+// A signal is consumed exactly once: Drain takes an actor off the dirty set and
+// reprojects it across whatever lenses are registered AT THAT MOMENT. Personal
+// lenses register one at a time as their rules activate, while the drain ticker
+// and the read-grant producers are already live — so an actor dirtied before the
+// last personal lens registers would be reprojected against a short registry,
+// and the frames its unregistered lenses owed it would be gone with no log, no
+// Health issue, and (until the convergence sweep lands) no healer.
+//
+// It answers the hazard cmd/refractor's own wiring already names for a
+// different consumer: over a registry still loading, a SHORT answer is
+// indistinguishable from a complete one, and Core KV — the persistent lens
+// registry — is what separates the two.
+//
+// It is NOT, however, the same check that consumer runs, and the difference
+// costs something. The retention-class consumer deliberately narrows to
+// ReconcileNowForHolderType, precisely so one permanently-unactivatable lens
+// somewhere else cannot withhold every attestation forever. No such narrowing
+// exists for "the lenses a personal reprojection needs" — the probe narrows by
+// declared Secure-Lens holder type, which is a different question — so this gate
+// passes the corpus-global ReconcileNow and inherits exactly the failure that
+// narrowing was introduced to avoid: in a deployment where any unrelated lens
+// never registers, readiness is false forever, for everyone.
+//
+// RegistryHoldMax is therefore not a theoretical backstop here, it is the thing
+// that makes the gate survivable, and the practical effect deserves saying
+// plainly: on such a deployment EVERY process restart eats the full hold on the
+// FIRST grant-change signal after boot, not merely during a genuinely-loading
+// window. Nothing is lost when that happens — the signals are held in the
+// coalescing set, not dropped, and the hold latches open once — but the fast
+// path's first reaction is that much later than the sweep-free design implies.
+// If that becomes real, the fix is a narrowing the probe does not offer today:
+// reconcile only the lenses this reprojector has been asked to drive.
 func (r *Reprojector) SetRegistryReady(fn func(context.Context) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,8 +192,15 @@ func (r *Reprojector) SetRegistryReady(fn func(context.Context) error) {
 // It latches: once the registry has been observed complete, the check stops
 // running. That bounds its cost — it is a Core KV enumeration, and the drain
 // ticks every second — and it is sound for what the gate is FOR, which is the
-// boot window. A lens hot-added later reopens a far smaller window (between its
-// activation and its RegisterPersonal call), which is the sweep's to close.
+// boot window.
+//
+// A lens hot-added later reopens a smaller window, and "smaller" is the honest
+// word rather than "brief": it runs from the lens's Core-KV declaration being
+// dispatched to its RegisterPersonal call, which is the whole of
+// cmd/refractor's startPipeline in between — adapter construction, engine
+// wiring, durable registration. That is not a sub-second gap, and a grant
+// change landing inside it is missed for the new lens. Closing it is the
+// convergence sweep's job, not this gate's.
 //
 // It is also skipped entirely while nothing is queued: an idle boot has no
 // signal to lose, so it should not spend an enumeration per tick to say so.
@@ -201,6 +233,15 @@ func (r *Reprojector) registryIsReady(ctx context.Context) bool {
 		r.latchRegistry()
 		slog.Warn("grantchange: lens registry never reported complete within the hold bound — draining anyway; signals for a lens that is still missing will be lost until the convergence sweep covers them",
 			"heldFor", held.String(), "bound", holdMax.String(), "reason", err)
+		// Raised, not merely logged, for the same reason the overflow path is:
+		// this is a degradation an operator has to be able to SEE, and every
+		// other way this package can silently do less already raises one. It
+		// fires once per process — the latch above guarantees it — so it costs
+		// one Health write per registered lens, ever.
+		detail := "drained against an incomplete lens registry after " + held.Round(time.Second).String() + ": " + err.Error()
+		for _, p := range r.snapshotPersonal() {
+			_ = p.RecordGrantReprojectIssue(ctx, "registry-incomplete", detail)
+		}
 		return true
 	}
 	if !logged {

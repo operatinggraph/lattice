@@ -361,7 +361,16 @@ var (
 	// the qualifier it looks for is RESOLVED from the file's own imports rather
 	// than hardcoded. The dot-import form is captured too — its calls carry no
 	// qualifier at all.
-	grantChangePostureImport = regexp.MustCompile(`^\s*(?:([A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"github\.com/operatinggraph/lattice/internal/refractor/capabilityread"`)
+	//
+	// The leading `import` keyword is CONSUMED, never captured. Both single-line
+	// forms are legal and gofmt-stable — `import "path"` and `import cr "path"`
+	// — and an optional-alias group with nothing to consume the keyword
+	// mis-reads the first as an alias literally named "import" (so the gate
+	// looks for `import.IsReadable(` and matches nothing) and fails the second
+	// outright (so the whole FILE goes unscanned). Both are silent
+	// un-gatings of a default-deny check, which is worse than the evasion the
+	// resolver was added to close.
+	grantChangePostureImport = regexp.MustCompile(`^\s*(?:import\s+)?(?:([A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"github\.com/operatinggraph/lattice/internal/refractor/capabilityread"`)
 	// grantChangePostureBare anchors a dot-imported (unqualified) call.
 	grantChangePostureBare = regexp.MustCompile(`(^|[^.\w])IsReadable\(`)
 	// grantChangePostureShape is the author's declaration of how THIS consumer
@@ -2113,6 +2122,22 @@ func selfTest() []string {
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n// personalEnvelopeFn gates every row on capabilityread.IsReadable, the D1 boundary.\nfunc f() {}\n", ""},
 		{"the gate reaches a NEW consumer outside the refractor packages", "cmd/loupe/handlers.go",
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a SINGLE-LINE unaliased import is still gated", "internal/refractor/projection/personal.go",
+			"import \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n" +
+				"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a single-line unaliased import carrying a declaration passes", "internal/refractor/projection/personal.go",
+			"import \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n" +
+				"func f() {\n\t// grant-change-posture: (swept) the personal convergence sweep re-asks\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"a SINGLE-LINE aliased import does not skip the whole file", "internal/refractor/projection/personal.go",
+			"import cr \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n" +
+				"func f() {\n\tok, err := cr.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a single-line DOT import does not evade the gate", "internal/refractor/projection/personal.go",
+			"import . \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n" +
+				"func f() {\n\tok, err := IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
 			"undeclared capabilityread.IsReadable call site"},
 		{"an ALIASED import does not evade the gate", "internal/refractor/projection/personal.go",
 			"import (\n\tcr \"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\n" +

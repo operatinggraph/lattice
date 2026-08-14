@@ -396,6 +396,15 @@ func TestDrain_RegistryHoldIsNotPermanent(t *testing.T) {
 
 	assert.Equal(t, []string{actorA}, lens.seen(),
 		"past the bound the drain proceeds rather than holding the edge closed forever")
+	assert.Equal(t, []string{"registry-incomplete"}, lens.raised(),
+		"proceeding against an incomplete registry is a degradation, and every other way this package does less already raises a Health issue")
+
+	// Latched: the issue is raised once per process, not once per tick.
+	r.GrantChanged(substrate.VertexKey("identity", actorB))
+	r.Drain(context.Background())
+	assert.Equal(t, []string{"registry-incomplete"}, lens.raised(),
+		"the latch means the fallback reports once, not on every drain thereafter")
+	assert.ElementsMatch(t, []string{actorA, actorB}, lens.seen())
 }
 
 // TestDrain_ReadinessIsSkippedWhileNothingIsQueued pins the cost bound: the

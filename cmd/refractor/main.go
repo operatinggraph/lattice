@@ -2067,12 +2067,20 @@ func main() {
 	// the frames its unregistered lenses owed would be gone — no log, no Health
 	// issue, and no healer until the convergence sweep lands.
 	//
-	// That is the same hazard, and the same answer, as the retention-class
-	// consumer's readiness gate above: over a registry still loading, a short
-	// answer is indistinguishable from a complete one, and Core KV — the
-	// persistent lens registry — is what makes the two separable. The
-	// reprojector holds its signals (bounded and coalescing) until this reports
-	// complete, then drains them against a full registry.
+	// That is the same hazard the retention-class consumer's readiness gate
+	// above answers — over a registry still loading, a short answer is
+	// indistinguishable from a complete one, and Core KV, the persistent lens
+	// registry, is what makes the two separable. The reprojector holds its
+	// signals (bounded and coalescing) until this reports complete, then drains
+	// them against a full registry.
+	//
+	// It is deliberately the CORPUS-GLOBAL ReconcileNow, not the narrowed
+	// ReconcileNowForHolderType that gate uses. The narrowing exists so one
+	// permanently-unactivatable lens elsewhere cannot withhold every
+	// attestation forever, and the probe offers no equivalent narrowing for
+	// "the lenses a personal reprojection needs" — so this inherits that
+	// failure, and grantchange.RegistryHoldMax is what bounds it. See
+	// SetRegistryReady for what that costs on a deployment carrying such a lens.
 	grantReprojector.SetRegistryReady(func(ctx context.Context) error {
 		missing, err := registryProbe.ReconcileNow(ctx)
 		if err != nil {
