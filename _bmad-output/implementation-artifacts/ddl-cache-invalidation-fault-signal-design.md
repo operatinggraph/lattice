@@ -56,41 +56,63 @@ pattern — a Designer-lane item, not an in-line Winston decision), but it is **
 key's own localName* (📐 needs designer pass). **This fire narrows the board row to the cache-staleness arm
 only** — the arm this doc actually fixes — and the filed row above carries the other one forward.
 
-## 2. The fix
+## 2. The fix, as shipped
 
-**New state: a sticky "degraded" latch on `DDLCache`, set on any `Invalidate` failure.**
+**§2 originally speced a single global `degraded` latch and a two-way step 6.5 check (`!ok` + degraded ⇒
+reject). Three cold-review rounds found that shape under-protects: it left a platform-wide write outage for
+non-aspect kinds, a stale-but-present cache entry, and the `instanceOf`-chain fallback all open. What shipped
+is the corrected shape below — this section describes the actual mechanism, not the original speculative one;
+see the fire-brief-round build note appended at the end of this file for the finding-by-finding history.**
+
+**New state, two pieces, both on `DDLCache`:**
 
 | State | Created | Reset | Carried across | Ordered relative to |
 |---|---|---|---|---|
-| `degraded` (bool + since + err + the metaRootKey that failed) | Zero value at `NewDDLCache` (not degraded) | **Never auto-clears** — deliberate; see below | N/A — in-process only, a restart runs a fresh `Refresh` and starts clean | Set by `Invalidate`'s two existing error-return paths, under the same `invalidateMu`/`mu` discipline already serializing writers. Read by step 6.5 and the heartbeat; never by step 6 (step 6 keeps its existing permissive posture unconditionally — see §3 non-goals) |
+| `degraded` (bool + since + err + the metaRootKey that first failed) | Zero value at `NewDDLCache` | **A later `Invalidate` never clears it** (see below) — cleared only by a subsequent **`Refresh`** that loads every root cleanly (the only way `Refresh` returns without error) | In-process only; today `Refresh` runs solely at construction, so the clearing event is a restart — a future periodic `Refresh` (§3) inherits the clear for free | Set by `Invalidate`'s error-return paths; cleared by `Refresh`'s success path. Both under the same `mu` discipline as every other index write. Read by step 6.5 and the heartbeat; never by step 6 (§3 non-goals) |
+| `degradedStaleRoots map[string]string` (failed root → the canonicalName its **surviving, un-reloaded** entry still serves) | Nil until first failure | A root's entry is removed the moment **that same root's own** later `Invalidate` succeeds; unaffected by any other root's outcome | Same as above | Written under `mu` from `Invalidate`'s failure and success paths; read under `mu` from `PossiblyStale` |
 
-**Why sticky-until-restart, not auto-clearing on the next successful `Invalidate`.** A later, unrelated root's
-successful `Invalidate` proves Core KV reads work again *now* — it does not retroactively fix the ROOT that
-failed earlier, whose canonicalName (if any) is exactly the piece the cache is missing. Since step 6.5 cannot
-know in advance which canonicalName a missed root would have claimed, precise per-root tracking cannot answer
-"is *this* class's absence explained by the failure" — only a global, conservative "the cache is not fully
-trustworthy right now" answers it, and that must stay set until the only event that actually re-establishes
-full trust: a fresh `Refresh` (i.e., a restart). Prevention best-effort (retried reads inside
-`Invalidate`/`Refresh` already), detect-and-recover authoritative (Health signal + fail-closed write rejection
-until an operator restarts) — the platform's standing posture elsewhere (personal-lens-grant-change-trigger
-design §8.2, erasure-orchestration design).
+**Why `degraded` needs no per-root precision, but a stale *resolved* entry does.** The global latch answers
+"can an *absence* (`ok=false`) be trusted as genuinely-no-DDL" — and a missed root's canonicalName is exactly
+what was never read, so no per-root bookkeeping can name which class's absence a given failure explains; only
+the conservative "not fully trustworthy" claim is supportable, until a full `Refresh` re-establishes it.
+`degradedStaleRoots` answers a *different* question a miss can't raise at all: `Invalidate`'s failure path
+returns **before** touching `byRoot`, so an **already-cached** root's old entry survives untouched — a package
+upgrade flipping that DDL's `.sensitive` false→true (Contract #8 §8.1 keeps the meta-vertex NanoID across
+upgrades, so this is an update, not a fresh install) leaves `Lookup` answering `ok=true` with the stale
+`false`. This one *is* nameable, because the root — and therefore its still-served canonicalName — is sitting
+right there in `byRoot` at the moment `Invalidate` fails on it. Keyed by root rather than name because a name
+two roots claim must not be cleared by the wrong root's success, and a root whose canonicalName changed
+between the failed and the successful load must withdraw the name that was flagged, not the one it now serves.
 
-**`step65_encrypt.go`:** when resolution returns `!ok` with `fault == nil`, additionally check
-`resolver.DDLs.Degraded()`. If degraded, treat it exactly like the existing fault path — terminal rejection,
-same error shape/wording family — instead of falling through to `!ok || !ref.Sensitive`. Not degraded → the
-existing Contract #1 §1.6 permissive-default `continue` is unchanged.
+**`step65_encrypt.go`'s `degradedCacheRefusal`, three arms, aspect-scoped.** Only an `aspectType` DDL can ever
+be `Sensitive` (`internal/pkgmgr/sensitivescope.go`), so the whole check is gated on `kind ==
+substrate.KindAspect` — a degraded cache must never refuse a link or vertex write, which could never have been
+encrypted anyway even with a perfect cache (the original speced shape got this wrong: gating on bare `!ok`
+rejected every unresolvable link too, a near-total write outage with zero security benefit). Within an aspect
+mutation, while `Degraded()`:
 
-**Health (`internal/processor/health.go`):** mirror the shipped `ProcessorLaneLagging` pattern exactly
-(`health.go:296-311`, the `active[...] = activeIssue{...}` + `reconcileIssues`'s since-persistence). Add a
-`ddlCache` field + `AttachDDLCache(*DDLCache)` setter (mirrors `AttachCapabilityAuthorizer`,
-`health.go:175-177`), wired from `MakePipeline` (`commit_path.go`) right after `ddls := NewDDLCache(...)`
-(`:1069-1072`) — the same site `hb.AttachCapabilityAuthorizer(ca)` already wires from, a few lines above.
-In `buildHealthDoc`, when `h.ddlCache.Degraded()` is true, add `active["DDLCacheDegraded"] = activeIssue{code:
-"DDLCacheDegraded", severity: "error", message: fmt.Sprintf("DDL cache invalidation failed at %s for %s and
-has not recovered (%v); sensitive-class writes may be rejected until the processor restarts", since, key,
-err)}`. **Severity `error`** (→ `unhealthy` via `aggregateStatus`), not `warning`: unlike lane-lag (latency
-only), this state is actively rejecting legitimate sensitive-class operations for affected submitters — a
-real functional degradation, not just a slow queue.
+1. **`!resolved`** (the resolver found nothing at all) ⇒ refuse — the base case §2 originally speced.
+2. **The mutation's own `class` does not hit `DDLs.Lookup` exactly** ⇒ refuse, even if the resolver DID return
+   `ok=true` via its `instanceOf`-chain fallback to a different, fresh ancestor DDL. A stale cache is exactly
+   what makes the class's own direct entry (if newly added) invisible, forcing the walk onto a coarser
+   ancestor whose `Sensitive` value says nothing about the missing one — an unspeced hole three reviews'
+   worth of code-tracing found live and reproduced.
+3. **`PossiblyStale(ref.CanonicalName)`** ⇒ refuse — the stale-but-present case above.
+
+Arm 2 is deliberately broader than per-name tracking: an answer that never consulted this class's own cache
+entry cannot be checked against it, so every chain-resolved aspect is refused while degraded, not just the
+ones provably affected. Not degraded ⇒ the existing Contract #1 §1.6 permissive-default `continue` is
+completely unchanged for every arm.
+
+**Health (`internal/processor/health.go`):** mirrors the shipped `ProcessorLaneLagging` pattern exactly (the
+`active[...] = activeIssue{...}` + `reconcileIssues`'s since-persistence). A `ddlCache` field +
+`AttachDDLCache(*DDLCache)` setter (mirrors `AttachCapabilityAuthorizer`), wired from `MakePipeline` right
+after `ddls := NewDDLCache(...)` — the same site `hb.AttachCapabilityAuthorizer(ca)` already wires from.
+Severity **`error`** (→ `unhealthy` via `aggregateStatus`), not `warning`: this state actively rejects
+legitimate aspect writes for affected submitters, a real functional degradation. Message wording states the
+actual scope (aspect writes whose governing DDL the cache cannot vouch for), not the narrower "sensitive-class
+writes" the original speced text used — arms 1+2 together refuse *any* aspect with no exact cache entry, not
+only ones later confirmed sensitive.
 
 ## 3. Non-goals
 
@@ -99,32 +121,47 @@ real functional degradation, not just a slow queue.
   cache staleness (the write-scope gate, not the sensitivity gate) — step 6.5 is the only place a stale
   "no DDL" answer has a security consequence (plaintext where ciphertext was owed).
 - **No retry-until-success for a failed `Invalidate`.** That is a larger mechanism (a durable retry queue or a
-  periodic background `Refresh`) with its own state-lifetime questions; sticky-latch + loud Health signal +
+  periodic background `Refresh`) with its own state-lifetime questions; the latch + loud Health signal +
   fail-closed step 6.5 is the right-sized fix for an S–M row. Named revisit trigger: if a degraded-cache
-  restart cadence proves operationally painful in practice, that is the fire to add a bounded retry.
-- **No change to the empty-`class` arm** (§1, confirmed Contract #1 §1.6-sanctioned).
+  restart cadence proves operationally painful in practice, that is the fire to add a bounded retry — and per
+  §2, a periodic `Refresh` would inherit the latch-clear for free, no new state-lifetime work needed on this
+  mechanism's side.
+- **No change to the empty-`class` arm** — RETRACTED as a "confirmed sanctioned" claim (§1); it is a real,
+  separately-filed gap, out of scope for this fire because it needs a genuinely new mechanism.
 
-## 4. Test strategy
+## 4. Test strategy (as shipped)
 
 | # | Proves | Shape |
 |---|---|---|
-| T1 | `Invalidate`'s two error paths set `Degraded()=true` with the failing root key + error; a healthy `Invalidate` before any failure leaves it false | Unit, `internal/processor/ddl_cache_test.go` — inject a failing `conn` (existing fake) |
-| T2 | `Degraded()` never auto-clears on a later unrelated successful `Invalidate` | Unit, same file — mutation-tested: assert it STAYS true |
-| T3 | Step 6.5: unresolved class + `Degraded()==true` ⇒ terminal rejection error (mirrors the fault-path wording family) | Unit, `step65_encrypt_test.go` — fake/degraded `DDLCache`. Mutation-tested: revert the check, confirm this test fails |
-| T4 | Step 6.5: unresolved class + `Degraded()==false` (healthy cache) ⇒ unchanged permissive `continue` — the existing Contract #1 §1.6 tests must not regress | Unit, same file — assert existing empty-class / genuine-no-DDL cases still pass through |
-| T5 | Heartbeat emits `DDLCacheDegraded` (severity error, status unhealthy) once degraded, `since` persists across ticks (the `openIssues` pattern), absent when healthy | Unit, `health_internal_test.go` — mirrors the existing `ProcessorLaneLagging` test shape |
+| T1 | `Invalidate`'s error paths set `Degraded()=true` with the failing root key + error; a healthy `Invalidate` before any failure leaves it false | Unit, `ddl_cache_test.go` |
+| T2 | `Degraded()` never auto-clears on a later unrelated successful `Invalidate` | Unit, same file — mutation-tested |
+| T3 (arm 1) | Step 6.5: `!resolved` + degraded ⇒ terminal rejection | Unit, `step65_encrypt_test.go` — mutation-tested |
+| T3b (arm 2) | An aspect resolved ONLY via the `instanceOf`-chain fallback to a fresh ancestor DDL is still refused while degraded — the exact hole three review rounds found live, reproduced with a positive control (same batch, healthy cache, passes and encrypts) | Unit, same file — mutation-tested |
+| T3c (arm 3) | An aspect resolved `ok=true` whose canonicalName the latch flagged `PossiblyStale` is refused, even though `ref.Sensitive` reads `false` off the stale entry | Unit, same file — reproduces the real upgrade-then-failed-Invalidate path, not a map poke; mutation-tested |
+| T4 | Non-aspect kinds (link, vertex) pass through completely unaffected while degraded — the aspect-scoping gate | Unit, same file — mutation-tested |
+| T4b | An unresolved class with a healthy (non-degraded) cache is unchanged Contract #1 §1.6 permissive `continue` | Unit, same file |
+| T5 | Heartbeat emits `DDLCacheDegraded` (severity error, status unhealthy) once degraded, `since` persists across ticks, absent when healthy or unattached | Unit, `health_internal_test.go` |
+| T6 | A stale-flagged canonicalName clears when its OWN root's later `Invalidate` succeeds; a rename correctly withdraws the OLD flagged name, not the new one; two different roots failing both stay flagged independently | Unit, `ddl_cache_test.go`, three tests — all mutation-tested |
+| T7 | A full `Refresh` that loads every root cleanly clears BOTH the process-wide latch and every stale-root flag | Unit, `ddl_cache_test.go` — closes the gap between the field doc's own claim and what the code did before this was added |
 
-## 5. Increment (single, posture-changing ⇒ full review depth)
+## 5. Increment, as built (single fire, three cold-review rounds, full review depth throughout)
 
-1. `DDLCache`: add the degraded latch (fields + `Degraded() (bool, time.Time, string, error)`), set from both
-   `Invalidate` error-return paths. **T1, T2.**
-2. `step65_encrypt.go`: the degraded-aware rejection branch. **T3, T4.**
+The speced single pass (build → one review → ship) undersized the mechanism for a security-plane change. What
+actually ran: build → **3 parallel cold reviews** (security / edge-case / acceptance-scope-diff) → fix round 1
+(2 blocking: aspect-scoping, stale-but-present) → skeptical verify → fix round 2 (1 new blocking: the
+`instanceOf`-chain bypass, found and reproduced by the verifier, not by the original three) → skeptical verify
+→ Winston's own 5-line close (Refresh clears the latch, matching its own field doc's claim) → this doc rewrite.
+
+1. `DDLCache`: the `degraded` latch + `degradedStaleRoots` (root→canonicalName), set from `Invalidate`'s
+   failure paths, cleared respectively by `Refresh`'s and `Invalidate`'s own success paths. **T1, T2, T6, T7.**
+2. `step65_encrypt.go`: `degradedCacheRefusal`, the three-arm aspect-scoped check (§2). **T3, T3b, T3c, T4, T4b.**
 3. `health.go`: `ddlCache` field, `AttachDDLCache`, the `DDLCacheDegraded` issue in `buildHealthDoc`. **T5.**
-4. `commit_path.go`: wire `hb.AttachDDLCache(ddls)` in `MakePipeline` (mirror `AttachCapabilityAuthorizer`
-   two lines above). Check whether `MakeStubPipeline` also needs it (likely not — stub mode has no real
-   Invalidate failures to observe, confirm at build time rather than assume).
-5. Board row narrowed to name only the fixed arm; the empty-class arm's non-fix recorded as a decided
-   non-goal (§3), not silently dropped.
+4. `commit_path.go`: `hb.AttachDDLCache(ddls)` in `MakePipeline` — `MakeStubPipeline` delegates to it, so it's
+   covered without separate wiring (confirmed at build time, not assumed).
+5. Board row narrowed to name only the fixed arm; the empty-class arm re-filed as its own real gap (§1, §3),
+   not folded into a false "sanctioned" claim.
 
 *Green bar:* `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
-./scripts/lint-conventions.go`, `go test ./internal/processor/... ./cmd/processor/...`.
+./scripts/lint-conventions.go`, `go test ./internal/processor/... ./cmd/processor/...`, `go test -race
+./internal/processor/`. All green at every round; the fix rounds landed BECAUSE of review, not after breaking
+a green bar — no gate ever caught these, only adversarial reading did.
