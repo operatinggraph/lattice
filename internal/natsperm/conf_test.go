@@ -731,6 +731,149 @@ func TestBackingStreamSideChannel(t *testing.T) {
 	}
 }
 
+// TestCoreEventsSideChannel: core-events is a plain stream outside the
+// PlatformBuckets() registry, so protectedStreamDenies never ran over it
+// before this test's fix — any $JS.API.> holder could purge the stream or
+// administer a protected consumer's durable (board item: "[natsperm]
+// $JS.API.> lets any component delete a durable or purge core-events").
+// Registry-driven per TestRegistryDrivenStreamAdminSideChannel's precedent
+// (not the hand-picked-component-subset shape this test used before this
+// fire): every non-bootstrap component (nonBootstrapComponentNames()) is
+// exercised, not a fixed sample. Two denial classes per protected consumer:
+// DELETE/RESET/PAUSE denied to every component including the owner (nobody
+// administers their own durable — the Chronicler precedent), and
+// CREATE/DURABLE.CREATE/MSG.NEXT denied to every component EXCEPT the
+// owner (who needs both to run at all). Positive controls on both axes:
+// bootstrap may purge/create/delete (the provisioner), and each consumer's
+// owner may CREATE its own durable (proves the owner-exception is real, not
+// an accidental blanket deny).
+func TestCoreEventsSideChannel(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, "core-events", []string{"events.>"})
+
+	// bootstrap (the provisioner) may purge the stream it created.
+	if _, err := boot.NATS().Request("$JS.API.STREAM.PURGE.core-events", []byte("{}"), 3*time.Second); err != nil {
+		t.Fatalf("bootstrap PURGE core-events: want success, got %v", err)
+	}
+
+	// every non-bootstrap component's purge is denied at the door,
+	// including the stream's own publisher (Processor).
+	for _, component := range nonBootstrapComponentNames() {
+		component := component
+		t.Run("denied-purge/"+component, func(t *testing.T) {
+			t.Parallel()
+			c := connectAs(t, url, component)
+			if _, err := c.NATS().Request("$JS.API.STREAM.PURGE.core-events", []byte("{}"), deniedTimeout); err == nil {
+				t.Errorf("%s PURGE core-events: want denial, got a reply", component)
+			}
+		})
+	}
+
+	// the legacy single-wildcard create endpoint carries no consumer name
+	// in the subject (the name is read from the request body), so it can
+	// hijack ANY consumer on the stream and cannot be scoped per-name —
+	// closed matrix-wide instead. bootstrap may use it (positive control);
+	// every other component, including every protected consumer's own
+	// owner, is denied.
+	t.Run("bootstrap-legacy-create", func(t *testing.T) {
+		c := connectAs(t, url, "bootstrap")
+		body := []byte(`{"stream_name":"core-events","config":{"filter_subject":"events.probe"}}`)
+		if _, err := c.NATS().Request("$JS.API.CONSUMER.CREATE.core-events", body, 3*time.Second); err != nil {
+			t.Fatalf("bootstrap legacy CONSUMER.CREATE: want success, got %v", err)
+		}
+	})
+	for _, component := range nonBootstrapComponentNames() {
+		component := component
+		t.Run("denied-legacy-create/"+component, func(t *testing.T) {
+			t.Parallel()
+			c := connectAs(t, url, component)
+			if _, err := c.NATS().Request("$JS.API.CONSUMER.CREATE.core-events", []byte("{}"), deniedTimeout); err == nil {
+				t.Errorf("%s legacy CONSUMER.CREATE core-events: want denial, got a reply", component)
+			}
+		})
+	}
+
+	for _, pc := range coreEventsProtectedConsumers {
+		pc := pc
+
+		// bootstrap may create the durable directly (positive control for
+		// the admin-verb class: proves the "no reply" signal below means
+		// ACL denial, not just "nobody would ever succeed here"). Run
+		// sequentially (no t.Parallel()) so it completes — including its
+		// own cleanup — before owner-create below touches the same name.
+		t.Run("bootstrap-admin/"+pc.name, func(t *testing.T) {
+			c := connectAs(t, url, "bootstrap")
+			createSubj := "$JS.API.CONSUMER.DURABLE.CREATE.core-events." + pc.name
+			body := []byte(`{"stream_name":"core-events","config":{"durable_name":"` + pc.name + `","ack_policy":"explicit"}}`)
+			if _, err := c.NATS().Request(createSubj, body, 3*time.Second); err != nil {
+				t.Fatalf("bootstrap DURABLE.CREATE %s: want success, got %v", pc.name, err)
+			}
+			if _, err := c.NATS().Request("$JS.API.CONSUMER.DELETE.core-events."+pc.name, []byte("{}"), 3*time.Second); err != nil {
+				t.Fatalf("bootstrap DELETE %s: want success, got %v", pc.name, err)
+			}
+		})
+
+		// the owner may create its own durable — the owner-only exception
+		// is real, not an accidental blanket deny that also caught it. Also
+		// sequential: it mutates the same named resource as the subtest
+		// above and must not race it.
+		t.Run("owner-create/"+pc.name, func(t *testing.T) {
+			boot := connectAs(t, url, "bootstrap")
+			owner := connectAs(t, url, pc.owner)
+			createSubj := "$JS.API.CONSUMER.CREATE.core-events." + pc.name + ".events.>"
+			if _, err := owner.NATS().Request(createSubj, []byte(`{"stream_name":"core-events","config":{"durable_name":"`+pc.name+`","filter_subject":"events.>","ack_policy":"explicit"}}`), 3*time.Second); err != nil {
+				t.Fatalf("%s CREATE own consumer %s: want success, got %v", pc.owner, pc.name, err)
+			}
+			// clean up as bootstrap so the next subtest starts fresh.
+			_, _ = boot.NATS().Request("$JS.API.CONSUMER.DELETE.core-events."+pc.name, []byte("{}"), 3*time.Second)
+		})
+
+		// admin verbs (DELETE/RESET/PAUSE): denied to every component,
+		// owner included.
+		for _, verb := range []string{"DELETE", "RESET", "PAUSE", "UNPIN"} {
+			verb := verb
+			for _, component := range nonBootstrapComponentNames() {
+				component := component
+				t.Run("denied-"+verb+"/"+pc.name+"/"+component, func(t *testing.T) {
+					t.Parallel()
+					c := connectAs(t, url, component)
+					subject := "$JS.API.CONSUMER." + verb + ".core-events." + pc.name
+					if _, err := c.NATS().Request(subject, []byte("{}"), deniedTimeout); err == nil {
+						t.Errorf("%s %s core-events consumer %s: want denial, got a reply", component, verb, pc.name)
+					}
+				})
+			}
+		}
+
+		// owner-only verbs (CREATE/DURABLE.CREATE/MSG.NEXT): denied to
+		// every component except the owner.
+		for _, subject := range []string{
+			"$JS.API.CONSUMER.CREATE.core-events." + pc.name,
+			"$JS.API.CONSUMER.CREATE.core-events." + pc.name + ".events.privacy.somefilter",
+			"$JS.API.CONSUMER.DURABLE.CREATE.core-events." + pc.name,
+			"$JS.API.CONSUMER.MSG.NEXT.core-events." + pc.name,
+		} {
+			subject := subject
+			for _, component := range nonBootstrapComponentNames() {
+				if component == pc.owner {
+					continue
+				}
+				component := component
+				t.Run("denied-owner-only/"+pc.name+"/"+subject+"/"+component, func(t *testing.T) {
+					t.Parallel()
+					c := connectAs(t, url, component)
+					if _, err := c.NATS().Request(subject, []byte("{}"), deniedTimeout); err == nil {
+						t.Errorf("%s %s: want denial, got a reply", component, subject)
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestChroniclerBackingStreamSideChannel: chronicler-host-reconciliation's new
 // bucket closes the backing-stream side channel from day one rather than
 // reproducing the weaver-targets-class debt — chronicler itself is denied
@@ -981,7 +1124,10 @@ func TestFacetSubscribeConfinement(t *testing.T) {
 // may purge the backing stream and every OTHER non-bootstrap component —
 // INCLUDING the bucket's own owner — is denied. A row writer never needs to
 // administer its own backing stream; bootstrap primordially provisions all
-// of them.
+// of them. Also covers SNAPSHOT (protectedStreamDenies' whole-stream
+// backup/restore extension): a bulk byte-level export of the ENTIRE backing
+// stream, denied the same way — no ordinary reader (MSG.GET/DIRECT.GET/INFO
+// stay allowed) ever needs it.
 func TestRegistryDrivenStreamAdminSideChannel(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
@@ -1004,6 +1150,18 @@ func TestRegistryDrivenStreamAdminSideChannel(t *testing.T) {
 					c := connectAs(t, url, name)
 					if _, err := c.NATS().Request(purgeSubject, []byte("{}"), deniedTimeout); err == nil {
 						t.Errorf("%s PURGE KV_%s: want denial, got a reply", name, b.Name)
+					}
+				})
+			}
+
+			snapshotSubject := "$JS.API.STREAM.SNAPSHOT.KV_" + b.Name
+			for _, name := range nonBootstrapComponentNames() {
+				name := name
+				t.Run("denied-snapshot/"+name, func(t *testing.T) {
+					t.Parallel()
+					c := connectAs(t, url, name)
+					if _, err := c.NATS().Request(snapshotSubject, []byte("{}"), deniedTimeout); err == nil {
+						t.Errorf("%s SNAPSHOT KV_%s: want denial, got a reply", name, b.Name)
 					}
 				})
 			}

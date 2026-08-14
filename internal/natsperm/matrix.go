@@ -58,8 +58,15 @@ type Component struct {
 // subject ($KV.<bucket>.>) blocks ordinary writes, but a holder of the broad
 // $JS.API.> grant could otherwise mutate or destroy the backing stream
 // directly via the JetStream API (the backing-stream side-channel). These are
-// the write-shaped verbs; reads (MSG.GET, DIRECT.GET, INFO) and consumer ops
-// stay allowed so CDC readers are unaffected.
+// the write-shaped verbs plus the two whole-stream backup/restore verbs
+// (SNAPSHOT/RESTORE) that reach far beyond CDC-reader territory — SNAPSHOT is
+// a bulk byte-level export of the ENTIRE backing stream (every key's full
+// history, not the current-value reads MSG.GET/DIRECT.GET/INFO cover) and
+// RESTORE wholesale-replaces it; verified no production code in this repo
+// uses either (both are external-operator disaster-recovery tools, never
+// this codebase's own runtime path), so closing them costs nothing.
+// Ordinary reads (MSG.GET, DIRECT.GET, INFO) and consumer ops stay allowed
+// so CDC readers are unaffected.
 func protectedStreamDenies(stream string) []string {
 	return []string{
 		"$JS.API.STREAM.CREATE." + stream,
@@ -67,6 +74,100 @@ func protectedStreamDenies(stream string) []string {
 		"$JS.API.STREAM.DELETE." + stream,
 		"$JS.API.STREAM.PURGE." + stream,
 		"$JS.API.STREAM.MSG.DELETE." + stream,
+		"$JS.API.STREAM.SNAPSHOT." + stream,
+		"$JS.API.STREAM.RESTORE." + stream,
+	}
+}
+
+// coreEventsProtectedConsumer names a security-plane durable consumer on
+// core-events whose administration and delivery are restricted to its
+// owning component — the consumer-level analogue of PlatformBuckets(). The
+// board item named the crypto-shred pair ("either shred worker's durable");
+// this registry also covers the other static, package-const-named
+// consumers on the SAME stream that guard an equivalently silent,
+// equivalently irreversible security outcome — PII nullification after a
+// shred (Refractor) and auth-plane materialization (Gateway). It
+// deliberately excludes non-security core-events consumers with the
+// identical mechanical exposure (bridge-external, the object-store
+// byte-janitor/cascade, chronicler's history projector, every loom/weaver
+// per-domain consumer) — those are reliability/data-integrity concerns, not
+// this fire's security-boundary scope; filed separately. Every name below
+// is verified wired with its package default in production (cmd/processor,
+// cmd/refractor, cmd/gateway pass no override), so nothing legitimate runs
+// under a name outside this list.
+type coreEventsProtectedConsumer struct {
+	name  string
+	owner string
+}
+
+var coreEventsProtectedConsumers = []coreEventsProtectedConsumer{
+	{name: "privacy-worker", owner: "processor"},
+	{name: "privacy-worker-retention", owner: "processor"},
+	{name: "refractor-keyshredded", owner: "refractor"},
+	{name: "refractor-classkeyshredded", owner: "refractor"},
+	{name: "gateway-revocation", owner: "gateway"},
+	{name: "gateway-credential-bindings", owner: "gateway"},
+}
+
+// coreEventsAdminDenies returns the JetStream consumer-admin verbs on a
+// protected core-events consumer denied to EVERY component, owner included
+// — none of these six is ever programmatically deleted, reset, or paused by
+// its own owner in production (verified: no .Reset/.Remove call site names
+// any of them, and they are built via substrate.RunDurableConsumer /
+// ConsumerSupervisor.Add, neither of which self-heals by delete-recreate
+// unless a caller explicitly asks). DELETE is the board item's literal
+// vector — dropping the durable outright. RESET achieves the identical
+// silent-suppression effect with no delete call at all: the JetStream
+// server treats a DeliverAll consumer's reset target as always allowed
+// (server/consumer.go's resetStartingSeqLocked), so any $JS.API.> holder
+// could otherwise jump the cursor past pending shred/revocation/binding
+// events. PAUSE is an indefinite native-JetStream delivery halt this
+// codebase never uses for real — ConsumerSupervisor.Pause/Resume, the only
+// "pause" concept here, is a pure in-process flag that never touches the
+// NATS pause verb — so denying it costs no component a legitimate
+// operation. UNPIN is inert without a priority group (none of these
+// consumers use one, so it always errors) but costs nothing to close too.
+func coreEventsAdminDenies(stream, name string) []string {
+	return []string{
+		"$JS.API.CONSUMER.DELETE." + stream + "." + name,
+		"$JS.API.CONSUMER.RESET." + stream + "." + name,
+		"$JS.API.CONSUMER.PAUSE." + stream + "." + name,
+		"$JS.API.CONSUMER.UNPIN." + stream + "." + name,
+	}
+}
+
+// coreEventsOwnerOnlyDenies returns the verbs denied to every component
+// EXCEPT a protected consumer's owner — the owner needs both at runtime
+// (CREATE at first boot; MSG.NEXT to pull its own backlog), so these cannot
+// be universal like coreEventsAdminDenies.
+//
+// CREATE: nats.go's CreateOrUpdateConsumer, when a FilterSubject is set (as
+// all six of these consumers are), issues CONSUMER.CREATE.<stream>.<name>.
+// <filterSubject> — confirmed against the pinned nats.go v1.52.0
+// (jetstream/consumer.go's apiConsumerCreateWithFilterSubjectT), so the
+// wildcarded form below is required, mirroring the bridge DIRECT.GET
+// bare-vs-wildcard lesson: NATS' `>` needs at least one token after the
+// prefix, so the bare subject and the wildcarded one are BOTH required, not
+// either/or. The legacy DURABLE.CREATE endpoint (nats-server's
+// JSApiDurableCreateT) reaches the same consumer via a different subject
+// family and is closed too. Any of the three, sent as an "update" against
+// an already-existing durable, can silently repoint FilterSubject or add a
+// MaxDeliver cap without ever calling DELETE — the same hijack-by-update
+// nats-server's checkNewConsumerConfig does not reject for FilterSubject.
+//
+// MSG.NEXT: the pull-fetch subject (nats-server's JSApiRequestNextT). All
+// six consumers are PULL consumers — RunDurableConsumer and
+// ConsumerSupervisor both call jetstream.Consumer.Messages(), never a push
+// DeliverSubject — so a component holding $JS.ACK.> (granted matrix-wide)
+// could otherwise fetch-and-ack the owner's own pending messages: a
+// steal-and-ack that starves the real consumer without touching an admin
+// verb at all.
+func coreEventsOwnerOnlyDenies(stream, name string) []string {
+	return []string{
+		"$JS.API.CONSUMER.CREATE." + stream + "." + name,
+		"$JS.API.CONSUMER.CREATE." + stream + "." + name + ".>",
+		"$JS.API.CONSUMER.DURABLE.CREATE." + stream + "." + name,
+		"$JS.API.CONSUMER.MSG.NEXT." + stream + "." + name,
 	}
 }
 
@@ -111,6 +212,15 @@ func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 // stream; bootstrap primordially provisions all of them). This is what
 // closes the $JS.API.> backing-stream side channel matrix-wide, not just for
 // the buckets a component doesn't own.
+//
+// The same precedent applies to core-events even though it is a plain
+// stream outside the PlatformBuckets() registry, not a KV bucket: bootstrap
+// primordially provisions it too (internal/bootstrap/primordial.go), so no
+// component — including the Processor, whose outbox consumer only ever
+// PUBLISHES into it — needs $JS.API stream administration over it. Applied
+// matrix-wide (owner included, same as the registry loop above), plus the
+// consumer-level denies for coreEventsProtectedConsumers (owner-scoped: see
+// coreEventsAdminDenies / coreEventsOwnerOnlyDenies).
 func (c Component) Deny(buckets []bootstrap.PlatformBucket) []string {
 	if c.Name == bootstrapComponentName {
 		return nil
@@ -121,6 +231,23 @@ func (c Component) Deny(buckets []bootstrap.PlatformBucket) []string {
 			deny = append(deny, "$KV."+b.Name+".>")
 		}
 		deny = append(deny, protectedStreamDenies("KV_"+b.Name)...)
+	}
+	deny = append(deny, protectedStreamDenies(bootstrap.CoreEventsStreamName)...)
+	// The legacy single-wildcard create endpoint ($JS.API.CONSUMER.CREATE.
+	// <stream>, nats-server's JSApiConsumerCreate) carries no consumer name
+	// in the subject at all — the name comes from the request body — so it
+	// cannot be closed per-consumer like coreEventsOwnerOnlyDenies below;
+	// it is denied here, matrix-wide, for every non-bootstrap component
+	// including every protected consumer's own owner. Safe universally:
+	// no production code in this repo uses it (every consumer here is
+	// created through nats.go's named jetstream.CreateOrUpdateConsumer,
+	// never the legacy JetStreamContext ephemeral path).
+	deny = append(deny, "$JS.API.CONSUMER.CREATE."+bootstrap.CoreEventsStreamName)
+	for _, pc := range coreEventsProtectedConsumers {
+		deny = append(deny, coreEventsAdminDenies(bootstrap.CoreEventsStreamName, pc.name)...)
+		if c.Name != pc.owner {
+			deny = append(deny, coreEventsOwnerOnlyDenies(bootstrap.CoreEventsStreamName, pc.name)...)
+		}
 	}
 	return deny
 }
