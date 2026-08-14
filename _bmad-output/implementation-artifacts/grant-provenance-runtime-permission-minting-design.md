@@ -754,3 +754,84 @@ omission condition) — staged **UNCOMMITTED** in `main` per CLAUDE.md, flagged 
 key survival, with no anchor-type check, silently widens past its ratified scope to cover schema/routing
 definitions the design never analyzed — check: key the guard on the anchor-type prefix
 (`metaVertexPrefix`/`vtx.meta.`), never on tombstone-state alone.
+
+## 13. Increment 1 + Increment 2 fire brief (build note, 2026-08-14)
+
+**Scope sentence.** Ship §7 Increment 1 (withdraw the `UpdatePermission` grant from `rbac-domain`, making
+a permission vertex's body write-once — nine specs remain) and Increment 2 (a `scripts/lint-package-standard.go`
+gate that fails any package's `PermissionSpec` for `UpdatePermission`, blocking from day one), the two
+branch-independent, non-Inc-3 increments now unblocked by the un-tombstone prerequisite (CLEARED
+2026-08-14, `0bb6daea`).
+
+**Verified touch-list** (re-checked live this fire, zero divergence from the design's citations — all
+five files last touched 2026-08-11, inside the design's own authoring window):
+- `packages/rbac-domain/permissions.go:19-29` — the ten `mk(...)` calls; remove `mk("UpdatePermission")`
+  (line 23). Doc comment at line 5 ("Permissions returns the 10 permission vertices…") → "9".
+- `packages/rbac-domain/manifest.yaml` — version `0.3.4` → bump; remove the `operationType:
+  UpdatePermission` entry (line 35).
+- `scripts/verify-package-rbac.go:52-57` (`rbacExpectedOps`) — split into two constants: one used by the
+  `permittedCommands` check (`:180-191`, stays all ten — the DDL branch is untouched, §5.2) and one used by
+  the permission-vertex + `grantedBy`-link loop (`:456-507`, drops to nine).
+- `packages/rbac-domain/ddls.go` — ` UpdatePermission` DDL dispatch branch (`:325`), `permittedCommands`
+  list entry (`:56`), and doc comments (`:10,35,74-77,122`) **stay** (§5.2: only the grant is withdrawn,
+  not the Starlark).
+- `packages/rbac-domain/package_test.go:32`, `testhelpers_test.go:42`, `integration_test.go:368` — spec
+  fixtures asserting the full ten-op shape; each needs the Inc-1 e2e's positive/negative pair folded in or
+  a sibling test added (builder's call, mirroring existing fixture shape).
+- `scripts/lint-package-standard.go:211-212` — existing `pkgregistry.Names()`/`Lookup()` walk; add the new
+  rule inside it, reading `Definition.Permissions()` (not a source scan).
+- `internal/pkgregistry/registry.go:86,93,104` — `Lookup`/`Names`/`All`, confirmed unchanged, no edit
+  needed here.
+
+**Precedents to mirror:**
+- The lint gate mirrors `lint-package-standard.go:91-128`'s existing `[no-op-meta: <code> — <prose>]`
+  declared-exception convention (closed vocabulary in a `Note` field) for its escape hatch, per §6's
+  "declaration, not a flag" instruction — **not** a separate allowlist file. A `PermissionSpec` that must
+  re-grant `UpdatePermission` declares it in its own `Note`.
+- Inc 1's e2e mirrors the existing `AuthDenied "no matching platformPermission"` assertion shape already
+  used elsewhere in the step-3 test corpus (builder locates the nearest sibling at build time — no single
+  cited precedent file for this exact denial shape).
+- `rbacExpectedOps` split mirrors the general "split the constant rather than editing one list" instruction
+  in §7 Inc 1 step 3 verbatim.
+
+**Increment order + runnable green checks:**
+1. Inc 1 code: remove the grant, bump version + manifest count, split `rbacExpectedOps` →
+   `go build ./packages/rbac-domain/... ./scripts/...`.
+2. Inc 1 tests: package test (exactly nine specs, no `UpdatePermission`) + step-3 e2e (positive `CreateRole`
+   allowed, then `UpdatePermission` denied) →
+   `go test ./packages/rbac-domain/... -run 'TestPermissions|TestRBAC' -v` and
+   `make test-hello-lattice` (build-tagged `integration` — **not** covered by default `go test ./...`,
+   must run explicitly per C1b).
+3. Inc 2 code: the lint rule + its unit test (positive vector: helper-built `mk("UpdatePermission")`
+   fixture FAILS; same spec + `[no-op-meta:…]`-style sanction PASSES) →
+   `go run ./scripts/lint-package-standard.go` and
+   `go test ./scripts/... -run TestLintPackageStandard -v`.
+4. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+   `STRICT=1 go run ./scripts/lint-conventions.go`, `make verify-package-rbac`,
+   `go test ./packages/rbac-domain/... ./scripts/... ./internal/processor/...`.
+
+**In-scope gotchas (standing checklist + component dossiers, copied in):**
+- **Capability/security-plane change** → full 3-layer adversarial review at admit, regardless of size
+  (steward SKILL.md §4) — Inc 1 changes an authorization surface, Inc 2 is its guarding gate; both reviewed
+  together as one posture-changing unit.
+- Standing checklist #3 (negative test needs its positive vector first) — binds the Inc-1 e2e (`CreateRole`
+  allowed before `UpdatePermission` denied) and the Inc-2 lint test (sanctioned spec PASSES before the
+  unsanctioned one is asserted to FAIL).
+- Standing checklist #6 (precedent may carry debt) — the `[no-op-meta:…]` convention is verified live
+  above (item 7 of the scout report), not assumed from the design doc's description of it.
+- `docs/components/pkgmgr.md` dossier: "Two writers of one deterministic key" (not directly triggered —
+  this fire removes a writer, adds no new one) and "canonicalName vs instance-key segment" (not triggered —
+  no canonicalName logic touched). `docs/components/processor.md` dossier: "a silently-rejected op logs at
+  Info" — relevant if the Inc-1 denial e2e needs to inspect *why* `UpdatePermission` was refused; raise the
+  test logger to WARN/capture step-3's reason rather than trusting silence.
+- `make test-hello-lattice` is `-tags integration` (C1b) — must run explicitly; a green default `go test
+  ./...` does not prove Milestones 3/5 or the NFR-P3 probe are unaffected (they use `CreatePermission`/
+  `GrantPermission`, not the withdrawn op, so expected to pass untouched — verify, don't assume).
+
+**Adjacent finds:** none beyond the three already-spawned sibling rows (§9 rows 2–4, not blockers) and the
+already-filed reconciler follow-on (§5.3, seq'd behind Inc 3). Nothing new surfaced by the scout.
+
+**Non-goals:** Increment 3 (provenance stamp + reserved set) is explicitly out of scope for this fire — it
+depends on Inc 1's write-once precondition but is its own posture-changing unit, sized M, and follows as a
+separate fire. The `UpdatePermission` DDL dispatch branch, `permittedCommands` list entry, and doc comments
+in `ddls.go` are untouched per §5.2 (Starlark stays; only the grant is withdrawn).
