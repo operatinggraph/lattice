@@ -710,3 +710,82 @@ func TestAudit_CycleTotalsSpanTheWholeWalk(t *testing.T) {
 		"but the cycle's finding stands until a new cycle re-derives it — a pass must never clear a verdict it did not re-derive")
 	require.Equal(t, 4, st.CycleAudited)
 }
+
+// TestAuditorStale walks the verdict clock Auditor.Stale reads. It needs no
+// corpus and no substrate: the whole mechanism is LastPassAt against the
+// auditor's own cadence, and `now` is a parameter precisely so the window can be
+// crossed by naming a time rather than by sleeping through one.
+func TestAuditorStale(t *testing.T) {
+	const interval = 15 * time.Minute
+	window := auditorStaleCycles * interval
+	base := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+
+	// The auditor a lens carries when it is being audited: a real cadence and a
+	// verdict clock a pass has stamped.
+	enrolled := func(lastPass time.Time) *Auditor {
+		a := newAuditor(nil, AuditPlan{AnchorLabel: "unit", Interval: interval}, false)
+		a.status.LastPassAt = lastPass
+		return a
+	}
+
+	t.Run("no cadence at all is stale — a refused auditor is not a standing re-test", func(t *testing.T) {
+		// A refused lens holds no interval. The heartbeat reads that zero as "no
+		// cadence to be late against" and stays quiet; a WRITE licence must read
+		// it the other way, because an auditor with no clock re-tests nothing.
+		a := newRefusedAuditor(nil, "it projects onto the auth plane")
+		require.Zero(t, a.Interval())
+		stale, elapsed := a.Stale(base)
+		require.True(t, stale)
+		require.Zero(t, elapsed, "with no cadence there is no window to measure an age against")
+	})
+
+	t.Run("a verdict clock that has never been stamped is stale", func(t *testing.T) {
+		a := enrolled(time.Time{})
+		require.True(t, a.Status().LastPassAt.IsZero())
+		stale, elapsed := a.Stale(base)
+		require.True(t, stale, "not yet proven is not licensed")
+		require.Positive(t, elapsed)
+	})
+
+	t.Run("a recent verdict is not stale", func(t *testing.T) {
+		a := enrolled(base.Add(-interval))
+		stale, elapsed := a.Stale(base)
+		require.False(t, stale)
+		require.Equal(t, interval, elapsed)
+	})
+
+	t.Run("exactly at the window is not yet stale", func(t *testing.T) {
+		// The comparison is strictly greater-than, so the last instant of the
+		// window still counts as a running audit. Pinned rather than left to
+		// taste: the licence's own boundary case cannot assert it, because there
+		// `now` is the wall clock.
+		a := enrolled(base.Add(-window))
+		stale, elapsed := a.Stale(base)
+		require.False(t, stale)
+		require.Equal(t, window, elapsed)
+	})
+
+	t.Run("one nanosecond past the window is stale", func(t *testing.T) {
+		a := enrolled(base.Add(-window - time.Nanosecond))
+		stale, elapsed := a.Stale(base)
+		require.True(t, stale)
+		require.Equal(t, window+time.Nanosecond, elapsed)
+	})
+
+	t.Run("a long-wedged audit is stale and reports how long", func(t *testing.T) {
+		a := enrolled(base.Add(-72 * time.Hour))
+		stale, elapsed := a.Stale(base)
+		require.True(t, stale)
+		require.Equal(t, 72*time.Hour, elapsed, "the elapsed is what the refusal names, so it must be the real age")
+	})
+
+	t.Run("a clock ahead of now is not stale", func(t *testing.T) {
+		// A negative elapsed (a clock step, or a restored cursor stamped by
+		// another instance) reads as fresh rather than as an enormous age, which
+		// is what a bare subtraction of an unsigned width would produce.
+		a := enrolled(base.Add(time.Hour))
+		stale, elapsed := a.Stale(base)
+		require.False(t, stale)
+		require.Negative(t, elapsed)
+	})
+}

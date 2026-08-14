@@ -37,6 +37,25 @@ const (
 	AuditEnabledByDefault = true
 )
 
+// auditorStaleCycles is how many audit intervals may elapse with no verdict
+// before Auditor.Stale calls the audit stale — 10, so ~2.5 hours at the 15
+// minute default. The window is scaled off the audit's OWN cadence rather than
+// being a second independently-tuned duration, and it is generous on purpose: an
+// audit that has skipped a tick or two is a detector hiccup, not a lens whose
+// rows nothing is re-testing.
+//
+// It is 10 because the heartbeat's own audit-stall window is
+// defaultCapabilitySweepStallCycles = 10 (internal/refractor/health), and an
+// operator who has reasoned about how late an audit may run before the platform
+// says so expects the two signals to agree about the same lens. It is
+// deliberately a SEPARATE constant rather than a shared one: the heartbeat's
+// window governs when to ALARM and so is tuned to stay quiet through an ordinary
+// pause or rebuild, while this one governs whether a write may be narrowed and
+// so must err toward refusing. Two dispositions that happen to want the same
+// number today must be able to move apart without one silently dragging the
+// other with it.
+const auditorStaleCycles = 10
+
 // auditArmed is the live reading of AuditEnabledByDefault, moved by
 // SetAuditEnabled. It is a var rather than the constant itself for two reasons:
 // the refusal it produces has to be exercisable (a published refusal nobody has
@@ -279,6 +298,38 @@ func (a *Auditor) Status() AuditStatus {
 // reads the zero as "no cadence to be late against", which is what stops a
 // refused lens from ever reporting as audit-stalled.
 func (a *Auditor) Interval() time.Duration { return a.interval }
+
+// Stale reports whether this audit has gone auditorStaleCycles intervals without
+// reaching a verdict, and how long it has been since the last one. It is the
+// question "is anything actually re-testing this lens's rows RIGHT NOW", which
+// AuditStatus.Enrolled and AuditStatus.Suppression together cannot answer: both
+// are written by the tick loop, so a loop that has stopped running — crashed,
+// wedged, blocked forever inside a pass — leaves Enrolled true and Suppression
+// empty for as long as the process lives. LastPassAt is the only field that ages
+// on its own, which is exactly what it is for (see AuditStatus.LastPassAt), and
+// this is the reading of it.
+//
+// It is fail-closed in both directions a caller can be wrong about. A zero or
+// absent cadence (a refused auditor holds none) reads as stale rather than as
+// "no cadence to be late against", because a caller asking this question wants a
+// standing re-test and an auditor with no clock has none. And a zero LastPassAt
+// — an auditor that has never completed a pass — computes as an enormous elapsed
+// and so reads as stale, which is the correct answer for a write licence: not
+// yet proven is not licensed. That is the OPPOSITE disposition to the
+// heartbeat's own stall detector, which must not alarm on a freshly activated
+// lens and therefore rebases its clock at first sight; the two mechanisms are
+// deliberately independent for that reason and share no state.
+//
+// now is supplied by the caller rather than read here so the window is testable
+// without waiting for one.
+func (a *Auditor) Stale(now time.Time) (stale bool, elapsed time.Duration) {
+	interval := a.Interval()
+	if interval <= 0 {
+		return true, 0
+	}
+	elapsed = now.Sub(a.Status().LastPassAt)
+	return elapsed > auditorStaleCycles*interval, elapsed
+}
 
 // AnchorLabel is the vertex type this audit currently walks, and "" for a
 // refused lens. Read under the lock because a pass may adopt a new one after a

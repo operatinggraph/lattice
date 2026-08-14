@@ -16,6 +16,7 @@ package pipeline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -48,12 +49,34 @@ RETURN 'all' AS key, collect(u.name) AS names
 // licenceFixture builds an audited plain lens and arms its auditor through the
 // production enrolment path, so the licence is asked of a pipeline in the state
 // a real activation leaves behind.
+//
+// It then runs one real pass, because a licensed lens is one whose audit is
+// actually TICKING and the staleness conjunct reads that off the verdict clock:
+// an auditor that has never completed a pass carries a zero LastPassAt and is
+// stale by construction. The pass is driven rather than the timestamp written,
+// for the same reason the suppression vector below drives a pause: the clock the
+// licence reads must be the one the auditor itself stamps.
 func licenceFixture(t *testing.T, spec string) *auditFixture {
 	t.Helper()
 	f := newAuditFixture(t, spec, nil)
 	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
 	require.True(t, enrolled, "the fixture lens must enrol; refusal: %s", refusal)
+	f.p.Auditor().pass(context.Background())
+	require.False(t, f.p.Auditor().Status().LastPassAt.IsZero(),
+		"the fixture's audit must have reached a verdict, or every licence below refuses as stale")
 	return f
+}
+
+// ageLastPass backdates the auditor's verdict clock by d. Written directly under
+// the auditor's own lock because the alternative — waiting for a real cadence to
+// lapse — is a fixed sleep, and the value under test is a duration nothing else
+// can move. The FIELD is the mechanism's whole input (AuditStatus.LastPassAt is
+// the only thing that ages when the tick loop stops), so posing it is posing the
+// real state a wedged loop leaves behind, not a proxy for it.
+func ageLastPass(a *Auditor, d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status.LastPassAt = a.status.LastPassAt.Add(-d)
 }
 
 // parseLicenceRule compiles a rule to swap onto an ALREADY-ENROLLED pipeline's
@@ -257,6 +280,75 @@ func TestPlainDerivationLicence_SuppressedAuditRefuses(t *testing.T) {
 	require.Empty(t, a.Status().Suppression)
 	licensed, _ = f.p.plainDerivationLicence(f.p.ruleState())
 	require.True(t, licensed)
+}
+
+// TestPlainDerivationLicence_StaleAuditRefuses closes the fail-open that
+// survives BOTH of the fields above. Enrolled is the install-time verdict and
+// Suppression is the last tick's reason — and both are written by the tick loop
+// itself, so a loop that has stopped running altogether (crashed, deadlocked,
+// blocked forever inside a pass) leaves Enrolled true and Suppression empty for
+// as long as the process lives. Neither field can ever report that state,
+// because reporting it would require the very loop that is gone. LastPassAt is
+// the only one that ages on its own, and this is the test that it is read.
+//
+// The wedged audit is posed by backdating that clock rather than by pausing or
+// refusing anything: the whole point is a lens whose every other audit field
+// reads healthy, which is what an operator (and the previous licence) would see.
+func TestPlainDerivationLicence_StaleAuditRefuses(t *testing.T) {
+	f := licenceFixture(t, seedUnitsSpec)
+	a := f.p.Auditor()
+
+	// The positive twin first, so a refusal below cannot be a gate that refuses
+	// everything: a lens whose audit reached a verdict one interval ago — well
+	// inside the window — is licensed.
+	ageLastPass(a, a.Interval())
+	licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
+	require.True(t, licensed, "an audit one interval old is running, not stale; refusal: %s", refusal)
+
+	// And it stays licensed at nine intervals, so the refusal that follows is
+	// the window closing and not a cliff somewhere short of it. The exact
+	// boundary is pinned in TestAuditorStale, which supplies `now` and so can
+	// name an elapsed to the nanosecond; here `now` is the wall clock the licence
+	// itself reads, and a test that leaned on the last nanosecond of the window
+	// would be asserting that no time passes between two statements.
+	ageLastPass(a, (auditorStaleCycles-2)*a.Interval())
+	licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+	require.True(t, licensed, "nine intervals is inside the window; refusal: %s", refusal)
+
+	ageLastPass(a, 2*a.Interval())
+	licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+	require.False(t, licensed, "an audit that has not reached a verdict in %d intervals is not a standing re-test", auditorStaleCycles)
+	require.Contains(t, refusal, "has not reached a verdict")
+	require.True(t, a.Status().Enrolled, "the install-time verdict still reads healthy — which is the point")
+	require.Empty(t, a.Status().Suppression, "and so does the suppression reason — neither field can see a wedged loop")
+
+	// A resumed audit restores the licence, so this is a live read of the clock
+	// and not a latch.
+	a.pass(context.Background())
+	licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+	require.True(t, licensed, "a fresh verdict must restore the licence; refusal: %s", refusal)
+}
+
+// TestPlainDerivationLicence_NeverAuditedRefuses is the staleness conjunct's
+// fail-closed direction on a lens whose auditor was installed a moment ago and
+// has never completed a pass. It is licensed by every other conjunct, and the
+// zero LastPassAt is doing all the work: for a WRITE licence, "no verdict yet"
+// must read as not-licensed, which is the opposite of the heartbeat's own
+// stall detector (where a fresh install must not alarm).
+func TestPlainDerivationLicence_NeverAuditedRefuses(t *testing.T) {
+	f := newAuditFixture(t, seedUnitsSpec, nil)
+	enrolled, refusal := f.p.InstallAudit(AuditOptions{})
+	require.True(t, enrolled, "refusal: %s", refusal)
+	require.True(t, f.p.Auditor().Status().LastPassAt.IsZero(), "no pass has run")
+
+	licensed, refusal := f.p.plainDerivationLicence(f.p.ruleState())
+	require.False(t, licensed, "an audit that has proven nothing yet licenses nothing yet")
+	require.Contains(t, refusal, "has not reached a verdict")
+
+	// The positive twin: one pass, and the same lens is licensed.
+	f.p.Auditor().pass(context.Background())
+	licensed, refusal = f.p.plainDerivationLicence(f.p.ruleState())
+	require.True(t, licensed, "refusal: %s", refusal)
 }
 
 // TestPlainDerivationLicence_IsReadOffLiveFields pins §4.3's own requirement:

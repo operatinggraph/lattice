@@ -11,12 +11,13 @@
 // already use — once per derived anchor instead of running the unseeded
 // evaluation.
 //
-// The narrowing LICENCE (§5: per-anchor closure, an enrolled Auditor, no
-// $now/$projectedAt, no secure decryptor, the auth-plane exclusion) lives
-// here too, as plainDerivationLicence — a standalone predicate no write path
-// consults yet, because plainDerivationIndexForAct declines unconditionally
-// (see its own doc). So `act` mode cannot let this derivation decide an
-// event's outcome: only `shadow` mode's measurement runs the walk at all,
+// The narrowing LICENCE (§5: per-anchor closure, an Auditor that is enrolled,
+// unsuppressed and not stale, no $now/$projectedAt, no secure decryptor, the
+// auth-plane exclusion) lives here too, as plainDerivationLicence — a standalone
+// predicate no write path consults yet, because plainDerivationIndexForAct
+// declines unconditionally (see its own doc). So `act` mode cannot let this
+// derivation decide an event's outcome: only `shadow` mode's measurement runs
+// the walk at all,
 // through the SAME three-way mode switch and the SAME derivationShadow
 // counters the actor-aware arm's affectedAnchors already uses
 // (anchor_derivation_mode.go, anchor_derivation_shadow.go). A pipeline is one
@@ -27,8 +28,10 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
@@ -164,6 +167,24 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 //     all refuse. Suppression is "" before the first pass, which is the honest
 //     reading of a freshly activated auditor: enrolled, running, nothing
 //     reported.
+//   - an audit whose last verdict is RECENT — Auditor.Stale, i.e. less than
+//     auditorStaleCycles of the audit's own Interval since AuditStatus.LastPassAt.
+//     Enrolled and Suppression together still leave one fail-open state, and it is
+//     the worst one: both fields are written BY the tick loop, so a loop that has
+//     stopped running at all — crashed, wedged, blocked forever inside a pass —
+//     leaves Enrolled true and Suppression empty for the life of the process. A
+//     licence reading only those two would take a dead audit for a healthy quiet
+//     one indefinitely, and narrow every write behind it. LastPassAt is the one
+//     field that ages without anyone writing it, so it is the one that can answer
+//     "is something re-testing this lens NOW" rather than "was something once".
+//     The window is scaled off the lens's own cadence rather than a second
+//     duration, and a zero LastPassAt — an auditor that has never completed a pass
+//     — reads as stale, which is the correct fail-closed answer for a write
+//     licence: not yet proven is not licensed. That is deliberately the OPPOSITE
+//     disposition to the heartbeat's own audit-stall detector, which must not
+//     alarm on a freshly activated lens and so rebases its clock at first sight;
+//     the two mechanisms share no state and no constant, only a default value
+//     chosen to keep them legible together (see auditorStaleCycles).
 //   - a full-engine compiled rule, without which neither closure nor the
 //     parameter walk can be asked at all.
 //   - a target that can read a row back (adapter.RowReader). Required twice
@@ -195,11 +216,16 @@ func (p *Pipeline) plainDerivationIndex(rs ruleState) (full.HopIndex, bool) {
 //     neighbour-keyed lens whose rows happen to be partitionable by anchor is
 //     refused too, and keeps today's behaviour.
 //
-// The five conjuncts the audit shares are asked in auditEnrolment's own order,
-// and the closure conjunct — the one with no counterpart there — is asked last,
-// so a lens the audit also refuses reports the same reason both predicates
-// publish, and "not keyed by its anchor alone" is reported only for a lens that
-// is otherwise fully eligible, which is the reading an operator can act on.
+// The conjuncts the audit shares are asked in auditEnrolment's own order, so a
+// lens the audit also refuses reports the same reason both predicates publish.
+// The conjuncts with no counterpart there sit outside that ordering, at the two
+// ends and for opposite reasons. The auditor's own health — enrolled,
+// unsuppressed, not stale — is asked FIRST because it is the cheapest (field reads
+// off one status snapshot and a clock) and because it is the conjunct most likely
+// to move under a lens that is otherwise permanently eligible. Closure is asked
+// LAST because it is a fixed property of the query: reporting "not keyed by its
+// anchor alone" only for a lens that is otherwise fully eligible is the reading
+// an operator can act on.
 //
 // The §4.2 conjuncts (plain pipeline, single branch, complete and resolved
 // rootHops, no diffRetraction) are plainDerivationIndex's, not restated here:
@@ -222,6 +248,10 @@ func (p *Pipeline) plainDerivationLicence(rs ruleState) (licensed bool, refusal 
 		return false, reason
 	case st.Suppression != "":
 		return false, "its divergence audit is suppressed (" + st.Suppression + "), so nothing is re-testing its rows while that holds"
+	}
+	if stale, elapsed := auditor.Stale(time.Now()); stale {
+		return false, fmt.Sprintf("its divergence audit has not reached a verdict in %s, longer than its cadence tolerates, so nothing is proven to be re-testing its rows",
+			elapsed.Round(time.Second))
 	}
 	fullCR, isFull := rs.cr.(*full.CompiledRule)
 	if !isFull || fullCR == nil {
