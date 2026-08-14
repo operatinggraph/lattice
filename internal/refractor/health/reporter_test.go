@@ -678,3 +678,84 @@ func TestReporter_StatusTransitions_PreserveTheStructuralAutoRecoveryRecord(t *t
 	require.NoError(t, r.SetActive(ctx))
 	assertRecord(t, "SetActive after rebuild")
 }
+
+// TestReporter_SetPersonalSweepProgress covers the personal convergence sweep's
+// health write (personal-lens-grant-change-trigger-design.md §4.3), including
+// the rule it inherits from SetAuditProgress: a zero cycle stamp is "this tick
+// did not close a cycle", never "forget the one that did".
+func TestReporter_SetPersonalSweepProgress(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "personal-rule")
+
+	// An intermediate tick: a cursor and a live queue depth, no cycle claim.
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", time.Time{}, 3))
+	entry, err := r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "Hj4kPmRtw9nbCxz5vQ2y", entry.PersonalSweepCursor)
+	assert.Equal(t, uint64(3), entry.PersonalSweepQueueDepth)
+	assert.Empty(t, entry.PersonalSweepCycleCompletedAt,
+		"a tick that closed no cycle must not claim coverage the walk has not earned")
+
+	// The tick that closes a cycle stamps it.
+	completed := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Kx3TmZpq7RvwNsY2Hc9L", completed, 0))
+	entry, err = r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "Kx3TmZpq7RvwNsY2Hc9L", entry.PersonalSweepCursor)
+	assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt)
+	assert.Equal(t, uint64(0), entry.PersonalSweepQueueDepth,
+		"the depth is a live GAUGE, so a drained queue overwrites a busy one — unlike the cycle stamp, a stale depth is worse than none")
+
+	// And the next intermediate tick leaves that claim alone. Writing a zero
+	// here would erase, once a minute, the only field that says what the sweep
+	// has actually covered.
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Wq7bNmXt4RkzPy2LcH8v", time.Time{}, 1))
+	entry, err = r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt)
+	assert.Equal(t, uint64(1), entry.PersonalSweepQueueDepth)
+
+	// A concurrent fault write must not lose it, and vice versa: both are
+	// read-modify-write under the same writeMu.
+	require.NoError(t, r.RecordGrantReprojectIssue(ctx, "overflow", "dropped 2 signal(s)"))
+	entry, err = r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "Wq7bNmXt4RkzPy2LcH8v", entry.PersonalSweepCursor)
+	require.NotNil(t, entry.LastError)
+}
+
+// The status-transition half. The completeness gate in
+// entry_carry_forward_completeness_test.go pins that every Entry field survives
+// the three wholesale writers; this pins the BEHAVIOUR for these three, which is
+// the sharper statement: the sweep is one PROCESS-level walk fanned onto
+// per-lens entries, so a lens pausing and resuming observes nothing about it,
+// and the sweep only rewrites the fields once per interval — so a dropped value
+// would stand for a whole cycle rather than being repaired by the next tick.
+func TestReporter_StatusTransitions_PreserveThePersonalSweepProgress(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "personal-transition-rule")
+
+	completed := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, r.SetPersonalSweepProgress(ctx, "Hj4kPmRtw9nbCxz5vQ2y", completed, 7))
+
+	assertProgress := func(t *testing.T, stage string) {
+		t.Helper()
+		entry, err := r.GetStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "Hj4kPmRtw9nbCxz5vQ2y", entry.PersonalSweepCursor, "cursor must survive %s", stage)
+		assert.Equal(t, completed.Format(time.RFC3339), entry.PersonalSweepCycleCompletedAt,
+			"cycle claim must survive %s", stage)
+		assert.Equal(t, uint64(7), entry.PersonalSweepQueueDepth, "queue depth must survive %s", stage)
+	}
+
+	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))
+	assertProgress(t, "SetPaused")
+	require.NoError(t, r.SetActive(ctx))
+	assertProgress(t, "SetActive")
+	require.NoError(t, r.SetRebuilding(ctx))
+	assertProgress(t, "SetRebuilding")
+	require.NoError(t, r.SetActive(ctx))
+	assertProgress(t, "SetActive after rebuild")
+}

@@ -192,6 +192,29 @@ type Entry struct {
 	// closed over it. Restored at startup beside the cursor, so a redeploy does
 	// not silently retract a coverage claim the lens has already earned.
 	AuditCycleCompletedAt string `json:"auditCycleCompletedAt,omitempty"`
+	// PersonalSweepCursor is the personal convergence sweep's round-robin
+	// position — the last identity it re-drove
+	// (personal-lens-grant-change-trigger-design.md §4.3). Unlike SweepCursor it
+	// is written by ONE process-level walk shared by every personal lens, and
+	// fanned out to each of their entries, because the question it answers ("do
+	// this lens's rows have a standing healer, and where has it got to") is
+	// per-lens even though the mechanism is not. It is not restored at startup:
+	// a restart re-starts the cycle from the top of the population, which is the
+	// safe direction. "" for every lens the sweep does not drive.
+	PersonalSweepCursor string `json:"personalSweepCursor,omitempty"`
+	// PersonalSweepCycleCompletedAt is when that sweep last reached the END of
+	// the identity population — RFC3339 UTC, "" before the first completed
+	// cycle. It is what a healthy-looking cursor is worth: a tick covers at most
+	// one batch of identities, so a moving cursor says the backstop is alive
+	// while only a closed cycle says it has covered the plane.
+	PersonalSweepCycleCompletedAt string `json:"personalSweepCycleCompletedAt,omitempty"`
+	// PersonalSweepQueueDepth is how many actors the grant-change drain still
+	// owes a reprojection at the moment the sweep published — the fast path's
+	// backlog gauge, carried on the sweep's write because the sweep is the only
+	// thing that reports on a schedule. A depth that keeps climbing is a mass
+	// grant change outpacing the drain, which is the shape that ends in the
+	// coalescing set overflowing (and that overflow raises its own fault).
+	PersonalSweepQueueDepth uint64 `json:"personalSweepQueueDepth,omitempty"`
 	// EvalDriftRetries is the cumulative number of inline re-executions an
 	// auth-plane evaluation's footprint validation has triggered — a
 	// mid-evaluation write moved a key the evaluation read

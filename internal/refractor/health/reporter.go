@@ -147,6 +147,17 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		// pause/resume would retract a whole-lens verdict nothing re-derived.
 		AuditCursor:           existing.AuditCursor,
 		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
+		// The personal convergence sweep's position, its last closed cycle and
+		// the grant-change drain's depth, for the same reason with one extra
+		// edge: that walk is a PROCESS-level mechanism fanned out onto per-lens
+		// entries, so a single lens's status transition observes nothing
+		// whatever about it. Zeroing them here would make a paused-and-resumed
+		// personal lens read as one with no standing healer at all, and since
+		// the sweep rewrites them only once per tick the false reading stands
+		// for a whole interval.
+		PersonalSweepCursor:           existing.PersonalSweepCursor,
+		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
+		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
 		// Every CUMULATIVE fault counter carries forward for the same reason,
 		// and SecureRedactions is the one that made the omission load-bearing:
 		// a rebuild calls SetRebuilding on the way in and SetActive on the way
@@ -266,7 +277,13 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		SweepReconciled:       existing.SweepReconciled,
 		AuditCursor:           existing.AuditCursor,
 		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
-		SecureRedactions:      existing.SecureRedactions,
+		// The personal convergence sweep's state, preserved for the reason
+		// SetActive states: it is written by a process-level walk fanned out
+		// onto per-lens entries, and this transition observes nothing about it.
+		PersonalSweepCursor:           existing.PersonalSweepCursor,
+		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
+		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
+		SecureRedactions:              existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
@@ -349,7 +366,13 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		SweepReconciled:       existing.SweepReconciled,
 		AuditCursor:           existing.AuditCursor,
 		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
-		SecureRedactions:      existing.SecureRedactions,
+		// The personal convergence sweep's state, preserved for the reason
+		// SetActive states: it is written by a process-level walk fanned out
+		// onto per-lens entries, and this transition observes nothing about it.
+		PersonalSweepCursor:           existing.PersonalSweepCursor,
+		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
+		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
+		SecureRedactions:              existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
@@ -811,6 +834,42 @@ func (r *Reporter) SetAuditProgress(ctx context.Context, cursor string, cycleCom
 	if !cycleCompletedAt.IsZero() {
 		existing.AuditCycleCompletedAt = cycleCompletedAt.UTC().Format(time.RFC3339)
 	}
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// SetPersonalSweepProgress persists the personal convergence sweep's
+// round-robin cursor, the time its walk last closed a full cycle, and the
+// grant-change drain's queue depth onto the lens's existing health entry
+// (personal-lens-grant-change-trigger-design.md §4.3). Read-modify-write under
+// the same writeMu as every other setter, so it cannot lose an update to a
+// concurrent RecordError.
+//
+// Unlike SetSweepProgress and SetAuditProgress this is written by ONE
+// process-level walk fanned out across every personal lens, not by a per-lens
+// mechanism. It is the same fan-out RecordGrantReprojectIssue takes and for the
+// same reason: the mechanism is shared, the fact is per-lens.
+//
+// A zero cycleCompletedAt leaves the stored value alone rather than clearing
+// it, exactly as SetAuditProgress does: the sweep stamps that field only on the
+// tick that reaches the END of the identity population, so writing a zero on
+// every intermediate tick would erase the one field that says what the walk has
+// actually covered. queueDepth always overwrites — it is a live gauge, not a
+// milestone, and a stale depth is worse than a zero one.
+func (r *Reporter) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetPersonalSweepProgress read: %w", err)
+	}
+	existing.PersonalSweepCursor = cursor
+	if !cycleCompletedAt.IsZero() {
+		existing.PersonalSweepCycleCompletedAt = cycleCompletedAt.UTC().Format(time.RFC3339)
+	}
+	existing.PersonalSweepQueueDepth = queueDepth
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)
