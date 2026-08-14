@@ -925,3 +925,62 @@ step 5's entry, seeded early since Increment 1 is what actually closes the speci
 projection read as a decision input by another projection, with no change edge — check: does every producer
 this lens depends on for AUTHORIZATION (not just anchor data) have a `grant-change-posture` (or equivalent)
 declaration at its read call site, enforced by a blocking lint gate?"*
+
+---
+
+## 16. Increment 2 — SHIPPED (checkpoint, 2026-08-14)
+
+Built on branch `steward-refractor-personal-sweep-inc2`, on top of Increment 1's `b69487ef`.
+*Review: pending Winston's admit-time pass.*
+
+**What shipped, against §11 Inc 2's five steps:**
+
+| Step | Where |
+|---|---|
+| 1. `PersonalSweeper` | `internal/refractor/grantchange/sweeper.go` — `PersonalSweeper`, `NewPersonalSweeper`, `Run`/`Sweep`, `SetBounds`, `Cursor`/`CycleCompletedAt`, `CoreKVLister`, `DefaultPersonalSweepInterval` (60s) / `DefaultPersonalSweepBatch` (5), local `resumeAt`. Plus `Reprojector.ReprojectNow` (`reprojector.go`) — the sweeper reuses the drain's own per-lens walk rather than opening a second call path, and holds **no** registry of its own |
+| 2. Health surface | `healthwire.Entry.PersonalSweep{Cursor,CycleCompletedAt,QueueDepth}`; `Reporter.SetPersonalSweepProgress` (+ carry-forward in `SetActive`/`SetPaused`/`SetRebuilding`); `Pipeline.SetPersonalSweepProgress`; the third method on `grantchange.PersonalPipeline`. Documented in `docs/observability/health-kv-schema.md` |
+| 3. `docs/components/refractor.md` | the sweep-exclusion prose at G8/G9 rewritten (it read as a permanent property), and a new bullet under the Personal Lens fires covering the D1 dependency edge + both mechanisms |
+| 4. **T6** | `internal/refractor/personal_lens_grant_change_e2e_test.go` — both directions, over T4's own sink-disabled mutation fixture |
+| 5. Dossier entry | already present and still accurate (seeded at Increment 1's close); unchanged |
+
+**Two things the build decided that §4.3 left open, both stated in-code:**
+
+1. **An empty population is never cached.** The cache is invalidated by a cycle *wrapping*, and a
+   walk over nothing never wraps — so caching the empty answer would leave a cell that boots
+   before its first identity exists unswept for the life of the process. It re-lists per tick
+   while empty, which is the cheapest listing there is.
+2. **T6 drives ticks rather than running the ticker.** An authoritative frame is republished for
+   every swept identity on every tick, by construction, so a drain-until-quiet against a
+   free-running sweeper never goes quiet. The ticker is unit-tested (`Run` respects its context);
+   T6 proves the *cycle* converges, which is its actual claim.
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), all nine
+`scripts/lint-*.go` under `STRICT=1`, and `go test ./internal/refractor/... ./cmd/refractor/...
+-count=1` — all clean. `make verify-kernel` was **not** run: it needs a live stack
+(`lattice.bootstrap.json`), which this fire's scope excludes.
+
+**Residuals, precisely:**
+
+1. **M1 is now OBSERVABLE but still NOT RECORDED.** Increment 1's residual 3 named the gap: the
+   drain-queue depth and reactions-per-minute were never measurable because nothing read
+   `QueueDepth()`. That half is closed — the depth is now published to every personal lens's
+   Health KV entry once per sweep tick, so an operator (or Lamplighter) can read it off a running
+   cell. What is still missing is the **number**: this fire also built against `go test` +
+   embedded NATS with no live stack, so no measurement over a real auth-plane sweep cycle was
+   taken. The remaining work is a live observation pass, not a code change.
+2. **Increment 1's residuals 1 and 2 are unchanged in mechanism, but no longer unhealed.** The
+   registry-completeness window (Core-KV declaration → `RegisterPersonal`) and the corpus-global
+   readiness hold still exist exactly as described; what changes is their consequence. Both used
+   to end in "lost with no healer until Increment 2's sweep ships" — the sweep now ships, so a
+   signal lost in either window converges within a cycle instead of never. Neither window itself
+   is narrowed by this increment.
+3. **The sweep's own cursor is unpersisted, by design (§5), and that is a real cost at scale.** A
+   cell restarting more often than `N/5` minutes re-verifies the head of the population forever
+   and never reaches the tail — the same failure `AuditCursor`'s persistence exists to avoid. It
+   is the safe direction (re-work, never a skipped segment) and §5 chose it deliberately, but the
+   named future narrowing in §4.3 (sweep the live SYNC durable set rather than the whole identity
+   population) is the thing that makes it moot, and this is the second reason to want it.
+4. **`auditCursor`/`auditCycleCompletedAt` are undocumented in `docs/observability/health-kv-schema.md`**
+   — pre-existing, not introduced here (the divergence audit's fields never got a paragraph). The
+   personal-sweep fields added here are documented; the audit's gap is left as an adjacent find
+   rather than fixed in this fire's diff.

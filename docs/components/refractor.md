@@ -157,6 +157,36 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   missing read grant). Threaded into `InstallPersonalLens` as `capKV`; `nil` disables the gate — a
   trusted/test-only posture, never a production default (`cmd/refractor/main.go` always opens a
   real `capability-kv` handle).
+- **D1 read-grant change edge + personal convergence sweep
+  (`internal/refractor/grantchange`).** That gate makes a personal row a function of *two*
+  inputs — the lens's own Core-KV subgraph, which drives it through CDC, and the `cap-read`
+  projection, which is written by four *other* pipelines and drives nothing. So a grant landing
+  or being revoked changed no row until unrelated traffic happened to re-drive that actor. Two
+  mechanisms close that, the same pair every other Refractor plane runs. **The edge (latency
+  path):** the read-grant producer's guarded write already holds both the stored and the
+  outgoing body, so it — and only it — can tell a grant *liveness transition* from the
+  watermark rewrite the guard performs on every evaluation; on a transition it inverts the
+  written key back to its actor (`OutputDescriptor.AnchorFromKey`, fail-closed) and hands it to
+  the process-level `grantchange.Reprojector`, which coalesces per actor and re-drives that one
+  actor across every registered personal lens via `Pipeline.ReprojectPersonalActor` — `Hydrate`
+  without the terminal `hydrationComplete` marker, with the frame revision captured *after*
+  reprojection so the retraction can actually retract. `Truncate` (a rebuild, or the truncating
+  rebuild a *narrowing* MATCH reload owes automatically) announces every purged key the same
+  way, since it never reaches the guard. **The backstop (convergence path):**
+  `grantchange.PersonalSweeper` — one walk shared by every personal lens, over the `identity`
+  population from Core KV, `DefaultPersonalSweepBatch` (5) identities per
+  `DefaultPersonalSweepInterval` (60s), population cached per cycle rather than re-listed per
+  tick, cursor and last-closed-cycle unpersisted so a restart re-verifies from the top. It
+  exists because the edge is in-process and best-effort by construction: a crash between the
+  producer's write and the drain loses the signal, the coalescing set is bounded, a lens that
+  registers late never hears a transition that landed first, and in a partitioned-lens HA
+  deployment the two halves can sit in different processes. Prevention best-effort,
+  detect-and-recover authoritative. It needs no orphan direction — the authoritative keyset
+  frame is the stray-killer, evaluated on the device — which is exactly why the sweep the
+  actor-aggregate plane runs does not fit here. Both mechanisms report on each personal lens's
+  own health entry: faults through `RecordGrantReprojectIssue` (dropped signals, a failed
+  reprojection), and the sweep's cursor / last completed cycle / drain queue depth through
+  `personalSweep*` (personal-lens-grant-change-trigger-design.md).
 - **Hydration Hook (Fire PL.4, `internal/refractor/pipeline.Pipeline.Hydrate`).** The cold-start
   catch-up path for a device that missed the SYNC stream's retention window (or is starting for the
   first time): the control-plane RPC `lattice.ctrl.refractor.personal.hydrate` — request body
@@ -684,9 +714,13 @@ next happens to touch it.
 So every **actor-aggregate** lens runs a periodic self-audit beside its pump
 (`pipeline.RunSweep`, `internal/refractor/pipeline/sweep.go`;
 capability-projection-reconciliation-design.md §3.2, generalized by
-lens-projection-liveness-design.md §15). Every other lens kind is excluded structurally —
-the driver simply never installs a `SweepPlan` for it: a plain lens retracts through
-filter/diff retraction and the Personal Lens has its own Hydrate.
+lens-projection-liveness-design.md §15). No other lens kind gets a `SweepPlan` — a plain
+lens retracts through filter/diff retraction — but the **Personal Lens** now has a
+convergence walk of its own, run by a different mechanism for a reason the enrolment gate
+below makes plain: it cannot enumerate its target's keys, so it can never take the orphan
+direction the `SweepPlan` sweep is built around. Its keyset frame supplies that direction
+from the other end instead (`grantchange.PersonalSweeper` — see the D1 read-grant change
+edge above).
 
 Enrolment is gated on the lens being able to **name its own rows**, on three counts. A
 target is shared — one `weaver-targets` bucket holds a dozen lenses' rows — so the sweep

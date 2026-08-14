@@ -1014,6 +1014,9 @@ above).
   "ackFloorProgressAt": "<RFC3339>",
   "sweepCursor": "<anchorVertexKey>",
   "sweepReconciled": <uint64>,
+  "personalSweepCursor": "<identityId>",
+  "personalSweepCycleCompletedAt": "<RFC3339>",
+  "personalSweepQueueDepth": <uint64>,
   "secureRedactions": <uint64>,
   "structuralAutoRecoveredAt": "<RFC3339>",
   "structuralAutoRecoveredCause": "<string>",
@@ -1189,6 +1192,21 @@ live on this existing entry rather than in new state, so a restarted Refractor r
 walk where it stopped instead of re-verifying from the head every boot, and the heal count
 an operator reads survives the restart. Neither is reset by a status transition — a
 pause/resume must not silently restart the walk.
+
+`personalSweepCursor` / `personalSweepCycleCompletedAt` / `personalSweepQueueDepth` are the
+**personal** plane's convergence walk, and read differently from the pair above: one
+process-level sweeper covers every Personal Lens, and it writes the same three values onto
+each of their entries. So the cursor is the last **identity** it re-drove, not a per-lens
+position, and a lens carrying it is saying "the plane's backstop is alive and has got this
+far", not "I swept". `personalSweepCycleCompletedAt` is what a moving cursor is worth: a
+tick covers at most a batch, so only a closed cycle says the walk has covered the
+population. Neither is restored at boot — a restart re-verifies from the top of the
+population, which is the safe direction. `personalSweepQueueDepth` is the D1 grant-change
+drain's backlog at the moment the sweep published: the fast path's gauge, carried on the
+sweep's write because the sweep is the only thing here that reports on a schedule. A depth
+that keeps climbing is a mass grant change outrunning the drain, which ends in the
+coalescing set overflowing — and that overflow raises its own `errorCount`/`lastError`
+fault. All three are omitted for every lens the personal sweep does not drive.
 
 `filterMode` / `filterLabelCount` / `filterBroadReason` are the lens's **Core KV consumer
 footprint** — which server-side filter its own derivation chose, and, when that is the broad one,
