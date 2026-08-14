@@ -1183,3 +1183,56 @@ increment (a real write-path behaviour flip on live production data, even though
 plane). Part 1 above, being zero-behaviour-change, took a lead review only; a cumulative close-pass adversarial
 review should also cover Part 1 + Part 2's combined diff before the item's Done-log entry, per the multi-fire
 review-cadence rule.
+
+### Increment 4a — cumulative close pass (build note, 2026-08-14)
+
+Ran the review this section above calls for: three fresh, independent cold adversarial passes (correctness,
+edge-case, capability/security) over the **combined** Part 1 + Part 2 diff (`8f421d80..5c2adf26`), separate
+from and in addition to Part 2's own single-increment review. All three independently converged on the same
+defect, found only by reading both parts together — neither part's own isolated review could have surfaced it,
+since each half is individually correct and the failure is in their combination.
+
+**Confirmed, fixed (`bb453b66`).** `Auditor.record` stamped the write-licence's staleness clock
+(`AuditStatus.LastPassAt`) unconditionally, including for a pass where every anchor hit a target-read failure
+(`t.audited == 0`) — the exact case the sibling `CycleCompletedAt` guard six lines above it was already written
+to refuse, for the identical reason ("a pass … reaches the end having verified nothing, and stamping it would
+… read as … clean"). A target-read outage therefore kept the licence looking freshly-verified while auditing
+nothing, and — independently, from the same outage — Part 2's §6 presence probe was dropping every derived
+retraction fail-safe: narrowing continued, retractions silently stopped, and the one detector meant to catch
+the combination reported healthy throughout. Fixed by gating the stamp on `t.audited > 0`, mirroring the
+existing guard. Also fixed in the same round: the §6 probe's unreadable-row arm dropped a Delete and acked
+silently — correct for a confirmed-absent row, wrong for an unanswerable one, since this probe (unlike the
+`zeroRowDeleteKey` precedent it mirrors) fires on a one-shot neighbour event with no second delivery; it now
+fails the whole event so it NAKs and redelivers. A refusal-message default arm was blaming the wrong half of
+the gate (an index conjunct, not a licence conjunct) for a value that moved between two checks; corrected with
+its test. Two comment-only fixes closed an ordering contradiction and an overstated stability claim. New
+coverage: an all-unverified pass no longer advances the clock (zero prior coverage of this path existed); the
+licence test fixtures now drive a real audited pass instead of an empty corpus (surfaced as a side effect of
+the fix — they had been passing by never exercising the guarded clock at all); the four Part 2 e2e tests, which
+raced the audit's first tick against graph seeding, now await a real verdict before asserting on it.
+
+**Left as-is, with reasoning (not fixed this round):** two LOW-severity findings from the security pass — a
+refusal-latch that does not re-fire on a stale→licensed→stale oscillation (partially mitigated by the existing
+50-event tally log and the independently-published `AuditStatus`) and a process note that Part 1's own accepted
+`startPipeline`-activation test-coverage residual (§ Part 1 above) was not re-derived now that the licence gates
+real writes — both correctly scoped as low-impact by their own reviewer, and both out of the fix round's brief
+by this lead's call, not by omission.
+
+**The live before/after measurement (§11) was not collected.** The dev stack carried zero organic events on
+the specific shape this measures (a link event on a non-anchor position of a licensed lens, e.g.
+`clinicProviders`' `identifiedBy`) across the several hours this item has been in flight — confirmed by an empty
+grep for every shadow/act tally log line the mechanism emits. Synthesizing enough qualifying traffic live would
+mean minting providers/identities and binding them through `BindProviderIdentity` via `lattice op submit` (no
+existing seed harness does this), and the one way to also recover a genuine shadow-mode "before" baseline — the
+`REFRACTOR_ANCHOR_DERIVATION=shadow` knob — is process-wide and, per Part 1's own operational note, temporarily
+returns every actor-aware pipeline including the auth plane to shadow for the duration. Both are legitimate,
+bounded pieces of work, but neither is something to do unattended purely to populate a cap-sizing number the
+design itself states nothing correctness-bearing rests on (§11: "`DefaultPlainDerivedAnchorCap`'s value is
+justified from that distribution **or changed**" — i.e. the fallback path already covers an unmeasured cap, it
+just isn't yet tuned). Accepted as a residual for whoever next drives real traffic through the dev stack's
+clinic domain, or opens a deliberate, attended measurement window — named here rather than left implicit, per
+Part 1's own precedent for exactly this kind of proportionality call.
+
+**Close.** Inc 4a (flip to `act`, the §6 probe, the four e2es, and now this cumulative close-pass) is done. The
+item's remaining work is Increment 4b (the seeded branch's own multi-position gap, §4.4) and the already-deferred
+Increment 5 — both separate future fires per §12's decomposition.
