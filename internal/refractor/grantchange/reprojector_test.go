@@ -26,6 +26,34 @@ type fakePersonal struct {
 	// issueErr makes the Health write itself fail, which is how the overflow
 	// counter's "never clear what was not reported" rule is exercised.
 	issueErr error
+	// progress records every personal-sweep progress write, so the sweeper's
+	// health fan-out is observable without a Health KV behind it; progressErr
+	// makes that write fail.
+	progress    []sweepProgress
+	progressErr error
+}
+
+// sweepProgress is one recorded SetPersonalSweepProgress call.
+type sweepProgress struct {
+	cursor           string
+	cycleCompletedAt time.Time
+	queueDepth       uint64
+}
+
+func (f *fakePersonal) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.progressErr != nil {
+		return f.progressErr
+	}
+	f.progress = append(f.progress, sweepProgress{cursor: cursor, cycleCompletedAt: cycleCompletedAt, queueDepth: queueDepth})
+	return nil
+}
+
+func (f *fakePersonal) reportedProgress() []sweepProgress {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sweepProgress(nil), f.progress...)
 }
 
 func (f *fakePersonal) ReprojectPersonalActor(ctx context.Context, identityID string) error {

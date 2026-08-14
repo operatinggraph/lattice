@@ -69,6 +69,17 @@ type PersonalPipeline interface {
 	// caller tracking what has actually been REPORTED (rather than what it
 	// tried to report) can tell a landed issue from a lost one.
 	RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error
+	// SetPersonalSweepProgress records the SHARED personal convergence sweep's
+	// round-robin state, and the drain's queue depth, on this lens's own health
+	// entry.
+	//
+	// Per-lens for the reason RecordGrantReprojectIssue fans out the same way:
+	// the mechanism is process-level but the fact is about this lens. An
+	// operator reading one personal lens's entry is asking whether its rows
+	// converge, and that answer rests on a backstop the lens itself does not
+	// own — so a cursor kept anywhere else would leave every personal lens
+	// looking like it has no standing healer.
+	SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error
 }
 
 // Reprojector is the process-level consumer of read-grant transitions: one
@@ -447,6 +458,19 @@ func (r *Reprojector) reprojectActor(ctx context.Context, actorID string) {
 			}
 		}
 	}
+}
+
+// ReprojectNow re-evaluates one actor across every registered personal lens,
+// immediately, outside the coalescing drain.
+//
+// It is the sweeper's entry point, and it is deliberately the SAME walk the
+// drain runs for a signalled transition — same registry, same
+// re-read-before-each-call posture against a lens torn down mid-walk, same
+// Warn + Health-fault + continue on a per-lens failure. A second call path
+// would be a second place for that posture to drift, over an identical job:
+// the two callers differ only in what selected the actor.
+func (r *Reprojector) ReprojectNow(ctx context.Context, actorID string) {
+	r.reprojectActor(ctx, actorID)
 }
 
 // registered reports the pipeline currently registered under ruleID, if any.

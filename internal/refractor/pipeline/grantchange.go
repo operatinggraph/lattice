@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
@@ -75,6 +76,33 @@ func (p *Pipeline) RecordGrantReprojectIssue(ctx context.Context, kind, detail s
 	if err := p.reporter.RecordGrantReprojectIssue(ctx, kind, detail); err != nil {
 		slog.Warn("pipeline: grant change: could not record the reprojection issue on health",
 			"ruleId", p.ruleID, "kind", kind, "detail", detail, "err", err)
+		return err
+	}
+	return nil
+}
+
+// SetPersonalSweepProgress records the personal convergence sweep's
+// round-robin cursor, its last completed cycle, and the grant-change drain's
+// queue depth on this lens's own health entry
+// (personal-lens-grant-change-trigger-design.md §4.3).
+//
+// The sweep is one process-level walk shared by every personal lens, but the
+// fact it publishes is per-lens: whether THIS lens's rows have a standing
+// healer behind them, and how far behind the fast path is running. Routing it
+// to the lens's own entry is what lets an operator answer that from the lens
+// they are already looking at.
+//
+// A nil reporter (a directly-constructed pipeline, every harness) silently
+// succeeds, the same posture every other reporter call on this type takes. The
+// write's error is logged AND returned, so the sweeper can say which lens's
+// observability it lost rather than dropping the failure.
+func (p *Pipeline) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+	if p.reporter == nil {
+		return nil
+	}
+	if err := p.reporter.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, queueDepth); err != nil {
+		slog.Warn("pipeline: grant change: could not record the personal sweep's progress on health",
+			"ruleId", p.ruleID, "cursor", cursor, "err", err)
 		return err
 	}
 	return nil

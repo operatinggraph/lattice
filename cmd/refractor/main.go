@@ -1321,6 +1321,17 @@ func main() {
 	// install and registers every personal lens on it.
 	grantReprojector := grantchange.New()
 
+	// The standing healer behind that edge (§4.3). The edge is in-process and
+	// best-effort by construction — a crash between the producer's write and
+	// the drain loses the signal, the coalescing set is bounded, and a lens
+	// that registers after a transition never hears about it — so the personal
+	// plane gets the convergence sweep every other actor-aggregate plane
+	// already has. One sweeper for all fifteen personal lenses, not one each:
+	// they share a single identity population, and fifteen tickers would walk
+	// it fifteen times. It rides the reprojector's own registry, so there is no
+	// second registration site to keep in step. Started beside the drain below.
+	personalSweeper := grantchange.NewPersonalSweeper(grantReprojector, coreKV)
+
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
 		// recording (below, on a UseFullEngineBranches failure) and the
@@ -2092,6 +2103,11 @@ func main() {
 		return nil
 	})
 	go grantReprojector.Run(ctx)
+	// The sweep waits on no such gate. Its whole job is to converge whatever the
+	// fast path missed, and an empty registry costs it one identity listing per
+	// cycle and nothing else — while a lens that registers late is precisely one
+	// of the cases it exists to cover.
+	go personalSweeper.Run(ctx)
 
 	// Taxonomy currency on this instance's own entry. Without it the only
 	// trace of a resolver that never arms is a per-lens filterBroadReason,
