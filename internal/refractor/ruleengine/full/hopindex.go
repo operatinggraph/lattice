@@ -196,7 +196,12 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 	// the WITH carried the name (withScopeReject).
 	withReject := withScopeReject(cr.Query.Clauses)
 
-	b := &hopIndexBuilder{byVar: make(map[string]int), anchor: -1}
+	// root: -1 even though this builder never sets wantRoot (AnchorHopIndex
+	// has no terminus of its own here) — the zero value 0 is a VALID position
+	// index, so a future reader of b.root that forgets to check wantRoot
+	// would silently treat position 0 as a real terminus instead of failing
+	// loud.
+	b := &hopIndexBuilder{byVar: make(map[string]int), anchor: -1, root: -1}
 	for _, c := range cr.Query.Clauses {
 		switch cl := c.(type) {
 		case *Match:
@@ -271,6 +276,126 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		// that drops a live revocation.
 		idx.Incomplete = b.ungrounded
 	}
+	idx.Complete = idx.Incomplete == ""
+	return idx
+}
+
+// ScanRootHopIndex builds the same pattern graph AnchorHopIndex does, over the
+// same clauses, differing in exactly one place: which position is recorded as
+// the terminus. Where AnchorHopIndex terminates at the `{key: $actorKey}`
+// position, ScanRootHopIndex terminates at the ANCHOR PATTERN — the first
+// MATCH clause's first node (anchorPattern, anchor_delete.go) — the position a
+// seeded plain evaluation pins to one vertex (executor's key-property point
+// read / pointCandidate). It is the plain arm's own scan root: a plain lens
+// has no `$actorKey` position at all (AnchorHopIndex.Anchor is always -1 for
+// one), so this is a SECOND index sharing HopIndex's struct and builder
+// machinery, not a wider Anchor field. Widening Anchor to mean "terminus"
+// would break DeclaresActorAnchor (Anchor >= 0 IS the lens's declared
+// $actorKey binding, read by pipeline.ConsumerFilter's install-completeness
+// guard) — every plain lens would report as "declared actor-aware with no
+// enumerator installed" and take the broad filter forever.
+//
+// Every downstream consumer — Dist, AnchorSideSeeds, StepsFrom,
+// PositionsBinding, admitsType, walkToAnchors — reads HopIndex.Anchor as "the
+// terminus" and is reused verbatim; only which position ends up there
+// differs, so none of them need a second, independently fallible twin.
+//
+// Complete/Incomplete describe THIS index alone — nothing reads them across
+// AnchorHopIndex and ScanRootHopIndex.
+//
+// Cost: one extra AST walk per rule publication (useFullEngineBranches),
+// never per event — the same budget AnchorHopIndex already documents for
+// itself.
+func (cr *CompiledRule) ScanRootHopIndex() HopIndex {
+	if cr == nil || cr.Query == nil {
+		return HopIndex{Anchor: -1, Incomplete: "no compiled query"}
+	}
+
+	// Evaluated up front for the same reason AnchorHopIndex evaluates it up
+	// front: the builder's position-merging assumes two sightings of one
+	// variable name are the same executor binding, which a WITH boundary can
+	// break.
+	withReject := withScopeReject(cr.Query.Clauses)
+
+	// rootHasKey is read directly off the AST rather than through the
+	// builder: a node pinned by its own `key` property is already a point
+	// read (the executor's key-property fast path), so there is no scan for
+	// this index to remove — the check does not care WHICH expression pins
+	// it (unlike nodePinsActor, which insists on exactly `$actorKey`).
+	rootNode, foundRoot := anchorPattern(cr.Query)
+	_, rootHasKey := rootNode.Properties["key"]
+
+	b := &hopIndexBuilder{byVar: make(map[string]int), anchor: -1, root: -1, wantRoot: true}
+	for _, c := range cr.Query.Clauses {
+		switch cl := c.(type) {
+		case *Match:
+			for _, p := range cl.Patterns {
+				b.addPattern(p, true)
+			}
+			b.addExpr(cl.Where)
+		case *With:
+			for _, it := range cl.Items {
+				b.addExpr(it.Expr)
+			}
+			b.addExpr(cl.Where)
+		case *Return:
+			for _, it := range cl.Items {
+				b.addExpr(it.Expr)
+			}
+		}
+	}
+
+	idx := HopIndex{Labels: b.labels, Hops: b.hops, Anchor: b.root, LabelExpand: b.expand}
+	idx.Dist = idx.distances()
+
+	// Ordered so the most fundamental refusal wins, mirroring
+	// AnchorHopIndex's own ordering rationale: without a labeled terminus,
+	// nothing downstream — grounding included — means anything.
+	switch {
+	case !foundRoot || b.root < 0 || idx.Labels[b.root] == "":
+		// Covers both "no MATCH clause at all" (foundRoot false) and "the
+		// anchor pattern's node carries no label": either way no single
+		// vtx.<label>. prefix can be minted (walkToAnchors), and an
+		// unlabeled seed is refused anyway (executor's seedAnchorBinds).
+		idx.Incomplete = "the anchor pattern position carries no label"
+	case rootHasKey:
+		idx.Incomplete = "the anchor pattern is pinned by its own key"
+	case b.expand[b.root]:
+		// Same shape AnchorHopIndex refuses at its own anchor for the same
+		// reason: an expanded terminus's instances may be any of several
+		// concrete types, and walkToAnchors needs one literal key prefix.
+		idx.Incomplete = "the anchor pattern position carries the `*` taxonomy-expansion sigil — the derivation cannot construct a single anchor key prefix for an expanded set"
+	case b.reject != "":
+		idx.Incomplete = b.reject
+	case withReject != "":
+		// withScopeReject is the SAME general variable-scope walk
+		// AnchorHopIndex uses, unmodified, and its verdict transfers as-is:
+		// a drop-then-re-reference is a bucket-scan rebind regardless of
+		// which position is the terminus. Its own doc licenses dropping the
+		// $actorKey PARAMETER because the anchor is not a row column there;
+		// that licence does not apply here — a root terminus routinely IS a
+		// row column (`RETURN pr.key`) — but nothing has to special-case it:
+		// if the root's own variable is dropped and never referenced again,
+		// withScopeReject already reads that as harmless, and if it IS
+		// referenced again, the same drop-then-re-reference refusal already
+		// fires. Only this justification is root-specific; the mechanism and
+		// its returned reason are shared whole.
+		idx.Incomplete = withReject
+	case b.ungrounded != "":
+		// Reachable here in a way it never is for AnchorHopIndex on a plain
+		// lens: a plain query has no $actorKey position, so AnchorHopIndex's
+		// own b.anchor < 0 case fires first and swallows this conjunct for
+		// every one of them. With a root terminus every plain lens HAS a
+		// terminus, so a second MATCH headed by a variable the first one
+		// never bound is now the real, load-bearing refusal — it re-scans a
+		// bucket and really does affect every derived anchor.
+		idx.Incomplete = b.ungrounded
+	}
+	// b.multiAnchor has no counterpart here and is never checked: it tracks
+	// how many positions pin `{key: $actorKey}`, which this index does not
+	// use at all — the root is one position by construction (the first MATCH
+	// clause's first node names exactly one AST position, however many times
+	// $actorKey is pinned elsewhere in the same query).
 	idx.Complete = idx.Incomplete == ""
 	return idx
 }
@@ -369,6 +494,17 @@ type hopIndexBuilder struct {
 	multiAnchor bool
 	reject      string
 
+	// wantRoot/root are ScanRootHopIndex's terminus, alongside anchor/
+	// multiAnchor/noteAnchor which remain AnchorHopIndex's. Both sets of
+	// fields are populated by the same addPattern walk regardless of which
+	// index is being built (nodePinsActor is checked unconditionally), so a
+	// query with both a `{key: $actorKey}` position and an anchor pattern
+	// updates both — but only one of the two termini is what ground() and the
+	// returned HopIndex.Anchor read for a given build, selected by wantRoot.
+	// root is -1 until the anchor pattern's own node is reached.
+	wantRoot bool
+	root     int
+
 	// grounded holds the positions the executor reaches by walking FROM the
 	// anchor. A pattern whose head is not already grounded when the clause is
 	// reached is seeded by a bucket scan instead (executor.matchPath seeds
@@ -413,6 +549,28 @@ func (b *hopIndexBuilder) position(n NodePattern) int {
 }
 
 func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
+	// ScanRootHopIndex's terminus must be recorded from THIS pattern's
+	// Nodes[0] before anything below walks a property-map expression: a
+	// PatternExpr in a property map (checked right below, for every node of
+	// this pattern) reaches ground() through addExpr, and ground() reads
+	// b.terminus() — which must already be b.root by the time that happens,
+	// or a nested pattern in the anchor node's own property map would be
+	// judged ungrounded for the wrong reason (b.root still -1).
+	//
+	// rootHere is true on exactly the FIRST binding addPattern call this
+	// builder ever makes — the first MATCH clause's first pattern, the same
+	// one anchorPattern (anchor_delete.go) names — because the outer clause
+	// loop in ScanRootHopIndex visits clauses in order and this is a
+	// wantRoot-only branch. positions[0] below reuses b.root rather than
+	// calling position() a second time: position() merges a second sighting
+	// of a NAMED node onto the first, but mints a fresh class for an unnamed
+	// one, so a second call here would silently orphan the terminus for an
+	// unnamed anchor pattern.
+	rootHere := b.wantRoot && b.root < 0 && binding && len(p.Nodes) > 0
+	if rootHere {
+		b.root = b.position(p.Nodes[0])
+	}
+
 	// Property maps are general expressions the executor really evaluates
 	// (propsAllMatch -> evalExpr), and one may hold a PatternExpr or
 	// PatternComprehension binding a position no other clause mentions — which
@@ -430,7 +588,16 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 
 	positions := make([]int, len(p.Nodes))
 	for i, n := range p.Nodes {
-		positions[i] = b.position(n)
+		if rootHere && i == 0 {
+			// Reuse b.root rather than calling position() again: for an
+			// UNNAMED anchor node position() would mint a second, fresh
+			// class instead of returning the one rootHere already recorded
+			// above, silently orphaning the terminus. Do not "simplify" this
+			// to a plain position(n) call.
+			positions[0] = b.root
+		} else {
+			positions[i] = b.position(n)
+		}
 		if nodePinsActor(n) {
 			b.noteAnchor(positions[i])
 		}
@@ -490,12 +657,13 @@ func (b *hopIndexBuilder) ground(positions []int, binding bool) {
 	if len(positions) == 0 {
 		return
 	}
-	if b.anchor < 0 {
+	term := b.terminus()
+	if term < 0 {
 		b.markUngrounded(positions[0])
 		return
 	}
 	if b.grounded == nil {
-		b.grounded = map[int]bool{b.anchor: true}
+		b.grounded = map[int]bool{term: true}
 	}
 	if !b.grounded[positions[0]] {
 		b.markUngrounded(positions[0])
@@ -507,6 +675,18 @@ func (b *hopIndexBuilder) ground(positions []int, binding bool) {
 	for _, pos := range positions {
 		b.grounded[pos] = true
 	}
+}
+
+// terminus returns the position ground() must reach a pattern's head from —
+// b.root for ScanRootHopIndex, b.anchor for AnchorHopIndex. The two builders
+// share ground() (and every other walk below it) because "grounded relative
+// to the terminus" is the same question for either one; only which position
+// is the terminus differs.
+func (b *hopIndexBuilder) terminus() int {
+	if b.wantRoot {
+		return b.root
+	}
+	return b.anchor
 }
 
 func (b *hopIndexBuilder) markUngrounded(head int) {

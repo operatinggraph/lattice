@@ -1107,6 +1107,33 @@ func main() {
 			anchorDerivation = m
 		}
 	}
+
+	// REFRACTOR_PLAIN_DERIVED_ANCHOR_CAP overrides
+	// pipeline.DefaultPlainDerivedAnchorCap (64) — the plain arm's own
+	// derivation-mode fallback trigger (plain-lens-neighbour-anchor-
+	// derivation-design.md §4.2): a derived set larger than the cap falls
+	// back to today's unseeded evaluation rather than paying for that many
+	// seeded ones. Read here rather than per-lens for the same reason the
+	// mode above is: two places build pipelines and one of them could be
+	// missed.
+	if v := os.Getenv("REFRACTOR_PLAIN_DERIVED_ANCHOR_CAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		switch {
+		case err != nil:
+			logger.Error("invalid REFRACTOR_PLAIN_DERIVED_ANCHOR_CAP; keeping the default", "value", v, "err", err)
+		case n <= 0:
+			// Rejected rather than silently accepted: SetDefaultPlainDerivedAnchorCap
+			// treats n <= 0 as "unset" (restores the built-in default), so logging
+			// "cap overridden" for a non-positive value would claim an override that
+			// did not happen — mirrors ParseDerivationMode's own convention of
+			// rejecting an unusable value rather than silently keeping the default
+			// under a misleading log line.
+			logger.Error("invalid REFRACTOR_PLAIN_DERIVED_ANCHOR_CAP; must be a positive integer, keeping the default", "value", v)
+		default:
+			pipeline.SetDefaultPlainDerivedAnchorCap(n)
+			logger.Info("plain-lens derived-anchor cap overridden", "cap", n)
+		}
+	}
 	// Logged unconditionally, not only when overridden. Which arm decides a
 	// reprojection is the single most load-bearing thing about this process's
 	// auth-plane behaviour, and an operator reading a tally line needs to know

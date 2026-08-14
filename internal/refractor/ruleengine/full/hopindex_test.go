@@ -20,6 +20,11 @@ func indexOf(t *testing.T, body string) HopIndex {
 	return parseFull(t, body).AnchorHopIndex()
 }
 
+func rootIndexOf(t *testing.T, body string) HopIndex {
+	t.Helper()
+	return parseFull(t, body).ScanRootHopIndex()
+}
+
 // The shipped cypher of the auth-plane lens the whole design is measured on
 // (packages/rbac-domain/lenses.go). Copied verbatim so a change to the real
 // lens that the derivation cannot index shows up as a test failure here rather
@@ -780,4 +785,215 @@ func TestDeclaresActorAnchor_NilSafe(t *testing.T) {
 	var nilCR *CompiledRule
 	require.False(t, nilCR.DeclaresActorAnchor())
 	require.False(t, (&CompiledRule{}).DeclaresActorAnchor())
+}
+
+// The shipped cypher of clinicProviders (packages/clinic-domain/lenses.go),
+// the plain lens plain-lens-neighbour-anchor-derivation-design.md §4.2 traces
+// its payoff through conjunct by conjunct. Copied verbatim so a change to the
+// real lens that ScanRootHopIndex cannot index shows up as a test failure
+// here rather than as a silent fallback in production.
+const shippedClinicProviders = `MATCH (pr:provider)
+WHERE pr.profile.data.fullName <> null
+OPTIONAL MATCH (pr)-[:identifiedBy]->(id:identity)
+RETURN
+  pr.key AS key,
+  pr.key AS providerKey,
+  pr.profile.data.fullName AS name,
+  id.key AS identityKey`
+
+// TestScanRootHopIndex_ClinicProviders walks the real lens end to end: the
+// terminus it finds, and — the point of the whole increment — that an
+// identifiedBy link event's anchor-side seed IS the root itself (distance 0),
+// so the identity endpoint's rescan collapses into a duplicate of the
+// provider endpoint's own seed rather than a second, unseeded walk.
+func TestScanRootHopIndex_ClinicProviders(t *testing.T) {
+	ix := rootIndexOf(t, shippedClinicProviders)
+
+	require.True(t, ix.Complete, "the shipped clinicProviders must be indexable: %s", ix.Incomplete)
+	require.Equal(t, "provider", ix.Labels[ix.Anchor])
+	require.Equal(t, []int{0, 1}, ix.Dist, "provider → identity")
+
+	seeds := ix.AnchorSideSeeds("provider", "identifiedBy", "identity")
+	require.Len(t, seeds, 1)
+	require.Equal(t, ix.Anchor, seeds[0].Pos, "the root-side endpoint IS the terminus — a zero-adjacency-read seed")
+	require.True(t, seeds[0].SrcIsAnchorSide, "the provider endpoint is the source of an identifiedBy link")
+
+	// The identity endpoint reaches the root by reading its own OUTBOUND
+	// identifiedBy edge backwards (the pattern writes (pr)-[:identifiedBy]->(id)),
+	// which is the one adjacency read a neighbour-side event would pay if it
+	// ever needed to walk instead of seeding directly.
+	var towardRoot []PatternStep
+	for _, s := range ix.StepsFrom(1 - ix.Anchor) {
+		if s.ToPos == ix.Anchor {
+			towardRoot = append(towardRoot, s)
+		}
+	}
+	require.Len(t, towardRoot, 1)
+	require.Equal(t, "identifiedBy", towardRoot[0].Rel)
+	require.Equal(t, "in", towardRoot[0].EdgeDir)
+	require.Equal(t, "provider", towardRoot[0].ToLabel)
+}
+
+// TestScanRootHopIndex_Refusals covers ScanRootHopIndex's own completeness
+// conjuncts (plain-lens-neighbour-anchor-derivation-design.md §4.1's table),
+// one at a time. Per the standing rule a negative test needs a positive
+// vector first, each case pairs the refusing shape with a positive twin that
+// DOES narrow — so "refused" is never indistinguishable from "the harness
+// never reached the code" (mirrors TestAnchorHopIndex_Refusals).
+func TestScanRootHopIndex_Refusals(t *testing.T) {
+	const positive = `MATCH (pr:provider)-[:identifiedBy]->(id:identity) RETURN pr.key AS key, id.key AS idk`
+
+	for _, tc := range []struct {
+		name     string
+		refused  string
+		positive string
+		want     string
+	}{
+		{
+			name:     "an unlabeled anchor pattern position carries no label",
+			refused:  `MATCH (pr)-[:identifiedBy]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
+			positive: positive,
+			want:     "the anchor pattern position carries no label",
+		},
+		{
+			// Already a point read (the executor's key-property fast path) —
+			// there is no scan here for a terminus to remove.
+			name:     "an anchor pattern pinned by its own key is already a point read",
+			refused:  `MATCH (pr:provider {key: $actorKey})-[:identifiedBy]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
+			positive: positive,
+			want:     "the anchor pattern is pinned by its own key",
+		},
+		{
+			name:     "a `*` sigil on the anchor pattern cannot mint one key prefix",
+			refused:  `MATCH (pr:provider*)-[:identifiedBy]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
+			positive: positive,
+			want:     "taxonomy-expansion sigil",
+		},
+		{
+			name:     "an untyped hop cannot be indexed by relation name",
+			refused:  `MATCH (pr:provider)-[]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
+			positive: positive,
+			want:     "untyped relationship",
+		},
+		{
+			name:     "a variable-length hop cannot be stepped hop-by-hop",
+			refused:  `MATCH (pr:provider)-[:identifiedBy*0..]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
+			positive: positive,
+			want:     "variable-length relationship",
+		},
+		{
+			// The conjunct AnchorHopIndex's own `b.anchor < 0` early-out
+			// swallows for every plain lens: there is no $actorKey position
+			// to judge groundedness relative to, so AnchorHopIndex's switch
+			// never reaches its ungrounded case for one (see
+			// TestScanRootHopIndex_UngroundedIsReachableWhereAnchorHopIndexSwallowsIt).
+			// ScanRootHopIndex has a terminus for every plain lens, so a
+			// cartesian second MATCH is now the real, load-bearing refusal.
+			name:     "a second MATCH headed by a variable the first never bound is refused",
+			refused:  `MATCH (pr:provider) MATCH (o:org)-[:employs]->(x:identity) RETURN pr.key AS key, o.key AS ok`,
+			positive: `MATCH (pr:provider)-[:employedBy]->(o:org) MATCH (o)-[:owns]->(x:asset) RETURN pr.key AS key, x.key AS xk`,
+			want:     "not reached from the anchor",
+		},
+		{
+			// `pr` is gone after the WITH, so a later MATCH headed by it seeds
+			// from the whole provider bucket — the same bucket-scan hazard
+			// TestAnchorHopIndex_WithScope pins, over the same withScopeReject
+			// mechanism, on the position that here is a row column
+			// (`pr.key`) rather than the `$actorKey` parameter.
+			name:     "a WITH dropping the anchor pattern's own variable and re-referencing it is refused",
+			refused:  `MATCH (pr:provider)-[:identifiedBy]->(id:identity) WITH id MATCH (pr)-[:employedBy]->(o:org) RETURN id.key AS key, o.key AS ok`,
+			positive: `MATCH (pr:provider)-[:identifiedBy]->(id:identity) WITH pr, id MATCH (id)-[:worksAt]->(o:org) RETURN pr.key AS key, o.key AS ok`,
+			want:     "a WITH dropped",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refused := rootIndexOf(t, tc.refused)
+			require.False(t, refused.Complete, "must decline, not answer")
+			require.Contains(t, refused.Incomplete, tc.want)
+
+			ok := rootIndexOf(t, tc.positive)
+			require.True(t, ok.Complete, "the positive vector must narrow: %s", ok.Incomplete)
+			require.GreaterOrEqual(t, ok.Anchor, 0, "an indexed query has a terminus")
+		})
+	}
+}
+
+// TestScanRootHopIndex_UngroundedIsReachableWhereAnchorHopIndexSwallowsIt is
+// the regression for §4.1's ordering note: the SAME query refuses for two
+// DIFFERENT reasons depending on which index asks, because AnchorHopIndex's
+// `b.anchor < 0` conjunct fires first for any plain lens (there is no
+// $actorKey position at all) and never reaches its own ungrounded check.
+func TestScanRootHopIndex_UngroundedIsReachableWhereAnchorHopIndexSwallowsIt(t *testing.T) {
+	const body = `MATCH (pr:provider) MATCH (o:org)-[:employs]->(x:identity) RETURN pr.key AS key, o.key AS ok`
+
+	anchor := indexOf(t, body)
+	require.False(t, anchor.Complete)
+	require.Equal(t, "no pattern position binds $actorKey", anchor.Incomplete,
+		"AnchorHopIndex refuses every plain lens on the anchor conjunct alone — it never reaches the ungrounded one")
+
+	root := rootIndexOf(t, body)
+	require.False(t, root.Complete)
+	require.Contains(t, root.Incomplete, "not reached from the anchor",
+		"ScanRootHopIndex has a terminus for this query, so the cartesian second MATCH is the real, load-bearing refusal")
+}
+
+// TestScanRootHopIndex_MultiAnchorHasNoCounterpart pins §4.1's dead-code note:
+// several `{key: $actorKey}` positions still refuse AnchorHopIndex (its own
+// conjunct), but say nothing about ScanRootHopIndex at all — the root is one
+// position by construction, however many times $actorKey is pinned elsewhere
+// in the same query.
+func TestScanRootHopIndex_MultiAnchorHasNoCounterpart(t *testing.T) {
+	// Two DIFFERENT positions pin $actorKey — refuses AnchorHopIndex on its
+	// own multiAnchor conjunct. Neither is the root (pr, which carries no
+	// key property at all), so ScanRootHopIndex's own key-pinned conjunct
+	// does not fire either — the two refusals are structurally unrelated.
+	const body = `MATCH (pr:provider)-[:employedBy]->(a:identity {key: $actorKey})
+MATCH (pr)-[:reviewedBy]->(b:identity {key: $actorKey})
+RETURN pr.key AS key, a.key AS ak, b.key AS bk`
+
+	anchor := indexOf(t, body)
+	require.False(t, anchor.Complete)
+	require.Contains(t, anchor.Incomplete, "several pattern positions bind $actorKey")
+
+	root := rootIndexOf(t, body)
+	require.True(t, root.Complete, "%s", root.Incomplete)
+	require.Equal(t, "provider", root.Labels[root.Anchor])
+}
+
+// TestScanRootHopIndex_PatternInsideAnchorPropertyMap is the §4.1 ordering
+// constraint's own trip-wire: addPattern's rootHere branch must record the
+// terminus from the anchor pattern's Nodes[0] BEFORE the loop that walks that
+// same node's property-map expressions, because a PatternExpr inside the
+// property map (an `exists((pr)-[...]->(...))` predicate on the anchor's own
+// properties) reaches ground() through addExpr while the terminus is still
+// unset if the ordering is ever inverted — and ground() would then refuse the
+// whole index as ungrounded, for a lens that is genuinely indexable. Getting
+// this wrong would not show up in TestScanRootHopIndex_Refusals (none of
+// those shapes carry a pattern inside the ROOT's own property map), so it
+// needs its own case.
+func TestScanRootHopIndex_PatternInsideAnchorPropertyMap(t *testing.T) {
+	const body = `MATCH (pr:provider {tag: exists((pr)-[:taggedBy]->(t:tag))})-[:identifiedBy]->(id:identity)
+RETURN pr.key AS key, id.key AS idk`
+
+	ix := rootIndexOf(t, body)
+	require.True(t, ix.Complete,
+		"a PatternExpr in the anchor's OWN property map must not make ground() see an unset terminus: %s", ix.Incomplete)
+	require.Equal(t, "provider", ix.Labels[ix.Anchor])
+}
+
+// TestScanRootHopIndex_UnnamedRootPins pins today's answer for an anchor
+// pattern with no variable at all — position() mints an unnamed node its own
+// fresh class (hopindex.go's position doc), and addPattern's rootHere branch
+// reuses b.root for Nodes[0] rather than calling position() a second time
+// (which would orphan the terminus onto a second, unnamed class). A future
+// edit that "simplified" that special case away would silently stop indexing
+// every plain lens whose anchor pattern carries no variable, with the rest of
+// this file staying green.
+func TestScanRootHopIndex_UnnamedRootPins(t *testing.T) {
+	const body = `MATCH (:provider)-[:identifiedBy]->(id:identity) RETURN id.key AS key`
+
+	ix := rootIndexOf(t, body)
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+	require.Equal(t, "provider", ix.Labels[ix.Anchor], "the unnamed anchor pattern is still the terminus")
+	require.Equal(t, []int{0, 1}, ix.Dist, "the neighbour identity sits one binding hop from the unnamed root")
 }

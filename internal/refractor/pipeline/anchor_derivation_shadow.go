@@ -83,6 +83,25 @@ type DerivationShadowStats struct {
 	Acted        int64
 	ActedAnchors int64
 	FellBack     int64
+
+	// The plain arm's own shadow counters (plain-lens-neighbour-anchor-
+	// derivation-design.md §11's measurement), populated by
+	// shadowPlainDerivation (anchor_derivation_plain.go) instead of
+	// shadowAnchorDerivation. A plain lens has no enumerated anchor-key list
+	// to diff against, so Agreed/Narrowed*/Divergent*/BFSAnchors above stay
+	// at their zero value for one — DerivedAnchors is shared (it is exactly
+	// the derived-set-size total both arms want), but "declined" is split
+	// into three causes rather than collapsed into one Declined, because an
+	// operator sizing DefaultPlainDerivedAnchorCap needs to tell "the index
+	// was never ready" apart from "the walk hit its own read cap" apart from
+	// "the derived set was ready but too big" — and folding the last of
+	// those into a plain Declined with no size recorded would make the
+	// derived-set-size distribution circular: truncated exactly at the cap
+	// it exists to justify.
+	PlainNotReady     int64 // plainDerivationIndex was not ready (a §4.2 conjunct refused)
+	PlainWalkDeclined int64 // the walk itself declined (ok == false) or errored — includes DefaultDerivationReadCap exhaustion
+	PlainOverCap      int64 // the derived set was ready but exceeded DefaultPlainDerivedAnchorCap
+	PlainOverCapSize  int64 // sum of derived-set sizes that triggered PlainOverCap — the tail §11's distribution needs
 }
 
 type derivationShadow struct {

@@ -157,6 +157,15 @@ test** (§11), so the numbers below are re-derivable rather than quoted.
 **Addressable ceiling: ≤ 36** (45 exposed − 9 variable-length). Their hop-distance profile from the anchor
 pattern: **21 at distance 1**, 12 at 2, 2 at 3, 1 at 4.
 
+> **Amended, Incs 1+2 build note (2026-08-13): the ceiling was not reached.** Increment 1's census test
+> (`internal/refractor/plain_scanroot_corpus_census_test.go`), the executable form of this section, measured
+> **33 addressable**, not 36 — 3 of the theoretical 36 refuse on the now-reachable ungrounded-pattern-head
+> conjunct (§4.1's table), exactly the outcome the next paragraph flagged as possible before this fire ran.
+> Distance profile: **20 at 1, 12 at 2, 1 at 3** (the single distance-4 lens is one of the three that now
+> refuses). The **"Adapter split of the 36"** paragraph below and its 22/14 and 5-`GrantTable` breakdowns are
+> therefore stale by population size; the census test, not this prose, is the number's live source going
+> forward — re-derive the adapter split from it before relying on it for §5's licence (Increment 3's job).
+
 The nine that stay on today's behaviour: `applicantRosterRead`, `cafeIdentitiesRead`, `cafeLeaseWorkplaces`,
 `landlordLeaseApplicationsRead`, `landlordUnitsRead`, `menuCatalog`, `wellnessIdentitiesRead`,
 `wellnessMembers`, `wellnessSessions`. **The in-flight typed-relation-signatures design does not rescue
@@ -849,3 +858,28 @@ board).
 its own trigger per the ratified fork) are **out of scope this fire** — sequenced behind
 `lens-projection-divergence-audit-design.md` Fire 2 per §12. This fire changes no write behaviour: shadow
 counters only.
+
+**Close.** `ScanRootHopIndex()` (`full/hopindex.go`), its conjunct + ordering-constraint tests, the corpus
+census test (33 addressable, §2 amended above), `plainDerivationIndex` + the three plain derivation entry
+points, and the derived-anchor seam wired through the existing `off`/`shadow`/`act` mode switch — with
+`plainDerivationIndexForAct` unconditionally declining this fire, so acting is impossible by construction,
+not by relying on the operator-facing `REFRACTOR_ANCHOR_DERIVATION` knob staying at its default. Full 3-layer
+adversarial review (correctness, edge-case, capability-plane — L-size per admit rules) found **zero Blocking**
+findings; the mechanism held under attack (ordering constraint, terminus-generic reuse across both indices,
+shadow-decides-nothing, dedupe/error-disposition hoist, `rootHops` lifetime, cap orthogonality, no write
+reachable from shadow). Material findings fixed before merge: the zero-behaviour-change test now covers `act`
+(the mode that actually ships) alongside `off`/`shadow`; the shadow counters split `Declined` into
+`NotReady`/`WalkDeclined`/`OverCap` and record the derived-set size even on cap overflow, so §11's measurement
+is answerable from the counters instead of truncated at the cap; the differential test now compares against
+the **unseeded** evaluation per §11's literal requirement, not just the seeded one; the census's
+`hasNeighbour` no longer mis-buckets a hypothetical untyped-hop lens as single-node; both cap fallbacks are
+tested, plus an explicit zero-adjacency-read proof for the 1-hop root-side seed case; the §4.1 ordering
+constraint and the unnamed-root special case each gained a trip-wire regression test. Left unfixed and
+flagged in code for Increment 3: a double-Secure-decrypt hazard on the derived re-entry path, unreachable this
+fire (only reachable from `act`, which always declines) and excluded going forward by §5.1's "not a Secure
+Lens" licence conjunct — Increment 3 must prove that exclusion actually prevents it before flipping to act.
+**Operational note for whoever collects Inc 4's measurement:** `REFRACTOR_ANCHOR_DERIVATION` is one
+process-wide knob shared with the actor-aware arm — setting it to `shadow` to observe the plain arm's counters
+also flips every actor-aware pipeline (auth-plane included) out of `act` back to `shadow` for the duration.
+Direction is safe (wider reprojection, never narrower — cannot over-grant) but is a real, if temporary,
+posture change to a component this fire does not otherwise touch; do it deliberately, not by surprise.

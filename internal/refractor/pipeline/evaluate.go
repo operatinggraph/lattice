@@ -259,8 +259,24 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	// reach here through evaluatePlainFromVertex with the owner/endpoint vertex
 	// as the entry, so each arm seeds precisely when its own vertex is an
 	// anchor.
-	results, err := p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties,
-		p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey))
+	seed := p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey)
+	var results []ruleengine.EvalResult
+	var err error
+	if seed == "" && p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil {
+		// A plain lens's neighbour event: seedAnchorFor found no seed because
+		// entry's own type is not the lens's anchor pattern, so today's
+		// shipped behaviour is the unseeded whole-corpus re-scan below.
+		// plain-lens-neighbour-anchor-derivation-design.md Increment 2 gives
+		// this branch its own producer into the derivation-mode switch
+		// (evaluatePlainNeighbourEvent, anchor_derivation_plain.go) — shadow
+		// -only this fire (Increment 3's licence is unbuilt), so the outcome
+		// here is always identical to calling executeFullForActor with an
+		// empty seed directly, the same call the else-branch below makes for
+		// every other (already-seeded, or non-plain) event.
+		results, err = p.evaluatePlainNeighbourEvent(ctx, rs, entry)
+	} else {
+		results, err = p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties, seed)
+	}
 	if err != nil {
 		return nil, nil, err
 	}

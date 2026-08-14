@@ -221,6 +221,17 @@ type Pipeline struct {
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
 
+	// rootHops is the plain arm's OWN pattern graph — Increment 1's
+	// ScanRootHopIndex, terminated at the anchor PATTERN rather than at
+	// `{key: $actorKey}` (plain-lens-neighbour-anchor-derivation-design.md
+	// §4.1/§10). Guarded by ruleMu and republished UNCONDITIONALLY on every
+	// rule swap alongside anchorHops — never carried forward, mirroring the
+	// branches/walkOwnedColumns pair's own "unconditional, not just the
+	// len>1 arm" rule (pipeline.go's useFullEngineBranches, near the top).
+	// Its zero value is Complete == false, the same fail-closed answer
+	// anchorHops's zero value is: fall back to today's unseeded evaluation.
+	rootHops full.HopIndex
+
 	// declaresActorAnchor is whether the PUBLISHED rule's cypher pins a pattern
 	// position with `{key: $actorKey}` — see the ruleState field of the same
 	// name for what reads it and why. Guarded by ruleMu and republished on every
@@ -281,6 +292,14 @@ type Pipeline struct {
 	// derivReadCap bounds the adjacency documents one derivation walk may read
 	// before it gives up and falls back. Zero means DefaultDerivationReadCap.
 	derivReadCap atomic.Int64
+
+	// plainDerivedAnchorCapOverride bounds the number of anchor vertices the
+	// plain arm's derivation (anchor_derivation_plain.go) may return before
+	// it falls back to today's unseeded evaluation. Zero means
+	// DefaultPlainDerivedAnchorCap (or the package override, if set). Its
+	// unit is derived ROOT VERTICES, never projected rows — see
+	// DefaultPlainDerivedAnchorCap's own doc.
+	plainDerivedAnchorCapOverride atomic.Int64
 
 	// peerAnchorMode is this pipeline's override of whether an event on a vertex
 	// of the actor type may reach anchors other than that vertex. Zero is
@@ -1006,6 +1025,16 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			// full.WithLabelExpansion exactly: a no-op when expandedLabels is
 			// nil (no `*` anywhere in this query).
 			next.anchorHops = fullCR.AnchorHopIndex().WithLabelExpansion(expandedLabels)
+			// The plain arm's own terminus (plain-lens-neighbour-anchor-
+			// derivation-design.md §4.1/§10) — built alongside anchorHops, on
+			// the SAME multi-walk exclusion and the SAME label-expansion
+			// threading, so a hot reload can never leave one of the pair
+			// stale against the other. Unconditional within this branch: a
+			// plain lens (AnchorLabel not ok) still gets a rootHops, since
+			// ScanRootHopIndex's terminus is the anchor PATTERN, never
+			// `{key: $actorKey}` — the two termini are independent questions
+			// answered by the same builder.
+			next.rootHops = fullCR.ScanRootHopIndex().WithLabelExpansion(expandedLabels)
 		}
 	}
 	p.publishRuleState(next)
@@ -1062,6 +1091,10 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// rootHops is the plain arm's own scan-root pattern graph — see the
+	// Pipeline field of the same name, which this publishes into, and §10 of
+	// plain-lens-neighbour-anchor-derivation-design.md for its lifetime.
+	rootHops full.HopIndex
 	// declaresActorAnchor is true when this rule's cypher pins a pattern
 	// position with `{key: $actorKey}` — the lens's DECLARED projection kind,
 	// as against p.actorEnumerator, which is what the host has INSTALLED so
@@ -1127,6 +1160,7 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
+		rootHops:            p.rootHops,
 		declaresActorAnchor: p.declaresActorAnchor,
 		labelExpansion:      p.labelExpansion,
 		narrowingBlocked:    p.plainNarrowingBlocked,
@@ -1166,6 +1200,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.rootHops = rs.rootHops
 	p.declaresActorAnchor = rs.declaresActorAnchor
 	p.labelExpansion = rs.labelExpansion
 	p.plainNarrowingBlocked = rs.narrowingBlocked
