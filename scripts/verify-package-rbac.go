@@ -9,8 +9,9 @@
 //  8 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script,
 //                 .inputSchema, .outputSchema, .fieldDescription, .examples
 //    Each aspect also validated for correct vertexKey + localName envelope fields.
-// 10 permission vertices (vtx.permission.<NanoID>) — one per op
-// 10 grantedBy link keys (each permission → operator role)
+//  9 permission vertices (vtx.permission.<NanoID>) — one per GRANTED op
+//    (the DDL dispatches ten; UpdatePermission is ungranted, see rbacGrantedOps)
+//  9 grantedBy link keys (each permission → operator role)
 //  2 Lens meta-vertices (vtx.meta.<NanoID>, class=meta.lens):
 //      - capabilityRoles (actorAggregate; cypher walks holdsRole/grantedBy →
 //        platformPermissions; projects cap.roles.<actor>)
@@ -49,9 +50,28 @@ const (
 	coreKVBucket     = "core-kv"
 )
 
-var rbacExpectedOps = []string{
+// The two lists below look like one concept and are not. What the `rbac` DDL
+// can DISPATCH and what the package GRANTS are separate sets, and they differ
+// by exactly one op.
+//
+// rbacDispatchedOps is the DDL's `.permittedCommands` aspect — every branch the
+// rbac script implements.
+var rbacDispatchedOps = []string{
 	"CreateRole", "UpdateRole", "TombstoneRole",
 	"CreatePermission", "UpdatePermission", "TombstonePermission",
+	"AssignRole", "RevokeRole",
+	"GrantPermission", "RevokePermission",
+}
+
+// rbacGrantedOps is what the package's PermissionSpecs actually confer — one
+// `vtx.permission.<NanoID>` and one `grantedBy` link each. `UpdatePermission`
+// is dispatched but never granted (packages/rbac-domain/permissions.go): it
+// rewrites a permission vertex's body, which Contract #6 §6.1 rule 1 requires
+// to be write-once. Its Starlark branch stays, so asserting it here would
+// assert a grant the package deliberately withholds.
+var rbacGrantedOps = []string{
+	"CreateRole", "UpdateRole", "TombstoneRole",
+	"CreatePermission", "TombstonePermission",
 	"AssignRole", "RevokeRole",
 	"GrantPermission", "RevokePermission",
 }
@@ -177,18 +197,18 @@ func main() {
 			cmds := pkgverify.ToStringSlice(data["commands"])
 			cmdSet := pkgverify.ToSet(cmds)
 			allPresent := true
-			for _, op := range rbacExpectedOps {
+			for _, op := range rbacDispatchedOps {
 				if !cmdSet[op] {
 					fail(pcKey, fmt.Sprintf("missing command %q", op))
 					allPresent = false
 				}
 			}
-			if len(cmds) != len(rbacExpectedOps) {
-				fail(pcKey, fmt.Sprintf("command count=%d want %d", len(cmds), len(rbacExpectedOps)))
+			if len(cmds) != len(rbacDispatchedOps) {
+				fail(pcKey, fmt.Sprintf("command count=%d want %d", len(cmds), len(rbacDispatchedOps)))
 				allPresent = false
 			}
-			if allPresent && len(cmds) == len(rbacExpectedOps) {
-				ok(fmt.Sprintf("%s contains all %d commands", pcKey, len(rbacExpectedOps)))
+			if allPresent && len(cmds) == len(rbacDispatchedOps) {
+				ok(fmt.Sprintf("%s contains all %d commands", pcKey, len(rbacDispatchedOps)))
 			}
 			if err := pkgverify.CheckAspectEnvelope(env, pcKey, rbacDDLKey, "permittedCommands"); err != nil {
 				fail(pcKey+" envelope", err.Error())
@@ -429,6 +449,21 @@ func main() {
 	}
 
 	// Map op → permID for permission vertices found in KV.
+	// ungrantedOps are the ops the rbac DDL dispatches but the package does NOT
+	// grant. Derived from the two lists rather than spelled out a third time, so
+	// moving an op between them cannot leave this assertion aimed at the wrong
+	// one. Every id found live under one of these is a defect (see below).
+	grantedSet := pkgverify.ToSet(rbacGrantedOps)
+	var ungrantedOps []string
+	for _, op := range rbacDispatchedOps {
+		if !grantedSet[op] {
+			ungrantedOps = append(ungrantedOps, op)
+		}
+	}
+	sort.Strings(ungrantedOps)
+	ungrantedSet := pkgverify.ToSet(ungrantedOps)
+	liveUngranted := map[string][]string{}
+
 	permIDByOp := map[string]string{}
 	for key := range allKeys {
 		if !strings.HasPrefix(key, "vtx.permission.") {
@@ -453,17 +488,17 @@ func main() {
 			continue
 		}
 		// Only record ops that belong to rbac-domain.
-		for _, expected := range rbacExpectedOps {
-			if opType == expected {
-				permIDByOp[opType] = parts[2]
-				break
-			}
+		if grantedSet[opType] {
+			permIDByOp[opType] = parts[2]
+		}
+		if ungrantedSet[opType] {
+			liveUngranted[opType] = append(liveUngranted[opType], parts[2])
 		}
 	}
 
 	// Assert one permission vertex per expected op.
-	sortedOps := make([]string, len(rbacExpectedOps))
-	copy(sortedOps, rbacExpectedOps)
+	sortedOps := make([]string, len(rbacGrantedOps))
+	copy(sortedOps, rbacGrantedOps)
 	sort.Strings(sortedOps)
 
 	for _, op := range sortedOps {
@@ -503,6 +538,48 @@ func main() {
 						ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<operator> exists", permID))
 					}
 				}
+			}
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// The withdrawal, asserted as ABSENCE.
+	//
+	// Every assertion above is a presence check, and presence checks are blind
+	// in exactly the direction this package's security posture depends on: the
+	// nine granted ops can all be present while a tenth, ungranted one is ALSO
+	// live, and the run still reports ALL ASSERTIONS PASSED. `UpdatePermission`
+	// is denied at step 3 by having no matching platformPermission, so a live
+	// permission vertex for it — package-installed or runtime-minted — is the
+	// whole property failing, and nothing else here can see it.
+	//
+	// A live vertex is reported even without a grant link: the vertex is what a
+	// single `GrantPermission` turns back into a capability, so it is the thing
+	// that has to be gone. The remedy is to tombstone it (TombstonePermission),
+	// which is what the package's own upgrade does to its declared key.
+	// -------------------------------------------------------------------------
+	for _, op := range ungrantedOps {
+		ids := liveUngranted[op]
+		if len(ids) == 0 {
+			ok(fmt.Sprintf("no live vtx.permission.* carries operationType=%s (the ungranted op is absent, which is what denies it)", op))
+			continue
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			permKey := "vtx.permission." + id
+			fail(permKey, fmt.Sprintf("live permission vertex for %s, which rbac-domain dispatches but deliberately does NOT grant — the op is denied only by this vertex's absence. Tombstone it (TombstonePermission); if it is package-declared, the upgrade should have tombstoned it and did not.", op))
+			for key := range allKeys {
+				if !strings.HasPrefix(key, "lnk.permission."+id+".grantedBy.") {
+					continue
+				}
+				env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+				if err != nil {
+					continue
+				}
+				if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+					continue
+				}
+				fail(key, fmt.Sprintf("live grantedBy link CONFERRING %s — a role holding this reaches an op the package withholds on purpose", op))
 			}
 		}
 	}

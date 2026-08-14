@@ -14,6 +14,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
 // Test actor NanoIDs. 20 chars, substrate.Alphabet only.
@@ -32,19 +33,23 @@ const (
 	rmTargetRoleKey = "vtx.role." + rmTargetRoleID
 )
 
-// operatorCapDoc builds a cap doc granting all 10 rbac operations.
+// operatorCapDoc builds the operator's cap doc from the package's OWN
+// PermissionSpecs — the same set `capabilityRoles` projects from the installed
+// permission vertices and their `grantedBy` links.
+//
+// It is derived rather than listed because a hand-written list is a second
+// source of truth for the grant set, and the direction it fails in is the
+// dangerous one: an op the package does NOT grant would still appear here, so
+// every denial test in this suite would exercise an actor the real projection
+// never produces and pass while the platform was wide open. Withdrawing a
+// PermissionSpec must show up at step 3 in this suite with no fixture edit.
 func operatorCapDoc() *processor.CapabilityDoc {
-	perms := []processor.PlatformPermission{
-		{OperationType: "CreateRole", Scope: "any"},
-		{OperationType: "UpdateRole", Scope: "any"},
-		{OperationType: "TombstoneRole", Scope: "any"},
-		{OperationType: "CreatePermission", Scope: "any"},
-		{OperationType: "UpdatePermission", Scope: "any"},
-		{OperationType: "TombstonePermission", Scope: "any"},
-		{OperationType: "AssignRole", Scope: "any"},
-		{OperationType: "RevokeRole", Scope: "any"},
-		{OperationType: "GrantPermission", Scope: "any"},
-		{OperationType: "RevokePermission", Scope: "any"},
+	perms := make([]processor.PlatformPermission, 0, len(rbacdomain.Package.Permissions))
+	for _, p := range rbacdomain.Package.Permissions {
+		perms = append(perms, processor.PlatformPermission{
+			OperationType: p.OperationType,
+			Scope:         p.Scope,
+		})
 	}
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{

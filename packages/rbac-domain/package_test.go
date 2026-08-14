@@ -59,11 +59,20 @@ func TestPackage_ScriptHasNoScans(t *testing.T) {
 	}
 }
 
-func TestPackage_TenPermissions(t *testing.T) {
-	if got := len(Package.Permissions); got != 10 {
-		t.Fatalf("expected 10 permissions, got %d", got)
+// TestPackage_NinePermissions pins the granted set against the DDL's ten
+// dispatched commands. The gap is UpdatePermission, which rewrites an existing
+// permission vertex's body: Contract #6 §6.1 rule 1 requires that body to be
+// write-once, so the op stays dispatchable and stays ungranted. Asserting its
+// absence by name — not just the count — is what stops a later author from
+// swapping it back in for another op and keeping the total at nine.
+func TestPackage_NinePermissions(t *testing.T) {
+	if got := len(Package.Permissions); got != 9 {
+		t.Fatalf("expected 9 permissions, got %d", got)
 	}
 	for _, p := range Package.Permissions {
+		if p.OperationType == "UpdatePermission" {
+			t.Errorf("UpdatePermission must not be granted: it rewrites a permission vertex's body, which Contract #6 §6.1 rule 1 requires to be write-once")
+		}
 		if len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
 			t.Errorf("permission %s grantsTo=%v, expected [operator]", p.OperationType, p.GrantsTo)
 		}

@@ -34,6 +34,16 @@
 //     widen the absence-tolerance of an op some other package owns.
 //     `validateOpMetas` already rejects the duplicate WITHIN a package; this is
 //     the cross-package case that check structurally cannot see.
+//   - GRANT-AUTHORING — no package confers an operationType that rewrites an
+//     existing permission vertex's body (`UpdatePermission`). Contract #6 §6.1
+//     rule 1 requires that body to be write-once: a vertex whose operationType,
+//     scope, or `data.origin` can be re-targeted after authoring carries no
+//     provenance the step-3 reserved-operation refusal can trust. The rule
+//     reads the compiled `Definition.Permissions`, never the source, because
+//     the corpus declares grants through helper closures (`mk("…")`), loops and
+//     named constants — a text scan would miss the exact idiom it exists to
+//     catch. Its body is in `scripts/pkgstd` so a fixture can prove it fires;
+//     a default-deny that silently never runs looks identical to a clean corpus.
 //
 // Two escape hatches, both explicit, neither silent:
 //
@@ -70,6 +80,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
+	"github.com/operatinggraph/lattice/scripts/pkgstd"
 )
 
 // trustedToolRoles are the roles whose holder is an ADMIN TOOL rather than a
@@ -216,6 +227,9 @@ func main() {
 		checkReadTemplates(rep, name, def, seenReadTemplateDebt)
 		checkS6(rep, name, dir, def, seenS6Debt)
 		checkS7(rep, name, dir, def)
+		for _, issue := range pkgstd.GrantAuthoringIssues(name, def) {
+			rep.issuef("%s", issue)
+		}
 	}
 	// S9 is corpus-wide: the collision only exists BETWEEN packages, so it
 	// cannot be decided while walking one.
