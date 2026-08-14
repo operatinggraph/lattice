@@ -415,6 +415,13 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				}
 				out.Deleted = true
 				out.Wrote = true
+				// The convergence sweep's deep verify and the operator
+				// reproject RPC both land here, and a retraction either of
+				// them heals is as real a grant withdrawal as one the CDC
+				// path writes. A consumer of the read-grant projection that
+				// heard only about CDC-path flips would keep honouring a
+				// grant the healer just took away.
+				p.notifyGrantChange(outcome.Key, outcome.Transition)
 				fold.add(retractionVerdict(retractionEvidenced))
 				continue
 			}
@@ -483,6 +490,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				continue
 			}
 			out.Wrote = outcome.Wrote
+			p.notifyGrantChange(outcome.Key, outcome.Transition)
 			fold.add(writeVerdict(canRead))
 			continue
 		}
