@@ -774,3 +774,78 @@ A separate mechanical pass verified all 30+ `file:line` citations against HEAD; 
 > `reproject.go`, `plan.go` and `anchor_delete.go` pins are unmoved. The build's Phase 0 re-pins
 > `executor.go` citations against merged `main`, exactly as §12's contention note already instructs.
 (`plan.go:82` → `:94-96`, and a comment/code off-by-one).
+
+---
+
+### Incs 1+2 fire brief (build note, 2026-08-13)
+
+**1. Scope sentence (verbatim, §12).** *"`ScanRootHopIndex` + its conjunct tests + the corpus census test
+(completeness **and** closure); the derived-anchor re-entry path, dedupe hoist, error disposition and both
+caps, wired in **shadow**. Ships the corrected census numbers and the measurement."* Green bar: ✅ green +
+green suite; no behaviour change (shadow decides nothing).
+
+**2. Verified touch-list (re-pinned against merged `main`, `f3df3fcc`, by a Phase-0 scout).** `hopindex.go`,
+`pipeline.go`, `evaluate.go`, `anchor_derivation.go`, `anchor_derivation_mode.go`, `natskv.go`, `plan.go`,
+`driver.go`, `reproject.go`, `sweep.go`, `anchor_delete.go` citations are all current within a few lines of
+the design's own numbers, **except `full/executor.go`, which drifted further than the ratification DD's own
++126 note captured** — the DD's two named seams (`:850`, `:903`) are exactly right, but four more citations
+this fire only *reads* (never edits) have moved further: `nodeMatches` `:600-620→:725-745` (+125),
+`seedAnchorBinds` `:842-844→:966-986` (+122-142), traversal admission `:1005-1014→~:1149` (+135-144),
+`projectItems` grouping `:1219-1300→:1373+` (+73-154). **None of these four are edit sites for Incs 1+2** —
+`executor.go` is not touched by this fire at all; they are read-only citations in §3's grounding ledger and
+§5.1's corpus-shape argument, both already-settled reasoning this fire does not re-derive. Noted so the
+close-pass re-pin (§12's own instruction) isn't surprised twice. `evaluate.go`'s `evaluateForEntry` empty-seed
+citation resolves to the function at line 76 (body content the design's `:262-263` describes is inside it,
+not a second location — confirmed, not drift). Every citation `full/hopindex.go`, `anchor_derivation*.go`,
+`natskv.go`, `plan.go`, `driver.go`, `reproject.go`, `sweep.go`, `anchor_delete.go`, `cmd/refractor/reload.go`
+cite lines current as written. **No file contention:** working tree clean at scout time, `59441252` (the DD's
+own branch-decomposition commit) is the only recent touch to any of these five files, and no other worktree
+references them.
+
+**3. Precedents to mirror.** `ScanRootHopIndex` mirrors `AnchorHopIndex()` (`hopindex.go:188`) — same builder,
+different terminus, per §4.1. Conjunct tests mirror `hopindex_test.go` + `TestAnchorHopIndex_WithScope`
+(exists, that file). The corpus census test mirrors `anchor_hopindex_corpus_census_test.go`'s
+`corpusAnchorIndexVerdicts` (line 80, **not** `label_derivation_corpus_census_test.go` as an early design
+reference implied — confirmed the census machinery itself, `forEachCorpusCypher`, lives at
+`label_derivation_corpus_census_test.go:536` and is reused, not reimplemented per the component dossier's
+standing rule below). The derived-anchor entry point mirrors the three shipped `deriveAnchorsFor{Vertex,
+Aspect,Link}` call sites already in `pipeline.go` and re-enters `evaluatePlainFromVertex` unchanged (§4.2).
+The differential test mirrors `anchor_derivation_differential_test.go` (exists).
+
+**4. Increment order + green checks.**
+- Inc 1: `go test ./internal/refractor/ruleengine/full/... -run HopIndex -count=1` (new conjunct tests) +
+  `go test ./internal/refractor/... -run CorpusCensus -count=1` (new census test, checked > N guard).
+- Inc 2: `go test ./internal/refractor/pipeline/... -run Plain -count=1` (derived-set correctness, refusals,
+  cap fallbacks, differential test) — shadow only, so also assert no target-bucket write changes via the
+  existing e2e harness at `-shadow` mode.
+- Whole-fire: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+  `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/refractor/...`.
+
+**5. In-scope gotchas — standing checklist + dossier entries copied in.**
+- **New state needs a LIFETIME** (checklist #1): `ruleState.rootHops` — §10 already tables it
+  (created/reset/carried/ordered/crash/tombstone); the builder must not diverge from that table, only
+  implement it.
+- **Every census is a premise** (checklist #2): §2's numbers (114/60/54, 45 exposed, 9 var-length, ≤36
+  addressable, 21/12/2/1 distance) are re-derived live by Inc 1's own census test, never hand-trusted.
+- **A negative test needs its positive vector proven first** (checklist #3): every `ScanRootHopIndex` refusal
+  test is paired with a shape that narrows (§11 already specifies this); the differential test is
+  mutation-checked (walk stubbed empty ⇒ must fail).
+- **Precedent may carry debt** (checklist #6): `AnchorHopIndex()` is the mirror source — verify its
+  `ground()`/`addPattern` ordering constraint (§4.1's ordering note) transfers rather than assuming it does.
+- Dossier (`docs/components/refractor.md`): **"New pipeline state without a declared lifetime… reset, carry,
+  order it at replay, reconnect, tombstone, retry, or the review will"** — directly this fire's `rootHops`;
+  §10's table is the answer, confirm the code matches it exactly. **"An upsert-only reprojection retracts
+  nothing whose key drops out"** — Inc 2 ships no writes (shadow), but the retraction-class reasoning (§6) is
+  read-adjacent to this fire's `AnchorProjectionKey`-`ok` conjunct; keep the closure predicate exactly as §5.1
+  derives it, not a looser stand-in. **Standing rule**: the census test reuses `forEachCorpusCypher`
+  verbatim — confirmed above, not reimplemented.
+
+**6. Adjacent finds.** None beyond the executor.go pin-drift already absorbed into part 2 above (reading-only,
+no behaviour consequence — not a defect, just a citation correction folded into this note rather than the
+board).
+
+**7. Non-goals.** Inc 3 (the licence — closure/RowReader/ReferencesParam/secure/auth-plane threading), Inc 4a
+(flip to `act`), Inc 4b (seeded-branch multi-position fix), Inc 5 (`retained`-class repair, deferred behind
+its own trigger per the ratified fork) are **out of scope this fire** — sequenced behind
+`lens-projection-divergence-audit-design.md` Fire 2 per §12. This fire changes no write behaviour: shadow
+counters only.
