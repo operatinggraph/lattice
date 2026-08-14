@@ -930,8 +930,30 @@ declaration at its read call site, enforced by a blocking lint gate?"*
 
 ## 16. Increment 2 — SHIPPED (checkpoint, 2026-08-14)
 
+**Merged to `main` at `63f53d67`** (7 commits, `4455c142..63f53d67`, +1176/−5 across 13 files;
+fast-forward, landing shape unchanged from Increment 1's — no persistent worktree carries forward).
 Built on branch `steward-refractor-personal-sweep-inc2`, on top of Increment 1's `b69487ef`.
-*Review: pending Winston's admit-time pass.*
+
+**Review actually run:** ordinary Steward sizing per §11's own call ("Posture-changing: no"), plus
+one cold adversarial pass (never the implementer) given the change is capability-plane-adjacent —
+the personal D1 convergence sweep, even though it does not touch `IsReadable` or the D1 gate
+itself. The pass confirmed the D1 boundary is genuinely untouched (empty diff over
+`capabilityread/`, `projection/`, `pipeline/reproject_personal.go`, `pipeline/evaluate.go`,
+`adapter/`, `edge/`) and the keyed (lens,actor) mutex from §4.1.1 still serializes all three
+publishers unchanged. It found **one MAJOR**: `publishProgress`'s Health fan-out wrote to every
+registered lens from a stale registry snapshot with no liveness re-check, able to resurrect a
+just-deleted lens's Health entry as a permanent phantom "active" row (the exact class Increment 1's
+own `reprojectActor` already guards on its error branch) — fixed in `63f53d67` by re-checking
+`registered(ruleID)` immediately before each write, mirroring that precedent; mutation-tested
+(reverted the fix, confirmed the new test fails deterministically, restored it). Five MINOR findings
+recorded and accepted as-is or as named residuals (below), none blocking: a per-sweeper
+`cycleCompletedAt` published as if per-lens even when a lens's own reprojections all failed; the
+`Interval`/`Batch` knobs have no deployment override path today (test-only, matches how
+`Reprojector.SetBounds` is itself wired); a comment slightly overstates the substrate's partial-page
+guarantee (self-heals next cycle regardless); a cached population can go stale for up to one cycle
+if the personal registry empties and later repopulates; Health-write volume on a persistent per-lens
+fault has no rate limit the way the overflow reporter's `dropReportEvery` does (low-stakes, bounded
+to boot-transient in practice).
 
 **What shipped, against §11 Inc 2's five steps:**
 
