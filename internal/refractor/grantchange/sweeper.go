@@ -285,12 +285,22 @@ func (s *PersonalSweeper) claim() (ids []string, cycleCompletedAt time.Time, ok 
 // exposes and nothing read: a mass grant change shows up as a depth that stops
 // falling, and this is the only place that number reaches an operator.
 func (s *PersonalSweeper) publishProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time) {
-	depth := s.r.QueueDepth()
-	if depth < 0 {
-		depth = 0
-	}
-	for ruleID, p := range s.r.snapshotPersonal() {
-		if err := p.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, uint64(depth)); err != nil {
+	depth := uint64(s.r.QueueDepth())
+	for _, ruleID := range s.r.registeredRuleIDs() {
+		// Re-read the registry immediately before each write, the same posture
+		// reprojectActor takes and for the same reason: the batch this reports on
+		// spans a real window, and a lens deleted inside it has had its Health
+		// entry removed already. The progress write is a read-modify-PUT, so
+		// writing to a deleted lens would RE-CREATE that entry — an orphan row
+		// claiming an active lens that no longer exists, with no TTL behind it to
+		// reap it. Unlike the reprojection, a single progress write is short
+		// enough that this one check closes the window; there is no second check
+		// after it.
+		p, live := s.r.registered(ruleID)
+		if !live {
+			continue
+		}
+		if err := p.SetPersonalSweepProgress(ctx, cursor, cycleCompletedAt, depth); err != nil {
 			slog.Warn("grantchange: personal sweep could not record its progress on a lens's health entry — the sweep itself is unaffected, its observability is not",
 				"ruleId", ruleID, "cursor", cursor, "err", err)
 		}

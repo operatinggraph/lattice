@@ -31,6 +31,11 @@ type fakePersonal struct {
 	// makes that write fail.
 	progress    []sweepProgress
 	progressErr error
+	// onProgress runs inside SetPersonalSweepProgress, which is how a lens
+	// deleted DURING the sweep's health fan-out is simulated deterministically —
+	// no sleeps, no racing goroutine. Set at construction and never mutated, so
+	// it needs no lock.
+	onProgress func()
 }
 
 // sweepProgress is one recorded SetPersonalSweepProgress call.
@@ -41,6 +46,9 @@ type sweepProgress struct {
 }
 
 func (f *fakePersonal) SetPersonalSweepProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time, queueDepth uint64) error {
+	if f.onProgress != nil {
+		f.onProgress()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.progressErr != nil {

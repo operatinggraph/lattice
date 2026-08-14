@@ -269,6 +269,35 @@ func TestPersonalSweep_AFailedHealthWriteDoesNotStopTheWalk(t *testing.T) {
 	assert.Len(t, heard.reportedProgress(), 1, "one lens's unwritable entry does not silence the others")
 }
 
+// A lens deleted while the sweep is fanning its progress out must not be
+// written to. SetPersonalSweepProgress is a read-modify-PUT: on a missing entry
+// the read synthesizes a zero one and the write puts it back, so writing to a
+// deleted lens RE-CREATES the Health entry the deleter just removed — an orphan
+// row reading "active" for a lens that no longer exists, with no TTL behind it
+// to reap it. Worse than the drain's guarded case, because this write runs on
+// every tick unconditionally rather than on an error branch.
+func TestPersonalSweep_ALensDeletedMidFanOutGetsNoProgressWrite(t *testing.T) {
+	ids, keys := sweepActors(2)
+	lister := &fakeLister{keys: keys}
+	r := grantchange.New()
+	doomed := &fakePersonal{}
+	// The fan-out is sorted by rule ID, so "a-survivor" is written before
+	// "b-doomed" deterministically — and it deletes the doomed lens from inside
+	// its own progress write, which IS the window.
+	survivor := &fakePersonal{onProgress: func() { r.DeregisterPersonal("b-doomed") }}
+	r.RegisterPersonal("a-survivor", survivor)
+	r.RegisterPersonal("b-doomed", doomed)
+	s := grantchange.NewPersonalSweeper(r, lister)
+	s.SetBounds(10, 0)
+
+	s.Sweep(context.Background())
+
+	assert.Equal(t, ids, doomed.seen(), "the deletion lands after the batch, so the reprojections themselves stand")
+	assert.Empty(t, doomed.reportedProgress(),
+		"a lens deregistered mid-fan-out must not have its Health entry re-created by the progress write")
+	assert.Len(t, survivor.reportedProgress(), 1, "and the lenses that are still live are still reported on")
+}
+
 func TestPersonalSweep_SetBoundsLeavesTheDefaultsForZeroOrNegative(t *testing.T) {
 	s, _, lens, ids := newSweptFixture(t, grantchange.DefaultPersonalSweepBatch+2, 0)
 	s.SetBounds(-1, -time.Second)
