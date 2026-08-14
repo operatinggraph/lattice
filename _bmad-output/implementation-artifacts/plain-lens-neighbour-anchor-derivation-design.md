@@ -883,3 +883,144 @@ process-wide knob shared with the actor-aware arm — setting it to `shadow` to 
 also flips every actor-aware pipeline (auth-plane included) out of `act` back to `shadow` for the duration.
 Direction is safe (wider reprojection, never narrower — cannot over-grant) but is a real, if temporary,
 posture change to a component this fire does not otherwise touch; do it deliberately, not by surprise.
+
+---
+
+### Increment 3 fire brief (build note, 2026-08-14)
+
+**1. Scope sentence (verbatim, §12).** *"The licence (§5): closure, `RowReader`, `ReferencesParam`, secure,
+and threading `projection.IsAuthPlane` onto the plain pipeline so its conjunct can fire. Tests install through
+activation. Still not acting."* Green bar: ✅ green + green suite; no behaviour change.
+
+**2. The load-bearing invariant this brief adds (resolving an ambiguity the design doc's prose leaves open).**
+`builtinDerivationMode = DerivationModeAct` (`anchor_derivation_mode.go:105`) is the process **default**. If
+`plainDerivationIndexForAct` is rewritten to *return* the licence's real verdict, a licensed lens starts
+**acting** the moment this ships — directly contradicting §12's own classification of Inc 3 as
+`Posture-changing: No` / "Still not acting", and turning an XS/S-review increment into an unreviewed
+production behaviour flip. **Therefore: `plainDerivationIndexForAct` (`anchor_derivation_plain.go:143-145`)
+keeps its unconditional `return full.HopIndex{}, false` this increment, unchanged.** Inc 3 builds the licence
+as an independently-testable predicate (name/shape left to the builder, e.g. a method on `*Pipeline` taking
+`rs ruleState` and returning `(licensed bool, refusal string)`) that **nothing yet calls from the act path** —
+Inc 4a's own scope line ("Flip to act") is precisely the one-line change that makes
+`plainDerivationIndexForAct` consult it. The existing test `TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire`
+(`anchor_derivation_plain_internal_test.go:344`) must keep passing unmodified in spirit (rename only if its
+"ThisFire" wording is now inaccurate) — its assertion (`plainDerivationIndexForAct` always declines) is the
+regression trip-wire for this exact invariant; a reviewer should treat any edit to it as a signal to re-check
+the reasoning above, not wave it through.
+
+**3. Verified touch-list (re-grounded against merged `main`, `c5321ba2`, by a Phase-0 scout + direct reading).**
+- `internal/refractor/pipeline/anchor_derivation_plain.go:126-145` — `plainDerivationIndexForAct`'s doc comment
+  (already correctly describes Inc 3's scope) and the new licence predicate, added alongside it. **Not** the
+  function's return value (§2 above).
+- `internal/refractor/pipeline/audit.go:838-927` — `auditEnrolment`, the precedent for three of the five
+  conjuncts. Confirmed conjuncts + line numbers: no-authPlane refusal `:850-852` (parameter, not `p.authPlane`
+  — the Auditor takes `authPlane bool` as an explicit arg, sidestepping the very gap this fire closes for the
+  *write* licence); `RowReader` type-assert `:894-896`; secure-decryptor `:902-904`; `ReferencesParam` loop
+  over `"now"`/`"projectedAt"`, both exhaustive+referenced checked `:916-923`. **Reuse this shape directly**
+  (same package, same `rs`/`adpt` types) rather than re-deriving it independently — a hand-rolled second
+  version of the same three checks is exactly the kind of drift the design's "already exists, already tested"
+  framing means to avoid.
+- `internal/refractor/pipeline/audit.go:205-301` — `Auditor` struct + `AuditStatus` (`:128` — read it, don't
+  re-derive: `Enrolled bool` is a **field** on `AuditStatus`, reached via `p.Auditor().Status().Enrolled`,
+  **not** an `Enrolled()` method — the design doc's `auditor.Enrolled()` shorthand does not exist verbatim in
+  code and must not be typed as a method call). `p.Auditor()` returns `nil` when `InstallAudit` never ran —
+  guard the nil case (`p.Auditor() != nil && p.Auditor().Status().Enrolled`).
+- `internal/refractor/ruleengine/full/anchor_delete.go:61-181` — `AnchorProjectionKey`, the closure conjunct's
+  source. **Open engineering decision, resolved here:** `AnchorProjectionKey` requires a concrete
+  `eventKey`/`eventType`/`eventProps` (it evaluates key-column expressions against a live binding), so it
+  cannot be called as-is from a `rs`-only, no-event context like the licence predicate. Its **first**
+  structural half — no `WITH` clause (`:75-79`), anchor found + label match (`:95-109`), and every key
+  column's expression passing `exprReferencesOnlyVariable(expr, anchorVar)` (`:145-152`, itself defined
+  `:189-256`) — is decidable from the **compiled rule alone**, with no event data: `exprReferencesOnlyVariable`
+  never inspects a value, only an expression's variable references. The **second** half (`:154-171`:
+  `ex.evalExpr`, nil/isNode checks) is inherently per-event and is exactly what `AnchorDeleteResult`'s existing
+  per-anchor call already guards defensively (falls through to a re-execute) — that half is Inc 4a/§6's
+  concern (the zero-row probe sits beside it), not Inc 3's. **Build a structural-only helper** — e.g.
+  `(cr *CompiledRule) hasAnchorOnlyKeyColumns() bool` in `full/anchor_delete.go`, factored so
+  `AnchorProjectionKey` calls it internally for the no-WITH + anchor-only-key-column checks rather than
+  duplicating them — and have the licence predicate call the structural helper, never `AnchorProjectionKey`
+  itself. This is a genuine, if small, engine-side code change (not zero-touch reuse); flag it prominently in
+  the PR description since "the conjunct already exists" (§5.1) undersells it slightly — the *checks* already
+  exist, the *entry point that doesn't need an event* does not yet.
+- `internal/refractor/ruleengine/full/params.go:32` — `(cr *CompiledRule) ReferencesParam(name string)
+  (referenced, exhaustive bool)`. Confirmed signature; reuse verbatim, same non-exhaustive-is-a-refusal
+  disposition as `auditEnrolment` (`:916-923`).
+- `internal/refractor/projection/plan.go:110-115` — `IsAuthPlane(r *lens.Rule) bool`, both arms (`nats_kv` +
+  `AuthPlaneBucket`; `postgres` + `GrantTable`). No change needed here; cited for the licence conjunct and the
+  test in §5 below.
+- `internal/refractor/pipeline/pipeline.go:367,2076-2078` — `authPlane bool` field + `SetAuthPlane(v bool)`.
+  No change; the write site is added at the call site below.
+- `cmd/refractor/main.go` — the `startPipeline` closure (begins `:1307`), the **single** activation path used
+  both at boot and at hot-reload (confirmed: `reload.go` has no separate pipeline-construction code path of
+  its own — `newPipelineEntry` at `reload.go:238` is a post-hoc metadata wrapper built from the already-active
+  `p`, not a second constructor). **Add exactly one line**, `p.SetAuthPlane(projection.IsAuthPlane(r))`,
+  placed after the `switch` block that installs actor-aggregate/personal-lens components (ends `:1659`) and
+  before the `InstallAudit` call (`:1700`) — i.e. right beside the comment block at `:1694-1699` that already
+  names this exact gap ("`Pipeline.authPlane` is set only by `InstallActorAggregate`..."). **Verified safe for
+  the actor-aggregate case:** `InstallActorAggregate` already calls `p.SetAuthPlane(plan.AuthPlane)`
+  (`driver.go:357`) where `plan.AuthPlane = IsAuthPlane(r)` (`plan.go` `Compile`, confirmed) — an unconditional
+  second call with the identical value is a no-op re-assertion, not a behaviour change. **Verified inert for
+  every existing reader:** `p.authPlane` has exactly one runtime reader today, `evaluate.go:512`
+  (`(p.envelopeFn != nil || p.multiEnvelopeFn != nil) && p.authPlane && p.requiresFootprintValidation`) — its
+  first conjunct is `false` for every plain lens (`envelopeFn`/`multiEnvelopeFn` are nil), so setting
+  `p.authPlane` on a plain pipeline cannot change this function's answer. `ConsumerFilter`'s ordering
+  constraint (`:1721-1734`, "must stay after every stage that installs a conjunct of the actor-aware
+  eligibility predicate") does **not** name `authPlane` among its conjuncts — confirm this holds at build time
+  by grepping `ConsumerFilter`'s own source for `authPlane` before finalizing placement, but nothing found in
+  this scout's pass.
+- **No file contention.** Working tree clean at `c5321ba2`; no other worktree touches
+  `anchor_derivation_plain.go`, `audit.go`, `anchor_delete.go`, `pipeline.go`, or `main.go`'s `startPipeline`.
+
+**4. Precedents to mirror.** `auditEnrolment` (§3 above) for the three carried-over conjuncts' exact shape and
+disposition (fail-closed, reason string, non-exhaustive-is-a-refusal). `InstallActorAggregate`'s
+`p.SetAuthPlane(plan.AuthPlane)` call (`driver.go:357`) for the new call site's shape. The existing
+`TestAudit_*` suite (`audit_test.go`) for activation-installed test structure — Inc 3's auth-plane tests must
+install through the **real** `startPipeline`/`InstallAudit`-equivalent activation path per §11, not a hand-set
+`p.authPlane = true`, exactly as §5.3 and the design's adversarial-pass finding B1 require.
+
+**5. Increment order + green checks.**
+- Licence predicate + its five conjunct unit tests (closure structural helper, enrolled-Auditor, two
+  `ReferencesParam` params, no-secure, not-auth-plane) — mirror `TestPlainDerivationIndex_Conjuncts`'s table
+  shape (`anchor_derivation_plain_internal_test.go:266`). `go test ./internal/refractor/pipeline/... -run
+  License -count=1` (or whatever name the builder gives the test group — state it in the commit).
+- `hasAnchorOnlyKeyColumns` (or chosen name) unit tests in `full/anchor_delete_test.go`, mirroring the existing
+  `AnchorProjectionKey` test table's shapes for the no-WITH and anchor-only-key-column cases, asserting the new
+  helper and the now-refactored `AnchorProjectionKey` agree on every existing case (regression pin — mutation-
+  test by construction since `AnchorProjectionKey`'s existing suite must stay green unmodified).
+- Auth-plane threading: one activation-path test per `IsAuthPlane` arm (nats_kv capability bucket; postgres +
+  GrantTable), asserting `p.authPlane` reads `true` after real activation — the tautology-vs-real-guard
+  distinction §5.3/B1 calls out.
+- Whole-fire: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+  `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/refractor/...`.
+- **Zero-behaviour-change regression:** `TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire` (or its rename)
+  and `TestEvaluatePlainNeighbourEvent_NoModeChangesTheResultThisFire`
+  (`anchor_derivation_plain_internal_test.go:595`) both still pass unmodified in substance — §2's invariant,
+  proven in code, not just argued.
+
+**6. In-scope gotchas — standing checklist + dossier entries copied in.**
+- **New state needs a LIFETIME** (checklist #1): this increment adds no new `ruleState`/`Pipeline` field beyond
+  the licence predicate itself (a pure function of already-lifetimed state) — confirm the builder didn't
+  introduce one; if it did, table it per §10's pattern before merging.
+- **A soundness claim must cite the code that enforces it** (feedback memory): the closure conjunct's
+  structural-vs-per-event split (§3 above) is exactly this class of claim — the PR/commit must cite
+  `exprReferencesOnlyVariable` and the line range factored out, not just assert "closure is checked."
+  **Read the MATCHER, not the AST**: the closure helper must literally walk the same `Expr` types
+  `exprReferencesOnlyVariable` does; a re-derivation that "looks equivalent" but misses a case (e.g. a new
+  `Expr` subtype added later) silently diverges from `AnchorProjectionKey`'s own behaviour — hence the "factor,
+  don't duplicate" instruction in §3.
+- **Precedent may carry debt** (checklist #6): `auditEnrolment`'s conjunct order is deliberate (cheap/no-alloc
+  checks — `authArmed`, `authPlane` param, engine-kind — before the `ReferencesParam` walk); mirror the
+  ordering, don't just mirror the individual checks in an arbitrary order.
+- Dossier (`docs/components/refractor.md`): carry forward whatever entries the Incs 1+2 build note already
+  copied (§13 risks table above is the authoritative current risk list for this design; re-read it before
+  writing the licence predicate, particularly the auth-plane and closure rows).
+
+**7. Adjacent finds.** None expected beyond the `hasAnchorOnlyKeyColumns` extraction itself, which is in-scope
+per §3's reasoning (needed to build the licence at all, not an unrelated discovery) — if the builder finds the
+extraction is materially riskier than sketched here (e.g. `exprReferencesOnlyVariable`'s recursion depends on
+executor state this fire didn't expect), stop and reflag rather than forcing a shape that doesn't fit; this
+brief's §3 is this fire's best-grounded guess, not gospel.
+
+**8. Non-goals.** Inc 4a (flip to act, §6's zero-row probe, the four e2es, the measured before/after), Inc 4b
+(seeded-branch multi-position fix), Inc 5 (`retained`-class repair) are **out of scope**. `plainDerivationIndexForAct`
+returning anything other than `full.HopIndex{}, false` is out of scope — see §2's invariant.
