@@ -860,3 +860,68 @@ widening. The one declared dependency (Increment 2's sweep as the durability bac
 load-bearing for Increment 1's own green bar (T1–T10, M1) — Increment 1 is independently shippable per
 §11's own "yes" answer, confirmed by re-reading the code: nothing in the touch-list above requires
 `PersonalSweeper` to exist first.
+
+---
+
+## 15. Increment 1 — SHIPPED (checkpoint, 2026-08-14)
+
+**Merged to `main` at `b69487ef`** (9 commits, `136645e6..b69487ef`, +3762/−49 across 25 files). Landing
+shape: **land each increment on `main` independently** (not hold-the-worktree) — Increment 1 is its own
+green bar per §11's "independently shippable: yes" answer, so no persistent worktree carries forward; a
+resumed fire for Increment 2 opens a fresh one per the usual convention.
+
+**Review depth actually run** (full 3-layer, as the design's own header requires for a posture-changing
+increment): three independent cold reviews (Blind Hunter / Edge-Case Hunter / Acceptance Auditor) against the
+9-step build, zero CRITICAL findings, 4 MAJOR + 5 MINOR closed in one fix-round commit (`a18918e6`), a fourth
+cold verification pass on that fix commit found one genuine (latent) regression in the new lint-gate's
+import-qualifier resolver plus two doc issues, closed in a final commit (`b69487ef`). All four review passes'
+full text and per-finding verdicts live in the fire's sub-agent transcripts, not duplicated here — this
+section records outcomes and residuals only.
+
+**What shipped, beyond §11's 9 steps (adjacent fold-ins, all reviewed and closed):**
+- Closed board row *"[Refractor] The CDC write path audits a retraction the ordering guard declined"* — the
+  same `OutcomeDeleter` consultation step 2 needed anyway. `wrote` for a KV-target delete now reflects
+  `DeleteWithOutcome`'s real outcome for every adapter, not only guarded auth-plane ones — judged more
+  correct by two independent reviewers; no test regressed.
+- `Reproject` (the operator RPC / sweep deep-verify path) also signals the grant-change edge — not one of
+  the original 9 steps, added because a healer that repairs a real grant flip without notifying the
+  personal plane would leave a consumer unaware the healer acted. Verified volume-safe (gated on the
+  transition, not `Wrote`) and verified not to touch `Reproject`'s `KeySetPublisher` refusal.
+- `DeregisterPersonal`, wired to both pipeline-removal triggers — without it the drain would raise Health
+  faults against a deleted lens forever.
+
+**Known residuals, characterized precisely (corrected from an earlier, too-narrow description in a build
+note that called one of these "sub-second" — it is not):**
+1. **The registry-completeness gate's window is "Core-KV declaration → `RegisterPersonal`", the whole of
+   `startPipeline`'s adapter/engine wiring in between — not a sub-second gap.** A lens hot-added or replaced
+   after boot gets no protection for that window; a signal landing in it is lost with no healer until
+   Increment 2's sweep ships. Practical impact is smaller than the window sounds, since a newly-installed
+   personal lens does its own initial projection off current grants — but the window itself is real and is
+   now documented in `registryIsReady`'s own doc comment, not only here.
+2. **The registry-readiness gate reconciles corpus-globally (`ReconcileNow`), not narrowed to the lenses
+   this reprojector actually drives** (the retention-class consumer's analogous gate deliberately narrows via
+   `ReconcileNowForHolderType`; this one doesn't, because no narrowing primitive exists for "the lenses a
+   personal reprojection needs"). Consequence, stated plainly in-code: any single unrelated lens that never
+   registers makes readiness false forever, so `RegistryHoldMax` (2 min, now Health-signalled when it fires)
+   is load-bearing rather than theoretical — **every process restart potentially eats a 2-minute hold on the
+   first grant-change signal**, not only in a genuinely-still-loading registry. Named fix if this bites in
+   practice: narrow the reconcile to the lenses this reprojector drives, mirroring the retention-class
+   pattern.
+3. **M1 (drain-queue depth / reactions-per-minute) is NOT recorded.** §11 Inc 1 step 9 and §14 part 4 step 9
+   both require this as a live measurement over one auth-plane sweep cycle on a running stack — this fire
+   built entirely against `go test` + embedded/ephemeral NATS per its own scope (no `make up`), so the number
+   was never derivable here. **Needs a live showcase-stack observation before this line can be struck** —
+   whichever fire builds Increment 2 (naturally exercising a live stack for its own e2e) should record it
+   then, or a standalone measurement pass if Increment 2 is delayed.
+
+**Increment 2 (the personal convergence sweep) is UNBUILT — this is where the next fire on this item
+resumes.** §11's own decomposition (5 steps: `PersonalSweeper`, Health surface wiring, `docs/components/
+refractor.md` update, T6, the dossier entry below) still applies unchanged; nothing in Increment 1's build
+invalidated any part of it. No frozen-contract change, no architectural fork — ordinary Steward sizing
+(§11: "Posture-changing: no").
+
+**Refractor "Review keeps catching" dossier entry, added now** (`docs/components/refractor.md`, §11 Inc 2
+step 5's entry, seeded early since Increment 1 is what actually closes the specific defect class): *"a
+projection read as a decision input by another projection, with no change edge — check: does every producer
+this lens depends on for AUTHORIZATION (not just anchor data) have a `grant-change-posture` (or equivalent)
+declaration at its read call site, enforced by a blocking lint gate?"*
