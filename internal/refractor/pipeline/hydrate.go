@@ -32,7 +32,20 @@ import (
 // vtx.identity.<id> key internally. Personal Lens actors are always
 // identities (ActorEnumerator's actorType, Fire PL.2); Hydrate does not take
 // an actor type.
+// Hydrate holds the same keyed (lens, actor) publish lock
+// ReprojectPersonalActor does, across its own revision capture and its frame.
+// Both publish an authoritative keyset frame for one (lens, actor) from off the
+// consumer goroutine, and the client keeps whichever frame ARRIVED carrying the
+// higher revision — so two of them interleaving would let the stale one win by
+// arriving second. Hydrate captures its revision BEFORE reprojecting and the
+// reprojection path captures AFTER (each correct for its own job,
+// reproject_personal.go), which makes the ordering matter more, not less: the
+// lock is what stops the two captures from being interleaved with the two
+// publishes.
 func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, error) {
+	unlock := p.lockPersonalActor(identityID)
+	defer unlock()
+
 	highWater := p.Progress().LastAppliedSeq
 	actorKey := substrate.VertexKey("identity", identityID)
 

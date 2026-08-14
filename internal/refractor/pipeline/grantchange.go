@@ -55,6 +55,27 @@ func (p *Pipeline) SetGrantChangeSink(sink GrantChangeSink, anchorFromKey func(t
 	p.grantAnchorFromKey = anchorFromKey
 }
 
+// RecordGrantReprojectIssue raises the lens's Health fault for a grant-change
+// reprojection that did not happen — a dropped signal or a failed re-evaluation.
+// It forwards to the pipeline's own reporter, so the fault lands on the health
+// entry of the lens that is actually degraded rather than on some process-level
+// aggregate an operator would have to correlate back.
+//
+// A nil reporter (a directly-constructed pipeline, every harness) silently does
+// nothing, the same posture every other reporter call on this type takes. The
+// write failing is logged, not returned: the caller is a drain worker whose job
+// is to keep draining, and it has nothing better to do with the error than what
+// this does with it.
+func (p *Pipeline) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) {
+	if p.reporter == nil {
+		return
+	}
+	if err := p.reporter.RecordGrantReprojectIssue(ctx, kind, detail); err != nil {
+		slog.Warn("pipeline: grant change: could not record the reprojection issue on health",
+			"ruleId", p.ruleID, "kind", kind, "detail", detail, "err", err)
+	}
+}
+
 // HasGrantChangeSink reports whether the read-grant change edge is wired on
 // this pipeline. Its reader is the installer's own classification test: whether
 // a lens announces grant changes is a security-plane posture decision, and the

@@ -40,6 +40,15 @@ type pipelineDeleter struct {
 	// retryRefused sweep, whichever of the two Deleter triggers reached it.
 	// May be nil (tests that do not exercise the taxonomy seam).
 	clearRefused func(ruleID string)
+	// dropGrantConsumer evicts ruleID from the grant-change reprojector's
+	// personal-lens registry (grantchange.Reprojector.DeregisterPersonal),
+	// unconditionally and idempotently, for the same reason clearRefused is
+	// unconditional: a lens that no longer runs must stop being re-driven.
+	// Without it the drain would keep calling ReprojectPersonalActor on a
+	// pipeline whose run context is cancelled, failing on every dirty actor and
+	// raising a Health fault against the entry this Deleter just removed. May
+	// be nil.
+	dropGrantConsumer func(ruleID string)
 }
 
 // Delete implements control.Deleter. See Pipeline.RemoveConsumer's doc for
@@ -47,6 +56,9 @@ type pipelineDeleter struct {
 func (d pipelineDeleter) Delete(ctx context.Context) error {
 	if d.clearRefused != nil {
 		d.clearRefused(d.ruleID)
+	}
+	if d.dropGrantConsumer != nil {
+		d.dropGrantConsumer(d.ruleID)
 	}
 
 	err := retryTransientBoot(ctx, func() error {
@@ -112,6 +124,13 @@ type remover struct {
 	// producer, a resurrected grant writer with no definition behind it).
 	// May be nil (tests that do not exercise the taxonomy seam).
 	clearRefused func(ruleID string)
+	// dropGrantConsumer evicts a tombstoned lens's ID from the grant-change
+	// reprojector's personal-lens registry, and is called UNCONDITIONALLY for
+	// the same reason clearRefused is: a lens whose activation failed before
+	// the registry insert still takes take's !ok branch here, and a personal
+	// lens that registered as a reprojection consumer and then failed a later
+	// activation step would otherwise stay on that list forever. May be nil.
+	dropGrantConsumer func(ruleID string)
 }
 
 // remove is lens.RemoveCallback. old is CoreKVSource's last-loaded snapshot
@@ -124,6 +143,9 @@ func (rm *remover) remove(old *lens.Rule) {
 	if rm.clearRefused != nil {
 		rm.clearRefused(old.ID)
 	}
+	if rm.dropGrantConsumer != nil {
+		rm.dropGrantConsumer(old.ID)
+	}
 	entry, ok := rm.take(old.ID)
 	if !ok {
 		// Never started (activation failed before the registry insert — the
@@ -134,7 +156,7 @@ func (rm *remover) remove(old *lens.Rule) {
 	}
 	delCtx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
 	defer cancel()
-	if err := (pipelineDeleter{ruleID: old.ID, entry: entry, clearRefused: rm.clearRefused}).Delete(delCtx); err != nil {
+	if err := (pipelineDeleter{ruleID: old.ID, entry: entry, clearRefused: rm.clearRefused, dropGrantConsumer: rm.dropGrantConsumer}).Delete(delCtx); err != nil {
 		rm.logger.Error("remove tombstoned lens", "lensId", old.ID, "err", err)
 	}
 	rm.unregister(old.ID)

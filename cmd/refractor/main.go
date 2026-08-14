@@ -34,6 +34,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
+	"github.com/operatinggraph/lattice/internal/refractor/grantchange"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/keyshredded"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
@@ -1304,6 +1305,19 @@ func main() {
 	// startPipeline below and reported once after boot settles.
 	census := newAuditCensus()
 
+	// The D1 read-grant change edge (personal-lens-grant-change-trigger-
+	// design.md §4.2). One per process: the read-grant producers announce a
+	// grant landing or being withdrawn, and this re-drives that one actor
+	// across every personal lens — the only thing that re-asks the security
+	// filter every personal row is gated on.
+	//
+	// It is offered to every actor-aggregate installation and the installer's
+	// own classification decides which lenses it is actually wired onto. The
+	// consumer side registers below, beside the control-plane hydrator, which
+	// is where the concrete personal pipeline is in hand.
+	grantReprojector := grantchange.New()
+	go grantReprojector.Run(ctx)
+
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
 		// recording (below, on a UseFullEngineBranches failure) and the
@@ -1521,7 +1535,8 @@ func main() {
 		// (keyed by operationType) is driven by the generic null-key-skip envelope.
 		switch {
 		case projection.IsActorAggregate(r):
-			if !projection.InstallActorAggregate(p, adpt, r, projectionRevision, adjKV, coreKV, logger) {
+			if !projection.InstallActorAggregate(p, adpt, r, projectionRevision, adjKV, coreKV, logger,
+				projection.WithGrantChangeSink(grantReprojector)) {
 				return
 			}
 		case isOperationRoleIndexLens(r):
@@ -1554,6 +1569,13 @@ func main() {
 			// alone ships ten), so this is a per-ruleID registry like every
 			// other per-lens control hook, not a single overwritten handle.
 			controlSvc.RegisterPersonalHydrator(r.ID, p)
+			// The grant-change edge's consumer registry. Its own list, not the
+			// hydrator one above: control.Hydrator is a one-method, unexported
+			// registry behind a deliberate boundary that keeps internal/control
+			// from importing the pipeline package at all, and there is no
+			// iterator over it. This list is Refractor-internal and crosses
+			// nothing.
+			grantReprojector.RegisterPersonal(r.ID, p)
 			// The syncgap gap-detection read (edge-syncgap-control-rpc-
 			// design.md §3.2): the "personal.syncgap" control RPC answers the
 			// Edge node's warm-resume freshness check off the control host's
@@ -1829,7 +1851,7 @@ func main() {
 		// (control.Service.deleteRule) dispatches to this. remover.remove
 		// (below) drives the SAME pipelineDeleter automatically on a Core KV
 		// tombstone, so the two triggers share one removal mechanism.
-		controlSvc.RegisterDeleter(r.ID, pipelineDeleter{ruleID: r.ID, entry: entry, clearRefused: rl.clearRefusedForTaxonomy})
+		controlSvc.RegisterDeleter(r.ID, pipelineDeleter{ruleID: r.ID, entry: entry, clearRefused: rl.clearRefusedForTaxonomy, dropGrantConsumer: grantReprojector.DeregisterPersonal})
 		// Per-actor reconciliation is defined only for actor-aggregate lenses
 		// (capability-projection-reconciliation-design.md §3.1); the pipeline
 		// refuses structurally besides, so the registry is the routing gate
@@ -1932,6 +1954,10 @@ func main() {
 		// succeeded), and take's registry lookup alone would miss exactly
 		// that lens, leaving it queued for retryRefused to resurrect.
 		clearRefused: rl.clearRefusedForTaxonomy,
+		// dropGrantConsumer is unconditional for the same reason: a personal
+		// lens that registered as a grant-change reprojection consumer must
+		// stop being re-driven the moment its definition is gone.
+		dropGrantConsumer: grantReprojector.DeregisterPersonal,
 	}
 
 	// Wait for adjacency bootstrap before activating any lens.

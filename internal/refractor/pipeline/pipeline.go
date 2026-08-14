@@ -396,6 +396,16 @@ type Pipeline struct {
 	grantSink          GrantChangeSink
 	grantAnchorFromKey func(targetKey string) (string, bool)
 
+	// personalPublishLocks holds one publish slot per actor currently being
+	// reprojected on this lens, and personalPublishMu guards the map itself.
+	// Slots are created on demand and dropped the moment nobody holds or wants
+	// one, so the map is bounded by concurrent reprojections rather than by the
+	// identity population. Nothing survives a restart, and nothing needs to:
+	// the lock orders publishers within one process, which is the only place
+	// they exist. See lockPersonalActor for what it orders and why.
+	personalPublishMu    sync.Mutex
+	personalPublishLocks map[string]*actorPublishLock
+
 	// requiresFootprintValidation reports whether this lens's compiled cypher
 	// emits at least one multi-binding conjunct unit (projection.Compile's
 	// derived ProjectionPlan.RequiresFootprintValidation,

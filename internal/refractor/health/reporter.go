@@ -429,6 +429,27 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	return nil
 }
 
+// RecordGrantReprojectIssue records a fault in the D1 grant-change
+// reprojection path for this lens: a coalescing dirty-actor set that overflowed
+// its bound and dropped signals, or a per-actor reprojection that failed
+// (personal-lens-grant-change-trigger-design.md §5).
+//
+// Both are the same operator-facing fact — the prompt path is no longer
+// covering some set of actors, so the standing healer is the only thing
+// converging them — and both have to be loud, because the degraded state is
+// otherwise invisible: the drain simply does less, correctly, forever. kind
+// names which (overflow, reproject); detail carries the actor or the count.
+//
+// Deliberately routed through the existing ErrorCount/LastError pair rather
+// than a new wire field. Those two already have readers — `lattice health
+// summary`, Loupe's fault rendering, Lamplighter's Health KV read — and a
+// counter nobody reads is an issue nobody sees, which is the exact failure this
+// method exists to prevent. Unlike SetFilterState, which is an observation of a
+// correct decision, this is a fault and belongs in the fault bucket.
+func (r *Reporter) RecordGrantReprojectIssue(ctx context.Context, kind, detail string) error {
+	return r.RecordError(ctx, fmt.Sprintf("grant-change reprojection: %s: %s", kind, detail))
+}
+
 // SetFilterState records which Core KV consumer filter this lens's derivation
 // chose — the footprint triple FilterMode / FilterLabelCount /
 // FilterBroadReason. It is an OBSERVATION of a decision the pipeline has
