@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // EnabledArtifactKinds is the artifact-kind allow-list for the capability-author
@@ -217,6 +218,14 @@ type LoomPatternArtifactContent struct {
 type HeldPermission struct {
 	OperationType string
 	Scope         string
+
+	// Origin is the projected entry's provenance (Contract #6 §6.1), carried
+	// through from platformPermissions[].origin rather than re-derived here.
+	//
+	// It has to travel with the entry because an entry step 3 would REFUSE must
+	// not count as held when proposing a new grant of the same op. Absence
+	// reads as `runtime` — the fail-closed direction, exactly as at step 3.
+	Origin string
 }
 
 // covers reports whether a held permission's scope authorizes granting the
@@ -224,8 +233,26 @@ type HeldPermission struct {
 // "any" for an operationType may grant either "any" or "self"; an operator
 // holding only "self" may grant "self" but never "any" (that would let a
 // self-scoped operator mint a broader grant than their own).
+//
+// An entry the Processor would refuse at step 3 covers NOTHING, whatever its
+// scope says. The projection is not an authority list: a reserved
+// operationType held at runtime origin is refused at submission (Contract #6
+// §6.1 rule 3), and letting it satisfy the no-escalation check here would be a
+// laundering channel rather than a scope widening. The requester proposes a
+// `grant` artifact for that same op; approval runs it through
+// CapabilityApplyPlanForProposal → DefinitionForCapabilityArtifact →
+// Installer.Apply → build.go's permission mint, which stamps
+// `origin: "package"` on everything it applies — repo package and approved
+// proposal alike. The re-minted vertex then authorizes at step 3, and its
+// `declaredBy` names a package that exists in no manifest. Refusing here is
+// what keeps "the installer's stamp means a declared deployment decision"
+// true. The predicate is imported from the Processor, never restated, so the
+// two sides cannot drift.
 func (h HeldPermission) covers(operationType, requestedScope string) bool {
 	if h.OperationType != operationType {
+		return false
+	}
+	if processor.WouldRefuseReservedGrant(h.OperationType, h.Origin) {
 		return false
 	}
 	if h.Scope == "any" {

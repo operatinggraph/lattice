@@ -313,7 +313,14 @@ def execute(state, op):
             note = p.note
         perm_id = nanoid.new()
         perm_key = "vtx.permission." + perm_id
-        data = {"operationType": opt, "scope": scope}
+        # origin is the provenance stamp (Contract #6 6.1): this vertex was
+        # authored at runtime by a grant-holding actor, not declared by an
+        # installed package. It is written exactly once, here, and no granted
+        # rbac-domain op rewrites a permission body, so the marker is as
+        # trustworthy as the mint. The projection carries it into every
+        # capabilityRoles platformPermissions entry, where step 3 refuses a
+        # runtime-origin entry that names a core-reserved operationType.
+        data = {"operationType": opt, "scope": scope, "origin": "runtime"}
         if note != "":
             data["note"] = note
         mutations = [make_vtx(perm_key, "permission", data)]

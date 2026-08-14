@@ -35,6 +35,16 @@ const (
 // retention-class destruction verbs the sibling suite drives. The grant is a
 // TEST posture only: privacy-base ships no ShredRetentionClassKey grant for
 // the reason permissions.go records.
+//
+// ShredRetentionClassKey is stamped `origin: "package"` because that is the
+// only provenance under which the verb is grantable at all — it is in the
+// core-owned reserved set (internal/processor/step3_auth_capability.go), so a
+// runtime-origin or unstamped entry naming it is refused at step 3 (Contract #6
+// §6.1). The stamp is what makes this fixture model the posture it claims to:
+// a deployment that DECLARED the destruction verb, which is the sanctioned
+// channel. The unreserved verbs alongside it are deliberately left unstamped —
+// origin is immaterial to them, and an unstamped ordinary grant is what most of
+// a live graph looks like until every package has been re-applied.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -48,7 +58,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
 			{OperationType: "RecordIdentityPII", Scope: "any"},
 			{OperationType: "ShredIdentityKey", Scope: "any"},
-			{OperationType: "ShredRetentionClassKey", Scope: "any"},
+			{OperationType: "ShredRetentionClassKey", Scope: "any", Origin: "package"},
 			{OperationType: "RecordRetentionClassShredFinalization", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},

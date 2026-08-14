@@ -300,7 +300,12 @@ func heldPermissionsForActor(ctx context.Context, conn *substrate.Conn, actor st
 			return nil, fmt.Errorf("parse %s: %w", key, err)
 		}
 		for _, p := range doc.PlatformPermissions {
-			held = append(held, pkgmgr.HeldPermission{OperationType: p.OperationType, Scope: p.Scope})
+			// Origin travels with the entry: a reserved op held at runtime
+			// origin is refused at step 3, so it must not count as held when
+			// proposing a grant of that same op (pkgmgr.HeldPermission.covers).
+			held = append(held, pkgmgr.HeldPermission{
+				OperationType: p.OperationType, Scope: p.Scope, Origin: p.Origin,
+			})
 		}
 	}
 	return held, nil

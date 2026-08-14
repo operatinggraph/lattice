@@ -236,6 +236,15 @@ func mergeStrings(a, b []string) []string {
 	return out
 }
 
+// mergePlatformPermissions dedups by {operationType, scope} only, so the
+// surviving entry's `origin` (Contract #6 §6.1 provenance) is whichever copy
+// was seen first — the field is effectively DROPPED by this merge. That is
+// tolerable only because this is the client-side FR19 cold-start traversal
+// helper, never an authorization path: nothing derived here may decide whether
+// an actor is authorized. The reserved-grant refusal that reads `origin` lives
+// at step 3 (processor.WouldRefuseReservedGrant), and any future caller
+// wanting this merge for an auth-shaped question must key the dedup on origin
+// too rather than inheriting this one's tolerance.
 func mergePlatformPermissions(a, b []processor.PlatformPermission) []processor.PlatformPermission {
 	type key struct{ op, scope string }
 	seen := make(map[key]bool, len(a)+len(b))

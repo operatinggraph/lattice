@@ -436,6 +436,91 @@ var privilegedLaneAllowlist = map[string]map[string]bool{
 // quietly narrowed to default rather than silently honored.
 const AlertCodePrivilegedLaneGrantRejected = "privileged-lane-grant-rejected"
 
+// reservedOperationTypes is the core-owned set of operationTypes a
+// RUNTIME-provenanced grant may never confer (Contract #6 §6.1 rule 3,
+// grant-provenance-runtime-permission-minting-design.md Move 3). It is the
+// verb-side twin of privilegedLaneAllowlist above: core owns the policy of
+// what a self-minted grant may never reach; a PACKAGE remains free to declare
+// a PermissionSpec for any of these, because that is an explicit,
+// manifest-recorded, uninstallable deployment decision rather than authority
+// an actor conferred on itself in two ops.
+//
+// Two members:
+//
+//   - ShredRetentionClassKey — the widest-blast-radius destruction verb, which
+//     privacy-base deliberately ships no grant for: it destroys every record a
+//     retention class holds, for subjects who never asked and may not know the
+//     class exists.
+//   - UpdatePermission — the design's own write-once precondition. Inc 1
+//     withdrew rbac-domain's grant of it, but CreatePermission takes
+//     operationType as a FREE STRING with no allow-list, so an actor can mint
+//     a brand-new permission{operationType:"UpdatePermission"} vertex at
+//     runtime and grant it to a role they hold. Holding it lets them rewrite
+//     ANY permission vertex's body — including stripping `origin` off a
+//     package's reserved grant, which silently downgrades it to
+//     unstamped→runtime→refused. Withdrawing the package grant closed the
+//     declared channel; reserving the verb closes the runtime one, and the two
+//     together are what make "no operation may rewrite a permission body" true
+//     rather than aspirational. (This does NOT reach internal/bootstrap's
+//     UpgradePackage primitive — a separate, separately-filed gap.)
+//
+// BEFORE ADDING AN ENTRY: check that no kernel-seeded permission vertex grants
+// it. internal/bootstrap/primordial.go seeds the meta- and package-install
+// permissions (CreateMetaVertex/UpdateMetaVertex/TombstoneMetaVertex,
+// InstallPackage/UninstallPackage/UpgradePackage) as real vtx.permission.*
+// bodies linked `grantedBy operator`, so rbac-domain's capabilityRoles lens
+// walks them and they carry NO origin — meaning they read as `runtime` here.
+// None of the six is in the v1 set, so nothing is over-denied today; adding one
+// without also stamping the kernel seed would lock the operator out of package
+// installation. The anchor's own literal grant set
+// (internal/bootstrap/lenses.go) is the design's named core-owned exception and
+// is likewise unstamped.
+var reservedOperationTypes = map[string]bool{
+	"ShredRetentionClassKey": true,
+	"UpdatePermission":       true,
+}
+
+// AlertCodeReservedOperationGrantRejected is raised (Contract #5 §5.5 alert
+// convention) each time a runtime-provenanced entry names a reserved
+// operationType — the signal that someone minted themselves a grant the
+// platform reserves to package declaration. The op is refused either way; the
+// alert is what turns a silent refusal into something an operator can see.
+const AlertCodeReservedOperationGrantRejected = "reserved-operation-grant-rejected"
+
+// runtimeOrigin reports whether a projected entry counts as runtime-authored
+// for the reserved-set refusal.
+//
+// ABSENCE IS RUNTIME, not "unknown": a permission vertex minted before the
+// stamp existed, or one whose projection dropped the field, must be governed
+// by the reservation rather than exempted from it (Contract #6 §6.1 —
+// "absence reads as runtime"). The predicate is written as "anything that is
+// not an explicit `package` stamp" rather than "empty or `runtime`" so that a
+// value neither side of this code has heard of — a future third origin, a
+// typo in a lens, a partially-migrated body — also fails closed. Only the one
+// stamp the installer writes escapes the reservation.
+func runtimeOrigin(origin string) bool {
+	return origin != "package"
+}
+
+// WouldRefuseReservedGrant reports whether step 3 would refuse a
+// platformPermissions entry with this {operationType, origin} pair — the
+// reserved-set rule of Contract #6 §6.1, exported so that any OTHER consumer
+// of a projected capability entry applies the identical test.
+//
+// It exists because "may this actor submit the op" and "may this actor's
+// holding of the op justify granting it to someone else" have to answer the
+// same way. internal/pkgmgr's grant-artifact scope check (`requesterHolds`,
+// the validateGrantArtifact no-escalation invariant) reads the same
+// cap.roles.<actor> projection this authorizer does; if it counted an entry
+// this function rejects, an actor could launder a refused runtime grant into a
+// package-origin one by proposing a capability artifact for the same op — the
+// installer stamps `origin: "package"` on everything it applies, so the
+// laundered vertex would then authorize here. Exporting the predicate rather
+// than restating it is what keeps the two sides from drifting apart.
+func WouldRefuseReservedGrant(operationType, origin string) bool {
+	return reservedOperationTypes[operationType] && runtimeOrigin(origin)
+}
+
 // disallowedPrivilegedLanes returns the subset of lanes that are privileged
 // (meta/urgent/system) but not on privilegedLaneAllowlist for operationType.
 // A non-privileged lane (default) is never rejected.
@@ -507,9 +592,56 @@ func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, d
 			firstDenial = &d
 		}
 	}
+	// One reserved-grant alert per Authorize call, however many refused entries
+	// the scan meets. EmitAlert is a BLOCKING KV write on the auth hot path
+	// (NFR-P3 = 500ms p99) and CreatePermission is unbounded, so an actor who
+	// mints N permission vertices for one reserved op and grants them all to a
+	// role they hold would otherwise charge every later submission of that op N
+	// sequential KVPutWithTTL calls — a self-inflicted latency amplification.
+	// The cap is on the SIGNAL only: every matching entry is still evaluated and
+	// still refused below, because a later package-origin entry must remain able
+	// to authorize. One alert already tells an operator everything the Nth
+	// would: the actor, the op, and that a reserved grant was reached for.
+	reservedAlertSent := false
 	for i := range doc.PlatformPermissions {
 		p := &doc.PlatformPermissions[i]
 		if p.OperationType != env.OperationType {
+			continue
+		}
+		// Provenance gate (Contract #6 §6.1 rule 3): a runtime-authored entry
+		// may not confer a core-reserved operationType. Refuse THIS entry and
+		// keep scanning — never return — because the same actor may also hold
+		// a package-declared entry for the same op, and that one must still be
+		// able to authorize. Returning here would make projection order decide
+		// whether a legitimate package grant is honored.
+		//
+		// Placed after the operationType filter and before the scope switch on
+		// purpose: the reservation is on the operationType under runtime
+		// origin, at any scope (any/self/specific/owned alike), so it must not
+		// be nested inside a scope arm.
+		//
+		// Deliberately NOT origin-conditioned for lanes: a runtime-origin entry
+		// cannot currently claim a privileged lane at all — neither
+		// CreatePermission nor UpdatePermission accepts a `lanes` parameter
+		// (packages/rbac-domain/ddls.go) — and if such a parameter is ever
+		// added, platformLaneGate's disallowedPrivilegedLanes check below
+		// already fires on ANY entry carrying non-empty Lanes, unconditional on
+		// origin. Do not add a redundant origin check to the lane path.
+		if WouldRefuseReservedGrant(p.OperationType, p.Origin) {
+			if !reservedAlertSent {
+				reservedAlertSent = true
+				a.emitter.EmitAlert(context.Background(), AlertCodeReservedOperationGrantRejected, map[string]any{
+					"actor":         env.Actor,
+					"requestId":     env.RequestID,
+					"operationType": env.OperationType,
+					"origin":        p.Origin,
+				})
+			}
+			deny(Decision{
+				Authorized: false,
+				Code:       ErrCodeAuthDenied,
+				Reason:     "runtime-authored grant may not confer reserved operationType " + p.OperationType,
+			})
 			continue
 		}
 		switch p.Scope {

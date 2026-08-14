@@ -12,9 +12,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 //   - capabilityRoles (actor-aggregate): for every actor holding an rbac role,
 //     projects cap.roles.<actor-suffix> carrying that actor's role-derived
-//     platformPermissions[] ({operationType, scope, lanes}) plus the role
-//     keys held. `lanes` is per-op and optional (absent unless the granting
-//     permission's PermissionSpec.Lanes set it) — Contract #6 §6.4.
+//     platformPermissions[] ({operationType, scope, lanes, origin}) plus the
+//     role keys held. `lanes` is per-op and optional (absent unless the
+//     granting permission's PermissionSpec.Lanes set it) — Contract #6 §6.4.
+//     `origin` is the granting vertex's provenance stamp (`package` /
+//     `runtime`), which step 3 reads to refuse a runtime-authored grant of a
+//     core-reserved operationType; an unstamped vertex projects null, which
+//     reads as `runtime` — Contract #6 §6.1.
 //     The disjoint cap.roles.* key space (Contract #6 §6.1) keeps the
 //     package's grant projection off the core cap.<actor> key, so ordinary
 //     actors read their grants from cap.roles.<actor> via the registered auth
@@ -77,6 +81,13 @@ func Lenses() []pkgmgr.LensSpec {
 // degenerate (all-null) collect entry for an actor holding no role; the
 // envelope wrapper's emptyBehavior:delete drops the key when no real grant
 // remains (Contract #6 §6.8 absence = denial).
+//
+// `origin` carries the permission vertex's provenance stamp (Contract #6 §6.1)
+// into each projected entry, which is what lets step 3 tell a package-declared
+// grant from a runtime self-mint at the point the entry is consumed. A vertex
+// authored before the stamp existed projects null here and reads as `runtime`
+// on the consuming side — fail-closed, so a missing stamp denies rather than
+// grants.
 const capabilityRolesSpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:grantedBy]-(perm:permission)
@@ -85,7 +96,8 @@ RETURN
   collect(DISTINCT {
     operationType: perm.data.operationType,
     scope: perm.data.scope,
-    lanes: perm.data.lanes
+    lanes: perm.data.lanes,
+    origin: perm.data.origin
   }) AS platformPermissions,
   collect(DISTINCT role.key) AS roles
 `
