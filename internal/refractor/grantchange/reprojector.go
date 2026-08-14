@@ -29,15 +29,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-// PersonalActorType is the vertex type a personal reprojection is keyed by.
-// Personal Lens actors are always identities (the ActorEnumerator's configured
-// actorType), which is why the dirty set holds bare NanoIDs rather than full
-// vertex keys — and why a transition naming any other anchor type is dropped
-// rather than guessed at.
-const PersonalActorType = "identity"
 
 // DefaultDrainInterval is how often the drain worker looks for dirty actors.
 // Short on purpose: this is the LATENCY path — the whole reason it exists
@@ -152,8 +146,13 @@ func (r *Reprojector) DeregisterPersonal(ruleID string) {
 // It never blocks and never does I/O: it runs inline on the producing
 // pipeline's consumer goroutine, synchronous with the write it describes.
 func (r *Reprojector) GrantChanged(actorKey string) {
+	// projection.PersonalActorType is the SAME symbol InstallPersonalLens
+	// configures the ActorEnumerator with, not a copy of the literal: the type
+	// this drops on and the type a personal lens actually enumerates cannot be
+	// allowed to drift, since the drift's failure mode is a reprojector that
+	// silently accepts nothing.
 	actorType, actorID, ok := substrate.ParseVertexKey(actorKey)
-	if !ok || actorType != PersonalActorType || actorID == "" {
+	if !ok || actorType != projection.PersonalActorType || actorID == "" {
 		// A read-grant producer anchored on something other than an identity
 		// has no personal lens keyed off it, so there is nothing to re-drive.
 		// Dropping is the fail-slow direction and it is silent by design: a
