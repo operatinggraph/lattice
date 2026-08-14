@@ -413,6 +413,23 @@ transfer — no `$now`/`$projectedAt` (`CompiledRule.ReferencesParam`, that desi
 decryptor, not actor-aware — are carried alongside it, so the two predicates overlap without one standing in
 for the other.
 
+> **Build correction, 2026-08-14 (Increment 3).** The paragraph above under-specifies the conjunct: "no
+> `WITH`, every key column resolving read-free from the anchor binding to a scalar" admits a lens whose key
+> column is a **literal** (e.g. `RETURN 'all' AS key, collect(u.name) AS names`) — a literal resolves
+> read-free from the anchor trivially, but such a lens still aggregates across every root binding, which is
+> exactly the truncation hazard this section exists to exclude. Inc 3's adversarial review caught this against
+> the shipped code, not against a live corpus lens. The as-built conjunct is `ProjectsOneRowPerAnchor`
+> (`anchor_delete.go`): the closure half above (factored into `HasAnchorOnlyKeyColumns`, a structural-only
+> variant needing no concrete event — the licence has no event to evaluate against) **AND** at least one key
+> column must *identify* the anchor, not merely resolve from it — its own `.key`, or `nanoIdFromKey` over it,
+> checked by name against an allowlist (an unrecognized function refuses, fail-closed; this is not a denylist
+> of known-lossy functions). `capabilityRoleIndex`'s `collect(DISTINCT …)` is still excluded (the aggregate
+> itself fails the closure half, unchanged); the literal-key shape is excluded by the added identification
+> half. `clinicProviders` and every other `<anchor>.key`-keyed lens in the addressable set are unaffected —
+> confirmed against the full corpus, no admitted lens's verdict moved. `AnchorProjectionKey`/`AnchorDeleteResult`
+> themselves are unchanged (this conjunct is layered on top, in the licence, not folded into the shipped `ok`
+> contract, so §6's Delete path keeps its current behaviour).
+
 **A corpus shape proves the hazard is not theoretical.** `capabilityRoleIndexSpec`
 (`packages/rbac-domain/lenses.go:97-105`) roots on `role`, keys on `perm.data.operationType`, and
 `collect(DISTINCT …)`s across root bindings — `TestCapabilityRoleIndex_CollapsesRolesPerOperation` pins that
@@ -1024,3 +1041,29 @@ brief's §3 is this fire's best-grounded guess, not gospel.
 **8. Non-goals.** Inc 4a (flip to act, §6's zero-row probe, the four e2es, the measured before/after), Inc 4b
 (seeded-branch multi-position fix), Inc 5 (`retained`-class repair) are **out of scope**. `plainDerivationIndexForAct`
 returning anything other than `full.HopIndex{}, false` is out of scope — see §2's invariant.
+
+**9. Close.** Built: `plainDerivationLicence` (the five-conjunct predicate — auth-plane, enrolled-and-
+unsuppressed Auditor, full-engine rule, `RowReader`, no secure decryptor, `ReferencesParam`, and
+`ProjectsOneRowPerAnchor` — see §5.1's build correction above), `p.SetAuthPlane` threaded onto every plain
+lens at activation (`cmd/refractor/main.go`'s `installLensPlane`), and a `hotReloadRefusal` pin closing the
+one live gap review found adjacent to this fire (an unguarded lens's INTO-only bucket edit could move it onto
+or off the auth plane with none of `pipeline.authPlane`/`pipelineEntry.authPlane`/`Auditor.authPlane` re-
+deriving — the last two are **live today**, independent of this design; fixed at the root as a refusal, not a
+re-derivation, to avoid a data race on the unsynchronized `authPlane` field). Three cold adversarial passes
+(correctness, edge-case, capability/security) plus one fix round plus one verification pass found zero
+defects reaching production: `plainDerivationIndexForAct` still declines unconditionally and nothing calls
+the new licence from any write path (`TestPlainDerivationLicence_DoesNotReachTheActGate` pins this).
+
+**Two explicit preconditions for Inc 4a**, surfaced by the verification pass and not fixed here because
+nothing consults the licence yet:
+- **The enrolled-Auditor conjunct has no staleness clock.** It reads `Status().Enrolled` and
+  `Status().Suppression`, both correctly live-not-latched, but not `LastPassAt`/`Interval` — so a lens whose
+  audit will never successfully pass (killed post-activation, wedged mid-pass with no per-pass deadline) reads
+  licensed for up to the pre-first-pass window and indefinitely once wedged. The heartbeat already derives
+  `LensAuditStalled` off this same clock (`health/lattice_heartbeater.go`); Inc 4a's licence must consult it
+  too before the licence can gate a write.
+- **The activation-time `p.SetAuthPlane` call is proven reachable but not regression-pinned against
+  `startPipeline` itself** (`cmd/refractor/main_test.go`'s `activateLens` re-derives the production sequence
+  rather than calling `startPipeline`, which is not unit-testable as written) — deleting `installLensPlane`'s
+  call site from `main.go` today breaks no test. Inc 4a's own e2e work should add the missing trip-wire, or
+  this exclusion could silently regress to B1's original tautology.
