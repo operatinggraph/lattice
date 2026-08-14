@@ -824,6 +824,29 @@ func main() {
 				snap.SweepSuppressionAt = status.SuppressionAt
 				snap.SweepInterval = sw.Interval()
 			}
+			// The divergence audit's verdicts, read from the in-process auditor
+			// on exactly the terms the sweep's are: before the reporter, because
+			// an unreadable health entry is an observation fault and not an
+			// audit one. A REFUSED lens carries a non-nil auditor too — its
+			// refusal is a published verdict, and this is the field that
+			// publishes it.
+			if au := entry.pipeline.Auditor(); au != nil {
+				status := au.Status()
+				snap.AuditEnrolled = status.Enrolled
+				snap.AuditRefusal = status.Refusal
+				snap.Audited = status.Audited
+				snap.DivergentRows = status.Divergent
+				snap.DivergentTotal = status.DivergentTotal
+				snap.AuditUnverified = status.Unverified
+				snap.AuditLastUnverified = status.LastUnverified
+				snap.AuditLastPassAt = status.LastPassAt
+				snap.AuditCycleCompletedAt = status.CycleCompletedAt
+				snap.AuditCoverageBasis = status.CoverageBasis
+				snap.AuditListingSize = status.ListingSize
+				snap.AuditSuppression = status.Suppression
+				snap.AuditSuppressionAt = status.SuppressionAt
+				snap.AuditInterval = au.Interval()
+			}
 			// A rebuild suppresses the sweep, so the stall detector cannot judge
 			// the sweep's silence while one runs. These let it judge the REBUILD
 			// instead — one that is draining against one that is wedged.
@@ -929,6 +952,30 @@ func main() {
 				snap.SweepSuppression = status.Suppression
 				snap.SweepSuppressionAt = status.SuppressionAt
 				snap.SweepInterval = sw.Interval()
+			}
+			// The divergence audit's verdicts — for a plain lens this is the
+			// ONLY per-row correctness signal there is, so it is read on the
+			// same terms as the sweep's and for a sharper version of the same
+			// reason: the audit writes nothing, so a verdict lost to a fault
+			// observing something else is a divergence nothing else will find.
+			// A REFUSED lens carries a non-nil auditor too, because its refusal
+			// is a published verdict rather than an absence.
+			if au := entry.pipeline.Auditor(); au != nil {
+				status := au.Status()
+				snap.AuditEnrolled = status.Enrolled
+				snap.AuditRefusal = status.Refusal
+				snap.Audited = status.Audited
+				snap.DivergentRows = status.Divergent
+				snap.DivergentTotal = status.DivergentTotal
+				snap.AuditUnverified = status.Unverified
+				snap.AuditLastUnverified = status.LastUnverified
+				snap.AuditLastPassAt = status.LastPassAt
+				snap.AuditCycleCompletedAt = status.CycleCompletedAt
+				snap.AuditCoverageBasis = status.CoverageBasis
+				snap.AuditListingSize = status.ListingSize
+				snap.AuditSuppression = status.Suppression
+				snap.AuditSuppressionAt = status.SuppressionAt
+				snap.AuditInterval = au.Interval()
 			}
 			// A lens whose liveness inputs cannot be read is reported as
 			// unknown, never omitted: dropping it removes the lens from
@@ -1198,6 +1245,10 @@ func main() {
 	// startPipeline runs once per personal-lens rule — edge-manifest alone
 	// ships ten — and again for every one of them on every hot reload.
 	syncStreams := health.NewSyncStreamWitness()
+
+	// The divergence audit's enrolment tally, filled one lens at a time by
+	// startPipeline below and reported once after boot settles.
+	census := newAuditCensus()
 
 	startPipeline := func(r *lens.Rule) {
 		// Computed once, at function scope, so both the taxonomy-refusal
@@ -1571,6 +1622,30 @@ func main() {
 			logger.Info("secure lens decryptor installed", "lensId", r.ID, "columns", len(cols))
 		}
 
+		// The plain-lens divergence audit (lens-projection-divergence-audit-
+		// design.md §4.3/§4.4). It gives a plain lens its first per-row
+		// correctness verdict — a background recompute-and-compare that NEVER
+		// writes to the target — and it must sit here, below every stage that
+		// installs a conjunct it reads: the envelope/enumerator switch above,
+		// SetDiffRetraction, and SetSecureDecryptor immediately above. A
+		// conjunct evaluated against a half-built pipeline reads as satisfied
+		// for a lens that must never audit, which is the same ordering hazard
+		// ConsumerFilter's own placement note spells out below.
+		//
+		// A refusal is logged at Info, not Warn: refusing is the designed
+		// outcome for most of the corpus (an actor-aggregate lens is the
+		// sweep's, a Postgres target cannot read a row back), and it is
+		// published per lens as auditEnrolled/auditRefusal — the log line is
+		// the operator's local copy, not the record.
+		if enrolled, refusal := p.InstallAudit(); enrolled {
+			census.record(r.ID, true, "")
+			logger.Info("divergence audit enrolled", "lensId", r.ID,
+				"anchorLabel", p.Auditor().AnchorLabel(), "interval", p.Auditor().Interval())
+		} else {
+			census.record(r.ID, false, refusal)
+			logger.Info("lens gets no divergence audit", "lensId", r.ID, "reason", refusal)
+		}
+
 		// D1 (refractor-footprint-reduction-design.md): a full-engine lens
 		// with an exhaustive referenced-label set gets a narrowed,
 		// server-side FilterSubjects consumer instead of the broad
@@ -1695,6 +1770,15 @@ func main() {
 		go func() {
 			defer wg.Done()
 			p.RunSweep(lensCtx)
+		}()
+
+		// The divergence audit runs beside the sweep on the same lens context,
+		// so it stops with the lens. RunAudit returns immediately unless the
+		// enrolment above granted this lens a plan.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.RunAudit(lensCtx)
 		}()
 
 		logger.Info("lens pipeline started", "lensId", r.ID, "target", r.Into.Target, "table", r.Into.Table, "bucket", r.Into.Bucket)
@@ -1945,6 +2029,12 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("control service started")
+
+	// The enrolment census (§4.4): the increment's first act is a REPORTED
+	// number of audited lenses rather than a predicted one, so a refusal reason
+	// that turns out to dominate is a grounded follow-on instead of a guess made
+	// at design time.
+	go census.Report(ctx, logger)
 
 	logger.Info("refractor ready", "instance", instance)
 	<-ctx.Done()

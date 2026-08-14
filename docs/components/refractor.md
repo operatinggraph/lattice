@@ -816,6 +816,77 @@ drawn so a lens keeps its slot across restarts.
   from one that was never installed. Its sweep verdicts still apply, since those come from the
   in-process sweeper rather than the health entry.
 
+### The plain-lens divergence audit — a correctness verdict that never repairs
+
+The sweep above covers actor-aggregate lenses, and its detection is a **byproduct of its
+repair**: `healed` counts writes that landed, so a divergence with no repair transport
+produces no write, no heal, and a cleared streak. The plain corpus had neither half — no
+sweep, and therefore no per-row correctness signal at all: `lastProjectedAt`,
+`projectionLag` and `alert` answer *"is this lens still moving?"*, and nothing answered
+*"is what it already wrote still true?"*. A frozen row rendered green.
+
+So an enrolled **plain** lens runs a periodic divergence audit beside its pump
+(`pipeline.RunAudit`, `internal/refractor/pipeline/audit.go`;
+lens-projection-divergence-audit-design.md §4.3). Every 15 minutes
+(`DefaultAuditInterval`) it lists a bounded batch of its anchors from the persisted cursor
+(`DefaultAuditBatch`, 10), re-runs the lens's own **seeded** evaluation for each — the D2
+Phase 1 primitive that makes a per-anchor recompute cost one anchor's walk instead of a
+corpus-wide scan — and compares each result against the stored row with `rowsEquivalent`,
+the same definition of "same row" the sweep and `Reproject` use. **It never writes to the
+target.** Repair on a shared, unguarded plain target was rejected (§8.1): there is no
+ordering token to keep a repair subordinate to a racing CDC event, a seeded evaluation
+cannot prove it owns the keyspace it would write into, and coupling this detector to a
+writer would rebuild the exact structure whose collapse produced the twelve-day silence.
+The remediation path is the operator's control-plane `reproject` RPC and `Rebuild`.
+
+Enrolment is fail-closed on six conjuncts (`auditEnrolment`, §4.4), and — unlike the
+sweep's, which is decided once at install — **every one is re-checked at the top of every
+pass**: they are all mutable pipeline state, so a hot reload could otherwise leave a lens
+auditing under a shape it no longer has. A failed re-check self-suppresses with the reason
+rather than auditing. The conjuncts: a single derivable anchor pattern
+(`seedAnchorLabels`, exactly one label — a multi-walk lens has N anchors and one seed
+cannot speak for all of them, and a `*` taxonomy anchor resolves to a subtype *set* one
+key-type listing cannot enumerate); no actor enumerator and no envelope (an actor-aware
+evaluation's anchor is the actor, so seeding it evaluates the wrong entity, and those
+lenses are the sweep's); no diff retraction (whose full-key-set semantics a single-anchor
+row set would misread); an `adapter.RowReader` target (without read-back there is nothing
+to compare against, and an audit that cannot compare would report clean); no secure
+decryptor (a background job with no request context must not re-derive plaintext to
+compare it); and no `$now` / `$projectedAt` reference — `$now` is wall-clock and
+`$projectedAt` derives from the *event* vertex's provenance, a neighbour of the anchor on
+the plain CDC path, so a seeded recompute supplying the anchor's own props can never
+reproduce either and the lens would read divergent forever. That last conjunct reads
+`full.CompiledRule.ReferencesParam`, whose **non-exhaustive answer is a refusal, never a
+pass**: `(referenced=false, exhaustive=false)` means the walk could not rule the parameter
+out, and treating that as an absence is the read-the-declaration-not-the-matcher mistake
+the flag exists to prevent.
+
+A refused lens publishes `auditEnrolled: false` plus `auditRefusal`, runs no pass, and can
+never read as audit-stalled — *not audited* must stay distinguishable from *audited,
+clean*. Most of the corpus refuses by design, and the number is **observed rather than
+asserted**: the Refractor logs an enrolment census at startup (enrolled, refused, and the
+dominant reason) so a refusal that turns out to dominate is a grounded follow-on instead of
+a guess.
+
+Divergences are reported per class in `metrics.lensLiveness.<lens>.divergentRows` —
+`missing`, `stale`, `retained` — carrying only the classes that fired, so a direction that
+has silently stopped detecting reads as absent rather than as zero; `divergentTotal` is the
+sum the `LensProjectionDiverged` issue and the `diverged` alert key on, at `warning`
+severity at every magnitude. An anchor the audit could conclude nothing about is counted in
+`auditUnverified` and is **neither clean nor divergent**. Coverage is stated rather than
+implied: a pass covers one batch, `auditCycleCompletedAt` says when the walk last closed
+over the whole lens, `auditListingSize` how large that lens's anchor type is, and
+`auditCoverageBasis: "key-type"` names the real boundary — the executor also admits a vertex
+whose *body* `class`/`label` equals the pattern label, and such an anchor is never
+enumerated and never audited. That is under-coverage, never a wrong verdict, and it is
+published rather than assumed away. Suppression (rebuild in flight, paused lens, unreadable
+health entry, failed enrolment re-check) records its reason and leaves `auditLastPassAt`
+ageing, so a held audit cannot republish a clean verdict forever; past **10 audit
+intervals** with no verdict the heartbeat raises `LensAuditStalled` and `alert` reads
+`audit-stalled`. The cursor and the last completed cycle persist on the lens's own health
+entry (`health.Reporter.SetAuditProgress` — the audit's only write anywhere), so a redeploy
+resumes the walk instead of re-auditing the head forever while never reaching the tail.
+
 ---
 
 ## Capability KV envelope (Contract #6 §6.2)
@@ -990,7 +1061,7 @@ it emits:
 | Per-lens latency | `pipeline.LatencyRingBuffer` → `LatticeHeartbeater.LensLatencyProvider` | `health.refractor.<instance>` heartbeat — inline `metrics.lensLatency` (keyed by `canonicalName`) | p95 / p99 / mean / count of per-event projection latency (NFR-P3 instrument). |
 | Instance heartbeat | `LatticeHeartbeater` | `health.refractor.<instance>` | 10s heartbeat with TTL purge (NFR-O1). |
 | **Capability-Lens liveness alert** | `LatticeHeartbeater.CapabilityLensProvider` → threshold eval | `health.refractor.<instance>` — `metrics.capabilityLens.<canonicalName>` `{status, consumerLag, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded/unhealthy `status` when anomalous | A **paused** capability lens raises `CapabilityLensPaused` (`severity: error` ⇒ `status: unhealthy`): the authz read-model is frozen. An **active** lens with `consumerLag` over the threshold (default 100, deployment-overridable) raises `CapabilityLensLagging` (`severity: warning` ⇒ `status: degraded`) — **debounced**: it raises only after the lens stays over threshold for N consecutive heartbeats (default 3 ≈ 30s sustained) and clears once lag falls to/below a lower clear-threshold band, so a one-cycle spike does not flap. `rebuilding` and within-threshold are `ok`. The issue's `since` persists across heartbeats and the issue is dropped when it resolves. An actor-aggregate capability lens also carries its convergence sweep's verdicts here — `CapabilityCoverageDivergence`, `CapabilityRepairFailing`, `CapabilityRepairBlocked`, `CapabilityAuditUnverified`, `CapabilitySweepStalled` — where, unlike the business-lens family, a sustained streak escalates to `error` (⇒ `status: unhealthy`): a wrong auth-plane row is a live permission set the graph no longer grants. `CapabilityRepairBlocked` names a divergence the §6.2 ordering guard refused to let the sweep repair (the write returned success having changed nothing, so `RepairFailing` stays silent), and `CapabilityAuditUnverified` an anchor the sweep could reach no verdict on at all. Read-only — it observes the lens reporter + supervised consumer; no authz path, Core KV, or projection is touched. |
-| **Per-lens projection liveness (all lenses)** | `Pipeline.Progress()` (in-process `lastAppliedSeq`/`lastProjectedAt`) → `health.Reporter.SetProjectionProgress` (5s cycle) → `LatticeHeartbeater.LensProvider` → threshold eval | `<lensId>` entry — `lastProjectedAt`/`projectionLag`; `health.refractor.<instance>` — `metrics.lensLiveness.<canonicalName>` `{status, projectionLag, lastProjectedAt, alert, unreadable}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded `status` when anomalous | The generalized sibling of the Capability-Lens backstop above, widened to **every** non-auth-plane (business) lens (lens-projection-liveness-design.md). `lastProjectedAt` (advances only on a real target write, so a caught-up-but-no-op consumer leaves it frozen even while `lastAppliedSeq` moves) gives an operator a real freshness clock; the same raise-after-N / clear-band debounce as the cap path auto-alerts a wedged consumer via `LensProjectionLagging`, and a paused business lens raises `LensProjectionPaused` — both `severity: warning` (⇒ `status: degraded`), **never** `error`/`unhealthy`: a single frozen business lens is a real outage for that vertical but must not fail the whole Refractor instance. A lens whose liveness inputs cannot be read is reported `status: "unknown"` / `alert: "unreadable"` with `projectionLag: null` and raises `LensProjectionUnreadable`, never dropped from the map — an absent lens is indistinguishable from one that was never installed. An actor-aggregate business lens also carries its convergence sweep's verdicts here — `LensCoverageDivergence`, `LensRepairFailing`, `LensRepairBlocked`, `LensAuditUnverified`, `LensSweepStalled` — mirroring the `Capability*` sweep codes but **always `severity: warning`**, at every streak length, for the same reason pause and lag are. Auth-plane lenses are excluded (the Capability-Lens path above stays canonical for them) — separate debounce/issue and sweep-staleness state, zero regression surface on that security-critical path. |
+| **Per-lens projection liveness (all lenses)** | `Pipeline.Progress()` (in-process `lastAppliedSeq`/`lastProjectedAt`) → `health.Reporter.SetProjectionProgress` (5s cycle) → `LatticeHeartbeater.LensProvider` → threshold eval | `<lensId>` entry — `lastProjectedAt`/`projectionLag`; `health.refractor.<instance>` — `metrics.lensLiveness.<canonicalName>` `{status, projectionLag, lastProjectedAt, alert, unreadable}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded `status` when anomalous | The generalized sibling of the Capability-Lens backstop above, widened to **every** non-auth-plane (business) lens (lens-projection-liveness-design.md). `lastProjectedAt` (advances only on a real target write, so a caught-up-but-no-op consumer leaves it frozen even while `lastAppliedSeq` moves) gives an operator a real freshness clock; the same raise-after-N / clear-band debounce as the cap path auto-alerts a wedged consumer via `LensProjectionLagging`, and a paused business lens raises `LensProjectionPaused` — both `severity: warning` (⇒ `status: degraded`), **never** `error`/`unhealthy`: a single frozen business lens is a real outage for that vertical but must not fail the whole Refractor instance. A lens whose liveness inputs cannot be read is reported `status: "unknown"` / `alert: "unreadable"` with `projectionLag: null` and raises `LensProjectionUnreadable`, never dropped from the map — an absent lens is indistinguishable from one that was never installed. An actor-aggregate business lens also carries its convergence sweep's verdicts here — `LensCoverageDivergence`, `LensRepairFailing`, `LensRepairBlocked`, `LensAuditUnverified`, `LensSweepStalled` — mirroring the `Capability*` sweep codes but **always `severity: warning`**, at every streak length, for the same reason pause and lag are. Auth-plane lenses are excluded (the Capability-Lens path above stays canonical for them) — separate debounce/issue and sweep-staleness state, zero regression surface on that security-critical path. An enrolled **plain** lens carries a second, independent detector here: the divergence audit's `LensProjectionDiverged` (the recomputation disagrees with the stored row, per-class in `divergentRows`, and **nothing was repaired** — the audit never writes) and `LensAuditStalled` (the audit itself has stopped reaching verdicts), both `warning`. `auditEnrolled`/`auditRefusal` are published for every lens, so a lens with no correctness detector is visible rather than reading like one that keeps finding nothing. |
 | Eval-drift retries/requeues | `pipeline.executeFullForActor` → `Reporter.RecordEvalDriftRetry` / `RecordEvalDriftRequeue` | `<lensId>` entry — `evalDriftRetries`/`evalDriftRequeues` | Footprint-validation counters (evaluation-consistency-design.md §4.6/§13.3): only an auth-plane actor-aggregate lens whose cypher emits a multi-binding conjunct unit pays this cost — a single-binding auth-plane lens (e.g. `capabilityRoles`) is exempt by construction and never attempts a drift-retry on its own legitimate churn. `evalDriftRetries` counts an inline re-execution the drift-detection triggered; `evalDriftRequeues` counts an evaluation whose read surface still diverged after that retry and was requeued as `failure.ErrEvalDrift` rather than landing a possibly-torn row. Both are cumulative and expected to stay near zero — a nonzero rate under sustained load is the signal that sizes Fire 2's per-row footprint scope. |
 | Audit | `health.AuditWriter` | `lattice.refractor.audit.<lensId>` | Per-projection audit append. |
 

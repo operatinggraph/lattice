@@ -120,7 +120,18 @@ const (
 //     there is no fault to chase, not because it is more benign.
 //   - sweep-stalled: the detector itself is not running, so every value below
 //     is stale by construction.
+//   - audit-stalled: the OTHER detector is not running. One rank quieter than
+//     sweep-stalled for one reason only — the sweep both detects and repairs, so
+//     its silence stops repairs as well as verdicts, while the audit is
+//     read-only and its silence costs verdicts alone. Still above everything
+//     below it, for sweep-stalled's own reason: a halted detector makes every
+//     quieter value stale by construction.
 //   - unverified: the detector ran and could reach no conclusion.
+//   - diverged: the audit ran, reached a conclusion, and the conclusion is that
+//     the read model is WRONG. Below unverified deliberately: a divergence is a
+//     bounded, named fact an operator can act on with the reproject RPC, while
+//     an unverified anchor means the detector does not know what it is looking
+//     at — and an unknown of unknown size outranks a known of known size.
 //   - lagging: the read model is merely behind, and will catch up.
 //   - structural-pause-auto-recovered: the quietest token, and the only one
 //     that describes a lens which is fine RIGHT NOW — it reports a window that
@@ -130,13 +141,15 @@ const (
 // Nothing displaced is lost: each condition raises its own issue, and the
 // underlying counters travel in the same metrics map.
 var alertRank = map[string]int{
-	"secure-redaction":                9,
-	"paused":                          8,
-	"unreadable":                      7,
-	"repair-failing":                  6,
-	"repair-blocked":                  5,
-	"sweep-stalled":                   4,
-	"unverified":                      3,
+	"secure-redaction":                11,
+	"paused":                          10,
+	"unreadable":                      9,
+	"repair-failing":                  8,
+	"repair-blocked":                  7,
+	"sweep-stalled":                   6,
+	"audit-stalled":                   5,
+	"unverified":                      4,
+	"diverged":                        3,
 	"lagging":                         2,
 	"structural-pause-auto-recovered": 1,
 	"ok":                              0,
@@ -255,6 +268,25 @@ const (
 	issueLensSweepStalled       = "LensSweepStalled"
 	issueLensAuditUnverified    = "LensAuditUnverified"
 	issueLensRepairBlocked      = "LensRepairBlocked"
+	// The divergence audit's two codes (lens-projection-divergence-audit-
+	// design.md §4.3). They are NOT the sweep's codes reused: every code above
+	// is inferred from what a repair managed to WRITE, while these two come from
+	// a detector that writes nothing at all, so a lens can carry one family
+	// silent and the other loud — and which one it is, is the finding.
+	//
+	// issueLensProjectionDiverged says the projection disagrees with the graph
+	// and NOTHING has been done about it. That is deliberate: the audit detects
+	// and reports, and repair on a shared, unguarded plain target was rejected
+	// (§8.1) precisely because coupling this detector to a writer would rebuild
+	// the structure whose collapse produced the twelve-day silence. The
+	// remediation is the operator's control-plane reproject RPC or Rebuild.
+	issueLensProjectionDiverged = "LensProjectionDiverged"
+	// issueLensAuditStalled is the audit's own liveness, and it covers exactly
+	// the blind spot the code above has: every audit counter describes the last
+	// pass, so an audit that stops passing republishes its final clean verdict
+	// forever. A refused lens never raises it — it has no cadence to be late
+	// against, and "not audited" must not read as "audited and late".
+	issueLensAuditStalled = "LensAuditStalled"
 	// issueLensStructuralPauseAutoRecovered is raised when a business lens
 	// cleared a structural pause on its own — its probe re-verified the condition
 	// and the consumer resumed with nobody involved. It and its auth-plane
@@ -364,6 +396,27 @@ type CapabilityLensStatus struct {
 	SweepSuppression   string
 	SweepSuppressionAt time.Time
 	SweepInterval      time.Duration
+	// The divergence audit's verdicts. An auth-plane lens cannot enrol today —
+	// every one is actor-aggregate (the audit refuses those to the sweep) or
+	// targets a store that cannot read a row back — so in practice this path
+	// carries AuditEnrolled=false plus the reason, which is the whole point of
+	// carrying it: the GrantTable producers and the Protected secure lens must
+	// read as REFUSED rather than as absent, or "not audited" is
+	// indistinguishable from "audited, clean".
+	AuditEnrolled         bool
+	AuditRefusal          string
+	Audited               int
+	DivergentRows         map[string]int
+	DivergentTotal        int
+	AuditUnverified       int
+	AuditLastUnverified   string
+	AuditLastPassAt       time.Time
+	AuditCycleCompletedAt time.Time
+	AuditCoverageBasis    string
+	AuditListingSize      int
+	AuditSuppression      string
+	AuditSuppressionAt    time.Time
+	AuditInterval         time.Duration
 	// RebuildOutstanding is the rebuild's most recent un-drained count and
 	// RebuildProgressAt when that count last DECREASED. A rebuild suppresses the
 	// sweep, so while one runs the sweep's silence is explained and the stall
@@ -435,6 +488,53 @@ type LensLivenessStatus struct {
 	SweepSuppression      string
 	SweepSuppressionAt    time.Time
 	SweepInterval         time.Duration
+	// The divergence audit's verdicts — the plain corpus's FIRST per-row
+	// correctness signal (lens-projection-divergence-audit-design.md §4.3).
+	// They answer what neither the liveness fields nor the sweep fields can for
+	// a plain lens: the liveness plane says whether the lens is still moving,
+	// the sweep is never installed here at all, and nothing says whether what
+	// the lens already wrote is still TRUE.
+	//
+	// AuditEnrolled is the install-time verdict and AuditRefusal the reason
+	// behind a false one; a refused lens publishes nothing else and can never
+	// read as audit-stalled, because "not audited" must stay distinguishable
+	// from "audited, clean".
+	AuditEnrolled bool
+	AuditRefusal  string
+	// Audited counts ANCHORS the last pass concluded about; DivergentRows and
+	// DivergentTotal count ROWS. DivergentRows carries only the classes that
+	// actually fired (missing / stale / retained), so a direction that has
+	// silently stopped detecting reads as ABSENT rather than as zero.
+	Audited        int
+	DivergentRows  map[string]int
+	DivergentTotal int
+	// AuditUnverified is how many anchors the last pass could conclude nothing
+	// about, and AuditLastUnverified the governing reason. Named apart from the
+	// sweep's SweepUnverified deliberately: they are two detectors' verdicts
+	// about different anchors, and one field for both would let either erase
+	// the other's finding.
+	AuditUnverified     int
+	AuditLastUnverified string
+	// AuditLastPassAt is the audit's liveness clock and AuditInterval its
+	// cadence — zero for a refused lens, which is what gates the staleness
+	// evaluation off. AuditCycleCompletedAt is the coverage claim: a pass
+	// covers at most one batch, so DivergentTotal == 0 says nothing about the
+	// whole lens until a cycle has closed over it. AuditListingSize is how many
+	// anchor keys the type filter matched, so a pathologically large anchor
+	// type is visible rather than merely expensive, and AuditCoverageBasis
+	// names how they were enumerated — the audit's under-coverage boundary,
+	// published rather than assumed away.
+	AuditLastPassAt       time.Time
+	AuditCycleCompletedAt time.Time
+	AuditCoverageBasis    string
+	AuditListingSize      int
+	// AuditSuppression names why the most recent tick verified nothing ("" when
+	// it ran) and AuditSuppressionAt when that was recorded — the timestamp is
+	// what separates an audit held suppressed from one wedged inside a tick,
+	// since both keep publishing the same reason.
+	AuditSuppression   string
+	AuditSuppressionAt time.Time
+	AuditInterval      time.Duration
 	// SecureRedactions is the cumulative count of secure-column values this
 	// lens projected as null because it could not resolve them (fork F2). It
 	// answers what no liveness field can: the lens is active, caught up and
@@ -657,6 +757,12 @@ type LatticeHeartbeater struct {
 	// set, so one shared map would have each path evicting the other's
 	// staleness baselines every cycle and neither lens ever reading stalled.
 	lensSweepBase map[string]time.Time
+	// lensAuditBase is the divergence audit's staleness baseline, separate from
+	// lensSweepBase for a reason the two-map split above does not cover: the two
+	// detectors run on DIFFERENT cadences (15 minutes against 5), so one shared
+	// baseline would have whichever ran last excuse the other's silence — and
+	// the audit's whole subject is a detector that has stopped without saying so.
+	lensAuditBase map[string]time.Time
 
 	// registryIssueMu guards openRegistryIssueSince — its own SEPARATE
 	// since-persistence state (not folded into openLensIssues, which
@@ -1116,6 +1222,13 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 		} else {
 			entryMetric["consumerLag"] = s.ConsumerLag
 		}
+		// The divergence audit is PUBLISHED here and evaluated nowhere: no
+		// auth-plane lens can enrol (every one is actor-aggregate, which the
+		// audit refuses to the sweep, or targets a store that cannot read a row
+		// back), so an issue code on this path would be one nothing can raise.
+		// The refusal itself still has to be readable — the GrantTable producers
+		// and the Protected secure lens must show as REFUSED rather than absent.
+		addAuditMetrics(entryMetric, s.audit())
 		metric[name] = entryMetric
 	}
 	h.pruneLagState(seen)
@@ -1403,6 +1516,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	metric := make(map[string]map[string]any, len(snaps))
 	var paused, lagging, unreadable, blocked, unverified []string
 	var diverging, unrepaired, stalled, redacting, recovered []string
+	var diverged, auditStalled []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
@@ -1414,6 +1528,12 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		// losing it to a fault in observing something else would leave the lens
 		// looking merely unobserved.
 		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled, &blocked, &unverified)
+		// The divergence audit's verdicts are read here for the same reason and
+		// on the same terms: they come from the in-process auditor, not from the
+		// health entry, so they stay valid across an unreadable one. A row the
+		// audit has PROVEN wrong must not be lost to a fault observing something
+		// else — the audit writes nothing, so nothing else will find it again.
+		sweepAlert = raiseAlert(sweepAlert, h.evalLensAudit(name, now, s, &diverged, &auditStalled))
 		if s.Unreadable != "" {
 			// The reporter-derived inputs (status, pause reason, projection lag)
 			// are the untrusted ones, so their thresholds are skipped rather
@@ -1449,6 +1569,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 				m["secureRedactions"] = s.SecureRedactions
 			}
 			addLensSweepMetrics(m, s)
+			addAuditMetrics(m, s.audit())
 			metric[name] = m
 			continue
 		}
@@ -1484,6 +1605,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			m["secureRedactions"] = s.SecureRedactions
 		}
 		addLensSweepMetrics(m, s)
+		addAuditMetrics(m, s.audit())
 		metric[name] = m
 	}
 	h.pruneLensLagState(seen)
@@ -1561,6 +1683,22 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			severity: "warning",
 			message: "convergence sweep has reached no verdict for longer than its staleness window, so every verdict above describes a pass that is no longer happening: " +
 				strings.Join(stalled, ", "),
+		}
+	}
+	if len(diverged) > 0 {
+		active[issueLensProjectionDiverged] = capIssue{
+			severity: "warning",
+			message: "the divergence audit recomputed a lens's rows from the graph and the read model disagrees. NOTHING has been " +
+				"repaired: the audit detects and never writes, so the row stays wrong until an operator reprojects or rebuilds the " +
+				"lens. Read divergentTotal against auditCycleCompletedAt — a pass covers one batch, so a clean sibling number is a " +
+				"claim about those anchors, not about the lens: " + strings.Join(diverged, ", "),
+		}
+	}
+	if len(auditStalled) > 0 {
+		active[issueLensAuditStalled] = capIssue{
+			severity: "warning",
+			message: "the divergence audit has reached no verdict for longer than its staleness window, so every audit field above " +
+				"describes a pass that is no longer happening — including a clean one: " + strings.Join(auditStalled, ", "),
 		}
 	}
 	return metric, h.reconcileLensIssues(active, now)
@@ -1797,6 +1935,248 @@ func (h *LatticeHeartbeater) evalLensSweep(
 	return raiseAlert(alert, "sweep-stalled")
 }
 
+// auditSnapshot is one lens's divergence-audit state, lifted off whichever
+// status struct carries it so the publication and evaluation below are written
+// once rather than per plane. It mirrors structuralRecovery's accessor pattern
+// for the same reason: the two status structs are deliberately separate, and the
+// logic reading them must not be.
+type auditSnapshot struct {
+	enrolled         bool
+	refusal          string
+	audited          int
+	divergent        map[string]int
+	divergentTotal   int
+	unverified       int
+	lastUnverified   string
+	lastPassAt       time.Time
+	cycleCompletedAt time.Time
+	coverageBasis    string
+	listingSize      int
+	suppression      string
+	suppressionAt    time.Time
+	interval         time.Duration
+}
+
+func (s LensLivenessStatus) audit() auditSnapshot {
+	return auditSnapshot{
+		enrolled: s.AuditEnrolled, refusal: s.AuditRefusal,
+		audited: s.Audited, divergent: s.DivergentRows, divergentTotal: s.DivergentTotal,
+		unverified: s.AuditUnverified, lastUnverified: s.AuditLastUnverified,
+		lastPassAt: s.AuditLastPassAt, cycleCompletedAt: s.AuditCycleCompletedAt,
+		coverageBasis: s.AuditCoverageBasis, listingSize: s.AuditListingSize,
+		suppression: s.AuditSuppression, suppressionAt: s.AuditSuppressionAt,
+		interval: s.AuditInterval,
+	}
+}
+
+func (s CapabilityLensStatus) audit() auditSnapshot {
+	return auditSnapshot{
+		enrolled: s.AuditEnrolled, refusal: s.AuditRefusal,
+		audited: s.Audited, divergent: s.DivergentRows, divergentTotal: s.DivergentTotal,
+		unverified: s.AuditUnverified, lastUnverified: s.AuditLastUnverified,
+		lastPassAt: s.AuditLastPassAt, cycleCompletedAt: s.AuditCycleCompletedAt,
+		coverageBasis: s.AuditCoverageBasis, listingSize: s.AuditListingSize,
+		suppression: s.AuditSuppression, suppressionAt: s.AuditSuppressionAt,
+		interval: s.AuditInterval,
+	}
+}
+
+// addAuditMetrics publishes the divergence audit's own state alongside the
+// lens's liveness.
+//
+// `auditEnrolled` is published for EVERY lens, enrolled or not, and the refusal
+// beside it. That is the field the whole enrolment gate exists to produce: a
+// lens quietly running without its only per-row correctness detector reads
+// exactly like a lens whose audit keeps finding nothing, and the audit's own
+// coverage would then shrink silently as lens shapes evolve.
+//
+// The audit's unverified count is published as `auditUnverified`, NOT as the
+// `unverified` the sweep already owns in this same map. They are two detectors'
+// verdicts about different anchors, and one key for both would let either erase
+// the other's finding.
+func addAuditMetrics(m map[string]any, a auditSnapshot) {
+	m["auditEnrolled"] = a.enrolled
+	if !a.enrolled {
+		if a.refusal != "" {
+			m["auditRefusal"] = a.refusal
+		}
+		return
+	}
+	lastPassAt := ""
+	if !a.lastPassAt.IsZero() {
+		lastPassAt = substrate.FormatTimestamp(a.lastPassAt)
+	}
+	cycleCompletedAt := ""
+	if !a.cycleCompletedAt.IsZero() {
+		cycleCompletedAt = substrate.FormatTimestamp(a.cycleCompletedAt)
+	}
+	m["audited"] = a.audited
+	// The map is published even when empty, and carries only the classes that
+	// FIRED. An always-present zero per class would make a direction that has
+	// silently stopped detecting indistinguishable from one with nothing to
+	// find; the total beside it is the single number a first glance keys on.
+	//
+	// An empty verdict renders as `{}`, never as `null`: in this document a null
+	// means "could not be read" (consumerLag says so explicitly), and a pass
+	// that found nothing read everything it was asked to.
+	divergent := a.divergent
+	if divergent == nil {
+		divergent = map[string]int{}
+	}
+	m["divergentRows"] = divergent
+	m["divergentTotal"] = a.divergentTotal
+	m["auditUnverified"] = a.unverified
+	m["auditLastPassAt"] = lastPassAt
+	m["auditCycleCompletedAt"] = cycleCompletedAt
+	m["auditCoverageBasis"] = a.coverageBasis
+	m["auditListingSize"] = a.listingSize
+	m["auditSuppression"] = a.suppression
+	if a.lastUnverified != "" {
+		m["auditUnverifiedReason"] = a.lastUnverified
+	}
+}
+
+// evalLensAudit collects one business lens's divergence-audit verdicts into the
+// caller's detail lists and returns the alert this lens's audit argues for
+// ("audit-stalled", "unverified", "diverged", or "" for none) — the caller merges
+// it against the other alerts through raiseAlert.
+//
+// A REFUSED lens returns "" immediately and reaches none of the branches below.
+// That is the enrolment gate's whole point carried through to the alert plane: a
+// lens with no audit must never read as one whose audit ran, whether the reading
+// is "clean" or "late".
+//
+// Severity is the caller's, and it is `warning` at every magnitude — never
+// error. The audit runs only on business lenses, and a single business lens's
+// read model, however wrong, degrades the instance rather than failing it
+// (docs/components/refractor.md's standing rule). The escalation the sweep's
+// AUTH-PLANE sibling carries is deliberately not inherited: the audit has no
+// auth-plane lens to escalate for.
+func (h *LatticeHeartbeater) evalLensAudit(
+	name string,
+	now time.Time,
+	s LensLivenessStatus,
+	diverged, auditStalled *[]string,
+) string {
+	a := s.audit()
+	if !a.enrolled {
+		return ""
+	}
+	alert := ""
+	if a.divergentTotal > 0 {
+		*diverged = append(*diverged, fmt.Sprintf("%s (%d divergent row(s) %s across %d audited anchor(s))",
+			name, a.divergentTotal, divergenceClassSummary(a.divergent), a.audited))
+		alert = raiseAlert(alert, "diverged")
+	}
+	if a.unverified > 0 {
+		// The audit's unverified anchors raise the `unverified` ALERT token but
+		// no issue of their own: the sweep owns LensAuditUnverified, and one code
+		// written by two independent detectors would be two `since` clocks
+		// disagreeing about when the condition began. The count and the governing
+		// reason travel in the metrics map beside it.
+		alert = raiseAlert(alert, "unverified")
+	}
+
+	stallCycles := h.CapabilitySweepStallCycles
+	if stallCycles == 0 {
+		stallCycles = defaultCapabilitySweepStallCycles
+	}
+	stallAfter := time.Duration(stallCycles) * a.interval
+	switch {
+	case a.interval <= 0 || stallAfter <= 0:
+		// No cadence to be late against.
+		return alert
+	case s.Status == StatusPaused:
+		// Suppression while paused is deliberate and indefinite, and the pause
+		// is already an issue of its own. Rebasing also stops a resumed lens
+		// starting out stalled for the length of its pause.
+		h.rebaseLensAuditClock(name, now)
+		return alert
+	}
+	stalledFor, isStalled := h.evalLensAuditStall(name, now, a.lastPassAt, stallAfter)
+	if !isStalled {
+		return alert
+	}
+	detail := fmt.Sprintf("%s (no verdict for %s", name, stalledFor.Round(time.Second))
+	// A reason recorded more than a couple of intervals ago describes an earlier
+	// tick — the audit is wedged, not suppressed.
+	explained := a.suppression != "" &&
+		now.Sub(a.suppressionAt) <= time.Duration(capabilitySweepSuppressionFreshnessCycles)*a.interval
+	if explained {
+		detail += ", suppressed: " + a.suppression
+	} else {
+		detail += ", no suppression recorded — the audit is not ticking"
+	}
+	*auditStalled = append(*auditStalled, detail+")")
+	return raiseAlert(alert, "audit-stalled")
+}
+
+// divergenceClassSummary renders the per-class breakdown in a stable order, so
+// the issue text names WHICH direction diverged rather than only how much. The
+// order is fixed rather than map order for the reason governingReasonLocked
+// sorts its own output: a message that reshuffles every cycle reads as a
+// changing condition.
+func divergenceClassSummary(classes map[string]int) string {
+	if len(classes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(classes))
+	for _, class := range []string{"missing", "stale", "retained"} {
+		if n, ok := classes[class]; ok {
+			parts = append(parts, fmt.Sprintf("%s=%d", class, n))
+		}
+	}
+	// A class this list does not name is still reported rather than dropped —
+	// an unrendered class would be a divergence counted into the total with
+	// nothing saying what it was.
+	var extra []string
+	for class, n := range classes {
+		switch class {
+		case "missing", "stale", "retained":
+		default:
+			extra = append(extra, fmt.Sprintf("%s=%d", class, n))
+		}
+	}
+	sort.Strings(extra)
+	parts = append(parts, extra...)
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// lensAuditClockBase / rebaseLensAuditClock / evalLensAuditStall are the
+// divergence audit's staleness clock, the exact shape the sweep's own trio
+// takes and over its own map: the two detectors tick on different cadences, so
+// a shared baseline would have whichever ran last excuse the other's silence.
+func (h *LatticeHeartbeater) lensAuditClockBase(name string, now time.Time) time.Time {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	if h.lensAuditBase == nil {
+		h.lensAuditBase = map[string]time.Time{}
+	}
+	if base, ok := h.lensAuditBase[name]; ok {
+		return base
+	}
+	h.lensAuditBase[name] = now
+	return now
+}
+
+func (h *LatticeHeartbeater) rebaseLensAuditClock(name string, now time.Time) {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	if h.lensAuditBase == nil {
+		h.lensAuditBase = map[string]time.Time{}
+	}
+	h.lensAuditBase[name] = now
+}
+
+func (h *LatticeHeartbeater) evalLensAuditStall(name string, now, lastPassAt time.Time, stallAfter time.Duration) (time.Duration, bool) {
+	since := h.lensAuditClockBase(name, now)
+	if lastPassAt.After(since) {
+		since = lastPassAt
+	}
+	elapsed := now.Sub(since)
+	return elapsed, elapsed > stallAfter
+}
+
 // evalRegistryReconciliation surfaces the RegistryReconciliationProvider's
 // latest snapshot as a LensRegistryIncomplete issue (§4 Fire B step 2).
 // Severity error (⇒ unhealthy, not just degraded): an incomplete registry
@@ -1920,6 +2300,11 @@ func (h *LatticeHeartbeater) pruneLensLagState(seen map[string]struct{}) {
 	for name := range h.lensSweepBase {
 		if _, ok := seen[name]; !ok {
 			delete(h.lensSweepBase, name)
+		}
+	}
+	for name := range h.lensAuditBase {
+		if _, ok := seen[name]; !ok {
+			delete(h.lensAuditBase, name)
 		}
 	}
 }

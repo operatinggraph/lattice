@@ -461,6 +461,12 @@ type Pipeline struct {
 	// convergence, and operation-aggregate lenses structurally.
 	sweeper *Sweeper
 
+	// auditor is the plain-lens divergence audit, installed via InstallAudit
+	// and driven by RunAudit. Nil until InstallAudit has run; non-nil and
+	// carrying Enrolled=false for a lens the enrolment conjuncts REFUSED, so
+	// the refusal is a published verdict rather than an absence.
+	auditor *Auditor
+
 	// Supervised runtime. The supervisor hosts the pump skeleton (restore →
 	// pump → classify → pause/probe/resume); the pipeline supplies the handler
 	// + Classify + Probe + HealthSink policy. Configured via RunOn before Run.

@@ -14,8 +14,11 @@ import (
 // reviewer has to read every branch in order to learn it, and a branch inserted
 // in the wrong place changes the policy silently.
 func TestAlertRank_TotalOrder(t *testing.T) {
-	// Worst first. Each neighbour pair is asserted, so the whole chain is
-	// pinned without asserting every combination.
+	// Worst first, as ONE ordered list. Each neighbour pair is asserted, so the
+	// whole chain is pinned without asserting every combination — and the list
+	// is then checked for completeness against the live table, so a token added
+	// to alertRank without a decision about where it belongs fails here by name
+	// instead of landing at whatever rank its author happened to type.
 	order := []string{
 		// A read model that is CONFIDENTLY wrong outranks one that is merely
 		// frozen: a paused lens misleads nobody, a null indistinguishable from a
@@ -26,7 +29,15 @@ func TestAlertRank_TotalOrder(t *testing.T) {
 		"repair-failing",
 		"repair-blocked",
 		"sweep-stalled",
+		// The audit's own halt, one rank quieter than the sweep's: the sweep
+		// both detects and repairs, so its silence stops repairs too, while the
+		// audit is read-only and its silence costs verdicts alone.
+		"audit-stalled",
 		"unverified",
+		// A named, bounded wrongness an operator can act on, below the unknown
+		// of unknown size that "unverified" is, and above a read model that is
+		// merely behind and will catch up on its own.
+		"diverged",
 		"lagging",
 		// The quietest token, and the only one that describes a lens which is
 		// fine right now: it reports a window that has already closed, so
@@ -39,6 +50,25 @@ func TestAlertRank_TotalOrder(t *testing.T) {
 		worse, better := order[i], order[i+1]
 		require.Greater(t, alertRank[worse], alertRank[better],
 			"%q must outrank %q", worse, better)
+	}
+
+	listed := make(map[string]bool, len(order))
+	for _, token := range order {
+		require.False(t, listed[token], "%q is listed twice, so the order it pins is ambiguous", token)
+		listed[token] = true
+		_, declared := alertRank[token]
+		require.True(t, declared, "%q is ordered here but absent from alertRank, so nothing raises it", token)
+	}
+	for token := range alertRank {
+		if token == "" {
+			// The empty token is "no alert", a synonym of ok rather than a rank
+			// of its own — it is deliberately not in the order.
+			continue
+		}
+		require.True(t, listed[token],
+			"alertRank declares %q but this order does not place it. Decide where it belongs and add it: a token "+
+				"nobody ordered still competes for the single-valued field, and its rank is then whatever its "+
+				"author happened to type.", token)
 	}
 }
 

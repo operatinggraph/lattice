@@ -534,10 +534,10 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
     }
   },
   "issues": [
@@ -665,12 +665,91 @@ looking at, where blocked knows exactly) and *above* `lagging`. It is expected t
 across the current corpus — every shipped actor-aggregate lens arms zero-row retraction —
 and that is the point: the silence can no longer happen, not that it is happening.
 
+`LensProjectionDiverged` and `LensAuditStalled` come from a different detector, and the
+difference is the point. Every code above is inferred from what the convergence sweep
+managed to **write**; the **divergence audit** writes nothing at all
+(`lens-projection-divergence-audit-design.md` §4.3). It is the plain corpus's first per-row
+correctness signal: on a slow clock (`DefaultAuditInterval`, 15 minutes) it re-runs an
+enrolled plain lens's own seeded evaluation over a bounded batch of its anchors
+(`DefaultAuditBatch`, 10) and compares each result against the stored row, using the same
+`rowsEquivalent` definition of "same row" the sweep and `Reproject` use.
+
+`LensProjectionDiverged` is raised when it finds a disagreement, and it says so with the
+per-class breakdown in `divergentRows` — `missing` (the recomputation produces a row the
+target does not hold), `stale` (the target holds it and the content differs), `retained` (the
+target still holds a row for an anchor that no longer projects it, because its match stopped
+matching or the anchor was tombstoned and the retraction was lost). The map carries **only
+the classes that fired**, so a direction that has silently stopped detecting reads as absent
+rather than as zero; `divergentTotal` is the sum and the single number the alert keys on.
+Severity is `warning` at every magnitude — the audit runs only on business lenses, and a
+wrong business read model degrades the instance rather than failing it.
+
+**Nothing is repaired.** The audit detects and reports; repair on a shared, unguarded plain
+target was rejected (§8.1), so the row stays wrong until an operator drives the control-plane
+`reproject` RPC or a `Rebuild`. Read `divergentTotal` against `auditCycleCompletedAt` before
+concluding anything from a zero: one pass covers at most one batch, so a clean number is a
+claim about *those* anchors until a cycle has closed over the lens. `auditListingSize` is how
+many anchor keys the type filter matched (a pathologically large anchor type is visible
+rather than merely expensive), and `auditCoverageBasis` is always `"key-type"` — a real
+boundary, not a formality: the executor also admits a vertex whose *body* `class`/`label`
+equals the pattern label, and such an anchor is never enumerated and never audited. The
+result is under-coverage, never a wrong verdict, and publishing the basis is what keeps
+"audited clean" readable as the bounded claim it is.
+
+`auditEnrolled` is published for **every** lens, and `auditRefusal` beside a false one. The
+enrolment gate is fail-closed on six conjuncts (§4.4) and every one is re-checked at the top
+of every pass, not only at install — they are all mutable pipeline state, so a hot reload
+could otherwise leave a lens auditing under a shape it no longer has; a failed re-check
+self-suppresses with the reason instead. Most of the corpus refuses by design: an
+actor-aggregate lens is the sweep's, a Postgres or subject target cannot read a row back, a
+Secure Lens must not have plaintext re-derived by a background job outside a request context,
+and a query returning `$now` or `$projectedAt` would read divergent forever because a
+recomputation cannot reproduce either. A refused lens publishes its reason, raises no verdict,
+and can never read as audit-stalled — *not audited* must stay distinguishable from *audited,
+clean*.
+
+`LensAuditStalled` is the audit's own liveness, and covers the blind spot every audit field
+shares: they all describe the last pass, so an audit that stops passing republishes its final
+verdict — including a clean one — indefinitely. `auditLastPassAt` is the clock that
+contradicts it and `auditSuppression` names why the most recent tick verified nothing (a
+rebuild in flight, a paused lens, an unreadable health entry, or a failed enrolment
+re-check). It uses the sweep's own staleness rule scaled off the audit's cadence — **10 audit
+intervals**, ~2.5 hours at the default — and stays `warning` on the business path, naming a
+fresh suppression reason when one explains it and saying the audit is not ticking when none
+does. A paused lens is exempt and re-baselines the clock, exactly as the sweep's stall
+detector does.
+
+An anchor the audit could conclude nothing about is counted in `auditUnverified`, with the
+governing cause in `auditUnverifiedReason`, and it is counted as **neither clean nor
+divergent**. It raises the `unverified` alert but no issue of its own: `LensAuditUnverified`
+belongs to the sweep, and one code written by two independent detectors would be two `since`
+clocks disagreeing about when the condition began.
+
 **`alert` precedence**, worst first, is a single total order shared by both maps:
-`paused` > `unreadable` > `repair-failing` > `repair-blocked` > `sweep-stalled` >
-`unverified` > `lagging` > `ok`. The field is single-valued and several conditions can hold
-at once, so the order ships as a table with a test rather than as the call sequence of the
-branches that set it. Nothing displaced is lost: each condition raises its own issue and
-its underlying counters travel in the same metrics map.
+
+`secure-redaction` > `paused` > `unreadable` > `repair-failing` > `repair-blocked` >
+`sweep-stalled` > `audit-stalled` > `unverified` > `diverged` > `lagging` >
+`structural-pause-auto-recovered` > `ok`.
+
+The field is single-valued and several conditions can hold at once, so the order ships as a
+table with a test (`alertRank`, `TestAlertRank_TotalOrder`) rather than as the call sequence
+of the branches that set it. Nothing displaced is lost: each condition raises its own issue
+and its underlying counters travel in the same metrics map.
+
+The order reads as one argument. `secure-redaction` tops it because that read model is not
+stale or frozen but **confidently wrong** and being served that way — a null the reader
+cannot distinguish from a lawful erasure — where a frozen lens misleads nobody. Below it,
+`paused` and `unreadable` say that everything quieter is a claim made on suppressed or
+missing evidence. Then the two repair verdicts (a row that is wrong *now*, its repair
+errored or declined), then the two detector-halt verdicts — `sweep-stalled` above
+`audit-stalled` only because the sweep both detects and repairs, so its silence stops
+repairs too, while the audit is read-only. `unverified` (the detector ran and could conclude
+nothing) outranks `diverged` (it concluded, and the conclusion is a named, bounded
+wrongness an operator can act on): an unknown of unknown size beats a known of known size.
+`lagging` is a read model merely behind and catching up, and
+`structural-pause-auto-recovered` is the quietest token and the only one describing a lens
+that is fine *right now* — it reports a window that has already closed, so anything
+currently wrong displaces it.
 
 `CapabilitySweepStalled` watches the **detector's own liveness**, which is the blind spot
 every code above shares: each of them reports what the sweep's last completed pass found,

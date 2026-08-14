@@ -176,6 +176,22 @@ type Entry struct {
 	// sweep has healed for this lens. Healing is deliberately loud: a nonzero
 	// rate is itself the signal to go find the delivery gap it is papering over.
 	SweepReconciled uint64 `json:"sweepReconciled,omitempty"`
+	// AuditCursor is the plain-lens divergence audit's round-robin position —
+	// the last anchor vertex key its pass examined
+	// (lens-projection-divergence-audit-design.md §4.3). Like SweepCursor it
+	// lives on the existing health entry rather than in new state, so a redeploy
+	// resumes the walk; without it a cell that restarts more often than a cycle
+	// completes would re-audit the head forever and never reach the tail, while
+	// publishing a verdict that reads clean. "" for every lens that is not
+	// audited.
+	AuditCursor string `json:"auditCursor,omitempty"`
+	// AuditCycleCompletedAt is when the audit last reached the END of its anchor
+	// listing — RFC3339 UTC, "" before the first completed cycle. It is what a
+	// clean verdict is worth: one pass covers at most one batch, so
+	// `divergentRows: 0` says nothing about the whole lens until a cycle has
+	// closed over it. Restored at startup beside the cursor, so a redeploy does
+	// not silently retract a coverage claim the lens has already earned.
+	AuditCycleCompletedAt string `json:"auditCycleCompletedAt,omitempty"`
 	// EvalDriftRetries is the cumulative number of inline re-executions an
 	// auth-plane evaluation's footprint validation has triggered — a
 	// mid-evaluation write moved a key the evaluation read

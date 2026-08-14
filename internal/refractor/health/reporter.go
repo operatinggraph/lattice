@@ -141,6 +141,12 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		// not silently restart the walk or zero the counter the operator reads.
 		SweepCursor:     existing.SweepCursor,
 		SweepReconciled: existing.SweepReconciled,
+		// The divergence audit's cursor and last completed cycle carry forward
+		// for the same reason, and the cycle stamp is the sharper of the two: it
+		// is a COVERAGE CLAIM the lens already earned, so zeroing it on a
+		// pause/resume would retract a whole-lens verdict nothing re-derived.
+		AuditCursor:           existing.AuditCursor,
+		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
 		// Every CUMULATIVE fault counter carries forward for the same reason,
 		// and SecureRedactions is the one that made the omission load-bearing:
 		// a rebuild calls SetRebuilding on the way in and SetActive on the way
@@ -256,9 +262,11 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		// Preserved for the same reason as in SetActive: sweep progress and the
 		// cumulative fault counters are lens-lifetime state, not
 		// status-transition state.
-		SweepCursor:       existing.SweepCursor,
-		SweepReconciled:   existing.SweepReconciled,
-		SecureRedactions:  existing.SecureRedactions,
+		SweepCursor:           existing.SweepCursor,
+		SweepReconciled:       existing.SweepReconciled,
+		AuditCursor:           existing.AuditCursor,
+		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
+		SecureRedactions:      existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
@@ -337,9 +345,11 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		// Preserved for the same reason as in SetActive: sweep progress and the
 		// cumulative fault counters are lens-lifetime state, not
 		// status-transition state.
-		SweepCursor:       existing.SweepCursor,
-		SweepReconciled:   existing.SweepReconciled,
-		SecureRedactions:  existing.SecureRedactions,
+		SweepCursor:           existing.SweepCursor,
+		SweepReconciled:       existing.SweepReconciled,
+		AuditCursor:           existing.AuditCursor,
+		AuditCycleCompletedAt: existing.AuditCycleCompletedAt,
+		SecureRedactions:      existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
@@ -750,6 +760,36 @@ func (r *Reporter) SetSweepProgress(ctx context.Context, cursor string, reconcil
 	}
 	existing.SweepCursor = cursor
 	existing.SweepReconciled = reconciled
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// SetAuditProgress persists the plain-lens divergence audit's round-robin
+// cursor and the time its walk last completed a full cycle onto the lens's
+// existing health entry (lens-projection-divergence-audit-design.md §4.3).
+// Read-modify-write under the same writeMu as every other setter, so it cannot
+// lose an update to a concurrent RecordError. Called once per audit pass — and
+// it is the audit's ONLY write anywhere: nothing in the audit path touches the
+// lens's target, and nothing touches Core KV.
+//
+// A zero cycleCompletedAt leaves the stored value alone rather than clearing
+// it. The audit stamps that field only when a walk reaches the END of the anchor
+// listing, so writing a zero on every intermediate pass would erase the one
+// field that says what a clean verdict covers — the same rule
+// SetProjectionProgress states about its own timestamps.
+func (r *Reporter) SetAuditProgress(ctx context.Context, cursor string, cycleCompletedAt time.Time) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetAuditProgress read: %w", err)
+	}
+	existing.AuditCursor = cursor
+	if !cycleCompletedAt.IsZero() {
+		existing.AuditCycleCompletedAt = cycleCompletedAt.UTC().Format(time.RFC3339)
+	}
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)
