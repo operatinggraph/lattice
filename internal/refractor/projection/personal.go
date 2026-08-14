@@ -174,6 +174,12 @@ func personalEnvelopeFn(interestKV, capKV *substrate.KV, logger *slog.Logger) pi
 			if !ok {
 				return nil, nil, fmt.Errorf("projection: personal lens anchor %q is not a Contract #1 vertex key", anchorRaw)
 			}
+			// grant-change-posture: (subscribed) the cap-read producers carry
+			// the grant-change edge (IsReadGrantProducer wires the sink in
+			// InstallActorAggregate), so a grant landing or being withdrawn
+			// re-drives this actor's personal pipelines through
+			// Pipeline.ReprojectPersonalActor rather than waiting for an
+			// unrelated Core KV event to happen to re-ask this gate.
 			readable, err := capabilityread.IsReadable(context.Background(), capKV, actorType, actorID, anchorNanoID)
 			if err != nil {
 				return nil, nil, fmt.Errorf("projection: personal lens read-grant check for %q: %w", actorID, err)

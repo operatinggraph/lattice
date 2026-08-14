@@ -355,6 +355,17 @@ var (
 	derivedKeyCall  = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
 	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 
+	// grantChangePostureCall anchors an EXECUTABLE call site of the D1
+	// read-grant gate. The trailing "(" is what makes it a call: without it the
+	// pattern also matches the four doc comments that name the function in
+	// prose (internal/pkgmgr/anchorwalk.go, refractor/pipeline/evaluate.go,
+	// refractor/pipeline/actor_enumerator.go), which consume nothing.
+	grantChangePostureCall = regexp.MustCompile(`\bcapabilityread\.IsReadable\(`)
+	// grantChangePostureShape is the author's declaration of how THIS consumer
+	// learns that a grant it already admitted has changed. The capture is the
+	// justification a none-justified declaration owes.
+	grantChangePostureShape = regexp.MustCompile(`//\s*grant-change-posture:\s*\(([a-z-]+)\)(.*)$`)
+
 	// substrateConnectCall anchors a substrate.Connect( call in a cmd/** binary.
 	// maxReconnectsField is the ConnectOpts field that call must set — the
 	// omission this gate exists to catch: substrate.Connect only threads
@@ -873,6 +884,16 @@ func scanSource(path string, data []byte) []finding {
 	if derivedKeyScoped {
 		derivedKeyLines = strings.Split(string(data), "\n")
 	}
+	// grant-change-posture scope: every non-test .go file. Deliberately not
+	// narrowed to the package that holds today's single call site — the whole
+	// point is to bind the NEXT consumer of the D1 read-grant projection,
+	// wherever it is written. This file is excluded because its own self-test
+	// fixtures below carry the very call shape the gate denies.
+	grantChangeScoped := !isTest && !strings.HasPrefix(slash, "scripts/lint-")
+	var grantChangeLines []string
+	if grantChangeScoped {
+		grantChangeLines = strings.Split(string(data), "\n")
+	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
 	var exemptHelpers map[string]bool
@@ -945,6 +966,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if derivedKeyScoped {
 			out = append(out, checkDerivedKey(path, ln, derivedKeyLines)...)
+		}
+		if grantChangeScoped {
+			out = append(out, checkGrantChangePosture(path, ln, grantChangeLines)...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -1621,6 +1645,81 @@ func derivedKeyOnLine(line string) derivedKeyVerdict {
 	return reasonGiven
 }
 
+// grantChangePostureShapes are the declared ways a consumer of the D1
+// read-grant projection learns that a grant it already admitted has changed.
+//
+//   - subscribed: the consumer's pipeline carries the producer-side change edge
+//     (projection.IsReadGrantProducer wires it), so a transition re-drives it.
+//   - swept: a standing healer re-asks on its own cadence, so the staleness is
+//     bounded by a sweep cycle rather than by unrelated traffic.
+//   - none-justified: neither, and the author says why that is acceptable here.
+var grantChangePostureShapes = map[string]bool{
+	"subscribed":     true,
+	"swept":          true,
+	"none-justified": true,
+}
+
+// checkGrantChangePosture default-denies one executable call site of
+// capabilityread.IsReadable that does not declare how it learns a grant
+// changed (personal-lens-grant-change-trigger-design.md §10.1; BLOCKING).
+//
+// The bug it exists to prevent is the one that produced that design: the
+// Personal Lens gates every row on this projection, reads it live, and had no
+// change edge — so a revoked grant stayed honoured until some unrelated Core KV
+// event happened to re-drive the actor. That is invisible in review, because
+// the call site reads exactly the same whether or not anything re-asks it.
+//
+// Like every gate in this file it does not CLASSIFY — it makes the author
+// declare, and forgetting fails closed. It ships blocking rather than
+// warn-first, unlike the read-posture gate it borrows its mechanical shape
+// from: warn-first was right there because it met a corpus of existing debt,
+// and is wrong here because the census is exactly one site, so a warn over a
+// clean tree would be precisely the fingers-crossed state the gate ends.
+//
+// A `<why>` is required on every shape, not only none-justified: "subscribed"
+// with nothing after it does not say subscribed to WHAT, which is the fact the
+// next reader needs. That follows the shipped authcontext-target gate rather
+// than the design's looser schema sketch.
+func checkGrantChangePosture(path string, ln int, lines []string) []finding {
+	line := lines[ln-1]
+	if isCommentLine(line) || !grantChangePostureCall.MatchString(line) {
+		return nil
+	}
+	shape, why, declared := grantChangePosture(lines, ln-1)
+	if !declared {
+		return []finding{{file: path, line: ln,
+			msg: "grant-change-posture: undeclared capabilityread.IsReadable call site — this reads the D1 read-grant projection as a security decision, and that projection is written by a DIFFERENT pipeline with no change notification of its own. Declare how this site learns a grant changed: `// grant-change-posture: (subscribed) <which producer edge re-drives it>`, `(swept) <which standing healer re-asks>`, or `(none-justified) <why staleness is acceptable here>` (personal-lens-grant-change-trigger-design.md §10.1)"}}
+	}
+	if !grantChangePostureShapes[shape] {
+		return []finding{{file: path, line: ln,
+			msg: "grant-change-posture: unknown shape (" + shape + ") — the declared ways a consumer learns a grant changed are (subscribed), (swept), and (none-justified)"}}
+	}
+	if strings.TrimSpace(why) == "" {
+		return []finding{{file: path, line: ln,
+			msg: "grant-change-posture: (" + shape + ") declaration carries no `<why>` — name the mechanism (or the accepted staleness), so the next reader need not re-derive whether anything re-asks this gate"}}
+	}
+	return nil
+}
+
+// grantChangePosture looks for the annotation on line i, else on the contiguous
+// run of comment lines directly above it. A blank line or any code line ends the
+// run, so a declaration never reaches past the call it was written for.
+func grantChangePosture(lines []string, i int) (shape, why string, declared bool) {
+	if m := grantChangePostureShape.FindStringSubmatch(lines[i]); m != nil {
+		return m[1], m[2], true
+	}
+	for j := i - 1; j >= 0; j-- {
+		trimmed := strings.TrimSpace(lines[j])
+		if trimmed == "" || !strings.HasPrefix(trimmed, "//") {
+			return "", "", false
+		}
+		if m := grantChangePostureShape.FindStringSubmatch(lines[j]); m != nil {
+			return m[1], m[2], true
+		}
+	}
+	return "", "", false
+}
+
 // quoteBytes renders a byte slice as a comma-separated, single-quoted list
 // for a finding message, e.g. []byte("l0") -> "'l', '0'".
 func quoteBytes(bs []byte) string {
@@ -1943,6 +2042,48 @@ func selfTest() []string {
 				"\t\t_ = entry\n" +
 				"\t}\n" +
 				"}\n", ""},
+		// The grant-change-posture gate (personal-lens-grant-change-trigger-
+		// design.md §10.1). The census behind it is exactly one call site, so
+		// these fixtures are the only thing that keeps the deny path honest —
+		// a clean tree and a broken gate look identical.
+		{"an undeclared IsReadable call site is denied", "internal/refractor/projection/personal.go",
+			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a subscribed declaration above the call passes", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (subscribed) the cap-read producer's edge re-drives it\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"a swept declaration passes", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (swept) the personal convergence sweep re-asks\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"a none-justified declaration with a reason passes", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (none-justified) one-shot admin check, re-run per request\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n", ""},
+		{"an on-the-line declaration passes", "internal/refractor/projection/personal.go",
+			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor) // grant-change-posture: (subscribed) producer edge\n}\n", ""},
+		{"a declaration with no why is denied", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (subscribed)\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"carries no `<why>`"},
+		{"an unknown shape is denied", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (exempt) staff are trusted\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"unknown shape (exempt)"},
+		{"a declaration separated by a blank line covers nothing", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (subscribed) producer edge\n\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a declaration does NOT reach the next sibling call", "internal/refractor/projection/personal.go",
+			"func f() {\n\t// grant-change-posture: (subscribed) producer edge\n" +
+				"\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, a1)\n" +
+				"\tok2, err := capabilityread.IsReadable(ctx, capKV, at, aid, a2)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"prose naming the function is not a call site", "internal/refractor/projection/personal.go",
+			"// personalEnvelopeFn gates every row on capabilityread.IsReadable, the D1 boundary.\nfunc f() {}\n", ""},
+		{"the gate reaches a NEW consumer outside the refractor packages", "cmd/loupe/handlers.go",
+			"func f() {\n\tok, err := capabilityread.IsReadable(ctx, capKV, at, aid, anchor)\n}\n",
+			"undeclared capabilityread.IsReadable call site"},
+		{"a test file is out of scope", "internal/refractor/capabilityread/capabilityread_test.go",
+			"func TestX(t *testing.T) {\n\tok, err := capabilityread.IsReadable(ctx, kv, at, aid, anchor)\n}\n", ""},
 		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
 			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
 				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
@@ -1963,6 +2104,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "read-posture:") &&
 				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") &&
 				!strings.HasPrefix(fd.msg, "derived-key:") &&
+				!strings.HasPrefix(fd.msg, "grant-change-posture:") &&
 				!strings.HasPrefix(fd.msg, "max-reconnects:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") {
 				continue
