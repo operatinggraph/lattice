@@ -379,6 +379,413 @@ func TestDDLCache_LoadMetaVertex_SensitiveFalseWhenLive(t *testing.T) {
 	}
 }
 
+// TestDDLCache_Invalidate_OpMetaFailureLatchesDegraded covers the first of
+// Invalidate's two error returns: a root whose bytes no decoder can read fails
+// in the op-meta load, before the DDL load is ever reached. The cache has then
+// missed a durable commit, and Degraded is the only record of it — the caller
+// (step 8) has already committed and cannot retry.
+func TestDDLCache_Invalidate_OpMetaFailureLatchesDegraded(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if degraded, _, _, _ := cache.Degraded(); degraded {
+		t.Fatalf("a freshly refreshed cache must not be degraded")
+	}
+
+	key := "vtx.meta.Dd4Ee5Ff6Gg7Hh8Jj9Kk"
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":`)); err != nil {
+		t.Fatalf("seed unparseable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail on an unparseable op-meta root")
+	}
+
+	degraded, since, failedKey, err := cache.Degraded()
+	if !degraded {
+		t.Fatalf("a failed Invalidate must latch degraded")
+	}
+	if since.IsZero() {
+		t.Fatalf("degraded since = zero, want the moment of the failure")
+	}
+	if failedKey != key {
+		t.Fatalf("degraded key = %q, want %q", failedKey, key)
+	}
+	if err == nil {
+		t.Fatalf("degraded err = nil, want the invalidation failure")
+	}
+}
+
+// TestDDLCache_Invalidate_MetaVertexFailureLatchesDegraded covers Invalidate's
+// SECOND error return. The fixture is the one loadMetaVertex's own decoder
+// comment names: a non-string `class` decodes cleanly in the op-meta loader
+// (which never binds the field) and fails only in the DDL loader, so this
+// reaches the second return without tripping the first.
+func TestDDLCache_Invalidate_MetaVertexFailureLatchesDegraded(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	key := "vtx.meta.Mm1Nn2Pp3Qq4Rr5Ss6T"
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed root with a non-string class: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail on a meta-vertex root it cannot parse")
+	}
+
+	degraded, _, failedKey, err := cache.Degraded()
+	if !degraded {
+		t.Fatalf("a failed meta-vertex load must latch degraded")
+	}
+	if failedKey != key {
+		t.Fatalf("degraded key = %q, want %q", failedKey, key)
+	}
+	if err == nil {
+		t.Fatalf("degraded err = nil, want the invalidation failure")
+	}
+}
+
+// TestDDLCache_Invalidate_SuccessLeavesDegradedUnset is the positive vector for
+// the two tests above: the same Invalidate call shape, against a root that
+// loads, must leave the latch alone — proving they fail on the failure and not
+// merely on having called Invalidate at all.
+func TestDDLCache_Invalidate_SuccessLeavesDegradedUnset(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	key := "vtx.meta.healthyclass"
+	doc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{"canonicalName":"healthyclass","permittedCommands":["DoHealthy"]}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, doc); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if degraded, _, _, _ := cache.Degraded(); degraded {
+		t.Fatalf("a successful Invalidate must not latch degraded")
+	}
+}
+
+// TestDDLCache_Degraded_NeverClearsOnLaterSuccess pins the deliberate stickiness.
+// A later root's successful Invalidate proves Core KV answers again — it does
+// NOT load the root that was missed, whose canonicalName is exactly what the
+// cache still does not know — so trust in the whole projection is not restored
+// and the latch must survive it. Only a restart (a fresh Refresh) clears it.
+func TestDDLCache_Degraded_NeverClearsOnLaterSuccess(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	badKey := "vtx.meta.Uu7Vv8Ww9Xx1Yy2Zz3A"
+	if _, err := conn.KVPut(ctx, testCoreBucket, badKey, []byte(`{"class":`)); err != nil {
+		t.Fatalf("seed unparseable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, badKey); err == nil {
+		t.Fatalf("Invalidate must fail on an unparseable root")
+	}
+	_, sinceBefore, _, _ := cache.Degraded()
+
+	// An unrelated, healthy root invalidates successfully afterwards.
+	goodKey := "vtx.meta.laterclass"
+	doc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{"canonicalName":"laterclass","permittedCommands":["DoLater"]}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, goodKey, doc); err != nil {
+		t.Fatalf("seed later root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, goodKey); err != nil {
+		t.Fatalf("Invalidate (later, healthy root): %v", err)
+	}
+	if _, ok := cache.Lookup("laterclass"); !ok {
+		t.Fatalf("the later root must be served — the fixture never proved a success happened")
+	}
+
+	degraded, since, failedKey, _ := cache.Degraded()
+	if !degraded {
+		t.Fatalf("degraded must survive a later unrelated success")
+	}
+	if failedKey != badKey {
+		t.Fatalf("degraded key = %q, want the root that actually failed (%q)", failedKey, badKey)
+	}
+	if !since.Equal(sinceBefore) {
+		t.Fatalf("degraded since moved from %v to %v; the onset must not be re-dated", sinceBefore, since)
+	}
+}
+
+// TestDDLCache_Invalidate_NonMetaKeyLatchesDegraded covers Invalidate's third
+// error return. Step 8 filters on the `vtx.meta.>` prefix, so nothing reaches it
+// today; it latches for the same reason as the other two, so a future caller
+// with a wrong filter cannot reopen the silent divergence.
+func TestDDLCache_Invalidate_NonMetaKeyLatchesDegraded(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if err := cache.Invalidate(ctx, "vtx.identity."+testNanoID2); err == nil {
+		t.Fatalf("Invalidate must reject a non-meta key")
+	}
+	if degraded, _, _, _ := cache.Degraded(); !degraded {
+		t.Fatalf("a rejected invalidation must latch degraded")
+	}
+}
+
+// TestDDLCache_Invalidate_FailureFlagsPriorEntryStale is the UPDATE half of the
+// latch. A failing Invalidate returns before it touches byRoot, so the root's
+// prior entry keeps being served — under a canonicalName whose declaration Core
+// KV has already changed. The name is flagged so a consumer can tell that HIT
+// apart from a trustworthy one; every other name stays clean, which is what
+// keeps the fail-closed reaction narrow.
+func TestDDLCache_Invalidate_FailureFlagsPriorEntryStale(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+
+	key := "vtx.meta.staleclass"
+	live := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"staleclass","sensitive":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, live); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if cache.PossiblyStale("staleclass") {
+		t.Fatalf("a freshly refreshed entry must not be flagged stale")
+	}
+
+	// The root's next invalidation cannot be loaded.
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail on a root it cannot parse")
+	}
+
+	if ref, ok := cache.Lookup("staleclass"); !ok || ref.Sensitive {
+		t.Fatalf("the prior entry must survive the failure (ok=%v sensitive=%v) — that is why the name is flagged", ok, ref.Sensitive)
+	}
+	if !cache.PossiblyStale("staleclass") {
+		t.Fatalf("the failed root's canonicalName must be flagged possibly stale")
+	}
+	if cache.PossiblyStale("identity") {
+		t.Fatalf("an unrelated class must not be flagged by another root's failure")
+	}
+	if cache.PossiblyStale("") {
+		t.Fatalf("the empty name must never be flagged")
+	}
+}
+
+// TestDDLCache_Invalidate_FailureOnUnknownRootFlagsNothing is the complement: a
+// root the cache never held strands no entry, so the failure raises the latch —
+// the class it would have declared is now missing — without flagging any name as
+// stale.
+func TestDDLCache_Invalidate_FailureOnUnknownRootFlagsNothing(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	key := "vtx.meta.Ee5Ff6Gg7Hh8Jj9Kk1Mm"
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail")
+	}
+	if degraded, _, _, _ := cache.Degraded(); !degraded {
+		t.Fatalf("the latch must still be raised")
+	}
+	if cache.PossiblyStale("identity") {
+		t.Fatalf("a root with no prior entry must flag no canonicalName")
+	}
+}
+
+// TestDDLCache_Invalidate_FailuresAccumulateAcrossRoots: two roots failing must
+// leave BOTH names flagged. The guard depends on the recording sitting above
+// markDegraded's already-degraded early return, and a reorder would strand the
+// second root's entry with every other test still green.
+func TestDDLCache_Invalidate_FailuresAccumulateAcrossRoots(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+
+	rootA, rootB := "vtx.meta.accumfirst", "vtx.meta.accumsecond"
+	for _, seed := range []struct{ key, name string }{{rootA, "accumfirst"}, {rootB, "accumsecond"}} {
+		doc := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"` + seed.name + `","sensitive":false}}`)
+		if _, err := conn.KVPut(ctx, testCoreBucket, seed.key, doc); err != nil {
+			t.Fatalf("seed %s: %v", seed.key, err)
+		}
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	unreadable := []byte(`{"class":123,"isDeleted":false,"data":{}}`)
+	for _, root := range []string{rootA, rootB} {
+		if _, err := conn.KVPut(ctx, testCoreBucket, root, unreadable); err != nil {
+			t.Fatalf("seed unreadable %s: %v", root, err)
+		}
+		if err := cache.Invalidate(ctx, root); err == nil {
+			t.Fatalf("Invalidate %s must fail", root)
+		}
+	}
+
+	if !cache.PossiblyStale("accumfirst") {
+		t.Fatalf("the FIRST failure's name must stay flagged after a second failure")
+	}
+	if !cache.PossiblyStale("accumsecond") {
+		t.Fatalf("the second failure's name must be flagged too")
+	}
+}
+
+// TestDDLCache_Invalidate_SuccessClearsItsOwnStaleFlag: a root's own successful
+// reload proves its entry current again, so its stale flag is withdrawn — one
+// transient blip must not refuse that class's sensitive writes until a restart.
+// The process-wide latch is untouched: some OTHER root may still be unresolved,
+// and only a full Refresh can speak for the whole projection.
+func TestDDLCache_Invalidate_SuccessClearsItsOwnStaleFlag(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+
+	key := "vtx.meta.recoverclass"
+	live := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"recoverclass","sensitive":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, live); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail")
+	}
+	if !cache.PossiblyStale("recoverclass") {
+		t.Fatalf("the failed root's name must be flagged first — the fixture proves nothing otherwise")
+	}
+
+	// The same root loads on a later invalidation.
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, live); err != nil {
+		t.Fatalf("restore live root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err != nil {
+		t.Fatalf("Invalidate (recovered): %v", err)
+	}
+	if cache.PossiblyStale("recoverclass") {
+		t.Fatalf("the flag must clear once THIS root's own reload succeeded")
+	}
+	if degraded, _, _, _ := cache.Degraded(); !degraded {
+		t.Fatalf("the process-wide latch must stay set — only a Refresh can speak for the whole cache")
+	}
+}
+
+// TestDDLCache_Invalidate_SuccessClearsTheFlaggedNameAfterRename is why the flag
+// is keyed by ROOT. A root whose canonicalName changed between the failed and the
+// successful load must withdraw the name that was FLAGGED, not the one it now
+// serves — under name-keying the old name would stay refused forever, with
+// nothing left in the cache able to name it.
+func TestDDLCache_Invalidate_SuccessClearsTheFlaggedNameAfterRename(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+
+	// A NanoID root, the real install shape: the canonicalName comes from the
+	// document, so the rename is expressible (a shadow key would pin the name).
+	key := "vtx.meta.Ff6Gg7Hh8Jj9Kk1Mm2Nn"
+	before := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"oldname","sensitive":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, before); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail")
+	}
+	if !cache.PossiblyStale("oldname") {
+		t.Fatalf("the pre-failure name must be flagged")
+	}
+
+	after := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"newname","sensitive":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, after); err != nil {
+		t.Fatalf("seed renamed root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err != nil {
+		t.Fatalf("Invalidate (renamed): %v", err)
+	}
+	if cache.PossiblyStale("oldname") {
+		t.Fatalf("the flagged OLD name must be withdrawn by its own root's reload")
+	}
+	if cache.PossiblyStale("newname") {
+		t.Fatalf("the name the root now serves was never flagged")
+	}
+}
+
+// TestDDLCache_Refresh_ClearsDegradedLatch proves the field doc's own claim —
+// "the only event that re-establishes full trust is a fresh Refresh" — is
+// actually implemented, not just asserted in a comment. A full rescan that
+// loads every root cleanly is exactly the trust a degraded latch withholds.
+func TestDDLCache_Refresh_ClearsDegradedLatch(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+
+	key := "vtx.meta.refreshclears"
+	live := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"refreshclears","sensitive":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, live); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, []byte(`{"class":123,"isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed unreadable root: %v", err)
+	}
+	if err := cache.Invalidate(ctx, key); err == nil {
+		t.Fatalf("Invalidate must fail")
+	}
+	if degraded, _, _, _ := cache.Degraded(); !degraded {
+		t.Fatalf("the fixture must actually degrade the cache, or this test proves nothing")
+	}
+	if !cache.PossiblyStale("refreshclears") {
+		t.Fatalf("the failed root's name must be flagged, or this test proves nothing")
+	}
+
+	// A later full Refresh loads every root cleanly (the fixture is repaired
+	// first — Refresh itself refuses the whole rebuild on any load error, so a
+	// Refresh that returns nil IS the "every root loaded" claim).
+	if _, err := conn.KVPut(ctx, testCoreBucket, key, live); err != nil {
+		t.Fatalf("restore live root: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh (recovered): %v", err)
+	}
+	if degraded, _, _, _ := cache.Degraded(); degraded {
+		t.Fatalf("a clean full Refresh must clear the process-wide latch")
+	}
+	if cache.PossiblyStale("refreshclears") {
+		t.Fatalf("a clean full Refresh must clear every stale-name flag too")
+	}
+}
+
 // seedMetaDDL writes a shadow-keyed meta-vertex DDL fixture (root carries class
 // + data.canonicalName + data.permittedCommands).
 func seedMetaDDL(t *testing.T, ctx context.Context, conn *substrate.Conn, key, metaClass, canonicalName string, permittedCommands []string) {

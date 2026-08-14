@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -282,6 +283,77 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
 		if doc.Status != "degraded" {
 			t.Fatalf("status = %q, want degraded at custom threshold 10/pending 20", doc.Status)
+		}
+	})
+}
+
+// A DDL cache that has latched degraded is an ERROR-severity issue (⇒
+// unhealthy), not the warning a lagging lane gets: step 6.5 is rejecting
+// sensitive-class writes it cannot adjudicate and nothing but a restart ends
+// that. Absent when no cache is attached and when the attached one is healthy —
+// the two states a fabricated issue would be indistinguishable from.
+func TestBuildHealthDocDDLCacheDegraded(t *testing.T) {
+	ctx := context.Background()
+	const failedKey = "vtx.meta.Cc3Dd4Ee5Ff6Gg7Hh8J"
+
+	t.Run("no cache attached → no issue, healthy", func(t *testing.T) {
+		h := newTestHeartbeater()
+		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
+		for _, is := range doc.Issues {
+			if is.Code == "DDLCacheDegraded" {
+				t.Fatalf("unattached heartbeat emitted %+v", is)
+			}
+		}
+		if doc.Status != "healthy" {
+			t.Fatalf("status = %q, want healthy", doc.Status)
+		}
+	})
+
+	t.Run("healthy cache → no issue", func(t *testing.T) {
+		h := newTestHeartbeater()
+		h.AttachDDLCache(&DDLCache{})
+		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
+		if len(doc.Issues) != 0 {
+			t.Fatalf("issues = %+v, want none for a healthy cache", doc.Issues)
+		}
+		if doc.Status != "healthy" {
+			t.Fatalf("status = %q, want healthy", doc.Status)
+		}
+	})
+
+	t.Run("degraded cache → error issue, unhealthy, since persists", func(t *testing.T) {
+		h := newTestHeartbeater()
+		cache := &DDLCache{logger: testLogger()}
+		cache.markDegraded(failedKey, errors.New("core kv unreachable"))
+		h.AttachDDLCache(cache)
+
+		t1 := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+		doc := h.buildHealthDoc(ctx, "healthy", t1)
+		if doc.Status != "unhealthy" {
+			t.Fatalf("status = %q, want unhealthy", doc.Status)
+		}
+		if len(doc.Issues) != 1 {
+			t.Fatalf("issues = %+v, want exactly one", doc.Issues)
+		}
+		is := doc.Issues[0]
+		if is.Code != "DDLCacheDegraded" || is.Severity != "error" {
+			t.Fatalf("issue = %+v, want a DDLCacheDegraded error", is)
+		}
+		if !strings.Contains(is.Message, failedKey) {
+			t.Fatalf("message %q omits the failing key", is.Message)
+		}
+		if !strings.Contains(is.Message, "core kv unreachable") {
+			t.Fatalf("message %q omits the underlying error", is.Message)
+		}
+		if is.Since == "" {
+			t.Fatalf("issue missing since timestamp")
+		}
+
+		// The latch never clears, so the issue must stay open with the SAME since
+		// across ticks (the openIssues persistence ProcessorLaneLagging relies on).
+		second := h.buildHealthDoc(ctx, "healthy", t1.Add(30*time.Second))
+		if len(second.Issues) != 1 || second.Issues[0].Since != is.Since {
+			t.Fatalf("second tick issues = %+v, want the same issue with since %q", second.Issues, is.Since)
 		}
 	})
 }

@@ -109,6 +109,14 @@ type HealthHeartbeater struct {
 	// lagThreshold is the backlog count above which ProcessorLaneLagging fires.
 	lagThreshold uint64
 
+	// ddlCache surfaces the commit path's DDL projection so a failed
+	// invalidation — the state in which the process serves DDL answers it can no
+	// longer vouch for — reaches an operator, who is the only actor that can end
+	// it (a restart). Attached by MakePipeline; nil where no cache is wired, and
+	// Degraded is nil-receiver safe so an unattached heartbeat reports nothing
+	// rather than a fabricated healthy answer.
+	ddlCache *DDLCache
+
 	// openIssues tracks an internal issue key → since-timestamp for currently-open
 	// issues so the §5.5 since field persists across heartbeats and drops on
 	// resolve. The key is per-lane (ProcessorLaneLagging:<lane>) so two lanes
@@ -174,6 +182,14 @@ func (h *HealthHeartbeater) SetInterval(d time.Duration) {
 // twice replaces the prior authorizer.
 func (h *HealthHeartbeater) AttachCapabilityAuthorizer(ca *CapabilityAuthorizer) {
 	h.capAuthorizer = ca
+}
+
+// AttachDDLCache wires the DDL cache whose degraded latch each heartbeat
+// reports as DDLCacheDegraded. Must be called before Run starts — the emit loop
+// reads the handle without synchronization. Idempotent: calling twice replaces
+// the prior cache.
+func (h *HealthHeartbeater) AttachDDLCache(c *DDLCache) {
+	h.ddlCache = c
 }
 
 // AttachBacklogReader wires the lane-backlog reader (the ConsumerSupervisor) and
@@ -315,6 +331,19 @@ func (h *HealthHeartbeater) buildHealthDoc(ctx context.Context, lifecycle string
 		metrics["lane_lag_total"] = total
 	} else {
 		metrics["lane_lag_total"] = nil
+	}
+
+	// A degraded DDL cache is severity error, not the warning a lagging lane
+	// gets: lane lag is latency against a backlog that still drains, while this
+	// state has step 6.5 rejecting the aspect writes whose sensitivity it cannot
+	// adjudicate, and it does not drain — only a restart ends it.
+	if degraded, since, key, err := h.ddlCache.Degraded(); degraded {
+		active["DDLCacheDegraded"] = activeIssue{
+			code:     "DDLCacheDegraded",
+			severity: "error",
+			message: fmt.Sprintf("DDL cache invalidation failed at %s for %s and has not recovered (%v); aspect writes whose governing DDL the cache cannot vouch for are rejected until the processor restarts",
+				substrate.FormatTimestamp(since), key, err),
+		}
 	}
 
 	issues := h.reconcileIssues(active, now)
