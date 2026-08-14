@@ -1067,3 +1067,113 @@ nothing consults the licence yet:
   rather than calling `startPipeline`, which is not unit-testable as written) — deleting `installLensPlane`'s
   call site from `main.go` today breaks no test. Inc 4a's own e2e work should add the missing trip-wire, or
   this exclusion could silently regress to B1's original tautology.
+
+---
+
+### Increment 4a Part 1 (build note, 2026-08-14) — the staleness conjunct, and a decision on the second precondition
+
+**Shipped, `4088d19a`.** `Auditor.Stale(now time.Time) (stale bool, elapsed time.Duration)`
+(`internal/refractor/pipeline/audit.go`) reads `AuditStatus.LastPassAt` against `Interval()`, scaled by a new
+`auditorStaleCycles = 10` (own constant, not shared with the heartbeat's `defaultCapabilitySweepStallCycles` —
+same default value for operator-legible parity, deliberately independent because the two mechanisms' fail
+directions differ: the heartbeat must not alarm on a fresh install, the licence must not license one). Wired
+into `plainDerivationLicence` as a new conjunct in the auditor-health cluster, right after
+`Enrolled`/`Suppression`. `plainDerivationIndexForAct` is untouched — still declines unconditionally; no write
+path reaches the licence yet. Zero behaviour change, full test coverage (`TestAuditorStale`,
+`TestPlainDerivationLicence_StaleAuditRefuses`, `TestPlainDerivationLicence_NeverAuditedRefuses`).
+
+**The second precondition — decided, not fixed: accepted as a residual, not deferred.** `startPipeline`
+(`cmd/refractor/main.go`) is a ~555-line closure capturing dozens of enclosing variables (confirmed by brace-
+depth trace at build time) — exactly what its own neighbouring comment already says ("captures a whole booted
+process... not callable from a test as written"). Extracting it into an independently testable, explicitly-
+parameterized function is the correct fix in principle (Go's compiler makes the mechanical part safe — a
+missed capture fails to build, not silently), but it is a large, blast-radius-wide refactor of Refractor's
+single most critical activation path, done unattended, in a fire whose actual mandate is the act-flip and the
+zero-row probe. That mismatch is disproportionate, so it was not attempted. The original precondition's own
+wording ("Inc 4a's own e2e work should add the missing trip-wire, **or** this exclusion could silently
+regress") already offered this as an accepted trade-off, not a mandate — this note exercises that "or"
+explicitly rather than silently. Residual, named rather than hidden: a deletion of `installLensPlane(p, r)`
+from inside `startPipeline` (`main.go:1690`) would not be caught by any test today (`TestInstallLensPlane` and
+`TestActivationRecordsTheLensPlane`/`activateLens` both call `installLensPlane` directly, not through
+`startPipeline`). Whoever next has cause to touch `startPipeline` for an unrelated reason should consider
+extracting it then, when the blast radius is already open rather than freshly incurred.
+
+### Increment 4a Part 2 — checkpoint (not started; hard-stopped before any edit)
+
+**Why stopped here.** Four consecutive attempts to spawn the Part 2 builder failed on `API Error: 529
+Overloaded` before making a single edit (worktree confirmed clean each time) — a platform-level infra
+condition, not a task problem. Per the unattended-fire protocol this is a hard stop, not a pacing choice: no
+code exists to review or commit, so there is nothing to leave half-built. The design below is fully resolved
+and grounded against merged `main` at `4088d19a` — the next fire should build straight from it with a fresh
+delta-scout to re-verify line numbers, not re-derive the design.
+
+**Scope (design §12 Inc 4a, in full — Part 1 above already closed the two preconditions):** flip
+`plainDerivationIndexForAct` to consult the licence; §6's zero-row `RowReader.GetRow` presence probe on the
+derived re-entry path's Deletes; the four e2e tests (§11); the measured before/after (§11, via the live dev
+stack's shadow counters — collect this AFTER Part 2 lands, comparing `derivShadow` stats pre/post-flip on
+`bin/refractor`, cycled from `main`).
+
+**Part 2a — the flip.**
+```go
+func (p *Pipeline) plainDerivationIndexForAct(rs ruleState) (full.HopIndex, bool) {
+	idx, ready := p.plainDerivationIndex(rs)
+	if !ready {
+		return full.HopIndex{}, false
+	}
+	if licensed, _ := p.plainDerivationLicence(rs); !licensed {
+		return full.HopIndex{}, false
+	}
+	return idx, true
+}
+```
+Rewrite (don't delete) `TestPlainDerivationIndexForAct_AlwaysDeclinesThisFire` and
+`TestPlainDerivationLicence_DoesNotReachTheActGate` (`anchor_derivation_plain_licence_internal_test.go`) — both
+currently pin the OLD unconditional-decline invariant, which this flip makes false by design; give them real
+positive/negative cases instead of deleting the coverage.
+
+**`noteStaticPlainDerivationRefusal`** currently logs a hardcoded string that is wrong once licensed lenses
+exist. Fix it to report the real reason: `plainDerivationIndex`'s own conjuncts first (mirror
+`noteStaticDerivationRefusal`'s per-conjunct switch, `anchor_derivation_mode.go:181-205`, for the plain arm's
+equivalents — plain pipeline shape / single branch / `rootHops` complete+resolved / no `diffRetraction`), else
+`plainDerivationLicence`'s own returned refusal string directly (no need to re-derive a switch — it already
+gives you the string). **Resolved design nuance, implement as stated, do not re-litigate:** keep the licence's
+refusal in the SAME "static, dedup-by-reason-string, uncounted via `recordDerivationFellBack`" bucket
+`plainDerivationIndex`'s refusal already uses, even though the licence's auditor-health conjuncts are genuinely
+live per-event facts (unlike the actor-aware arm's install-time-fixed conjuncts) — counting every event during
+an hours-long audit-stale window would drown `recordDerivationFellBack`'s signal (real per-event walk
+failures/cap-overflows) with a repeated lens-level fact, the same "drown the ratio" problem
+`noteStaticDerivationRefusal`'s own doc comment names. The existing dedup-by-changed-string mechanism already
+re-logs when the reason changes, so this loses no operator visibility.
+
+**Part 2b — the §6 probe.** `evaluatePlainDerivedAnchors` re-enters `evaluatePlainFromVertex` once per derived
+anchor, which reaches `evaluateForEntryRaw`'s existing `AnchorProjectionKey`-based retraction check
+(`internal/refractor/pipeline/evaluate.go`, the `resultsContainKeys` block) — correct and unchanged for a
+genuine top-level anchor event, but a hazard for a WALK-derived anchor: `walkToAnchors` models no `WHERE`, so it
+can derive an anchor that never had a live row, and the existing check would emit an unconditional `Delete` for
+it — a spurious durable tombstone under soft-delete. Guard: in `evaluatePlainDerivedAnchors`, after each
+`evaluatePlainFromVertex` call returns, before merging a `Delete: true` result into `combined`, probe
+`adapter.RowReader.GetRow` (from `p.currentAdapter()`, guaranteed present by the licence's own `RowReader`
+conjunct) for the Delete's key(s); drop the Delete silently (not an error) if the row is absent, keep it if
+present. Mirror `zeroRowDeleteKey`'s pattern (`evaluate.go`, same file) without calling it directly (it is
+`$actorKey`-scoped, not reusable here) — read its exact `GetRow` call shape and its own error disposition, and
+match both; verify `EvalResult.Keys`' shape against `adapter.RowReader.GetRow`'s real signature before writing
+this (the closure conjunct's `ProjectsOneRowPerAnchor` should mean exactly one key column always, but confirm
+against the real types, don't assume). Add a regression test proving a genuine top-level anchor event's
+existing Delete behaviour is unchanged by this probe — the single most important correctness pin in Part 2,
+since misplacing the probe in `evaluate.go`'s general path would silently change retraction behaviour for
+every plain lens, not just licensed ones.
+
+**Part 2c — the four e2e tests (design §11 "e2e (Inc 4)"):** (a) `clinicProviders`-shaped narrowing — an
+`identifiedBy` link event reprojects only the affected provider, asserted by a bystander provider's row
+revision NOT moving; (b) §6 retraction — a non-anchor-incident link removal on a closure-conjunct lens now
+retracts the anchor's row (new behaviour, today's code cannot); (c) §6 probe — a `WHERE`-filtered anchor the
+walk derives but which never projected a row produces no delete marker; (d) licence gate — an un-enrolled lens
+(no Auditor) still gets the whole-corpus rescan even with `act` mode on. Each needs a positive precedent pair
+per house convention (a refusal test is worthless if the harness never reached the code). Find the closest
+existing `*_e2e_test.go` in `internal/refractor/pipeline/` for harness precedent before writing a new file.
+
+**Review depth for Part 2 (per §12/admit rules): full 3-layer adversarial** — this is the posture-changing
+increment (a real write-path behaviour flip on live production data, even though the licence excludes the auth
+plane). Part 1 above, being zero-behaviour-change, took a lead review only; a cumulative close-pass adversarial
+review should also cover Part 1 + Part 2's combined diff before the item's Done-log entry, per the multi-fire
+review-cadence rule.
