@@ -344,9 +344,14 @@ func TestRoleMgmt_UnauthorizedDenied(t *testing.T) {
 }
 
 // TestRoleMgmt_AuditViaCapKV validates the operator cap doc carries
-// the 10 rbac permissions. The setup helpers seed the doc directly;
+// the 9 granted rbac permissions. The setup helpers seed the doc directly;
 // in production the same shape comes from the Capability Lens
 // projection over the rbac-domain installed package.
+//
+// The expected list is spelled out rather than derived from
+// rbacdomain.Package: the fixture already derives from it, so a derived
+// expectation would compare the package to itself. Written out, this is the
+// pin — the DDL's tenth command, UpdatePermission, must not appear.
 func TestRoleMgmt_AuditViaCapKV(t *testing.T) {
 	ctx, conn := setupTestEnv(t)
 
@@ -365,7 +370,7 @@ func TestRoleMgmt_AuditViaCapKV(t *testing.T) {
 	}
 	expected := []string{
 		"CreateRole", "UpdateRole", "TombstoneRole",
-		"CreatePermission", "UpdatePermission", "TombstonePermission",
+		"CreatePermission", "TombstonePermission",
 		"AssignRole", "RevokeRole",
 		"GrantPermission", "RevokePermission",
 	}
@@ -382,5 +387,12 @@ func TestRoleMgmt_AuditViaCapKV(t *testing.T) {
 		if scope != "any" {
 			t.Errorf("platformPermissions[%q].scope = %q, want any", op, scope)
 		}
+	}
+	if len(doc.PlatformPermissions) != len(expected) {
+		t.Errorf("platformPermissions carries %d entries, want %d: %v",
+			len(doc.PlatformPermissions), len(expected), doc.PlatformPermissions)
+	}
+	if _, granted := permMap["UpdatePermission"]; granted {
+		t.Errorf("UpdatePermission is projected into the operator's capability doc — it rewrites a permission vertex's body, which Contract #6 §6.1 rule 1 requires to be write-once")
 	}
 }

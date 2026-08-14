@@ -9,8 +9,13 @@ Role / permission / grant management operations.
   - `CreatePermission`, `UpdatePermission`, `TombstonePermission`
   - `AssignRole`, `RevokeRole`
   - `GrantPermission`, `RevokePermission`
-- 10 permission vertices (one per op), each granted to the `operator` role
-  via a `grantedBy` link.
+- 9 permission vertices, each granted to the `operator` role via a
+  `grantedBy` link — one per op except `UpdatePermission`, which the DDL
+  dispatches but the package deliberately does not grant: it rewrites an
+  existing permission vertex's body, which Contract #6 §6.1 requires to be
+  write-once. An ungranted op is denied at step 3 by absence. This closes the
+  operation channel only — `UpgradePackage`'s bootstrap DDL reaches the same
+  bodies by another route, a separately-filed gap outside this package.
 
 ## Link conventions
 
