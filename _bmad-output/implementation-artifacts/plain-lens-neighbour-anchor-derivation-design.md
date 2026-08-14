@@ -365,10 +365,23 @@ This is the posture-changing increment (§12).
 
 **4b.** Route the **seeded** branch through the same derivation when the lens binds the anchor label at more
 than one pattern position — the §1.1 gap. `PositionsBinding` already returns both positions
-(`anchor_derivation.go:63-65`), so the machinery 4a builds answers it with no new mechanism, and the two live
-consumers are named (`duplicateCandidates`, `identityCredentialBindingsRead`). Built rather than filed
-because the consumer is nameable and the fix is a call-site change. Sequenced after 4a so the flip and this
-correction are separately attributable in the measurement.
+(`anchor_derivation.go:63-65`), so the machinery 4a builds answers it with no new mechanism.
+
+**Correction (build note, 2026-08-14): the two named consumers turned out to have zero live payoff — the
+mechanism was built anyway, generic, because it is genuinely correct and low-risk once the declined path is
+fixed to cost nothing extra.** `duplicateCandidates` sets `DiffRetraction: true`
+(`packages/identity-hygiene/lenses.go`), which makes `seedAnchorFor` (`pipeline.go`) refuse it a seed
+unconditionally — it never took the seeded branch at all, seeded or not, so §1.1's gap never applied to it.
+`identityCredentialBindingsRead`'s every column is key-derived (`c.key`, `u.key`, `nanoIdFromKey(...)`,
+`packages/identity-domain/lenses.go`) with no `WHERE`, so no property of the far (`u`) position can ever make
+its row stale, and the one real state change on that side — a tombstone — is intercepted by
+`evaluateForEntryRaw`'s earlier anchor-tombstone branch (`evaluate.go`) before this dispatch is ever reached.
+Neither claim survived the build's own adversarial review; see the build note below for the full finding and
+the fix (the declined/fallback answer, which an earlier draft of this section assumed could safely reuse
+4a's unseeded whole-corpus rescan, is instead the narrow single-seed call — see §12's build note for why).
+Built rather than filed because the SHAPE (an anchor label bound at a second pattern position) is a real,
+general correctness gap regardless of today's corpus, and the fix's own declined path now costs nothing
+beyond what a seeded event already paid before this increment existed.
 
 ### 4.5 Increment 5 — the `retained`-class repair, deferred behind its own trigger (fork resolved: not pre-built)
 
@@ -1236,3 +1249,74 @@ Part 1's own precedent for exactly this kind of proportionality call.
 **Close.** Inc 4a (flip to `act`, the §6 probe, the four e2es, and now this cumulative close-pass) is done. The
 item's remaining work is Increment 4b (the seeded branch's own multi-position gap, §4.4) and the already-deferred
 Increment 5 — both separate future fires per §12's decomposition.
+
+### Increment 4b — build note (2026-08-14)
+
+**Scope (§4.4).** `evaluateForEntryRaw`'s seeded branch (`evaluate.go`) only ever narrows the query's ANCHOR
+pattern position (`full/executor.go`'s `anchorPattern`: the first `MATCH` clause's first node). A lens binding
+the SAME label at a second pattern position silently drops every row where the event vertex sits at that
+other position, since the narrow seed forces it into the anchor slot and evaluates a pattern it structurally
+cannot satisfy. New predicate `seedMultiPosition` (`anchor_derivation_plain.go`) detects the shape via
+`plainDerivationIndex` + `HopIndex.PositionsBinding`; `evaluate.go` gains a second dispatch case routing a
+matching seeded event through the SAME derivation machinery Inc 1–4a already built
+(`deriveAnchorsForPlainVertex` + `evaluatePlainDerivedAnchors`), which correctly seeds every position the
+label binds — the anchor position itself as a zero-hop terminus, any other by walking from it.
+
+**The reentrancy hazard, found and fixed during the build.** Every derived anchor `evaluatePlainDerivedAnchors`
+re-evaluates is, by `walkToAnchors`' own construction, of the SAME anchor-labelled type this new branch exists
+to answer for — so its re-entrant call into `evaluateForEntryRaw` (via `evaluatePlainFromVertex`/
+`evaluateForEntry`) would itself qualify for the new branch, re-derive the identical anchor set, and recurse
+forever. Confirmed empirically (stack overflow with the guard removed). Fixed with a `context.WithValue`
+marker (`plainDerivedAnchorReentryKey` / `isPlainDerivedAnchorReentry`) set for exactly the duration of
+`evaluatePlainDerivedAnchors`' per-anchor loop; both of `evaluateForEntryRaw`'s derivation-eligible cases
+check it. Verified sound in general, not only for the two-position shape tested, by an independent 3-layer
+adversarial review (correctness/edge-case/capability lenses) including a purpose-built 3-position chain lens.
+
+**The declined-path cost regression, found and fixed during the build.** The first draft reused
+`evaluatePlainNeighbourEvent`'s `unseeded()` closure (a full corpus rescan) as the new branch's fallback for
+`off` mode / no licence — correct for a genuine NEIGHBOUR event, whose shipped default (before Increment 1
+existed at all) always was the unseeded rescan, but WRONG for a SEEDED event, whose shipped default was
+already the narrow single-seed call. Reusing the rescan meant an unlicensed multi-position lens paid a full
+corpus rescan on every qualifying seeded event it used to answer cheaply and correctly — a real per-event cost
+regression with no offsetting benefit, and no way back via `REFRACTOR_ANCHOR_DERIVATION=off` (which routes to
+the same declined closure). Fixed by extracting the shared mode-switch/licence-gate logic into
+`plainDerivationDecide(ctx, rs, entry, declined)`, parameterized on the declined answer: `
+evaluatePlainNeighbourEvent` still passes the unseeded rescan, and the new `evaluateSeededMultiPosition` passes
+the narrow single-seed call instead — so `off` mode and any unlicensed lens now pay EXACTLY what they paid
+before this increment, and only a licensed `act` lens gets the correction.
+
+**The named consumers' payoff, corrected.** §4.4's original text named `duplicateCandidates` and
+`identityCredentialBindingsRead` as live consumers with real payoff. Both claims were false — see §4.4's own
+correction above for the grounding. The mechanism was kept and built anyway: the shape (an anchor label bound
+at a second pattern position, with data-dependent output columns off that position, and no `DiffRetraction`)
+is a real, general correctness class, and — once the declined-path fix above lands — costs nothing beyond what
+a seeded event already paid, so there is no reason to gate a correct, low-risk mechanism behind a corpus that
+happens not to need it today.
+
+**Left as residuals, with reasoning (not fixed this round, both 0/N corpus incidence today, live-census
+confirmed during the build's own review).** (1) `seedMultiPosition`'s own gate (`plainDerivationIndex`) refuses
+on an incomplete `rootHops` (a var-length hop, a key-pinned root, an unresolved `*` expansion) — but the §1.1
+gap it exists to catch does not depend on `rootHops` completeness at all (`seedAnchorLabels` comes from
+`CompiledRule.AnchorLabel()` alone), so a lens that seeds, binds its anchor label at a second position, AND has
+an incomplete `rootHops` would silently keep the narrow (buggy) path with nothing flagging it. (2)
+`PositionsBinding` counts an UNLABELED pattern position as admitting any type, so a plain lens with one
+unlabeled node position and an otherwise-complete `rootHops` reports multi-position for every type and routes
+every seeded event through the derivation/decline switch — arguably correct (an unlabeled position really can
+bind the anchor's type) but an invisible, ungated perf cliff for whichever lens next lands in that shape. Both
+are structural, not corpus-specific; the corpus census that found 0 incidence today is not a proof they stay
+at 0 incidence tomorrow. Whoever next edits a plain lens's cypher into either shape is the natural trigger to
+revisit.
+
+**Verification.** `go build ./...`, `make vet`, `golangci-lint run ./internal/refractor/...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `make verify-kernel`, and `go test` across
+`internal/refractor/...`, `packages/identity-hygiene/...`, `packages/identity-domain/...` all green. Two new
+e2e tests (`plain_derivation_act_e2e_test.go`) over a synthetic multi-position shape (neither real named
+lens exhibits it, per the correction above): one proves the corrected declined path costs nothing extra
+unlicensed, the other proves the licensed derived path narrows correctly and the reentrancy guard terminates.
+Both were mutation-tested (temporarily disabled the new dispatch case): the licensed test fails as designed,
+the unlicensed test still passes — confirming it tests the declined path's OWN correctness, not a side effect
+of the fix. Two internal unit tests (`anchor_derivation_plain_internal_test.go`) pin `seedMultiPosition`'s
+positive/negative vectors and the reentrancy marker directly.
+
+**Close.** Increment 4b (routing, the reentrancy guard, the declined-path cost fix) is done. Increment 5
+remains deferred behind its own trigger per §4.5, unchanged.
