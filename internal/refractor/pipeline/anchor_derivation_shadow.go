@@ -102,6 +102,15 @@ type DerivationShadowStats struct {
 	PlainWalkDeclined int64 // the walk itself declined (ok == false) or errored — includes DefaultDerivationReadCap exhaustion
 	PlainOverCap      int64 // the derived set was ready but exceeded DefaultPlainDerivedAnchorCap
 	PlainOverCapSize  int64 // sum of derived-set sizes that triggered PlainOverCap — the tail §11's distribution needs
+
+	// PlainProbeUnreadable counts §6 presence probes the target could not answer
+	// (derivedRowIsLive's failed-read arm), each of which dropped a derived
+	// anchor's Delete fail-safe. Unlike the four above it is an ACT-mode counter,
+	// not a sampled one, and it is the only way to tell a retraction the target
+	// confirmed unnecessary from one it could not be asked about: the two leave
+	// the target in the same state, so a persistent read fault would otherwise
+	// read as a lens with nothing to retract.
+	PlainProbeUnreadable int64
 }
 
 type derivationShadow struct {
@@ -282,9 +291,14 @@ func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats) {
 	if total == 0 || total%derivationShadowSummaryEvery != 0 {
 		return
 	}
-	slog.Info("pipeline: anchor-derivation tally",
-		"ruleId", p.ruleID,
-		"acted", st.Acted, "actedAnchors", st.ActedAnchors, "fellBack", st.FellBack)
+	attrs := []any{"ruleId", p.ruleID,
+		"acted", st.Acted, "actedAnchors", st.ActedAnchors, "fellBack", st.FellBack}
+	// Carried only when it has fired, so the actor-aware arm's tally — which can
+	// never reach the plain probe — is not padded with a permanent zero.
+	if st.PlainProbeUnreadable > 0 {
+		attrs = append(attrs, "probeUnreadable", st.PlainProbeUnreadable)
+	}
+	slog.Info("pipeline: anchor-derivation tally", attrs...)
 }
 
 func cappedList(s []string, n int) []string {
