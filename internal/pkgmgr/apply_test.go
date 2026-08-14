@@ -213,6 +213,40 @@ func TestApply_DryRunDoesNotSubmit(t *testing.T) {
 	}
 }
 
+// TestApply_ForceRespectsOutOfBandRevocation exercises Apply's Force
+// same-version in-place branch — the actual `make reinstall-package` /
+// `refresh-<vertical>` trigger the design names — against an out-of-band
+// tombstone on a surviving permission. Mirrors
+// TestApply_SameVersionForceUpdatesInPlace's harness shape but asserts the
+// revocation is respected rather than a body edit landing.
+func TestApply_ForceRespectsOutOfBandRevocation(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	tombstoneOutOfBand(t, ctx, conn, permKey)
+
+	// Same version, Force, same declared permission — the reinstall/refresh
+	// path with nothing else to change.
+	res, err := inst.Apply(ctx, sampleDef("0.1.0"), ApplyOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Apply (force same-version): %v", err)
+	}
+	if res.RevocationsRespected != 1 {
+		t.Fatalf("RevocationsRespected = %d, want 1: %+v", res.RevocationsRespected, res)
+	}
+	if !res.Skipped || res.Reason == "" {
+		t.Fatalf("a run with nothing else to change must report skipped with a non-empty reason naming the respected revocation: %+v", res)
+	}
+
+	after := kvDoc(t, ctx, conn, permKey)
+	if del, _ := after["isDeleted"].(bool); !del {
+		t.Fatalf("%s should stay tombstoned across the force refresh: %+v", permKey, after)
+	}
+}
+
 // TestApply_DryRunFreshInstall: a dry-run of an absent package previews the
 // full create batch without installing it.
 func TestApply_DryRunFreshInstall(t *testing.T) {

@@ -42,6 +42,15 @@ type UpgradeResult struct {
 	// difference between an upgrade that applied and one that only landed.
 	ReactivationRequired []string
 
+	// RevocationsRespected counts surviving declared GRANT/ROLE topology keys
+	// (vtx.permission.*, vtx.role.*, lnk.permission.*.grantedBy.role.*, …—
+	// never vtx.meta.* definitions, see diffManifest) this upgrade left
+	// tombstoned because an out-of-band op (RevokePermission/
+	// TombstonePermission/TombstoneRole) had already revoked them. The
+	// upgrade succeeded; these grants stay revoked rather than being silently
+	// un-tombstoned by the body-diff update path.
+	RevocationsRespected int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
@@ -101,11 +110,12 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		Tombstoned:  sum.tombstoned,
 
 		ReactivationRequired: sum.reactivation,
+		RevocationsRespected: sum.revocationsRespected,
 		LeafBudgetWarnings:   leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Skipped = true
-		res.Reason = fmt.Sprintf("package %q already matches the requested definition (no changes)", def.Name)
+		res.Reason = noChangesReason(def.Name, sum.revocationsRespected)
 		return res, nil
 	}
 
@@ -201,6 +211,19 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 	}
 }
 
+// noChangesReason renders the Reason string for an upgrade/apply whose
+// mutation batch came back empty. A plain "no changes" is only true when
+// nothing was skipped for a reason worth naming: if revocationsRespected > 0,
+// a declared key is deliberately dead, and saying so is what makes the
+// respected-revocation outcome visible even on a run that otherwise emits no
+// mutation at all (Force same-version with nothing else changed, e.g.).
+func noChangesReason(pkgName string, revocationsRespected int) string {
+	if revocationsRespected > 0 {
+		return fmt.Sprintf("package %q body matches; %d previously-revoked grant(s) intentionally left revoked", pkgName, revocationsRespected)
+	}
+	return fmt.Sprintf("package %q already matches the requested definition (no changes)", pkgName)
+}
+
 // diffSummary counts the three partitions an upgrade produces.
 type diffSummary struct {
 	created int
@@ -211,6 +234,13 @@ type diffSummary struct {
 	revived    int
 	updated    int
 	tombstoned int
+	// revocationsRespected counts surviving grant/role topology keys (declared
+	// by both the old and new manifest, never vtx.meta.* definitions) whose
+	// committed doc was already tombstoned by an out-of-band op
+	// (RevokePermission/TombstonePermission/TombstoneRole). The upgrade leaves
+	// them tombstoned rather than reviving them, and this counter is what makes
+	// that silent-by-default outcome visible to the operator.
+	revocationsRespected int
 	// reactivation names the lens spec edits this upgrade commits that a running
 	// Refractor cannot adopt without re-activating the lens. The upgrade is
 	// correct and lands; what would otherwise be wrong is reporting it as
@@ -319,6 +349,32 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			// state). Re-create it — CreateOnly succeeds on an absent key.
 			out = append(out, installMutation{Op: "create", Key: op.Key, Document: op.Document})
 			sum.created++
+			continue
+		}
+		if del, _ := committed["isDeleted"].(bool); del && !strings.HasPrefix(op.Key, metaVertexPrefix) {
+			// A surviving key (present in both old and new sets) that is already
+			// tombstoned can only have been tombstoned out-of-band: this diff's
+			// own tombstone emission (below) touches exclusively old \ new keys,
+			// never one the package still declares. Respect the deliberate
+			// revocation instead of reviving it via the update path.
+			//
+			// Scoped to non-definition keys only (excludes vtx.meta.* — DDL/lens
+			// meta-vertices and their aspects). Grant/role topology —
+			// vtx.permission.*, vtx.role.*, lnk.permission.*.grantedBy.role.* —
+			// is exactly what RevokePermission/TombstonePermission/TombstoneRole
+			// target, and is this design's ratified scope
+			// (grant-provenance-runtime-permission-minting-design.md §5.2, §12).
+			// vtx.meta.* definitions are deliberately left on the pre-existing
+			// body-diff revive path below: that behavior predates this fix, is
+			// unanalyzed by this design (reactivation semantics and the opMeta
+			// retirement guard both assume a definition stays revivable via
+			// reapply), and extending the guard to it would be undesigned scope
+			// creep — internal/bootstrap/reconcile.go:76-97 draws an analogous
+			// definition-vs-topology boundary in a sibling mechanism (though
+			// there every tombstone is respected unconditionally, definitions
+			// included; it is cited here only for the shape of the split, not as
+			// a claim that it also revives tombstoned definitions).
+			sum.revocationsRespected++
 			continue
 		}
 		if logicalDocEqual(op.Document, committed) {

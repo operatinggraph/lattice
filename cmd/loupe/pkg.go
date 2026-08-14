@@ -326,21 +326,22 @@ func manifestFromUpload(files []*multipart.FileHeader) (*multipart.FileHeader, e
 // lists present only on a dry-run preview).
 func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 	return map[string]any{
-		"packageName":    res.PackageName,
-		"packageKey":     res.PackageKey,
-		"action":         res.Action,
-		"fromVersion":    res.FromVersion,
-		"toVersion":      res.ToVersion,
-		"created":        res.Created,
-		"updated":        res.Updated,
-		"tombstoned":     res.Tombstoned,
-		"skipped":        res.Skipped,
-		"dryRun":         res.DryRun,
-		"reason":         res.Reason,
-		"createdKeys":    res.CreatedKeys,
-		"updatedKeys":    res.UpdatedKeys,
-		"tombstonedKeys": res.TombstonedKeys,
-		"warnings":       res.DependencyWarnings,
+		"packageName":          res.PackageName,
+		"packageKey":           res.PackageKey,
+		"action":               res.Action,
+		"fromVersion":          res.FromVersion,
+		"toVersion":            res.ToVersion,
+		"created":              res.Created,
+		"updated":              res.Updated,
+		"tombstoned":           res.Tombstoned,
+		"revocationsRespected": res.RevocationsRespected,
+		"skipped":              res.Skipped,
+		"dryRun":               res.DryRun,
+		"reason":               res.Reason,
+		"createdKeys":          res.CreatedKeys,
+		"updatedKeys":          res.UpdatedKeys,
+		"tombstonedKeys":       res.TombstonedKeys,
+		"warnings":             res.DependencyWarnings,
 	}
 }
 

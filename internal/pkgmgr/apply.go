@@ -53,6 +53,13 @@ type ApplyResult struct {
 	// applied and one that merely landed.
 	ReactivationRequired []string
 
+	// RevocationsRespected counts surviving declared GRANT/ROLE topology keys
+	// (never vtx.meta.* definitions, see diffManifest) this apply left
+	// tombstoned because an out-of-band op had already revoked them. The apply
+	// succeeded; these grants stay revoked rather than being silently
+	// un-tombstoned by the body-diff update path.
+	RevocationsRespected int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this apply pushed past its
 	// declared LeafBudget. Advisory only — the apply still succeeded. This is
@@ -120,17 +127,18 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		Action:      "upgrade",
 		FromVersion: existing.Version,
 		ToVersion:   def.Version,
-		Created:     sum.created,
+		Created:     sum.created + sum.revived,
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
 
 		ReactivationRequired: sum.reactivation,
+		RevocationsRespected: sum.revocationsRespected,
 		LeafBudgetWarnings:   leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Action = "skip"
 		res.Skipped = true
-		res.Reason = fmt.Sprintf("package %q already matches the requested definition (no changes)", def.Name)
+		res.Reason = noChangesReason(def.Name, sum.revocationsRespected)
 		return res, nil
 	}
 	if opts.DryRun {

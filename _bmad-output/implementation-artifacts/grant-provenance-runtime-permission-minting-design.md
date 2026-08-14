@@ -713,7 +713,9 @@ convention (`upgrade.go:39-43`).
 - **Every census is a premise** (checklist #2): "the package's own diff tombstones exclusively `old \ new`"
   is re-verified live above at `upgrade.go:334-367` — confirmed: the only other `Op: "tombstone"` emission
   site in `diffManifest`.
-- No `docs/components/pkgmgr.md` dossier file exists yet to copy from (checked); nothing to carry forward.
+- `docs/components/pkgmgr.md`'s dossier (6 active entries) carries forward: "Two writers of one
+  deterministic key" (checklist #5, already cited above) is the closest match; none of the others bind
+  this fix directly.
 
 **Adjacent finds:** none surfaced beyond the three already-spawned sibling rows (§9 rows 2–4), which are
 explicitly not blockers for this row and stay filed as-is.
@@ -721,3 +723,34 @@ explicitly not blockers for this row and stay filed as-is.
 **Non-goals:** the re-add arm (`!survives`, `:298-315`) is untouched — its revive is intended and tested.
 Provenance (`origin` field, Inc 2–3 of this design) is not part of this prerequisite; it lands after,
 per the ratified sequencing (§9).
+
+**Shipped (build note, 2026-08-14).** Built as briefed, then narrowed by a cold opus adversarial review
+before merge — the review's core finding: the first-cut guard skipped revival for **every** surviving
+tombstoned key, including package-owned `vtx.meta.*` definitions (lenses/DDLs/panes/opMetas), which is
+wider than this design's ratified scope (grant durability only) and removes an unanalyzed,
+never-ratified definition-repair behavior (`ReactivationRequired`/opMeta-retirement-guard interactions
+were never evaluated against it). **Fix landed:** the skip is scoped to `!strings.HasPrefix(key,
+metaVertexPrefix)` — grant/role topology (`vtx.permission.*`, `vtx.role.*`,
+`lnk.permission.*.grantedBy.role.*`) only; `vtx.meta.*` definitions keep the pre-existing body-diff revive
+path, unchanged. (Note for the next reader: `internal/bootstrap/reconcile.go`'s tombstone rule is
+*unconditional* — it never revives anything tombstoned, definitions included — so it grounds only the
+*shape* of a definition-vs-topology split, not a claim that reconcile itself revives tombstoned
+definitions; the actual justification for the narrowing is ratified-scope discipline, not that precedent.)
+
+Also landed, all review-driven: a `noChangesReason` helper so a Force/no-op run that respected a
+revocation no longer reports the false "already matches (no changes)"; `apply.go`'s pre-existing
+`Created: sum.created` (omitting `sum.revived`) fixed to match `upgrade.go`'s construction; the counter
+surfaced to both operator surfaces (`cmd/lattice-pkg`'s `logApplyResult` Warn, `cmd/loupe/pkg.go`'s
+`applyReply` JSON) since an unread counter is not visibility; and test coverage extended to the literal
+`RevokePermission` shape (the grant **link**, not just the permission vertex), an `Apply`+`Force`
+same-version case (the actual `make reinstall-package`/`refresh-<vertical>` trigger), and a negative test
+proving the narrowing (`TestUpgrade_RevocationGuardExcludesDefinitions`).
+
+**Contract.** `docs/contracts/08-package-install.md` §8.6 carries a normative addition (the second
+omission condition) — staged **UNCOMMITTED** in `main` per CLAUDE.md, flagged for Andrew; not part of the
+2026-08-13 ratification, which only touched contract 06 §6.1.
+
+**Dossier.** New entry filed to `docs/components/pkgmgr.md`: a security-plane skip guard keyed on mere
+key survival, with no anchor-type check, silently widens past its ratified scope to cover schema/routing
+definitions the design never analyzed — check: key the guard on the anchor-type prefix
+(`metaVertexPrefix`/`vtx.meta.`), never on tombstone-state alone.

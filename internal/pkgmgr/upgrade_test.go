@@ -135,6 +135,111 @@ func TestUpgrade_ReAddsRemovedEntity(t *testing.T) {
 	}
 }
 
+// tombstoneOutOfBand flips isDeleted:true directly in Core KV for an already
+// -committed key, the way RevokePermission/TombstonePermission/TombstoneRole
+// would, without going through the package's own diff.
+func tombstoneOutOfBand(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, CoreBucket, key)
+	if err != nil {
+		t.Fatalf("capture %s entry: %v", key, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s entry: %v", key, err)
+	}
+	doc["isDeleted"] = true
+	newValue, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal tombstoned %s: %v", key, err)
+	}
+	if _, err := conn.KVUpdate(ctx, CoreBucket, key, newValue, entry.Revision); err != nil {
+		t.Fatalf("simulated out-of-band tombstone of %s: %v", key, err)
+	}
+}
+
+// TestUpgrade_RespectsOutOfBandRevocation proves an out-of-band tombstone
+// (RevokePermission/TombstonePermission) on keys the package continues to
+// declare survives an upgrade instead of being silently un-tombstoned by the
+// surviving-key update path. Unlike TestUpgrade_ReAddsRemovedEntity, v2 here
+// never drops the permission from its manifest — the keys are tombstoned
+// purely by the direct KV write, simulating an operator's deliberate
+// revocation. It covers both the permission vertex AND the grant link
+// (lnk.permission.<id>.grantedBy.role.<id>) — the literal shape
+// RevokePermission targets in practice.
+func TestUpgrade_RespectsOutOfBandRevocation(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	permID := entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	permKey := "vtx.permission." + permID
+	grantLinkKey := "lnk.permission." + permID + ".grantedBy.role." + bootstrap.RoleOperatorID
+
+	tombstoneOutOfBand(t, ctx, conn, permKey)
+	tombstoneOutOfBand(t, ctx, conn, grantLinkKey)
+
+	// v2 still declares the SAME permission, unchanged — the "survives" case.
+	v2 := sampleDef("0.2.0")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade must not fail on a respected revocation: %v", err)
+	}
+	if res.RevocationsRespected != 2 {
+		t.Fatalf("RevocationsRespected = %d, want 2 (permission + grant link) (%+v)", res.RevocationsRespected, res)
+	}
+
+	after := kvDoc(t, ctx, conn, permKey)
+	if del, _ := after["isDeleted"].(bool); !del {
+		t.Fatalf("%s should stay tombstoned across the upgrade, got %+v", permKey, after)
+	}
+	afterLink := kvDoc(t, ctx, conn, grantLinkKey)
+	if del, _ := afterLink["isDeleted"].(bool); !del {
+		t.Fatalf("%s should stay tombstoned across the upgrade, got %+v", grantLinkKey, afterLink)
+	}
+	// The version-only bump on package vertex + manifest aspect still applies
+	// normally — the revocation guard only touches the surviving grant topology.
+	if res.Updated != 2 {
+		t.Fatalf("unrelated version-only changes should still apply exactly (package vertex + manifest): %+v", res)
+	}
+}
+
+// TestUpgrade_RevocationGuardExcludesDefinitions proves the guard is scoped to
+// grant/role topology only: a package-declared vtx.meta.* definition (a lens)
+// that is tombstoned out-of-band while it still survives across versions is
+// REVIVED by the next upgrade, same as before this fix. That pre-existing
+// revive-via-reapply behavior for definitions is unchanged and out of this
+// design's ratified scope (see diffManifest's surviving-key branch) — only
+// grant/role topology (what RevokePermission/TombstonePermission/
+// TombstoneRole target) respects an out-of-band tombstone.
+func TestUpgrade_RevocationGuardExcludesDefinitions(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	lensKey := metaVertexPrefix + entityNanoID(v1.Name, "lens:sampleLens")
+	tombstoneOutOfBand(t, ctx, conn, lensKey)
+
+	// v2 still declares the SAME lens, unchanged.
+	v2 := sampleDef("0.2.0")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade: %v", err)
+	}
+	if res.RevocationsRespected != 0 {
+		t.Fatalf("a vtx.meta.* definition must not count toward RevocationsRespected: %+v", res)
+	}
+
+	revived := kvDoc(t, ctx, conn, lensKey)
+	if del, _ := revived["isDeleted"].(bool); del {
+		t.Fatalf("%s (a definition) should be revived by the upgrade, not left tombstoned: %+v", lensKey, revived)
+	}
+}
+
 // TestUpgrade_DiffCreateUpdateTombstone exercises all three partitions in one
 // upgrade: add a lens (create), change the DDL description (update, with
 // createdAt carried forward), drop the permission (tombstone). It asserts the

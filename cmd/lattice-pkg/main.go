@@ -240,6 +240,9 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 	for _, w := range res.ReactivationRequired {
 		logger.Warn("lens change requires re-activation to take effect", "detail", w)
 	}
+	if res.RevocationsRespected > 0 {
+		logger.Warn("upgrade left previously-revoked grant(s) untouched", "count", res.RevocationsRespected)
+	}
 	if res.DryRun {
 		logger.Info("dry-run — no changes submitted",
 			"package", res.PackageName,

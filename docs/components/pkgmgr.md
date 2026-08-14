@@ -59,3 +59,9 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   the exclusion is argued at the call site rather than assumed.
 - **RETIRED (the model of a retired entry):** a package-content edit without a version bump silently
   no-ops on a live stack — mechanized: `scripts/lint-package-version.go`.
+- **A security-plane skip guard keyed on tombstone-state alone, with no anchor-type check, silently widens
+  past its ratified scope** — a fix scoped to "respect a revoked grant" first-cut as "respect any
+  surviving tombstoned key," quietly covering package definitions (`vtx.meta.*`) the design never
+  analyzed. Minted: grant-provenance §12 (un-tombstone prerequisite), caught by cold adversarial review.
+  Check: none yet (key the guard on the anchor-type prefix, e.g. `metaVertexPrefix`, never on
+  tombstone-state alone).
