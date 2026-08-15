@@ -2994,3 +2994,94 @@ full-stack reset for exactly this and the demo box resets nightly. This is a pre
 property — a deployment that outlives a reset makes it a real row.
 
 The deferred tail (a)–(d) is unchanged and still behind its named triggers.
+
+---
+
+## 28. Fire brief — a renamed/uninstalled retention class strands its DEK (build note, 2026-08-14)
+
+### 28.1 Scope sentence
+
+`internal/pkgmgr`'s upgrade/apply diff-apply auto-tombstones a `vtx.retentionclass.<NanoID>` holder root
+(+ its `.retentionPolicy` aspect) the moment a package rename or removal drops it from the new declared-key
+set — but `ShredRetentionClassKey`'s `vertex_alive` guard then refuses that holder forever, permanently
+blocking the only path that can ever destroy its (possibly still-live) `.piiKey` DEK. Stop the diff from
+auto-tombstoning a retention-class holder; leave it live-but-undeclared so `ShredRetentionClassKey` stays
+reachable on the controller's own schedule.
+
+### 28.2 Verified touch-list (file:line, re-checked live at `5acbaa8e`)
+
+- `internal/pkgmgr/upgrade.go:390-423` — the `diffManifest` "Removed keys (old \ new) → tombstone" loop.
+  This is the actual bug site (distinct from the `0bb6daea` guard at `upgrade.go:354-378`, which only
+  covers the old∩new *revival* case, never this old\new *removal* case).
+- `internal/pkgmgr/build.go:97-107` — install-time creation of the two declared keys per class:
+  `vtx.retentionclass.<id>` root + `.retentionPolicy`. `.piiKey` is lazily minted by the Processor
+  (`step65_encrypt.go`) and never declared, so it never enters `oldKeys`/`newSet` either way.
+- `internal/pkgmgr/definition.go:870-873` — `RetentionClassVertexType = "retentionclass"`.
+- `internal/pkgmgr/installer.go:466-470` — exported `pkgmgr.RetentionClassKey(pkg, canonicalName)`, the
+  prefix helper to mirror.
+- `packages/privacy-base/shred_retention_class_key.go:152-160,178-183` — `vertex_alive` + the
+  `ShredRetentionClassKey` guard: `fail("NotFound: … is absent or tombstoned")` on the holder ROOT, not on
+  `.piiKey`. Confirms tombstoning the root (not `.piiKey`, which this op alone ever marks `shredded`) is
+  what permanently blocks destruction.
+- `internal/pkgmgr/upgrade.go:29-58` (`UpgradeResult`) and `apply.go:28-69` (`ApplyResult`) —
+  `RevocationsRespected` is the field shape to mirror for a new `RetentionHoldersPreserved` counter,
+  wired at `upgrade.go:113` / `apply.go:135`.
+- `internal/pkgmgr/upgrade.go:220-225` (`noChangesReason`) — extend for symmetry: an uninstall-only-of-a-
+  class change can legitimately produce zero mutations, and the reason string is the only place that says
+  so.
+- `docs/contracts/08-package-install.md:172-185` (§8.6) — the frozen contract text this diff implements;
+  already mid-edit, uncommitted, for the `0bb6daea` grant/role exception. This fire adds a second,
+  parallel exception paragraph to the same **old \ new → tombstone** bullet (the grant/role exception is on
+  the *update* bullet above it) — same file, same uncommitted-for-Andrew posture, not a second proposal.
+- Live consumers confirmed unchanged: `packages/clinic-domain/ddls.go:942-958` (`clinicalRecord`),
+  `packages/lease-signing/ddls.go:320-405` (`underwritingRecord`, two aspects).
+
+### 28.3 Precedents to mirror
+
+`0bb6daea` (`upgrade.go:354-378`) is the sibling mechanism, not a template to copy verbatim: same
+principle — a topology entity's destruction is owned by its own explicit verb
+(`RevokePermission`/`TombstoneRole` there, `ShredRetentionClassKey` here), never by package diff-apply —
+applied at a **different point in the same function** (the old\new removal loop, not the old∩new revival
+guard). `TestUpgrade_RespectsOutOfBandRevocation` / `TestUpgrade_RevocationGuardExcludesDefinitions` /
+`TestUpgrade_ReAddsRemovedEntity` (`upgrade_test.go`) are the test shapes to mirror: same
+`newInstallerHarness` / `kvDoc` / `sampleDef`-style fixture pattern, asserting live KV state after the
+op rather than mutation-list internals only.
+
+### 28.4 Increment order + green checks
+
+Single increment (S-M, no design fork):
+
+1. `diffSummary` gains `retentionHoldersPreserved int`; the removed-keys loop in `diffManifest` skips
+   emitting a tombstone for any `k` with prefix `"vtx." + RetentionClassVertexType + "."`, incrementing the
+   new counter instead. `UpgradeResult`/`ApplyResult` gain `RetentionHoldersPreserved int`, wired from
+   `sum.retentionHoldersPreserved`; `noChangesReason` reports it alongside `revocationsRespected`.
+2. `docs/contracts/08-package-install.md` §8.6 — second exception paragraph on the tombstone bullet
+   (uncommitted).
+3. Tests: a rename/uninstall scenario (old declares a class, new does not) asserting the old holder +
+   `.retentionPolicy` stay `isDeleted:false` and `RetentionHoldersPreserved == 2`; a no-other-change
+   uninstall-only case asserting `Skipped` with the new reason text populated.
+   Green check: `go test ./internal/pkgmgr/...`.
+4. `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`.
+
+### 28.5 In-scope gotchas
+
+- The exclusion is a **prefix match on the key**, not a class/type check on the committed document — a
+  tombstoned-and-since-reused key path cannot exist here (retention-class IDs are deterministic per
+  `(package, canonicalName)`, and a genuinely re-added same-named class lands on the exact same key, which
+  is a pre-existing, unrelated revive concern the `!survives` branch already handles).
+- Do **not** touch `.piiKey` itself anywhere in this fire — it is never declared, never in `oldKeys`, and
+  the whole point is that it is untouched either way; the bug is the ROOT vertex's tombstone blocking the
+  *destruction op*, not any direct threat to the DEK aspect.
+- `sum.tombstoned` / `res.Tombstoned` must **decrease** by exactly the preserved-key count relative to what
+  a rename/uninstall would have produced pre-fix — assert this in the new test, not just the new counter,
+  so a future refactor that double-counts or double-skips is caught.
+
+### 28.6 Non-goals (the drift fence)
+
+- No automatic expiry / periodized destruction (§7.3's deferred scope, unchanged).
+- No change to `ShredRetentionClassKey` itself — it already does the right thing once the holder stays
+  reachable.
+- No new operator-facing decommission verb for "I am intentionally done with this class forever" — leaving
+  the orphaned holder addressable (findable only by an operator who still knows/records its old
+  canonicalName) is the whole fix; a discovery/enumeration surface for orphaned holders is a separate,
+  un-scoped concern, not filed here (no live consumer needs one yet).
