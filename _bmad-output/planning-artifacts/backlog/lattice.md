@@ -106,7 +106,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **[bootstrap] `UpgradePackage`/`UninstallPackage` mutations aren't scoped to the named package's own manifest** | Neither script verifies a submitted update/tombstone's key belongs to the named package's `.manifest.declaredKeys` — any holder can tombstone or rewrite any non-protected key while naming an unrelated package. | ★★★ | M | 📐 needs designer pass · found 2026-08-14, confirmed dominant 2026-08-15 (concrete `holdsRole` create repro) · [why](../../implementation-artifacts/permission-role-provenance-write-once-design.md) §8(b), §15 |
 | **[rbac] A tombstoned `grantedBy` link can be revived by a direct `update` with `isDeleted:false`** | `diffManifest`'s already-tombstoned-skip is client-side only; an `UpgradePackage` holder crafting the envelope directly restores a specifically-revoked grant with no server-side backstop. | ★★ | S–M | 📐 needs designer pass · build attempt 2026-08-15 falsified `OperationType` as a sufficient signal · [findings](../../implementation-artifacts/permission-role-provenance-write-once-design.md) §15 |
 | **[Loupe] A `weaverTarget`/lens config's `protected` field reads a malformed value as "not protected"** | `cmd/loupe/lens.go:83`/`lenses.go:45` read `cfg["protected"].(bool)` ok-discarded — same fail-open shape, display-only badge not a gate; today's writers always emit Go `true`. | ★ | XS | 📋 ready · found 2026-08-15 · [why](../../implementation-artifacts/permission-role-provenance-write-once-design.md) §17 |
-| **[rbac] `vtx.roleindex.<id>` (name→role lookup) is the same unguarded-rewrite class one layer down** | An `update` on `data.roleId` redirects a canonical name to a different role, same shape as the `.canonicalName` vector just closed — no live reader today (`RoleIDs` in-memory map is the real cross-package resolution path), so latent not live. | ★ | XS–S | 🏗️ building · worktree `/tmp/lattice-worktrees/roleindex-write-once` · next: adversarial review then merge |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -155,6 +154,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-15 · `aa41f292` · [rbac] `vtx.roleindex.<id>` provenance write-once CLOSED — mirrors the role-root guard; 3 cold reviews + 1 fix round, 0 blocking; create-forgery and no-repoint-heal limitations filed, not built
 - 2026-08-15 · (verification, no SHA) · [Edge] cross-lens delete-drop row REMOVED — already closed, proven by the pinned `TestPersonalTarget_ProducesNoDeleteShapedResult`
 - 2026-08-15 · `30d87457` · [identity-domain] erased-incumbent identityindex repoint CLOSED — review found+fixed a cross-op steal/revive race, closed with content+revision gates in privacy-base and identity-hygiene too; pin-coverage gap filed
 - 2026-08-15 · `db65e4da` · [Facet] concurrent first-`Acquire` mirror race CLOSED — per-identity singleflight, not a widened mutex; adversarial review found+fixed a Purge-race corpse-supersedes-live-build bug; both regressions mutation-verified
