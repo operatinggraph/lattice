@@ -162,17 +162,19 @@ func TestPackage_ScriptGuardsContainedIn(t *testing.T) {
 	// levels (a location's class is its own key type), while the class is what
 	// proves location-domain minted the vertex rather than a foreign package
 	// keying under vtx.unit.*. Both must be present.
-	for _, want := range []string{"class_of", "LOCATION_CLASSES", "LEGACY_LOCATION_CLASS"} {
+	for _, want := range []string{"class_of", "LOCATION_CLASSES"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("location script must reference %q — the endpoint guard checks the key AND the class", want)
 		}
 	}
-	// The class arm admits the shared legacy discriminator alongside the
-	// per-type classes: locations minted before the taxonomy landed carry
-	// `location` on a concrete key and nothing rewrites them, so a class arm
-	// that admitted only the per-type values would refuse every one of them.
-	if !strings.Contains(src, `LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]`) {
-		t.Error("the admitted class set must be the per-type classes PLUS the legacy shared discriminator")
+	if strings.Contains(src, "LEGACY_LOCATION_CLASS") {
+		t.Error("LEGACY_LOCATION_CLASS was retired (dynamic-type-taxonomy-design.md §17.22 — the 25 legacy-classed roots were repaired 2026-08-10); it must not reappear")
+	}
+	// The admitted class set is exactly the per-type classes: the 2026-08-10
+	// repair rewrote every legacy-classed root to its key type, so nothing
+	// live can carry the old shared discriminator any more.
+	if !strings.Contains(src, `LOCATION_CLASSES = LOCATION_TYPES`) {
+		t.Error("the admitted class set must be exactly the per-type classes")
 	}
 }
 

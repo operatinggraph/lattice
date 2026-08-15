@@ -164,7 +164,7 @@ func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string
 func seedLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, locType, id string) string {
 	t.Helper()
 	key := "vtx." + locType + "." + id
-	seedVertex(t, ctx, conn, key, "location", nil)
+	seedVertex(t, ctx, conn, key, locType, nil)
 	return key
 }
 
@@ -617,16 +617,11 @@ func TestSL_ResidesIn_RejectsForeignClassOnLocationKey(t *testing.T) {
 	}
 }
 
-// TestSL_ResidesIn_AcceptsPerTypeClass pins the FORWARD-migration half of the
-// class arm, which every other location fixture in this file misses: they all
-// seed the shared pre-taxonomy class, so narrowing the admitted set back to
-// just that one would leave the whole suite green while every location minted
-// AFTER the upgrade silently stopped being wireable.
-//
-// A location created by location-domain today carries its own key type as its
-// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
-// production produces from here on. Its legacy counterpart is seedLocation's
-// own output, accepted by every other residesIn test here.
+// TestSL_ResidesIn_AcceptsPerTypeClass pins the class arm's positive case: a
+// location vertex's class is its own key type (CreateLocation writes
+// make_vtx(loc_key, lt, {})), which is the only shape a live location vertex
+// carries — the same shape seedLocation mints, accepted by every other
+// residesIn test here.
 func TestSL_ResidesIn_AcceptsPerTypeClass(t *testing.T) {
 	ctx, conn := setupSLEnv(t)
 	cp, cons := newSLPipeline(t, ctx, conn, "respertype")
@@ -644,14 +639,14 @@ func TestSL_ResidesIn_AcceptsPerTypeClass(t *testing.T) {
 		wireHint(idKey, "residesIn", unitKey), processor.OutcomeAccepted)
 }
 
-// TestSL_ResidesIn_RejectsLegacyClassOnNonLocationKey discriminates the KEY arm
-// from the class arm. Every other negative vector here fails BOTH arms at once,
-// so none of them can tell a key-type guard from the class-only guard that
-// preceded it. This one carries an admitted class on a key type that is not a
-// location at all: only the key arm can refuse it.
-func TestSL_ResidesIn_RejectsLegacyClassOnNonLocationKey(t *testing.T) {
+// TestSL_ResidesIn_RejectsAdmittedClassOnNonLocationKey discriminates the KEY
+// arm from the class arm. Every other negative vector here fails BOTH arms at
+// once, so none of them can tell a key-type guard from the class-only guard
+// that preceded it. This one carries an admitted class on a key type that is
+// not a location at all: only the key arm can refuse it.
+func TestSL_ResidesIn_RejectsAdmittedClassOnNonLocationKey(t *testing.T) {
 	ctx, conn := setupSLEnv(t)
-	cp, cons := newSLPipeline(t, ctx, conn, "reslegacynonloc")
+	cp, cons := newSLPipeline(t, ctx, conn, "resnonlocadmcls")
 
 	idID := "SLresLegacyHJKMNPQRS"
 	idKey := "vtx.identity." + idID
@@ -659,7 +654,7 @@ func TestSL_ResidesIn_RejectsLegacyClassOnNonLocationKey(t *testing.T) {
 	// An admitted CLASS on a non-location KEY TYPE.
 	impostorID := "SLimpostorHJKMNPQRST"
 	impostorKey := "vtx.service." + impostorID
-	seedVertex(t, ctx, conn, impostorKey, "location", nil)
+	seedVertex(t, ctx, conn, impostorKey, "unit", nil)
 
 	outcome, why := submitHintWithReason(t, ctx, conn, cp, cons, "slResLegacyBad", "WireResidesIn",
 		map[string]any{"identity": idKey, "location": impostorKey},

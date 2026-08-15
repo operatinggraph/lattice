@@ -357,10 +357,9 @@ def require_live_unit(state, key):
     # vertex never receives listing economics.
     # BOTH the key and the class are checked, and each catches what the other
     # cannot. The KEY's type segment is what distinguishes a unit from a
-    # building at all — a location's class is its own key type, and the legacy
-    # shared class names no level. The CLASS is what proves location-domain
-    # minted the vertex: a foreign package writing vtx.unit.<id> with a class
-    # of its own passes the key check and must still be refused.
+    # building at all. The CLASS is what proves location-domain minted the
+    # vertex: a foreign package writing vtx.unit.<id> with a class of its own
+    # passes the key check and must still be refused.
     if key not in state or state[key] == None:
         fail("UnknownUnit: unit: " + key + " is absent")
     doc = state[key]
@@ -370,7 +369,7 @@ def require_live_unit(state, key):
         fail("NotAUnit: unit: " + key + " is not a vtx.unit.<NanoID> key, required unit")
     cls = class_of(state, key)
     if cls not in UNIT_CLASSES:
-        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required unit or " + LEGACY_LOCATION_CLASS)
+        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required unit")
 
 def class_of(state, key):
     # The vertex's root class, or None if absent. "class" is a Starlark
@@ -382,11 +381,8 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-# The classes a live location-domain UNIT may carry: its own key type, or the
-# shared discriminator every location minted before the taxonomy landed
-# carries. Nothing rewrites those documents, so both shapes are live at once.
-LEGACY_LOCATION_CLASS = "location"
-UNIT_CLASSES = ["unit", LEGACY_LOCATION_CLASS]
+# The classes a live location-domain UNIT may carry: its own key type.
+UNIT_CLASSES = ["unit"]
 
 def key_type_of(key):
     # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any

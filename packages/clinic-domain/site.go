@@ -121,17 +121,16 @@ def require_live_building(state, key):
     # belongs only on a location-domain building.
     # BOTH the key and the class are checked, and each catches what the other
     # cannot. The KEY's type segment is what distinguishes a building from a
-    # unit at all — a location's class is its own key type, and the legacy
-    # shared class names no level. The CLASS is what proves location-domain
-    # minted the vertex: a foreign package writing vtx.building.<id> with a
-    # class of its own passes the key check and must still be refused.
+    # unit at all. The CLASS is what proves location-domain minted the
+    # vertex: a foreign package writing vtx.building.<id> with a class of its
+    # own passes the key check and must still be refused.
     if not vertex_alive(state, key):
         fail("UnknownBuilding: buildingKey: " + key + " is absent or tombstoned")
     if key_type_of(key) != "building":
         fail("NotALocation: buildingKey: " + key + " is not a vtx.building.<NanoID> key, required building")
     cls = class_of(state, key)
     if cls not in BUILDING_CLASSES:
-        fail("NotALocation: buildingKey: " + key + " has class " + str(cls) + ", required building or " + LEGACY_LOCATION_CLASS)
+        fail("NotALocation: buildingKey: " + key + " has class " + str(cls) + ", required building")
 
 def class_of(state, key):
     # The vertex's root class, or None if absent. "class" is a Starlark
@@ -143,11 +142,8 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-# The classes a live location-domain BUILDING may carry: its own key type, or
-# the shared discriminator every location minted before the taxonomy landed
-# carries. Nothing rewrites those documents, so both shapes are live at once.
-LEGACY_LOCATION_CLASS = "location"
-BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+# The classes a live location-domain BUILDING may carry: its own key type.
+BUILDING_CLASSES = ["building"]
 
 def key_type_of(key):
     # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
@@ -296,17 +292,16 @@ def require_live_building(state, key):
     # Alive, keyed vtx.building.<NanoID>, AND carrying a building class.
     # BOTH the key and the class are checked, and each catches what the other
     # cannot. The KEY's type segment is what distinguishes a building from a
-    # unit at all — a location's class is its own key type, and the legacy
-    # shared class names no level. The CLASS is what proves location-domain
-    # minted the vertex: a foreign package writing vtx.building.<id> with a
-    # class of its own passes the key check and must still be refused.
+    # unit at all. The CLASS is what proves location-domain minted the
+    # vertex: a foreign package writing vtx.building.<id> with a class of its
+    # own passes the key check and must still be refused.
     if not vertex_alive(state, key):
         fail("UnknownBuilding: building: " + key + " is absent or tombstoned")
     if key_type_of(key) != "building":
         fail("NotALocation: building: " + key + " is not a vtx.building.<NanoID> key, required building")
     cls = class_of(state, key)
     if cls not in BUILDING_CLASSES:
-        fail("NotALocation: building: " + key + " has class " + str(cls) + ", required building or " + LEGACY_LOCATION_CLASS)
+        fail("NotALocation: building: " + key + " has class " + str(cls) + ", required building")
 
 def class_of(state, key):
     # The vertex's root class, or None if absent. "class" is a Starlark
@@ -318,11 +313,8 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-# The classes a live location-domain BUILDING may carry: its own key type, or
-# the shared discriminator every location minted before the taxonomy landed
-# carries. Nothing rewrites those documents, so both shapes are live at once.
-LEGACY_LOCATION_CLASS = "location"
-BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+# The classes a live location-domain BUILDING may carry: its own key type.
+BUILDING_CLASSES = ["building"]
 
 def key_type_of(key):
     # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any

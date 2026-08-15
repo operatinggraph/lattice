@@ -81,12 +81,12 @@ func wcWorksAtLink() string {
 func seedWorkplaceTopology(t *testing.T, ctx context.Context, conn *substrate.Conn) (string, string) {
 	t.Helper()
 	seedIdentity(t, ctx, conn, wcStaffID)
-	seedVertex(t, ctx, conn, wcBuildingAKey, "location", map[string]any{})
-	seedVertex(t, ctx, conn, wcBuildingBKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingAKey, "building", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingBKey, "building", map[string]any{})
 
 	mk := func(unitID, leaseID, buildingKey string) string {
 		unitKey := "vtx.unit." + unitID
-		seedVertex(t, ctx, conn, unitKey, "location", map[string]any{})
+		seedVertex(t, ctx, conn, unitKey, "unit", map[string]any{})
 		testutil.SeedLink(t, ctx, conn,
 			"lnk.unit."+unitID+".containedIn.building."+buildingKey[len("vtx.building."):],
 			"containedIn", unitKey, buildingKey)
@@ -417,17 +417,14 @@ func TestWorkplace_MenuItemStaffConfinedToWorkplace(t *testing.T) {
 // TestWorkplace_MenuItemRejectsNonLocation pins the migrated location guard on
 // CreateMenuItem's `locationKey`: the servedAt target must be keyed with an
 // admitted location type segment. The guard reads the KEY, never the root
-// class — a location vertex's class equals its own key type, while every
-// location minted before the taxonomy landed carries the shared class
-// `location`, so no class value names the family.
+// class alone.
 //
 // Both calls are made as the OPERATOR, which is exempt from workplace
 // confinement, so the difference between them is the location guard alone.
 // Verified by mutation: disabling the guard turns the negative green, which a
 // staff-actor version of this test did NOT — the confinement guard was
 // refusing it instead. The positive vector is seedWorkplaceTopology's
-// building: a concrete key type carrying the legacy shared class, which is the
-// live production migration shape.
+// building: a real per-type-classed building.
 func TestWorkplace_MenuItemRejectsNonLocation(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
@@ -435,7 +432,7 @@ func TestWorkplace_MenuItemRejectsNonLocation(t *testing.T) {
 	seedWorkplaceTopology(t, ctx, conn)
 
 	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmlp00000000000001", wcBuildingAKey, domainActorKey); got != processor.OutcomeAccepted {
-		t.Fatalf("operator CreateMenuItem at a legacy-classed building = %v, want Accepted", got)
+		t.Fatalf("operator CreateMenuItem at a real building = %v, want Accepted", got)
 	}
 	got, why := wcSubmitCreateMenuItemWithReason(t, ctx, conn, cp, cons, "wcmln00000000000002", wcStaffKey, domainActorKey)
 	if got != processor.OutcomeRejected {
@@ -446,18 +443,12 @@ func TestWorkplace_MenuItemRejectsNonLocation(t *testing.T) {
 	}
 }
 
-// TestWorkplace_MenuItemAcceptsPerTypeClass pins the FORWARD-migration half of
-// the class arm, which every other location fixture in this package misses:
-// seedWorkplaceTopology seeds the shared pre-taxonomy class everywhere, so
-// narrowing the admitted class set back to just that one leaves the whole
-// suite green while every location minted AFTER the upgrade silently stops
-// being servable.
-//
-// A location created by location-domain today carries its own key type as its
-// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
-// production produces from here on. Both calls are made as the OPERATOR, which
-// is exempt from workplace confinement, so the only thing separating them is
-// the location guard.
+// TestWorkplace_MenuItemAcceptsPerTypeClass pins the class arm's positive
+// case: a location vertex's class is its own key type (CreateLocation writes
+// make_vtx(loc_key, lt, {})), which is the only shape a live location vertex
+// carries. Both calls are made as the OPERATOR, which is exempt from
+// workplace confinement, so the only thing separating them is the location
+// guard.
 func TestWorkplace_MenuItemAcceptsPerTypeClass(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
@@ -476,7 +467,7 @@ func TestWorkplace_MenuItemAcceptsPerTypeClass(t *testing.T) {
 	// at once and so cannot tell the key guard from the class-only guard that
 	// preceded it.
 	impostor := "vtx.tab.BBCAFEMPSTRTABHJKMNP"
-	seedVertex(t, ctx, conn, impostor, "location", map[string]any{})
+	seedVertex(t, ctx, conn, impostor, "building", map[string]any{})
 	got, why := wcSubmitCreateMenuItemWithReason(t, ctx, conn, cp, cons, "wcmpt00000000000002", impostor, domainActorKey)
 	if got != processor.OutcomeRejected {
 		t.Fatalf("CreateMenuItem servedAt a non-location target = %v, want Rejected", got)

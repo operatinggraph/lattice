@@ -198,13 +198,14 @@ func seedIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, id st
 
 // seedLocation seeds a location the way location-domain actually mints one:
 // the key TYPE segment is the location level (unit|building|property) and the
-// CLASS is always `location` (location-domain/ddls.go). Seeding a
-// `vtx.location.<id>` would test a key shape production never produces — and
-// would hide that servedAt's link key carries the level, not the class.
+// CLASS is that same key type (location-domain/ddls.go, CreateLocation).
+// Seeding a `vtx.location.<id>` would test a key shape production never
+// produces — and would hide that servedAt's link key carries the level, not
+// the class.
 func seedLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
 	t.Helper()
 	key := "vtx.unit." + id
-	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	seedVertex(t, ctx, conn, key, "unit", map[string]any{})
 	return key
 }
 
@@ -1830,7 +1831,7 @@ func TestCharge_SelfOrder_AcceptsMenuItemServedAtCoveringBuilding(t *testing.T) 
 	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGCVUNPTHJ")
 	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
 	buildingKey := "vtx.building.BBCAFEDMNCHGCVBLDGHJ"
-	seedVertex(t, ctx, conn, buildingKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, buildingKey, "building", map[string]any{})
 	seedLink(t, ctx, conn, "lnk.unit.BBCAFEDMNCHGCVUNPTHJ.containedIn.building.BBCAFEDMNCHGCVBLDGHJ",
 		unitKey, buildingKey, "containedIn", "containedIn")
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargecov10001", leaseKey)

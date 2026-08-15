@@ -486,17 +486,19 @@ func TestLocation_WireRejectsForeignClassOnLocationKey(t *testing.T) {
 	}
 }
 
-// TestLocation_WireAcceptsLegacyClassedEndpoint is the migration-window pin,
-// and it is the reason no write-path guard may read the root class. A location
-// minted before the taxonomy landed carries the shared class `location` on a
-// `vtx.unit.<id>` key, and nothing rewrites those documents. A class-based
-// guard — whether `cls == "location"` or `cls in {unit,building,property}` —
-// necessarily rejects one of the two live populations. The key-type-segment
-// guard accepts both, which is the whole migration.
+// TestLocation_WireRejectsLegacyClassedEndpoint proves the retired migration
+// widening stays retired: LOCATION_CLASSES no longer admits the pre-taxonomy
+// shared class `location` (dynamic-type-taxonomy-design.md §17.22 — the 25
+// live legacy-classed roots were rewritten to their key type 2026-08-10, and
+// the Processor's abstract-type gate, Contract #1 §1.2, refuses any new
+// document from carrying `class:"location"` at all). A vertex seeded directly
+// into KV with the old class (bypassing that gate, as this fixture does)
+// simulates the now-impossible shape, and the guard must refuse it exactly
+// like any other wrong-classed key.
 //
 // Its positive/negative pair is TestLocation_WireRejectsNonLocation above: the
 // same op, the same shape, a parent whose type segment is not a location.
-func TestLocation_WireAcceptsLegacyClassedEndpoint(t *testing.T) {
+func TestLocation_WireRejectsLegacyClassedEndpoint(t *testing.T) {
 	ctx, conn := setupLocationEnv(t)
 	cp, cons := newLocationPipeline(t, ctx, conn, "legacy-class")
 
@@ -517,13 +519,18 @@ func TestLocation_WireAcceptsLegacyClassedEndpoint(t *testing.T) {
 		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + legacyKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, legacyKey}},
 	}
-	testutil.PublishOp(t, conn, env)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want rejected", outcome)
+	}
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "NotALocation") {
+		t.Fatalf("refused with %v, want the endpoint guard's own NotALocation", reply)
+	}
 
 	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
 	lnk := "lnk.unit." + unitID + ".containedIn.building." + legacyID
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err != nil {
-		t.Fatalf("containedIn link to a legacy-classed building was refused: %s: %v", lnk, err)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err == nil {
+		t.Fatalf("containedIn link to a legacy-classed building was committed: %s", lnk)
 	}
 }
 

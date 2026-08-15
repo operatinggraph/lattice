@@ -156,7 +156,7 @@ func TestClinic_SetSiteProfileRejectsNonLocationBuilding(t *testing.T) {
 	cp, cons := newClinicPipeline(t, ctx, conn, "site-profile-badclass")
 
 	notABuilding := "vtx.unit.CLnotabuiLdingHJKMNP"
-	clSeedVertex(t, ctx, conn, notABuilding, "location", false) // a real location, the WRONG level
+	clSeedVertex(t, ctx, conn, notABuilding, "unit", false) // a real location, the WRONG level
 
 	outcome, why := clSubmitSiteProfileReason(t, ctx, conn, cp, cons, "spbad0001", notABuilding)
 	if outcome != processor.OutcomeRejected {
@@ -186,16 +186,21 @@ func TestClinic_SetSiteProfileRejectsNonLocationBuilding(t *testing.T) {
 		t.Fatalf("a .site aspect was committed for a building-keyed vertex of a foreign class")
 	}
 
-	// The migration-window vector the class arm must still ADMIT: a building
-	// key carrying the shared pre-taxonomy class, which is what the live
-	// location vertices look like.
+	// The retired migration widening stays retired: a building key carrying
+	// the old shared pre-taxonomy class is refused like any other
+	// wrong-classed key (dynamic-type-taxonomy-design.md §17.22 — the live
+	// legacy-classed roots were rewritten to their key type 2026-08-10).
 	legacy := "vtx.building.CLgacyCLassHJKMNPQRS"
 	clSeedVertex(t, ctx, conn, legacy, "location", false)
-	clSubmit(t, ctx, conn, cp, cons, "spgood0001", "SetSiteProfile", "clinicSite",
-		`{"buildingKey":"`+legacy+`","name":"Legacy Clinic"}`,
-		[]string{legacy}, processor.OutcomeAccepted)
-	if clMissing(t, ctx, conn, legacy+".site") {
-		t.Fatalf("a legacy-classed building must still receive its .site aspect")
+	outcome, why = clSubmitSiteProfileReason(t, ctx, conn, cp, cons, "spbad0003", legacy)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("SetSiteProfile on a legacy-classed building = %v, want rejected", outcome)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the building guard's own NotALocation", why)
+	}
+	if !clMissing(t, ctx, conn, legacy+".site") {
+		t.Fatalf("a .site aspect was committed for a legacy-classed building")
 	}
 }
 
@@ -380,7 +385,7 @@ func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "apbadpat0001", "Gail Ghostsite")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "apbadprv0001", "Dr. Bad Class", "Cardiology")
 	fakeSite := "vtx.unit.CLapbadsiteHJKMNPQRS"
-	clSeedVertex(t, ctx, conn, fakeSite, "location", false) // a real location, the WRONG level
+	clSeedVertex(t, ctx, conn, fakeSite, "unit", false) // a real location, the WRONG level
 
 	apptID := clCreateAppointmentWithSite(t, ctx, conn, cp, cons, "apbadappt001", patientKey, providerKey, fakeSite, processor.OutcomeRejected)
 

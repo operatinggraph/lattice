@@ -55,7 +55,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "location-domain",
-	Version:     "0.3.1",
+	Version:     "0.3.2",
 	Description: "Spatial base domain: the abstract `location` type with its unit/building/property concrete leaves, and the containedIn containment link.",
 	Depends:     []string{},
 	DDLs:        DDLs(),

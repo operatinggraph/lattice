@@ -2112,11 +2112,8 @@ def doc_class(doc):
         return None
     return getattr(doc, "class")
 
-# The classes a live location-domain BUILDING may carry: its own key type, or
-# the shared discriminator every location minted before the taxonomy landed
-# carries. Nothing rewrites those documents, so both shapes are live at once.
-LEGACY_LOCATION_CLASS = "location"
-BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+# The classes a live location-domain BUILDING may carry: its own key type.
+BUILDING_CLASSES = ["building"]
 
 def require_site_membership(site_key, provider):
     # Optional site association (Increment 2 — see the multi-site design note).
@@ -2128,11 +2125,10 @@ def require_site_membership(site_key, provider):
     #
     # BOTH the key and the class are checked, and each catches what the other
     # cannot. The KEY's type segment is what distinguishes a building from a
-    # unit at all — a location's class is its own key type, and the legacy
-    # shared class names no level — and a practicesAt link's target is a
-    # building. The CLASS is what proves location-domain minted the vertex: a
-    # foreign package writing vtx.building.<id> with a class of its own passes
-    # the key check and must still be refused.
+    # unit at all, and a practicesAt link's target is a building. The CLASS
+    # is what proves location-domain minted the vertex: a foreign package
+    # writing vtx.building.<id> with a class of its own passes the key check
+    # and must still be refused.
     # read-posture: (d) declared optionalReads by CreateAppointment's dispatcher
     # (cmd/clinic-app/web/app.js submitAppointment) — site is optional overall,
     # so a hard-required declared read would be wrong when it's omitted.
@@ -2142,7 +2138,7 @@ def require_site_membership(site_key, provider):
     if key_type_of(site_key) != "building":
         fail("NotALocation: site: " + site_key + " is not a vtx.building.<NanoID> key, required building")
     if doc_class(site_doc) not in BUILDING_CLASSES:
-        fail("NotALocation: site: " + site_key + " has class " + str(doc_class(site_doc)) + ", required building or " + LEGACY_LOCATION_CLASS)
+        fail("NotALocation: site: " + site_key + " has class " + str(doc_class(site_doc)) + ", required building")
     _, provider_id = parts_of(provider, "provider", "provider")
     _, site_id = parts_of(site_key, "site", "building")
     link_key = "lnk.provider." + provider_id + ".practicesAt.building." + site_id

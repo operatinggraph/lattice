@@ -90,7 +90,7 @@ func ptCapDoc() *processor.CapabilityDoc {
 // bound-provider binder cannot answer for it and only the workplace walk can.
 func seedProviderTombstoneTopology(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
-	clSeedVertex(t, ctx, conn, ptBuildingKey, "location", false)
+	clSeedVertex(t, ctx, conn, ptBuildingKey, "building", false)
 	clSeedVertex(t, ctx, conn, ptProviderKey, "provider", false)
 	clSeedVertex(t, ctx, conn, ptPatientKey, "patient", false)
 	clSeedVertex(t, ctx, conn, ptActorKey, "identity", false)

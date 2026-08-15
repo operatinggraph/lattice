@@ -474,7 +474,8 @@ func TestLoftspace_RejectsNonUnit(t *testing.T) {
 // stops another package minting a vertex there under a class of its own. The
 // class arm is what proves location-domain minted this unit before listing
 // economics attach to it. Its positive vector is the accepted SetListing over
-// a real unit elsewhere in this file, plus the legacy-classed acceptance below.
+// a real unit elsewhere in this file; its sibling below is the retired
+// legacy-classed shape, refused the same way.
 func TestLoftspace_RejectsForeignClassOnUnitKey(t *testing.T) {
 	ctx, conn := setupLoftspaceEnv(t)
 	cp, cons := newLoftspacePipeline(t, ctx, conn, "foreign-class")
@@ -494,14 +495,23 @@ func TestLoftspace_RejectsForeignClassOnUnitKey(t *testing.T) {
 		t.Fatalf("a listing was committed on a unit-keyed vertex of a foreign class: %s", foreign)
 	}
 
-	// The legacy-classed unit is the migration-window vector the class arm must
-	// still admit: a concrete key type carrying the shared pre-taxonomy class,
-	// which is what the 69 live location vertices look like.
+	// The retired migration widening stays retired: a concrete key type
+	// carrying the old shared pre-taxonomy class is refused like any other
+	// wrong-classed key (dynamic-type-taxonomy-design.md §17.22 — the live
+	// legacy-classed roots were rewritten to their key type 2026-08-10).
 	legacy := "vtx.unit.LSgacyCLassHJKMNPQRS"
 	lsSeedVertex(t, ctx, conn, legacy, "location", false)
-	setListing(t, ctx, conn, cp, cons, "legacyCls01", legacy,
-		`{"unit":"`+legacy+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`,
-		processor.OutcomeAccepted)
+	got, why = setListingWithReason(t, ctx, conn, cp, cons, "legacyCls01", legacy,
+		`{"unit":"`+legacy+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("SetListing on a legacy-classed unit = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotAUnit") {
+		t.Errorf("refused with %q, want the unit guard's own NotAUnit", why)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, legacy+".listing"); err == nil {
+		t.Fatalf("a listing was committed on a legacy-classed unit: %s", legacy)
+	}
 }
 
 // TestLoftspace_RejectsDeadUnit proves the alive guard: a tombstoned unit is

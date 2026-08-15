@@ -93,8 +93,8 @@ func fdCapDoc() *processor.CapabilityDoc {
 // actor_holds_operator resolves False — the actor cannot prove root).
 func seedFrontDeskTopology(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
-	clSeedVertex(t, ctx, conn, fdBuildingAKey, "location", false)
-	clSeedVertex(t, ctx, conn, fdBuildingBKey, "location", false)
+	clSeedVertex(t, ctx, conn, fdBuildingAKey, "building", false)
+	clSeedVertex(t, ctx, conn, fdBuildingBKey, "building", false)
 	clSeedVertex(t, ctx, conn, fdProviderAKey, "provider", false)
 	clSeedVertex(t, ctx, conn, fdProviderBKey, "provider", false)
 	clSeedVertex(t, ctx, conn, fdPatientKey, "patient", false)

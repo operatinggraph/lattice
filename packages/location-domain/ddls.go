@@ -282,15 +282,9 @@ def required_string(p, name):
 # script serves all three, and a location vertex's class IS its key type.
 LOCATION_TYPES = ["unit", "building", "property"]
 
-# The class a location vertex minted before the taxonomy landed carries: one
-# shared discriminator across all three levels. Nothing rewrites those
-# documents, so both class shapes are live at once and the guards admit either.
-LEGACY_LOCATION_CLASS = "location"
-
-# The full set of classes a live location vertex may carry: its own key type
-# (the class every newly-minted location gets) or the shared legacy
-# discriminator.
-LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
+# The full set of classes a live location vertex may carry: its own key type,
+# the class every location gets.
+LOCATION_CLASSES = LOCATION_TYPES
 
 def required_location_type(p):
     lt = required_string(p, "locationType")
@@ -429,7 +423,7 @@ def require_live_location(state, key, name):
         fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
     cls = class_of(state, key)
     if cls not in LOCATION_CLASSES:
-        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type")
 
 def execute(state, op):
     ot = op.operationType

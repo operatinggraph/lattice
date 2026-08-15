@@ -72,8 +72,8 @@ func wcStaffCapDoc() *processor.CapabilityDoc {
 func wcSeedStaff(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
 	seedVertex(t, ctx, conn, wcStaffKey, "identity", map[string]any{})
-	seedVertex(t, ctx, conn, wcBuildingAKey, "location", map[string]any{})
-	seedVertex(t, ctx, conn, wcBuildingBKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingAKey, "building", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingBKey, "building", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.identity."+wcStaffID+".worksAt.building."+wcBuildingAID,
 		"worksAt", wcStaffKey, wcBuildingAKey)
@@ -255,25 +255,21 @@ func TestWorkplace_CreateStudioConfinedToTheStaffersBuilding(t *testing.T) {
 	}
 }
 
-// TestWorkplace_CreateStudioRejectsNonLocation pins the migrated location guard
-// on CreateStudio's optional `location`: the locatedAt target must be keyed
-// with an admitted location type segment. The guard reads the KEY, never the
-// root class — a location vertex's class equals its own key type, while every
-// location minted before the taxonomy landed carries the shared class
-// `location`, so no class value names the family.
+// TestWorkplace_CreateStudioRejectsNonLocation pins the location guard on
+// CreateStudio's optional `location`: the locatedAt target must be keyed
+// with an admitted location type segment.
 //
 // Both calls are made as the OPERATOR, which is exempt from workplace
 // confinement, so the difference between them is the location guard alone.
-// The positive vector is wcBuildingAKey: a concrete key type carrying the
-// legacy shared class — the live production migration shape.
+// The positive vector is wcBuildingAKey: a real per-type-classed building.
 func TestWorkplace_CreateStudioRejectsNonLocation(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcstudioloc")
 	wcSeedStaff(t, ctx, conn)
 
 	if _, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
-		"wdwcstudiol000000001", "Legacy Class Studio", wcBuildingAKey, domainActorKey); got != processor.OutcomeAccepted {
-		t.Fatalf("operator CreateStudio at a legacy-classed building = %v, want Accepted", got)
+		"wdwcstudiol000000001", "Building Studio", wcBuildingAKey, domainActorKey); got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateStudio at a real building = %v, want Accepted", got)
 	}
 	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
 		"wdwcstudiol000000002", "Nonplace Studio", wcStaffKey, domainActorKey)
@@ -290,17 +286,11 @@ func TestWorkplace_CreateStudioRejectsNonLocation(t *testing.T) {
 	}
 }
 
-// TestWorkplace_CreateStudioAcceptsPerTypeClass pins the FORWARD-migration
-// half of the class arm, which every other location fixture in this package
-// misses: they all seed the shared pre-taxonomy class, so narrowing the
-// admitted class set back to just that one leaves the whole suite green while
-// every location minted AFTER the upgrade silently stops accepting a studio.
-//
-// A location created by location-domain today carries its own key type as its
-// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
-// production produces from here on. Both calls run as the OPERATOR, which is
-// exempt from workplace confinement, so the location guard is the only thing
-// separating them.
+// TestWorkplace_CreateStudioAcceptsPerTypeClass pins the class arm's positive
+// case: a location vertex's class is its own key type (CreateLocation writes
+// make_vtx(loc_key, lt, {})), which is the only shape a live location vertex
+// carries. Both calls run as the OPERATOR, which is exempt from workplace
+// confinement, so the location guard is the only thing separating them.
 func TestWorkplace_CreateStudioAcceptsPerTypeClass(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcstudiopertype")
@@ -319,7 +309,7 @@ func TestWorkplace_CreateStudioAcceptsPerTypeClass(t *testing.T) {
 	// at once and so cannot tell the key guard from the class-only guard that
 	// preceded it.
 	impostor := "vtx.session.BBWELLMPSTRSESSNHJKM"
-	seedVertex(t, ctx, conn, impostor, "location", map[string]any{})
+	seedVertex(t, ctx, conn, impostor, "building", map[string]any{})
 	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
 		"wdwcstudiopt00000002", "Impostor Studio", impostor, domainActorKey)
 	if got != processor.OutcomeRejected {
@@ -469,7 +459,7 @@ func TestWorkplace_ConsumerSelfServiceIsUnconfined(t *testing.T) {
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcself")
 	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
 	seedVertex(t, ctx, conn, domainConsumerKey, "identity", map[string]any{})
-	seedVertex(t, ctx, conn, wcBuildingAKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingAKey, "building", map[string]any{})
 
 	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcslfstudioa000001", "Studio A")
 	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
@@ -568,10 +558,10 @@ func TestWorkplace_SharedRoomCoveredByEveryContainmentParent(t *testing.T) {
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcmultiparent")
 	wcSeedStaff(t, ctx, conn) // staff A worksAt building A; buildings A + B exist
 
-	seedVertex(t, ctx, conn, wcBuildingCKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcBuildingCKey, "building", map[string]any{})
 	// The shared room sits under BOTH building A and building B — and under
 	// neither C.
-	seedVertex(t, ctx, conn, wcSharedRoomKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcSharedRoomKey, "unit", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.unit."+wcSharedRoomID+".containedIn.building."+wcBuildingAID,
 		"containedIn", wcSharedRoomKey, wcBuildingAKey)
@@ -675,8 +665,8 @@ func TestWorkplace_TombstonedAncestorConfersNothing(t *testing.T) {
 	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
 
 	// attic -containedIn-> floor -containedIn-> building A, staff A at building A.
-	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
-	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcAtticKey, "unit", map[string]any{})
+	seedVertex(t, ctx, conn, wcDeadFloorKey, "unit", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.unit."+wcAtticID+".containedIn.unit."+wcDeadFloorID,
 		"containedIn", wcAtticKey, wcDeadFloorKey)
@@ -908,8 +898,8 @@ func TestWorkplace_ContainmentCycleTerminates(t *testing.T) {
 	wcSeedStaff(t, ctx, conn) // staff A worksAt building A — NOT in the cycle
 
 	// A two-node cycle reachable from neither building: attic <-> floor.
-	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
-	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcAtticKey, "unit", map[string]any{})
+	seedVertex(t, ctx, conn, wcDeadFloorKey, "unit", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.unit."+wcAtticID+".containedIn.unit."+wcDeadFloorID,
 		"containedIn", wcAtticKey, wcDeadFloorKey)

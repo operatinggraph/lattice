@@ -232,9 +232,9 @@ func mdSeedWorld(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
 	mdSeedVertex(t, ctx, conn, mdActorKey, "identity")
 	mdSeedVertex(t, ctx, conn, mdTechKey, "identity")
-	mdSeedVertex(t, ctx, conn, mdBuildingAKey, "location")
-	mdSeedVertex(t, ctx, conn, mdBuildingBKey, "location")
-	mdSeedVertex(t, ctx, conn, mdUnitAKey, "location")
+	mdSeedVertex(t, ctx, conn, mdBuildingAKey, "building")
+	mdSeedVertex(t, ctx, conn, mdBuildingBKey, "building")
+	mdSeedVertex(t, ctx, conn, mdUnitAKey, "unit")
 	testutil.SeedLink(t, ctx, conn,
 		"lnk.unit."+mdUnitAID+".containedIn.building."+mdBuildingAID,
 		"containedIn", mdUnitAKey, mdBuildingAKey)
@@ -388,27 +388,23 @@ func TestReportIssue_CommitsWorkOrderAtLocation(t *testing.T) {
 	}
 }
 
-// TestReportIssue_RejectsNonLocationTarget pins the migrated location guard on
-// ReportIssue's `location` payload field. The guard reads the KEY's type
-// segment — a location vertex's class equals its own key type, and every
-// location minted before the taxonomy landed still carries the shared class
-// `location`, so no class value names the family and a class check would
-// reject one of the two live populations.
+// TestReportIssue_RejectsNonLocationTarget pins the location guard on
+// ReportIssue's `location` payload field: the target must be keyed with an
+// admitted location type segment.
 //
 // The negative vector is a live IDENTITY (a real vertex, not a location) and
-// the positive vector is the same op over mdUnitAKey, which mdSeedWorld seeds
-// with a concrete key type and the legacy shared class — the exact production
-// migration shape. Asserting both is what keeps the rejection attributable to
-// the guard rather than to the fixture.
+// the positive vector is the same op over mdUnitAKey, a real per-type-classed
+// unit. Asserting both is what keeps the rejection attributable to the guard
+// rather than to the fixture.
 func TestReportIssue_RejectsNonLocationTarget(t *testing.T) {
 	ctx, conn := setupMaintenanceEnv(t)
 	cp, cons := mdPipeline(t, ctx, conn, "mdnonloc")
 	mdSeedWorld(t, ctx, conn)
 
-	// Positive: a legacy-classed unit is still a location.
+	// Positive: a real per-type-classed unit.
 	if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, "mdnlp0000000000001",
 		mdActorKey, mdUnitAKey, "Tap drips", "BBMANTWQRKPHJKMNPQRS"); got != processor.OutcomeAccepted {
-		t.Fatalf("ReportIssue at a legacy-classed unit = %v, want Accepted", got)
+		t.Fatalf("ReportIssue at a real unit = %v, want Accepted", got)
 	}
 	// Negative: a live vertex whose type segment is not a location level.
 	got, why := mdSubmitReportIssueWithReason(t, ctx, conn, cp, cons, "mdnln0000000000002",
@@ -424,15 +420,10 @@ func TestReportIssue_RejectsNonLocationTarget(t *testing.T) {
 	}
 }
 
-// TestReportIssue_AcceptsPerTypeClass pins the FORWARD-migration half of the
-// class arm, which every other location fixture in this package misses:
-// mdSeedWorld seeds the shared pre-taxonomy class everywhere, so narrowing the
-// admitted class set back to just that one leaves the whole suite green while
-// every location minted AFTER the upgrade silently stops being reportable-at.
-//
-// A location created by location-domain today carries its own key type as its
-// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
-// production produces from here on.
+// TestReportIssue_AcceptsPerTypeClass pins the class arm's positive case: a
+// location vertex's class is its own key type (CreateLocation writes
+// make_vtx(loc_key, lt, {})), which is the only shape a live location vertex
+// carries.
 func TestReportIssue_AcceptsPerTypeClass(t *testing.T) {
 	ctx, conn := setupMaintenanceEnv(t)
 	cp, cons := mdPipeline(t, ctx, conn, "mdpertype")
@@ -451,7 +442,7 @@ func TestReportIssue_AcceptsPerTypeClass(t *testing.T) {
 	// at once and so cannot tell the key guard from the class-only guard that
 	// preceded it.
 	impostor := "vtx.workorder.BBMANTMPSTRWQHJKMNPQ"
-	mdSeedVertex(t, ctx, conn, impostor, "location")
+	mdSeedVertex(t, ctx, conn, impostor, "unit")
 	got, why := mdSubmitReportIssueWithReason(t, ctx, conn, cp, cons, "mdpt00000000000002",
 		mdActorKey, impostor, "Tap drips", "BBMANTWQRKUHJKMNPQRS")
 	if got != processor.OutcomeRejected {
