@@ -754,3 +754,81 @@ same authenticity question that design already has to answer for creates and tom
 more coherent shape: one mechanism that verifies an `UpgradePackage` mutation batch against the named
 package's real compiled Definition would close the create-forgery gap, the manifest-scoping gap, AND this
 revival gap at once, rather than three separate point guards. Worth deciding which before designing either.
+
+## 16. Fire brief — mutation `isDeleted` type gate (Steward, 2026-08-15)
+
+**Scope sentence (verbatim from the board row, `lattice.md` Security & trust boundary):** "A mutation's
+boolean fields (`isDeleted` etc.) are never type-checked against what readers assume — a link `update` with
+`isDeleted` present but non-bool reads live to the Processor's own type assertions while Refractor's typed
+decoders DLQ/hard-fail — a grant `RevokePermission` can no longer even read. General to every mutation
+class." Filed from §15's "Also found" bullet — mechanical, not a Designer-pass item.
+
+**Verified touch-list:**
+- `internal/processor/step6_validate.go` — new batch-wide pre-pass `validateMutationBooleanFields`, called
+  first inside `Validate` (`step6_validate.go:73`), before `validateExternalEgressGuard`. Reuses `*DDLViolation`
+  (`step6_validate.go:15-25`) — no new error type or wire code.
+- `internal/processor/step6_validate_test.go` — new test mirroring `TestValidate_UnknownOpRejected`/
+  `TestValidate_KeyPatternViolation` (`step6_validate_test.go:132-176`)'s shape (`errors.As` + `ViolatedConstraint`
+  assertion), reusing `buildValidatorWithCache`/`newTestEnvelope`/`testNanoID1`/`testNanoID2`.
+
+**Precedent to mirror:** `priorDocs.lookup`'s `!decoded` branch (`step8_commit.go:522-535`) already treats a
+present-but-unparseable stored *document* as unprovable rather than absent, failing the guard closed rather
+than silently reading it as if it didn't exist. This gate applies the identical philosophy one level down, to
+a single *field* within an incoming mutation's document, at the earliest point in the pipeline (step 6, before
+step 6.5 encrypt or step 8 commit ever run) rather than patching each of the several lenient readers
+individually (`mutationTombstoned` at `step6_resolve_ddl.go:558`, `docIsProtected` at `step8_commit.go`,
+`rejectPermissionRoleRewrites`'s own reads) — one authoritative gate at the boundary, same as
+`rejectProtectedMutations`/`rejectPermissionRoleRewrites` are for their own concerns.
+
+**Why a batch-wide PRE-pass, not folded into `validateOne`'s per-mutation loop (design decision, mine —
+§0 decide-don't-defer):** `Validate` loops `validateOne` mutation-by-mutation, but step 6's own DDL
+resolution reads OTHER mutations in the same batch while resolving mutation *i* — `classOf`
+(`step6_resolve_ddl.go:476-495`) scans the *whole* `result.Mutations` for the last write to a target key, and
+`reconcileBatchInstanceOf` (`step6_resolve_ddl.go:393-418`) folds every `instanceOf` link mutation in the
+batch — both call `mutationTombstoned` on mutations the per-mutation loop has not reached yet. Checking
+`isDeleted`'s type only within `validateOne(m)` at m's own turn would leave a window: mutation 5's malformed
+`isDeleted` could be read by mutation 0's DDL resolution before the loop ever reaches index 5. A pre-pass over
+the whole batch, run before the per-mutation loop starts, has no such window.
+
+**Increment order (single increment, S):**
+1. Add `validateMutationBooleanFields(mutations []MutationOp, rid string) error` to `step6_validate.go`: for
+   every mutation with a non-nil `Document`, if `isDeleted` is present and its value does not type-assert to
+   `bool`, return `&DDLViolation{ViolatedConstraint: "isDeletedType", MutationKey: m.Key, OperationRequestID:
+   rid, Detail: "isDeleted must be a JSON bool, got <type>"}`. Call it first thing in `Validate`, before
+   `validateExternalEgressGuard`. No op-based exemption — even a tombstone-carrying-a-document is checked,
+   since `buildMutationValue` forcing `isDeleted:true` on tombstone makes a malformed value there harmless in
+   practice, but rejecting it anyway keeps the gate simple and total rather than op-conditional. Green check:
+   `go build ./internal/processor/...`.
+2. Table-driven test in `step6_validate_test.go`: (a) `isDeleted: "true"` (string) on a `create` → rejected,
+   `ViolatedConstraint == "isDeletedType"`; (b) `isDeleted: false` (well-typed) → passes — the positive vector
+   proven alongside the negative, standing checklist #3, not merely inherited from `TestValidate_CleanPass`'s
+   unrelated case; (c) `isDeleted` absent entirely → passes (the default-omitted path stays legal); (d)
+   `isDeleted: 1` (number) on an `update` → rejected, same constraint. Green check: `go test
+   ./internal/processor/... -run TestValidate_IsDeletedType -v`.
+3. Full package suite plus a wide-blast-radius sanity pass — this gate runs on every operation platform-wide,
+   so the shared-default risk (CLAUDE.md Tests & Determinism note) is real even though no legitimate script
+   should ever emit a non-bool `isDeleted`. Green check: `go test ./internal/processor/...` then a full `go
+   test ./...` before merge.
+
+**In-scope gotchas (standing checklist + dossier entries copied in):**
+- Standing checklist #3 — prove the positive vector (increment 2b) alongside the negative, not merely
+  inherited from an unrelated clean-pass test.
+- `docs/components/processor.md` dossier (permission/role-provenance class): a reader must not assume
+  absence-means-false at the read site while conflating it with a malformed-value case — this gate is
+  deliberately about the malformed-TYPE case only (`present, wrong type` → reject); an absent `isDeleted`
+  stays legal exactly as it is today (readers already treat absence as `false`).
+
+**Adjacent finds filed to the board NOW (not this fire's to fix — different mechanism, not reachable today):**
+`docIsProtected` (`step8_commit.go`, `data["protected"].(bool)`) has the identical fail-open shape — a
+malformed stored `data.protected` reads as "not protected" rather than rejecting — but it reads a *stored*
+document's nested `data.*` field (a different code path than this fire's incoming-mutation top-level gate),
+and is not reachable today: only bootstrap writes `data.protected`, and `rejectProtectedMutations` already
+rejects any further update/tombstone once a root's stored `protected` is validly `true`, so no live path can
+ever corrupt it. Filed as its own row (below) — same class, smaller and lower-priority, a natural companion
+to this fire's gate but a distinct check over a distinct field shape.
+
+**Non-goals:** `data.protected` and any other DDL-declared boolean field beyond `isDeleted` (filed separately,
+above); no change to `mutationTombstoned`, `docIsProtected`, or `rejectPermissionRoleRewrites` themselves —
+they stay lenient readers, now protected by this gate running strictly before any of them can observe an
+unvalidated mutation; no contract edit — `docs/contracts/01-addressing-and-envelope.md:74` already declares
+`isDeleted` as `boolean`, so this fix enforces the already-declared type rather than extending or changing it.
