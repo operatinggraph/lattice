@@ -37,7 +37,9 @@ mechanisms it had not opened. Findings are folded into the body; §11 records wh
    behavior; committed present-tense contract text with no runtime behind it is fail-open.
 4. **What ships now, as its own board row:** an ownership guard on `CreateLeaseServiceInstance`'s
    payload-named `subjectKey` + aspect segment, and an **authoring gate** that default-denies the class.
-   One package fire, S.
+   One package fire, S. **Concrete mechanism grounded and decomposed in §12 (Steward, 2026-08-14) — the S
+   estimate did not survive grounding; retag M** (a new Starlark-exposed primordial-actor primitive, not a
+   package-only edit).
 
 **Why — the containment was verified, not assumed.** The design's four faces are all contained on current
 `main`, and the ratify session checked each rather than accepting the severity as filed:
@@ -732,4 +734,59 @@ security claim and three unimplementable instructions; what changed:
 
 The pre-build gate this design set itself is therefore **discharged**: the passes ran, and their findings
 are in the body rather than appended.
+
+---
+
+## 12. Steward build note — decision 4's concrete mechanism, grounded (2026-08-14)
+
+Decision 4 named an outcome ("an ownership guard … and an authoring gate") without a mechanism. Grounding
+before building found no ready-made primitive for either half; both are small but real, and the
+`internal/processor` half makes this a Lattice-core change, not a `packages/lease-signing`-only one —
+**retag M**, not S (banner corrected above).
+
+**Why "ownership guard" doesn't mean "actor owns subject."** `CreateLeaseServiceInstance` /
+`CreateLeaseDocInstance` / `capability-author`'s `CreateAuthoringClaim` are engine-submitted
+(`Scope:"any"`, granted to `operator`) — there is no end-user actor to compare against `subjectKey`
+(unlike `CreateLeaseApplication`'s `payload.applicant == actor`), and `subjectKey`'s vertex type (`identity`
+/ `leaseapp` / `capabilityproposal`) carries no back-link to an owning actor to walk. The real gap the
+ratify session named is narrower: **`Scope:"any"` admits *any* `operator`-role holder**, not only the one
+trusted engine (Loom) the package comments assume. Grounded live:
+
+- `internal/loom/engine.go:1065-1066` — Loom's `submitExternalTask` always sets `subjectKey` from
+  `inst.SubjectKey`, the pattern instance's own trigger-bound, liveness-checked subject. Loom's own path is
+  sound; the gap is that nothing stops a **different** `operator`-scope holder from submitting the same op
+  with an arbitrary `subjectKey`.
+- `internal/bootstrap/nanoid.go:79,605` — `bootstrap.LoomIdentityKey` is already a stable, primordial
+  `vtx.identity.<id>` (bootstrap-seeded, loaded once at startup — the same registry `SystemActorKeys` /
+  `ClassAwarePlatformKey` already draw from). **This is the missing check's other half**: restrict the op
+  to `op.actor == LoomIdentityKey`, not to the whole `operator` role.
+- `internal/processor/starlark_runner.go:675-696` (`ddlMapToStarlark`) is the precedent to mirror — a
+  small Go-built dict exposed to every script's global scope, the same shape a new `primordialActor` dict
+  needs. `op.actor` (`:661`) is already exposed and is the server-resolved, non-forgeable actor key —
+  `authContextTarget`/`authTargetValidated` are the wrong tool here (they prove *self*-scope ownership,
+  which doesn't apply to an engine submitter).
+- `internal/processor` does not import `internal/bootstrap` today (by design — it receives primordial
+  keys as constructor params, the same seam `SystemActorKeys` uses via `cmd/processor/main.go`). Thread
+  `LoomIdentityKey` the same way: a param into whatever builds the Starlark environment, not a new import.
+- **Same shape, same fix, three call sites** (all `Scope:"any"`, all resolve a payload-named subject
+  through `resolve_subject_params`, all Loom-submitted per their own package comments):
+  `packages/lease-signing/scripts.go:1212` (`CreateLeaseServiceInstance`),
+  `packages/lease-signing/leasedoc_scripts.go:156` (`CreateLeaseDocInstance` — no `subject.*` param
+  templates in its pattern today, so no live PII exposure, but same forgeable-subject shape and same
+  fix cost; included rather than left half-guarded), `packages/capability-author/ddls.go:988`
+  (`CreateAuthoringClaim`, permissions.go:17: "Loom's relay actor … the same idiom … lease-signing's
+  `CreateLeaseServiceInstance` uses").
+
+**Decomposition:**
+
+| # | Scope | Green when |
+|---|---|---|
+| **1** | `internal/processor`: expose a small `primordialActor` Starlark global (mirrors `ddlMapToStarlark`) seeded from a param carrying the trusted-engine-actor keys the constructor already threads (start with `loom` only — the three live call sites need no other engine); wire the param from `cmd/processor/main.go` alongside the existing `SystemActorKeys` plumbing. | `go test ./internal/processor/...`; a script referencing `primordialActor["loom"]` resolves the real key in an integration test |
+| **2** | Guard the three call sites: `op.actor != primordialActor["loom"]` → `fail("AuthDenied: …")`, placed before any `resolve_subject_params`/sensitive read, in `lease-signing/scripts.go`, `lease-signing/leasedoc_scripts.go`, `capability-author/ddls.go`. Annotate each per the package's existing ownership-guard comment idiom (mirror `scripts.go:460-470`'s `# authcontext-target:` style — name this one, e.g. `# actor-guard: (primordial) restricted to Loom's relay actor, see design §12`). | `go test ./packages/lease-signing/... ./packages/capability-author/...`; a forged non-Loom-actor submission of each op is rejected; the real (Loom-actor) path is unchanged in existing tests |
+| **3** | Authoring gate (`scripts/lint-conventions.go` or a new `scripts/lint-*.go`): an op whose `Scope:"any"` **and** whose script calls `resolve_subject_params` with a non-literal (payload-sourced) `subject_key` must also reference `primordialActor[` in the same operationType branch — fail-closed on omission, mirroring the `# read-posture:` / `authContext.target` gates' doctrine (default-deny, author declares). Corpus today is exactly the 3 sites in Inc 2, so the gate ships blocking, not warn-first (same "migration leaves zero debt" reasoning as §5.5). | `STRICT=1 go run ./scripts/lint-conventions.go` (or the new gate) passes clean on `main`; a synthetic violating script fails it |
+
+Increments 1–2 are the security fix; Increment 3 is what makes it stick for the next author. All three are
+one fire (owner: Lattice Steward, component: Processor + lease-signing + capability-author).
+**Review depth:** this is a new enforcement point on the security/capability plane — full 3-layer
+adversarial regardless of size, per the Steward's model-tier table.
 </content>
