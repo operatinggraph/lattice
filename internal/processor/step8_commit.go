@@ -61,7 +61,10 @@ func (e *ProtectedKeyError) Error() string {
 // four on a surviving key: a real change produces a different key (create +
 // tombstone), never an update. data.note / data.lanes stay freely mutable.
 // The same error carries a role's .canonicalName aspect rewrite, with Field
-// "value". The commit path maps this onto a `rejected` reply with code
+// "value". For a role or roleindex root rewrite, Field names whichever
+// top-level document field the mutation changed (e.g. "data" for a rewritten
+// roleindex root), not one of the four permission-specific names above. The
+// commit path maps this onto a `rejected` reply with code
 // `PermissionProvenance`.
 type PermissionProvenanceError struct {
 	Key   string // the offending mutation key
@@ -698,14 +701,15 @@ var committerManagedFields = map[string]bool{
 }
 
 // rejectPermissionRoleRewrites is the authoritative commit-time guard making a
-// permission vertex's provenance and a role vertex's identity write-once. The
-// package-lifecycle primitives (InstallPackage / UpgradePackage /
-// UninstallPackage) carry client-supplied mutation bodies that no DDL gates —
-// step 6 resolves no governing DDL for class "permission" or "role" — so
-// without this guard an actor holding one of them can rewrite an entity it
-// already holds a grant through, with no new grant step.
+// permission vertex's provenance, a role vertex's identity, and a roleindex
+// vertex's name→role binding write-once. The package-lifecycle primitives
+// (InstallPackage / UpgradePackage / UninstallPackage) carry client-supplied
+// mutation bodies that no DDL gates — step 6 resolves no governing DDL for
+// class "permission", "role", or "roleindex" — so without this guard an actor
+// holding one of them can rewrite an entity it already holds a grant through,
+// with no new grant step.
 //
-// Three shapes are guarded:
+// Four shapes are guarded:
 //
 //   - A vtx.permission.<id> root: every field in permissionProvenanceFields
 //     must match the stored document. A permission's key is content-addressed
@@ -724,6 +728,12 @@ var committerManagedFields = map[string]bool{
 //
 //   - A vtx.role.<id>.canonicalName aspect: its value must match the stored
 //     aspect, closing the same redirection at the aspect itself.
+//
+//   - A vtx.roleindex.<id> root: the whole body is write-once, same as the
+//     role root above. A roleindex vertex is the canonical-name→role lookup
+//     (data.canonicalName, data.roleId); a rewritten data.roleId would, once a
+//     consumer resolves through it, redirect a canonical role name to a
+//     different role's grants with no new grant step.
 //
 // Like the protected-key guard this is path-independent — it fires for any
 // script or future primitive emitting such a mutation, and does not rely on a
@@ -783,6 +793,31 @@ func rejectPermissionRoleRewrites(mutations []MutationOp, prior priorDocs) error
 			// so it can differ between a stored body and a faithful resupply
 			// without redirecting a single read. Reviving a tombstoned role is a
 			// separate mechanism from rewriting a live one's identity.
+			for _, f := range unionFields(priorDoc, m.Document) {
+				if committerManagedFields[f] || f == "isDeleted" {
+					continue
+				}
+				if !docFieldEqual(priorDoc, m.Document, f) {
+					return &PermissionProvenanceError{Key: m.Key, Field: f}
+				}
+			}
+
+		// A vtx.roleindex.<id> root is a flat name→role lookup document with no
+		// aspects, so its whole root is the write-once surface — a rewritten
+		// data.roleId would, once a consumer resolves through it, redirect a
+		// canonical role name to a different role's grants with no new grant
+		// step. roleindex is aspect-free by construction today; a future
+		// vtx.roleindex.<id>.<something> aspect would need its own arm here,
+		// mirroring how the role case needed both a root arm and a
+		// .canonicalName aspect arm.
+		case keys.IsVertexKeyOfType(m.Key, "roleindex"):
+			priorDoc, found, decoded := prior.lookup(m.Key)
+			if !found {
+				continue
+			}
+			if !decoded {
+				return &PermissionProvenanceError{Key: m.Key, Field: "document"}
+			}
 			for _, f := range unionFields(priorDoc, m.Document) {
 				if committerManagedFields[f] || f == "isDeleted" {
 					continue

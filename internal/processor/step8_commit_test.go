@@ -720,6 +720,13 @@ func roleCanonicalNameDoc(roleKey, value string) map[string]interface{} {
 	}
 }
 
+func roleindexDoc(canonicalName, roleID string) map[string]interface{} {
+	return map[string]interface{}{
+		"class": "roleindex",
+		"data":  map[string]interface{}{"canonicalName": canonicalName, "roleId": roleID},
+	}
+}
+
 // A permission vertex's operationType/scope/origin/declaredBy/lanes are what
 // authorization reads, and no DDL gates class "permission" or "role" — so an
 // actor holding a package-lifecycle op could otherwise widen a grant it already
@@ -747,6 +754,8 @@ func TestCommit_PermissionRoleProvenanceIsWriteOnce(t *testing.T) {
 		roleIDRootShadow   = "Db9gYa6ctSmp1kE7nFhL"
 		roleIDRootNoop     = "Ec1hZb7duTnq2mF8pGjM"
 		identityIDUnaffect = "Xv3bSu1wmLfh4dY1gZbE"
+		roleindexIDNoop    = "Fh4jKn7qStvx2cAy8wZm"
+		roleindexIDRewrite = "Gj5kLp8rTuwy3dBz9xAq"
 	)
 
 	priorPerm := permissionDoc("ReadListing", "own", "package", "listings-domain", "original note", "default")
@@ -784,6 +793,12 @@ func TestCommit_PermissionRoleProvenanceIsWriteOnce(t *testing.T) {
 			key:    "vtx.role." + roleIDRootNoop,
 			prior:  roleRootDoc(),
 			update: roleRootDoc(),
+		},
+		{
+			name:   "roleindex resupplied unchanged",
+			key:    "vtx.roleindex." + roleindexIDNoop,
+			prior:  roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
+			update: roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
 		},
 		{
 			name:  "non permission or role class is unaffected",
@@ -854,6 +869,17 @@ func TestCommit_PermissionRoleProvenanceIsWriteOnce(t *testing.T) {
 				"canonicalName": map[string]interface{}{"data": map[string]interface{}{"value": "operator"}},
 			},
 			wantField: "canonicalName",
+		},
+		{
+			// The roleindex root is write-once as a whole document, mirroring
+			// the role root case — a rewritten data.roleId changes the
+			// top-level "data" field, since the guard walks the document's
+			// own top-level fields rather than descending into nested data.
+			name:      "roleindex roleId rewritten to a different role",
+			key:       "vtx.roleindex." + roleindexIDRewrite,
+			prior:     roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
+			update:    roleindexDoc("consoleOperator", "Jm7nPr2tVwz5fEs3xFq8"),
+			wantField: "data",
 		},
 		{
 			// origin/declaredBy postdate some stored permissions, so the first
@@ -1015,6 +1041,79 @@ func TestCommit_TombstoneCarryingDocumentCannotRewriteProvenance(t *testing.T) {
 	data, _ := doc["data"].(map[string]interface{})
 	if data["value"] != "consoleOperator" {
 		t.Fatalf("stored canonicalName = %v, want consoleOperator", data["value"])
+	}
+}
+
+// Same laundering attempt as TestCommit_TombstoneCarryingDocumentCannotRewriteProvenance,
+// retargeted at a vtx.roleindex.<id> root: a tombstone carrying a rewritten
+// roleId must be rejected, not laundered through as a delete.
+func TestCommit_TombstoneCarryingDocumentCannotRewriteRoleindexProvenance(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	roleindexID := "Kn8pRt3vWy6cDf9hJm2q"
+	key := "vtx.roleindex." + roleindexID
+
+	commitOne(t, ctx, c, "rid-rits-create", MutationOp{
+		Op: "create", Key: key,
+		Document: roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
+	})
+
+	err := commitOneErr(ctx, c, "rid-rits-launder", MutationOp{
+		Op: "tombstone", Key: key,
+		Document: roleindexDoc("consoleOperator", "Jm7nPr2tVwz5fEs3xFq8"),
+	})
+	var provErr *PermissionProvenanceError
+	if !errors.As(err, &provErr) {
+		t.Fatalf("Commit(tombstone carrying a rewritten roleId): %v, want *PermissionProvenanceError", err)
+	}
+	if provErr.Field != "data" {
+		t.Fatalf("rejected on field %q, want data", provErr.Field)
+	}
+
+	// The laundering tombstone left the committed roleId alone.
+	entry, gerr := c.Conn.KVGet(ctx, testCoreBucket, key)
+	if gerr != nil {
+		t.Fatalf("KVGet %s: %v", key, gerr)
+	}
+	var doc map[string]interface{}
+	if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
+		t.Fatalf("unmarshal %s: %v", key, uerr)
+	}
+	data, _ := doc["data"].(map[string]interface{})
+	if data["roleId"] != "Hk6mNq9sUvyz4eCr1wDp" {
+		t.Fatalf("stored roleId = %v, want Hk6mNq9sUvyz4eCr1wDp", data["roleId"])
+	}
+}
+
+// Same revive attempt as TestCommit_TombstoneThenReviveCannotRewriteProvenance,
+// retargeted at a vtx.roleindex.<id> root: tombstoning first must not launder a
+// roleId rewrite in through the revive.
+func TestCommit_TombstoneThenReviveCannotRewriteRoleindexProvenance(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	roleindexID := "Mp9qSu4wYz7dEg1kNr3s"
+	key := "vtx.roleindex." + roleindexID
+
+	commitOne(t, ctx, c, "rid-rirev-create", MutationOp{
+		Op: "create", Key: key,
+		Document: roleindexDoc("consoleOperator", "Hk6mNq9sUvyz4eCr1wDp"),
+	})
+	if err := commitOneErr(ctx, c, "rid-rirev-tombstone", MutationOp{
+		Op: "tombstone", Key: key,
+	}); err != nil {
+		t.Fatalf("Commit(tombstone): %v", err)
+	}
+
+	err := commitOneErr(ctx, c, "rid-rirev-update", MutationOp{
+		Op: "update", Key: key,
+		Document: roleindexDoc("consoleOperator", "Jm7nPr2tVwz5fEs3xFq8"),
+	})
+	var provErr *PermissionProvenanceError
+	if !errors.As(err, &provErr) {
+		t.Fatalf("Commit(revive with a new roleId): %v, want *PermissionProvenanceError", err)
+	}
+	if provErr.Field != "data" {
+		t.Fatalf("rejected on field %q, want data", provErr.Field)
 	}
 }
 
