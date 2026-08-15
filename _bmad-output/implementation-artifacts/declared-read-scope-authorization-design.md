@@ -5,7 +5,8 @@ Increments 2–3 (`readScope`) are **held as disproportionate**; the staged Cont
 **reverted**. The live weakness this design named is being closed at its own altitude instead — one
 package fire (guard the op, gate the class). Decisions, the containment evidence that drove them, and the
 revive triggers are in *Ratification outcome* below; **read that before the body**, which argues for a
-mechanism that was not ratified. Nothing built.
+mechanism that was not ratified. **Decision 4 shipped 2026-08-14 (`acecf6f9`) — see §12.** Increments 1–3
+(`readScope`) remain unbuilt.
 **Lane:** Lattice (Stream 2). **Board row:** *[Processor] A declared read is never scope-checked against
 the actor's grant* (★★, M-as-filed → **L/XL as designed**, see §9).
 **Filed by:** `client-ceremony-op-descriptors-design.md` §12.7 — the residual class-(g) `derive_reads`
