@@ -34,9 +34,9 @@ func (a *parkingAdapter) Upsert(context.Context, map[string]any, map[string]any,
 }
 
 func (a *parkingAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
-func (a *parkingAdapter) Probe(context.Context) error                         { return nil }
-func (a *parkingAdapter) Close() error                                        { return nil }
-func (a *parkingAdapter) releaseAll()                                         { a.once.Do(func() { close(a.release) }) }
+func (a *parkingAdapter) Probe(context.Context) error                          { return nil }
+func (a *parkingAdapter) Close() error                                         { return nil }
+func (a *parkingAdapter) releaseAll()                                          { a.once.Do(func() { close(a.release) }) }
 
 // TestRebuild_HoldsUntilTheConsumerPumpHasReopened pins the one line that makes
 // a rebuild's concurrency slot span the whole durable handover.

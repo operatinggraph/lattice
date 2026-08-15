@@ -74,8 +74,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CompleteTask",
 			Scope:         "self",
 			Note: "Grants an assignee the right to complete a task assignedTo THEMSELVES (the script's standing guard confines a non-operator caller to a task whose assignedTo link resolves to the submitting actor; completing someone else's task is rejected). Every role a task can legitimately be assignedTo (Contract #10 §10.1's direct-push assignment) needs the grant, mirroring control-authz's personalLensPermissions role list. " +
-					"[no-op-meta: client-agent-op — the out-of-band §10.7 completion follow-up a client submits on its own behalf right after the bound op it retires commits (loftspace-app's completeTask()), never a human choosing a form action.]",
-			GrantsTo:      []string{"consumer", "frontOfHouse", "backOfHouse", "provider"},
+				"[no-op-meta: client-agent-op — the out-of-band §10.7 completion follow-up a client submits on its own behalf right after the bound op it retires commits (loftspace-app's completeTask()), never a human choosing a form action.]",
+			GrantsTo: []string{"consumer", "frontOfHouse", "backOfHouse", "provider"},
 		},
 		{
 			OperationType: "CancelTask",

@@ -75,9 +75,9 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	// cap-read self-grant does NOT unlock the roster row (only the wildcard
 	// does — the row itself carries no anchor a self-grant could ever match).
 	exec(`INSERT INTO read_loftspace_identities (identity_id, entity_key, identity_key, name, state, authz_anchors, projection_seq)
-	      VALUES ('id-A', 'vtx.identity.`+subAlice+`', 'vtx.identity.`+subAlice+`', 'Alice Renter', 'claimed', '{}', 1)`)
+	      VALUES ('id-A', 'vtx.identity.` + subAlice + `', 'vtx.identity.` + subAlice + `', 'Alice Renter', 'claimed', '{}', 1)`)
 	exec(`INSERT INTO read_loftspace_identities (identity_id, entity_key, identity_key, name, state, authz_anchors, projection_seq)
-	      VALUES ('id-B', 'vtx.identity.`+subBob+`', 'vtx.identity.`+subBob+`', 'Bob Tenant', 'unclaimed', '{}', 1)`)
+	      VALUES ('id-B', 'vtx.identity.` + subBob + `', 'vtx.identity.` + subBob + `', 'Bob Tenant', 'unclaimed', '{}', 1)`)
 	// A crypto-shredded identity: the Secure Lens projects its name as NULL.
 	// selectIdentitiesSQL's `name IS NOT NULL` filter must keep it out of the
 	// picker even for the wildcard reader (a NULL name would also fail the

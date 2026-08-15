@@ -714,7 +714,6 @@ func rowlessAnchors(t *testing.T, p *Pipeline, n int) []string {
 	return out
 }
 
-
 // hintMissesForTest reads a prefilter hint's standing record under the
 // sweeper's own lock.
 func (s *Sweeper) hintMissesForTest(which string) int {

@@ -815,7 +815,7 @@ func TestVerify_NanoIDSystemActorPassesThrough(t *testing.T) {
 		t.Fatalf("NewVerifier: %v", err)
 	}
 	c := claims()
-	c.Issuer = "" // nanoid mode never checks/derives from iss — prove it's absent, not just unchecked
+	c.Issuer = ""       // nanoid mode never checks/derives from iss — prove it's absent, not just unchecked
 	c.Subject = testSub // already a valid NanoID (fixture convention)
 	got, err := v.Verify(signRS256(t, kp.priv, testKID, c))
 	if err != nil {

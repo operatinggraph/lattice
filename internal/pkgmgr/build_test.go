@@ -225,7 +225,7 @@ func TestColumnMapping_MarshalJSON_WireShape(t *testing.T) {
 		"from/map": {From: "eventType", Map: map[string]string{
 			"loom.patternStarted": "running", "loom.patternCompleted": "complete",
 		}},
-		"when/value":       {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
+		"when/value": {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
 		"bare path + clearOn": {
 			Path:    "payload.reason",
 			ClearOn: []string{"loom.patternStarted"},

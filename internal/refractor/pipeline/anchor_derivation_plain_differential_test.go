@@ -287,4 +287,3 @@ func TestPlainDerivation_Differential_TwoHop(t *testing.T) {
 	require.NotContains(t, derived, pr2, "pr2 never reaches loc1, so a sound derivation must not name it")
 	f.requireUnionEqualsUnseeded(t, f.key("loc1"), "location", "provider", derived)
 }
-

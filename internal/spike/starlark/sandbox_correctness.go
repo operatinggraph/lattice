@@ -7,12 +7,12 @@ import (
 
 // SandboxTestResult records the outcome of a single forbidden-operation test.
 type SandboxTestResult struct {
-	Name        string // test name
-	Script      string // the Starlark script attempted
-	ShouldFail  bool   // expected to be rejected
-	Failed      bool   // actual: was it rejected?
-	ErrorMsg    string // the exact error message from the interpreter
-	Pass        bool   // test passed (expectation matched reality)
+	Name       string // test name
+	Script     string // the Starlark script attempted
+	ShouldFail bool   // expected to be rejected
+	Failed     bool   // actual: was it rejected?
+	ErrorMsg   string // the exact error message from the interpreter
+	Pass       bool   // test passed (expectation matched reality)
 }
 
 // RunSandboxCorrectnessTests runs all four forbidden-operation tests
@@ -33,9 +33,9 @@ func RunSandboxCorrectnessTests() []SandboxTestResult {
 	}
 
 	tests := []struct {
-		name        string
-		script      string
-		shouldFail  bool
+		name       string
+		script     string
+		shouldFail bool
 	}{
 		{
 			name: "Forbidden: external HTTP call via load()",

@@ -60,10 +60,10 @@ var allowedSQLTables = map[string]string{
 // allowedOpLiterals are the only operationType string literals cmd/facet
 // sources may carry.
 var allowedOpLiterals = map[string]string{
-	"ClaimIdentity":           "the claim ceremony (edge-showcase-app-design.md §7.1)",
-	"InitiateCredentialLink":  "credential-link ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
-	"CompleteCredentialLink":  "credential-link ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
-	"UnlinkCredential":        "credential-unlink ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
+	"ClaimIdentity":          "the claim ceremony (edge-showcase-app-design.md §7.1)",
+	"InitiateCredentialLink": "credential-link ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
+	"CompleteCredentialLink": "credential-link ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
+	"UnlinkCredential":       "credential-unlink ceremony (edge-showcase-app-design.md §7.2 Inc 3)",
 	"ClaimTask":              "the ratified claim affordance (facet-staff-worlds-design.md F2; facet-entity-browse-design.md §6.1)",
 }
 

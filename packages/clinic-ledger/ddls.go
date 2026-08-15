@@ -156,7 +156,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"Rejects InvalidArgument if expectedReimbursementCents is missing, <= 0, or > amountCents.",
 			},
 			{
-				Name: "ClinicDebitAccount — Weaver-dispatched no-show settlement (appointmentRef)",
+				Name:    "ClinicDebitAccount — Weaver-dispatched no-show settlement (appointmentRef)",
 				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>", "amountCents": 2500, "appointmentRef": "vtx.appointment.<NanoID>"},
 				ExpectedOutcome: "Same as the self-pay case, plus validates appointmentRef is alive (UnknownAppointment otherwise) " +
 					"and writes lnk.clinictransaction.<id>.settles.appointment.<id> (transaction→appointment). This is the shape " +

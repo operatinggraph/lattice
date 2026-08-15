@@ -418,8 +418,8 @@ type CapabilityLensStatus struct {
 	// carrying it: the GrantTable producers and the Protected secure lens must
 	// read as REFUSED rather than as absent, or "not audited" is
 	// indistinguishable from "audited, clean".
-	AuditEnrolled         bool
-	AuditRefusal          string
+	AuditEnrolled            bool
+	AuditRefusal             string
 	Audited                  int
 	DivergentRows            map[string]int
 	DivergentTotal           int
@@ -1995,23 +1995,23 @@ func (h *LatticeHeartbeater) evalLensSweep(
 // for the same reason: the two status structs are deliberately separate, and the
 // logic reading them must not be.
 type auditSnapshot struct {
-	enrolled         bool
-	refusal          string
-	audited          int
-	divergent        map[string]int
-	divergentTotal   int
-	unverified       int
-	lastUnverified   string
+	enrolled            bool
+	refusal             string
+	audited             int
+	divergent           map[string]int
+	divergentTotal      int
+	unverified          int
+	lastUnverified      string
 	lastPassAt          time.Time
 	cycleCompletedAt    time.Time
 	cycleAudited        int
 	cycleDivergentTotal int
 	cycleUnverified     int
 	coverageBasis       string
-	listingSize      int
-	suppression      string
-	suppressionAt    time.Time
-	interval         time.Duration
+	listingSize         int
+	suppression         string
+	suppressionAt       time.Time
+	interval            time.Duration
 }
 
 func (s LensLivenessStatus) audit() auditSnapshot {
@@ -2022,7 +2022,7 @@ func (s LensLivenessStatus) audit() auditSnapshot {
 		lastPassAt: s.AuditLastPassAt, cycleCompletedAt: s.AuditCycleCompletedAt,
 		cycleAudited: s.AuditCycleAudited, cycleDivergentTotal: s.AuditCycleDivergentTotal,
 		cycleUnverified: s.AuditCycleUnverified,
-		coverageBasis: s.AuditCoverageBasis, listingSize: s.AuditListingSize,
+		coverageBasis:   s.AuditCoverageBasis, listingSize: s.AuditListingSize,
 		suppression: s.AuditSuppression, suppressionAt: s.AuditSuppressionAt,
 		interval: s.AuditInterval,
 	}
@@ -2036,7 +2036,7 @@ func (s CapabilityLensStatus) audit() auditSnapshot {
 		lastPassAt: s.AuditLastPassAt, cycleCompletedAt: s.AuditCycleCompletedAt,
 		cycleAudited: s.AuditCycleAudited, cycleDivergentTotal: s.AuditCycleDivergentTotal,
 		cycleUnverified: s.AuditCycleUnverified,
-		coverageBasis: s.AuditCoverageBasis, listingSize: s.AuditListingSize,
+		coverageBasis:   s.AuditCoverageBasis, listingSize: s.AuditListingSize,
 		suppression: s.AuditSuppression, suppressionAt: s.AuditSuppressionAt,
 		interval: s.AuditInterval,
 	}

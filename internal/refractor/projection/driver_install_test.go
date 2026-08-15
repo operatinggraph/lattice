@@ -77,8 +77,8 @@ func (nonKVAdapter) Upsert(context.Context, map[string]any, map[string]any, uint
 	return nil
 }
 func (nonKVAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
-func (nonKVAdapter) Probe(context.Context) error                         { return nil }
-func (nonKVAdapter) Close() error                                        { return nil }
+func (nonKVAdapter) Probe(context.Context) error                          { return nil }
+func (nonKVAdapter) Close() error                                         { return nil }
 
 func TestInstallActorAggregate_InvalidOutputDescriptor_Refuses(t *testing.T) {
 	r := installRule(t, "my-tasks", string(projection.EmptySkip))

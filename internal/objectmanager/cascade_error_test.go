@@ -241,9 +241,9 @@ func TestSplitVertexRoot(t *testing.T) {
 	}
 
 	rejects := []string{
-		"",                  // empty
-		"vtx.identity",      // 2 segments
-		ownerX + ".profile", // 4-segment aspect
+		"",                      // empty
+		"vtx.identity",          // 2 segments
+		ownerX + ".profile",     // 4-segment aspect
 		"lnk.photoOf." + wantID, // 3 segments but not vtx
 		"vtx.." + wantID,        // empty type segment
 		"vtx.identity.",         // empty id segment

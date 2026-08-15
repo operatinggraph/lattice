@@ -573,8 +573,8 @@ func (fakeBareAdapter) Upsert(context.Context, map[string]any, map[string]any, u
 	return nil
 }
 func (fakeBareAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
-func (fakeBareAdapter) Probe(context.Context) error                         { return nil }
-func (fakeBareAdapter) Close() error                                        { return nil }
+func (fakeBareAdapter) Probe(context.Context) error                          { return nil }
+func (fakeBareAdapter) Close() error                                         { return nil }
 
 // fakePrefixOnlyAdapter adds PrefixKeyLister but still can't read back a row.
 type fakePrefixOnlyAdapter struct {

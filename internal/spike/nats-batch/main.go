@@ -205,4 +205,3 @@ func setTTL(m *nats.Msg, ttl time.Duration) {
 	}
 	m.Header.Set("Nats-TTL", ttl.String())
 }
-

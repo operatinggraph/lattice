@@ -14,3 +14,7 @@ linters:
     rules:
       - linters: [staticcheck]
         text: "QF1001"
+
+formatters:
+  enable:
+    - gofmt

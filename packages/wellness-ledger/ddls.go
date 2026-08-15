@@ -157,7 +157,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"Returns primaryKey. Rejects UnknownAccount if the account is absent, or InvalidArgument if amountCents <= 0.",
 			},
 			{
-				Name: "WellnessDebitAccount — Weaver-dispatched no-show settlement (bookingRef)",
+				Name:    "WellnessDebitAccount — Weaver-dispatched no-show settlement (bookingRef)",
 				Payload: map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 2500, "bookingRef": "vtx.booking.<NanoID>"},
 				ExpectedOutcome: "Same as the plain charge, plus validates bookingRef is alive (UnknownBooking otherwise) " +
 					"and writes lnk.wellnesstransaction.<id>.settles.booking.<id> (transaction→booking). This is the shape " +
@@ -165,7 +165,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"simply omits bookingRef and gets the plain charge shape above.",
 			},
 			{
-				Name: "WellnessDebitAccount — Weaver-dispatched class-price settlement (priceBookingRef)",
+				Name:    "WellnessDebitAccount — Weaver-dispatched class-price settlement (priceBookingRef)",
 				Payload: map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "priceBookingRef": "vtx.booking.<NanoID>"},
 				ExpectedOutcome: "Same as the plain charge, plus validates priceBookingRef is alive (UnknownBooking otherwise) " +
 					"and writes lnk.wellnesstransaction.<id>.settlesClassPrice.booking.<id> (transaction→booking) — a distinct " +
@@ -181,7 +181,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"(the wellnessLedgerHistory-derived balance = sum(debits) − sum(credits)).",
 			},
 			{
-				Name: "WellnessCreditAccount — Weaver-dispatched class-price refund (refundRef)",
+				Name:    "WellnessCreditAccount — Weaver-dispatched class-price refund (refundRef)",
 				Payload: map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "refundRef": "vtx.wellnessrefund.<NanoID>"},
 				ExpectedOutcome: "Same as a plain payment, plus validates refundRef is alive (UnknownRefund otherwise) " +
 					"and writes lnk.wellnesstransaction.<id>.settlesRefund.wellnessrefund.<id> (transaction→wellnessrefund). " +

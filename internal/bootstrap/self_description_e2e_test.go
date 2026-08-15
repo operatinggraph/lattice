@@ -261,10 +261,10 @@ func TestMetaLensSpec_CypherRuleInAspectData(t *testing.T) {
 		t.Fatalf("marshal spec: %v", err)
 	}
 	payload := map[string]any{
-		"targetClass":  "meta.lens",
+		"targetClass":   "meta.lens",
 		"canonicalName": "books",
-		"description":  "Projects book vertices to the books Postgres table.",
-		"spec":         string(specBytes),
+		"description":   "Projects book vertices to the books Postgres table.",
+		"spec":          string(specBytes),
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {

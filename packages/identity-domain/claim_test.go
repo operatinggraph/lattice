@@ -17,8 +17,8 @@
 //  7. TestClaimIdentity_FR5_GrandfatheredFlow              — historical import
 //  8. TestClaimIdentity_FR5_ImmediateAccess                — second claim blocked
 //  9. TestClaimIdentity_ReClaimAfterRealClaim_GenericError — spent claimKey
-// 10. TestClaimIdentity_RejectionCausesIndistinguishable   — one wire shape
-// 11. TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub — the script's own
+//  10. TestClaimIdentity_RejectionCausesIndistinguishable   — one wire shape
+//  11. TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub — the script's own
 //     tombstone guard, isolated from the Processor's scrub
 package identitydomain_test
 

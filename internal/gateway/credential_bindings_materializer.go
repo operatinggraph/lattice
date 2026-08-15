@@ -134,7 +134,7 @@ func credentialBindingsHandler(conn *substrate.Conn, hb *Heartbeater, logger *sl
 			return substrate.Ack, nil
 		}
 		if eb.Payload.ActorKey == "" || eb.Payload.IdentityKey == "" {
-			logger.Warn("gateway: "+eb.EventType+" event missing actorKey/identityKey; dropping")
+			logger.Warn("gateway: " + eb.EventType + " event missing actorKey/identityKey; dropping")
 			hb.SetIssue(credentialBindingsPoisonIssueKey, severityError, "credentialBindings.missingFields",
 				eb.EventType+" event missing actorKey/identityKey, dropped")
 			return substrate.Ack, nil

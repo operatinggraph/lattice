@@ -14,8 +14,8 @@ import (
 var _ kvGetter = (*substrate.KV)(nil)
 
 type fakeKV struct {
-	entry *substrate.KVEntry
-	err   error
+	entry  *substrate.KVEntry
+	err    error
 	gotKey string
 }
 
