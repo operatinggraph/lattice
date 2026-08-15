@@ -832,3 +832,66 @@ above); no change to `mutationTombstoned`, `docIsProtected`, or `rejectPermissio
 they stay lenient readers, now protected by this gate running strictly before any of them can observe an
 unvalidated mutation; no contract edit — `docs/contracts/01-addressing-and-envelope.md:74` already declares
 `isDeleted` as `boolean`, so this fix enforces the already-declared type rather than extending or changing it.
+
+## 17. Fire brief — `data.protected`/`data.sensitive` type gate (Steward, 2026-08-15)
+
+**Scope sentence (verbatim from the two board rows, `lattice.md` Security & trust boundary, both filed by
+§16's close pass):** "`docIsProtected` reads a malformed stored `data.protected` as 'not protected'
+(fail-open)" and "a malformed `data.sensitive` on a DDL root silently reads as 'not sensitive,' skipping
+step 6.5 encryption and committing plaintext." Both are the same shape §16 closed for `isDeleted` — a bare
+Go `.(bool)` type assertion silently reading any non-bool JSON value as `false` — one field over, on two
+different nested `data.*` fields instead of the document's top-level `isDeleted`.
+
+**Verified touch-list (grounded live, this fire):**
+- `internal/processor/step6_validate.go:115-134` — `validateMutationBooleanFields`, the exact pre-pass §16
+  built. Extend it to also check `Document["data"].(map[string]interface{})["protected"]` and
+  `["sensitive"]`, same shape as the existing `isDeleted` check, once per mutation whose `Document["data"]`
+  is a map and carries either key. Precedent comment at `step6_validate.go:105-108` already names this as
+  the intended next extension ("docIsProtected's own analogous fail-open ... is a separate, unbuilt
+  finding").
+- `internal/processor/step8_commit.go:889-900` (`docIsProtected`) and `internal/processor/ddl_cache.go:778-782`
+  (root-document `sensitive` fallback) are the two READ sites the design doc's board rows name — confirmed
+  live, both a bare `.(bool)` with no error path. **Neither read site changes.** Per §16's own precedent
+  (`mutationTombstoned`/`docIsProtected`/`rejectPermissionRoleRewrites` all stayed lenient readers, protected
+  by the boundary gate instead), the fix is upstream: refuse to ever COMMIT a mutation whose `data.protected`
+  or `data.sensitive` is present-but-not-bool, so no malformed value can reach either read site in the first
+  place. This is narrower than patching the read sites individually (two call sites become one gate, exactly
+  §16's stated rationale) and is the only shape consistent with the already-shipped precedent in the same
+  function.
+- `internal/processor/ddl_cache.go:761-777` (the typed `.sensitive` ASPECT struct, `root+".sensitive"`, JSON
+  `data.value bool`) is a **different, unflagged** fail-open (a struct-tagged `json.Unmarshal` failure is
+  silently swallowed, not a bare type assertion) — **out of scope**, not named by either board row, and its
+  own repro/fix shape differs (unmarshal-error handling, not a type assertion). Left as a non-goal below,
+  matching the scope-diff discipline (narrow-only, never substituting an adjacent mechanism).
+
+**Precedent to mirror:** identical to §16's own precedent chain — `priorDocs.lookup`'s `!decoded` branch
+treats a present-but-unparseable *document* as unprovable rather than absent; §16 applied that one level down
+to a single top-level *field*; this fire applies the same philosophy to two nested `data.*` fields, at the
+same pre-pass, same file, same function.
+
+**Increment order (single increment, XS–S):**
+1. Extend `validateMutationBooleanFields` (`step6_validate.go`): after the existing `isDeleted` check, if
+   `Document["data"]` type-asserts to `map[string]interface{}`, check `protected` and `sensitive` the same
+   way — present-and-non-bool → `&DDLViolation{ViolatedConstraint: "protectedType"}` /
+   `"sensitiveType"` respectively, `Detail: "data.<field> must be a JSON bool, got <type>"`. No op-based
+   exemption, matching `isDeleted`'s unconditional posture. Green check: `go build ./internal/processor/...`.
+2. Table-driven tests in `step6_validate_test.go`, mirroring `TestValidate_IsDeletedType*`'s four-case shape
+   per field (string-rejected, number-on-update-rejected, bool-accepted, absent-accepted) — positive vector
+   proven alongside each negative per the standing checklist. Reuses `buildValidatorWithCache`/
+   `newTestEnvelope`/`testNanoID1`/`testNanoID2`. Green check: `go test ./internal/processor/... -run
+   TestValidate_ProtectedType -run TestValidate_SensitiveType -v` (or the actual chosen test names).
+3. Full package suite + wide-blast-radius pass, same reasoning as §16 (this gate runs on every operation
+   platform-wide). Green check: `go test ./internal/processor/...` then `go test ./...` before merge.
+4. `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`.
+
+**In-scope gotchas:**
+- `data.protected`/`data.sensitive` are two *different* fields from the `.sensitive` ASPECT (§ note above) —
+  don't conflate the nested-`data`-field gate this fire builds with the separate aspect-unmarshal path.
+- Standing checklist #3 — prove the positive vector per field, not merely inherited from `TestValidate_CleanPass`.
+
+**Non-goals:** the `root+".sensitive"` typed-aspect unmarshal-error swallow (`ddl_cache.go:761-777`) — a
+different failure shape (unmarshal error, not type assertion) over a different field (the aspect's own
+`data.value`, not the DDL root's `data.sensitive`), unflagged by either board row; no contract edit —
+`docs/contracts/08-package-install.md:158/166` already treats `data.protected` as a boolean by comparing it
+`== true` in prose, so this fix enforces an already-implicit type rather than declaring a new one, same
+reasoning as §16's `isDeleted` non-goal.
