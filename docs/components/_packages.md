@@ -435,6 +435,16 @@ mechanizes it (name the gate, strike the entry).
   same guard as the named wrapper, so a grep for wrapper names undercounts. Minted: dynamic-type-taxonomy §9.2
   (8 sites / 5 packages claimed; 19 / 7 real, plus two JavaScript submit sites no Go census would find).
   Check: grep the predicate and the error string, then re-derive at Phase 0.
+- **A shared-vertex repoint needs a content-and-revision gate against EVERY other writer of that vertex, not
+  just atomicity within its own batch.** A script's own mutation batch being atomic (CAS-guarded) proves
+  nothing about a DIFFERENT op racing the same key between that op's own live read and its commit — the
+  gap is closed only by (a) checking the read's *content* still matches what justified the mutation and
+  (b) pinning the write to *that same read's revision*, not a later step-8 fallback re-read. Minted:
+  identity-domain's `CreateUnclaimedIdentity` identityindex repoint (2026-08-15) — two independent cold
+  reviews found `PurgeIdentityDedupFootprint`'s sweep and `MergeIdentity`'s repoint could each destroy or
+  steal a vertex the repoint had just legitimately claimed. Check: for any script that reads a vertex live
+  (`kv.Read`, read-posture (e)) then conditionally mutates it, grep for `expectedRevision` on that exact
+  mutation — its absence, or a bare content check without the revision pin, is the defect.
 
 ## Related contracts
 
