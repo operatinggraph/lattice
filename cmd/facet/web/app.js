@@ -490,6 +490,14 @@ function onAuthDeath() {
   if (authDeathHandled) return;
   authDeathHandled = true;
   if (activeSource) { activeSource.close(); activeSource = null; }
+  // The §4.4 purge belongs to the auth BOUNDARY, not to the sign-out button:
+  // what it protects against is a secret outliving the access that minted it,
+  // and an expiry ends that access exactly as a deliberate sign-out does. It
+  // matters more here, in fact — the holds live in tab-scoped storage, which a
+  // same-tab location.replace does not clear, so without this the plaintext
+  // would rehydrate onto whatever loads next in this tab, including the next
+  // identity to sign in on a shared device.
+  purgeCeremonyReveals();
   location.replace("/login");
 }
 
@@ -672,7 +680,11 @@ function applyOutboxFrame(e) {
     if (paneRows().length) refreshPanesUntilChanged();
     setTimeout(() => {
       const cur = state.outbox.get(e.requestId);
-      if (cur && cur.state === "confirmed") {
+      // A confirmed write whose secret was lost stays PINNED until the operator
+      // dismisses it, exactly as a rejected one does. Archiving it on the timer
+      // would fold the only standing notice that somebody is now armed with an
+      // unheld secret into a collapsed section nobody has a reason to open.
+      if (cur && cur.state === "confirmed" && !secretLost(cur)) {
         state.outbox.delete(e.requestId);
         state.outboxHistory.unshift(cur);
         state.outboxHistory.length = Math.min(state.outboxHistory.length, maxOutboxHistory);
@@ -686,7 +698,19 @@ function applyOutboxFrame(e) {
   // and it deletes the held plaintext before rendering, so a throw here would
   // lose the secret AND (settled first) skip the outbox bookkeeping above.
   try {
-    settleCeremonyReveal(e.requestId, e.state);
+    if (settleCeremonyReveal(e.requestId, e.state) === "lost") {
+      // Said twice on purpose. The toast reaches whoever is looking right now;
+      // the mark keeps the note pinned in Activity for whoever comes looking
+      // later, which a delayed confirmation makes the likely case. Recorded
+      // against the requestId, never on `e`: settle reports the loss exactly
+      // once, and the burst of frames feed.go sends for one request would
+      // otherwise replace the flagged object with an unflagged one that settle
+      // has nothing left to say about. The render scheduled just above picks
+      // the mark up — it runs on a microtask, and this is still the same
+      // synchronous turn — as does the archive timer armed above.
+      markSecretLost(e.requestId);
+      toast("A minted secret was lost before it could be shown — issue a fresh one.", false);
+    }
   } catch (err) {
     console.error("ceremony reveal failed", err);
   }
@@ -1700,8 +1724,13 @@ function openTaskDetail(key) {
 let outboxHistoryExpanded = false;
 
 function renderActivity() {
+  // Confirmed entries fall out of the pinned set — their own manifest.inst.*
+  // row takes over — with one exception: a confirmed write whose secret was
+  // lost. That one is the only record anywhere that a target got armed with a
+  // secret nobody holds, and it needs answering, so it is pinned on the terms a
+  // rejected write is, and leaves the same way, when the operator dismisses it.
   const pinned = [...state.outbox.values()]
-    .filter((e) => e.state === "queued" || e.state === "submitting" || e.state === "rejected")
+    .filter((e) => e.state === "queued" || e.state === "submitting" || e.state === "rejected" || secretLost(e))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const insts = instances().sort(byCreatedDesc);
   const history = state.outboxHistory;
@@ -1721,27 +1750,58 @@ function titleForOutbox(e) {
   return (match && match.data.title) || prettifyOpType(e.operationType);
 }
 
+// lostSecretMsg renders the note a ceremony write carries once its secret was
+// confirmed but unrecoverable. It is on the card rather than a toast alone
+// because the confirmation can land long after anyone stopped watching, and
+// this is the surface they come back to.
+//
+// Drawn by BOTH outbox cards, for the same reason the mark is keyed by
+// requestId: which card draws an entry is a fact about where it sits in the
+// outbox, and says nothing about whether its secret survived. The pinned card
+// is the live path — the archive timer holds a marked entry back from history —
+// and a note that only one arrangement of the cards can render is a note one
+// change to that arrangement silences.
+function lostSecretMsg(e) {
+  return secretLost(e) ? `<div class="error-msg">Secret was not shown — issue a new one.</div>` : "";
+}
+
 function outboxHistoryCard(e) {
   const stateLabel = e.state === "confirmed" ? "Done" : e.state;
   return `<div class="timeline-item">
     <div class="row1"><span class="title">${esc(titleForOutbox(e))}</span><span class="badge ${esc(e.state)}">${esc(stateLabel)}</span></div>
+    ${lostSecretMsg(e)}
   </div>`;
 }
 
 function outboxCard(e) {
   const stateLabel = { queued: "Queued", submitting: "Sending…", confirmed: "Done", rejected: "Failed" }[e.state] || e.state;
   const errMsg = e.state === "rejected" && e.errorMessage ? `<div class="error-msg">${esc(e.errorCode || "")}: ${esc(e.errorMessage)}</div>` : "";
+  // Dismiss is offered for a lost secret too — it is what takes the pinned
+  // notice down once the operator has answered it by issuing a fresh one.
+  // Review is NOT: it reopens the submitted payload as a draft to resubmit,
+  // which is the right offer for a write that failed and a wrong one for a
+  // write that landed.
   const actions = e.state === "rejected"
     ? `<div class="actions"><button class="ghost-btn" data-dismiss="${esc(e.requestId)}">Dismiss</button><button class="ghost-btn" data-review="${esc(e.requestId)}">Review</button></div>`
-    : "";
+    : secretLost(e)
+      ? `<div class="actions"><button class="ghost-btn" data-dismiss="${esc(e.requestId)}">Dismiss</button></div>`
+      : "";
   return `<div class="timeline-item">
     <div class="row1"><span class="title">${esc(titleForOutbox(e))}</span><span class="badge ${esc(e.state)}">${esc(stateLabel)}</span></div>
     ${errMsg}
+    ${lostSecretMsg(e)}
     ${actions}
   </div>`;
 }
 
-function dismissOutbox(reqId) { state.outbox.delete(reqId); scheduleRender(); }
+// dismissOutbox drops the mark along with the entry. Dismissal is the operator
+// saying they have answered the loss; leaving the mark behind would let the
+// next duplicate frame for the same request re-pin a notice they are done with.
+function dismissOutbox(reqId) {
+  lostSecretRequestIds.delete(reqId);
+  state.outbox.delete(reqId);
+  scheduleRender();
+}
 
 function reviewOutbox(reqId) {
   const e = state.outbox.get(reqId);
@@ -1952,26 +2012,155 @@ async function mintSecret() {
 }
 
 // pendingReveals holds a minted plaintext between submission and the outbox
-// frame that settles it, keyed by requestId. In memory only, never persisted:
-// a reload drops an unrevealed secret, which is the correct failure — the
-// write either landed (and the target needs a fresh secret issued) or it
-// did not.
+// frame that settles it, keyed by requestId. Each entry is either a reveal
+// ({plaintext, title, help}) or a {lost: true, title} marker — a request whose
+// secret is gone but whose settlement still has something to say.
+//
+// The map is mirrored into sessionStorage (PENDING_REVEALS_KEY) so an ordinary
+// reload recovers the hold. It has to: the enqueued write is already durable in
+// the device's own queue and its confirm frame replays onto the reconnected
+// feed, so the tab's memory lifetime decides nothing about whether the write
+// lands — only about whether anyone ever sees the secret it armed. Tab-scoped
+// storage, cleared on tab close, behind the same same-origin boundary the
+// reveal modal already renders the plaintext into, so it opens no new exposure.
+// The invariant across both copies: every requestId this client holds a secret
+// for stays keyed here until its write reaches a terminal state, and no
+// terminal state settles silently.
+const PENDING_REVEALS_KEY = "facet.pendingReveals";
 const pendingReveals = new Map();
+
+// revealHoldMaxAgeMs bounds how long a hold survives across reloads. Nothing
+// else reaps one: the host's outbox is in-memory and does not survive a restart,
+// it trims old terminal entries, and an explicit sign-out deletes the device's
+// intent queue outright — so a write can simply stop having any terminal frame
+// left to send, and its hold would otherwise sit in storage for the life of the
+// tab. A day is far past the point a person would still be waiting on a secret
+// while the tab that minted it stayed open.
+const revealHoldMaxAgeMs = 24 * 60 * 60 * 1000;
+
+// lostSecretRequestIds records the requests whose write confirmed with no
+// recoverable secret. Keyed by requestId rather than flagged on the outbox
+// entry, because the entry is not stable: feed.go marshals outbox frames from
+// a shared pointer, so one request routinely yields several near-duplicate
+// frames, and a later one REPLACES the object state.outbox holds. A flag on the
+// object would disappear with it — while the fact it records, that the target
+// is armed with a secret nobody has, belongs to the request and outlives every
+// frame for it.
+//
+// A Map keyed to its insertion time rather than a Set, purely so the bound
+// below has an eviction order. Page-lifetime only: unlike a hold, this carries
+// no secret, so it has nothing to protect across a reload.
+const lostSecretRequestIds = new Map();
+const maxLostSecretIds = 200;
+
+// markSecretLost is the one entry point, so the bound cannot be bypassed by a
+// caller that sets the key directly.
+function markSecretLost(requestId) {
+  lostSecretRequestIds.set(requestId, Date.now());
+  while (lostSecretRequestIds.size > maxLostSecretIds) {
+    lostSecretRequestIds.delete(lostSecretRequestIds.keys().next().value);
+  }
+}
+
+// secretLost answers the question the renderers ask — of the REQUEST, never of
+// the frame object in hand.
+function secretLost(e) { return !!e && lostSecretRequestIds.has(e.requestId); }
+
+// persistPendingReveals mirrors the whole map into sessionStorage — whole-map
+// rather than per-key, because at this size a single write can never leave the
+// two copies disagreeing. Storage may be absent (a runtime without it) or throw
+// (private mode, quota, a partitioned frame); the in-memory map is authoritative
+// for this page load either way, so a failure here costs reload recovery and
+// nothing else. Never stores an empty object: an absent key and an empty map say
+// the same thing.
+//
+// The whole body sits inside the try, the `typeof` guard included. Reading
+// `sessionStorage` where site data is blocked THROWS rather than answering
+// undefined — it is a resolvable global whose getter raises SecurityError — so a
+// guard outside the try is itself the unhandled throw. That matters most on the
+// sign-out path, which calls this before /api/logout: a throw there would abort
+// the sign-out and leave the session live.
+function persistPendingReveals() {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    if (!pendingReveals.size) {
+      sessionStorage.removeItem(PENDING_REVEALS_KEY);
+      return;
+    }
+    sessionStorage.setItem(PENDING_REVEALS_KEY, JSON.stringify(Object.fromEntries(pendingReveals)));
+  } catch { /* reload recovery is best effort; the live map still settles this load */ }
+}
+
+// loadStoredReveals rehydrates the holds an earlier load of this tab left
+// behind, and runs once at script load — before any feed connection can replay
+// the confirm frame those holds are waiting for. Anything unreadable or
+// unparseable is treated as nothing held, which is a page that reveals no
+// secret rather than a page that fails to boot. Same try placement as
+// persistPendingReveals, and for a sharper reason: this runs at the top level of
+// a classic script, so an uncaught throw aborts the rest of app.js and the app
+// does not boot at all.
+//
+// An entry has to look like something this file wrote — a plaintext or a
+// loss marker — before it is honoured. A truncated or foreign entry that merely
+// happens to be an object would otherwise rehydrate as a live hold and, on its
+// confirmation, present an empty modal as if it were somebody's secret.
+function loadStoredReveals() {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    const stored = JSON.parse(sessionStorage.getItem(PENDING_REVEALS_KEY) || "null");
+    if (!stored || typeof stored !== "object") return;
+    const now = Date.now();
+    for (const [requestId, reveal] of Object.entries(stored)) {
+      if (!reveal || typeof reveal !== "object") continue;
+      if (typeof reveal.plaintext !== "string" && reveal.lost !== true) continue;
+      if (typeof reveal.at === "number" && now - reveal.at > revealHoldMaxAgeMs) continue;
+      // An entry with no stamp is not aged out on sight — that would drop a
+      // secret silently, the failure this whole path exists to prevent. It is
+      // stamped instead, so it is bounded from here on.
+      pendingReveals.set(requestId, typeof reveal.at === "number" ? reveal : { ...reveal, at: now });
+    }
+    // Written back so the entries dropped just above leave STORAGE too. Skipping
+    // them in memory alone would leave an expired plaintext sitting in the tab
+    // for as long as it stays open, which is the opposite of a bound.
+    persistPendingReveals();
+  } catch { /* corrupt or inaccessible — proceed with nothing held */ }
+}
+
+loadStoredReveals();
 
 // holdCeremonyReveal parks a minted plaintext against the request that will
 // settle it. Paired with settleCeremonyReveal so the hold/settle lifecycle has
 // one entry and one exit rather than the map being poked at from the submit
 // path directly.
 function holdCeremonyReveal(requestId, reveal) {
-  pendingReveals.set(requestId, reveal);
+  // Stamped on the way in, which is what gives loadStoredReveals an age to
+  // apply revealHoldMaxAgeMs against.
+  pendingReveals.set(requestId, { ...reveal, at: Date.now() });
+  persistPendingReveals();
 }
 
-// purgeCeremonyReveals drops every held plaintext. Part of the §4.4 sign-out
-// purge: a minted secret is exactly the kind of thing that must not survive a
-// sign-out, and it is held outside `state` so the mirror sweep does not reach
-// it.
+// purgeCeremonyReveals drops every held plaintext and leaves a {lost: true}
+// marker keyed by the same requestId. Part of the §4.4 sign-out purge: a minted
+// secret is exactly the kind of thing that must not survive a sign-out, and it
+// is held outside `state` so the mirror sweep does not reach it. The marker
+// carries no secret — only the title, for context — and exists so that a
+// confirm frame arriving afterwards can still be told apart from a frame for an
+// ordinary write, and say that the write landed with a secret nobody holds.
+//
+// Called from BOTH exits from an identity's access — the sign-out button and
+// onAuthDeath — because what must not survive is the access, not the button.
 function purgeCeremonyReveals() {
-  pendingReveals.clear();
+  for (const [requestId, pending] of pendingReveals) {
+    if (pending && pending.lost) continue;
+    // The marker inherits the hold's own stamp, so a marker ages out on the
+    // schedule its secret would have.
+    pendingReveals.set(requestId, {
+      lost: true,
+      title: (pending && pending.title) || "",
+      at: (pending && pending.at) || Date.now(),
+    });
+  }
+  persistPendingReveals();
   shownReveals.length = 0;
 }
 
@@ -1980,19 +2169,35 @@ function purgeCeremonyReveals() {
 // otherwise never arrive, leaving a person waiting on a secret that no longer
 // exists. Both terminal branches delete, so a plaintext outlives its request
 // by exactly one state transition; a non-terminal state holds.
+//
+// Returns "lost" when the write confirmed but its secret is unrecoverable, so
+// the caller can surface that; undefined otherwise. A requestId this client
+// never held is an ordinary write and stays inert.
 function settleCeremonyReveal(requestId, outboxState) {
   const pending = pendingReveals.get(requestId);
   if (!pending) return;
+  if (pending.lost) {
+    // Nothing to show, so nothing is shown. A confirmed write is the one that
+    // matters: the target is now armed with a secret nobody has. A rejected one
+    // needs no telling — the secret was never going to be needed.
+    if (outboxState === "confirmed" || outboxState === "rejected") {
+      pendingReveals.delete(requestId);
+      persistPendingReveals();
+    }
+    return outboxState === "confirmed" ? "lost" : undefined;
+  }
   if (outboxState === "confirmed") {
     // Shown BEFORE the hold is released: if rendering throws, the plaintext is
     // still held and the next frame for this request can still deliver it.
     // Dropping it first would trade a render error for a lost secret.
     showCeremonyReveal(pending);
     pendingReveals.delete(requestId);
+    persistPendingReveals();
     return;
   }
   if (outboxState === "rejected") {
     pendingReveals.delete(requestId);
+    persistPendingReveals();
     toast("That didn't go through, so no secret was issued — nothing to hand over.", false);
   }
 }

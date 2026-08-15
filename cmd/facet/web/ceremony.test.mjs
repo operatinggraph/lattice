@@ -30,17 +30,97 @@ const appSrc = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 
 // loadApp evaluates app.js with a crypto implementation of the caller's
 // choosing — `webcrypto` for a capable runtime, `undefined` for the insecure
-// origin where crypto.subtle does not exist.
-function loadApp(crypto) {
+// origin where crypto.subtle does not exist — and, optionally, a sessionStorage
+// to persist ceremony holds into. Omitting the storage is the runtime that has
+// none: every test that does not name one is also the assertion that the app
+// works unchanged without it.
+// `extra` overlays the sandbox for the vectors that drive more of app.js than
+// the reveal lifecycle alone — timers, a microtask, a DOM node to render into.
+function loadApp(crypto, sessionStorage, extra) {
   const sandbox = {
     console,
     document: { addEventListener() {} },
     crypto,
     TextEncoder,
+    // scheduleRender's scheduler. Synchronous here, and it renders nothing —
+    // hasBootstrapped is false in a headless load — so it is just the global
+    // the call needs to resolve.
+    queueMicrotask: (fn) => fn(),
+    ...extra,
   };
+  if (sessionStorage) sandbox.sessionStorage = sessionStorage;
   vm.createContext(sandbox);
   vm.runInContext(appSrc, sandbox, { filename: "app.js" });
   return sandbox;
+}
+
+// fakeSessionStorage is the Web Storage surface app.js actually uses. Handing
+// the SAME object to two loadApp calls is what makes a "reload" testable: two
+// independent script evaluations, one tab's storage.
+function fakeSessionStorage() {
+  const store = new Map();
+  return {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: (k) => { store.delete(k); },
+  };
+}
+
+const REVEALS_KEY = "facet.pendingReveals";
+
+// frameHarness drives the real applyOutboxFrame / renderActivity, rather than
+// settleCeremonyReveal on its own. That distinction is the point: every part of
+// this signal that regressed under review — which object carries the loss,
+// whether the note is ever rendered — lives in the WIRING between them, and a
+// test that calls settle directly cannot see any of it.
+//
+// The sandbox supplies only what those two paths reach for: a capturable
+// setTimeout (the 2-second archive hand-off, driven by hand here), a
+// synchronous microtask for scheduleRender, and one element for Activity to
+// render into. The rest are function declarations, so they are stubbed on the
+// sandbox global after load.
+function frameHarness() {
+  const timers = [];
+  const activity = { innerHTML: "" };
+  const toasts = [];
+  const app = loadApp(webcrypto, undefined, {
+    setTimeout: (fn) => timers.push(fn),
+    clearTimeout: () => {},
+    queueMicrotask: (fn) => fn(),
+    document: {
+      addEventListener() {},
+      getElementById: (id) => (id === "view-activity" ? activity : { innerHTML: "", hidden: true }),
+    },
+  });
+  app.toast = (msg) => toasts.push(msg);
+  app.showModal = () => {};
+  app.ops = () => [];
+  app.paneRows = () => [];
+  return {
+    app, toasts,
+    // The 2s archive timer, fired on demand — the only way to assert what it
+    // does and does not sweep without waiting on a real clock.
+    runTimers: () => { timers.splice(0).forEach((fn) => fn()); },
+    render: () => { app.renderActivity(); return activity.innerHTML; },
+    // `state` is a top-level const, so it is lexical to the context rather than
+    // a sandbox property — reached by evaluating in the same context. Round
+    // -tripped through JSON so the array carries THIS realm's prototype and
+    // deepEqual compares by structure.
+    pinnedIds: () => JSON.parse(vm.runInContext("JSON.stringify([...state.outbox.keys()])", app)),
+    historyLen: () => vm.runInContext("state.outboxHistory.length", app),
+  };
+}
+
+// frame builds an outbox frame in feed.go's shape. Each call returns a NEW
+// object, which is the shape of the hazard: the host marshals from a shared
+// pointer, so several distinct objects arrive for one requestId.
+function frame(requestId, state) {
+  return {
+    requestId,
+    operationType: "CreateUnclaimedIdentity",
+    state,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 const ceremonyOp = {
@@ -311,6 +391,329 @@ test("an outbox frame for a request with no held secret is inert", () => {
   const shown = revealCapture(app);
   app.settleCeremonyReveal("some-ordinary-write", "confirmed");
   assert.deepEqual(shown, []);
+});
+
+// ---- rule 4: a secret that is confirmed but unrecoverable is never silent,
+// and an ordinary reload does not make one ----
+//
+// The failure these pin is the quietest one in the ceremony: the write is
+// durable in the device's queue the moment it is enqueued, so it lands whether
+// or not this browser still holds the plaintext. A settlement that finds
+// nothing held therefore has two utterly different meanings — an ordinary
+// write (inert, pinned above) and a ceremony write whose secret is gone (the
+// target is armed with a secret nobody has). They must not look alike.
+
+test("a purged reveal that later CONFIRMS reports the loss instead of going quiet", () => {
+  const app = loadApp(webcrypto);
+  const shown = revealCapture(app);
+
+  app.holdCeremonyReveal("req-purged", { plaintext: "goneForever", title: "Their claim secret", help: "h" });
+  app.purgeCeremonyReveals(); // the §4.4 sign-out wipe
+  const outcome = app.settleCeremonyReveal("req-purged", "confirmed");
+
+  assert.equal(outcome, "lost", "a confirmed write with no recoverable secret must announce itself");
+  assert.deepEqual(shown, [], "there is no plaintext left to show — and the purge is not weakened");
+  assert.ok(!JSON.stringify(shown).includes("goneForever"));
+
+  // Reported once. A replayed frame for the same request has nothing to add.
+  assert.equal(app.settleCeremonyReveal("req-purged", "confirmed"), undefined);
+});
+
+test("a purged reveal that later REJECTS is quiet — nothing was ever going to be needed", () => {
+  const app = loadApp(webcrypto);
+  const shown = revealCapture(app);
+  const toasts = [];
+  app.toast = (msg) => toasts.push(msg);
+
+  app.holdCeremonyReveal("req-purged-rej", { plaintext: "goneForever", title: "t", help: "h" });
+  app.purgeCeremonyReveals();
+
+  assert.equal(app.settleCeremonyReveal("req-purged-rej", "rejected"), undefined);
+  assert.deepEqual(shown, []);
+  assert.deepEqual(toasts, [], "no secret was issued and none was owed — there is nothing to say");
+  // And the marker is spent: a later frame cannot resurrect a report either.
+  assert.equal(app.settleCeremonyReveal("req-purged-rej", "confirmed"), undefined);
+});
+
+test("a purged reveal still held in a non-terminal state keeps its marker", () => {
+  const app = loadApp(webcrypto);
+  revealCapture(app);
+  app.holdCeremonyReveal("req-purged-interim", { plaintext: "goneForever", title: "t", help: "h" });
+  app.purgeCeremonyReveals();
+  assert.equal(app.settleCeremonyReveal("req-purged-interim", "queued"), undefined);
+  // The eventual confirmation still reports, which is the whole point of
+  // holding the marker rather than deleting it.
+  assert.equal(app.settleCeremonyReveal("req-purged-interim", "confirmed"), "lost");
+});
+
+test("a reload recovers a hold and still reveals the original plaintext", () => {
+  // Two evaluations of app.js over one tab's storage — a page refresh between
+  // enqueue and confirmation. The write survived it in the device queue and its
+  // confirm frame replays onto the new feed connection; the secret must survive
+  // it too, or the reload alone silently arms an unusable identity.
+  const storage = fakeSessionStorage();
+
+  const first = loadApp(webcrypto, storage);
+  revealCapture(first);
+  first.holdCeremonyReveal("req-reload", {
+    plaintext: "survivesTheReload", title: "Their claim secret", help: "Give this to them now.",
+  });
+  assert.ok(storage.getItem("facet.pendingReveals"), "the hold must be mirrored where a reload can find it");
+
+  const second = loadApp(webcrypto, storage);
+  const shown = revealCapture(second);
+  second.settleCeremonyReveal("req-reload", "confirmed");
+
+  assert.equal(shown.length, 1, "the confirmation after the reload must still reveal");
+  assert.match(shown[0], /survivesTheReload/);
+  assert.match(shown[0], /Their claim secret/);
+  // Settled means spent, in storage as well as in memory: the next load must
+  // not re-reveal a secret already handed over.
+  assert.equal(storage.getItem("facet.pendingReveals"), null);
+  const third = loadApp(webcrypto, storage);
+  const shownThird = revealCapture(third);
+  third.settleCeremonyReveal("req-reload", "confirmed");
+  assert.deepEqual(shownThird, []);
+});
+
+test("a reload after a sign-out purge recovers the marker, not the plaintext", () => {
+  const storage = fakeSessionStorage();
+  const first = loadApp(webcrypto, storage);
+  revealCapture(first);
+  first.holdCeremonyReveal("req-purged-reload", { plaintext: "mustNotSurvive", title: "T", help: "h" });
+  first.purgeCeremonyReveals();
+  assert.ok(!(storage.getItem("facet.pendingReveals") || "").includes("mustNotSurvive"),
+    "the §4.4 purge must drop the plaintext from storage too, not only from memory");
+
+  const second = loadApp(webcrypto, storage);
+  const shown = revealCapture(second);
+  assert.equal(second.settleCeremonyReveal("req-purged-reload", "confirmed"), "lost");
+  assert.deepEqual(shown, []);
+});
+
+test("the reveal lifecycle works, and persistence is inert, with no sessionStorage at all", () => {
+  // The sandbox defines none, which is also every other test in this file.
+  const app = loadApp(webcrypto);
+  const shown = revealCapture(app);
+  app.persistPendingReveals(); // must not throw with nothing to persist...
+  app.holdCeremonyReveal("req-nostore", { plaintext: "stillWorks", title: "t", help: "h" });
+  app.persistPendingReveals(); // ...nor with something to persist and nowhere to put it.
+  app.loadStoredReveals();
+  app.settleCeremonyReveal("req-nostore", "confirmed");
+  assert.equal(shown.length, 1);
+  assert.match(shown[0], /stillWorks/);
+});
+
+test("the outbox cards carry a lost-secret note only when the REQUEST is marked", () => {
+  const app = loadApp(webcrypto);
+  app.ops = () => [];
+  app.markSecretLost("r-lost");
+  // Two DIFFERENT objects for the marked request, one of them a bare frame with
+  // no ceremony field on it at all: the note follows the requestId, so both
+  // carry it. That is the property a flag on the entry object cannot have.
+  const marked = { requestId: "r-lost", operationType: "CreateUnclaimedIdentity", state: "confirmed" };
+  const markedDup = { requestId: "r-lost", operationType: "CreateUnclaimedIdentity", state: "queued" };
+  const plain = { requestId: "r-ok", operationType: "CreateUnclaimedIdentity", state: "confirmed" };
+  for (const card of [app.outboxCard, app.outboxHistoryCard]) {
+    assert.match(card(marked), /Secret was not shown — issue a new one\./);
+    assert.match(card(markedDup), /Secret was not shown — issue a new one\./);
+    assert.doesNotMatch(card(plain), /Secret was not shown/);
+  }
+  // Dismissing is the operator answering the notice, and it takes the mark with
+  // it — otherwise the next duplicate frame re-pins what they just cleared.
+  app.dismissOutbox("r-lost");
+  assert.doesNotMatch(app.outboxCard(marked), /Secret was not shown/);
+});
+
+// ---- rule 5: the loss notice survives the wiring ----
+//
+// Everything above proves settleCeremonyReveal REPORTS a loss. These prove the
+// report reaches a person, which is a claim about applyOutboxFrame and
+// renderActivity that calling settle directly cannot make. Two ways to hold a
+// correct report and still show nobody: attach it to a frame object the host
+// routinely replaces, or render it only on a card the main Activity view never
+// draws. Both are silent, and both look fine read off the settle path alone.
+
+test("a duplicate outbox frame cannot erase the lost-secret notice", () => {
+  const h = frameHarness();
+  h.app.holdCeremonyReveal("req-burst", { plaintext: "goneForever", title: "T", help: "h" });
+  h.app.purgeCeremonyReveals();
+
+  h.app.applyOutboxFrame(frame("req-burst", "confirmed"));
+  assert.equal(h.toasts.length, 1, "the confirmation must announce the loss once");
+  assert.match(h.render(), /Secret was not shown/);
+
+  // The burst feed.go actually sends: more frames for the SAME request,
+  // distinct objects, marshaled from the shared pointer around the flip. Each
+  // replaces the entry in state.outbox, and settle has nothing left to say
+  // about any of them — the marker was spent on the first.
+  h.app.applyOutboxFrame(frame("req-burst", "queued"));
+  h.app.applyOutboxFrame(frame("req-burst", "confirmed"));
+  assert.equal(h.toasts.length, 1, "and exactly once — a duplicate is not a second loss");
+  assert.match(h.render(), /Secret was not shown/,
+    "the notice belongs to the request; a replacement frame object must not take it down");
+});
+
+test("a lost-secret entry stays pinned in Activity instead of being archived", () => {
+  const h = frameHarness();
+  h.app.holdCeremonyReveal("req-pinned", { plaintext: "goneForever", title: "T", help: "h" });
+  h.app.purgeCeremonyReveals();
+  h.app.applyOutboxFrame(frame("req-pinned", "confirmed"));
+
+  // The 2s hand-off that sweeps an ordinary confirmed entry into the collapsed
+  // history section. It must leave this one alone: history is behind a click
+  // nobody has a reason to make, and this is the only standing record that
+  // somebody is armed with a secret no one holds.
+  h.runTimers();
+  assert.deepEqual(h.pinnedIds(), ["req-pinned"], "a lost secret must not be swept out of the pinned set");
+  assert.equal(h.historyLen(), 0);
+
+  const html = h.render();
+  assert.match(html, /Secret was not shown — issue a new one\./);
+  assert.match(html, /data-dismiss="req-pinned"/, "and it must be answerable, the way a failed write is");
+  assert.doesNotMatch(html, /data-review="req-pinned"/,
+    "but not resubmittable — the write LANDED; reopening its payload as a draft would misdescribe it");
+
+  // Dismiss is the operator saying they have issued a fresh secret. It clears.
+  h.app.dismissOutbox("req-pinned");
+  assert.deepEqual(h.pinnedIds(), []);
+  assert.doesNotMatch(h.render(), /Secret was not shown/);
+});
+
+test("an ordinary confirmed write is still archived on the timer", () => {
+  // The control for the test above: without this, a filter that pinned
+  // everything would pass it just as well.
+  const h = frameHarness();
+  h.app.applyOutboxFrame(frame("req-ordinary", "confirmed"));
+  h.runTimers();
+  assert.deepEqual(h.pinnedIds(), [], "nothing was lost, so nothing stays pinned");
+  assert.equal(h.historyLen(), 1);
+  assert.doesNotMatch(h.render(), /Secret was not shown/);
+});
+
+// ---- rule 6: the purge follows the ACCESS, and the storage cannot brick the
+// page ----
+
+test("an auth-death exit purges the held plaintext, not just the sign-out button", () => {
+  // onAuthDeath is the exit nobody chose — an expired session, a 401. It never
+  // calls /api/logout, so the queued write survives on the host and WILL
+  // confirm later; what must not survive is this identity's plaintext. And
+  // sessionStorage is same-TAB, so the location.replace it ends with does not
+  // clear it: without the purge the secret rehydrates onto whoever signs in
+  // next on a shared device.
+  const storage = fakeSessionStorage();
+  const replaced = [];
+  const first = loadApp(webcrypto, storage, { location: { replace: (u) => replaced.push(u) } });
+  revealCapture(first);
+  first.holdCeremonyReveal("req-authdeath", { plaintext: "mustNotSurvive", title: "T", help: "h" });
+
+  first.onAuthDeath();
+  assert.deepEqual(replaced, ["/login"], "the exit itself still happens");
+  assert.ok(!(storage.getItem(REVEALS_KEY) || "").includes("mustNotSurvive"),
+    "an expired session must drop the plaintext exactly as a deliberate sign-out does");
+
+  // The next load of this tab — the next identity on a kiosk — finds no secret,
+  // and the marker still reports the loss when the write confirms.
+  const second = loadApp(webcrypto, storage);
+  const shown = revealCapture(second);
+  assert.equal(second.settleCeremonyReveal("req-authdeath", "confirmed"), "lost");
+  assert.deepEqual(shown, []);
+});
+
+test("a sessionStorage whose getter THROWS does not stop the app booting", () => {
+  // Site data blocked, or a partitioned frame: `sessionStorage` resolves and
+  // its getter raises SecurityError, so `typeof sessionStorage` throws rather
+  // than answering "undefined". Defined on the context's own globalThis, since
+  // that is where the identifier resolves — a plain sandbox property is read
+  // through the vm's global proxy, which swallows the throw.
+  //
+  // loadStoredReveals runs at the top level of a classic script, so an escaping
+  // throw does not merely lose reload recovery: the rest of app.js never
+  // evaluates and the app does not boot.
+  const sandbox = { console, document: { addEventListener() {} }, crypto: webcrypto, TextEncoder };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    `Object.defineProperty(globalThis, "sessionStorage", { get() { throw new Error("SecurityError"); }, configurable: true });`,
+    sandbox,
+  );
+  assert.doesNotThrow(() => vm.runInContext(appSrc, sandbox, { filename: "app.js" }));
+  // Top-level state declared AFTER loadStoredReveals runs — its existence is
+  // the proof that evaluation reached the end of the file.
+  assert.equal(vm.runInContext("shownReveals.length", sandbox), 0);
+
+  // And the write paths stay callable, which is what keeps sign-out working:
+  // purgeCeremonyReveals persists, and signOut calls it before /api/logout, so
+  // a throw here would abandon the sign-out with the session still live.
+  const shown = revealCapture(sandbox);
+  assert.doesNotThrow(() => {
+    sandbox.holdCeremonyReveal("req-nostorage", { plaintext: "stillWorks", title: "t", help: "h" });
+    sandbox.purgeCeremonyReveals();
+  });
+  assert.equal(sandbox.settleCeremonyReveal("req-nostorage", "confirmed"), "lost");
+  assert.deepEqual(shown, []);
+});
+
+// ---- rule 7: a hold is bounded, and only a hold this file wrote is honoured ----
+
+test("a hold older than the bound is reaped from storage, not carried forever", () => {
+  // Nothing else reaps one. The host's outbox is in-memory and does not survive
+  // a restart, so a write can stop having any terminal frame left to send — and
+  // its plaintext would otherwise sit in the tab for as long as it stays open.
+  const storage = fakeSessionStorage();
+  storage.setItem(REVEALS_KEY, JSON.stringify({
+    "req-stale": { plaintext: "tooOldToBeWaitedOn", title: "t", help: "h", at: Date.now() - 25 * 60 * 60 * 1000 },
+    "req-fresh": { plaintext: "stillWanted", title: "t", help: "h", at: Date.now() - 60 * 1000 },
+  }));
+
+  const app = loadApp(webcrypto, storage);
+  const shown = revealCapture(app);
+  assert.ok(!(storage.getItem(REVEALS_KEY) || "").includes("tooOldToBeWaitedOn"),
+    "an aged-out plaintext must leave STORAGE, not merely be skipped in memory");
+
+  app.settleCeremonyReveal("req-stale", "confirmed");
+  assert.deepEqual(shown, [], "and it is gone: nothing to reveal");
+  app.settleCeremonyReveal("req-fresh", "confirmed");
+  assert.equal(shown.length, 1, "a hold inside the bound is untouched");
+  assert.match(shown[0], /stillWanted/);
+});
+
+test("a corrupt stored entry is never presented as somebody's secret", () => {
+  // A truncated or foreign entry that merely happens to be an object must not
+  // rehydrate as a live hold: its confirmation would open an empty reveal modal
+  // captioned as the secret, which is worse than showing nothing — it reads as
+  // the ceremony having succeeded.
+  const storage = fakeSessionStorage();
+  storage.setItem(REVEALS_KEY, JSON.stringify({
+    "req-empty": {},
+    "req-truncated": { title: "t", help: "h" },
+    "req-marker": { lost: true, title: "t" },
+    "req-real": { plaintext: "realSecret", title: "t", help: "h" },
+  }));
+
+  const app = loadApp(webcrypto, storage);
+  const shown = revealCapture(app);
+  for (const id of ["req-empty", "req-truncated"]) {
+    assert.equal(app.settleCeremonyReveal(id, "confirmed"), undefined, `${id} must not rehydrate as a hold`);
+  }
+  assert.deepEqual(shown, []);
+
+  // The two legitimate shapes still rehydrate — a stamp-less entry included,
+  // since dropping one on sight would be the silent loss this all exists to
+  // prevent.
+  assert.equal(app.settleCeremonyReveal("req-marker", "confirmed"), "lost");
+  app.settleCeremonyReveal("req-real", "confirmed");
+  assert.equal(shown.length, 1);
+  assert.match(shown[0], /realSecret/);
+});
+
+test("the lost-request record is bounded", () => {
+  const app = loadApp(webcrypto);
+  for (let i = 0; i < 250; i++) app.markSecretLost("req-" + i);
+  assert.equal(vm.runInContext("lostSecretRequestIds.size", app), 200,
+    "a long-lived tab must not accumulate these without limit");
+  // Eviction is oldest-first, so the notices still standing are the recent ones.
+  assert.ok(!vm.runInContext(`lostSecretRequestIds.has("req-0")`, app));
+  assert.ok(vm.runInContext(`lostSecretRequestIds.has("req-249")`, app));
 });
 
 test("the reveal escapes its content and is not a toast", () => {
