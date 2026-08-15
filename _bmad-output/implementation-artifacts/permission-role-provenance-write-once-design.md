@@ -111,12 +111,19 @@ identical comment. This design is that filed gap.
 - **`UpdateRole` (the one granted role-mutating op) never touches the role root** —
   `packages/rbac-domain/ddls.go:276-291`: it mutates only the `.description` **aspect**; a role's
   `vtx.role.<id>` root document is always `{}` (`packages/rbac-domain/ddls.go:263`,
-  `internal/pkgmgr/build.go:76-98`) and carries no security-relevant field. The role-side escalation
-  surface is therefore not the root's `data` (empty by construction on every legitimate path) but the
-  **`.canonicalName` aspect** — an `UpgradePackage` rewrite of it does not escalate a privilege directly,
-  but does let an attacker redirect which role a display name resolves to (a confusion vector, not an
-  authorization bypass; included here as cheap defense-in-depth since it costs nothing extra to guard the
-  same way and the board row named "role" explicitly).
+  `internal/pkgmgr/build.go:76-98`) on every legitimate path.
+  **Correction (build-time, closed by the shipped guard — see §13): this is a full authorization bypass,
+  not a confusion vector.** `internal/refractor/ruleengine/full/executor.go`'s `resolveProperty` reads a
+  node's **root document first** and only falls back to an aspect point-read when the root has no field
+  of that name — so a top-level `canonicalName` field written onto the role **root** (not the aspect)
+  shadows the real `.canonicalName` aspect in every cypher read, including the kernel root-grant lens
+  (`internal/bootstrap/lenses.go:137`, `WHERE role.canonicalName.data.value = 'operator'`) and the
+  wildcard read-grant lens (`lenses.go:359`). An `UpgradePackage` holder rewriting their own held role's
+  **root** — not its aspect — with `{"canonicalName":{"data":{"value":"operator"}}}` reaches full kernel
+  write-root plus an all-rows read grant, with no aspect ever touched. The guard therefore makes the
+  **whole role root** write-once (byte-identical to the stored body, `isDeleted` excepted), not just the
+  `.canonicalName` aspect — closing the shadow path structurally rather than by enumerating which fields
+  could shadow which aspects.
 - **Step 8 already reads the exact document this guard needs, for free.** `readPriorDocuments`
   (`internal/processor/step8_commit.go:513-563`) already `KVGet`s the stored document for **every**
   update/tombstone mutation's own key (not just the protected root) — `prior.doc(m.Key)` is already
@@ -309,15 +316,20 @@ positive).
 today. This design adds a parallel subsection, staged **uncommitted** (§7):
 
 > **Permission/role provenance protection.** In addition to the protected-root guard above, every
-> `update` mutation targeting an existing `vtx.permission.<id>` root is rejected if it would change
-> `data.operationType`, `data.scope`, `data.origin`, or `data.declaredBy` from the value already
-> committed — the four fields `grant-provenance-runtime-permission-minting-design.md`'s origin invariant
-> depends on staying write-once outside the RBAC op surface (which itself never rewrites them —
-> `UpdatePermission` is ungranted). `data.note`/`data.lanes` may still change. The identical rule
-> protects a role's `.canonicalName` aspect. This closes the channel the protected-root guard does not:
-> an ordinary (non-`protected`) permission/role vertex, rewritten via `UpgradePackage` or any future
-> path that trusts a client-supplied mutation body. Rejected with `ErrCodePermissionProvenance`
-> (`"PermissionProvenance"`), terminal (no redelivery).
+> `update` mutation (and any `tombstone` mutation that carries a document) targeting an existing
+> `vtx.permission.<id>` root is rejected if it would change `data.operationType`, `data.scope`,
+> `data.origin`, `data.declaredBy`, or `data.lanes` from the value already committed — the fields
+> `grant-provenance-runtime-permission-minting-design.md`'s origin invariant and `platformLaneGate`'s lane
+> gate depend on staying write-once outside the RBAC op surface (which itself never rewrites them —
+> `UpdatePermission` is ungranted). `data.origin`/`data.declaredBy` may be set for the first time on a
+> permission stored without them (a pre-existing installation predating their introduction); every other
+> guarded field must already be present. `data.note` may still change freely. The identical rule makes a
+> role's **entire root document** write-once (not only its `.canonicalName` aspect — a top-level field on
+> the root shadows a same-named aspect in every cypher read, so the whole body must hold, `isDeleted`
+> excepted) and protects the `.canonicalName` aspect itself the same way. This closes the channel the
+> protected-root guard does not: an ordinary (non-`protected`) permission/role vertex, rewritten via
+> `UpgradePackage` or any future path that trusts a client-supplied mutation body. Rejected with
+> `ErrCodePermissionProvenance` (`"PermissionProvenance"`), terminal (no redelivery).
 
 Not a change to §8.1's client-trust model (still "client pre-computes, thin script trusts") — an
 *addition* to §8.4's kernel-protection guarantee list, same category as the guard it sits beside.
@@ -449,3 +461,66 @@ step-8 code path. Build against `step8_commit_test.go`'s existing fixture/harnes
 17 `Test*` functions are the precedent for how this file constructs a `CommitterImpl` + mutation batch);
 per §10 step 4, no sibling test for `rejectProtectedMutations` exists to mirror directly, so this is the
 first unit test for this class of step-8 guard in the file.
+
+## 13. Build note (Steward, 2026-08-14/15) — shipped shape differs from §4.1/§10, five review findings closed
+
+Built in an isolated worktree (`internal/processor/{step8_commit.go,step8_commit_test.go,commit_path.go,
+envelope.go}`, `internal/processor/opwire/opwire.go`; +365 lines, no other package touched). §10's decomposition
+and §5's census both held as scoped. **Full 3-layer cold adversarial review (per §10's mandated review depth)
+found one critical bypass and four lesser gaps in the first pass; all five closed and independently
+mutation-tested before merge** — the shipped guard is materially wider than §4.1's sketch:
+
+- **Role guard covers the whole root, not just `.canonicalName`** (§2's correction above) — closes a
+  full kernel-root bypass a cold reviewer found live: an `UpgradePackage` holder writing a top-level
+  `canonicalName` field onto their own held role's **root** shadows the real aspect in every cypher read
+  (`resolveProperty` reads the root body before falling back to an aspect point-read), reaching the same
+  kernel root-grant + wildcard read-grant lenses `.canonicalName` itself feeds. §4.1's aspect-only sketch
+  did not close this; the shipped guard makes the role root byte-identical to its stored body
+  (`isDeleted` excluded — that flag is the tombstone path's concern, not this guard's) rather than
+  special-casing one field, since no legitimate path writes the root at all.
+- **`data.lanes` joined the write-once set** (`permissionProvenanceFields`), compared as an
+  order-independent set (`platformLaneGate` tests membership, `step3_auth_capability.go:553-574`) rather
+  than freely mutable as §4.1/§6 originally said. `lanes` is authorization-consumed, not audit-only like
+  `note`: `privilegedLaneAllowlist` sanctions exactly the `meta` lane for the three package-lifecycle ops
+  this design's own threat model centers on, so a `lanes` rewrite on a surviving permission is the same
+  escalation shape as the four guarded fields, closed the same way. Live census
+  (`go test ./internal/pkgmgr/... -run TestUpgrade`) confirms no shipped package's upgrade path changes
+  `lanes` on a surviving key. **Known, accepted consequence:** there is now no way to *add* a `Lanes`
+  declaration to an existing permission short of a key-changing bump (absent→present is a presence
+  change, and presence-change is exactly what closes the widening attack) — consistent with how every
+  other guarded field already works (a real change mints a new key), not a new restriction class.
+- **`origin`/`declaredBy` are healable when absent from the stored document** (`healableProvenanceFields`)
+  — `internal/pkgmgr/build.go`'s `2666acd1` (landed the same day as this fire) started stamping both
+  fields on permissions that could already be committed without them, so the very first upgrade of any
+  pre-`2666acd1` package would otherwise be rejected by its own protection. Safe narrowly: runtime-minting
+  (`grant-provenance-runtime-permission-minting-design.md`, `f464c7a5`) is itself new as of today, so no
+  permission stored without an `origin` value could have been runtime-minted — an absent-origin heal can
+  only ever assign what has always been true, never launder a genuinely-runtime grant. `operationType`/
+  `scope` are not healable — a permission's key is derived from them, so a stored permission always
+  carries both.
+- **A `tombstone` mutation carrying a document is now held to the same comparison as an `update`.**
+  `buildMutationValue` seeds the written value from the stored document and overlays the mutation's
+  document on top — for `update` that's the whole point, but for a `tombstone` carrying its own document
+  it means a rewrite could ride a delete-then-revive pair, one op each. Every current script drops the
+  document on a permission/role tombstone (`starlark_runner.go` rejects a tombstone that carries one), so
+  this was not reachable through any live path, but the guard is documented as path-independent like
+  `rejectProtectedMutations` — this closes it at the guard's own layer instead of resting on a
+  Starlark-layer check staying in place forever.
+- **A stored document that exists but fails to decode is now rejected, not treated as absent.**
+  `readPriorDoc` deliberately keeps an undecodable entry rather than failing the read (so one corrupt
+  value can't wedge unrelated commits); the original sketch's `prior.doc()` accessor collapsed that state
+  into the same "nil → allow" branch as "key never existed." `priorDocs.lookup()` now separates
+  found/decoded, and this guard — unlike the availability-first `rejectProtectedMutations` it sits beside
+  — treats present-but-undecodable as protected. Not reachable today (every writer marshals a proper map).
+
+**Two adjacent gaps found during review, deliberately not built here** (same class as §8's non-goals — a
+different mechanism than a field-level write-once guard, filed as new `lattice.md` rows rather than
+bolted on): a tombstoned `grantedBy` **link** can still be revived via a direct `update` with
+`isDeleted:false` (client-side `diffManifest` exclusion, no server-side backstop — the link-topology
+mirror of what this design fixed for permission/role vertex fields); and `vtx.roleindex.<id>` (the
+name→role lookup index) is the same class of unguarded surface one layer down, but has zero live readers
+today (only `build.go` writes it, `cmd/loupe/pkg.go` reads it for display only) — not exploitable, filed
+for when a consumer lands.
+
+§6's contract text is corrected to match (role-root scope, `lanes`, the healable carve-out, tombstone
+coverage) in the same uncommitted edit to `docs/contracts/08-package-install.md`.
