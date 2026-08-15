@@ -119,27 +119,6 @@ The script tombstones each declared key and (when a key carries an integer
 protected-key check — a tombstone of a protected kernel key is rejected
 authoritatively by the Processor commit-time guard (§8.4), not by this script.
 
-**Exception (client-side): a retention-class holder is never submitted for
-tombstone.** A `vtx.retentionclass.<NanoID>` key holder (root + its
-`.retentionPolicy` aspect) is excluded from the `declaredKeys` the client reads
-off the manifest and submits in the payload — per §8.1 the client pre-computes
-the complete mutation set, so this is a read-time filter, not a script change.
-Its DEK may be destroyed only by `ShredRetentionClassKey`
-(`retention-class-key-custody-design.md` §4.3), whose target-existence guard
-refuses an already-tombstoned holder; submitting it here for tombstone would
-strand the class key it custodies beyond any reach, permanently. The excluded
-keys are reported back to the caller
-(`pkgmgr.UninstallResult.RetentionHoldersPreserved`) rather than silently
-dropped, and stay live in Core KV — undeclared, but still shreddable on the
-controller's own retention schedule. A holder the uninstall finds ALREADY
-tombstoned is reported under the sibling
-`pkgmgr.UninstallResult.RetentionHoldersAlreadyStranded` instead: it is
-excluded from the tombstone set like any holder, but it is not preserved —
-`ShredRetentionClassKey` already refuses it, so the class key it custodies is
-past every destruction path, and an operator carrying that retention
-obligation needs to see it named rather than counted as intact. Every other
-declared key (DDL/lens/permission/grant/role/aspect) tombstones normally.
-
 > **Per-key OCC (read-time revision).** Before submitting, the client `KVGet`s each
 > declared key and passes the entry's revision as its `expectedRevision`. If any
 > declared key is concurrently modified between the client's read and the commit,
@@ -180,27 +159,6 @@ Defense-in-depth (clearer per-op error, **not** authoritative):
 Net invariant: an operation cannot disable auth (the Capability lenses) or the kernel (the meta-root
 DDL) by rewriting or tombstoning them.
 
-**Permission/role provenance protection (Processor commit-time, path-independent).** In addition to the
-protected-root guard above, every `update` mutation (and any `tombstone` mutation that carries a
-document) targeting an existing `vtx.permission.<id>` root is rejected — error code
-`PermissionProvenance` — if it would change `data.operationType`, `data.scope`, `data.origin`,
-`data.declaredBy`, or `data.lanes` from the value already committed. These are the fields
-`grant-provenance-runtime-permission-minting-design.md`'s origin invariant and the lane-gate
-(`platformLaneGate`) depend on staying write-once outside the RBAC op surface (which itself never
-rewrites them — `UpdatePermission` is deliberately ungranted to every role). `data.origin`/
-`data.declaredBy` may be set for the first time on a permission stored without them (a pre-existing
-installation predating their introduction); every other guarded field must already be present.
-`data.note` may still change freely. The identical rule makes a role's **entire root document**
-write-once — not only its `.canonicalName` aspect, since a top-level field on the root shadows a
-same-named aspect in every cypher read (`isDeleted` excepted) — and protects the `.canonicalName` aspect
-itself the same way. Permission entity keys are content-addressed on `(package, operationType, scope)`
-(§8.1), so a legitimate upgrade never needs to change `operationType`/`scope` on a surviving key — a real
-change necessarily produces a different key (a create paired with a tombstone of the old one), never an
-update; a role root carries no field on any legitimate path. This closes the channel the protected-root
-guard does not: an ordinary (non-`protected`) permission/role vertex, rewritten via `UpgradePackage` or
-any future path that trusts a client-supplied mutation body — see
-`permission-role-provenance-write-once-design.md`.
-
 ---
 
 ## 8.6 `UpgradePackage` op
@@ -213,39 +171,8 @@ mixed-mutation op:
 
 - a key in **new \ old** → `create`
 - a key in **new ∩ old** whose body **changed** → `update` (a byte-equal body is
-  omitted — no needless re-stamp / re-rebuild). **Exception:** for a
-  non-definition key (anything outside `vtx.meta.*` — permission/role vertices,
-  the `grantedBy` grant link) whose committed body is already tombstoned, the
-  diff omits the update too, even though the body differs: a surviving key can
-  only be tombstoned by an out-of-band operator action
-  (`RevokePermission`/`TombstonePermission`/`TombstoneRole`), never by this
-  diff itself, so silently reviving it via the body-diff path would undo a
-  deliberate revocation. `vtx.meta.*` definitions are unaffected and keep the
-  plain body-diff rule — this exception is scoped to grant/role topology,
-  mirroring `internal/bootstrap/reconcile.go`'s definition-vs-topology
-  boundary (`grant-provenance-runtime-permission-minting-design.md` §12).
-- a key in **old \ new** → `tombstone`. **Exception:** a `vtx.retentionclass.<NanoID>`
-  key holder (root or its `.retentionPolicy` aspect) is never tombstoned by this
-  diff, whether the removal is a class rename (a new canonicalName mints a new
-  holder key, so the old one falls out of the new set) or an outright drop. Its
-  DEK may be destroyed only by `ShredRetentionClassKey`
-  (`retention-class-key-custody-design.md` §4.3), whose target-existence guard
-  refuses an already-tombstoned holder — so tombstoning it here would strand
-  the class key it custodies beyond any reach, permanently, the opposite of
-  what a retention obligation promises. The excluded keys are left live but
-  undeclared; their **count** is reported back
-  (`UpgradeResult`/`ApplyResult.RetentionHoldersPreserved`, with
-  `.RetentionHoldersAlreadyStranded` counting any holder the diff found
-  already tombstoned), never silently dropped — `Installer.Uninstall`'s
-  sibling result carries the key list itself
-  (`pkgmgr.UninstallResult.RetentionHoldersPreserved`), since an uninstall has
-  no other delta to size the operator's attention against. Mirrors the
-  grant/role exception above in principle (a topology entity's destruction
-  belongs to its own explicit verb, never to a package diff) but is a
-  separate mechanism at a different point of this same diff — the
-  **removal** partition, not the **update/revival** guard, since a rename's
-  old holder is absent from the new set entirely rather than surviving with a
-  stale body.
+  omitted — no needless re-stamp / re-rebuild)
+- a key in **old \ new** → `tombstone`
 
 Because keys are version-independent (§8.1), a surviving entity keeps its key, so the
 upgrade is a true in-place update; every NanoID cross-reference stays valid.
