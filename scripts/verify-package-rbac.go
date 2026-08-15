@@ -5,21 +5,21 @@
 // Connects to a running Lattice NATS instance and checks that the
 // rbac-domain package has been correctly installed. Asserts:
 //
-//  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//  8 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script,
-//                 .inputSchema, .outputSchema, .fieldDescription, .examples
-//    Each aspect also validated for correct vertexKey + localName envelope fields.
-//  9 permission vertices (vtx.permission.<NanoID>) — one per GRANTED op
-//    (the DDL dispatches ten; UpdatePermission is ungranted, see rbacGrantedOps)
-//  9 grantedBy link keys (each permission → operator role)
-//  2 Lens meta-vertices (vtx.meta.<NanoID>, class=meta.lens):
-//      - capabilityRoles (actorAggregate; cypher walks holdsRole/grantedBy →
-//        platformPermissions; projects cap.roles.<actor>)
-//      - capabilityRoleIndex (operation-aggregate; the FR22 role-by-operation
-//        index)
-//    plus each lens's .spec + .canonicalName aspects.
-//  1 package vertex (vtx.package.<NanoID>)
-//  1 package manifest aspect (vtx.package.<NanoID>.manifest) with name=rbac-domain
+//	1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
+//	8 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script,
+//	               .inputSchema, .outputSchema, .fieldDescription, .examples
+//	  Each aspect also validated for correct vertexKey + localName envelope fields.
+//	9 permission vertices (vtx.permission.<NanoID>) — one per GRANTED op
+//	  (the DDL dispatches ten; UpdatePermission is ungranted, see rbacGrantedOps)
+//	9 grantedBy link keys (each permission → operator role)
+//	2 Lens meta-vertices (vtx.meta.<NanoID>, class=meta.lens):
+//	    - capabilityRoles (actorAggregate; cypher walks holdsRole/grantedBy →
+//	      platformPermissions; projects cap.roles.<actor>)
+//	    - capabilityRoleIndex (operation-aggregate; the FR22 role-by-operation
+//	      index)
+//	  plus each lens's .spec + .canonicalName aspects.
+//	1 package vertex (vtx.package.<NanoID>)
+//	1 package manifest aspect (vtx.package.<NanoID>.manifest) with name=rbac-domain
 //
 // Total target: ~45 OK lines.
 //

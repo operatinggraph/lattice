@@ -4,9 +4,9 @@ import "testing"
 
 func TestComputeOneBillHistory_FiltersSumsOrdersAndTagsSource(t *testing.T) {
 	entries := map[string]string{
-		"vtx.transaction.1": `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":150000,"memo":"June rent","postedAt":"2026-06-01T00:00:00Z","source":"rent"}`,
+		"vtx.transaction.1":     `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":150000,"memo":"June rent","postedAt":"2026-06-01T00:00:00Z","source":"rent"}`,
 		"vtx.cafetransaction.1": `{"transactionKey":"vtx.cafetransaction.1","accountKey":"vtx.cafeaccount.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":525,"memo":"Latte + Croissant","postedAt":"2026-06-03T00:00:00Z","source":"cafe"}`,
-		"vtx.transaction.2": `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"credit","amountCents":100000,"memo":"Partial payment","postedAt":"2026-06-05T00:00:00Z","source":"rent"}`,
+		"vtx.transaction.2":     `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"credit","amountCents":100000,"memo":"Partial payment","postedAt":"2026-06-05T00:00:00Z","source":"rent"}`,
 		// a different lease's transaction — must not leak into this lease's rows/balance
 		"vtx.transaction.3": `{"transactionKey":"vtx.transaction.3","accountKey":"vtx.account.other","leaseAppKey":"vtx.leaseapp.other","type":"debit","amountCents":999999,"postedAt":"2026-06-01T00:00:00Z","source":"rent"}`,
 		// a tombstoned / undecodable projection entry — skipped

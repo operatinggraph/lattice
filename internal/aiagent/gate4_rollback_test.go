@@ -15,6 +15,7 @@
 //  7. Verify DDL is no longer discoverable: DiscoverDDL returns ErrDDLNotFound.
 //  8. Verify the tombstoned vertex has isDeleted: true in Core KV.
 //  9. Verify same canonicalName can be re-created (idempotency is per requestId).
+//
 // 10. Repeat steps 2–9 for a meta.lens vertex.
 // 11. Write health.gates.phase1.gate4 to Health KV on success.
 //

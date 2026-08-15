@@ -284,8 +284,8 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
 		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
 		SecureRedactions:              existing.SecureRedactions,
-		EvalDriftRetries:  existing.EvalDriftRetries,
-		EvalDriftRequeues: existing.EvalDriftRequeues,
+		EvalDriftRetries:              existing.EvalDriftRetries,
+		EvalDriftRequeues:             existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
 		// rule SetProjectionProgress states about itself: they are OBSERVATIONS,
 		// and a status transition observes none of them, so writing zeroes here
@@ -373,8 +373,8 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		PersonalSweepCycleCompletedAt: existing.PersonalSweepCycleCompletedAt,
 		PersonalSweepQueueDepth:       existing.PersonalSweepQueueDepth,
 		SecureRedactions:              existing.SecureRedactions,
-		EvalDriftRetries:  existing.EvalDriftRetries,
-		EvalDriftRequeues: existing.EvalDriftRequeues,
+		EvalDriftRetries:              existing.EvalDriftRetries,
+		EvalDriftRequeues:             existing.EvalDriftRequeues,
 		// The projection-progress fields, for the same reason and by the same
 		// rule SetProjectionProgress states about itself: they are OBSERVATIONS,
 		// and a status transition observes none of them, so writing zeroes here

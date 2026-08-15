@@ -155,4 +155,3 @@ func TestComputeProviderSites_SortsAndSkips(t *testing.T) {
 		t.Fatalf("provider-sites not sorted by (providerKey, siteKey): %+v", rows)
 	}
 }
-

@@ -118,15 +118,15 @@ func seedCSVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, 
 }
 
 type harness struct {
-	t          *testing.T
-	ctx        context.Context
-	conn       *substrate.Conn
-	cp         *processor.CommitPath
-	cons       jetstream.Consumer
-	urgentCP   *processor.CommitPath
-	urgentCons jetstream.Consumer
-	sysCP      *processor.CommitPath
-	sysCons    jetstream.Consumer
+	t              *testing.T
+	ctx            context.Context
+	conn           *substrate.Conn
+	cp             *processor.CommitPath
+	cons           jetstream.Consumer
+	urgentCP       *processor.CommitPath
+	urgentCons     jetstream.Consumer
+	sysCP          *processor.CommitPath
+	sysCons        jetstream.Consumer
 	targetKV       *substrate.KV
 	secureTargetKV *substrate.KV
 	keyShred       *keyshredded.Manager

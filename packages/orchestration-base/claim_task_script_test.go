@@ -33,8 +33,8 @@ const (
 // -> the task commits queuedFor (not assignedTo).
 func TestCreateTask_QueueOnly_CommitsQueuedFor(t *testing.T) {
 	eps := map[string]processor.VertexDoc{
-		tsForOp:    {Key: tsForOp, Class: "meta", Data: map[string]any{"operationType": "ApproveLeaseApplication"}},
-		tsScopedTo: {Key: tsScopedTo, Class: "leaseapp", Data: map[string]any{"state": "pending"}},
+		tsForOp:     {Key: tsForOp, Class: "meta", Data: map[string]any{"operationType": "ApproveLeaseApplication"}},
+		tsScopedTo:  {Key: tsScopedTo, Class: "leaseapp", Data: map[string]any{"state": "pending"}},
 		ctQueueRole: {Key: ctQueueRole, Class: "role"},
 	}
 	res, err := runCreateTaskWith(t, map[string]any{

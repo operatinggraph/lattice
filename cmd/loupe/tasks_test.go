@@ -106,7 +106,7 @@ func TestComputeTasks(t *testing.T) {
 	// back to the root operationType so the inbox renders a name, not a blank.
 	t.Run("op name falls back to root operationType when no canonicalName aspect", func(t *testing.T) {
 		real := map[string][]byte{
-			"vtx.task.taskreal0000000000":                                      []byte(`{"class":"task","data":{"status":"open","expiresAt":"2026-07-01T00:00:00Z"}}`),
+			"vtx.task.taskreal0000000000":                                       []byte(`{"class":"task","data":{"status":"open","expiresAt":"2026-07-01T00:00:00Z"}}`),
 			"lnk.task.taskreal0000000000.forOperation.meta.opddl00000000000000": []byte(`{}`),
 			// The op DDL meta: operationType on the root, no canonicalName aspect.
 			"vtx.meta.opddl00000000000000": []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"SignLease"}}`),

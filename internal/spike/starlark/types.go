@@ -12,12 +12,12 @@ package starlark_spike
 // OperationEnvelope represents the message format for operations on core-operations JetStream.
 // Per Contract #2 §2.1. This is a simplified prototype for the spike.
 type OperationEnvelope struct {
-	RequestID     string      `json:"requestId"`
-	Lane          string      `json:"lane"`
-	OperationType string      `json:"operationType"`
-	Actor         string      `json:"actor"`
-	SubmittedAt   string      `json:"submittedAt"`
-	Payload       interface{} `json:"payload"`
+	RequestID     string       `json:"requestId"`
+	Lane          string       `json:"lane"`
+	OperationType string       `json:"operationType"`
+	Actor         string       `json:"actor"`
+	SubmittedAt   string       `json:"submittedAt"`
+	Payload       interface{}  `json:"payload"`
 	ContextHint   *ContextHint `json:"contextHint,omitempty"`
 	AuthContext   *AuthContext `json:"authContext,omitempty"`
 }
@@ -48,10 +48,10 @@ type VertexDoc struct {
 // MetaVertex represents a DDL meta-vertex (class definition).
 // Per Contract #1 §1.5.
 type MetaVertex struct {
-	Key             string   `json:"key"`
-	CanonicalName   string   `json:"canonicalName"`
-	PermittedCommands []string `json:"permittedCommands"`
-	Schema          interface{} `json:"schema"`
+	Key               string      `json:"key"`
+	CanonicalName     string      `json:"canonicalName"`
+	PermittedCommands []string    `json:"permittedCommands"`
+	Schema            interface{} `json:"schema"`
 }
 
 // ---- Contract #3 types (MutationBatch and EventList) ----

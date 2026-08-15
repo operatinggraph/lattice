@@ -103,8 +103,8 @@ func strp(s string) *string { return &s }
 func TestOccupiedLeaseAppKeys(t *testing.T) {
 	rows := []protectedLandlordRow{
 		{EntityKey: "vtx.leaseapp.a", SignedAt: strp("2026-07-01T00:00:00Z")},
-		{EntityKey: "vtx.leaseapp.b", SignedAt: nil},        // never signed
-		{EntityKey: "vtx.leaseapp.c", SignedAt: strp("")},   // signed_at present but empty
+		{EntityKey: "vtx.leaseapp.b", SignedAt: nil},      // never signed
+		{EntityKey: "vtx.leaseapp.c", SignedAt: strp("")}, // signed_at present but empty
 		{EntityKey: "vtx.leaseapp.d", SignedAt: strp("2026-07-05T00:00:00Z")},
 	}
 	got := occupiedLeaseAppKeys(rows)

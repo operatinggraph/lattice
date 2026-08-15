@@ -32,7 +32,6 @@
 //   - The lens definition vertex is unchanged (Core KV revision didn't bump).
 //   - The auth trace captures planes.capabilityKV.matched == false (no-entry).
 //   - NFR-S10: no AI-actor special-case code exists in the Authorizer.
-//
 package bypass
 
 import (

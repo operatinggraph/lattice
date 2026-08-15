@@ -581,9 +581,9 @@ func TestRLS_CrossAnchorBleed_Filtered_Integration(t *testing.T) {
 			id, "secret-"+id, anchors, 1)
 		require.NoError(t, err)
 	}
-	insertRow("rowX", []string{unitX, buildingB})      // a unit in building B
-	insertRow("rowY", []string{unitY, buildingB})      // a different unit in building B
-	insertRow("rowOrphan", []string{unitY})            // a unit neither actor has a grant for
+	insertRow("rowX", []string{unitX, buildingB}) // a unit in building B
+	insertRow("rowY", []string{unitY, buildingB}) // a different unit in building B
+	insertRow("rowOrphan", []string{unitY})       // a unit neither actor has a grant for
 
 	// fineActor (unit.X) sees rowX only — no cross-anchor bleed to rowY/rowOrphan.
 	assert.Equal(t, 1, visibleAs(tbl, fineActor), "unit.X holder sees only the unit.X row")

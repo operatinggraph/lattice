@@ -18,8 +18,8 @@ func TestShapeReplyJS(t *testing.T) {
 		"committedAt":  "2026-07-03T10:00:00Z",
 		"primaryKey":   "vtx.listing.L1",
 		"revisions": map[string]any{
-			"vtx.listing.L1":       7,
-			"vtx.listing.L1.title": 3,
+			"vtx.listing.L1":                     7,
+			"vtx.listing.L1.title":               3,
 			"lnk.listing.L1.ownedBy.identity.I1": 1,
 		},
 	}).(map[string]any)

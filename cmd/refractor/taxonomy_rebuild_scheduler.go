@@ -41,6 +41,7 @@ import (
 //     steady state, so a slot held to the end of the drain would be a slot held
 //     for the lens's lifetime. So this bounds concurrent consumer HANDOVERS, not
 //     concurrent replay traffic.
+//
 //   - The SYNCHRONOUS rebuild arm — control.Service.RebuildRule, which the
 //     class-key destruction handler calls to attest an erasure. It takes no slot
 //     because it needs none and could not afford one.

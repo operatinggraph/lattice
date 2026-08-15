@@ -92,7 +92,7 @@ func TestGroupLandlordRowsByUnit(t *testing.T) {
 		{EntityKey: "vtx.leaseapp.app-L1", UnitKey: &uL}, // first row, facets nil
 		{EntityKey: "vtx.leaseapp.app-L2", UnitKey: &uL, UnitAddress: &addrL, UnitStatus: &available, UnitRent: &rent},
 		{EntityKey: "vtx.leaseapp.app-CO", UnitKey: &uCO, UnitStatus: &leased},
-		{EntityKey: "vtx.leaseapp.orphan"},                  // nil unit_key → skipped
+		{EntityKey: "vtx.leaseapp.orphan"},                   // nil unit_key → skipped
 		{EntityKey: "vtx.leaseapp.blank", UnitKey: &emptyUK}, // empty-string unit_key → skipped
 	}
 

@@ -130,7 +130,7 @@ func TestLensLag_HappyPath(t *testing.T) {
 	// Seed a refractor health entry.
 	lagKey := "health.refractor.lens.testLens.lag"
 	lagDoc := map[string]interface{}{
-		"lens": "testLens",
+		"lens":  "testLens",
 		"lagMs": 42,
 	}
 	data, _ := json.Marshal(lagDoc)
