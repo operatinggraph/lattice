@@ -71,7 +71,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Refractor] `dispositionEvalErr` has no `CatPrivacyCritical` arm** | The category is defined and classified (`classify.go:149`) but `pipeline.go:2116-2138` routes it to the default `Nak`. Unreachable today — it is only ever constructed inside `keyshredded`, which handles its own pause and never returns it up the evaluation path. | ★ | XS–S | 📋 ready · consumer: the first caller wrapping an evaluation-path error as `PrivacyCritical` |
 | **[Pkgmgr] The manifest verifier skips retention classes** | `ManifestBlock` (`manifest.go:133-152`) compares DDLs/lenses/permissions/weaverTargets/loomPatterns/opMetas/panes; `RetentionClasses` has no field and no comparison, so a package mints a `vtx.retentionclass` holder its manifest never declares. | ★ | XS–S | 📋 ready · consumers: clinic `clinicalRecord`, lease-signing `underwritingRecord` · mirror the opMetas block |
 | **[Refractor] A behavior-frozen consolidation pass — 105K LOC at ×1.8 in 39 days** | test:prod ≈1:1, `pipeline.go` ≈3.2K, `executor.go` ≈2.1K; fold test scaffolding, split god-files — LOC + CI time down, suite green. | ★★ | M–L | 📋 ready · owner-driven · behavior-frozen · first target: pipeline.go + test-corpus overlap |
-| **[Tooling] No gate enforces `gofmt`, and 34 files across all three lanes have drifted** | No gofmt step in CI, in golangci's enabled set, or in the Makefile — drift is invisible until someone runs `gofmt -l` by hand. Live census 2026-08-11: **34 unformatted files** spanning `internal/*`, `cmd/loupe`, and the vertical apps. Enabling the gate means formatting all of them, so it lands cleanest when the three lanes are quiet. | ★★ | S | 📋 ready · consumer: unformatted struct literals reach `main` today, in every lane |
 
 ### Survey log (round-robin rotation)
 
@@ -149,6 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-15 · `b4eb8fb2` · [Tooling] gofmt CI gate CLOSED — 37 files formatted; dangling ratified §19 contract edit also committed this fire (`0e84769e`)
 - 2026-08-15 · `70bec5e6` · [bootstrap] package-manifest ownership scoping CLOSED — review found+fixed a self-forged-manifest bypass; §8(a)/§15 stay open, narrowed not closed
 - 2026-08-15 · `6ecf3d77` · [Facet] queued ceremony reveal durability CLOSED — reload recovery + a pinned loss signal; review found+fixed 2 real gaps in the sign-out/auth-death purge paths
 - 2026-08-15 · `8ca834a1` · [Processor] undeclared-key RevisionConflict attribution CLOSED — kv.Links-discovered keys now retry-eligible + correctly named; review found+fixed a false-pass test and an unbounded probe
