@@ -1,5 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-11 · `9ffc8ac8` · [Refractor/Processor/Pkgmgr] auth-plane grant latency CLOSED — Inc 4 close pass: descriptor-floor withdrawal, three install gates onto one entry point, boot meta reads fail closed
+- 2026-08-11 · `d7126548` · [Refractor] 4a-4 — the actor-aware link arm gains a relation gate so the filter may narrow by relation; set-equality with the client arm, capabilityRoles 9 relation-blind subjects → 15 pinned
+- 2026-08-11 · `fba7f172` · [Refractor] 4b — a half-installed pipeline refuses to narrow, reading the lens's declared kind from its own cypher rather than a new latch
+- 2026-08-11 · `0ae2b7a1` · [CI] unit sharded 2→3 runners, re-balanced by test-file LOC (82.4k each); unit pole 210s→179s, CI wall-clock 227s→195s; all gates still run, coverage assertion still exact
+- 2026-08-10 · `ed89444f` · [Processor] Contract #2 §2.5's descriptor floor — a submitter can no longer harden a descriptor-optional key into an existence oracle; claim ceremony 9 OK/0 FAIL live
+- 2026-08-10 · `e72c86ed` · [Processor/identity-domain] 4d — a tombstoned sensitive read delivers scrubbed instead of failing the op, and both ceremonies' rejections collapse to one wire shape
+- 2026-08-10 · `d4f7ebba` · [Refractor] 4a-2 — the enumerator's one-key answer kept only where a standing healer exists; tombstoned actors' peers reprojected
+- 2026-08-10 · `20a45bb4` · [Contract] #1 abstract-type tombstone exemption + #3 soft-deleted sensitive-aspect read disposition — Andrew-ratified, both already built and live
+- 2026-08-10 · `8013da3e` · [Refractor] 4c — the narrowing's mandated healer proven end to end; a row deleted under a narrowed consumer is restored only by RunSweep
+- 2026-08-10 · `fef53ea7` · [Refractor] 4a-1 — the affected-anchor index narrows its WITH refusal, and walks the WITH clause its builder had been skipping
+- 2026-08-10 · `33b7e49b` · [Refractor/Pkgmgr] dynamic type taxonomy — abstract types declared, resolved and gated; Fires A/B/C complete, C4/C5 adjudicated, narrowing re-homed to typed relation signatures
 - 2026-08-10 · `98f83f5d` · [Refractor/Substrate] the taxonomy barrier reads the connection loss instead of waiting to be told — a verdict straddling a drop armed a `*` lens against a dead feed; 3/20 → 0/20
 - 2026-08-10 · `e107083a` · [Refractor/Substrate] C2.6 — every rebuild starter shares one bound and the slot covers the pump's reopen; the non-atomic durable delete-recreate that paused a healthy lens is fixed
 - 2026-08-10 · `208409f0` · [Refractor/Substrate] adjacency Shape B — the 1 MiB-jammed hub latches an overflow mark and its reads enumerate Core KV; live: 30,245 payload errors → 0, NATS 7.6 GiB OOM → 800 MiB steady, Refractor runs again

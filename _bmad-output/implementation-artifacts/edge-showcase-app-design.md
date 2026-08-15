@@ -644,15 +644,33 @@ build-path of `Acquire` — the branch below the `no cached entry` check — in 
 reached once per identity-build instead of racily twice), `go.mod`/`go.sum` (`go mod tidy` to drop
 the `// indirect` marker). No change to `newEngine`/`engine.go`.
 
+**As-built correction (Winston, 2026-08-15, `db65e4da`) — the paragraphs above describe the
+*intended* shape; the shipped one differs where an adversarial review found the intended shape
+still racing.** The map-install logic did NOT stay unchanged: it moved into a new `buildEngine`
+method that ALSO folds in the dead-conn eviction path (`Acquire`'s old top-of-function
+delete+`Close()` branch), because evicting outside the flight let a second caller's `newEngine`
+start against a mirror lock the old engine hadn't finished releasing — the same race in a different
+shape. And the "lost the race, `eng.Close()` the loser" branch is NOT simply dead code to delete
+(the paragraph below is wrong on this point) — under the shipped shape it is the guard against a
+distinct, real bug: a `Purge` landing between a build installing its entry and a caller claiming a
+hold can leave a closed-engine corpse reinstalled in the map, and a *later* build's install step
+must supersede that corpse rather than deferring to it (deferring would close the new live engine
+and hand back the corpse to everyone). The guard's condition changed from "entry exists → defer" to
+"entry exists AND (pinned OR live) → defer"; a present-but-dead non-pinned entry is now superseded.
+See the commit message (`db65e4da`) for the full interleaving traces; both new regression tests are
+mutation-verified against the pre-fix and pre-review code respectively.
+
 **Precedent mirrored:** none in-repo (scout confirmed no existing keyed-mutex/singleflight pattern
 under `internal/`) — this is the first use of `x/sync/singleflight` in Lattice, justified because the
 dependency is already pulled transitively and is the standard-library-adjacent idiom for exactly
 this shape (dedupe concurrent identical work by key), not a new bespoke mechanism.
 
-**In-scope gotchas:** `singleflight.Do`'s shared result means every waiter gets the identical `*engine`
-pointer — the existing "lost the race, `eng.Close()` the loser" branch (`enginemanager.go:146-148`)
-becomes dead code once only one `newEngine` call ever runs per identity-build, and should be deleted,
-not left unreachable. Error results are shared too (correct: a failed build fails identically for
+**In-scope gotchas (superseded by the as-built correction above — this paragraph's dead-code claim
+is wrong, kept for the record of what the brief originally predicted):** `singleflight.Do`'s shared
+result means every waiter gets the identical `*engine` pointer — the existing "lost the race,
+`eng.Close()` the loser" branch (`enginemanager.go:146-148`) becomes dead code once only one
+`newEngine` call ever runs per identity-build, and should be deleted, not left unreachable. Error
+results are shared too (correct: a failed build fails identically for
 every waiter, rather than the pre-fix behavior where concurrent callers could get *different*
 outcomes for the same identity). `singleflight.Group.Do` forgets an in-flight call once it completes
 (no stickiness), so a later, independent Acquire for the same identity after this one settles starts
