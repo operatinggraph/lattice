@@ -616,6 +616,57 @@ structurally enforced, not just asserted in prose. The freeze itself — promoti
 not implied by this fire; flagging so a future fire doesn't read "trigger closed" as "contract
 frozen."
 
+### 7.14 Fire brief — concurrent first-`Acquire` race on the mirror (Winston, 2026-08-15)
+
+**Scope (verbatim from the board row):** two concurrent first-time `Acquire`s for one identity race
+the mirror — `engineManager.Acquire` (`cmd/facet/enginemanager.go:104-153`) releases `m.mu` before
+calling `newEngine`, so two callers can both reach `newEngine` for the same identity before either
+installs an entry. `newEngine` (`engine.go:75-246`) opens the identity's bbolt store
+(`store.Open`, `internal/edge/store/bolt.go`, `openLockTimeout = 2s`) and starts `runAgentLoop` +
+`runSyncLoop` before returning — a losing caller either times out opening the same store file or,
+having opened it, races the winner's durable/sync state before `Acquire`'s post-build recheck
+`eng.Close()`s it. Consumer: a first sign-in whose SSE attach (`handleFeed`) and first write
+(`handleEnqueue`) land together (`server.go`).
+
+**Fix shape — per-identity build serialization via `singleflight`, not a widened mutex.**
+`golang.org/x/sync/singleflight` is already an indirect dependency (`go.mod:39`) via a transitive
+pull; this fire promotes it to direct. Rejected alternative: holding `m.mu` across the whole
+`newEngine` call — this was the mechanically obvious fix, but `m.mu` guards the entries map for
+*every* identity, so holding it across one identity's NATS dial + store open would serialize
+concurrent Acquires for *unrelated* identities too, which the item never asked for ("serialize the
+build **per identity**"). A `singleflight.Group` keyed on `identityID` dedupes concurrent builds for
+the *same* identity — all waiters share one `newEngine` call and its result — while different
+identities' builds proceed fully concurrently, same as today.
+
+**Touch-list:** `cmd/facet/enginemanager.go` (add `sf singleflight.Group` field; wrap the
+build-path of `Acquire` — the branch below the `no cached entry` check — in `m.sf.Do(identityID,
+...)`; the post-build map-install logic (`enginemanager.go:140-152`) is unchanged in shape, just now
+reached once per identity-build instead of racily twice), `go.mod`/`go.sum` (`go mod tidy` to drop
+the `// indirect` marker). No change to `newEngine`/`engine.go`.
+
+**Precedent mirrored:** none in-repo (scout confirmed no existing keyed-mutex/singleflight pattern
+under `internal/`) — this is the first use of `x/sync/singleflight` in Lattice, justified because the
+dependency is already pulled transitively and is the standard-library-adjacent idiom for exactly
+this shape (dedupe concurrent identical work by key), not a new bespoke mechanism.
+
+**In-scope gotchas:** `singleflight.Do`'s shared result means every waiter gets the identical `*engine`
+pointer — the existing "lost the race, `eng.Close()` the loser" branch (`enginemanager.go:146-148`)
+becomes dead code once only one `newEngine` call ever runs per identity-build, and should be deleted,
+not left unreachable. Error results are shared too (correct: a failed build fails identically for
+every waiter, rather than the pre-fix behavior where concurrent callers could get *different*
+outcomes for the same identity). `singleflight.Group.Do` forgets an in-flight call once it completes
+(no stickiness), so a later, independent Acquire for the same identity after this one settles starts
+a fresh build/dedupe cycle as normal.
+
+**Non-goals:** no change to `reapIdle`, `Purge`, `Seed`, or the "cached entry with a dead NATS conn
+gets rebuilt" path (`enginemanager.go:106-118`) — none of those race two concurrent *first-time*
+builds.
+
+**Verification:** a new regression test firing two goroutines' `Acquire` at the same fresh identity
+concurrently (mirroring `TestEngineManager_AcquireRebuildsAnEngineWhosePermanentlyClosed`'s
+`testutil.StartEmbeddedNATS` + `testDevSigner` harness), asserting both return the *same* `*engine`
+pointer, `refCount == 2` after both, and no error from either.
+
 ## 8. Non-goals (v1)
 
 No local authority (EDGE.6 stays a separate Andrew-gated decision); no admin or graph-browsing surfaces (Loupe exists — Facet is not a graph browser): cross-identity data reaches Facet only as role-derived, workplace-scoped worklists per [facet-staff-worlds-design.md](facet-staff-worlds-design.md) (✅ ratified 2026-07-19, lifting this section's former blanket "no cross-identity surfaces"), never as arbitrary vertex navigation; no payments UX; no vendor push integration before the waker design; no per-vertical bespoke screens — a vertical that wants richer-than-vocabulary UI builds its own FE (the existing pattern) while Facet keeps the universal floor.
