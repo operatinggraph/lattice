@@ -533,6 +533,28 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   (2) `DefinitionForCapabilityArtifact` (apply-time materializer) never re-checks scope — a TOCTOU window
   between approval and apply if the requester's authority is revoked in between. **Loupe/CLI review-and-apply
   affordance remains** (next).
+
+  **Fire brief — platform-package guard (Steward, 2026-08-15).** `CapabilityApplyPlanForProposal`
+  (`internal/pkgmgr/capabilityapply.go`) binds `target.mode` to the live install catalog (newPackage vs
+  upgradeExisting) but excludes no `packageName` — an approved proposal naming `capability-author`,
+  `orchestration-base`, or any other platform-trust/orchestration package diff-applies a one-artifact
+  Definition straight into it via `upgradeExisting`. §5's deterministic validator bounds an artifact's
+  *content* (a lens/grant is well-formed and in-scope); it has no notion of the *target's* blast radius, so a
+  well-formed grant artifact aimed at `rbac-domain` or `capability-author` itself (the authoring machinery's
+  own package — the sharpest privilege-escalation shape) sails through untouched. No ratified pattern
+  excludes a package by name anywhere in pkgmgr, so this is a scoped classification call, not a mechanical
+  mirror: **platform-protected** = the Makefile `install-packages` core set (`rbac-domain`, `control-authz`,
+  `privacy-base`, `privacy-operator-grant`, `identity-domain`, `identity-hygiene`, `objects-base`,
+  `console-operator`) + the capability-authoring machinery itself (`capability-author`, `augur`) +
+  `orchestration-base` (named in the board row; shared cross-vertical primitive, blast radius spans every
+  vertical) + `semantic-contracts`. A vertical business-domain package (`cafe-domain`, `clinic-domain`, …) is
+  unaffected — `upgradeExisting` there is exactly what Fire 2 shipped to allow. **Touch-list:**
+  `internal/pkgmgr/capabilityapply.go` (the guard, both modes) + a new `internal/pkgmgr/capabilityapply_test.go`
+  + `packages/capability-author/apply_test.go` (one e2e proving the plan-build itself refuses, mirroring
+  `TestCapAuthor_Apply_UnknownPackage_Rejected`'s pattern). **Non-goal:** no attempt to make the set
+  self-deriving from the Makefile — it is a manually maintained, commented allow-into-protected-set list,
+  same shape as `EnabledArtifactKinds` above it in the same file. Capability-plane change → full 3-layer
+  adversarial review regardless of size.
 - **Fire 3 — Declarative orchestration kinds.** The **weaverTarget** + **loomPattern** kinds in
   the materializer (`validateWeaverTargets`/`validateGapAction`/`validateLoomPatterns`, reused verbatim — plus
   one check *stronger* than the hand-authored path: a loomPattern step's `Guard` is run through the shared
