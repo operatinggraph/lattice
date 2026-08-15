@@ -379,6 +379,86 @@ func TestDDLCache_LoadMetaVertex_SensitiveFalseWhenLive(t *testing.T) {
 	}
 }
 
+// TestDDLCache_LoadMetaVertex_SensitiveUnparseableFailsClosed pins the third
+// outcome the reader's asymmetry comment (ddl_cache.go, above the read)
+// argues for but the code did not yet enforce: a data.value that decodes to
+// the wrong JSON type (here a string, not a bool) must NOT silently leave
+// Sensitive at its zero value — that would skip step 6.5 encryption for a
+// class whose declaration exists but could not be read, the same fail-open
+// shape §17's mutation-time gate closes for future writes, but for a
+// pre-existing or write-path-bypassing malformed record already at rest.
+// The read site now poisons toward true instead, mirroring the custody
+// reader's poison-on-unparseable posture a few lines below in this file.
+func TestDDLCache_LoadMetaVertex_SensitiveUnparseableFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	const nanoID = "Rr4Ss5Tt6Uu7Vv8Ww9Xx"
+	root := "vtx.meta." + nanoID
+	rootDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root, rootDoc); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	cn := []byte(`{"class":"canonicalName","isDeleted":false,"data":{"value":"unparseablesensitive"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", cn); err != nil {
+		t.Fatalf("seed canonicalName: %v", err)
+	}
+	malformed := []byte(`{"class":"sensitive","isDeleted":false,"data":{"value":"true"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".sensitive", malformed); err != nil {
+		t.Fatalf("seed malformed sensitive: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	ref, ok, err := cache.loadMetaVertex(ctx, root, nil)
+	if err != nil {
+		t.Fatalf("loadMetaVertex: %v", err)
+	}
+	if !ok {
+		t.Fatalf("meta-vertex must still load (only the sensitive aspect is malformed)")
+	}
+	if !ref.Sensitive {
+		t.Fatalf("an unparseable sensitive aspect must fail closed to Sensitive=true; got false")
+	}
+}
+
+// TestDDLCache_LoadMetaVertex_SensitiveMissingValueFailsClosed is the second-
+// review finding: a well-typed aspect with NO data.value (or an explicit
+// JSON null) decodes without error, so the unparseable-only gate above would
+// leave it at the zero value (false) — but pkgmgr's only legitimate writer
+// (build.go) never creates this aspect for the false case at all (absence of
+// the whole aspect IS how "not sensitive" is encoded), so a present aspect
+// with no value is exactly as undecidable as a malformed one. Must also fail
+// closed.
+func TestDDLCache_LoadMetaVertex_SensitiveMissingValueFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	const nanoID = "Yy1Zz2Aa3Bb4Cc5Dd6Ee"
+	root := "vtx.meta." + nanoID
+	rootDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root, rootDoc); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	cn := []byte(`{"class":"canonicalName","isDeleted":false,"data":{"value":"missingvaluesensitive"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", cn); err != nil {
+		t.Fatalf("seed canonicalName: %v", err)
+	}
+	noValue := []byte(`{"class":"sensitive","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".sensitive", noValue); err != nil {
+		t.Fatalf("seed valueless sensitive: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	ref, ok, err := cache.loadMetaVertex(ctx, root, nil)
+	if err != nil {
+		t.Fatalf("loadMetaVertex: %v", err)
+	}
+	if !ok {
+		t.Fatalf("meta-vertex must still load (only the sensitive aspect is missing its value)")
+	}
+	if !ref.Sensitive {
+		t.Fatalf("a sensitive aspect present with no data.value must fail closed to Sensitive=true; got false")
+	}
+}
+
 // TestDDLCache_Invalidate_OpMetaFailureLatchesDegraded covers the first of
 // Invalidate's two error returns: a root whose bytes no decoder can read fails
 // in the op-meta load, before the DDL load is ever reached. The cache has then

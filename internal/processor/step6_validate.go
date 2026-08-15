@@ -95,38 +95,55 @@ func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, re
 }
 
 // validateMutationBooleanFields is a batch-wide pre-pass, run before any
-// per-mutation resolution: every mutation's isDeleted, if present, must be a
-// JSON bool. A Go type assertion silently reads any other JSON type as false
-// (ok=false), so a malformed value would otherwise commit and read as "live"
-// to mutationTombstoned (step6_resolve_ddl.go), the one reader in this
-// package that type-asserts an incoming mutation's isDeleted, while
-// internal/refractor's strict typed decoders DLQ or hard-fail on the exact
-// same stored value: a worse outcome than any revival this closes.
-// docIsProtected and rejectPermissionRoleRewrites do not read isDeleted at
-// all (the latter explicitly excludes it) and are not covered by this gate —
-// docIsProtected's own analogous fail-open on the unrelated data.protected
-// field is a separate, unbuilt finding (see the design doc's adjacent finds).
+// per-mutation resolution: every mutation's isDeleted, and every mutation's
+// data.protected / data.sensitive, if present, must each be a JSON bool. A Go
+// type assertion silently reads any other JSON type as false (ok=false), so a
+// malformed value would otherwise commit and read as "live" to
+// mutationTombstoned (step6_resolve_ddl.go, for isDeleted), docIsProtected
+// (step8_commit.go, for data.protected), and the DDL-root sensitive fallback
+// (ddl_cache.go, for data.sensitive) — the last of which skips step 6.5
+// encryption and commits plaintext. Meanwhile internal/refractor's strict
+// typed decoders DLQ or hard-fail on the same stored isDeleted value: a worse
+// outcome than any revival this closes. rejectPermissionRoleRewrites does not
+// read isDeleted at all (it explicitly excludes it) and is not covered by
+// this gate.
 //
 // This runs as a batch-wide PRE-pass, not folded into validateOne's per-
 // mutation loop, because step 6's own DDL resolution (classOf,
 // reconcileBatchInstanceOf) reads OTHER mutations in the same batch — a
-// later mutation's malformed isDeleted could otherwise be observed by an
+// later mutation's malformed field could otherwise be observed by an
 // earlier mutation's resolution before its own turn in the loop reaches it.
 func validateMutationBooleanFields(mutations []MutationOp, rid string) error {
 	for _, m := range mutations {
 		if m.Document == nil {
 			continue
 		}
-		v, present := m.Document["isDeleted"]
-		if !present {
+		if v, present := m.Document["isDeleted"]; present {
+			if _, ok := v.(bool); !ok {
+				return &DDLViolation{
+					ViolatedConstraint: "isDeletedType",
+					MutationKey:        m.Key,
+					OperationRequestID: rid,
+					Detail:             fmt.Sprintf("isDeleted must be a JSON bool, got %T", v),
+				}
+			}
+		}
+		data, ok := m.Document["data"].(map[string]interface{})
+		if !ok {
 			continue
 		}
-		if _, ok := v.(bool); !ok {
-			return &DDLViolation{
-				ViolatedConstraint: "isDeletedType",
-				MutationKey:        m.Key,
-				OperationRequestID: rid,
-				Detail:             fmt.Sprintf("isDeleted must be a JSON bool, got %T", v),
+		for _, field := range [...]string{"protected", "sensitive"} {
+			fv, present := data[field]
+			if !present {
+				continue
+			}
+			if _, ok := fv.(bool); !ok {
+				return &DDLViolation{
+					ViolatedConstraint: field + "Type",
+					MutationKey:        m.Key,
+					OperationRequestID: rid,
+					Detail:             fmt.Sprintf("data.%s must be a JSON bool, got %T", field, fv),
+				}
 			}
 		}
 	}

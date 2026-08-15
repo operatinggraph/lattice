@@ -294,3 +294,191 @@ func TestValidate_IsDeletedTypeAbsentAccepted(t *testing.T) {
 		t.Fatalf("Validate (absent isDeleted): %v", err)
 	}
 }
+
+func TestValidate_ProtectedTypeStringRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.vertexType",
+				"data":  map[string]interface{}{"canonicalName": "widget", "protected": "true"},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "protectedType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+	if ddlErr.MutationKey != "vtx.meta."+testNanoID2 {
+		t.Fatalf("MutationKey = %q", ddlErr.MutationKey)
+	}
+}
+
+func TestValidate_ProtectedTypeNumberOnUpdateRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "update",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.vertexType",
+				// int64, not float64: convert.go's StarlarkValueToGo returns
+				// int64 for a whole-valued Starlark int, the real shape a
+				// script-submitted numeric data.protected would decode to.
+				"data": map[string]interface{}{"canonicalName": "widget", "protected": int64(1)},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "protectedType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+}
+
+// The positive vector for the gate above: a well-typed data.protected passes.
+func TestValidate_ProtectedTypeBoolAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.vertexType",
+				"data":  map[string]interface{}{"canonicalName": "widget", "protected": true},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (well-typed data.protected): %v", err)
+	}
+}
+
+// An omitted data.protected stays legal — readers already treat absence as false.
+func TestValidate_ProtectedTypeAbsentAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.vertexType",
+				"data":  map[string]interface{}{"canonicalName": "widget"},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (absent data.protected): %v", err)
+	}
+}
+
+func TestValidate_SensitiveTypeStringRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.aspectType",
+				"data":  map[string]interface{}{"canonicalName": "ssn", "sensitive": "true"},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "sensitiveType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+	if ddlErr.MutationKey != "vtx.meta."+testNanoID2 {
+		t.Fatalf("MutationKey = %q", ddlErr.MutationKey)
+	}
+}
+
+func TestValidate_SensitiveTypeNumberOnUpdateRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "update",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.aspectType",
+				// int64, not float64: convert.go's StarlarkValueToGo returns
+				// int64 for a whole-valued Starlark int, the real shape a
+				// script-submitted numeric data.sensitive would decode to.
+				"data": map[string]interface{}{"canonicalName": "ssn", "sensitive": int64(1)},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "sensitiveType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+}
+
+// The positive vector for the gate above: a well-typed data.sensitive passes.
+func TestValidate_SensitiveTypeBoolAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.aspectType",
+				"data":  map[string]interface{}{"canonicalName": "ssn", "sensitive": true},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (well-typed data.sensitive): %v", err)
+	}
+}
+
+// An omitted data.sensitive stays legal — readers already treat absence as false.
+func TestValidate_SensitiveTypeAbsentAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.meta." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "meta.ddl.aspectType",
+				"data":  map[string]interface{}{"canonicalName": "ssn"},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (absent data.sensitive): %v", err)
+	}
+}

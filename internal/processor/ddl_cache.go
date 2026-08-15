@@ -762,15 +762,37 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		var asp struct {
 			IsDeleted bool `json:"isDeleted"`
 			Data      struct {
-				Value bool `json:"value"`
+				// A pointer, not bool: the only legitimate writer
+				// (pkgmgr.emitDDLMutations, internal/pkgmgr/build.go) never
+				// creates this aspect for the false case at all — absence IS
+				// how "not sensitive" is encoded, so a PRESENT aspect whose
+				// value is missing/null is exactly as undecidable as one that
+				// fails to parse, never a shape the honest install path
+				// produces. Only an explicit JSON `false` counts as a
+				// deliberate live declaration.
+				Value *bool `json:"value"`
 			} `json:"data"`
 		}
-		if err := json.Unmarshal(sEntry.Value, &asp); err == nil {
-			if asp.IsDeleted && asp.Data.Value {
+		if err := json.Unmarshal(sEntry.Value, &asp); err == nil && asp.Data.Value != nil {
+			if asp.IsDeleted && *asp.Data.Value {
 				c.logger.Warn("ddl cache: sensitive aspect tombstoned but still declares true; withdrawal not honored, class stays sensitive",
 					"key", root+".sensitive")
 			}
-			ref.Sensitive = asp.Data.Value
+			ref.Sensitive = *asp.Data.Value
+		} else {
+			// Unparseable OR present-but-no-explicit-value: both poison
+			// Sensitive to true rather than leaving it at its zero value,
+			// mirroring the custody reader's poison-on-unparseable posture
+			// below (and the same asymmetry the tombstone comment above
+			// states: staying sensitive can only OVER-protect, so an
+			// undecidable value resolves the safe way).
+			reason := "unparseable"
+			if err == nil {
+				reason = "missing/null data.value"
+			}
+			c.logger.Warn("ddl cache: undecidable sensitive aspect; failing closed toward sensitive",
+				"key", root+".sensitive", "reason", reason, "error", err)
+			ref.Sensitive = true
 		}
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
 		return ref, false, fmt.Errorf("read sensitive %s: %w", root, err)
