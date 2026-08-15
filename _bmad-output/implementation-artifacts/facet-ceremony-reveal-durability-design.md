@@ -51,37 +51,92 @@ write outlives the plaintext it minted." Imp ★★, Size S-M.
   `cmd/facet/web/boot.mjs:59` — `resolveDeviceId(storage = globalThis.localStorage)`. This fire follows
   the same shape (a `typeof … !== "undefined"` guard, since `cmd/facet/web/*.test.mjs` run app.js inside
   a `vm.createContext` sandbox — see `ceremony.test.mjs` header comment — that does not define
-  `sessionStorage` unless a test explicitly injects one).
+  `sessionStorage` unless a test explicitly injects one). The guard must sit *inside* the `try`, not
+  outside it: `sessionStorage` is a resolvable global whose getter can throw `SecurityError` (site data
+  blocked, a sandboxed/partitioned frame), so `typeof sessionStorage === "undefined"` itself can throw —
+  and since `loadStoredReveals()` runs at classic-script top level, an uncaught throw there aborts the
+  rest of `app.js`'s evaluation and the app fails to boot.
+- **`signOut()`'s exit is not symmetric with `onAuthDeath()`'s, and that difference is load-bearing.**
+  `signOut` → `POST /api/logout` → `main.go`'s `OnSignOut: engines.Purge` → `enginemanager.go`'s `Purge`,
+  which evicts the identity's whole engine **and deletes its durable intent-queue file**
+  (`os.Remove(StoreDir/<identityID>.db)` — the same store `agent.Enqueue` writes to). A ceremony write
+  still `queued` at an explicit sign-out is **destroyed, not landed**: no identity is ever armed by that
+  path, and the next login for that identity gets a brand-new engine with an empty outbox, so no confirm
+  frame for the old requestId will ever replay. `onAuthDeath()` (`app.js`, session/token expiry or a
+  network-triggered auth death) is the OTHER exit and does neither of those things — it does not call
+  `/api/logout` and does not touch the server-side engine or store at all. A write queued before an
+  auth-death event survives server-side and **will** confirm later, and that confirm frame **will**
+  replay to the next `/api/feed` connection for that identity's engine. Pre-fire, `onAuthDeath` left
+  `pendingReveals` unpurged, which was harmless because the in-memory Map died with the page at
+  `location.replace`. Post-fire, with the hold persisted to `sessionStorage`, it is no longer harmless:
+  `sessionStorage` survives a same-tab navigation, so the plaintext now outlives a session's end and
+  rehydrates for whoever loads the app next in that tab — including a *different* identity signing into
+  the same shared/kiosk tab. That is a new exposure window on exactly the threat model §4.4 exists for.
+- **`sessionStorage` is disk-backed, not a RAM-equivalent.** Chromium persists Session Storage to a
+  LevelDB on disk (surviving a browser crash and "reopen closed tab" / session restore); Firefox similarly
+  persists it for session restore; "Duplicate Tab" clones it into the new tab. It is *tab-scoped* and
+  cleared on a genuine tab close, which is the property this fire's reload-recovery actually needs — but
+  it is not equivalent to the browser-process memory `pendingReveals` lived in before, and the "adds no
+  new exposure class" framing below is corrected accordingly: the exposure class is bounded (same-origin
+  JS access, same as the DOM reveal already grants), but it is not *unchanged* from pre-fire.
 
 ## 3. Decision (Winston, this fire)
 
 Two independent, additive changes — reload-recovery is not a substitute for the signal, because the
 signal is what covers the case reload-recovery deliberately does not (sign-out):
 
-**(a) Reload recovery — persist the hold in `sessionStorage`, tab-scoped.** The plaintext is already
-displayed once in cleartext in the DOM (`showCeremonyReveal`, a `<pre data-reveal-secret>`) — the same
-JS-same-origin trust boundary `sessionStorage` sits behind, and it is auto-cleared on tab close, so this
-adds no new exposure class. `holdCeremonyReveal` / the terminal branches of `settleCeremonyReveal` /
-`purgeCeremonyReveals` all sync a `PENDING_REVEALS_KEY` `sessionStorage` entry; a fresh page load
-rehydrates `pendingReveals` from it before the SSE reconnect can replay the confirm frame. **Sign-out
-still purges it** (§4.4 is a deliberate security wipe on a shared/kiosk device — not the bug this fire
-closes, and not weakened here).
+**(a) Reload recovery — persist the hold in `sessionStorage`, tab-scoped, timestamped for eviction.**
+The plaintext is already displayed once in cleartext in the DOM (`showCeremonyReveal`, a
+`<pre data-reveal-secret>`) — the same JS-same-origin trust boundary `sessionStorage` sits behind. Every
+hold carries an `at` timestamp; a rehydrate older than 24h is dropped rather than trusted (nothing else
+reaps a hold whose write never reaches a terminal state — a host restart drops `feed.outbox`'s in-memory
+state, `trimOutboxLocked` ages out old terminal entries past 200, and an explicit sign-out deletes the
+store entirely, per the engine-purge finding above). `holdCeremonyReveal` / the terminal branches of
+`settleCeremonyReveal` / `purgeCeremonyReveals` all sync a `PENDING_REVEALS_KEY` `sessionStorage` entry;
+a fresh page load rehydrates `pendingReveals` from it before the SSE reconnect can replay the confirm
+frame.
 
-**(b) The signal — a purge-before-settle keeps a `{lost: true}` marker, not a deletion.**
-`purgeCeremonyReveals` today deletes every pending entry outright, which is indistinguishable from
-"never held." Replacing the deletion with a `{lost: true}` marker (title kept for context, plaintext
-dropped) lets a later confirm frame for that `requestId` still reach `settleCeremonyReveal` and tell the
-two cases apart: genuinely-unrelated write (`pending === undefined`, unchanged, stays inert — the pinned
-test keeps passing) vs. a ceremony write whose secret is confirmed-but-unrecoverable (`pending.lost`).
-The latter now: (1) does **not** call `showCeremonyReveal` (nothing to show), (2) fires a `toast` so an
-operator watching right then sees it, and (3) marks the outbox entry itself (`e.secretLost = true`)
-before it's rendered, so `outboxCard` / `outboxHistoryCard` carry a persistent "Secret was not shown —
-issue a new one" note discoverable later in Activity — a toast alone can be missed if nobody's looking
-at the moment a delayed confirm lands.
+**Both exits purge the client-held plaintext — `signOut()` (unchanged) AND `onAuthDeath()` (new).**
+Any auth-boundary exit — voluntary sign-out or involuntary auth death — wipes `pendingReveals` (converted
+to `{lost:true}` markers, not deleted outright — see (b)) and its `sessionStorage` mirror. This closes the
+cross-identity exposure the engine-purge finding above identified, and it is also what gives (b) a
+reachable consumer: because `onAuthDeath` (unlike `signOut`) does not touch the server-side engine or
+store, a marker created there CAN be settled by a later replayed confirm frame — the sign-out path's
+marker, by contrast, can never be settled (see below), which is a known, accepted gap.
 
-**Non-goals (this fire):** persisting the secret across an explicit sign-out (contradicts §4.4 by
-design); a server-side/durable record of ceremony requestIds (the `{lost}` marker is sufficient and
-needs no new server state); auto-reissue of a fresh secret (an operator action, not this fire's job).
+**(b) The signal — a purge-before-settle keeps a `{lost: true}` marker, not a deletion; loss is tracked
+by requestId, not by frame object.** `purgeCeremonyReveals` converts every still-pending entry to a
+`{lost: true, title, at}` marker (plaintext dropped, title kept for context) instead of deleting it, so a
+later confirm frame for that `requestId` can still reach `settleCeremonyReveal` and tell the two cases
+apart: genuinely-unrelated write (`pending === undefined`, unchanged, stays inert — the pinned test keeps
+passing) vs. a ceremony write whose secret is confirmed-but-unrecoverable (`pending.lost`). Because
+`cmd/facet/feed.go` marshals outbox frames from a shared pointer in a writer goroutine, a `confirmed`
+request routinely receives 2-3 near-duplicate frames in a burst — tracking loss on the mutable frame
+object itself (`e.secretLost`) would let a later duplicate silently erase the flag when it replaces the
+object in `state.outbox`. Loss is tracked in a separate `requestId → timestamp` map, checked by requestId
+wherever the flag matters, immune to which frame object is currently held. The confirmed-but-lost case:
+(1) does **not** call `showCeremonyReveal` (nothing to show), (2) fires a `toast`, and (3) keeps its
+Activity entry **pinned** in the main view (not auto-archived into collapsed Outbox history like an
+ordinary confirm) with a "Secret was not shown — issue a new one" note and a Dismiss action, so it is
+discoverable whether or not anyone was watching at the moment the delayed confirm landed.
+
+**Known, accepted gap — the sign-out path's marker can never be settled.** `signOut`'s `/api/logout`
+deletes the identity's engine and durable store outright (see above), so a marker created by `signOut`'s
+purge has no future confirm frame to ever reach — it is inert by construction, not a bug. This is
+acceptable: `signOut`'s purge exists for the confidentiality wipe (which it delivers unconditionally, sign-
+out or not), not for the loss-signal (which `onAuthDeath` genuinely delivers, since that path leaves the
+server-side write alive to eventually confirm).
+
+**Known, accepted gap — the in-page (wasm/EDGE.5) host.** `internal/edge/browser/feed.go` documents that
+an unknown requestId on that host is a silent no-op: its outbox dies with the page, so a rehydrated hold
+surviving a reload on that host has no future confirm frame either, the same shape as the sign-out gap
+above. Reload-recovery's *benefit* (claim a) is Go-host-only until a future fire gives the in-page engine
+its own outbox-replay-on-reconnect. Not fixed here — filed as a follow-up, not silently dropped.
+
+**Non-goals (this fire):** a server-side/durable record of ceremony requestIds (the `{lost}` marker plus
+the requestId-keyed loss map is sufficient and needs no new server state); auto-reissue of a fresh secret
+(an operator action, not this fire's job); closing the in-page-host gap above (needs a materially
+different mechanism on that host, not a client-side JS change here).
 
 ## 4. Touch-list (verified)
 
@@ -97,3 +152,30 @@ needs no new server state); auto-reissue of a fresh secret (an operator action, 
 `go build ./cmd/facet/...`, `make lint-web`, `make test-facet-web` (`node --test cmd/facet/web/*.test.mjs`),
 `STRICT=1 go run ./scripts/lint-conventions.go`. No Core KV / contract / P5 surface touched — pure
 client-side JS + its Go-served handler is unaffected (no server-side change).
+
+## 6. Adversarial review — what it found, and the close
+
+Full 3-layer cold review (Blind Hunter / Edge Case Hunter / Acceptance Auditor) ran against the first
+build, since this touches secret-handling logic. All three independently converged on the same two
+defects (the `onAuthDeath` purge gap and the outbox-card marker being unreachable dead code), and the Edge
+Case Hunter additionally traced `signOut` → `engineManager.Purge` and found the sign-out marker path could
+never be settled at all — the finding that reshaped §2/§3 above. A fix round closed all of it:
+
+- `onAuthDeath()` now purges (§3 "Both exits purge…") — `app.js` around the `onAuthDeath` function.
+- Loss is tracked in `lostSecretRequestIds` (a bounded, requestId-keyed `Map`), never on the outbox frame
+  object, closing the duplicate-frame race the frame-object flag was vulnerable to.
+- `renderActivity`'s pinned filter keeps a lost-secret entry visible in the main Activity view (not just
+  collapsed history) until the operator dismisses it; `outboxCard` offers Dismiss (not Review — a landed
+  write is not a resubmittable draft).
+- `persistPendingReveals`/`loadStoredReveals` moved their `typeof sessionStorage` guard inside the `try`
+  (a real browser can throw `SecurityError` on that access, not just return `undefined`).
+- Holds carry an `at` timestamp; `loadStoredReveals` drops (and writes back the drop of) anything past
+  `revealHoldMaxAgeMs` (24h) rather than trusting an unbounded rehydrate.
+- Rehydrate validation tightened to `typeof reveal.plaintext === "string" || reveal.lost === true`.
+
+Each fix was mutation-tested (revert → a specific test fails → re-apply), and `cmd/facet/web/ceremony.test.mjs`
+gained a `frameHarness()` driving the real `applyOutboxFrame`/`renderActivity` rather than only the
+lower-level `settleCeremonyReveal`, which is what let the dead-code and duplicate-frame findings slip
+past the first build's own (real, but lower-level) tests. Final gate run (independently re-verified,
+not taken on the builder's report): `go build ./cmd/facet/...` clean, `node --test cmd/facet/web/*.test.mjs`
+221/221, `lint-web` 0 issues, `STRICT=1 lint-conventions` 0 issues.
