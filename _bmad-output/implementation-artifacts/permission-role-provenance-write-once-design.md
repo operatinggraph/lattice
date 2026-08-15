@@ -1074,157 +1074,151 @@ which this fire does not build (§19.6 says why).
   confirm the design already reasoned `holdsRole` as "runtime-minted, never package-declared." This is a
   **zero-false-positive** exclusion, not a design call with edge cases to weigh.
 
-### 19.2 The shape — two independent guards, same enforcement point
+### 19.2 The shape as SHIPPED — one entry point, four rules (supersedes the two-guard sketch below)
 
-Both land in `internal/processor/step8_commit.go`, wired into `Commit` immediately after
-`rejectPermissionRoleRewrites` (`:213`), using the `prior priorDocs` already read at `:203` where possible.
+**This section replaces the original two-guard draft.** The draft shipped wrong in one field path
+(`declaredKeys` lives at `data.declaredKeys`, not the document root) and, worse, two rounds of cold
+adversarial review found the draft's shape left the mechanism's own root of trust unvalidated: **Guard B
+exempted the package's manifest key from scope-checking with no check on its CONTENT**, so an actor could
+self-forge their own package's `declaredKeys` to claim any victim key (round-2 finding, closed), and that
+gap existed on **update** only — the manifest's initial **create** (every `InstallPackage`, and any
+`UpgradePackage` naming a never-installed name) was never validated at all (round-3 finding, PoC-confirmed
+by two independent reviewers, closed). What actually shipped, in `internal/processor/step8_commit.go`, is a
+single entry point, `rejectPackageScopeViolations` (`:1050`), wired into `Commit` immediately after
+`rejectPermissionRoleRewrites`, running unconditionally for `InstallPackage`/`UpgradePackage`/
+`UninstallPackage` (resolved via `packageLifecycleType`, `:966` — `env.Class` → `payload.class` →
+`env.OperationType`, mirroring `resolveClass`'s precedence in `step4_hydrate.go`, so the guard cannot be
+dodged by an envelope where `Class` and `OperationType` diverge). Five sequential passes, each scanning all
+mutations, any violation aborting before the atomic batch is assembled:
 
-**Guard A — package-lifecycle ops never touch a `holdsRole` link.**
+1. **`holdsRole` ban.** Any mutation (any op) whose key parses as a link with `linkName == "holdsRole"` →
+   reject, `Reason:"holdsRole"`. No package `Definition` field ever produces one (§19.1) — a
+   zero-false-positive exclusion, and the fix for the confirmed-dominant §15 repro.
+2. **Scope resolution** (`resolvePackageScope`, `:1141`). For `UpgradePackage`/`UninstallPackage`: derive
+   `pkgKey = vtx.package.<substrate.PackageEntityNanoID(name,"package")>`, `manifestKey = pkgKey +
+   ".manifest"` from `payload.name` (decoded lazily — only the arm that actually needs `payload.class` or
+   `payload.name` pays the JSON-decode cost, not every commit in the platform); read the manifest, preferring
+   the batch's own `prior` cache over a fresh KVGet when the batch itself mutates its manifest (true on every
+   real path); a manifest that's absent **or tombstoned** (an uninstalled package) resolves to `owned = ∅`
+   with everything downstream fail-closed — including for `InstallPackage`, which no longer gets a blanket
+   exemption (only the "update/tombstone must be owned" rule, #4 below, doesn't apply to it, since it is
+   create-only by construction — rules #1, #3, #5 all still run against it).
+3. **Manifest-create validation** (`rejectForgedManifestCreates`, `:1117`). Any `create` of a manifest-shaped
+   key — detected by **key shape** (`keys.ParseAspectKey` → parent type `package`, local name `manifest`),
+   never by matching the payload's claimed name, so a manifest forged for a package the batch doesn't even
+   name is still caught — is content-validated: every key in the submitted `data.declaredKeys` must be
+   either the manifest's own parent root, or a key this SAME batch also `create`s. No "already declared" or
+   "already tombstoned" bucket here (nothing legitimately pre-exists at create time). This is what closes
+   the round-3 gap: an honest install's `declaredKeys` is by construction exactly its own create-slice
+   (`build.go:69-71`'s `addCreate`), so real packages pay nothing; a forge naming any key it didn't itself
+   create in the same batch is rejected, `Reason:"manifestClaim"`.
+4. **Update/tombstone ownership.** For `UpgradePackage`/`UninstallPackage`, every `update`/`tombstone`
+   target must be in the resolved `owned` set — the prior manifest's `declaredKeys`, plus `pkgKey`/
+   `manifestKey` themselves (self-referential), plus any key **validated by `validatedManifestClaims`**
+   (`:1226`) as a legitimate addition to a manifest being updated in this same batch. That validator admits
+   a genuinely new key only if it's created this batch, or **already declared**, or — the narrowed revive
+   path — its stored document is **already tombstoned AND it is also an update/tombstone target elsewhere in
+   this same batch** (reusing `readPriorDocuments`'s already-loaded `prior` cache; **zero extra KV reads**,
+   which is what closes the round-2 DoS finding against the original tombstone-exemption's per-key KVGet).
+   `Reason:"unscoped"` on violation.
+5. **Created-link source ownership + aspect-parent ownership.** For a `create` of a **link**, the SOURCE
+   vertex (`keys.ParseLinkKey`'s first endpoint — per Contract #1 §1.1 the later-arriving, edge-minting side)
+   must be in `created ∪ owned`; the target is unconstrained (`Reason:"linkSource"`). This is asymmetric, not
+   symmetric, by necessity — a symmetric both-endpoints rule was tried and found to break 20+ shipped
+   packages' `grantsTo: [operator]` pattern (a permission the package mints, `grantedBy`-linked to a
+   *primordial* role it does not and should not own). Asymmetric-source still subsumes the `holdsRole` ban
+   (an identity is never package-owned) and independently closes a `grantedBy`-to-an-existing-foreign-or-
+   primordial-**permission** escalation the original single-name blocklist missed entirely. For a `create` of
+   an **aspect** (4-segment key), the parent vertex root must likewise be in `created ∪ owned`
+   (`Reason:"aspectParent"`) — the sibling gap a fresh-hunt reviewer found: minting a new aspect on a
+   foreign/kernel root was ungated even after the link rule shipped. The two composed cleanly in review: a
+   manifest-create validated by rule #3 doesn't need rule #5 to also fire on it, but a forge that hangs its
+   manifest on a *pre-existing* foreign package root (declaring only that root, slipping past #3's own-create
+   requirement) is still caught by #5.
 
-```go
-// rejectPackageHoldsRoleMutations rejects any InstallPackage/UpgradePackage/
-// UninstallPackage mutation whose key is a holdsRole link. No package
-// Definition field (DDL, lens, permission, role, retention class,
-// weaverTarget, loomPattern, opMeta, pane) ever produces one — identity-role
-// assignment is RBAC's op surface (GrantPermission et al.), never a package
-// diff's. Zero legitimate mutation is rejected by this rule.
-func rejectPackageHoldsRoleMutations(operationType string, mutations []MutationOp) error {
-	if operationType != "InstallPackage" && operationType != "UpgradePackage" && operationType != "UninstallPackage" {
-		return nil
-	}
-	for _, m := range mutations {
-		if _, _, linkName, _, _, ok := substrate.ParseLinkKey(m.Key); ok && linkName == "holdsRole" {
-			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "holdsRole"}
-		}
-	}
-	return nil
-}
-```
+`substrate.PackageEntityNanoID` (`internal/substrate/derive.go`) is `internal/pkgmgr`'s former unexported
+`nanoIDFromSalt`/`entityNanoID`, moved verbatim (same salt `"lattice-pkg:"+name+":"+tag`, byte-identical
+digest-to-alphabet mapping — **not** `SHA256NanoID`'s different PCG-seeded scheme) so the guard and the
+installer cannot compute divergent keys; `internal/pkgmgr` now calls the shared function, single source of
+truth, pinned by a golden-value test against the pre-move output.
 
-Applies to `create` too (install is create-only, so this is install's only exposure to this rule) — this is
-the fix for the confirmed-dominant repro.
+### 19.3 Error type
 
-**Guard B — `UpgradePackage`/`UninstallPackage` update/tombstone must target a key the named package's own
-prior manifest declared.**
-
-```go
-// rejectUnscopedPackageMutations is the manifest-ownership backstop for
-// UpgradePackage/UninstallPackage: an update or tombstone may only target a
-// key the OPERATION'S OWN NAMED PACKAGE already declared in its prior
-// .manifest.declaredKeys, read server-side — never the client-asserted
-// "name" string alone. InstallPackage is exempt: it is create-only and
-// therefore already safe by construction (§8.2).
-func (c *CommitterImpl) rejectUnscopedPackageMutations(ctx context.Context, env *OperationEnvelope, mutations []MutationOp) error {
-	if env.OperationType != "UpgradePackage" && env.OperationType != "UninstallPackage" {
-		return nil
-	}
-	payload, _ := jsonToGenericMap(env.Payload)
-	name, _ := payload["name"].(string)
-	if name == "" {
-		return nil // script-level guard already rejects an empty name; nothing to scope against here
-	}
-	pkgKey := substrate.VertexKey("package", packageEntityNanoID(name, "package"))
-	manifestKey := pkgKey + ".manifest"
-
-	manifest, err := c.readPriorDoc(ctx, manifestKey)
-	if err != nil {
-		return fmt.Errorf("step 8: read package manifest for %q: %w", name, err)
-	}
-	if !manifest.Found {
-		return nil // no installed package under this name — nothing declared to violate
-	}
-	declared := map[string]struct{}{}
-	if raw, ok := manifest.Doc["declaredKeys"].([]interface{}); ok {
-		for _, k := range raw {
-			if s, ok := k.(string); ok {
-				declared[s] = struct{}{}
-			}
-		}
-	}
-	for _, m := range mutations {
-		if m.Op != "update" && m.Op != "tombstone" {
-			continue
-		}
-		if m.Key == pkgKey || m.Key == manifestKey {
-			continue // the package's own root + its manifest aspect are always in-scope for their own upgrade/uninstall
-		}
-		if _, ok := declared[m.Key]; !ok {
-			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "unscoped", Package: name}
-		}
-	}
-	return nil
-}
-```
-
-`packageEntityNanoID` is a **new exported function in `internal/substrate`** (`derive.go`, beside
-`SHA256NanoID`) — `internal/pkgmgr`'s unexported `nanoIDFromSalt`/`entityNanoID` (`installer.go:418-420,
-486-496`) move there verbatim (same salt format `"lattice-pkg:"+name+":"+tag`, same digest-to-alphabet
-mapping, byte-identical output), and `internal/pkgmgr` is refactored to call the shared function instead of
-its private copy — a one-writer, two-reader primitive, matching the existing `SHA256NanoID` precedent
-exactly rather than growing a second parallel hash scheme. **Why substrate, not pkgmgr → processor
-directly:** `internal/pkgmgr` already imports `internal/processor` (§19.1), so the reverse import is a
-cycle; `internal/substrate` is a leaf both already depend on with zero new coupling.
-
-The manifest read is a **fresh out-of-band `KVGet`** (`c.readPriorDoc`, reused as-is — it already takes an
-arbitrary key, not just a mutation target), not a lookup into the batch-scoped `prior` map from
-`readPriorDocuments` — the manifest key is not necessarily a mutation target of the batch it's gating (a
-dev-mode force-reapply with zero body changes touches nothing, and the manifest read still must happen to
-validate whatever *is* submitted).
-
-### 19.3 New error type
-
-`PackageScopeError` in `step8_commit.go`, beside `PermissionProvenanceError`: `{Key, Op, Reason, Package
-string}`. `Reason` is `"holdsRole"` (Guard A) or `"unscoped"` (Guard B) — kept as one type with a
-discriminant rather than two, since both map to the same new wire error code and the same remediation class
-("this mutation doesn't belong to the package that submitted it"). New `ErrCodePackageScope` in
-`internal/processor/envelope.go` + `internal/opwire`, wired into `commit_path.go`'s reply mapping mirroring
-`*PermissionProvenanceError`'s branch.
+`PackageScopeError{Key, Op, Reason, Package string}` in `step8_commit.go`, beside `PermissionProvenanceError`.
+`Reason` ∈ `{"holdsRole", "manifestClaim", "unscoped", "linkSource", "aspectParent"}` — one type with a
+discriminant, since all five map to the same wire error code and remediation class ("this mutation doesn't
+belong to the package that submitted it"). `ErrCodePackageScope` in `internal/processor/envelope.go` +
+`internal/opwire`; `commit_path.go`'s reply mapping mirrors `*PermissionProvenanceError`'s branch.
 
 ### 19.4 Contract surface
 
-Contract #8 §8.4 gains a third paragraph (staged **uncommitted** in `main`, alongside the two already-staged
-retention-class + permission/role-provenance paragraphs from earlier fires today — append, do not
-disturb): "Package-manifest ownership scoping" — `InstallPackage`/`UpgradePackage`/`UninstallPackage` may
-never mutate a `holdsRole` link, and `UpgradePackage`/`UninstallPackage`'s update/tombstone mutations must
-target a key the named package's own prior `.manifest.declaredKeys` lists (root + manifest aspect exempted
-as self-referential). Names `PackageScopeError` as the authoritative guard, path-independent same as §8.4's
-existing two guards.
+Contract #8 §8.4 gains a third paragraph (staged **uncommitted** in `main`) — see the paragraph itself for
+the authoritative wording; it names all four rejection reasons and the exempt/narrowed cases (self-
+referential root+manifest, the create-time-only validation split from the update-time "already declared or
+already tombstoned-and-same-batch-revived" validation) rather than the two-rule sketch originally staged.
 
-### 19.5 Test plan (table-driven, positive vector first, per the standing check)
+### 19.5 Test plan — what shipped (36-case table + 5 standalone tests, `step8_commit_test.go`)
 
-`internal/processor/step8_commit_test.go`:
+Positive vectors first (this repo's standing convention), then negatives per rule, then boundary cases:
+a legitimate `UpgradePackage` update/tombstone of a surviving/removed declared key; the manifest-aspect
+self-update and package-root version-bump; a manifest revive (`declaredKeys` re-adds a dropped-then-
+reinstated, now-tombstoned key, same batch) accepted, the identical revive **without** the accompanying
+manifest claim rejected; an `InstallPackage`/`UpgradePackage`/`UninstallPackage` `holdsRole` create/update/
+tombstone rejected under all three ops; a cross-package update/tombstone rejected; a `grantedBy`-to-an-
+existing-foreign-role create rejected, the same link to a role the package mints or already declares
+accepted, the real `forOperation` link pattern from an actual install batch accepted; a foreign-root aspect
+create rejected, a same-batch-owned or already-declared aspect create accepted; an uninstalled (tombstoned)
+manifest treated as not-found; an undecodable/nameless payload hard-rejecting every mutation including
+creates; `env.Class`/`payload.class`/`env.OperationType` divergence in both directions (the class-carried-
+in-payload arm — initially unpinned, mutation-testing caught it, now covered by
+`TestCommit_PackageScopeFollowsAPayloadCarriedClass`); and the full two-op forge attempt end to end
+(`TestCommit_ForgedManifestCannotBootstrapOwnership`) — op 1 (forge) dies with `manifestClaim`, the forged
+manifest is verifiably absent from KV afterward, op 2 (exploit) then fails `unscoped`. Every rule
+mutation-tested: disabling each independently fails only its own cases. `internal/pkgmgr` + `internal/
+bootstrap` + all 31 `packages/...` suites confirmed green (zero legitimate install/upgrade/uninstall path
+regressed); full `go test ./... -p 4 -count=1` zero failures.
 
-- **Positive:** a legitimate `UpgradePackage` update to a surviving declared key; a legitimate tombstone of
-  a removed declared key; the manifest-aspect self-update; the package-root version-bump update; an
-  `InstallPackage` create batch containing no `holdsRole` link (unaffected).
-- **Negative, one per rule:** an `UpgradePackage` update naming package A whose key belongs to package B
-  (not in A's declaredKeys) → `PackageScopeError{Reason:"unscoped"}`; the same for a tombstone; an
-  `UpgradePackage`/`InstallPackage`/`UninstallPackage` batch creating/updating/tombstoning a `holdsRole`
-  link → `PackageScopeError{Reason:"holdsRole"}` (the §15 repro, pinned directly).
-- **Boundary:** `UpgradePackage` naming a package with no installed manifest (`Found=false`) → allowed
-  (matches `rejectPermissionRoleRewrites`'s "not found → not protected" posture; this is a degenerate/
-  first-touch case the create-forgery gap already covers, not this guard's job).
-- Run `internal/pkgmgr`'s + `internal/bootstrap`'s existing suites unchanged (the mutation producers) to
-  confirm no legitimate upgrade/uninstall/install path newly fails.
+**Review depth actually run:** three build rounds, each followed by cold adversarial review (round 1: 3
+reviewers — bypass hunt, edge-case walk, acceptance audit; round 2: 2 reviewers — verify-the-fixes +
+fresh bypass hunt, both independently found the same critical create-path gap, one with a working PoC;
+round 3: 1 focused reviewer verifying the close). This far exceeds the standing "full 3-layer regardless of
+size" floor because round 1 and round 2 each found genuine, ship-blocking bypasses — see the build note
+below for what each round found and fixed; this section states only the final shape.
 
-`internal/substrate`: one test pinning `packageEntityNanoID("x","package")`'s value against the pre-move
-`nanoIDFromSalt` output (byte-for-byte), so the move can't silently drift the hash `internal/pkgmgr` already
-has installed packages keyed by.
+### 19.6 What remains open (narrowed, not closed) + what's genuinely out of scope
 
-**Review depth:** security-plane, capability-adjacent — full 3-layer adversarial regardless of size, per
-steward SKILL.md §4.
+**§8(a) create-forgery is narrowed but not closed.** An actor holding `UpgradePackage`/`InstallPackage` can
+still mint a **fresh** permission/role under their own legitimately-named package (declaring only keys the
+same batch creates — that passes every rule above) and `grantedBy`-link it to a role they already,
+legitimately hold — because nothing server-side can verify "this package's Definition really declares this
+operationType" (§19.1: no server-side Definition registry exists, and `internal/pkgmgr` already imports
+`internal/processor`, so the reverse import is a cycle). This fire does not attempt it; it remains its own
+designer-pass item.
 
-### 19.6 Non-goal, restated precisely now that Guards A+B are scoped
+**The tombstoned-key revival path is a real, accepted residual, narrowed in *reach* rather than closed.**
+Before this fire's rule #4 (and its round-2/round-3 corrections), a forged manifest could claim **any live
+key anywhere**, i.e. arbitrary rewrite. After it, no path admits a *live* foreign key — a create of an
+existing key conflicts on overwrite (rule #3), and the update path requires the target's stored document to
+already be tombstoned (rule #4). What's left: a package can still atomically declare-and-revive an
+already-**dead**, non-protected key that some *other* package once owned (its own now-stale `declaredKeys`
+still names it, or it names nothing and the key is simply orphaned) — dual-declaration with no live owner,
+not a rewrite of anything currently in use. Fully closing this needs per-key ownership **provenance** (which
+package legitimately minted this specific key, tracked durably) — no such mechanism exists today
+(`declaredBy` is stamped on permissions only; meta-vertices carry no package field). Same shape as
+`retention-class-key-custody-design.md` §24.6's already-accepted "the oracle describes the lens NOW, not
+its history" residual — filed, not built, for the same reason.
 
-**§8(a) create-forgery and §15's grantedBy-revival ambiguity are UNCHANGED by this fire — still open, still
-needing their own design pass.** Neither guard touches a `create` of a `vtx.permission.*`/`vtx.role.*` whose
-key is self-consistent with the **named package's own** claimed content (Guard B only fires on
-update/tombstone; Guard A only fires on `holdsRole`) — an actor already holding `UpgradePackage` and an
-already-legitimately-held role can still mint a fresh permission under their own named package and
-`grantedBy`-link it to that role, because nothing server-side today can tell "clinic-domain really declares
-this operationType" from "the attacker typed it." Guards A+B **do** close the one repro that was confirmed
-dominant (§15) and the general cross-package rewrite/tombstone vector §8(b) named — real, independent
-value — but the board rows for §8(a) and §15's revival ambiguity stay open, reworded to note Guards A+B
-landed and did not reach them, per §19.1's grounding (closing them needs server-side access to a package's
-real compiled Definition, which does not exist today and is a materially bigger mechanism — sizing that is
-its own designer pass, not a same-fire extension).
+**Two low-severity notes recorded, not fixed:** `packageLifecycleType`'s third arm reads raw
+`env.OperationType` where `resolveClass` itself would consult a DDL's `permittedCommands` reverse index for
+an aliased command name — no live DDL registers a competing alias today (confirmed), and rule #5's
+aspect-parent check now additionally blocks a package from bolting `permittedCommands` onto a foreign DDL
+root, shrinking how that gap could ever become reachable. And the manifest read's out-of-band `KVGet`
+fallback (used only when a batch doesn't itself mutate its own manifest — no real `UpgradePackage`/
+`UninstallPackage` batch fails to) isn't threaded into the atomic batch's OCC condition set; `substrate.
+BatchOp` has no condition-only mode to express that without also writing the key, so this stays a narrow,
+documented gap rather than a mechanical fix.
+
+**Open policy question, not this fire's to resolve:** a holder of `UpgradePackage` is bound to *whatever
+package it names* (any installed package), not confined to packages it originated — there is no "package
+ownership by actor" concept anywhere in the platform today. Whether that containment should exist is a
+product/trust-model question for Andrew, not an implementation gap this guard should paper over.
