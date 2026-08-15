@@ -3337,3 +3337,69 @@ work must already produce is checked on the *dispatch* path first, not on the ar
   the running stack, because doing so destroys a key irreversibly. Consumer: the first real erasure.
 - **Loupe's Shred button still submits the bare op.** The panel now says so; repointing it is §12 step
   4 and Loupe-lane UX work. Consumer: the operator.
+
+## Fire brief — CreateUnclaimedIdentity repoints a live-but-erased incumbent's identityindex (Steward, 2026-08-15)
+
+**Scope sentence.** Extend `CreateUnclaimedIdentity`'s per-contact index-vertex mutation trigger to
+also fire when the live hit's incumbent has its erasure write-path closed (sealed **or** bare
+key-shredded), CAS-repointing the `identityindex` vertex to the new registrant and tombstoning the
+stale `indexes` link to the erased incumbent — closing the residual named directly above ("a bare
+shred leaves a live `identityindex` owned by an erased person, and the next walk-in on that contact
+gets no index of their own"), the board row *[identity-domain] An erased identity's live index vertex
+denies the next person their own* (`backlog/lattice.md`, ★★, S).
+
+**Verified touch-list (live at fire start):**
+- `packages/identity-domain/ddls.go:1189-1254` — `CreateUnclaimedIdentity`'s dedup-check block (builds
+  `duplicate`/`matched` off `live_hit`/`match_is_erased`) and its mutation-build block (the
+  `email`/`phone`/`name` `if hit == None or hit.isDeleted:` guards that decide whether to call
+  `index_vertex_mutation` + create the `indexes` link).
+- `packages/identity-domain/ddls.go:479-504` — the `indexes` link-type DDL's `Description`: currently
+  lists only `CreateUnclaimedIdentity` (create), `MergeIdentity` (repoint), `PurgeIdentityDedupFootprint`
+  (tombstone) as writers; add that `CreateUnclaimedIdentity` itself now also repoints, on the
+  erased-incumbent branch.
+- `packages/identity-domain/package.go:33` — `Version: "0.20.4"` → `"0.20.5"` (DDL script body changes;
+  same-version edits no-op per package-authoring convention).
+- `packages/identity-domain/erasure_gate_test.go:302-353, 656-708` —
+  `TestErasureGate_CreateUnclaimedIdentity_SkipsSealedIncumbent` /
+  `...SkipsBareShreddedIncumbent`: both must keep passing UNCHANGED (they assert `duplicateOf` absence,
+  which this fire does not touch); add sibling tests asserting the `identityindex` vertex and `indexes`
+  link now repoint to the new registrant in both the sealed and bare-shredded cases, and that the old
+  link tombstones.
+
+**Precedent to mirror.** `identity-hygiene/ddls.go:698-726`, `MergeIdentity`'s `idx_repoints` loop:
+tombstones the old `indexes` link **unconditioned** (`op:update`, `isDeleted:true`, `data:{}`, no CAS —
+safe there because the tombstone never lands alone; it is always in the same atomic batch as the
+CAS-guarded repoint of the vertex it targets, so any concurrent-erasure race that invalidates one
+invalidates the whole batch), then repoints the `identityindex` vertex, then creates the new link if not
+already live. `index_vertex_mutation` (ddls.go:604-619) already implements the CAS-guarded vertex
+repoint (`expectedRevision: existing.revision`) exactly as needed here — reuse it verbatim.
+
+**In-scope gotchas:**
+- `match_is_erased()` (ddls.go:1172-1184) does live, undeclared `kv.Read`s via `write_path_closed`
+  (read-posture (e)) — currently invoked once per contact type in the dedup-check branch. Compute it
+  ONCE per contact type into a local (e.g. `email_erased`) and reuse it in the mutation-build branch;
+  calling it a second time doubles live reads on that path for no reason.
+- The old `indexes` link key is a **deterministic derivation**
+  (`"lnk." + index_key[len("vtx."):] + ".indexes.identity." + old_identity_id`, `old_identity_id` from
+  `hit.data["identityKey"]` stripped of the `"vtx.identity."` prefix) — mirrors the exact string-building
+  idiom already used two lines below for the NEW link key. No enumeration and no extra read needed for
+  the tombstone itself; the invariant (identityindex vertex live ⇒ its current `indexes` out-link is
+  live) holds because neither `SealIdentityForErasureComplete` nor `ShredIdentityKey` ever touches
+  `identityindex` or `indexes` (grounding, this fire: `privacy-base/seal_identity_for_erasure.go`,
+  `privacy-base/shred_identity_key.go` — neither writes either key class).
+- Do **not** touch the `duplicateOf`-skip behavior — the two Skip*Incumbent tests above must pass
+  byte-identical to today; this fire only adds the missing index repoint, never a fresh `duplicateOf`
+  toward an erased incumbent (that would re-open exactly the hazard §6 closes).
+- `packages/identity-domain` is a known ROTATING-membership package-level flake under parallel load,
+  unrelated to any single change (this doc's own increment-9 build note, immediately above) — if a test
+  outside this fire's diff reddens, re-run that single test alone once before concluding it's a real
+  regression; never loosen an assertion to route around it.
+
+**Non-goals.** The other two residuals named directly above (live-stack end-to-end erasure run; Loupe's
+Shred-button UX) are explicitly out of scope for this fire.
+
+**Adjacent finds filed to the board now:** none — this fire closes the already-filed row directly rather
+than surfacing a new one.
+
+**Review depth:** full 3-layer adversarial (security/PII-plane, identity dedup path), per steward
+SKILL.md §4, regardless of S–M size.
