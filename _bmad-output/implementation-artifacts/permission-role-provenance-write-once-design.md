@@ -513,14 +513,18 @@ mutation-tested before merge** — the shipped guard is materially wider than §
   found/decoded, and this guard — unlike the availability-first `rejectProtectedMutations` it sits beside
   — treats present-but-undecodable as protected. Not reachable today (every writer marshals a proper map).
 
-**Two adjacent gaps found during review, deliberately not built here** (same class as §8's non-goals — a
-different mechanism than a field-level write-once guard, filed as new `lattice.md` rows rather than
+**One adjacent gap found during review, deliberately not built here** (same class as §8's non-goals — a
+different mechanism than a field-level write-once guard, filed as a new `lattice.md` row rather than
 bolted on): a tombstoned `grantedBy` **link** can still be revived via a direct `update` with
 `isDeleted:false` (client-side `diffManifest` exclusion, no server-side backstop — the link-topology
-mirror of what this design fixed for permission/role vertex fields); and `vtx.roleindex.<id>` (the
-name→role lookup index) is the same class of unguarded surface one layer down, but has zero live readers
-today (only `build.go` writes it, `cmd/loupe/pkg.go` reads it for display only) — not exploitable, filed
-for when a consumer lands.
+mirror of what this design fixed for permission/role vertex fields).
+
+**`vtx.roleindex.<id>` (the name→role lookup index) was built, not filed** — see §18. This paragraph
+originally deferred it ("zero live readers today... not exploitable, filed for when a consumer lands");
+the Lattice Steward built it anyway on 2026-08-15 as a cheap, well-precedented mirror rather than waiting
+for the named trigger, per steward guardrails against parking a scoped, buildable item. The "zero live
+readers" premise itself still holds — see §18 for what shipped and its two known, deliberately-unclosed
+limitations (both filed, not built).
 
 §6's contract text is corrected to match (role-root scope, `lanes`, the healable carve-out, tombstone
 coverage) in the same uncommitted edit to `docs/contracts/08-package-install.md`.
@@ -957,3 +961,55 @@ field via a bare `.(bool)` with the ok discarded — same fail-open shape, but o
 (written by `internal/pkgmgr/build.go:480` / `internal/bootstrap/primordial.go:1222`, always a Go-typed
 `true` literal today) surfaced only as a Loupe UI badge, not a write-path or encryption gate. Filed as its
 own `lattice.md` row.
+
+## 18. Build note — `vtx.roleindex.<id>` write-once (Steward, 2026-08-15)
+
+**Board row:** "[rbac] `vtx.roleindex.<id>` (name→role lookup) is the same unguarded-rewrite class one
+layer down" — ★, XS–S. Built this fire rather than left parked, per §13's amendment above: a cheap,
+well-precedented mirror of the already-shipped `vtx.role.<id>` root case, not a reason to wait for its
+named trigger.
+
+**Shape shipped.** `internal/processor/step8_commit.go`'s `rejectPermissionRoleRewrites` gained a fourth
+case, `keys.IsVertexKeyOfType(m.Key, "roleindex")`, byte-identical in logic to the `role` root case: the
+whole `vtx.roleindex.<id>` document (`data.canonicalName`, `data.roleId`) is write-once on `update` and a
+document-carrying `tombstone`, excluding `committerManagedFields`/`isDeleted`, via the same
+`unionFields`/`docFieldEqual` walk. `create` stays out of scope, matching permission/role. Six new tests
+in `internal/processor/step8_commit_test.go` (two table rows + two dedicated tombstone-carrying-document /
+tombstone-then-revive functions, mirroring the existing `role` ones) — full processor suite green, plus
+`internal/pkgmgr` and `internal/bootstrap` (the actual mutation producers) re-run clean. Contract #8 §8.4's
+uncommitted addition (docs/contracts/08-package-install.md) extended to name roleindex alongside
+permission/role.
+
+**Adversarially reviewed (3 cold agents, one fix round).** No blocking bug survived: a mutation test
+(disabling the new case) confirms it is load-bearing, and empirical probes confirmed tombstone-then-revive,
+tombstone-carrying-document, and create-over-a-live-key are all independently rejected by construction. The
+fix round tightened two comments that overstated a live hazard (roleindex has exactly one reader today,
+`cmd/loupe/pkg.go:251`, display-only) and added the two dedicated tombstone tests above.
+
+**Two known limitations, deliberately not closed this fire — both pre-existing classes, not new ones this
+guard introduces:**
+
+- **Create-time forgery.** Same shape as §8(a)/§9 row 1 (`UpgradePackage`'s create arm can forge a
+  package-origin permission/role vertex — 📐 needs designer pass): `roleindex` is a **sparsely populated**
+  namespace (only `internal/pkgmgr/build.go:85-87` writes one, for a package-declared role; the primordial
+  `operator` role and any `rbac-domain` `CreateRole`-minted runtime role get none), so an actor holding
+  `InstallPackage`/`UpgradePackage` can `create` (or `update` an absent key — `found=false` is waved
+  through) a roleindex entry for a canonical name nobody has claimed yet, and this fire's write-once guard
+  then freezes that squatted binding forever. The row's own board text is updated to note roleindex now
+  shares this gap; closing it needs the same manifest-ownership / content-authenticity mechanism §8(a)
+  already names, not a roleindex-specific patch.
+- **No escape hatch for a legitimate repoint.** The guard has no healable carve-out (unlike permission's
+  `origin`/`declaredBy`), so if a surviving roleindex key's `data.roleId` ever needs to legitimately
+  change, `update` is now permanently rejected. Concretely: `roleindex`'s key hashes only
+  `canonicalName` and was unaffected by `cd20ce81`'s (2026-06-28) move from version-salted to
+  `entityNanoID`-derived role keys, so a package installed before that date and not yet upgraded since
+  would hit exactly this on its first post-guard upgrade. Checked against `identity-domain` (the package
+  with the most role activity): its manifest has advanced through dozens of upgrades since 2026-06-28
+  (currently v0.20.5), so any staleness there almost certainly self-healed via an ordinary, unguarded
+  update long before this guard existed — this is not believed to be live on any actively-developed
+  deployment, but it was not verified against a running stack. The failure mode if it ever does fire is
+  fail-closed and loud (`PermissionProvenanceError`, whole batch rejected, no partial write) — the safer
+  direction to fail in, matching the role-root case's identical no-heal precedent. Not building a heal
+  mechanism now: the shape of a *safe* one (that can't be used to launder the exact redirection this guard
+  exists to close) is a real design question, not a mirror of an established pattern — revisit if a
+  concrete repoint need ever arrives.
