@@ -109,7 +109,16 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 
 	// Processor (all lanes, AuthModeStub) + the transactional outbox publisher
 	// (relays the augur op's external.augur event to the bridge).
-	cp, _, err := processor.MakeStubPipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, processor.AuthModeStub, logger, "ac-processor")
+	//
+	// MakePipeline rather than MakeStubPipeline (capabilityBucket="" keeps
+	// AuthModeStub, v=nil keeps step 6.5 a no-op — the stub wrapper's exact
+	// arguments) for one reason: CreateAugurReasoningClaim pins op.actor to
+	// `primordialActor["weaver"]`, and the stub wrapper wires an empty
+	// AuthWiring, under which that name binds "" and the guard denies the REAL
+	// Weaver dispatch this harness exists to prove.
+	cp, _, err := processor.MakePipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, "",
+		processor.AuthModeStub, false, logger, "ac-processor",
+		processor.AuthWiring{PrimordialActors: testutil.PrimordialActors(t)}, nil)
 	require.NoError(t, err)
 	procCons, err := processor.EnsureConsumer(ctx, js, processor.ConsumerConfig{
 		StreamName:     "core-operations",

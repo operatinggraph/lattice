@@ -25,6 +25,7 @@ package capabilityauthor_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,12 +91,41 @@ func staffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// loomCapDoc grants Loom's primordial relay actor CreateAuthoringClaim — the
+// externalTask instanceOp whose script pins op.actor to
+// `primordialActor["loom"]`. Read through a func, not a package var:
+// bootstrap's primordial globals are populated by SetupPackageTestEnv's
+// EnsurePrimordials, well after package var initialization.
+//
+// staffCapDoc keeps its own CreateAuthoringClaim grant deliberately — an
+// operator-role holder that is NOT Loom is exactly the forged-submitter vector
+// the guard rejects, and the negative test submits as capStaffActorKey to prove
+// the refusal comes from the actor check rather than from a missing grant.
+func loomCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.LoomIdentityID,
+		Actor:                  bootstrap.LoomIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.LoomIdentityKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "CreateAuthoringClaim", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
 func setupCapAuthorEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+identity+hygiene
 	installPkg(t, ctx, conn, orchestrationbase.Package)
 	installPkg(t, ctx, conn, capabilityauthor.Package)
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, loomCapDoc())
 	return ctx, conn
 }
 
@@ -167,7 +197,7 @@ func claimEnv(reqID, handle, proposalKey string) *processor.OperationEnvelope {
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAuthoringClaim",
-		Actor:         capStaffActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "capabilityauthorclaim",
 		Payload:       json.RawMessage(b),
@@ -291,6 +321,7 @@ const (
 	capIDGrantOverscope = "CAcapExceedHJKMNPQRS"
 	capIDVertexTypeDDL  = "CAcapVertexDHJKMNPQR"
 	capIDOpMeta         = "CAcapMetaXHJKMNPQRST"
+	capIDForgedClaim    = "CAcapForgedHJKMNPQRS"
 
 	capHandlePending        = "CAHNDPendingHJKMNPQR"
 	capHandleBadKind        = "CAHNDBadKindHJKMNPQR"
@@ -300,7 +331,46 @@ const (
 	capHandleGrantOverscope = "CAHNDExceedHJKMNPQRS"
 	capHandleVertexTypeDDL  = "CAHNDVertexDHJKMNPQR"
 	capHandleOpMeta         = "CAHNDMetaXHJKMNPQRST"
+	capHandleForgedClaim    = "CAHNDForgedHJKMNPQRS"
 )
+
+// TestCapAuthor_ClaimByNonLoomOperator_Denied: the primordial actor guard.
+// capStaffActorKey holds the operator role AND a Scope:"any"
+// CreateAuthoringClaim grant, so step 3 authorizes it; only the script's
+// `op.actor != primordialActor["loom"]` check stops it from having an arbitrary
+// proposal's .request contents resolved into params and shipped to the
+// capabilityAuthor vendor. Identical to the claim the passing tests commit,
+// differing in the actor alone.
+func TestCapAuthor_ClaimByNonLoomOperator_Denied(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-forged-claim")
+
+	proposalKey := "vtx.capabilityproposal." + capIDForgedClaim
+	req := requestEnv(testutil.GenReqID("CAReqForge"), capIDForgedClaim, "a lens a forger wants dispatched")
+	testutil.PublishOp(t, conn, req)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	claim := claimEnv(testutil.GenReqID("CAClaimForge"), capHandleForgedClaim, proposalKey)
+	claim.Actor = capStaffActorKey
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a non-Loom operator's claim: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Loom's relay actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	// No claim vertex, and the proposal keeps no .claim aspect: a denied
+	// instanceOp leaves the escalation entirely undispatched.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.capabilityauthorclaim."+capHandleForgedClaim); err == nil {
+		t.Fatalf("a denied claim op must mint NO claim vertex")
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey+".claim"); err == nil {
+		t.Fatalf("a denied claim op must write NO .claim aspect on the proposal")
+	}
+}
 
 // TestCapAuthor_ValidLens_Pending: a well-formed, deterministically-validated
 // lens artifact is stored review.state=pending (the fire's remaining

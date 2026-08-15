@@ -1000,10 +1000,10 @@ func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, aut
 	return MakePipeline(conn, coreBucket, healthBucket, "", authMode, false, logger, instance, AuthWiring{}, nil)
 }
 
-// AuthWiring carries the platform-path routing inputs the step-3 authorizer
-// needs but the processor cannot compute itself (they depend on bootstrap key
-// constants that live above the processor import boundary). The caller
-// (cmd/processor) discovers SystemActorKeys and threads them in.
+// AuthWiring carries the authorization inputs the processor needs but cannot
+// compute itself (they depend on bootstrap key constants that live above the
+// processor import boundary). The caller (cmd/processor) discovers
+// SystemActorKeys, names the primordial engine actors, and threads both in.
 type AuthWiring struct {
 	// RbacRolesActive enables class-aware platform routing (system actors →
 	// cap.<actor> ∪ cap.roles.<actor> union; every other actor →
@@ -1018,6 +1018,16 @@ type AuthWiring struct {
 	// of admin + the service actors) that read the cap.<actor> ∪ cap.roles.<actor>
 	// union. Primordial, so a one-time discovery at startup is stable.
 	SystemActorKeys []string
+	// PrimordialActors names the trusted platform engines' bootstrap-seeded
+	// identity keys by engine name ("loom" → bootstrap.LoomIdentityKey). It
+	// reaches the Starlark environment as the `primordialActor` global (see
+	// primordialActorToStarlark), where an op whose `Scope:"any"` grant is
+	// broader than its one-engine semantics pins op.actor against it.
+	//
+	// Unset is the fail-closed posture, not an open one: a missing name binds
+	// the empty string, so the comparison rejects every real actor. A pipeline
+	// that drives such an op therefore has to wire this.
+	PrimordialActors map[string]string
 }
 
 // MakePipeline is the production wiring entry point. capabilityBucket is the
@@ -1095,6 +1105,7 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 
 	hydrator := NewHydratorWithCache(conn, coreBucket, ddls, logger)
 	hydrator.Vault = v
+	hydrator.PrimordialActors = authWiring.PrimordialActors
 
 	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now)
 	cp := NewCommitPath(Deps{

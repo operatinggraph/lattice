@@ -45,6 +45,35 @@ const (
 	lsConsumerRoleID = "BBConsumerRoZeHJKMNP"
 )
 
+// lsLoomCapDoc grants Loom's primordial relay actor the two externalTask
+// instanceOps whose scripts pin op.actor to `primordialActor["loom"]`. It is
+// read through a func, not a package var: bootstrap's primordial globals are
+// populated by SetupPackageTestEnv's EnsurePrimordials, well after package
+// var initialization.
+//
+// lsCapDoc keeps its own grant on those ops deliberately — an operator-role
+// holder that is NOT Loom is exactly the forged-submitter vector the guard
+// exists to reject, and the negative tests submit as lsActorKey to prove the
+// refusal comes from the script's actor check rather than from a missing grant.
+func lsLoomCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.LoomIdentityID,
+		Actor:                  bootstrap.LoomIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.LoomIdentityKey: 1},
+		Lanes:                  []string{"default", "urgent"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
+			{OperationType: "CreateLeaseDocInstance", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
 // lsCapDoc grants the test actor the lease-signing ops (scope any).
 func lsCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -92,6 +121,7 @@ func setupLeaseEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	installLeaseDeps(t, ctx, conn)
 	testutil.SeedCapDoc(t, ctx, conn, lsCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, lsLoomCapDoc())
 	// The operator grant is only half the claim — the workplace-confinement
 	// guard reads the holdsRole LINK to decide whether its caller is root.
 	testutil.SeedHoldsRole(t, ctx, conn, lsActorKey, bootstrap.RoleOperatorKey)
@@ -407,7 +437,7 @@ func TestLeaseServiceInstance_MintsClaimVertex_EmitsExternalEvent(t *testing.T) 
 		RequestID:     instReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseServiceInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseServiceInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + applicantKey +
@@ -493,6 +523,47 @@ func TestLeaseServiceInstance_MintsClaimVertex_EmitsExternalEvent(t *testing.T) 
 	}
 }
 
+// TestLeaseServiceInstance_NonLoomOperatorDenied: the primordial actor guard.
+// lsActorKey holds the operator role AND a Scope:"any" CreateLeaseServiceInstance
+// grant, so step 3 authorizes it — the ONLY thing standing between it and an
+// arbitrary applicant's PII reaching the backgroundCheck vendor is the script's
+// `op.actor != primordialActor["loom"]` check. Submitting the identical payload
+// the Loom-actor test commits above, differing in the actor alone, must be
+// rejected with AuthDenied, mint no claim vertex, and emit no external event.
+func TestLeaseServiceInstance_NonLoomOperatorDenied(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "instanceopforged")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBforgapp1cntHJKMNPQ")
+
+	handle := "forgedSvcHandAbCdEfG"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("instOpForged01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseServiceInstance",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseServiceInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + applicantKey +
+			`","adapter":"backgroundCheck","replyOp":"RecordLeaseServiceOutcome","params":{"family":"backgroundCheck"}}`),
+		ContextHint: &processor.ContextHint{Reads: []string{applicantKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a non-Loom operator's instanceOp: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Loom's relay actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	if keyExists(t, ctx, conn, "vtx.service."+handle) {
+		t.Fatalf("a denied instanceOp must mint NO claim vertex")
+	}
+}
+
 // findEmittedEvent reads the committed transactional-outbox aspect for an op's
 // requestId and returns the payload of the first event of the given class. The
 // outbox aspect is the faithful EventList persisted in the step-8 atomic batch
@@ -570,7 +641,7 @@ func TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted(t *testing.
 		RequestID:     testutil.GenReqID("replyInst0001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseServiceInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseServiceInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + applicantKey +

@@ -66,6 +66,35 @@ func crStaffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// crWeaverCapDoc grants Weaver's primordial dispatch actor the two reminder ops
+// whose scripts pin op.actor to `primordialActor["weaver"]`. Read through a
+// func, not a package var: bootstrap's primordial globals are populated by
+// SetupPackageTestEnv's EnsurePrimordials, well after package var init.
+//
+// crStaffCapDoc keeps its own grant on those ops deliberately — an
+// operator-role holder that is NOT Weaver is exactly the forged-submitter
+// vector the guard rejects, and the negative test below submits as
+// crStaffActorKey to prove the refusal comes from the actor check rather than
+// from a missing grant.
+func crWeaverCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.WeaverIdentityID,
+		Actor:                  bootstrap.WeaverIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.WeaverIdentityKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordAppointmentReminder", Scope: "any"},
+			{OperationType: "RecordFollowUpReminder", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
 func setupRemEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
@@ -85,6 +114,7 @@ func setupRemEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	}
 	stop()
 	testutil.SeedCapDoc(t, ctx, conn, crStaffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, crWeaverCapDoc())
 	// CreateAppointment's workplace-confinement guard reads the holdsRole LINK to
 	// decide whether its caller is root (actor_holds_operator), not the cap doc's
 	// Roles — so the operator staff actor needs the link, exactly as clinic-domain's
@@ -123,12 +153,22 @@ const crSubmittedAnchor = "2026-01-01T00:00:00Z"
 
 func crSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, class, payload string, reads []string, want processor.MessageOutcome) string {
 	t.Helper()
+	return crSubmitAs(t, ctx, conn, cp, cons, crStaffActorKey, label, op, class, payload, reads, want)
+}
+
+// crSubmitAs is crSubmit with the actor named explicitly. The reminder ops need
+// it: their scripts pin op.actor to `primordialActor["weaver"]`, so they are
+// submitted as bootstrap.WeaverIdentityKey — the actor Weaver's own actuator
+// stamps on a directOp (internal/weaver/actuator.go, from cmd/weaver's
+// ActorKey) — while every other op in this suite stays on the staff actor.
+func crSubmitAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, actor, label, op, class, payload string, reads []string, want processor.MessageOutcome) string {
+	t.Helper()
 	reqID := testutil.GenReqID(label)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: op,
-		Actor:         crStaffActorKey,
+		Actor:         actor,
 		SubmittedAt:   crSubmittedAnchor,
 		Class:         class,
 		Payload:       json.RawMessage(payload),
@@ -173,7 +213,7 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	// the Processor's operationType→class reverse index, which resolves to the
 	// appointmentReminderOp vertexType handler; the appointmentReminder aspect DDL
 	// is excluded from that index).
-	crSubmit(t, ctx, conn, cp, cons, "crrem0001", "RecordAppointmentReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crrem0001", "RecordAppointmentReminder", "",
 		`{"appointmentKey":"`+apptKey+`","remindedFor":"2026-07-01T15:00:00Z"}`, []string{apptKey}, processor.OutcomeAccepted)
 
 	rem := crReadDoc(t, ctx, conn, apptKey+".reminder")
@@ -196,12 +236,44 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	// the discriminator that proves the write is an UNCONDITIONED overwrite, not a
 	// create-only insert — a create-only second write would conflict on the existing
 	// .reminder key and be Rejected, failing this assertion.
-	crSubmit(t, ctx, conn, cp, cons, "crrem0002", "RecordAppointmentReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crrem0002", "RecordAppointmentReminder", "",
 		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
 	rem2 := crReadDoc(t, ctx, conn, apptKey+".reminder")
 	rd2, _ := rem2["data"].(map[string]any)
 	if s, _ := rd2["sentAt"].(string); s == "" {
 		t.Fatalf("reminder sentAt missing after re-run: %v", rem2["data"])
+	}
+}
+
+// TestRecordAppointmentReminder_NonWeaverOperatorDenied: the primordial actor
+// guard. crStaffActorKey holds the operator role AND a Scope:"any"
+// RecordAppointmentReminder grant, so step 3 authorizes it; only the script's
+// `op.actor != primordialActor["weaver"]` check stops it from having the
+// platform send a notification about an arbitrary patient's appointment to that
+// patient. The payload is the one the Weaver-actor test commits, differing in
+// the actor alone.
+func TestRecordAppointmentReminder_NonWeaverOperatorDenied(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "remforged", Instance: "cr-remforged"})
+
+	patientKey := "vtx.patient." + crSubmit(t, ctx, conn, cp, cons, "crfgpat001", "CreatePatient", "patient",
+		`{"fullName":"Forge Target"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + crSubmit(t, ctx, conn, cp, cons, "crfgprv001", "CreateProvider", "provider",
+		`{"fullName":"Dr. Forge","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	apptID := crSubmit(t, ctx, conn, cp, cons, "crfgapt001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	crSubmit(t, ctx, conn, cp, cons, "crfgrem001", "RecordAppointmentReminder", "",
+		`{"appointmentKey":"`+apptKey+`","remindedFor":"2026-07-01T15:00:00Z"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
+
+	// No marker: a denied reminder leaves the convergence gap OPEN, so Weaver's
+	// own dispatch still fires later. A written marker would have closed the gap
+	// on the strength of a forged send.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, apptKey+".reminder"); err == nil {
+		t.Fatalf("a denied reminder op must write NO .reminder marker")
 	}
 }
 
@@ -221,7 +293,7 @@ func TestRecordAppointmentReminder_RejectsTombstonedAppointment(t *testing.T) {
 		t.Fatalf("seed tombstoned appointment: %v", err)
 	}
 
-	crSubmit(t, ctx, conn, cp, cons, "crrem0003", "RecordAppointmentReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crrem0003", "RecordAppointmentReminder", "",
 		`{"appointmentKey":"`+dead+`"}`, []string{dead}, processor.OutcomeRejected)
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".reminder"); err == nil {
@@ -293,6 +365,38 @@ func TestRecordFollowUpReminderNotification_WritesMarker(t *testing.T) {
 		`{"externalRef":"`+extRef+`","status":"completed","result":"redelivered"}`, nil, processor.OutcomeRejected)
 }
 
+// TestRecordFollowUpReminder_NonWeaverOperatorDenied: the primordial actor
+// guard on the follow-up reminder, the sibling of
+// TestRecordAppointmentReminder_NonWeaverOperatorDenied. crStaffActorKey holds
+// the operator role AND a Scope:"any" RecordFollowUpReminder grant, so step 3
+// authorizes it; only the script's `op.actor != primordialActor["weaver"]`
+// check stops it from having the platform send a follow-up notification about
+// an arbitrary patient's appointment. Same payload as the Weaver-actor test
+// below, differing in the actor alone.
+func TestRecordFollowUpReminder_NonWeaverOperatorDenied(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "furemforged", Instance: "cr-furemforged"})
+
+	patientKey := "vtx.patient." + crSubmit(t, ctx, conn, cp, cons, "crfufgpat01", "CreatePatient", "patient",
+		`{"fullName":"Forge Target"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + crSubmit(t, ctx, conn, cp, cons, "crfufgprv01", "CreateProvider", "provider",
+		`{"fullName":"Dr. Forge","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + crSubmit(t, ctx, conn, cp, cons, "crfufgap01", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+
+	crSubmit(t, ctx, conn, cp, cons, "crfufgrm01", "RecordFollowUpReminder", "",
+		`{"appointmentKey":"`+apptKey+`","remindedFor":"2027-01-15T09:00:00Z"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
+
+	// No marker: a denied reminder leaves the convergence gap OPEN, so Weaver's
+	// own dispatch still fires later. A written marker would have closed the gap
+	// on the strength of a forged send.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, apptKey+".followUpReminder"); err == nil {
+		t.Fatalf("a denied follow-up reminder op must write NO .followUpReminder marker")
+	}
+}
+
 // TestRecordFollowUpReminder_WritesMarker mints a bookable appointment then drives
 // RecordFollowUpReminder, asserting the .followUpReminder.sentAt marker lands (class
 // followUpReminder) — the directOp write-path the followUpReminders playbook
@@ -315,7 +419,7 @@ func TestRecordFollowUpReminder_WritesMarker(t *testing.T) {
 	// The directOp: RecordFollowUpReminder targets the appointment. Class LEFT EMPTY
 	// exactly as Weaver's actuator dispatches a directOp (the operationType→class
 	// reverse index resolves to the followUpReminderOp vertexType handler).
-	crSubmit(t, ctx, conn, cp, cons, "crfurm001", "RecordFollowUpReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crfurm001", "RecordFollowUpReminder", "",
 		`{"appointmentKey":"`+apptKey+`","remindedFor":"2027-01-15T09:00:00Z"}`, []string{apptKey}, processor.OutcomeAccepted)
 
 	rem := crReadDoc(t, ctx, conn, apptKey+".followUpReminder")
@@ -332,7 +436,7 @@ func TestRecordFollowUpReminder_WritesMarker(t *testing.T) {
 
 	// Idempotent in effect: a second RecordFollowUpReminder is ACCEPTED and the marker
 	// stays present (the unconditioned-overwrite discriminator).
-	crSubmit(t, ctx, conn, cp, cons, "crfurm002", "RecordFollowUpReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crfurm002", "RecordFollowUpReminder", "",
 		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
 	rem2 := crReadDoc(t, ctx, conn, apptKey+".followUpReminder")
 	rd2, _ := rem2["data"].(map[string]any)
@@ -354,7 +458,7 @@ func TestRecordFollowUpReminder_RejectsTombstonedAppointment(t *testing.T) {
 		t.Fatalf("seed tombstoned appointment: %v", err)
 	}
 
-	crSubmit(t, ctx, conn, cp, cons, "crfurm003", "RecordFollowUpReminder", "",
+	crSubmitAs(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crfurm003", "RecordFollowUpReminder", "",
 		`{"appointmentKey":"`+dead+`"}`, []string{dead}, processor.OutcomeRejected)
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".followUpReminder"); err == nil {

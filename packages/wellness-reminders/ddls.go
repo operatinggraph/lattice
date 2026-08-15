@@ -173,6 +173,19 @@ def execute(state, op):
     p = op.payload
 
     if ot == "RecordBookingReminder":
+        # actor-guard: (primordial) restricted to Weaver's dispatch actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind this
+        # op is operator/Scope:"any", which admits every operator-role holder —
+        # far wider than the one engine that dispatches the
+        # wellnessBookingReminders directOp playbook. bookingKey arrives off the
+        # payload and is forwarded in the external.notification body the bridge
+        # turns into a real message to the client, so a wider submitter set is a
+        # forged send: an arbitrary operator naming any booking it likes and
+        # having the platform notify that client. First statement in the branch:
+        # it also denies the payload-shape and vertex-alive oracles beneath it.
+        if op.actor != primordialActor["weaver"]:
+            fail("AuthDenied: RecordBookingReminder is restricted to Weaver's dispatch actor; got " + op.actor)
+
         booking_key = required_string(p, "bookingKey")
         parts_of(booking_key, "bookingKey", "booking")
 

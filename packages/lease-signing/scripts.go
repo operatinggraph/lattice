@@ -1210,6 +1210,17 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateLeaseServiceInstance":
+        # actor-guard: (primordial) restricted to Loom's relay actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind this
+        # op is operator/Scope:"any", which admits every operator-role holder —
+        # far wider than the one engine that dispatches the pattern. subjectKey
+        # is payload-named and its identity's params are resolved and forwarded
+        # to an external adapter below, so a wider submitter set is an arbitrary
+        # subject's data reaching a vendor. First statement in the branch: it
+        # also denies the payload-shape and vertex-alive oracles beneath it.
+        if op.actor != primordialActor["loom"]:
+            fail("AuthDenied: CreateLeaseServiceInstance is restricted to Loom's relay actor; got " + op.actor)
+
         handle = required_bare_handle(p, "instanceKey")
         subject_key = required_string(p, "subjectKey")
         adapter = required_string(p, "adapter")

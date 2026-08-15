@@ -695,6 +695,78 @@ func ddlMapToStarlark(m map[string]MetaVertex) *starlarklib.Dict {
 	return d
 }
 
+// primordialActorNames is the closed key set of the `primordialActor` global —
+// one name per platform engine that dispatches ops on its own behalf ("loom"
+// relays externalTask instanceOps; "weaver" submits directOps). Every name is
+// ALWAYS bound, so a script's `primordialActor["loom"]` resolves to a string
+// rather than raising a KeyError, and a deployment that wired no value binds
+// the empty string — which makes an actor comparison against it fail closed
+// for every real (non-empty) actor rather than admitting one.
+var primordialActorNames = []string{"loom", "weaver"}
+
+// unwiredPrimordialActor is bound for an engine name the deployment supplied no
+// key for. It is deliberately not a well-formed vertex key: Contract #1 §1.1
+// keys are `vtx.<type>.<NanoID>`, so no actor the platform can resolve — and no
+// actor a caller can spell on an envelope that survives validation — is ever
+// equal to it. A guard comparing against an unwired name therefore denies every
+// submitter, which is the fail-closed direction.
+const unwiredPrimordialActor = "\x00unwired-primordial-actor"
+
+// primordialActorToStarlark builds the `primordialActor` global: the
+// bootstrap-seeded identity key of each trusted platform engine, keyed by
+// engine name.
+//
+// It is the missing half of an engine-submitted operation's authorization. A
+// `Scope:"any"` op granted to `operator` admits ANY operator-role holder, but
+// several such ops are dispatched by exactly one engine and act on payload-named
+// keys on that engine's authority — the externalTask instanceOps read a
+// payload-named subjectKey's data and forward it to an external adapter, and
+// Weaver's augur directOp mints a claim vertex over payload-named entity/target
+// keys and emits the escalation off-platform. "Holds operator" is much weaker
+// than the "is the one engine that dispatches this pattern" their own semantics
+// assume. Comparing `op.actor` against an entry here closes that gap, and these
+// keys are primordial (fixed at bootstrap), so the comparison is stable for the
+// process lifetime.
+//
+// What the comparison is worth, stated exactly. `op.actor` is NOT intrinsically
+// unforgeable — it is a field on the envelope, and every holder of a NATS
+// credential carrying `ops.>` publish writes it directly (11 credentials do, per
+// internal/natsperm/matrix.go's ExtraPubAllow entries; cmd/lattice/op/op.go:93
+// sets it verbatim from a `--actor` flag). It is server-resolved only relative
+// to the Gateway HTTP boundary, where the caller's session — not its request
+// body — decides the actor. So this guard narrows the admitted set from "any
+// operator-role holder reaching the platform through the Gateway" to "any holder
+// of an ops-publishing NATS credential". That is a large, real reduction of the
+// reachable population, not an absolute one, and the credential matrix is what
+// carries the remainder.
+//
+// The values arrive as a wiring parameter rather than an internal/bootstrap
+// import: the processor sits below that boundary by design and receives
+// primordial keys the same way SystemActorKeys does (AuthWiring, wired in
+// cmd/processor).
+//
+// The dict is frozen: a script may read it but never rebind an entry, so a
+// guard's comparison is against the platform's value and not one the script's
+// own earlier statements substituted.
+//
+// An engine name whose key is missing or blank binds a sentinel that no actor
+// can equal, rather than the empty string. Empty would make the guard's
+// soundness depend on a property proved three layers away (opwire.ParseEnvelope
+// rejecting a blank actor); the sentinel makes "an unwired registry admits
+// nobody" a local, self-evident property of this function.
+func primordialActorToStarlark(actors map[string]string) *starlarklib.Dict {
+	d := starlarklib.NewDict(len(primordialActorNames))
+	for _, name := range primordialActorNames {
+		key := actors[name]
+		if strings.TrimSpace(key) == "" {
+			key = unwiredPrimordialActor
+		}
+		_ = d.SetKey(starlarklib.String(name), starlarklib.String(key))
+	}
+	d.Freeze()
+	return d
+}
+
 func dictString(d *starlarklib.Dict, key string) (string, error) {
 	val, found, err := d.Get(starlarklib.String(key))
 	if err != nil {

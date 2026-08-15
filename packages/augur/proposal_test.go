@@ -21,6 +21,7 @@ package augur_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,12 +67,41 @@ func staffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// weaverCapDoc grants Weaver's primordial dispatch actor
+// CreateAugurReasoningClaim — the directOp whose script pins op.actor to
+// `primordialActor["weaver"]`. Read through a func, not a package var:
+// bootstrap's primordial globals are populated by SetupPackageTestEnv's
+// EnsurePrimordials, well after package var initialization.
+//
+// staffCapDoc keeps its own CreateAugurReasoningClaim grant deliberately — an
+// operator-role holder that is NOT Weaver is exactly the forged-dispatch vector
+// the guard rejects, and the negative test submits as apStaffActorKey to prove
+// the refusal comes from the actor check rather than from a missing grant.
+func weaverCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.WeaverIdentityID,
+		Actor:                  bootstrap.WeaverIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.WeaverIdentityKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "CreateAugurReasoningClaim", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
 func setupAugurEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+identity+hygiene
 	installPkg(t, ctx, conn, orchestrationbase.Package)
 	installPkg(t, ctx, conn, augur.Package)
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, weaverCapDoc())
 	return ctx, conn
 }
 
@@ -135,6 +165,11 @@ func seedEscalation(t *testing.T, ctx context.Context, conn *substrate.Conn) (ta
 // directOp resolves a FLAT params map from the lens row, so every field arrives at
 // the top-level payload (Option F — no nested params object). The instanceOp
 // validates its link endpoints via kv.Read, so no ContextHint.Reads is needed.
+//
+// The actor is Weaver's primordial key because the script pins op.actor to
+// `primordialActor["weaver"]`: any other actor is denied before the branch's
+// payload-shape checks run, which would make every scenario below pass on the
+// guard rather than on what it means to assert.
 func createClaimEnv(reqID, handle, targetKey, entityKey string) *processor.OperationEnvelope {
 	payload := map[string]any{
 		"instanceKey": handle,
@@ -150,7 +185,7 @@ func createClaimEnv(reqID, handle, targetKey, entityKey string) *processor.Opera
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAugurReasoningClaim",
-		Actor:         apStaffActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
@@ -216,6 +251,7 @@ const (
 	hAbsent  = "BBaugurAbsnHJKMNPQRS"
 	hNoClaim = "BBaugurNoclHJKMNPQRS"
 	hNested  = "BBaugurNestHJKMNPQRS"
+	hForged  = "BBaugurFrgdHJKMNPQRS"
 	hForeign = "BBaugurFrgnHJKMNPQRS"
 	hNoScope = "BBaugurNscpHJKMNPQRS"
 	hMalform = "BBaugurMfrmHJKMNPQRS"
@@ -312,7 +348,7 @@ func TestAugur_ClaimStoresModelOverride(t *testing.T) {
 		RequestID:     testutil.GenReqID("APClaimModel"),
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAugurReasoningClaim",
-		Actor:         apStaffActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
@@ -533,13 +569,49 @@ func TestAugur_NestedParamsRejected(t *testing.T) {
 		RequestID:     testutil.GenReqID("APNested00001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAugurReasoningClaim",
-		Actor:         apStaffActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
 	}
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestAugur_ClaimByNonWeaverOperator_Denied: the primordial actor guard.
+// apStaffActorKey holds the operator role AND a Scope:"any"
+// CreateAugurReasoningClaim grant, so step 3 authorizes it; only the script's
+// `op.actor != primordialActor["weaver"]` check stops it from minting a claim
+// over any entity it names and having that forged escalation billed to a
+// reasoning model. Identical to the claim the passing tests commit, differing
+// in the actor alone.
+func TestAugur_ClaimByNonWeaverOperator_Denied(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-forged")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	claim := createClaimEnv(testutil.GenReqID("APClaimForge"), hForged, targetKey, entityKey)
+	claim.Actor = apStaffActorKey
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a non-Weaver operator's claim: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Weaver's dispatch actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	// No claim vertex and no .gap aspect: a denied instanceOp leaves the
+	// escalation entirely unminted, so nothing downstream (the replyOp, the
+	// review lens) can ever see a forged episode.
+	proposalKey := "vtx.augurproposal." + hForged
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey); err == nil {
+		t.Fatalf("a denied claim op must mint NO proposal vertex")
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey+".gap"); err == nil {
+		t.Fatalf("a denied claim op must write NO .gap aspect")
+	}
 }
 
 // --- ReviewProposal (the human verdict op — design §3.2) ---------------------

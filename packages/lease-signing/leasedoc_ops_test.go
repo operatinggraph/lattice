@@ -16,6 +16,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -89,7 +90,7 @@ func TestLeaseDocInstance_MintsClaim_EmitsDocGenEvent(t *testing.T) {
 		RequestID:     instReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseDocInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseDocInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
@@ -223,7 +224,7 @@ func TestLeaseDocInstance_ManagedUnit_ResolvesLandlordKey(t *testing.T) {
 		RequestID:     instReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseDocInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseDocInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
@@ -296,7 +297,7 @@ func TestLeaseDocInstance_ShreddedApplicant_OmitsNameNoFailure(t *testing.T) {
 		RequestID:     instReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseDocInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseDocInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
@@ -338,7 +339,7 @@ func TestLeaseDocInstance_UnsignedSubject_Rejected(t *testing.T) {
 		RequestID:     testutil.GenReqID("docInstUns001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseDocInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseDocInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
@@ -350,6 +351,47 @@ func TestLeaseDocInstance_UnsignedSubject_Rejected(t *testing.T) {
 
 	if keyExists(t, ctx, conn, "vtx.service."+handle) {
 		t.Fatalf("an unsigned application must mint NO claim vertex")
+	}
+}
+
+// TestLeaseDocInstance_NonLoomOperatorDenied: the primordial actor guard on the
+// docGen instanceOp. lsActorKey holds the operator role AND a Scope:"any"
+// CreateLeaseDocInstance grant, so step 3 authorizes it; only the script's
+// `op.actor != primordialActor["loom"]` check stops it from having an arbitrary
+// signed application's lease terms assembled and shipped to the docGen vendor.
+// The payload is the one the Loom-actor tests commit, differing in actor alone.
+func TestLeaseDocInstance_NonLoomOperatorDenied(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "docinstforged")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBdocforgcntHJKMNPQR")
+	appKey, _ := signedDocGenApp(t, ctx, conn, cp, cons, applicantKey)
+
+	handle := "dgForgedHandAbCdEfGh"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("docInstForged1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseDocInstance",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseDocInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
+			`","adapter":"docGen","replyOp":"RecordLeaseDocOutcome","params":{"family":"docGen"}}`),
+		ContextHint: &processor.ContextHint{Reads: []string{appKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a non-Loom operator's docGen instanceOp: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Loom's relay actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+	if keyExists(t, ctx, conn, "vtx.service."+handle) {
+		t.Fatalf("a denied instanceOp must mint NO claim vertex")
 	}
 }
 
@@ -368,7 +410,7 @@ func mintDocGenClaim(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		RequestID:     testutil.GenReqID("docClaim" + handle[:5]),
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateLeaseDocInstance",
-		Actor:         lsActorKey,
+		Actor:         bootstrap.LoomIdentityKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseDocInstance",
 		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +

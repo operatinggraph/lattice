@@ -17,6 +17,7 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,6 +281,7 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 	hydrator := processor.NewHydratorWithCache(conn, HarnessCoreBucket, cache, logger)
 	hydrator.Vault = v
+	hydrator.PrimordialActors = PrimordialActors(t)
 	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now)
 	deps := processor.Deps{
 		Conn:        conn,
@@ -405,6 +407,35 @@ const replyInboxHeader = "Lattice-Reply-Inbox"
 // to produce — a ceiling that only trips on a real defect, not a timing
 // assumption.
 const replyWait = 30 * time.Second
+
+// PrimordialActors is the trusted-engine actor map a harness pipeline wires
+// into the Hydrator, mirroring cmd/processor's AuthWiring.PrimordialActors.
+//
+// A test driving an op that pins op.actor against `primordialActor["loom"]`
+// must ALSO submit as bootstrap.LoomIdentityKey (and likewise
+// `primordialActor["weaver"]` / bootstrap.WeaverIdentityKey) — wiring this map
+// is what makes that actor the accepted one, not what exempts the op from the
+// check.
+//
+// It reads internal/bootstrap's primordial globals, which EnsurePrimordials
+// populates (SetupPackageTestEnv does that), and FAILS the test if they are
+// still blank. Returning a half-empty map instead would wire a registry whose
+// every guard denies every actor, and the test would fail several steps later
+// as an unexplained AuthDenied on the real dispatch path — a fixture ordering
+// bug wearing the costume of the security behaviour under test.
+func PrimordialActors(t *testing.T) map[string]string {
+	t.Helper()
+	actors := map[string]string{
+		"loom":   bootstrap.LoomIdentityKey,
+		"weaver": bootstrap.WeaverIdentityKey,
+	}
+	for name, key := range actors {
+		if strings.TrimSpace(key) == "" {
+			t.Fatalf("testutil.PrimordialActors: bootstrap key for %q is empty — call EnsurePrimordials(t) (or SetupPackageTestEnv) before building a pipeline", name)
+		}
+	}
+	return actors
+}
 
 // SetupPackageTestEnv composes the standard test harness used by
 // package-level integration tests:

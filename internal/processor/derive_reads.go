@@ -103,7 +103,7 @@ func declaredReadsFromEnvelope(env *OperationEnvelope) declaredReads {
 // would discard that demotion — letting a derived `reads` entry re-harden a
 // key the descriptor declared optional, by the very rule below that exists to
 // stop derivation hardening anything.
-func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, base declaredReads, budget starlarksandbox.Budget) (declaredReads, error) {
+func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, base declaredReads, budget starlarksandbox.Budget, primordialActors map[string]string) (declaredReads, error) {
 	rid := env.RequestID
 
 	// One op value, bound BOTH as the call argument and as the `op` global.
@@ -112,7 +112,7 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 	// derivation comparing `op` against its own parameter should see one value.
 	opValue := deriveReadsOpValue(env)
 	out, sErr := starlarksandbox.Run(ctx, prog, deriveReadsEntrypoint,
-		starlarklib.Tuple{opValue}, deriveReadsGlobals(opValue), budget)
+		starlarklib.Tuple{opValue}, deriveReadsGlobals(opValue, primordialActors), budget)
 	if sErr != nil {
 		return declaredReads{}, &HydrationError{
 			Code:               "DeriveReadsFailed",
@@ -151,16 +151,22 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 // the pre-pass runs BEFORE hydration, so there is no state to expose. `ddl` is
 // likewise empty — the derivation's input is the op, per the contract's
 // `derive_reads(op)` signature.
-func deriveReadsGlobals(opValue *starlarkstruct.Struct) starlarklib.StringDict {
+//
+// `primordialActor` binds its REAL values here, unlike `state`/`ddl`: it is
+// process configuration, not hydration output, so it is as available before
+// hydration as `crypto` or `time` and binding an empty stand-in would be the
+// only untruthful entry in the dict.
+func deriveReadsGlobals(opValue *starlarkstruct.Struct, primordialActors map[string]string) starlarklib.StringDict {
 	return starlarklib.StringDict{
-		"state":  starlarklib.NewDict(0),
-		"op":     opValue,
-		"ddl":    starlarklib.NewDict(0),
-		"nanoid": failingModule("nanoid", []string{"new", "short"}),
-		"crypto": cryptoModule(),
-		"time":   timeModule(),
-		"json":   starlarkjson.Module,
-		"kv":     failingModule("kv", []string{"Read", "Links"}),
+		"state":           starlarklib.NewDict(0),
+		"op":              opValue,
+		"ddl":             starlarklib.NewDict(0),
+		"nanoid":          failingModule("nanoid", []string{"new", "short"}),
+		"crypto":          cryptoModule(),
+		"time":            timeModule(),
+		"json":            starlarkjson.Module,
+		"kv":              failingModule("kv", []string{"Read", "Links"}),
+		"primordialActor": primordialActorToStarlark(primordialActors),
 	}
 }
 

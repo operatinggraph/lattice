@@ -744,13 +744,12 @@ before building found no ready-made primitive for either half; both are small bu
 `internal/processor` half makes this a Lattice-core change, not a `packages/lease-signing`-only one —
 **retag M**, not S (banner corrected above).
 
-**Why "ownership guard" doesn't mean "actor owns subject."** `CreateLeaseServiceInstance` /
-`CreateLeaseDocInstance` / `capability-author`'s `CreateAuthoringClaim` are engine-submitted
-(`Scope:"any"`, granted to `operator`) — there is no end-user actor to compare against `subjectKey`
-(unlike `CreateLeaseApplication`'s `payload.applicant == actor`), and `subjectKey`'s vertex type (`identity`
-/ `leaseapp` / `capabilityproposal`) carries no back-link to an owning actor to walk. The real gap the
-ratify session named is narrower: **`Scope:"any"` admits *any* `operator`-role holder**, not only the one
-trusted engine (Loom) the package comments assume. Grounded live:
+**Why "ownership guard" doesn't mean "actor owns subject."** These ops are engine-submitted
+(`Scope:"any"`, granted to `operator`) — there is no end-user actor to compare against the payload-named
+key (unlike `CreateLeaseApplication`'s `payload.applicant == actor`), and that key's vertex type
+(`identity` / `leaseapp` / `capabilityproposal` / `appointment` / `booking`) carries no back-link to an
+owning actor to walk. The real gap the ratify session named is narrower: **`Scope:"any"` admits *any*
+`operator`-role holder**, not only the one trusted engine the package comments assume. Grounded live:
 
 - `internal/loom/engine.go:1065-1066` — Loom's `submitExternalTask` always sets `subjectKey` from
   `inst.SubjectKey`, the pattern instance's own trigger-bound, liveness-checked subject. Loom's own path is
@@ -762,31 +761,84 @@ trusted engine (Loom) the package comments assume. Grounded live:
   to `op.actor == LoomIdentityKey`, not to the whole `operator` role.
 - `internal/processor/starlark_runner.go:675-696` (`ddlMapToStarlark`) is the precedent to mirror — a
   small Go-built dict exposed to every script's global scope, the same shape a new `primordialActor` dict
-  needs. `op.actor` (`:661`) is already exposed and is the server-resolved, non-forgeable actor key —
+  needs. `op.actor` (`:661`) is already exposed —
   `authContextTarget`/`authTargetValidated` are the wrong tool here (they prove *self*-scope ownership,
   which doesn't apply to an engine submitter).
+- **What `op.actor` is worth, stated exactly.** It is NOT intrinsically unforgeable: it is a field on the
+  envelope, and any holder of a NATS credential carrying `ops.>` publish writes it directly — 11 credentials
+  do (`internal/natsperm/matrix.go`, `ExtraPubAllow`), and `cmd/lattice/op/op.go:93,158` exposes it as a
+  first-class `lattice op submit --actor <anything>` flag. It is "server-resolved" only relative to the
+  **Gateway HTTP boundary**, where the caller's session rather than its request body picks the actor. So the
+  guard narrows the admitted set from *any operator-role holder reaching the platform through the Gateway*
+  to *any holder of an ops-publishing NATS credential*. A large, real reduction — the credential matrix
+  carries the remainder — but not an absolute identity proof, and it must not be described as one.
 - `internal/processor` does not import `internal/bootstrap` today (by design — it receives primordial
   keys as constructor params, the same seam `SystemActorKeys` uses via `cmd/processor/main.go`). Thread
   `LoomIdentityKey` the same way: a param into whatever builds the Starlark environment, not a new import.
-- **Same shape, same fix, three call sites** (all `Scope:"any"`, all resolve a payload-named subject
-  through `resolve_subject_params`, all Loom-submitted per their own package comments):
-  `packages/lease-signing/scripts.go:1212` (`CreateLeaseServiceInstance`),
-  `packages/lease-signing/leasedoc_scripts.go:156` (`CreateLeaseDocInstance` — no `subject.*` param
-  templates in its pattern today, so no live PII exposure, but same forgeable-subject shape and same
-  fix cost; included rather than left half-guarded), `packages/capability-author/ddls.go:988`
-  (`CreateAuthoringClaim`, permissions.go:17: "Loom's relay actor … the same idiom … lease-signing's
-  `CreateLeaseServiceInstance` uses").
+- **Same shape, same fix, SEVEN call sites across two engines.** The census that found them is the
+  egress: a `Scope:"any"` op branch that emits an `external.<adapter>` event built from payload-named
+  keys. `resolve_subject_params` is NOT the common factor — only two of the seven call that helper; the
+  rest hand-assemble the same event body — so an earlier framing of this section that described all sites
+  as resolving "a payload-named subject through `resolve_subject_params`" was wrong, and a gate anchored
+  on it bound fewer than half the corpus.
+
+  The split is **3 Loom / 4 Weaver**, by which engine actually dispatches each op — not by which package
+  it lives in.
+
+  **Loom-relayed — 3** (`primordialActor["loom"]`; `internal/loom/engine.go:1065-1066` sets `subjectKey`
+  from the pattern instance's own trigger-bound subject, on the externalTask InstanceOp path):
+  - `packages/lease-signing/scripts.go` — `CreateLeaseServiceInstance` (calls `resolve_subject_params`;
+    reaches the applicant identity's PII via the `$sensitiveRef` egress path — the sharpest exposure).
+  - `packages/lease-signing/leasedoc_scripts.go` — `CreateLeaseDocInstance`. No `resolve_subject_params`
+    call, and no `subject.*` param templates in its pattern, but it is the **richest** egress of the
+    seven: it reads the application's `.signature`, the applicant link, the unit's `.address`/`.listing`
+    and the app's `.terms`, and ships all of it in `external.docGen`.
+  - `packages/capability-author/ddls.go` — `CreateAuthoringClaim` (calls `resolve_subject_params`).
+    `patterns.go:29-31` declares it as an externalTask **InstanceOp**, i.e. Loom-relayed, and
+    `permissions.go:17` already names "Loom's relay actor" as the intended submitter — the comment was
+    the only thing enforcing it.
+
+  **Weaver-dispatched — 4** (`primordialActor["weaver"]`; every Weaver directOp's actor is stamped once
+  at `internal/weaver/actuator.go:91` from `cfg.ActorKey`, which `cmd/weaver/main.go:89` sets to
+  `bootstrap.WeaverIdentityKey` — one code path shared by all four):
+  - `packages/augur/ddls.go` — `CreateAugurReasoningClaim`: flat payload `entityId`/`targetId` written to
+    `.gap` as TRUSTED context and echoed off-platform; forging one spends a billed model call on an
+    arbitrary entity.
+  - `packages/clinic-reminders/ddls.go` — `RecordAppointmentReminder`, and
+    `packages/clinic-reminders/followups.go` — `RecordFollowUpReminder`: payload `appointmentKey` forwarded
+    in `external.notification`, which the bridge turns into a real message to the patient.
+  - `packages/wellness-reminders/ddls.go` — `RecordBookingReminder`: same shape on `bookingKey`.
+
+  The three reminder ops were NOT in this section's original census and were found only when Inc 3's
+  trigger was retargeted to the egress. Their permission notes ("dispatched by Weaver's service actor",
+  `clinic-reminders/permissions.go:16`, `wellness-reminders/permissions.go:15`) had documented the
+  one-engine assumption all along with nothing enforcing it.
 
 **Decomposition:**
 
 | # | Scope | Green when |
 |---|---|---|
-| **1** | `internal/processor`: expose a small `primordialActor` Starlark global (mirrors `ddlMapToStarlark`) seeded from a param carrying the trusted-engine-actor keys the constructor already threads (start with `loom` only — the three live call sites need no other engine); wire the param from `cmd/processor/main.go` alongside the existing `SystemActorKeys` plumbing. | `go test ./internal/processor/...`; a script referencing `primordialActor["loom"]` resolves the real key in an integration test |
-| **2** | Guard the three call sites: `op.actor != primordialActor["loom"]` → `fail("AuthDenied: …")`, placed before any `resolve_subject_params`/sensitive read, in `lease-signing/scripts.go`, `lease-signing/leasedoc_scripts.go`, `capability-author/ddls.go`. Annotate each per the package's existing ownership-guard comment idiom (mirror `scripts.go:460-470`'s `# authcontext-target:` style — name this one, e.g. `# actor-guard: (primordial) restricted to Loom's relay actor, see design §12`). | `go test ./packages/lease-signing/... ./packages/capability-author/...`; a forged non-Loom-actor submission of each op is rejected; the real (Loom-actor) path is unchanged in existing tests |
-| **3** | Authoring gate (`scripts/lint-conventions.go` or a new `scripts/lint-*.go`): an op whose `Scope:"any"` **and** whose script calls `resolve_subject_params` with a non-literal (payload-sourced) `subject_key` must also reference `primordialActor[` in the same operationType branch — fail-closed on omission, mirroring the `# read-posture:` / `authContext.target` gates' doctrine (default-deny, author declares). Corpus today is exactly the 3 sites in Inc 2, so the gate ships blocking, not warn-first (same "migration leaves zero debt" reasoning as §5.5). | `STRICT=1 go run ./scripts/lint-conventions.go` (or the new gate) passes clean on `main`; a synthetic violating script fails it |
+| **1** | `internal/processor`: expose a small `primordialActor` Starlark global (mirrors `ddlMapToStarlark`) seeded from a param carrying the trusted-engine-actor keys the constructor already threads — `loom` AND `weaver`, since the corpus spans both engines; wire the param from `cmd/processor/main.go` alongside the existing `SystemActorKeys` plumbing. An engine name with no key wired binds a sentinel no actor can equal, so an unwired registry denies everyone as a local property of the mechanism. | `go test ./internal/processor/...`; a script referencing `primordialActor["loom"]` resolves the real key in an integration test |
+| **2** | Guard all seven call sites: `op.actor != primordialActor["<engine>"]` → `fail("AuthDenied: …")` as the branch's FIRST statement (ahead of the payload-shape and vertex-alive oracles as well as the egress), in `lease-signing/scripts.go`, `lease-signing/leasedoc_scripts.go`, `capability-author/ddls.go`, `augur/ddls.go`, `clinic-reminders/ddls.go`, `clinic-reminders/followups.go`, `wellness-reminders/ddls.go`. Annotate each `# actor-guard: (primordial) <why>`. | `go test` on all five packages; a forged non-engine-actor submission of each op is rejected; the real (engine-actor) path is unchanged in existing tests |
+| **3** | Authoring gate (`scripts/lint-conventions.go`): an op branch that is `Scope:"any"` **and** emits `"class": "external.<adapter>"` must be preceded, IN THAT BRANCH, by the structural guard `if op.actor != primordialActor["<engine>"]:` with a `fail(` body. Checked structurally, not by substring: a comment, a dead `if False and …` branch, a guard placed after the emission, and a file-wide `primordialActor = …` shadow are each rejected. Escape hatch for a shared emission helper the gate cannot attribute: `# actor-guard: (caller-guarded) <why>`. Corpus is the 7 sites in Inc 2, so the gate ships blocking, not warn-first (same "migration leaves zero debt" reasoning as §5.5). | `STRICT=1 go run ./scripts/lint-conventions.go` passes clean; its self-test pins each bypass shape; deleting any of the 7 guards fails it |
 
 Increments 1–2 are the security fix; Increment 3 is what makes it stick for the next author. All three are
-one fire (owner: Lattice Steward, component: Processor + lease-signing + capability-author).
+one fire (owner: Lattice Steward, component: Processor + lease-signing + capability-author + augur +
+clinic-reminders + wellness-reminders).
 **Review depth:** this is a new enforcement point on the security/capability plane — full 3-layer
 adversarial regardless of size, per the Steward's model-tier table.
+
+**What this fire does and does not close.** The guard runs at **step 5** (script execution). A forged
+envelope naming a victim's aspect key in `contextHint.reads` is still hydrated — and Vault-decrypted — at
+**step 4**, before the guard ever runs; what contains that today is the pre-existing step-6
+`validateExternalEgressGuard`, which this fire leaves untouched. So this closes **dispatch forgery** and the
+**non-external-plane private-data exposure** (lease terms, unit rent, a patient's appointment being
+notified, a billed model call spent on an arbitrary entity) — all real and worth shipping — but it does
+**not** close §1.1 face (a), "the decrypt happens at all". That remains Increment 1 of the shelved design.
+
+**Scope of Inc 3's guarantee.** `scripts/lint-conventions.go` scans `packages/**` **Go sources** — the
+package-authored corpus. It does not see AI-authored `vertexTypeDDL` Starlark artifacts installed at
+runtime and validated by `internal/pkgmgr/capabilitymaterializer_starlark.go`. Those are human-approval
+gated today, so this is not a live hole, but "makes it stick for the next author" means the next *package*
+author, not the next *installed* artifact.
 </content>

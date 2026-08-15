@@ -26,6 +26,7 @@ import (
 // obscure failure on a live operation.
 var scriptGlobalNames = []string{
 	"state", "op", "ddl", "nanoid", "crypto", "time", "json", "kv",
+	"primordialActor",
 }
 
 // scriptGlobalNameSet is scriptGlobalNames as the predeclared-name probe
@@ -166,5 +167,11 @@ func scriptGlobals(sc ScriptContext, stateVal starlarklib.Value, opVal starlarkl
 		// via starlarksandbox.ContextFromThread (see starlark_kv.go), so a slow
 		// round-trip counts against the same wall budget Execute enforces.
 		"kv": kvModule(sc),
+		// primordialActor["<engine>"] — the bootstrap-seeded identity key of a
+		// trusted platform engine (see primordialActorToStarlark). Pure, frozen
+		// data, identical for every operation in the process: an op whose grant
+		// is `Scope:"any"` but whose semantics assume ONE engine submitter pins
+		// `op.actor` against it before touching the subject its payload names.
+		"primordialActor": primordialActorToStarlark(sc.PrimordialActors),
 	}
 }

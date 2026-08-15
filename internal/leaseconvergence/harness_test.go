@@ -222,8 +222,12 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	// on meta-lane commits, so InstallPackage's meta-lane writes land before any
 	// package op is submitted. capabilityBucket="" keeps AuthModeStub (the
 	// convergence proof is orchestration mechanics, not capability auth); v wires
-	// real PII crypto in place of MakeStubPipeline's nil.
-	cp, _, err := processor.MakePipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, "", processor.AuthModeStub, false, logger, "lc-processor", processor.AuthWiring{}, v)
+	// real PII crypto in place of MakeStubPipeline's nil. PrimordialActors is
+	// load-bearing even under AuthModeStub: lease-signing's externalTask
+	// instanceOps pin op.actor to `primordialActor["loom"]`, which binds "" when
+	// unwired and would deny the REAL Loom dispatch this harness exists to prove.
+	cp, _, err := processor.MakePipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, "", processor.AuthModeStub, false, logger, "lc-processor",
+		processor.AuthWiring{PrimordialActors: testutil.PrimordialActors(t)}, v)
 	require.NoError(t, err)
 	procCons, err := processor.EnsureConsumer(ctx, js, processor.ConsumerConfig{
 		StreamName:     "core-operations",

@@ -99,6 +99,13 @@ type ScriptContext struct {
 	// seam (connKVReader), and steps 6/6.5's own resolver calls — the same
 	// shared-by-pointer, nil-safe, dies-with-the-context shape as LiveReads.
 	DDLResolutionMemo *ddlResolutionMemo
+	// PrimordialActors are the bootstrap-seeded identity keys of the trusted
+	// platform engines, keyed by engine name ("loom"), surfaced to the script
+	// as the `primordialActor` global (see primordialActorToStarlark). Threaded
+	// in as data rather than imported, the same seam SystemActorKeys uses.
+	// Nil/absent binds the empty string for the missing name, which fails an
+	// actor comparison closed rather than admitting an arbitrary actor.
+	PrimordialActors map[string]string
 }
 
 // ScriptKVReader performs a single on-demand Core KV read for a Starlark

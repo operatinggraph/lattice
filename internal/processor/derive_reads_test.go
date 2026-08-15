@@ -169,7 +169,7 @@ func TestDeriveReads_StubsCoverEveryRealMember(t *testing.T) {
 	t.Parallel()
 	realKV := kvModule(ScriptContext{})
 	realNanoID := nanoidModule(testNanoID1)
-	stubs := deriveReadsGlobals(deriveReadsOpValue(newTestEnvelope(testNanoID1)))
+	stubs := deriveReadsGlobals(deriveReadsOpValue(newTestEnvelope(testNanoID1)), nil)
 
 	for _, tc := range []struct {
 		module string
@@ -452,7 +452,7 @@ func TestScriptGlobals_KeySetMatchesTheCompileNameSet(t *testing.T) {
 		}
 	}
 	// The pre-pass binds the same names, with the impure ones stubbed.
-	pre := deriveReadsGlobals(deriveReadsOpValue(newTestEnvelope(testNanoID1)))
+	pre := deriveReadsGlobals(deriveReadsOpValue(newTestEnvelope(testNanoID1)), nil)
 	if len(pre) != len(scriptGlobalNames) {
 		t.Fatalf("the pre-pass binds %d names, want %d", len(pre), len(scriptGlobalNames))
 	}

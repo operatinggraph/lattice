@@ -103,7 +103,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "augur",
-	Version:       "0.4.2",
+	Version:       "0.5.0",
 	Description:   "Augur (Weaver L3 reasoning tier) data + safety foundation: the augurproposal vertex type + the CreateAugurReasoningClaim / RecordProposal capture pair (record-time deterministic-validation boundary) + the ReviewProposal human-verdict op (re-validated on approve) + the augurDispatch meta.weaverTarget/augurDispatchPending lens/RecordProposalDispatch flip (Fire 2b — closes the loop: dispatches an approved proposal's remediation via the proposedOp action after a dispatch-time re-validation, collapse-only under reclaim).",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),

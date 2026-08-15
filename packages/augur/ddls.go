@@ -448,6 +448,21 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateAugurReasoningClaim":
+        # actor-guard: (primordial) restricted to Weaver's dispatch actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind this
+        # op is operator/Scope:"any", which admits every operator-role holder —
+        # far wider than the one engine that dispatches the escalation. Every
+        # coordinate this branch trusts (targetId / entityId / gapColumn /
+        # trigger) arrives FLAT off the payload and is written to .gap as the
+        # TRUSTED context the replyOp and the reviewer read back, and the same
+        # coordinates leave the platform in the external.<adapter> body, so a
+        # wider submitter set is a forged escalation: an arbitrary operator
+        # naming any entity it likes as the reasoned-about candidate and
+        # spending a model call on it. First statement in the branch: it also
+        # denies the payload-shape and vertex-alive oracles beneath it.
+        if op.actor != primordialActor["weaver"]:
+            fail("AuthDenied: CreateAugurReasoningClaim is restricted to Weaver's dispatch actor; got " + op.actor)
+
         # The reasoning instanceOp: mint the claim vertex write-ahead of the
         # reasoning call, recording the TRUSTED escalation context. Dispatched by
         # Weaver as a directOp (Option F) — every param arrives FLAT at the

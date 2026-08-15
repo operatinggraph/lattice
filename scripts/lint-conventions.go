@@ -290,6 +290,50 @@ var (
 	// runtime symptom at all. substrate.Conn owns them and multiplexes through
 	// OnConnectionStateChange.
 	connStateHandlerCall = regexp.MustCompile(`\.Set(?:DisconnectErr|Disconnect|Reconnect|Closed)Handler\(`)
+	// Primordial-actor guard (declared-read-scope-authorization-design.md §12).
+	// externalEventEmit anchors a script EMITTING an external.<adapter> business
+	// event — the moment payload-named subject data leaves the platform, and the
+	// hazard this gate binds. Anchored on the `"class":` field rather than the
+	// bare prefix so the Go-side package prose that merely NAMES an
+	// `external.notification` event does not match; both the
+	// `"external." + adapter` and the `"external.<literal>"` spellings do.
+	externalEventEmit = regexp.MustCompile(`"class":\s*"external\.`)
+	// opBranchHeader anchors a DDL script's per-operationType dispatch branch,
+	// the unit this gate reasons over: a guard in one branch says nothing about
+	// its siblings.
+	opBranchHeader = regexp.MustCompile(`(?m)^([ \t]*)if ot == "([A-Za-z0-9_]+)"`)
+	// topLevelDef anchors a script's own top-level `def` — the marker that an
+	// emission has left its dispatch branch and moved into a helper the gate
+	// cannot attribute (it does not trace calls).
+	topLevelDef = regexp.MustCompile(`(?m)^def `)
+	// primordialActorGuard is the ONE guard spelling this gate accepts. Anchored
+	// end to end on its own line so a mention in a comment, a guard buried in a
+	// compound condition (`if False and op.actor != ...`), or any other
+	// text that merely CONTAINS the global cannot pass for the check. The
+	// canonical form is the only one in the corpus, and pinning it is what makes
+	// the gate a structural test rather than a string search.
+	primordialActorGuard = regexp.MustCompile(`(?m)^([ \t]*)if op\.actor != primordialActor\["[a-z]+"\]:[ \t]*$`)
+	// primordialActorAssign anchors an ASSIGNMENT to the predeclared global —
+	// the shadowing bypass. starlark-go binds a function-local name over a
+	// predeclared one for the whole function, so `primordialActor = {...}` turns
+	// every guard below it into a self-comparison. The trailing [^=] keeps `==`
+	// out; a `!=` never reaches the `=` because the `!` fails the character class
+	// before it.
+	primordialActorAssign = regexp.MustCompile(`(?m)^[ \t]*primordialActor[ \t]*(\[[^\]]*\])?[ \t]*=[^=]`)
+	// actorGuardShape is the annotation a script carries to document the guard,
+	// or to declare that a shared emission helper is discharged by its callers.
+	actorGuardShape = regexp.MustCompile(`#\s*actor-guard:\s*\(([a-z-]+)\)(.*)$`)
+	// branchDataAccess anchors where a branch first TOUCHES the subject its
+	// payload named — a lazy Core KV read, a bounded link enumeration, or the
+	// helper that resolves the subject's own aspects into adapter params. The
+	// guard must precede this, not merely the emission: a guard that runs after
+	// the read has already let an arbitrary caller use the op as a read (and
+	// decrypt) oracle, even when nothing is ultimately sent.
+	branchDataAccess = regexp.MustCompile(`kv\.Read\(|kv\.Links\(|resolve_subject_params\(`)
+	// permissionOperationType / permissionScope read a pkgmgr.PermissionSpec
+	// entry's declared grant scope out of the owning package's own sources.
+	permissionOperationType = regexp.MustCompile(`OperationType:\s*"([A-Za-z0-9_]+)"`)
+	permissionScope         = regexp.MustCompile(`Scope:\s*"([a-z]+)"`)
 	// authContext.target shape declaration (authcontext-target-validated-
 	// primitive-design.md §5.5). authCtxTargetRef anchors any script reference
 	// to the forwarded, unvalidated field; authCtxTargetShape is the annotation
@@ -494,6 +538,18 @@ var workplaceExemptShapes = map[string]bool{
 // `op.actor` proves the platform checked it, and a scope=any caller chooses
 // both. The correct spelling of an exemption is `op.authTargetValidated`, and
 // every confinement guard in the corpus now uses it.
+// actorGuardShapes are the declarations a packages/ script may make about the
+// primordial-actor guard. Deliberately only two, and only one of them
+// discharges anything: (primordial) DOCUMENTS the canonical guard — the gate
+// still requires the guard statement itself, so the annotation can never stand
+// in for it — while (caller-guarded) is the escape hatch for a shared emission
+// helper the gate cannot attribute to a single dispatch branch, and asserts
+// that every caller pins the submitter first.
+var actorGuardShapes = map[string]bool{
+	"primordial":     true,
+	"caller-guarded": true,
+}
+
 var authCtxTargetShapes = map[string]bool{
 	"ownership":     true,
 	"payload-bind":  true,
@@ -915,13 +971,15 @@ func scanSource(path string, data []byte) []finding {
 	// Which annotation, if any, covers each line — one map per annotation kind,
 	// each resolved against the annotated statement's own block
 	// (see annotationSpans).
-	var postureAt, authCtxAt, workplaceAt map[int]annotation
+	var postureAt, authCtxAt, workplaceAt, actorGuardAt map[int]annotation
 	if postureScoped {
+		out = append(out, checkPrimordialActorGuard(path, string(data))...)
 		exemptHelpers = exemptionHelpers(data)
 		lines := strings.Split(string(data), "\n")
 		postureAt = annotationSpans(lines, readPosture)
 		authCtxAt = annotationSpans(lines, authCtxTargetShape)
 		workplaceAt = annotationSpans(lines, workplaceExemptShape)
+		actorGuardAt = annotationSpans(lines, actorGuardShape)
 	}
 	// kv-batch scope: the Starlark write path's own list-then-get sites Fire
 	// 1 collapsed (script-live-read-round-trip-collapse-design.md §5 Inc 3)
@@ -989,6 +1047,7 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
 			out = append(out, checkAuthContextTarget(path, ln, line, authCtxAt[ln])...)
 			out = append(out, checkWorkplaceExempt(path, ln, line, workplaceAt[ln], exemptHelpers)...)
+			out = append(out, checkActorGuardAnnotations(path, ln, line, actorGuardAt[ln])...)
 		}
 	}
 	return out
@@ -999,6 +1058,325 @@ func scanSource(path string, data []byte) []finding {
 // braces — a safety cap against pathological input, well beyond any real
 // LensSpec entry's size.
 const lensScanWindow = 8000
+
+// checkPrimordialActorGuard flags a `Scope:"any"` operation whose script sends
+// an `external.<adapter>` event without first pinning `op.actor` to a trusted
+// platform engine (declared-read-scope-authorization-design.md §12).
+//
+// The hazard is a mismatch between what a grant admits and what an op assumes.
+// These ops are each dispatched by exactly ONE engine — Loom relays the
+// externalTask instanceOps, Weaver submits the directOps — but the grant that
+// carries them is operator/`Scope:"any"`, i.e. every operator-role holder. The
+// op then takes the keys it acts on from its own payload, reads their data, and
+// copies it into an `external.<adapter>` event body, which leaves the platform.
+// So an actor the op never contemplated can name any subject it likes and have
+// that subject's data delivered to a vendor. Shape validation and a liveness
+// check do not touch this: both answer "is the subject well-formed and alive",
+// never "may THIS submitter dispatch for it".
+//
+// The trigger is the EGRESS, not any particular helper. An earlier revision
+// anchored on `resolve_subject_params(`, which bound only the two ops that
+// happen to call that helper; the other five hand-assemble the same event body
+// from the same payload-named keys and went unbound — including the richest
+// exposure of the seven (lease-signing's docGen instanceOp, which ships the
+// application's signature, its applicant, the unit's address and the lease
+// terms). `"class": "external.` is the shape the hazard actually has, and
+// retargeting to it is what surfaced the three reminder ops the original
+// census missed entirely.
+//
+// What discharges it is a STRUCTURAL guard, not a mention. The gate requires
+// the canonical statement
+//
+//	if op.actor != primordialActor["<engine>"]:
+//	    fail(...)
+//
+// on its own non-comment line, with a `fail(` in its body, positioned before the
+// earlier of the branch's first data access (branchDataAccess) and its emission.
+// Guarding only the emission would be too weak: a guard that runs after the
+// subject has been read still lets an arbitrary caller use the op as a read —
+// and, for a sensitive aspect, a decrypt — oracle even when nothing is sent.
+//
+// Requiring only that the branch CONTAIN the text `primordialActor[` — what the
+// earlier revision did — is satisfied by a comment, by a dead `if False and …`
+// branch, by a guard placed after the data has been read or sent, by a guard
+// whose body does not refuse, and by a local `primordialActor = {...}` that
+// shadows the predeclared global for the whole function (starlark-go binds a
+// function-local assignment over a predeclared name). Each is checked here and
+// pinned by its own self-test case; the shadow check is file-wide, since the
+// shadowing assignment need not sit in the branch it defeats.
+//
+// KNOWN LIMITATION — this gate does NOT trace call graphs. Branch attribution is
+// textual: an emission is attributed to the nearest preceding `if ot == "<Op>":`
+// header at the same indent. A helper `def` that emits and is called from
+// several branches is attributed to whichever branch precedes its definition,
+// not to its callers, so a helper called from BOTH a guarded and an unguarded
+// branch is judged by the wrong one. Two mitigations, both fail-closed: an
+// emission separated from its branch header by a top-level `def` is treated as
+// living in a helper and demands the `(caller-guarded)` declaration below, and
+// an emission with no preceding branch header at all does the same. A script
+// author must therefore keep the emission in its own dispatch branch, or say in
+// writing why the guard lives at the call sites. Closing the gap properly needs
+// a real Starlark parser, which is out of proportion to a corpus where every
+// emission today sits directly in its own branch.
+//
+// Fail-closed throughout, per this file's default-deny doctrine: an emission
+// whose branch cannot be identified is reported, and an operation whose declared
+// Scope cannot be read (see packageOpScopes) is treated as "any".
+func checkPrimordialActorGuard(path, src string) []finding {
+	var out []finding
+	lines := strings.Split(src, "\n")
+	declared := annotationSpans(lines, actorGuardShape)
+
+	// The shadow check is file-wide and unconditional: a local rebinding of
+	// `primordialActor` anywhere in a script makes EVERY guard in that script a
+	// comparison against a script-chosen value, so it is reported even when the
+	// file's own guards are otherwise well-formed.
+	for _, loc := range primordialActorAssign.FindAllStringIndex(src, -1) {
+		ln := 1 + strings.Count(src[:loc[0]], "\n")
+		if isCommentLine(lines[ln-1]) {
+			continue
+		}
+		out = append(out, finding{file: path, line: ln,
+			msg: "primordial-actor: `primordialActor` is ASSIGNED here, which shadows the predeclared platform " +
+				"global for the rest of the function (starlark-go binds a function-local name over a predeclared " +
+				"one). Every `op.actor != primordialActor[...]` comparison in this script then tests a value the " +
+				"script itself chose, so the guard proves nothing. Rename the local"})
+	}
+
+	for _, m := range externalEventEmit.FindAllStringIndex(src, -1) {
+		pos := m[0]
+		ln := 1 + strings.Count(src[:pos], "\n")
+		if isCommentLine(lines[ln-1]) {
+			continue
+		}
+		shape, why, hasDecl := declaredActorGuard(declared, ln)
+		if hasDecl && shape == "caller-guarded" && strings.TrimSpace(why) != "" {
+			continue
+		}
+		op, branchStart, branchEnd, ok := enclosingOpBranch(src, pos)
+		// A top-level `def` between the branch header and the emission means the
+		// emission is in a helper that merely FOLLOWS that branch, not in it.
+		inHelper := ok && topLevelDef.MatchString(src[branchStart:pos])
+		if !ok || inHelper {
+			out = append(out, finding{file: path, line: ln,
+				msg: "primordial-actor: an `external.<adapter>` emission that does not sit directly inside its own " +
+					"`if ot == \"<Op>\":` dispatch branch — this gate attributes an emission textually and does not " +
+					"trace calls, so it cannot tell which operations reach this one or whether each of them pins its " +
+					"submitter. Move the emission into its operation's branch, or declare " +
+					"`# actor-guard: (caller-guarded) <why every caller pins op.actor first>` " +
+					"(declared-read-scope-authorization-design.md §12)"})
+			continue
+		}
+		if !packageOpScopeIsAny(path, op) {
+			continue
+		}
+		// The guard must precede the earlier of the branch's first data access
+		// and the emission — a guard that runs after the subject has been read
+		// still leaves the op usable as a read/decrypt oracle by any caller.
+		branch := src[branchStart:branchEnd]
+		limit := pos - branchStart
+		if da := branchDataAccess.FindStringIndex(branch); da != nil && da[0] < limit {
+			limit = da[0]
+		}
+		if guardedBefore(branch, limit) {
+			continue
+		}
+		out = append(out, finding{file: path, line: ln,
+			msg: "primordial-actor: " + op + " is granted at Scope:\"any\" and sends an `external.<adapter>` event " +
+				"built from keys its own payload names, but no `if op.actor != primordialActor[\"<engine>\"]:` guard " +
+				"with a fail() body precedes the emission in this branch. Scope:\"any\" admits every holder of the " +
+				"granted role, not just the one engine that dispatches this op, so any of them can name an arbitrary " +
+				"subject and have that subject's data forwarded to the vendor. Add the guard as the branch's first " +
+				"statement — `if op.actor != primordialActor[\"loom\"]: fail(\"AuthDenied: ...\")` — and annotate it " +
+				"`# actor-guard: (primordial) <why>` (declared-read-scope-authorization-design.md §12). A mention of " +
+				"primordialActor in a comment, in a dead branch, or AFTER the emission does not count, and neither " +
+				"does shape or liveness validation: none of them answers who may dispatch for the subject"})
+	}
+	return out
+}
+
+// declaredActorGuard resolves the `# actor-guard:` annotation covering line ln,
+// validating the shape vocabulary. An unknown shape or a missing `<why>` is
+// reported by checkActorGuardAnnotations, so this only reports what was found.
+func declaredActorGuard(spans map[int]annotation, ln int) (shape, why string, ok bool) {
+	a, found := spans[ln]
+	if !found || a.shape == "" {
+		return "", "", false
+	}
+	return a.shape, a.why, true
+}
+
+// checkActorGuardAnnotations keeps the `# actor-guard:` vocabulary closed, the
+// same way the authcontext-target and read-posture gates keep theirs. An
+// annotation is the one thing that can discharge the egress rule, so a typo in
+// the shape must be a finding rather than a silently inert comment.
+func checkActorGuardAnnotations(path string, ln int, line string, declared annotation) []finding {
+	if !actorGuardShape.MatchString(line) {
+		return nil
+	}
+	shape, why := declared.shape, declared.why
+	if shape == "" {
+		shape, why = "", ""
+		if m := actorGuardShape.FindStringSubmatch(line); m != nil {
+			shape, why = m[1], m[2]
+		}
+	}
+	if !actorGuardShapes[shape] {
+		return []finding{{file: path, line: ln,
+			msg: "actor-guard: unknown shape (" + shape + ") — the declared shapes are (primordial), documenting " +
+				"the canonical `op.actor != primordialActor[...]` guard, and (caller-guarded), asserting that every " +
+				"caller of a shared emission helper pins the submitter first"}}
+	}
+	if strings.TrimSpace(why) == "" {
+		return []finding{{file: path, line: ln,
+			msg: "actor-guard: a (" + shape + ") declaration must state its `<why>` — what pins the submitter, in " +
+				"the author's own words"}}
+	}
+	return nil
+}
+
+// guardedBefore reports whether `branch` contains the canonical primordial-actor
+// guard, with a fail() in its body, at an offset before `emitAt`.
+//
+// The fail() requirement is what separates a guard from a branch that merely
+// mentions the global: a comparison whose body does not refuse lets execution
+// fall straight through to the emission.
+func guardedBefore(branch string, emitAt int) bool {
+	for _, loc := range primordialActorGuard.FindAllStringSubmatchIndex(branch, -1) {
+		if loc[0] >= emitAt {
+			continue
+		}
+		if guardBodyRefuses(branch, loc[1], len(branch[loc[2]:loc[3]])) {
+			return true
+		}
+	}
+	return false
+}
+
+// guardBodyRefuses reports whether the block opened at bodyStart (just past the
+// guard's `:`) refuses — its first non-blank, non-comment line is indented
+// deeper than the guard and calls fail().
+func guardBodyRefuses(branch string, bodyStart, guardIndent int) bool {
+	for _, line := range strings.Split(branch[bodyStart:], "\n") {
+		if strings.TrimSpace(line) == "" || isCommentLine(line) {
+			continue
+		}
+		if indentWidth(line) <= guardIndent {
+			return false
+		}
+		return strings.Contains(line, "fail(")
+	}
+	return false
+}
+
+// enclosingOpBranch returns the operationType and the source span of the
+// `if ot == "<Op>":` dispatch branch containing pos.
+//
+// The branch is bounded by the next branch header at the SAME indent (a sibling
+// dispatch arm) or the end of the source — the same delimiting the packages'
+// own dispatch-read guard tests use. Indent-equality is what keeps a nested
+// `if ot ==` inside a helper from prematurely closing the arm.
+func enclosingOpBranch(src string, pos int) (op string, start, end int, ok bool) {
+	var (
+		headerStart int
+		headerOp    string
+		headerIndet string
+		found       bool
+	)
+	for _, loc := range opBranchHeader.FindAllStringSubmatchIndex(src[:pos], -1) {
+		headerStart = loc[0]
+		headerIndet = src[loc[2]:loc[3]]
+		headerOp = src[loc[4]:loc[5]]
+		found = true
+	}
+	if !found {
+		return "", 0, 0, false
+	}
+	rest := src[headerStart:]
+	relEnd := len(rest)
+	for _, loc := range opBranchHeader.FindAllStringSubmatchIndex(rest, -1) {
+		if loc[0] == 0 {
+			continue
+		}
+		if src[headerStart+loc[2]:headerStart+loc[3]] == headerIndet {
+			relEnd = loc[0]
+			break
+		}
+	}
+	if headerStart+relEnd <= pos {
+		// pos fell past this arm's close — it belongs to no dispatch branch.
+		return "", 0, 0, false
+	}
+	return headerOp, headerStart, headerStart + relEnd, true
+}
+
+// packageOpScopes indexes one package directory's declared permission scopes by
+// operation type, read from the pkgmgr.PermissionSpec literals in its own
+// non-test sources. Cached per directory: the scan is per-file but the answer
+// is per-package.
+var packageOpScopes = map[string]map[string]string{}
+
+// packageOpScopeIsAny reports whether the package owning `path` declares `op`
+// at Scope:"any".
+//
+// Unreadable directory, unparseable sources, or an operation with no permission
+// entry all answer TRUE. That is the fail-closed direction for this gate: the
+// alternative would let a package silently exempt itself by putting its
+// permissions somewhere the scan cannot see, and it is also what makes the
+// gate's own self-test fixtures (whose paths have no directory on disk) subject
+// to the rule they pin.
+func packageOpScopeIsAny(path, op string) bool {
+	dir := filepath.Dir(path)
+	scopes, cached := packageOpScopes[dir]
+	if !cached {
+		scopes = map[string]string{}
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, e := range entries {
+				name := e.Name()
+				if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					continue
+				}
+				collectPermissionScopes(string(data), scopes)
+			}
+		}
+		packageOpScopes[dir] = scopes
+	}
+	declared, ok := scopes[op]
+	return !ok || declared == "any"
+}
+
+// collectPermissionScopes records each `OperationType: "<op>"` field's
+// neighbouring `Scope: "<scope>"` from a permission-spec source. The scope is
+// taken from the text between this OperationType and the next one, so entries
+// in one slice literal cannot borrow each other's scope regardless of
+// formatting. An entry declaring the same op twice keeps the WIDEST reading:
+// "any" is never overwritten by a narrower later entry.
+func collectPermissionScopes(src string, into map[string]string) {
+	locs := permissionOperationType.FindAllStringSubmatchIndex(src, -1)
+	for i, loc := range locs {
+		op := src[loc[2]:loc[3]]
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		scope := ""
+		if m := permissionScope.FindStringSubmatch(src[loc[1]:end]); m != nil {
+			scope = m[1]
+		}
+		if scope == "" {
+			continue
+		}
+		if prev, ok := into[op]; ok && (prev == "any" || scope != "any") {
+			continue
+		}
+		into[op] = scope
+	}
+}
 
 // checkLensProtectedByDefault flags a pkgmgr.LensSpec composite literal that
 // declares `Adapter: "postgres"` but none of Protected, Public, or GrantTable
@@ -2157,6 +2535,114 @@ func selfTest() []string {
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc f() {\n\tok := gate.IsReadable(anchor)\n}\n", ""},
 		{"a test file is out of scope", "internal/refractor/capabilityread/capabilityread_test.go",
 			"import (\n\t\"github.com/operatinggraph/lattice/internal/refractor/capabilityread\"\n)\nfunc TestX(t *testing.T) {\n\tok, err := capabilityread.IsReadable(ctx, kv, at, aid, anchor)\n}\n", ""},
+		// primordial-actor. The fixture directory does not exist on disk, so
+		// packageOpScopeIsAny answers "any" — the fail-closed default these
+		// cases are written against. `emit` is the external-egress line the
+		// gate triggers on; `guard` is the only shape that discharges it.
+		{"an unguarded external emission is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: CreateThing"},
+		{"a guarded branch passes", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        # actor-guard: (primordial) only Loom dispatches this pattern\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: nope\")\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
+		{"a literal adapter name is caught too", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        events.append({\"class\": \"external.notification\", \"data\": d})\n",
+			"primordial-actor: CreateThing"},
+		{"a guard in a SIBLING branch does not cover this one", fixture,
+			"    if ot == \"GuardedOp\":\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: nope\")\n" +
+				"    if ot == \"UnguardedOp\":\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: UnguardedOp"},
+		// The four bypass shapes a pure string-match gate admits.
+		{"bypass 1 — a guard placed AFTER the emission is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: too late\")\n",
+			"primordial-actor: CreateThing"},
+		{"bypass 1b — a guard after the subject READ is denied, even before the emit", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        doc = kv.Read(subject_key)\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: read already happened\")\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: CreateThing"},
+		{"bypass 2 — a comment mentioning the global is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        # guarded by primordialActor[\"loom\"] somewhere, honest\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: CreateThing"},
+		{"bypass 3 — a dead guard branch is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        if False and op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: unreachable\")\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: CreateThing"},
+		{"bypass 3b — a guard whose body does not refuse is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            pass\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"primordial-actor: CreateThing"},
+		{"bypass 4 — shadowing the global is denied", fixture,
+			"    primordialActor = {\"loom\": op.actor}\n" +
+				"    if ot == \"CreateThing\":\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: self-comparison\")\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"`primordialActor` is ASSIGNED here"},
+		{"a subscript rebinding is shadowing too", fixture,
+			"    primordialActor[\"loom\"] = op.actor\n",
+			"`primordialActor` is ASSIGNED here"},
+		{"a comparison is not an assignment", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: nope\")\n" +
+				"        ok = op.actor == primordialActor[\"loom\"]\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
+		// Helper attribution + the escape hatch.
+		{"an emission in a helper AFTER the branch is denied", fixture,
+			"    if ot == \"CreateThing\":\n" +
+				"        if op.actor != primordialActor[\"loom\"]:\n" +
+				"            fail(\"AuthDenied: nope\")\n" +
+				"        return dispatch(op)\n" +
+				"def dispatch(op):\n" +
+				"    events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"does not sit directly inside its own"},
+		{"an emission before any dispatch branch is denied", fixture,
+			"def dispatch(op):\n" +
+				"    events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"does not sit directly inside its own"},
+		{"a (caller-guarded) declaration discharges a shared helper", fixture,
+			"def dispatch(op):\n" +
+				"    # actor-guard: (caller-guarded) every ot branch pins op.actor before calling this\n" +
+				"    events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
+		{"a (caller-guarded) declaration with no why is denied", fixture,
+			"def dispatch(op):\n" +
+				"    # actor-guard: (caller-guarded)\n" +
+				"    events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n",
+			"must state its `<why>`"},
+		{"an unknown actor-guard shape is denied", fixture,
+			"    # actor-guard: (trusted) the caller is fine\n" +
+				"    if ot == \"CreateThing\":\n" +
+				"        pass\n",
+			"unknown shape (trusted)"},
+		{"prose naming an external event is not an emission", fixture,
+			"    // emits external.notification off its own outbox to the bridge\n" +
+				"    Desc: \"external.notification off the outbox\",\n", ""},
+		{"the gate is scoped to packages/", "internal/loom/engine.go",
+			"    if ot == \"CreateThing\":\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
+		{"the gate skips package test files", "packages/self-test/ddls_test.go",
+			"    if ot == \"CreateThing\":\n" +
+				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
 		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
 			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
 				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
@@ -2179,6 +2665,8 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "derived-key:") &&
 				!strings.HasPrefix(fd.msg, "grant-change-posture:") &&
 				!strings.HasPrefix(fd.msg, "max-reconnects:") &&
+				!strings.HasPrefix(fd.msg, "primordial-actor:") &&
+				!strings.HasPrefix(fd.msg, "actor-guard:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") {
 				continue
 			}

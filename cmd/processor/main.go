@@ -147,6 +147,18 @@ func run(logger *slog.Logger) error {
 	authWiring := processor.AuthWiring{
 		RbacRolesActive: true,
 		SystemActorKeys: systemActorKeys,
+		// The trusted platform engines' primordial actor keys, surfaced to
+		// package scripts as the `primordialActor` global. Both entries back a
+		// live call site whose operator grant is `Scope:"any"`: the externalTask
+		// instanceOps Loom relays pin op.actor against "loom" before touching the
+		// subject their payload names, and the augur reasoning claim Weaver
+		// dispatches as a directOp pins against "weaver" before minting over the
+		// entity/target its payload names. Unlike SystemActorKeys this needs no
+		// discovery — the keys are bootstrap-derived and fixed.
+		PrimordialActors: map[string]string{
+			"loom":   bootstrap.LoomIdentityKey,
+			"weaver": bootstrap.WeaverIdentityKey,
+		},
 	}
 	logger.Info("step-3 platform routing wired (class-aware, unconditional)",
 		"systemActors", len(systemActorKeys))

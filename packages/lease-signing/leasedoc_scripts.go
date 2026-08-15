@@ -154,6 +154,16 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateLeaseDocInstance":
+        # actor-guard: (primordial) restricted to Loom's relay actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind this
+        # op is operator/Scope:"any", which admits every operator-role holder —
+        # far wider than the one engine that dispatches the docGen pattern. The
+        # branch assembles document fields off the payload-named subjectKey and
+        # forwards them to an external adapter, so a wider submitter set is an
+        # arbitrary application's lease terms reaching a vendor.
+        if op.actor != primordialActor["loom"]:
+            fail("AuthDenied: CreateLeaseDocInstance is restricted to Loom's relay actor; got " + op.actor)
+
         handle = required_bare_handle(p, "instanceKey")
         subject_key = required_string(p, "subjectKey")
         adapter = required_string(p, "adapter")

@@ -48,6 +48,13 @@ type HydratorImpl struct {
 	// never wires PII, e.g. most test harnesses). Production wiring
 	// (MakePipeline) always sets it.
 	Vault vault.Vault
+	// PrimordialActors are the trusted platform engines' bootstrap-seeded
+	// identity keys, keyed by engine name ("loom"). Carried verbatim onto every
+	// ScriptContext this Hydrator builds, where they become the script's
+	// `primordialActor` global (see primordialActorToStarlark). Production
+	// wiring (MakePipeline, from AuthWiring) always sets it; unset binds the
+	// empty string per name, which fails an actor comparison closed.
+	PrimordialActors map[string]string
 }
 
 // NewHydrator wires a real Hydrator. The DDL cache parameter is
@@ -198,7 +205,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		declared = applyDescriptorFloor(declared, templates, env, h.Logger)
 	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
-		derived, err := deriveReads(ctx, prog, env, declared, h.deriveBudget())
+		derived, err := deriveReads(ctx, prog, env, declared, h.deriveBudget(), h.PrimordialActors)
 		if err != nil {
 			return HydratedState{}, err
 		}
@@ -408,6 +415,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			// Back the script's kv.Links() (§2.5.1) with a bounded link lister
 			// over the same Conn + Core bucket — the op-time set-valued enumeration.
 			LinkLister:        connLinkLister{conn: h.Conn, bucket: h.CoreBucket},
+			PrimordialActors:  h.PrimordialActors,
 			SensitiveReads:    tracker,
 			LiveReads:         &liveReadBudgetTracker{budget: DefaultLiveReadBudget},
 			DDLResolutionMemo: memo,
