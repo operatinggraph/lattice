@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/edge/store"
 	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
@@ -60,6 +62,13 @@ type engineManager struct {
 	entries map[string]*engineEntry
 	deps    engineManagerDeps
 	baseCtx context.Context
+	// sf dedupes concurrent builds for one identity: every caller arriving
+	// while that identity's engine is being built shares the single in-flight
+	// build and its result. Deliberately NOT m.mu — m.mu guards the entries
+	// map for EVERY identity, so holding it across a build's NATS dial and
+	// bbolt open would serialize unrelated identities' builds too. Keyed on
+	// identityID, so different identities still build fully concurrently.
+	sf singleflight.Group
 }
 
 func newEngineManager(baseCtx context.Context, deps engineManagerDeps) *engineManager {
@@ -97,16 +106,93 @@ func (m *engineManager) Seed(identityID, deviceID, token string) error {
 // A cached, non-pinned entry whose NATS connection has permanently closed is
 // evicted and rebuilt rather than handed back: newEngine's TokenHandler
 // keeps that connection recovering across the credential's TTL on its own,
-// so reaching this branch means reconnection genuinely failed for good
+// so reaching that case means reconnection genuinely failed for good
 // (nats.go exhausted MaxReconnects, or aborted after repeated identical auth
-// errors) — a last-resort backstop. Purge remains the explicit eviction
-// path for revocation (see its doc).
+// errors) — a last-resort backstop. The eviction itself belongs to buildEngine
+// (see its doc: evicting outside the flight would let a second caller's
+// newEngine start while the old engine is still releasing the mirror's file
+// lock). Purge remains the explicit eviction path for revocation (see its doc).
+//
+// Concurrent Acquires for the SAME identity share one build (m.sf,
+// buildEngine): two of them must never both reach newEngine, which opens the
+// identity's single-writer bbolt mirror and starts its sync loops — the loser
+// of that race either times out on the store's open lock or attaches to, and
+// then tears down, the winner's durable.
 func (m *engineManager) Acquire(identityID string) (*engine, error) {
+	for {
+		m.mu.Lock()
+		if e, ok := m.entries[identityID]; ok && (e.pinned || !e.eng.conn.NATS().IsClosed()) {
+			e.refCount++
+			e.idleSince = time.Time{}
+			m.mu.Unlock()
+			return e.eng, nil
+		}
+		m.mu.Unlock()
+
+		if m.deps.Signer == nil {
+			return nil, fmt.Errorf("no credential minter configured (FACET_DEV_AUTH not set) — cannot start %s's engine", identityID)
+		}
+
+		built, err, _ := m.sf.Do(identityID, func() (any, error) {
+			return m.buildEngine(identityID)
+		})
+		if err != nil {
+			// Shared with every waiter on the same build: one failed build is
+			// one failure for all of them, rather than each caller getting its
+			// own (and differing) outcome for the same identity.
+			return nil, err
+		}
+		eng := built.(*engine)
+
+		// Claim this caller's hold. Everyone who shared the build runs this —
+		// the caller that ran it and every caller that waited on it — so each
+		// ends up owing exactly one Release, per this method's contract.
+		m.mu.Lock()
+		if e, ok := m.entries[identityID]; ok {
+			e.refCount++
+			e.idleSince = time.Time{}
+			m.mu.Unlock()
+			return e.eng, nil
+		}
+		if eng.conn.NATS().IsClosed() {
+			// A Purge or a CloseAll landed between the build installing this
+			// entry and this caller claiming a hold on it — taking the engine
+			// with it. Handing back a corpse (or reinstalling one for the next
+			// caller to find) is worse than paying for another build, so retry.
+			// This terminates: a retry only happens when a fresh purge lands in
+			// that window, and each pass does a whole build rather than
+			// spinning — and once baseCtx is cancelled newEngine fails outright.
+			m.mu.Unlock()
+			continue
+		}
+		m.entries[identityID] = &engineEntry{eng: eng, refCount: 1}
+		m.mu.Unlock()
+		return eng, nil
+	}
+}
+
+// buildEngine returns identityID's engine, building one when the manager holds
+// none that is usable: it evicts a cached-but-dead entry, mints a fresh device
+// credential, starts the engine, and installs the entry — holder-less, since
+// each caller claims its own hold back in Acquire.
+//
+// It runs ONLY under m.sf, and that is what makes a second, mirror-racing
+// newEngine call for one identity impossible. A concurrent Acquire either
+// joins the in-flight build, or — arriving after it settles — starts a fresh
+// one that finds the entry installed here and returns it without opening the
+// store at all: singleflight forgets a key only after the function returns, so
+// the install always precedes the forget, leaving no window in which a later
+// build can begin while this one's entry is still uninstalled.
+//
+// The dead-entry eviction lives here, inside the flight, for the same reason:
+// eng.Close() is what releases the mirror's bbolt lock, so evicting from
+// Acquire — outside the flight — would let a second caller's newEngine start
+// its store.Open against a lock the old engine has not finished dropping,
+// which is the very open-lock timeout this serialization exists to prevent.
+func (m *engineManager) buildEngine(identityID string) (*engine, error) {
 	m.mu.Lock()
 	if e, ok := m.entries[identityID]; ok {
 		if e.pinned || !e.eng.conn.NATS().IsClosed() {
-			e.refCount++
-			e.idleSince = time.Time{}
 			m.mu.Unlock()
 			return e.eng, nil
 		}
@@ -117,9 +203,6 @@ func (m *engineManager) Acquire(identityID string) (*engine, error) {
 		m.mu.Unlock()
 	}
 
-	if m.deps.Signer == nil {
-		return nil, fmt.Errorf("no credential minter configured (FACET_DEV_AUTH not set) — cannot start %s's engine", identityID)
-	}
 	token, _, err := m.deps.Signer.Mint(identityID)
 	if err != nil {
 		return nil, fmt.Errorf("mint engine credential: %w", err)
@@ -137,17 +220,26 @@ func (m *engineManager) Acquire(identityID string) (*engine, error) {
 		return nil, err
 	}
 
+	// Defer to an entry that appeared mid-build only if it is actually usable.
+	// The one that can appear here is a CORPSE: a Purge landing between this
+	// flight installing an entry and an earlier caller claiming its hold makes
+	// that caller reinstall its now-closed engine (Acquire's claim step), and
+	// this build — started against the freed mirror — is the live replacement.
+	// Deferring to it blindly would close a good engine and hand back a dead
+	// one to everybody. Superseding the map entry leaks nothing: an entry
+	// reachable here is always backed by an already-closed engine, since a
+	// still-open one would still hold the mirror's file lock and newEngine
+	// above could not have returned (internal/edge/store/bolt.go's Open — the
+	// lock contends within this process too). The pinned/live arm is kept as
+	// defense in depth for a future second writer of entries; today's only
+	// other one, Seed, cannot reach it for that same file-lock reason.
 	m.mu.Lock()
-	if e, ok := m.entries[identityID]; ok {
-		// Lost a race with a concurrent first Acquire for the same
-		// identity — keep the winner already installed, discard this one.
-		e.refCount++
-		e.idleSince = time.Time{}
+	if e, ok := m.entries[identityID]; ok && (e.pinned || !e.eng.conn.NATS().IsClosed()) {
 		m.mu.Unlock()
 		eng.Close()
 		return e.eng, nil
 	}
-	m.entries[identityID] = &engineEntry{eng: eng, refCount: 1}
+	m.entries[identityID] = &engineEntry{eng: eng}
 	m.mu.Unlock()
 	return eng, nil
 }
