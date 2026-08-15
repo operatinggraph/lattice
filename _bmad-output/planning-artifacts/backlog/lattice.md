@@ -141,7 +141,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **`TestRefractor_E2E_P99` gates an absolute latency SLO on a shared runner** | NFR-P3's 500ms p99 is asserted by a unit test measuring wall-clock projection latency while three other jobs contend for the runner: CI run 31288862556 measured `10.03s`. A shared runner promises no latency floor, so the gate reads contention, not regression. | ★★ | S | 📋 ready · owner: Whetstone · reshape the measurement or move it off shared CI |
 | **[Perf] Convert the ~85-site `ListKeysPrefix`/list-then-get corpus to `KVGetMulti`** | Census (live, this fire): `cmd/loupe` (12 files), the 4 P5 vertical apps (~30 sites, Verticals-owned — wear-the-other-hat or that stream's pick), `pkgmgr` installer census (10 sites), weaver/loom state scans, the rule-engine's anchor scans. Precedent: `step4_hydrate.go` + `personalinterest.IsRelevant`. | ★★ | L | 📋 ready · [census](../../implementation-artifacts/adjacency-per-edge-index-design.md) §14.7 scope-diff |
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit sharded across 4 runners (was 3), re-balanced by measured `go test` time not LOC. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · unit pole 196s→170s, wall-clock 197s→171s (run 31513357030) · next: unit-2/convergence/lint-build now within 8s — no single pole; further gains likely need paid runners |
-| **[Processor] A RevisionConflict on an UNDECLARED key names nothing** | NATS omits the failing subject, so `ConflictError.ConflictingKey` is always empty and `conflictKeyForSignal` rebuilds it only from *declared* defaulted/absent-create keys (`commit_path.go:520`) — a submitter MISSING a `contextHint` declaration gets `conflictingKey:""` plus a raw `wrong last sequence`. Found driving Café. | ★★ | M | 📋 ready |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -152,6 +151,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-15 · `8ca834a1` · [Processor] undeclared-key RevisionConflict attribution CLOSED — kv.Links-discovered keys now retry-eligible + correctly named; review found+fixed a false-pass test and an unbounded probe
 - 2026-08-15 · `07b1615b` · [location-domain] `LEGACY_LOCATION_CLASS` widening CLOSED — 7 packages; census found the Contract #1 tombstone exemption is a permanent invariant, not the removable marker the row assumed
 - 2026-08-15 · `ada53b37` · [Edge] `SYNC` stream MaxBytes CLOSED — 512 MiB cap mirrors `EnsureAuditStream`; 2 dangling ratified contract edits also committed this fire (`004e079c`)
 - 2026-08-15 · `aa41f292` · [rbac] `vtx.roleindex.<id>` provenance write-once CLOSED — mirrors the role-root guard; 3 cold reviews + 1 fix round, 0 blocking; create-forgery and no-repoint-heal limitations filed, not built
