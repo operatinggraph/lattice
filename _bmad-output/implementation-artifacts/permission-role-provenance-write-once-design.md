@@ -524,3 +524,152 @@ for when a consumer lands.
 
 §6's contract text is corrected to match (role-root scope, `lanes`, the healable carve-out, tombstone
 coverage) in the same uncommitted edit to `docs/contracts/08-package-install.md`.
+
+## 14. Fire brief — grantedBy link revival guard (Steward, 2026-08-15)
+
+**Scope sentence (verbatim from the board row, `lattice.md` Security & trust boundary):** "A tombstoned
+`grantedBy` link can be revived by a direct `update` with `isDeleted:false` — `diffManifest`'s
+already-tombstoned-skip is client-side only; an `UpgradePackage` holder crafting the envelope directly
+restores a specifically-revoked grant with no server-side backstop — the link-topology mirror of the
+vertex-field guard `permission-role-provenance-write-once-design.md` just shipped." (§13 above named this
+the same gap.)
+
+**Verified touch-list:**
+- `internal/processor/step8_commit.go` — new sibling guard beside `rejectPermissionRoleRewrites`
+  (`step8_commit.go:736`), wired into `Commit` beside its call at `step8_commit.go:201`. Reuses
+  `PermissionProvenanceError`/`ErrCodePermissionProvenance` (`step8_commit.go:66`,
+  `opwire/opwire.go:183`) — no new error type, no new wire code.
+- `internal/processor/step8_commit_test.go` — new test beside `TestCommit_PermissionRoleProvenanceIsWriteOnce`
+  (`step8_commit_test.go:730`), mirroring its table-driven shape; use `newTestEnvelope`
+  (`integration_test.go:160`) and override `env.OperationType`.
+- `docs/contracts/08-package-install.md` §8.4 — extend the just-staged-uncommitted provenance-guard
+  paragraph with this guard (same uncommitted edit, not a new one — see the file's current diff).
+
+**Design decision (mine, implementation-level — §0 decide-don't-defer; not routed to Andrew or the
+Designer, since it extends the shipped guard's own mechanism rather than inventing a new one):**
+
+The vertex guard's "real change ⇒ new key" invariant does **not** hold for `grantedBy` links: a link key is
+content-addressed on `(permission, role)` (`lnk.permission.<permID>.grantedBy.role.<roleID>`,
+`internal/pkgmgr/build.go:387`), so re-granting the *same* permission to the *same* role after a revoke
+**necessarily** reuses the same key and **must** be an `update` (a `create` asserts revision 0 and
+RevisionConflicts forever against the tombstone — `packages/rbac-domain/ddls.go:150-158`'s own comment).
+So "reject every update reviving a tombstoned grantedBy link" would brick the legitimate
+`GrantPermission` re-grant path (`packages/rbac-domain/ddls.go:399-421`, `grant_link`/`revive_link`), not
+just the attack.
+
+The distinguishing signal is **which operation is running**, read off `env.OperationType`
+(`opwire/opwire.go:130`) — already an established pattern for this exact class of policy
+(`privilegedLaneAllowlist`, `step3_auth_capability.go:426`, a `map[operationType]...` core-owned allowlist;
+also the `env.OperationType == "ClaimIdentity"` branch at `commit_path.go:428`). `env.OperationType` is
+trustworthy at step 8: it selects which server-side script/handler actually ran, not a client-asserted
+flag the mutation body could forge. Only `"GrantPermission"` (`packages/rbac-domain/ddls.go:399`) may
+revive a tombstoned `grantedBy` link; every other path — chiefly `UpgradePackage`, whose honest client
+(`internal/pkgmgr/upgrade.go:393-417`, commit `0bb6daea`) already skips reviving exactly this key class —
+is rejected.
+
+Confirmed this can't reach `InstallPackage` (fresh installs emit `create`, which conflicts on any existing
+revision, tombstoned or not — never reaches the `update` branch) or `UninstallPackage` (emits `tombstone`,
+which `buildMutationValue` forces `isDeleted:true` regardless of the mutation's document —
+`step8_commit.go:463-466` — so a tombstone mutation can never revive). Only `update` is in play, on
+`UpgradePackage`'s diff path.
+
+**Scope boundary — `grantedBy` only, not `holdsRole`:** `0bb6daea`'s client-side skip is scoped to
+"grant/role topology" reachable from a package **manifest** — `vtx.permission.*`, `vtx.role.*`,
+`lnk.permission.*.grantedBy.role.*` (`upgrade.go:400-405`) — never `holdsRole` (identity→role grants are
+runtime-minted, never package-declared, so `UpgradePackage`'s manifest diff never touches one). The
+already-filed, separate, `📐 needs designer pass` row "`UpgradePackage`/`UninstallPackage` mutations
+aren't scoped to the named package's own manifest" covers the broader "attacker declares an unrelated key
+in a crafted manifest" class — out of scope here; this fire's guard is narrowly the `grantedBy`
+revival-via-update vector §13 named, matching `0bb6daea`'s own ratified scope exactly.
+
+**The guard (shape):**
+```go
+// grantedByLinkRevivalAllowlist is the core-owned policy of which operationType
+// may revive a tombstoned lnk.permission.<id>.grantedBy.role.<id> link via an
+// update that sets isDeleted back to false/absent. GrantPermission's own
+// grant_link/revive_link (packages/rbac-domain/ddls.go) is the only legitimate
+// revive path — re-granting a permission to a role after a RevokePermission
+// necessarily reuses the same content-addressed key (a create RevisionConflicts
+// against the standing tombstone), so this cannot be a blanket reject the way
+// the vertex-field guard is. UpgradePackage's honest client already skips
+// reviving this exact key class (internal/pkgmgr/upgrade.go, 0bb6daea); an
+// UpgradePackage holder crafting the update directly is exactly what this closes.
+var grantedByLinkRevivalAllowlist = map[string]bool{"GrantPermission": true}
+
+// rejectGrantedByLinkRevival is the server-side, path-independent mirror of
+// diffManifest's client-side already-tombstoned-skip (0bb6daea), for the one
+// mutation shape that skip cannot reach: an update submitted directly, bypassing
+// pkgmgr's diff computation entirely. Fires only for lnk.permission.<id>.grantedBy.role.<id>
+// keys whose stored document is isDeleted:true and whose mutation document does
+// not also assert isDeleted:true — i.e. an attempted revive.
+func rejectGrantedByLinkRevival(mutations []MutationOp, prior priorDocs, operationType string) error {
+	if grantedByLinkRevivalAllowlist[operationType] {
+		return nil
+	}
+	for _, m := range mutations {
+		if m.Op != "update" {
+			continue
+		}
+		type1, _, linkName, type2, _, ok := keys.ParseLinkKey(m.Key)
+		if !ok || type1 != "permission" || linkName != "grantedBy" || type2 != "role" {
+			continue
+		}
+		priorDoc, found, decoded := prior.lookup(m.Key)
+		if !found {
+			continue
+		}
+		if !decoded {
+			return &PermissionProvenanceError{Key: m.Key, Field: "isDeleted"}
+		}
+		wasDeleted, _ := priorDoc["isDeleted"].(bool)
+		if !wasDeleted {
+			continue
+		}
+		nowDeleted, _ := m.Document["isDeleted"].(bool)
+		if !nowDeleted {
+			return &PermissionProvenanceError{Key: m.Key, Field: "isDeleted"}
+		}
+	}
+	return nil
+}
+```
+Wire it into `Commit` right after the `rejectPermissionRoleRewrites` call (`step8_commit.go:201`), passing
+`env.OperationType`. `keys.ParseLinkKey` is already imported (`step8_commit.go:16`,
+`keys.IsVertexKeyOfType`/`keys.ParseAspectKey` already used at `step8_commit.go:749,796`) — no new import.
+
+**Increment order (single increment, S–M):**
+1. Add `grantedByLinkRevivalAllowlist` + `rejectGrantedByLinkRevival` to `step8_commit.go`; wire the call.
+   Green check: `go build ./internal/processor/...`.
+2. Table-driven test beside `TestCommit_PermissionRoleProvenanceIsWriteOnce`: (a) tombstoned link + `update`
+   with `isDeleted:false` under a non-`GrantPermission` `OperationType` → `*PermissionProvenanceError`; (b)
+   same under `OperationType:"GrantPermission"` → succeeds (proves the legitimate re-grant path is not
+   bricked — standing checklist #3, positive vector before the negative); (c) a **live** link (not
+   tombstoned) updated by any op → unaffected (guard is scoped to the revival transition only); (d) a
+   `create` for a never-existing link → unaffected. Green check:
+   `go test ./internal/processor/... -run TestCommit_GrantedByLinkRevival -v`.
+3. Extend the already-uncommitted `docs/contracts/08-package-install.md` §8.4 paragraph (the one this
+   design's §13 build note staged) with a sentence naming this guard, mirroring its existing structure.
+   Green check: `git diff docs/contracts/08-package-install.md` reads as one coherent addendum, not a
+   second disconnected proposal.
+4. Full suite for the touched package: `go test ./internal/processor/...`.
+
+**In-scope gotchas (standing checklist + dossier entries copied in):**
+- Standing checklist #3 — the positive vector (increment 2b) must be proven **before** the negative is
+  trusted; a guard tested only by its own rejection can pass vacuously.
+- Standing checklist #5 — one deterministic key (the link), now with two active writers in spirit
+  (`GrantPermission`'s legitimate revive vs. this guard's reject-everyone-else) — the allowlist *is* the
+  arbitration, decided here, not left implicit.
+- `docs/components/processor.md` dossier: *"A tombstone retains the prior document, so a reader that does
+  not filter `isDeleted` sees a revoked declaration as live"* — this guard IS such a reader; it must read
+  `priorDoc["isDeleted"]` directly (not assume absence-means-false at the read site, only at the write
+  site) since the whole point is distinguishing a stored `isDeleted:true` from a stored `isDeleted:false`.
+- `docs/components/pkgmgr.md` dossier: *"Two writers of one deterministic key"* — directly this fire's
+  shape; resolved by the `operationType` allowlist above, not left as an unspoken assumption.
+
+**Adjacent finds:** none beyond the two already named in §13 (roleindex — separate filed row, out of
+scope; the broader manifest-scoping gap — separate filed row, out of scope, cited above).
+
+**Non-goals:** `holdsRole` links (never package-declared, not reachable via `UpgradePackage`'s manifest
+diff — see scope boundary above); the CREATE-forgery and manifest-scoping gaps (separate filed rows,
+§8/§13); any change to `grant_link`/`revive_link`'s Starlark logic (already correct — this fire adds a
+server-side backstop beside it, not a change to it).
