@@ -72,6 +72,9 @@ func NewValidator(cache *DDLCache, conn *substrate.Conn, coreBucket string, logg
 // via its instanceOf chain.
 func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult, state HydratedState) error {
 	rid := env.RequestID
+	if err := validateMutationBooleanFields(result.Mutations, rid); err != nil {
+		return err
+	}
 	if err := validateExternalEgressGuard(result, state, rid); err != nil {
 		return err
 	}
@@ -88,6 +91,45 @@ func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, re
 	v.Logger.Info("step 6: validated",
 		"requestId", rid,
 		"mutations", len(result.Mutations))
+	return nil
+}
+
+// validateMutationBooleanFields is a batch-wide pre-pass, run before any
+// per-mutation resolution: every mutation's isDeleted, if present, must be a
+// JSON bool. A Go type assertion silently reads any other JSON type as false
+// (ok=false), so a malformed value would otherwise commit and read as "live"
+// to mutationTombstoned (step6_resolve_ddl.go), the one reader in this
+// package that type-asserts an incoming mutation's isDeleted, while
+// internal/refractor's strict typed decoders DLQ or hard-fail on the exact
+// same stored value: a worse outcome than any revival this closes.
+// docIsProtected and rejectPermissionRoleRewrites do not read isDeleted at
+// all (the latter explicitly excludes it) and are not covered by this gate —
+// docIsProtected's own analogous fail-open on the unrelated data.protected
+// field is a separate, unbuilt finding (see the design doc's adjacent finds).
+//
+// This runs as a batch-wide PRE-pass, not folded into validateOne's per-
+// mutation loop, because step 6's own DDL resolution (classOf,
+// reconcileBatchInstanceOf) reads OTHER mutations in the same batch — a
+// later mutation's malformed isDeleted could otherwise be observed by an
+// earlier mutation's resolution before its own turn in the loop reaches it.
+func validateMutationBooleanFields(mutations []MutationOp, rid string) error {
+	for _, m := range mutations {
+		if m.Document == nil {
+			continue
+		}
+		v, present := m.Document["isDeleted"]
+		if !present {
+			continue
+		}
+		if _, ok := v.(bool); !ok {
+			return &DDLViolation{
+				ViolatedConstraint: "isDeletedType",
+				MutationKey:        m.Key,
+				OperationRequestID: rid,
+				Detail:             fmt.Sprintf("isDeleted must be a JSON bool, got %T", v),
+			}
+		}
+	}
 	return nil
 }
 
