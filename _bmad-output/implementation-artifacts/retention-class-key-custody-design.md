@@ -3085,3 +3085,59 @@ Single increment (S-M, no design fork):
   the orphaned holder addressable (findable only by an operator who still knows/records its old
   canonicalName) is the whole fix; a discovery/enumeration surface for orphaned holders is a separate,
   un-scoped concern, not filed here (no live consumer needs one yet).
+
+### 28.7 Built shape — closed (build note, 2026-08-14, one fire)
+
+`Installer.Uninstall` (`internal/pkgmgr/installer.go`) turned out to be a **second, independent** tombstone
+site the board row's own title already named ("renamed **or uninstalled**") but §28.1-4 under-scoped to
+`diffManifest` alone: `Uninstall` tombstones every key in the manifest's `declaredKeys` unconditionally,
+retention-class holders included, via a different payload (`UninstallPackage`, not `UpgradePackage`). Fixed
+in the same fire with the identical prefix exclusion.
+
+A 3-layer adversarial review (security/correctness, edge-case, acceptance — all cold, none the implementer)
+against the full diff plus the `docs/contracts/08-package-install.md` edit found the core exclusion sound on
+every axis tried (prefix-collision safety, no other tombstone-emission site missed, OCC/atomicity
+unaffected, `.retentionPolicy` correctly covered, no new cross-package attack surface, `ShredRetentionClassKey`
+genuinely restored and the holder discoverable live via the `retentionKeyStatus` lens regardless of
+declaration). Real gaps found and closed in a second pass:
+
+- **A holder already tombstoned by a pre-fix run (or hard-deleted) was reported as "preserved — still
+  destroyable"**, which is false the moment it's already tombstoned. Both exclusion sites now read the
+  key's committed state before classifying it, splitting the outcome into `RetentionHoldersPreserved`
+  (live) vs. a new `RetentionHoldersAlreadyStranded` (already tombstoned — pre-existing damage this run
+  neither caused nor can undo, surfaced so an operator escalates instead of being reassured). Absent keys
+  are counted in neither.
+- **Loupe's console (`cmd/loupe/web/**`) surfaced nothing** — the pre-uninstall confirm dialog overstated
+  the tombstone count by the holder keys it would in fact preserve, and the post-op result panel rendered
+  neither preserved nor stranded keys. Fixed: the dialog nets holder keys out of its preview count and
+  copy, the result panel renders both buckets (a `warn-text` escalation line for stranded), and the
+  apply/upgrade summary line gains the same two counts (JSON key `retentionHoldersPreservedCount` on that
+  endpoint specifically, to avoid colliding with uninstall's same-named `[]string` field on the wire).
+- **§28.4 step 3's `noChangesReason` extension was dead code**: excluding a holder always rewrites the
+  `.manifest` aspect's `declaredKeys` body, so the empty-mutation-batch path this function serves can never
+  co-occur with a nonzero holder count. Reverted `noChangesReason` to its pre-fire one-argument shape;
+  `RetentionHoldersPreserved`/`RetentionHoldersAlreadyStranded` on the normal (non-skip) result path are
+  unaffected — only the unreachable Skip-path composition was removed, per CLAUDE.md's rule against
+  building handling for scenarios that cannot happen.
+- Contract text tightened: §8.6 was claiming the excluded **keys** are reported back on the upgrade/apply
+  path when only their **count** is (`UpgradeResult`/`ApplyResult.RetentionHoldersPreserved` are `int`;
+  only `UninstallResult`'s sibling field is `[]string`) — reworded, and both sections now name
+  `RetentionHoldersAlreadyStranded` alongside `RetentionHoldersPreserved`. §8.3's `Installer.UninstallResult`
+  typo (no such nested type; it's `pkgmgr.UninstallResult`) fixed.
+- `docs/components/_packages.md`'s uninstall/upgrade sentences ("tombstones each declared key" / "old \ new
+  → tombstone", both stated unconditionally) gained the one-clause exception, pointing at the contract.
+
+**Deliberately not built**, named as a residual rather than filed as a row (no live consumer forces it yet,
+and the existing write path already fails safe): redeclaring a previously-dropped canonicalName reactivates
+the *same* deterministic holder key, silently inheriting whatever state `.piiKey` is already in — including
+already-`shredded`, in which case every future sensitive write custodied on the "new" class rejects with
+`ErrKeyShredded` at `internal/vault`'s Encrypt path, loud and with no data exposure, just not until the
+first write rather than at redeclare time. Tightening this (warn or refuse at install/upgrade time when a
+reused canonicalName's holder is already shredded) is a genuine follow-on, not a defect in what shipped.
+
+Shipped as one fire (no multi-fire checkpoint needed): `internal/pkgmgr/{upgrade,apply,installer}.go` +
+tests, `cmd/lattice-pkg/main.go`, `cmd/loupe/{pkg.go,web/**}` + tests, `docs/contracts/08-package-install.md`
+§8.3+§8.6 (uncommitted, awaiting Andrew alongside the pre-existing `0bb6daea` grant/role proposal already in
+that same dirty file), `docs/components/_packages.md`, and an unrelated but gate-mandated version bump of
+`packages/edge-manifest` (`lint-package-version.go` fires on any non-test `internal/pkgmgr` change for every
+package declaring `ReadGrantDomains`; edge-manifest is the only one).
