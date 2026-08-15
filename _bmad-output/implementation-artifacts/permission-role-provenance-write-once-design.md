@@ -858,10 +858,14 @@ different nested `data.*` fields instead of the document's top-level `isDeleted`
   place. This is narrower than patching the read sites individually (two call sites become one gate, exactly
   §16's stated rationale) and is the only shape consistent with the already-shipped precedent in the same
   function.
-- `internal/processor/ddl_cache.go:761-777` (the typed `.sensitive` ASPECT struct, `root+".sensitive"`, JSON
+- ~~`internal/processor/ddl_cache.go:761-777` (the typed `.sensitive` ASPECT struct, `root+".sensitive"`, JSON
   `data.value bool`) is a **different, unflagged** fail-open (a struct-tagged `json.Unmarshal` failure is
   silently swallowed, not a bare type assertion) — **out of scope**, not named by either board row, and its
-  own repro/fix shape differs (unmarshal-error handling, not a type assertion). Left as a non-goal below,
+  own repro/fix shape differs (unmarshal-error handling, not a type assertion). Left as a non-goal below,~~
+  **Superseded — see the build note below.** The bypass-hunt review this fire ran found this IS the live,
+  reachable exposure (the root-fallback `data.sensitive` this fire's boundary gate closes has no processor-
+  mediated writer at all — pkgmgr only ever emits the aspect), so it is now built in the same fire, not left
+  a non-goal.
   matching the scope-diff discipline (narrow-only, never substituting an adjacent mechanism).
 
 **Precedent to mirror:** identical to §16's own precedent chain — `priorDocs.lookup`'s `!decoded` branch
@@ -895,3 +899,61 @@ different failure shape (unmarshal error, not type assertion) over a different f
 `docs/contracts/08-package-install.md:158/166` already treats `data.protected` as a boolean by comparing it
 `== true` in prose, so this fix enforces an already-implicit type rather than declaring a new one, same
 reasoning as §16's `isDeleted` non-goal.
+
+**Build note (Steward, 2026-08-15) — shipped shape is three files, not two; full 3-layer review found the
+brief's own scoping wrong.** Increments 1–4 shipped exactly as planned in `step6_validate.go` +
+`step6_validate_test.go`. The mandatory full adversarial pass (bypass-hunt, edge-case walk, acceptance
+audit — all cold, all opus, none the implementer) found the acceptance audit and edge-case walk clean, but
+the **bypass-hunt review found the brief's own non-goal was the live gap**: the `data.sensitive` **root**
+fallback this fire's boundary gate closes (`ddl_cache.go:778-782`) has **no processor-mediated writer at
+all** — grepping the corpus, only the DEDICATED `.sensitive` ASPECT (`root+".sensitive"`, `data.value`) is
+ever written (`internal/pkgmgr/build.go:179-181`), and that path's own read (`ddl_cache.go:761-777`, a
+struct-tagged `json.Unmarshal`) silently swallows a decode failure and leaves `Sensitive` at its zero
+value — the exact fail-open this fire exists to close, one field over, and live-reachable via any
+`UpgradePackage`-holding actor (the install script trusts a client-supplied document verbatim; no
+`data.protected`-style guard exists on this key).
+
+**Fixed in the same fire** (not filed — same mechanism, this fire already had the file open, and there is
+an already-established, directly-adjacent pattern to mirror): `ddl_cache.go`'s unmarshal-failure branch now
+poisons `Sensitive = true` (a `Warn` log, then fail closed toward encrypting) instead of silently leaving it
+`false` — mirroring the custody-kind reader's poison-on-unparseable posture a few lines below in the same
+function, and the asymmetry the sensitive-read's own preceding comment already argues for ("staying
+sensitive can only OVER-protect... encryption failing open toward confidentiality is the harmless side").
+New test: `TestDDLCache_LoadMetaVertex_SensitiveUnparseableFailsClosed`
+(`internal/processor/ddl_cache_test.go`), mirroring the existing tombstone/live-false sensitive tests'
+fixture shape. A second, targeted cold review (opus) of this addition alone confirmed the exploit path and
+the fix's mechanics, but found it **incomplete**: only a JSON *type* mismatch trips the new branch — a
+well-typed `{"data":{}}` (no `value` key) or `{"data":{"value":null}}` decodes to Go's zero value (`false`)
+with no unmarshal error, so it sailed straight past the new gate and still committed plaintext, for the
+identical attacker with a one-character-simpler payload. The reviewer's own grounding made the fix
+mechanical: `internal/pkgmgr/build.go:179-181` (the only legitimate writer) never creates this aspect for
+the false case at all — an absent aspect IS how "not sensitive" is encoded — so a *present* aspect with no
+explicit `value` is exactly as undecidable as one that fails to parse outright, by the same "the honest
+path never produces this shape" reasoning §17 already applies to the `data.protected`/`data.sensitive`
+mutation-time gate. Fixed by changing the aspect struct's `Value bool` to `Value *bool` and treating `nil`
+(absent-or-null) the same as an unmarshal error; an *explicit* `false` still reads as false (preserving
+`TestDDLCache_LoadMetaVertex_SensitiveFalseWhenLive`). New test:
+`TestDDLCache_LoadMetaVertex_SensitiveMissingValueFailsClosed`. Full suite (`go build`, `go vet`,
+`golangci-lint`, `lint-conventions`, `go test ./... -p 4 -count=1`) reran green after this refinement.
+
+**Also found by the bypass-hunt review, deliberately NOT built:**
+- **A well-typed `data.value:false` on a live (non-tombstoned) `.sensitive` aspect legitimately downgrades
+  sensitivity today, with no forgery guard.** This is not a new gap — it is the exact shape the two already-
+  filed ★★★ rows cover ("`UpgradePackage`'s create arm can forge a package-origin permission/role vertex" /
+  "`UpgradePackage`/`UninstallPackage` mutations aren't scoped to the named package's own manifest," both
+  📐 needs-designer-pass): an attacker holding `UpgradePackage` can already write any well-typed value to
+  any non-`protected` key, sensitivity included. Fixing this needs the same manifest-ownership /
+  content-authenticity mechanism those rows already name, not a third point guard here.
+- **No repair for a malformed value already at rest.** Inherent to any boundary-gate-only fix (§16 didn't
+  backfill pre-existing malformed `isDeleted` values either) — a mutation-time gate stops future bad writes;
+  it does not retroactively fix stored ones. The `ddl_cache.go` read-side fix above closes the *read*
+  side of this specific field regardless of when the bad value was written, which is why it was the right
+  shape here (unlike `isDeleted`/`data.protected`, which have no analogous "poison-forward" read site to
+  fix instead).
+
+**Adjacent finding filed, not built** (different mechanism, different files, lower severity — Loupe display
+only): `cmd/loupe/lens.go:83` and `cmd/loupe/lenses.go:45` read a `weaverTarget`/lens config's `protected`
+field via a bare `.(bool)` with the ok discarded — same fail-open shape, but over a `targetConfig` map
+(written by `internal/pkgmgr/build.go:480` / `internal/bootstrap/primordial.go:1222`, always a Go-typed
+`true` literal today) surfaced only as a Loupe UI badge, not a write-path or encryption gate. Filed as its
+own `lattice.md` row.

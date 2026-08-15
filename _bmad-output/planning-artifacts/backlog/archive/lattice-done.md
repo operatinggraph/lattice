@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-10 · `98f83f5d` · [Refractor/Substrate] the taxonomy barrier reads the connection loss instead of waiting to be told — a verdict straddling a drop armed a `*` lens against a dead feed; 3/20 → 0/20
 - 2026-08-10 · `e107083a` · [Refractor/Substrate] C2.6 — every rebuild starter shares one bound and the slot covers the pump's reopen; the non-atomic durable delete-recreate that paused a healthy lens is fixed
 - 2026-08-10 · `208409f0` · [Refractor/Substrate] adjacency Shape B — the 1 MiB-jammed hub latches an overflow mark and its reads enumerate Core KV; live: 30,245 payload errors → 0, NATS 7.6 GiB OOM → 800 MiB steady, Refractor runs again
 - 2026-08-10 · `d8cc803c` · [Substrate] `KVGetMulti` — batched, atomic multi-subject KV read (`multi_last`), adopted by step-4 hydration + `personalinterest.IsRelevant`; 3-layer adversarial review folded, incl. a wildcard-injection fix
