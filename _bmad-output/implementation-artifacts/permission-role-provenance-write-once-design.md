@@ -527,6 +527,10 @@ coverage) in the same uncommitted edit to `docs/contracts/08-package-install.md`
 
 ## 14. Fire brief — grantedBy link revival guard (Steward, 2026-08-15)
 
+**NOT SHIPPED — this fire's design was wrong; see §15 for what three cold reviews found and what to do
+instead.** Left in place (not deleted) because the wrong turn is itself the useful artifact for whoever
+designs the real fix — do not build the sketch below as written.
+
 **Scope sentence (verbatim from the board row, `lattice.md` Security & trust boundary):** "A tombstoned
 `grantedBy` link can be revived by a direct `update` with `isDeleted:false` — `diffManifest`'s
 already-tombstoned-skip is client-side only; an `UpgradePackage` holder crafting the envelope directly
@@ -673,3 +677,80 @@ scope; the broader manifest-scoping gap — separate filed row, out of scope, ci
 diff — see scope boundary above); the CREATE-forgery and manifest-scoping gaps (separate filed rows,
 §8/§13); any change to `grant_link`/`revive_link`'s Starlark logic (already correct — this fire adds a
 server-side backstop beside it, not a change to it).
+
+## 15. Why §14 was not shipped (Steward, 2026-08-15) — three cold reviews, one blocking regression
+
+The build ran clean, gofmt/vet/lint-conventions/full-package-suite all green, and the guard's own 6-row test
+table (positive vector first) passed. Full 3-layer adversarial review — a bypass hunt, an edge-case walk, and
+an acceptance audit, all cold, all opus, none the implementer — then found the central premise false. Not
+merged; worktree abandoned; the `docs/contracts/08-package-install.md` addendum reverted back to the
+pre-fire staged state (the retention-class + permission/role-provenance paragraphs only).
+
+**Blocking: `env.OperationType` cannot distinguish the attack from an already-legitimate `UpgradePackage`
+path, because at step 8 they are byte-identical.** `internal/pkgmgr/upgrade.go`'s `diffManifest` has two
+branches that can revive a tombstoned `grantedBy` link via `update`, not one:
+
+- the **`survives`** branch (key in both old and new manifest sets) — `0bb6daea`'s already-tombstoned skip
+  covers this one (`upgrade.go:393-417`), which is what §14's design reasoned from.
+- the **`!survives`** branch (`upgrade.go:361-384`) — a key **newly declared** relative to the immediately
+  prior version, but whose deterministic content-addressed slot KV already holds tombstoned, because an
+  **earlier** version of the same package declared it, a later version dropped it (tombstoning it as part
+  of that version's own `old \ new` diff), and this version re-adds it. This is legitimate, intentional,
+  already covered by a pre-existing green test (`internal/pkgmgr/upgrade_test.go`,
+  `TestUpgrade_ReAddsRemovedEntity`, in place since 2026-07-19) — and it is **not** protected by
+  `0bb6daea`'s skip, which only guards the `survives` branch.
+
+Both branches, run under `operationType:"UpgradePackage"`, emit the exact same shape at step 8: `update`,
+same key class, prior `isDeleted:true` → new `isDeleted:false`. §14's guard rejected both, so it broke the
+legitimate one (`go test ./internal/pkgmgr/... -run TestUpgrade_ReAddsRemovedEntity` fails on this branch,
+passes on `main`) while closing the attacker's one. **The real distinguishing fact — was this tombstone an
+explicit operator `RevokePermission`, or a package's own prior-version removal — is not present anywhere in
+the mutation, the prior document, or `env.OperationType`.** It would need a provenance marker at the
+tombstone write site (e.g. distinguishing `RevokePermission`'s tombstone from `UpgradePackage`'s own
+`old \ new` tombstone) — a genuinely new mechanism with real edge cases of its own (what a stored document
+with no such marker, predating the mechanism, means; whether the marker survives a further round-trip). No
+ratified pattern to extend. **This is Designer-pass work, not a same-fire correction** (§2.5's test).
+
+**Also found, not this item's to fix but load-bearing for the eventual design:**
+
+- **A general step-6/8 validation gap: no mutation document field is type-checked against the shape its
+  readers assume.** A `grantedBy`/`holdsRole` link `update` whose `isDeleted` is present but not a JSON
+  bool (e.g. the string `"true"`) is invisible to every guard that reads it with a Go type assertion
+  (`.(bool)` silently yields `false` on a type mismatch) — including this fire's guard, `readPriorDoc`, and
+  `rejectPermissionRoleRewrites`. Worse: `internal/refractor`'s pipeline/adjacency consumers parse the SAME
+  field with a strict typed decode and either DLQ or hard-fail. A live link written with a malformed
+  `isDeleted` therefore reads as **live** to the Processor (so `RevokePermission`/`GrantPermission`, which
+  declare the key as a required/optional read, fail permanently at hydration) while some Refractor read
+  paths treat it as gone and others keep projecting it — a worse outcome than the revival this fire set out
+  to close, and general to every mutation class, not just `grantedBy`. **Filed as its own row** (below) —
+  mechanical (type-check `isDeleted`, and plausibly every boolean-typed provenance field, at commit time;
+  fail closed on a type mismatch same as the existing `!decoded` branches already do for a whole document),
+  not a Designer-pass item.
+- **The `holdsRole` exclusion this design reasoned as safe ("runtime-minted, never package-declared") is
+  true only of the honest `pkgmgr` client — `UpgradePackage`'s server-side script has no check binding a
+  mutation's key to the named package's own manifest at all** (confirmed live:
+  `internal/bootstrap/install_ddl.go` validates only `name`/`fromVersion`/`toVersion` are non-empty and the
+  key has ≥3 dot-segments). A `create` of a fresh `lnk.identity.<attacker>.holdsRole.role.<operator>` link
+  under `UpgradePackage` needs no revival at all and grants the kernel `operator` role outright — this is
+  the **already-filed** "`UpgradePackage`/`UninstallPackage` mutations aren't scoped to the named package's
+  own manifest" row (`lattice.md`, found 2026-08-14), now with a concrete repro confirming it dominates
+  (in severity and reachability) everything this item set out to close. No new row; that one's urgency is
+  what changed.
+- **Minor, corrected in place, no lasting effect:** §14's guard comment and its (now-reverted) contract
+  prose both claimed `env.OperationType` "selects which server-side script actually ran." False — `class`
+  (client-supplied, highest precedence, `step4_hydrate.go` `resolveClass`) selects the script; nothing
+  binds `operationType` to the script DDL's `permittedCommands`. Not exploitable by the design's own
+  threat actor (`GrantPermission` is granted only to `operator`, who already holds `UpgradePackage`), so
+  this was a wrong justification for a control that happens to hold for an unrelated reason (step-3 auth
+  gates `GrantPermission` itself) — but any future design leaning on "`OperationType` proves which script
+  ran" is building on sand and must re-derive the actual guarantee.
+
+**For the next Designer pass:** the real fix likely needs one of — (a) a provenance marker on a tombstone
+distinguishing "explicit revoke" from "package-diff removal", written at both `RevokePermission`'s tombstone
+and (going forward) never at `UpgradePackage`'s `old \ new` tombstone, checked by the revival guard; or (b)
+folding this into the manifest-scoping design (the `!survives` revive is legitimate exactly when the
+reviving `UpgradePackage` call is honestly diffing against the named package's own manifest — which is the
+same authenticity question that design already has to answer for creates and tombstones). (b) may be the
+more coherent shape: one mechanism that verifies an `UpgradePackage` mutation batch against the named
+package's real compiled Definition would close the create-forgery gap, the manifest-scoping gap, AND this
+revival gap at once, rather than three separate point guards. Worth deciding which before designing either.
