@@ -60,6 +60,20 @@ type ApplyResult struct {
 	// un-tombstoned by the body-diff update path.
 	RevocationsRespected int
 
+	// RetentionHoldersPreserved counts LIVE vtx.retentionclass.* keys this
+	// apply left live-but-undeclared instead of tombstoning them off the
+	// removal path, because only ShredRetentionClassKey may destroy a class's
+	// DEK and it refuses a tombstoned holder forever. The apply succeeded;
+	// these holders remain shreddable on the controller's retention schedule.
+	RetentionHoldersPreserved int
+
+	// RetentionHoldersAlreadyStranded counts vtx.retentionclass.* keys the
+	// removal path found ALREADY tombstoned — untouched by this apply, but not
+	// preserved either: ShredRetentionClassKey refuses them, so their DEK is
+	// past every destruction path. Reported so an operator can escalate the
+	// pre-existing damage instead of reading a reassuring "preserved" count.
+	RetentionHoldersAlreadyStranded int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this apply pushed past its
 	// declared LeafBudget. Advisory only — the apply still succeeded. This is
@@ -131,9 +145,11 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
 
-		ReactivationRequired: sum.reactivation,
-		RevocationsRespected: sum.revocationsRespected,
-		LeafBudgetWarnings:   leafBudgetWarnings,
+		ReactivationRequired:            sum.reactivation,
+		RevocationsRespected:            sum.revocationsRespected,
+		RetentionHoldersPreserved:       sum.retentionHoldersPreserved,
+		RetentionHoldersAlreadyStranded: sum.retentionHoldersAlreadyStranded,
+		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Action = "skip"

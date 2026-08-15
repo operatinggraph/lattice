@@ -243,6 +243,23 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 	if res.RevocationsRespected > 0 {
 		logger.Warn("upgrade left previously-revoked grant(s) untouched", "count", res.RevocationsRespected)
 	}
+	// Same shape and the same reason: the removal the package asked for did not
+	// happen. A success line alone would read as "the holder is gone" when it is
+	// still live in Core KV — deliberately, so ShredRetentionClassKey can still
+	// reach the class key it custodies.
+	if res.RetentionHoldersPreserved > 0 {
+		logger.Warn("upgrade left retention-class holder key(s) preserved — undeclared, not tombstoned, so they stay destroyable by ShredRetentionClassKey",
+			"count", res.RetentionHoldersPreserved)
+	}
+	// A different fact needing a different word: these holders were tombstoned
+	// before this run touched anything, so ShredRetentionClassKey's
+	// vertex_alive guard already refuses them and the class key each custodies
+	// is past every destruction path. Nothing this upgrade can do fixes it —
+	// the point of saying so is that the operator can find and escalate it.
+	if res.RetentionHoldersAlreadyStranded > 0 {
+		logger.Warn("retention-class holder key(s) are ALREADY tombstoned from a prior run — their class key can never be destroyed by ShredRetentionClassKey; pre-existing platform damage, not caused by this upgrade",
+			"count", res.RetentionHoldersAlreadyStranded)
+	}
 	if res.DryRun {
 		logger.Info("dry-run — no changes submitted",
 			"package", res.PackageName,
@@ -311,6 +328,27 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 	res, err := inst.Uninstall(ctx, packageName)
 	if err != nil {
 		return err
+	}
+	// Warn before the success line, and only when something was held back: the
+	// uninstall landed, but these keys are still live in Core KV on purpose —
+	// tombstoning a retention-class holder would put its DEK beyond
+	// ShredRetentionClassKey forever, so the explicit shred verb still owns the
+	// destruction the operator may still be expecting from this uninstall.
+	if len(res.RetentionHoldersPreserved) > 0 {
+		logger.Warn("uninstall left retention-class holder key(s) preserved — undeclared, not tombstoned, so they stay destroyable by ShredRetentionClassKey",
+			"count", len(res.RetentionHoldersPreserved),
+			"keys", res.RetentionHoldersPreserved,
+		)
+	}
+	// The other bucket, and the one worth waking someone for: these were
+	// already tombstoned when the uninstall read them, so ShredRetentionClassKey
+	// refuses them and their class keys are unreachable. This uninstall did not
+	// do it and cannot undo it; the keys are named so the operator can escalate.
+	if len(res.RetentionHoldersAlreadyStranded) > 0 {
+		logger.Warn("retention-class holder key(s) are ALREADY tombstoned from a prior run — their class key can never be destroyed by ShredRetentionClassKey; pre-existing platform damage, not caused by this uninstall",
+			"count", len(res.RetentionHoldersAlreadyStranded),
+			"keys", res.RetentionHoldersAlreadyStranded,
+		)
 	}
 	logger.Info("uninstall committed",
 		"package", res.PackageName,

@@ -270,8 +270,11 @@ install operation — not a synthetic substitute.
 
 `lattice-pkg uninstall <package-canonical-name>` reads the package's `.manifest`
 aspect (`declaredKeys`) and submits `UninstallPackage`, which tombstones each
-declared key (cascade-style) and **rejects any protected key** (defense in
-depth). Uninstall is soft-delete only — tombstoned vertices remain queryable for
+declared key (cascade-style) except a `vtx.retentionclass.*` holder — those the
+client excludes from the payload and reports back instead, since tombstoning one
+would put the class DEK it custodies beyond `ShredRetentionClassKey` forever
+([Contract #8 §8.3](/docs/contracts/08-package-install.md)) — and **rejects any
+protected key** (defense in depth). Uninstall is soft-delete only — tombstoned vertices remain queryable for
 audit; physical removal is out of scope. The Refractor reprojects (lens output
 disappears; permissions drop out of cap entries within NFR-P3 lag).
 
@@ -296,7 +299,9 @@ lattice-pkg upgrade <dir>                  # explicit upgrade; errors if not ins
 `declaredKeys`, rebuilds the new manifest, and **diffs by key**:
 
 - a key only in the new manifest → **create**,
-- a key only in the old → **tombstone** (sorted),
+- a key only in the old → **tombstone** (sorted) — except a `vtx.retentionclass.*`
+  holder, which a dropped or renamed class leaves live-but-undeclared for the same
+  reason uninstall does ([Contract #8 §8.6](/docs/contracts/08-package-install.md)),
 - a key in both whose logical body changed → **update** (creation provenance —
   `createdAt`/`createdBy`/`createdByOp` — is carried forward; only `lastModified*`
   is re-stamped with the upgrade actor); an unchanged body is **skipped**.

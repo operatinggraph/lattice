@@ -240,6 +240,198 @@ func TestUpgrade_RevocationGuardExcludesDefinitions(t *testing.T) {
 	}
 }
 
+// defWithRetentionClass returns the sample package plus one declared
+// retention-class holder, so a test can drop the class on the next version and
+// observe what the diff does with the holder's keys. Built as a copy rather
+// than a change to sampleDef, which every other test in this package shares.
+func defWithRetentionClass(version, canonicalName string) Definition {
+	def := sampleDef(version)
+	def.RetentionClasses = []RetentionClassSpec{{
+		CanonicalName:   canonicalName,
+		Description:     "Records whose retention obligation outlives a subject's erasure.",
+		Policy:          RetentionPolicyEraseOnExpiry,
+		RetentionPeriod: "P1Y",
+	}}
+	return def
+}
+
+// TestUpgrade_PreservesRetentionClassHolderOnRemoval proves a package that
+// drops (or renames — the canonicalName salts the holder's deterministic
+// NanoID, so a rename is a drop plus an add) a retention class does NOT
+// tombstone the old holder's keys. Only ShredRetentionClassKey may destroy a
+// class's DEK, and its vertex_alive guard refuses a holder whose root is
+// already tombstoned — so an auto-tombstone here would strand that key beyond
+// any reach, forever. The holder is instead left live-but-undeclared, which is
+// what keeps the controller's retention schedule executable.
+func TestUpgrade_PreservesRetentionClassHolderOnRemoval(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithRetentionClass("0.1.0", "sampleClass1")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	holderKey := RetentionClassKey(v1.Name, "sampleClass1")
+	policyKey := holderKey + ".retentionPolicy"
+	for _, k := range []string{holderKey, policyKey} {
+		if del, _ := kvDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
+			t.Fatalf("%s should be live right after install", k)
+		}
+	}
+
+	// v2 drops the retention class entirely — both holder keys fall into the
+	// diff's old \ new removal partition.
+	v2 := sampleDef("0.2.0")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (drop class): %v", err)
+	}
+	if res.RetentionHoldersPreserved != 2 {
+		t.Fatalf("RetentionHoldersPreserved = %d, want 2 (holder root + .retentionPolicy) (%+v)", res.RetentionHoldersPreserved, res)
+	}
+	// The class removal is the only removal in this upgrade, so any nonzero
+	// tombstone count here means the exclusion failed to hold.
+	if res.Tombstoned != 0 {
+		t.Fatalf("dropping a retention class must emit no tombstone at all, got %d (%+v)", res.Tombstoned, res)
+	}
+
+	for _, k := range []string{holderKey, policyKey} {
+		doc := kvDoc(t, ctx, conn, k)
+		if del, _ := doc["isDeleted"].(bool); del {
+			t.Fatalf("%s must stay live so ShredRetentionClassKey can still destroy the class key: %+v", k, doc)
+		}
+	}
+	// The holder keeps its policy body too: an operator deciding when to shred
+	// reads the retention period off this aspect, and a holder stripped of it
+	// is unauditable even though it is technically still shreddable.
+	policy, ok := kvDoc(t, ctx, conn, policyKey)["data"].(map[string]any)
+	if !ok || policy["canonicalName"] != "sampleClass1" || policy["retentionPeriod"] != "P1Y" {
+		t.Fatalf("preserved holder lost its retention policy body: %+v", policy)
+	}
+}
+
+// TestUpgrade_PreservesRetentionClassHolderOnRename covers the rename half of
+// the same removal: the new canonicalName mints a fresh holder while the old
+// one leaves the declared set. Both must end live — the new one because the
+// package declares it, the old one because its DEK is still only destroyable
+// by ShredRetentionClassKey.
+func TestUpgrade_PreservesRetentionClassHolderOnRename(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithRetentionClass("0.1.0", "sampleClass1")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	oldHolder := RetentionClassKey(v1.Name, "sampleClass1")
+
+	v2 := defWithRetentionClass("0.2.0", "sampleClass2")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (rename class): %v", err)
+	}
+	newHolder := RetentionClassKey(v2.Name, "sampleClass2")
+	if newHolder == oldHolder {
+		t.Fatalf("the canonicalName must salt the holder NanoID; both names minted %s", newHolder)
+	}
+	if res.RetentionHoldersPreserved != 2 {
+		t.Fatalf("RetentionHoldersPreserved = %d, want 2 (the old holder root + its .retentionPolicy) (%+v)", res.RetentionHoldersPreserved, res)
+	}
+	if res.Tombstoned != 0 {
+		t.Fatalf("renaming a retention class must emit no tombstone, got %d (%+v)", res.Tombstoned, res)
+	}
+	for _, k := range []string{oldHolder, oldHolder + ".retentionPolicy", newHolder, newHolder + ".retentionPolicy"} {
+		if del, _ := kvDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
+			t.Fatalf("%s must be live after the rename", k)
+		}
+	}
+}
+
+// TestUpgrade_RetentionHolderAlreadyTombstonedReportedSeparately covers the
+// state the exclusion cannot rescue: a holder whose root is ALREADY tombstoned
+// when the removal path reads it. ShredRetentionClassKey's vertex_alive guard
+// refuses that root forever, so the class key it custodies is past every
+// destruction path — counting it as "preserved, still shreddable" would tell
+// the one operator who can escalate the damage that there is nothing to
+// escalate. It gets its own count, and a holder key that is absent entirely
+// gets neither (there is nothing there to preserve).
+func TestUpgrade_RetentionHolderAlreadyTombstonedReportedSeparately(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithRetentionClass("0.1.0", "sampleClass1")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	holderKey := RetentionClassKey(v1.Name, "sampleClass1")
+	policyKey := holderKey + ".retentionPolicy"
+
+	// Stand the holder root up as a stranded one: tombstoned in Core KV while
+	// still declared. Written directly because no sanctioned op produces this
+	// state any more — that is precisely what makes it pre-existing damage.
+	doc := kvDoc(t, ctx, conn, holderKey)
+	doc["isDeleted"] = true
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal stranded holder: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, holderKey, raw); err != nil {
+		t.Fatalf("KVPut stranded holder: %v", err)
+	}
+
+	v2 := sampleDef("0.2.0") // drops the class — both holder keys hit removal
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (drop class): %v", err)
+	}
+	if res.RetentionHoldersAlreadyStranded != 1 {
+		t.Fatalf("RetentionHoldersAlreadyStranded = %d, want 1 (the tombstoned root) (%+v)", res.RetentionHoldersAlreadyStranded, res)
+	}
+	if res.RetentionHoldersPreserved != 1 {
+		t.Fatalf("RetentionHoldersPreserved = %d, want 1 (the still-live .retentionPolicy aspect) (%+v)", res.RetentionHoldersPreserved, res)
+	}
+	if res.Tombstoned != 0 {
+		t.Fatalf("a stranded holder is still excluded from the tombstone set, got %d (%+v)", res.Tombstoned, res)
+	}
+	if del, _ := kvDoc(t, ctx, conn, policyKey)["isDeleted"].(bool); del {
+		t.Fatalf("%s must stay live — only the root was stranded", policyKey)
+	}
+
+	// An absent holder key is neither preserved nor stranded: there is nothing
+	// under it to report either way. Purge the policy aspect and re-run the
+	// same drop against a fresh v1 base.
+	ctx2, conn2, inst2 := newInstallerHarness(t)
+	if _, err := inst2.Install(ctx2, defWithRetentionClass("0.1.0", "sampleClass1")); err != nil {
+		t.Fatalf("Install (absent-key case): %v", err)
+	}
+	if err := conn2.KVPurge(ctx2, CoreBucket, policyKey); err != nil {
+		t.Fatalf("KVPurge %s: %v", policyKey, err)
+	}
+	res2, err := inst2.Upgrade(ctx2, sampleDef("0.2.0"))
+	if err != nil {
+		t.Fatalf("Upgrade (absent-key case): %v", err)
+	}
+	if res2.RetentionHoldersPreserved != 1 || res2.RetentionHoldersAlreadyStranded != 0 {
+		t.Fatalf("a purged holder key must be counted in neither bucket: preserved=%d stranded=%d (%+v)",
+			res2.RetentionHoldersPreserved, res2.RetentionHoldersAlreadyStranded, res2)
+	}
+}
+
+// TestNoChangesReason pins the empty-delta Reason string. A run that left a
+// grant revoked did something worth naming, and a bare "no changes" would be
+// the one sentence that hides it.
+func TestNoChangesReason(t *testing.T) {
+	plain := noChangesReason("pkg", 0)
+	if !strings.Contains(plain, "no changes") {
+		t.Fatalf("no revocations: want the plain no-changes reason, got %q", plain)
+	}
+
+	revoked := noChangesReason("pkg", 3)
+	if !strings.Contains(revoked, "3 previously-revoked grant(s)") {
+		t.Fatalf("revocations respected must be named: %q", revoked)
+	}
+	if strings.Contains(revoked, "no changes") {
+		t.Fatalf("a run that respected a revocation is not a plain no-change run: %q", revoked)
+	}
+}
+
 // TestUpgrade_DiffCreateUpdateTombstone exercises all three partitions in one
 // upgrade: add a lens (create), change the DDL description (update, with
 // createdAt carried forward), drop the permission (tombstone). It asserts the

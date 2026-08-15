@@ -215,7 +215,9 @@ function modalShell(title, focusables, isBusy) {
 }
 
 // renderApplyReply renders an install/upgrade reply: the summary line, the
-// dry-run key delta (linkified chips), and any dependency warnings.
+// dry-run key delta (linkified chips), any dependency warnings, and the
+// stranded-custody escalation when the diff met a holder it could not have
+// saved.
 function renderApplyReply(body) {
   const out = el("div");
   if (body.error) {
@@ -224,6 +226,11 @@ function renderApplyReply(body) {
   }
   out.appendChild(el("div", null, applySummaryLine(body)));
   (body.warnings || []).forEach((w) => out.appendChild(el("div", "warn-text small", w)));
+  if (body.retentionHoldersAlreadyStrandedCount) {
+    out.appendChild(el("div", "warn-text small",
+      body.retentionHoldersAlreadyStrandedCount + " retention-class holder key(s) are ALREADY tombstoned from a prior run — " +
+      "their class key can never be destroyed by ShredRetentionClassKey. Pre-existing platform damage, not caused by this operation; escalate."));
+  }
   [["create", body.createdKeys], ["update", body.updatedKeys], ["tombstone", body.tombstonedKeys]]
     .forEach(([verb, keys]) => {
       (keys || []).forEach((k) => {
@@ -330,7 +337,7 @@ function openUninstallModal(pkg) {
   const { modal, close } = modalShell("Uninstall package", () => [input, cancel, confirm], () => inFlight);
 
   modal.appendChild(el("p", "muted",
-    "Soft-deletes everything this package declared — " + uninstallSummary(pkg) +
+    "Soft-deletes this package's declared keys — " + uninstallSummary(pkg) +
     ". Vertices stay queryable for audit. Type the package name to confirm:"));
   modal.appendChild(el("div", "cid", token));
   const input = el("input");
@@ -375,10 +382,23 @@ function openUninstallModal(pkg) {
     // Render the full reply — the tombstoned key list, linkified (dimmed;
     // they are soft-deleted now) — before the operator closes out.
     const keys = body.tombstoned || [];
+    const preserved = body.retentionHoldersPreserved || [];
+    const stranded = body.retentionHoldersAlreadyStranded || [];
     msg.className = "small";
     msg.innerHTML = "";
     msg.appendChild(el("div", null, "uninstalled — " + keys.length + " key(s) tombstoned" +
       (body.note ? " (" + body.note + ")" : "")));
+    // The keys the uninstall deliberately held back. Naming them here is the
+    // only place an operator learns the package's retention custody outlived
+    // the package; the tombstone list below would otherwise read as complete.
+    if (preserved.length) {
+      msg.appendChild(el("div", null, preserved.length + " retention-class holder key(s) preserved (not tombstoned) — " +
+        "still destroyable via ShredRetentionClassKey: " + preserved.join(", ")));
+    }
+    if (stranded.length) {
+      msg.appendChild(el("div", "warn-text", stranded.length + " retention-class holder key(s) are ALREADY tombstoned from a prior run — " +
+        "their class key can never be destroyed by ShredRetentionClassKey. Pre-existing platform damage, not caused by this uninstall; escalate: " + stranded.join(", ")));
+    }
     const keyBox = el("div", "pkg-modal-out pkg-item-deleted");
     keys.forEach((k) => {
       const line = el("div", "pkg-delta small");

@@ -51,6 +51,22 @@ type UpgradeResult struct {
 	// un-tombstoned by the body-diff update path.
 	RevocationsRespected int
 
+	// RetentionHoldersPreserved counts LIVE vtx.retentionclass.* keys this
+	// upgrade left live-but-undeclared instead of tombstoning them off the
+	// removal path, because only ShredRetentionClassKey may destroy a class's
+	// DEK and it refuses a tombstoned holder forever. The upgrade succeeded;
+	// these holders remain shreddable on the controller's retention schedule.
+	RetentionHoldersPreserved int
+
+	// RetentionHoldersAlreadyStranded counts vtx.retentionclass.* keys the
+	// removal path found ALREADY tombstoned. They are not preserved in any
+	// useful sense: ShredRetentionClassKey's vertex_alive guard refuses them,
+	// so the DEK each custodies can no longer be destroyed by any path. This
+	// upgrade did not cause that — it reports it, because an operator holding
+	// a retention obligation on such a class needs to escalate rather than
+	// read a "preserved" count and be reassured.
+	RetentionHoldersAlreadyStranded int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
@@ -109,9 +125,11 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
 
-		ReactivationRequired: sum.reactivation,
-		RevocationsRespected: sum.revocationsRespected,
-		LeafBudgetWarnings:   leafBudgetWarnings,
+		ReactivationRequired:            sum.reactivation,
+		RevocationsRespected:            sum.revocationsRespected,
+		RetentionHoldersPreserved:       sum.retentionHoldersPreserved,
+		RetentionHoldersAlreadyStranded: sum.retentionHoldersAlreadyStranded,
+		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Skipped = true
@@ -217,6 +235,12 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 // a declared key is deliberately dead, and saying so is what makes the
 // respected-revocation outcome visible even on a run that otherwise emits no
 // mutation at all (Force same-version with nothing else changed, e.g.).
+//
+// The retention-holder exclusion has no branch here: a holder can only be
+// excluded once it has left the manifest's declaredKeys, and declaredKeys is a
+// field of the .manifest aspect body — so any run that excludes one also
+// rewrites that aspect, which is itself an update mutation. An empty mutation
+// batch and a nonzero holder count cannot co-occur.
 func noChangesReason(pkgName string, revocationsRespected int) string {
 	if revocationsRespected > 0 {
 		return fmt.Sprintf("package %q body matches; %d previously-revoked grant(s) intentionally left revoked", pkgName, revocationsRespected)
@@ -241,6 +265,21 @@ type diffSummary struct {
 	// them tombstoned rather than reviving them, and this counter is what makes
 	// that silent-by-default outcome visible to the operator.
 	revocationsRespected int
+	// retentionHoldersPreserved counts LIVE vtx.retentionclass.* keys (the
+	// holder root + its .retentionPolicy aspect) this upgrade left alone — live
+	// but no longer declared — rather than auto-tombstoning via the old\new
+	// removal path, because ShredRetentionClassKey's vertex_alive guard
+	// (packages/privacy-base/shred_retention_class_key.go) refuses a tombstoned
+	// holder forever: an auto-tombstone here would permanently block the only
+	// path that can destroy that class's DEK. retention-class-key-custody-
+	// design.md §3.1, §4.3.
+	retentionHoldersPreserved int
+	// retentionHoldersAlreadyStranded counts removal-path vtx.retentionclass.*
+	// keys whose committed doc is ALREADY tombstoned. Skipping them is the same
+	// non-action, but calling them "preserved" would be false: the vertex_alive
+	// guard refuses them, so their DEK is past every destruction path there is.
+	// Counted separately so the operator sees stranded custody as stranded.
+	retentionHoldersAlreadyStranded int
 	// reactivation names the lens spec edits this upgrade commits that a running
 	// Refractor cannot adopt without re-activating the lens. The upgrade is
 	// correct and lands; what would otherwise be wrong is reporting it as
@@ -408,7 +447,29 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 		}
 		if committed == nil {
 			// Absent from KV already (a prior partial state) — nothing to
-			// tombstone, nothing to condition.
+			// tombstone, nothing to condition. A retention-class holder that is
+			// absent is likewise nothing to preserve, so it is not counted.
+			continue
+		}
+		if strings.HasPrefix(k, "vtx."+RetentionClassVertexType+".") {
+			// A retention-class holder (the vtx.retentionclass.<id> root or its
+			// .retentionPolicy aspect) that the package renamed or dropped. Its
+			// DEK may only be destroyed by ShredRetentionClassKey, whose
+			// vertex_alive guard refuses a tombstoned holder — so tombstoning it
+			// here would permanently strand the class key it custodies, the
+			// opposite of what a retention obligation promises. Leave the key
+			// entirely alone: live but undeclared, still shreddable whenever the
+			// controller's retention schedule says to destroy it. Destruction
+			// belongs to the explicit verb, never to a package diff.
+			//
+			// A holder that is ALREADY tombstoned gets the same non-action but a
+			// different count: the guard refuses it, so "preserved — still
+			// shreddable" would be the one claim an operator must not be given.
+			if del, _ := committed["isDeleted"].(bool); del {
+				sum.retentionHoldersAlreadyStranded++
+			} else {
+				sum.retentionHoldersPreserved++
+			}
 			continue
 		}
 		out = append(out, installMutation{

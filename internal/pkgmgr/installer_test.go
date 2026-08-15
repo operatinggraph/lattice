@@ -2,9 +2,11 @@ package pkgmgr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -670,6 +672,133 @@ func TestInstaller_Uninstall(t *testing.T) {
 	}
 	if len(after) != 0 {
 		t.Fatalf("expected empty list post-uninstall, got %+v", after)
+	}
+}
+
+// TestInstaller_Uninstall_PreservesRetentionClassHolder is the uninstall half
+// of the removal path the upgrade diff already guards: uninstall enumerates the
+// manifest's declaredKeys, which includes a retention-class holder's root and
+// its .retentionPolicy aspect, and tombstoning either would put the class's DEK
+// beyond ShredRetentionClassKey forever (its vertex_alive guard refuses a
+// tombstoned holder). So the holder survives the uninstall, live but no longer
+// declared, while every other declared key tombstones normally.
+func TestInstaller_Uninstall_PreservesRetentionClassHolder(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithRetentionClass("0.1.0", "sampleClass1")
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	holderKey := RetentionClassKey(def.Name, "sampleClass1")
+	policyKey := holderKey + ".retentionPolicy"
+	preserved := map[string]bool{holderKey: true, policyKey: true}
+	// The whole test is vacuous unless the install actually declared the holder
+	// keys — declaredKeys is the exact list uninstall walks, so if the holder
+	// were absent here there would be nothing to preserve and the assertions
+	// below would pass without exercising the skip at all.
+	declared := map[string]bool{}
+	for _, k := range res.DeclaredKeys {
+		declared[k] = true
+	}
+	for k := range preserved {
+		if !declared[k] {
+			t.Fatalf("install did not declare %s; declaredKeys = %v", k, res.DeclaredKeys)
+		}
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	got := append([]string{}, uninst.RetentionHoldersPreserved...)
+	slices.Sort(got)
+	want := []string{holderKey, policyKey}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("RetentionHoldersPreserved = %v, want exactly %v (%+v)", got, want, uninst)
+	}
+
+	// Both holder keys must still read live: a tombstone on either is the bug.
+	for k := range preserved {
+		entry, err := conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			t.Fatalf("post-uninstall read %s: %v", k, err)
+		}
+		if contains(string(entry.Value), `"isDeleted":true`) {
+			t.Fatalf("%s was tombstoned by uninstall — ShredRetentionClassKey can never destroy this class key now: %s", k, entry.Value)
+		}
+	}
+
+	// Everything else the package declared — the sample DDL's meta vertex, its
+	// permission, the lens, and the package vertex itself — tombstones exactly
+	// as any other declared key.
+	for _, k := range append(append([]string{}, res.DeclaredKeys...), res.PackageKey) {
+		if preserved[k] {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			t.Fatalf("post-uninstall read %s: %v", k, err)
+		}
+		if !contains(string(entry.Value), `"isDeleted":true`) {
+			t.Fatalf("key %s not tombstoned: %s", k, entry.Value)
+		}
+	}
+	for _, k := range uninst.Tombstoned {
+		if preserved[k] {
+			t.Fatalf("Tombstoned names the preserved holder key %s: %v", k, uninst.Tombstoned)
+		}
+	}
+}
+
+// TestInstaller_Uninstall_ReportsAlreadyStrandedHolderSeparately is the
+// uninstall half of the same classification: the prefix match that excludes a
+// holder says nothing about the holder's state, so an already-tombstoned one
+// would otherwise be reported as "preserved — still destroyable by
+// ShredRetentionClassKey" when that verb's vertex_alive guard has already
+// refused it for good. Stranded custody must read as stranded.
+func TestInstaller_Uninstall_ReportsAlreadyStrandedHolderSeparately(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithRetentionClass("0.1.0", "sampleClass1")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	holderKey := RetentionClassKey(def.Name, "sampleClass1")
+	policyKey := holderKey + ".retentionPolicy"
+
+	entry, err := conn.KVGet(ctx, CoreBucket, holderKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", holderKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", holderKey, err)
+	}
+	doc["isDeleted"] = true
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal stranded holder: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, holderKey, raw); err != nil {
+		t.Fatalf("KVPut stranded holder: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if !slices.Equal(uninst.RetentionHoldersAlreadyStranded, []string{holderKey}) {
+		t.Fatalf("RetentionHoldersAlreadyStranded = %v, want exactly [%s] (%+v)", uninst.RetentionHoldersAlreadyStranded, holderKey, uninst)
+	}
+	if !slices.Equal(uninst.RetentionHoldersPreserved, []string{policyKey}) {
+		t.Fatalf("RetentionHoldersPreserved = %v, want exactly [%s] — the aspect is still live (%+v)", uninst.RetentionHoldersPreserved, policyKey, uninst)
+	}
+	for _, k := range uninst.Tombstoned {
+		if k == holderKey || k == policyKey {
+			t.Fatalf("a stranded holder is still excluded from the tombstone set, got %v", uninst.Tombstoned)
+		}
 	}
 }
 

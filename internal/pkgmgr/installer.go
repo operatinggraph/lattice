@@ -1248,7 +1248,10 @@ func (p *installedPackage) PackageKey() string { return p.Key }
 // Uninstall soft-deletes every Core-KV key recorded in a package's
 // manifest aspect. The aspect's `declaredKeys` field lists everything
 // the install wrote (DDL + lens + permission + grant + aspect keys);
-// the installer enumerates from there.
+// the installer enumerates from there. Retention-class holder keys are the one
+// exception: never tombstoned, and reported instead under
+// RetentionHoldersPreserved or RetentionHoldersAlreadyStranded by whether the
+// holder is still live.
 //
 // Soft-delete only — vertices remain queryable for audit.
 func (i *Installer) Uninstall(ctx context.Context, packageName string) (*UninstallResult, error) {
@@ -1273,6 +1276,7 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	declaredRaw, _ := env.Data["declaredKeys"].([]any)
 	seen := make(map[string]struct{}, len(declaredRaw)+2)
 	keys := make([]string, 0, len(declaredRaw)+2)
+	retentionHolders := make([]string, 0, 2)
 	appendKey := func(k string) {
 		if k == "" {
 			return
@@ -1281,6 +1285,21 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 			return
 		}
 		seen[k] = struct{}{}
+		if strings.HasPrefix(k, "vtx."+RetentionClassVertexType+".") {
+			// A retention-class holder (the vtx.retentionclass.<id> root or its
+			// .retentionPolicy aspect) never enters the tombstone set: only
+			// ShredRetentionClassKey may destroy a class's DEK and its
+			// vertex_alive guard refuses a tombstoned holder forever, so
+			// tombstoning here would strand the key it custodies beyond any
+			// reach. Mirrors diffManifest's old\new exclusion (see
+			// diffSummary.retentionHoldersPreserved) — an uninstall must not
+			// auto-tombstone a holder any more than an upgrade or rename may.
+			// The holder is left live but undeclared, still shreddable on the
+			// controller's retention schedule. Which of the two reported buckets
+			// it lands in depends on its committed state, resolved below.
+			retentionHolders = append(retentionHolders, k)
+			return
+		}
 		keys = append(keys, k)
 	}
 	for _, dk := range declaredRaw {
@@ -1296,6 +1315,36 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	// second tombstone race the first's revision advance and self-conflict.
 	appendKey(manifestKey)
 	appendKey(ip.Key)
+
+	// Classify each excluded holder by what is actually committed under it.
+	// The exclusion above is a prefix match, which says nothing about the key's
+	// state, and the two states that are not "live" must not be reported as
+	// preserved: an already-tombstoned holder is past ShredRetentionClassKey's
+	// vertex_alive guard forever (pre-existing damage this uninstall neither
+	// caused nor can undo — the operator has to be able to find it), and an
+	// absent one has nothing to preserve at all.
+	retentionHoldersPreserved := make([]string, 0, len(retentionHolders))
+	retentionHoldersAlreadyStranded := make([]string, 0, len(retentionHolders))
+	for _, k := range retentionHolders {
+		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("pkgmgr: uninstall read %s: %w", k, err)
+		}
+		var holder struct {
+			IsDeleted bool `json:"isDeleted"`
+		}
+		if err := json.Unmarshal(entry.Value, &holder); err != nil {
+			return nil, fmt.Errorf("pkgmgr: parse %s: %w", k, err)
+		}
+		if holder.IsDeleted {
+			retentionHoldersAlreadyStranded = append(retentionHoldersAlreadyStranded, k)
+			continue
+		}
+		retentionHoldersPreserved = append(retentionHoldersPreserved, k)
+	}
 
 	// Build the UninstallPackage payload. Keys that no longer resolve
 	// (already hard-deleted) are skipped — there is nothing to tombstone.
@@ -1320,7 +1369,20 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 		tombstoned = append(tombstoned, k)
 	}
 	if len(declaredEntries) == 0 {
-		return &UninstallResult{PackageName: packageName, Note: "nothing to uninstall"}, nil
+		// Every tombstonable key is already gone. "Nothing to uninstall" is only
+		// the whole truth when nothing was deliberately held back either: with a
+		// preserved holder in hand the package left something live on purpose,
+		// and an operator reading this note is the one who has to know that.
+		note := "nothing to uninstall"
+		if parts := retentionHolderNotes(retentionHoldersPreserved, retentionHoldersAlreadyStranded); len(parts) > 0 {
+			note = strings.Join(append([]string{"nothing to tombstone"}, parts...), "; ")
+		}
+		return &UninstallResult{
+			PackageName:                     packageName,
+			Note:                            note,
+			RetentionHoldersPreserved:       retentionHoldersPreserved,
+			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
+		}, nil
 	}
 
 	payload := map[string]any{
@@ -1334,7 +1396,12 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	}
 	switch reply.Status {
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
-		return &UninstallResult{PackageName: packageName, Tombstoned: tombstoned}, nil
+		return &UninstallResult{
+			PackageName:                     packageName,
+			Tombstoned:                      tombstoned,
+			RetentionHoldersPreserved:       retentionHoldersPreserved,
+			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
+		}, nil
 	default:
 		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
 			return nil, fmt.Errorf("%w: %s (a concurrent write raced this uninstall — re-run)",
@@ -1344,9 +1411,43 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	}
 }
 
+// retentionHolderNotes renders the operator-facing sentences for an
+// uninstall's two retention-holder buckets, in the order they matter: what was
+// held back live, then what was already past reach before this run started.
+// Returns nothing when both buckets are empty, so a caller can compose it into
+// a larger note without a trailing separator.
+func retentionHolderNotes(preserved, alreadyStranded []string) []string {
+	var parts []string
+	if len(preserved) > 0 {
+		parts = append(parts, fmt.Sprintf("%d retention-class holder key(s) left live but undeclared so ShredRetentionClassKey can still destroy the class key",
+			len(preserved)))
+	}
+	if len(alreadyStranded) > 0 {
+		parts = append(parts, fmt.Sprintf("%d retention-class holder key(s) were ALREADY tombstoned before this run — their class key can no longer be destroyed by ShredRetentionClassKey",
+			len(alreadyStranded)))
+	}
+	return parts
+}
+
 // UninstallResult summarises an uninstall.
 type UninstallResult struct {
 	PackageName string
 	Tombstoned  []string
 	Note        string
+
+	// RetentionHoldersPreserved names the LIVE vtx.retentionclass.* keys this
+	// uninstall left live-but-undeclared instead of tombstoning, because only
+	// ShredRetentionClassKey may destroy a class's DEK and it refuses a
+	// tombstoned holder forever. The uninstall succeeded; these holders remain
+	// shreddable on the controller's retention schedule.
+	RetentionHoldersPreserved []string
+
+	// RetentionHoldersAlreadyStranded names the declared vtx.retentionclass.*
+	// keys that were ALREADY tombstoned when this uninstall read them. They are
+	// excluded from the tombstone set like any holder, but they are not
+	// preserved: ShredRetentionClassKey's vertex_alive guard refuses them, so
+	// the class key each custodies is beyond every destruction path. Reported
+	// separately so the operator can escalate real stranded custody instead of
+	// reading it as a benign preservation.
+	RetentionHoldersAlreadyStranded []string
 }
