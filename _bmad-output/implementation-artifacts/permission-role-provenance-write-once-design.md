@@ -1013,3 +1013,218 @@ guard introduces:**
   mechanism now: the shape of a *safe* one (that can't be used to launder the exact redirection this guard
   exists to close) is a real design question, not a mirror of an established pattern — revisit if a
   concrete repoint need ever arrives.
+
+## 19. Fire brief — package-manifest ownership scoping (Steward, 2026-08-15)
+
+**Board rows addressed:** "[bootstrap] `UpgradePackage`/`UninstallPackage` mutations aren't scoped to the
+named package's own manifest" (`lattice.md`, ★★★, M, §8(b) below) and the dominant repro §15 found against
+it (a bare `create` of a `holdsRole` link, no revival needed). **Not addressed** (stays filed, see §19.6):
+"[bootstrap] `UpgradePackage`'s create arm can forge a package-origin permission/role vertex" (§8(a)) and
+the grantedBy-revival ambiguity (§15) — both genuinely need server-side Definition-content verification,
+which this fire does not build (§19.6 says why).
+
+### 19.1 Grounding (verified live, this fire, `HEAD` at fire start)
+
+- **No server-side package-Definition registry exists.** `internal/pkgmgr.Definition` is compiled only into
+  client tooling (`cmd/lattice-pkg`); `internal/processor` does not and, given `internal/pkgmgr` already
+  imports `internal/processor` (`installer.go:17`, for `processor.OperationReply`), **cannot** import
+  `internal/pkgmgr` back without a cycle. `VerifyAgainstDefinition` (`internal/pkgmgr/manifest.go:130-238`)
+  is a client-side-only count/name check and does not even cover `RetentionClasses` — it is not a
+  server-side primitive to extend.
+- **The established server-side guard shape** (`internal/processor/step8_commit.go`): `rejectProtectedMutations`
+  (:666) and `rejectPermissionRoleRewrites` (:762) both read a mutation's **prior stored document**
+  (`readPriorDoc`/`readPriorDocuments`, :579-657) and reject the whole operation on a shape violation. This
+  fire mirrors that shape exactly — it does not invent a new enforcement point.
+- **`.manifest.declaredKeys` already lists every key a package owns**, including link keys —
+  `internal/pkgmgr/build.go:69-71`'s `addCreate` closure appends every created key (DDL, lens, permission,
+  role, roleindex, weaverTarget, loomPattern, opMeta, pane, **and every link** — e.g. the `forOperation`
+  link at `build.go:404-406`) to `declared`, which becomes `manifestData["declaredKeys"]` at `build.go:421`
+  — **except** the manifest aspect's own key, explicitly excluded by the snapshot-before-self-reference at
+  `build.go:421`'s comment (the package root vertex `pkgKey`, by contrast, **is** in the snapshot — created
+  at `build.go:413`, before the manifest aspect at `:423-424`).
+- **The package's own vertex key is deterministic and independently derivable server-side** —
+  `PackageVertexPrefix + entityNanoID(name, "package")` (`internal/pkgmgr/installer.go:30,273`), where
+  `entityNanoID(name, tag) = nanoIDFromSalt("lattice-pkg:"+name+":"+tag)` (`installer.go:418-420`) and
+  `nanoIDFromSalt` (`installer.go:486-496`) is a **plain, unexported, deterministic SHA-256→alphabet-index
+  function** — **not** the same algorithm as `substrate.SHA256NanoID` (`internal/substrate/derive.go:69-77`,
+  which seeds a `rand.PCG` from the digest instead of mapping digest bytes directly); the existing comment
+  at `installer.go:414-419` already flags this divergence ("exact parity … is not required") because today
+  only Go installer code reads it. This fire needs parity for the first time — a second, independent
+  reader (the Processor guard) must compute the identical key from the identical name string, or the guard
+  looks up a manifest that isn't the one it thinks it is.
+- **`env.Payload` is `json.RawMessage`, not a map** — every other step-8/derive-reads reader that needs a
+  payload field decodes it first (`descriptor_floor.go:149-150`'s `jsonToGenericMap`,
+  `starlark_builtins.go:157-163`). The guard follows the same decode-then-read pattern, not a raw type
+  assertion on `env.Payload`.
+- **Link-key parsing already has a shared parser** — `substrate.ParseLinkKey` (`substrate/keys.go:73-75`)
+  returns `(type1, id1, linkName, type2, id2, ok)`; no hand-rolled `strings.Split` needed to test a link's
+  `linkName`.
+- **The dominant repro (§15) is a `create`, not an `update`/`tombstone`.** A bare
+  `create` of `lnk.identity.<attacker>.holdsRole.role.<operator>` under `UpgradePackage` needs no revival —
+  §15 confirmed live that `InstallPackageDDLScript`/`UpgradePackageDDLScript`/`UninstallPackageDDLScript`
+  (`internal/bootstrap/install_ddl.go`, all three) check only key-shape, underscore-aspect, and op-vocabulary
+  — nothing binds a mutation's key or link-type to what the named package legitimately declares. A pure
+  "update/tombstone must be in the named package's declaredKeys" guard (§8(b) as originally worded) does
+  **not** reach this, because a `create`'s key is by definition never in the prior manifest. Closing the
+  dominant repro needs a second, narrower rule (§19.3).
+- **No legitimate package `Definition` field ever produces a `holdsRole` link.** The `Definition` struct
+  (`internal/pkgmgr/definition.go:128-240`) carries `DDLs`, `Lenses`, `Permissions`, `Roles`,
+  `RetentionClasses`, `WeaverTargets`, `LoomPatterns`, `OpMetas`, `Panes` — no identity-role-assignment
+  field, and `install_ddl.go`'s three scripts have no code path that would emit one either; §15's own words
+  confirm the design already reasoned `holdsRole` as "runtime-minted, never package-declared." This is a
+  **zero-false-positive** exclusion, not a design call with edge cases to weigh.
+
+### 19.2 The shape — two independent guards, same enforcement point
+
+Both land in `internal/processor/step8_commit.go`, wired into `Commit` immediately after
+`rejectPermissionRoleRewrites` (`:213`), using the `prior priorDocs` already read at `:203` where possible.
+
+**Guard A — package-lifecycle ops never touch a `holdsRole` link.**
+
+```go
+// rejectPackageHoldsRoleMutations rejects any InstallPackage/UpgradePackage/
+// UninstallPackage mutation whose key is a holdsRole link. No package
+// Definition field (DDL, lens, permission, role, retention class,
+// weaverTarget, loomPattern, opMeta, pane) ever produces one — identity-role
+// assignment is RBAC's op surface (GrantPermission et al.), never a package
+// diff's. Zero legitimate mutation is rejected by this rule.
+func rejectPackageHoldsRoleMutations(operationType string, mutations []MutationOp) error {
+	if operationType != "InstallPackage" && operationType != "UpgradePackage" && operationType != "UninstallPackage" {
+		return nil
+	}
+	for _, m := range mutations {
+		if _, _, linkName, _, _, ok := substrate.ParseLinkKey(m.Key); ok && linkName == "holdsRole" {
+			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "holdsRole"}
+		}
+	}
+	return nil
+}
+```
+
+Applies to `create` too (install is create-only, so this is install's only exposure to this rule) — this is
+the fix for the confirmed-dominant repro.
+
+**Guard B — `UpgradePackage`/`UninstallPackage` update/tombstone must target a key the named package's own
+prior manifest declared.**
+
+```go
+// rejectUnscopedPackageMutations is the manifest-ownership backstop for
+// UpgradePackage/UninstallPackage: an update or tombstone may only target a
+// key the OPERATION'S OWN NAMED PACKAGE already declared in its prior
+// .manifest.declaredKeys, read server-side — never the client-asserted
+// "name" string alone. InstallPackage is exempt: it is create-only and
+// therefore already safe by construction (§8.2).
+func (c *CommitterImpl) rejectUnscopedPackageMutations(ctx context.Context, env *OperationEnvelope, mutations []MutationOp) error {
+	if env.OperationType != "UpgradePackage" && env.OperationType != "UninstallPackage" {
+		return nil
+	}
+	payload, _ := jsonToGenericMap(env.Payload)
+	name, _ := payload["name"].(string)
+	if name == "" {
+		return nil // script-level guard already rejects an empty name; nothing to scope against here
+	}
+	pkgKey := substrate.VertexKey("package", packageEntityNanoID(name, "package"))
+	manifestKey := pkgKey + ".manifest"
+
+	manifest, err := c.readPriorDoc(ctx, manifestKey)
+	if err != nil {
+		return fmt.Errorf("step 8: read package manifest for %q: %w", name, err)
+	}
+	if !manifest.Found {
+		return nil // no installed package under this name — nothing declared to violate
+	}
+	declared := map[string]struct{}{}
+	if raw, ok := manifest.Doc["declaredKeys"].([]interface{}); ok {
+		for _, k := range raw {
+			if s, ok := k.(string); ok {
+				declared[s] = struct{}{}
+			}
+		}
+	}
+	for _, m := range mutations {
+		if m.Op != "update" && m.Op != "tombstone" {
+			continue
+		}
+		if m.Key == pkgKey || m.Key == manifestKey {
+			continue // the package's own root + its manifest aspect are always in-scope for their own upgrade/uninstall
+		}
+		if _, ok := declared[m.Key]; !ok {
+			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "unscoped", Package: name}
+		}
+	}
+	return nil
+}
+```
+
+`packageEntityNanoID` is a **new exported function in `internal/substrate`** (`derive.go`, beside
+`SHA256NanoID`) — `internal/pkgmgr`'s unexported `nanoIDFromSalt`/`entityNanoID` (`installer.go:418-420,
+486-496`) move there verbatim (same salt format `"lattice-pkg:"+name+":"+tag`, same digest-to-alphabet
+mapping, byte-identical output), and `internal/pkgmgr` is refactored to call the shared function instead of
+its private copy — a one-writer, two-reader primitive, matching the existing `SHA256NanoID` precedent
+exactly rather than growing a second parallel hash scheme. **Why substrate, not pkgmgr → processor
+directly:** `internal/pkgmgr` already imports `internal/processor` (§19.1), so the reverse import is a
+cycle; `internal/substrate` is a leaf both already depend on with zero new coupling.
+
+The manifest read is a **fresh out-of-band `KVGet`** (`c.readPriorDoc`, reused as-is — it already takes an
+arbitrary key, not just a mutation target), not a lookup into the batch-scoped `prior` map from
+`readPriorDocuments` — the manifest key is not necessarily a mutation target of the batch it's gating (a
+dev-mode force-reapply with zero body changes touches nothing, and the manifest read still must happen to
+validate whatever *is* submitted).
+
+### 19.3 New error type
+
+`PackageScopeError` in `step8_commit.go`, beside `PermissionProvenanceError`: `{Key, Op, Reason, Package
+string}`. `Reason` is `"holdsRole"` (Guard A) or `"unscoped"` (Guard B) — kept as one type with a
+discriminant rather than two, since both map to the same new wire error code and the same remediation class
+("this mutation doesn't belong to the package that submitted it"). New `ErrCodePackageScope` in
+`internal/processor/envelope.go` + `internal/opwire`, wired into `commit_path.go`'s reply mapping mirroring
+`*PermissionProvenanceError`'s branch.
+
+### 19.4 Contract surface
+
+Contract #8 §8.4 gains a third paragraph (staged **uncommitted** in `main`, alongside the two already-staged
+retention-class + permission/role-provenance paragraphs from earlier fires today — append, do not
+disturb): "Package-manifest ownership scoping" — `InstallPackage`/`UpgradePackage`/`UninstallPackage` may
+never mutate a `holdsRole` link, and `UpgradePackage`/`UninstallPackage`'s update/tombstone mutations must
+target a key the named package's own prior `.manifest.declaredKeys` lists (root + manifest aspect exempted
+as self-referential). Names `PackageScopeError` as the authoritative guard, path-independent same as §8.4's
+existing two guards.
+
+### 19.5 Test plan (table-driven, positive vector first, per the standing check)
+
+`internal/processor/step8_commit_test.go`:
+
+- **Positive:** a legitimate `UpgradePackage` update to a surviving declared key; a legitimate tombstone of
+  a removed declared key; the manifest-aspect self-update; the package-root version-bump update; an
+  `InstallPackage` create batch containing no `holdsRole` link (unaffected).
+- **Negative, one per rule:** an `UpgradePackage` update naming package A whose key belongs to package B
+  (not in A's declaredKeys) → `PackageScopeError{Reason:"unscoped"}`; the same for a tombstone; an
+  `UpgradePackage`/`InstallPackage`/`UninstallPackage` batch creating/updating/tombstoning a `holdsRole`
+  link → `PackageScopeError{Reason:"holdsRole"}` (the §15 repro, pinned directly).
+- **Boundary:** `UpgradePackage` naming a package with no installed manifest (`Found=false`) → allowed
+  (matches `rejectPermissionRoleRewrites`'s "not found → not protected" posture; this is a degenerate/
+  first-touch case the create-forgery gap already covers, not this guard's job).
+- Run `internal/pkgmgr`'s + `internal/bootstrap`'s existing suites unchanged (the mutation producers) to
+  confirm no legitimate upgrade/uninstall/install path newly fails.
+
+`internal/substrate`: one test pinning `packageEntityNanoID("x","package")`'s value against the pre-move
+`nanoIDFromSalt` output (byte-for-byte), so the move can't silently drift the hash `internal/pkgmgr` already
+has installed packages keyed by.
+
+**Review depth:** security-plane, capability-adjacent — full 3-layer adversarial regardless of size, per
+steward SKILL.md §4.
+
+### 19.6 Non-goal, restated precisely now that Guards A+B are scoped
+
+**§8(a) create-forgery and §15's grantedBy-revival ambiguity are UNCHANGED by this fire — still open, still
+needing their own design pass.** Neither guard touches a `create` of a `vtx.permission.*`/`vtx.role.*` whose
+key is self-consistent with the **named package's own** claimed content (Guard B only fires on
+update/tombstone; Guard A only fires on `holdsRole`) — an actor already holding `UpgradePackage` and an
+already-legitimately-held role can still mint a fresh permission under their own named package and
+`grantedBy`-link it to that role, because nothing server-side today can tell "clinic-domain really declares
+this operationType" from "the attacker typed it." Guards A+B **do** close the one repro that was confirmed
+dominant (§15) and the general cross-package rewrite/tombstone vector §8(b) named — real, independent
+value — but the board rows for §8(a) and §15's revival ambiguity stay open, reworded to note Guards A+B
+landed and did not reach them, per §19.1's grounding (closing them needs server-side access to a package's
+real compiled Definition, which does not exist today and is a materially bigger mechanism — sizing that is
+its own designer pass, not a same-fire extension).
