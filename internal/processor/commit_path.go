@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -530,7 +532,15 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			// piiKey on the next attempt instead of re-minting it).
 			var confErr *ConflictError
 			if errors.As(err, &confErr) {
-				moved := cp.movedDefaultedKeys(ctx, defaulted)
+				moved := cp.movedConditionedKeys(ctx, defaulted)
+				// A conflict on a key never declared in contextHint.reads (one
+				// discovered only via kv.Links at execution time) is conditioned
+				// solely by step 8's own prior-document read (readPriorDocuments),
+				// never by the §3.2 default above — probe that set too. The two
+				// key sets are disjoint by construction (a key can be §3.2-defaulted
+				// or step-8-fallback-conditioned, never both), so a plain append is
+				// correct here with no dedup needed.
+				moved = append(moved, cp.movedConditionedKeys(ctx, confErr.FallbackConditionedKeys)...)
 				// A known-absent-conditioned create whose key now EXISTS lost the
 				// step-4-absence race — the declared-dedup analogue of a moved
 				// defaulted key: re-hydration sees it present and the script
@@ -640,7 +650,7 @@ func absentConditionedCreates(mutations []MutationOp, knownAbsent map[string]str
 
 // materializedAbsentKeys reports which known-absent-conditioned create keys now
 // EXIST in Core KV — the step-4 absence they were conditioned on has been
-// invalidated by a concurrent winner. The mirror of movedDefaultedKeys for the
+// invalidated by a concurrent winner. The mirror of movedConditionedKeys for the
 // create side: bounded (one KVGet per absent-conditioned create, typically one),
 // probed only on a conflict. A transient read error or a still-absent key is
 // treated as "did not materialize" (conservative — surface rather than spin).
@@ -657,51 +667,86 @@ func (cp *CommitPath) materializedAbsentKeys(ctx context.Context, absentCreates 
 	return materialized
 }
 
-// movedDefaultedKeys structurally attributes an atomic-batch revision conflict.
+// movedConditionedKeys structurally attributes an atomic-batch revision conflict.
 // NATS does NOT surface the failing subject in the rejection (it carries only
 // "wrong last sequence: N" — see substrate/batch.go), so the failing key cannot
-// be read off the error. Instead, re-read each key the Processor conditioned by
-// default (§3.2) and report those whose CURRENT Core-KV revision has moved off
-// the value we asserted — NATS revisions are monotonic, so a key that raced now
-// sits at a strictly higher sequence (or is gone). A non-empty result means a
-// benign same-key update race occurred → the retry can fix it by re-hydrating
-// against the new revision. An empty result means no defaulted key moved, so the
-// conflict was a create-once uniqueness collision or an explicit-CAS — retrying
-// cannot help, surface it. Bounded: one KVGet per defaulted key (typically one),
-// only on a conflict (rare). A transient read error is treated as "did not move"
-// (conservative — surface rather than spin); the lane-deadline / NakWithDelay
-// path covers a genuinely unreachable KV.
-func (cp *CommitPath) movedDefaultedKeys(ctx context.Context, defaulted map[string]uint64) []string {
-	if len(defaulted) == 0 {
+// be read off the error. Instead, re-read a set of keys this batch conditioned
+// automatically — the §3.2-defaulted set or step 8's fallback-conditioned set,
+// both passed through this same function — and report those whose CURRENT
+// Core-KV revision has moved off the value we asserted: NATS revisions are
+// monotonic, so a key that raced now sits at a strictly higher sequence (or is
+// gone). A non-empty result means a benign same-key update race occurred → the
+// retry can fix it by re-hydrating against the new revision. An empty result
+// means no conditioned key moved, so the conflict was a create-once uniqueness
+// collision or an explicit-CAS — retrying cannot help, surface it. The fan-out
+// is bounded to priorReadConcurrency in-flight KVGets, not the total key count
+// — the fallback-conditioned set can be cascade-width (every key a script
+// discovers via kv.Links, unlike the old §3.2-defaulted set which was
+// typically one), so this mirrors readPriorDocuments's own bound rather than
+// firing one goroutine per key. Only run on a conflict (rare). A transient
+// read error is treated as "did not move" (conservative — surface rather than
+// spin); the lane-deadline / NakWithDelay path covers a genuinely unreachable
+// KV.
+func (cp *CommitPath) movedConditionedKeys(ctx context.Context, conditioned map[string]uint64) []string {
+	if len(conditioned) == 0 {
 		return nil
 	}
-	var moved []string
-	for key, conditionedRev := range defaulted {
-		entry, err := cp.deps.Conn.KVGet(ctx, cp.deps.CoreBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				// Hard-deleted under us → the revision we conditioned on is no
-				// longer valid; re-execution must re-derive against its absence.
-				moved = append(moved, key)
+	var (
+		mu    sync.Mutex
+		moved []string
+		wg    sync.WaitGroup
+		sem   = make(chan struct{}, priorReadConcurrency)
+	)
+	for key, conditionedRev := range conditioned {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(key string, conditionedRev uint64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			entry, err := cp.deps.Conn.KVGet(ctx, cp.deps.CoreBucket, key)
+			if err != nil {
+				if errors.Is(err, substrate.ErrKeyNotFound) {
+					// Hard-deleted under us → the revision we conditioned on is no
+					// longer valid; re-execution must re-derive against its absence.
+					mu.Lock()
+					moved = append(moved, key)
+					mu.Unlock()
+				}
+				return
 			}
-			continue
-		}
-		if entry.Revision != conditionedRev {
-			moved = append(moved, key)
-		}
+			if entry.Revision != conditionedRev {
+				mu.Lock()
+				moved = append(moved, key)
+				mu.Unlock()
+			}
+		}(key, conditionedRev)
 	}
+	wg.Wait()
 	return moved
 }
 
+// conflictKeySignalCap bounds how many keys conflictKeyForSignal joins into its
+// returned string. `moved` can now be cascade-width (the fallback-conditioned
+// set covers every kv.Links-discovered key in a cascade, not just one declared
+// key), and the joined string feeds the RevisionConflict rejection reply, the
+// Info log, and recordCommitConflict's Health KV write — none of which should
+// carry an unbounded string. Retry eligibility is unaffected: it is decided on
+// the full, uncapped `moved` slice, only the reported STRING is capped here.
+const conflictKeySignalCap = 8
+
 // conflictKeyForSignal picks the key to report for a conflict. The substrate
 // rarely names the failing key (the NATS rejection omits the subject), so prefer
-// the structurally-attributed `moved` set — the keys we proved raced — and fall
-// back to the substrate's best-effort guess only when attribution found nothing.
+// the structurally-attributed `moved` set — the keys this batch conditioned
+// automatically and proved raced — and fall back to the substrate's best-effort
+// guess only when attribution found nothing.
 func conflictKeyForSignal(guessed string, moved []string) string {
-	if len(moved) > 0 {
-		return strings.Join(moved, ",")
+	if len(moved) == 0 {
+		return guessed
 	}
-	return guessed
+	if len(moved) > conflictKeySignalCap {
+		return strings.Join(moved[:conflictKeySignalCap], ",") + ",+" + strconv.Itoa(len(moved)-conflictKeySignalCap) + " more"
+	}
+	return strings.Join(moved, ",")
 }
 
 // recordCommitConflict surfaces a same-key conflict to Health KV as the

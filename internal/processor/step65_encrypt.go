@@ -30,7 +30,7 @@ import (
 //
 // Returns mintedPiiKey=true when this call minted a NEW piiKey (the identity
 // had none yet) — a "create" mutation, which applyHydratedRevisions never
-// conditions (it only defaults update/tombstone), so movedDefaultedKeys can
+// conditions (it only defaults update/tombstone), so movedConditionedKeys can
 // never attribute a piiKey create-once collision to a benign race. The caller
 // (commitPipeline's OCC retry) treats mintedPiiKey as an independent
 // retry-eligible signal alongside `moved`, so two concurrent first-sensitive

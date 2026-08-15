@@ -85,10 +85,59 @@ func TestApplyHydratedRevisions(t *testing.T) {
 	})
 }
 
-// --- Structural conflict attribution: movedDefaultedKeys (the production path:
-// NATS does not name the failing key, so we re-read the conditioned keys) ---
+// --- Pure helper: conditionRevision (step 8's per-mutation batch condition) ---
 
-func TestMovedDefaultedKeys(t *testing.T) {
+func TestConditionRevision(t *testing.T) {
+	t.Parallel()
+	key := "vtx.identity." + testNanoID2 + ".profile"
+
+	t.Run("explicit ExpectedRevision wins even when prior also has an entry", func(t *testing.T) {
+		explicit := uint64(3)
+		m := MutationOp{Op: "update", Key: key, ExpectedRevision: &explicit}
+		prior := priorDocs{key: priorDoc{Revision: 99, Found: true}}
+		rev, ok, fallback := conditionRevision(m, prior)
+		if !ok || fallback {
+			t.Fatalf("ok=%v fallback=%v, want ok=true fallback=false", ok, fallback)
+		}
+		if rev != 3 {
+			t.Fatalf("rev = %d, want the explicit revision 3, not prior's 99", rev)
+		}
+	})
+
+	t.Run("nil ExpectedRevision + key present in prior → fallback-conditioned", func(t *testing.T) {
+		m := MutationOp{Op: "update", Key: key}
+		prior := priorDocs{key: priorDoc{Revision: 42, Found: true}}
+		rev, ok, fallback := conditionRevision(m, prior)
+		if !ok || !fallback {
+			t.Fatalf("ok=%v fallback=%v, want ok=true fallback=true", ok, fallback)
+		}
+		if rev != 42 {
+			t.Fatalf("rev = %d, want prior's 42", rev)
+		}
+	})
+
+	t.Run("nil ExpectedRevision + key absent from prior → unconditioned", func(t *testing.T) {
+		m := MutationOp{Op: "update", Key: key}
+		prior := priorDocs{}
+		if _, ok, _ := conditionRevision(m, prior); ok {
+			t.Fatalf("a key with no prior document must be unconditioned")
+		}
+	})
+
+	t.Run("nil ExpectedRevision + key present but not Found → unconditioned", func(t *testing.T) {
+		m := MutationOp{Op: "update", Key: key}
+		prior := priorDocs{key: priorDoc{Found: false}}
+		if _, ok, _ := conditionRevision(m, prior); ok {
+			t.Fatalf("a prior entry with Found=false must be unconditioned")
+		}
+	})
+}
+
+// --- Structural conflict attribution: movedConditionedKeys (the production
+// path: NATS does not name the failing key, so we re-read the conditioned
+// keys) ---
+
+func TestMovedConditionedKeys(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
@@ -99,14 +148,14 @@ func TestMovedDefaultedKeys(t *testing.T) {
 	rev := occWriteKey(t, ctx, conn, key)
 
 	t.Run("key still at conditioned revision → not moved", func(t *testing.T) {
-		moved := cp.movedDefaultedKeys(ctx, map[string]uint64{key: rev})
+		moved := cp.movedConditionedKeys(ctx, map[string]uint64{key: rev})
 		if len(moved) != 0 {
 			t.Fatalf("an unchanged key must not be reported moved, got %v", moved)
 		}
 	})
 
 	t.Run("key bumped past conditioned revision → moved", func(t *testing.T) {
-		moved := cp.movedDefaultedKeys(ctx, map[string]uint64{key: rev - 1}) // assert a stale rev
+		moved := cp.movedConditionedKeys(ctx, map[string]uint64{key: rev - 1}) // assert a stale rev
 		if len(moved) != 1 || moved[0] != key {
 			t.Fatalf("a key whose revision advanced must be reported moved, got %v", moved)
 		}
@@ -114,14 +163,14 @@ func TestMovedDefaultedKeys(t *testing.T) {
 
 	t.Run("hard-deleted key → moved (conditioned revision no longer valid)", func(t *testing.T) {
 		gone := "vtx.identity." + testNanoID1 + ".gone"
-		moved := cp.movedDefaultedKeys(ctx, map[string]uint64{gone: 5})
+		moved := cp.movedConditionedKeys(ctx, map[string]uint64{gone: 5})
 		if len(moved) != 1 || moved[0] != gone {
 			t.Fatalf("an absent key must be reported moved, got %v", moved)
 		}
 	})
 
 	t.Run("empty defaulted set → nil", func(t *testing.T) {
-		if moved := cp.movedDefaultedKeys(ctx, nil); moved != nil {
+		if moved := cp.movedConditionedKeys(ctx, nil); moved != nil {
 			t.Fatalf("nil defaulted must yield nil, got %v", moved)
 		}
 	})
@@ -157,7 +206,7 @@ func (e occFakeExecutor) Execute(_ context.Context, _ *OperationEnvelope, _ Hydr
 // that carries NO ConflictingKey — exactly what the real committer produces,
 // since NATS omits the failing subject from an atomic-batch rejection. On each
 // failing call it bumps bumpKey's Core-KV revision to simulate the concurrent
-// winner, so the production structural-attribution path (movedDefaultedKeys) sees
+// winner, so the production structural-attribution path (movedConditionedKeys) sees
 // the conditioned key has moved and drives the retry.
 type occFakeCommitter struct {
 	conn       *substrate.Conn
@@ -165,16 +214,31 @@ type occFakeCommitter struct {
 	failFor    int
 	alwaysFail bool
 	bumpKey    string
+	// viaFallback reports bumpKey on the simulated conflict's
+	// FallbackConditionedKeys instead of relying on the §3.2-defaulted set — it
+	// exercises the undeclared-key retry path (the key step 8 conditioned via
+	// its own prior-document read, never hydrated at step 4) rather than the
+	// applyHydratedRevisions path the other occFakeCommitter tests exercise.
+	viaFallback bool
 }
 
 func (c *occFakeCommitter) Commit(ctx context.Context, _ *OperationEnvelope, _ ScriptResult, _ Tracker) (CommitAck, error) {
 	n := int(c.calls.Add(1))
 	if c.alwaysFail || n <= c.failFor {
+		var fallback map[string]uint64
 		if c.bumpKey != "" && c.conn != nil {
+			entry, err := c.conn.KVGet(ctx, testCoreBucket, c.bumpKey)
+			preBumpRev := uint64(0)
+			if err == nil {
+				preBumpRev = entry.Revision
+			}
 			_, _ = c.conn.KVPut(ctx, testCoreBucket, c.bumpKey,
 				[]byte(fmt.Sprintf(`{"key":%q,"class":"identity","isDeleted":false,"data":{}}`, c.bumpKey)))
+			if c.viaFallback {
+				fallback = map[string]uint64{c.bumpKey: preBumpRev}
+			}
 		}
-		return CommitAck{}, &ConflictError{Cause: substrate.ErrAtomicBatchRejected} // empty key, like prod
+		return CommitAck{}, &ConflictError{Cause: substrate.ErrAtomicBatchRejected, FallbackConditionedKeys: fallback} // empty key, like prod
 	}
 	return CommitAck{Revisions: map[string]uint64{}}, nil
 }
@@ -256,6 +320,52 @@ func TestCommitPipeline_RetryAbsorbsBenignConflict(t *testing.T) {
 	state, result := occUpdateState(t, ctx, conn, key)
 	// Conflict once (bumping the conditioned key to simulate the winner), then succeed.
 	committer := &occFakeCommitter{conn: conn, failFor: 1, bumpKey: key}
+	metrics := &Metrics{}
+	cp := newOCCPipeline(t, conn, occFakeHydrator{state}, occFakeExecutor{result}, committer, metrics)
+
+	outcome, decision := driveOCC(t, ctx, cp, testNanoID1)
+	if outcome != OutcomeAccepted || decision != substrate.Ack {
+		t.Fatalf("outcome=%v decision=%v, want accepted/Ack", outcome, decision)
+	}
+	if got := committer.calls.Load(); got != 2 {
+		t.Fatalf("committer calls = %d, want 2 (one conflict + one success)", got)
+	}
+	if metrics.CommitRetries.Load() != 1 {
+		t.Fatalf("CommitRetries = %d, want 1", metrics.CommitRetries.Load())
+	}
+	if metrics.CommitRetryExhausted.Load() != 0 {
+		t.Fatalf("CommitRetryExhausted = %d, want 0", metrics.CommitRetryExhausted.Load())
+	}
+	if metrics.OpsCommitted.Load() != 1 {
+		t.Fatalf("OpsCommitted = %d, want 1", metrics.OpsCommitted.Load())
+	}
+}
+
+// TestCommitPipeline_RetryAbsorbsBenignConflict_UndeclaredKey mirrors
+// TestCommitPipeline_RetryAbsorbsBenignConflict but for the undeclared-key
+// class: the mutation's key is absent from step 4's Hydrated set (never
+// declared in contextHint.reads — the shape of a key discovered only via
+// kv.Links at execution time), so applyHydratedRevisions leaves it
+// unconditioned and only step 8's own prior-document read can condition it.
+// The conflict is reported via ConflictError.FallbackConditionedKeys, not the
+// §3.2-defaulted set, and must be retried exactly like a defaulted key.
+func TestCommitPipeline_RetryAbsorbsBenignConflict_UndeclaredKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	conn := occConn(t)
+	provisionHarness(t, ctx, conn)
+
+	key := "vtx.identity." + testNanoID2 + ".profile"
+	occWriteKey(t, ctx, conn, key)
+	state := HydratedState{Context: ScriptContext{Hydrated: map[string]VertexDoc{}}}
+	result := ScriptResult{Mutations: []MutationOp{{
+		Op:       "update",
+		Key:      key,
+		Document: map[string]interface{}{"class": "identity", "isDeleted": false, "data": map[string]any{"name": "Andrew"}},
+	}}}
+	// Conflict once (bumping the fallback-conditioned key, reported via
+	// FallbackConditionedKeys rather than the §3.2-defaulted set), then succeed.
+	committer := &occFakeCommitter{conn: conn, failFor: 1, bumpKey: key, viaFallback: true}
 	metrics := &Metrics{}
 	cp := newOCCPipeline(t, conn, occFakeHydrator{state}, occFakeExecutor{result}, committer, metrics)
 
@@ -456,6 +566,72 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 	var confErr *ConflictError
 	if err == nil || !errors.As(err, &confErr) {
 		t.Fatalf("a stale conditioned update must be rejected as a ConflictError, got %v", err)
+	}
+}
+
+// TestRealCommitter_FallbackConditioning demonstrates the step-8 fallback path
+// end-to-end against the REAL committer + real NATS CAS. It is deliberately
+// NOT a plain success check: an unconditioned write also succeeds, so success
+// alone cannot distinguish "conditioned on the prior-read revision" from "not
+// conditioned at all" (deleting the fallback wiring entirely would still leave
+// a bare success assertion green). Instead this forces a genuine
+// ErrAtomicBatchRejected — a create-once collision on an UNRELATED key in the
+// same batch, deterministic, no goroutine racing needed — and asserts the
+// returned ConflictError.FallbackConditionedKeys reports the EXACT revision
+// step 8's own prior-document read (readPriorDocuments) conditioned the
+// untouched update mutation on.
+func TestRealCommitter_FallbackConditioning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	conn := occConn(t)
+	provisionHarness(t, ctx, conn)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+
+	keyA := "vtx.identity." + testNanoID1
+	keyB := "vtx.identity." + testNanoID2
+
+	// Seed B via a real commit, capturing the revision it lands at.
+	envSeedB := newTestEnvelope(testNanoID2 + "-seed-b")
+	createB := ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: keyB,
+		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B"}},
+	}}}
+	ackB, err := committer.Commit(ctx, envSeedB, createB, NewTracker(envSeedB, time.Now()))
+	if err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+	revB := ackB.Revisions[keyB]
+	if revB == 0 {
+		t.Fatalf("no revision derived for %s", keyB)
+	}
+
+	// Seed A too, so a later CreateOnly on A is guaranteed to collide.
+	envSeedA := newTestEnvelope(testNanoID1 + "-seed-a")
+	createA := ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: keyA,
+		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A"}},
+	}}}
+	if _, err := committer.Commit(ctx, envSeedA, createA, NewTracker(envSeedA, time.Now())); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+
+	// One batch: (i) a create on the now-existing A — CreateOnly fails this op
+	// deterministically, rejecting the WHOLE atomic batch — and (ii) an update
+	// on B with NO ExpectedRevision (never hydrated at step 4, so the §3.2
+	// default never fires). Nothing has touched B since the seed, so step 8's
+	// fallback conditioning must have asserted exactly revB.
+	envConflict := newTestEnvelope(testNanoID1 + "-conflict")
+	conflictRes := ScriptResult{Mutations: []MutationOp{
+		{Op: "create", Key: keyA, Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A-again"}}},
+		{Op: "update", Key: keyB, Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B-updated"}}},
+	}}
+	_, err = committer.Commit(ctx, envConflict, conflictRes, NewTracker(envConflict, time.Now()))
+	var confErr *ConflictError
+	if err == nil || !errors.As(err, &confErr) {
+		t.Fatalf("a create-once collision on A must reject the whole batch as a ConflictError, got %v", err)
+	}
+	if got := confErr.FallbackConditionedKeys[keyB]; got != revB {
+		t.Fatalf("FallbackConditionedKeys[%s] = %d, want %d (the revision B was actually fallback-conditioned on)", keyB, got, revB)
 	}
 }
 

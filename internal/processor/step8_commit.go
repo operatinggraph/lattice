@@ -21,10 +21,19 @@ import (
 // failure on one of the keys). The commit path maps this onto a
 // `rejected` reply with code `RevisionConflict`.
 type ConflictError struct {
-	ConflictingKey     string // best-effort — empty if the substrate did not report which key conflicted
-	ExpectedRevision   uint64
-	OperationRequestID string
-	Cause              error
+	ConflictingKey string // best-effort — empty if the substrate did not report which key conflicted
+	// FallbackConditionedKeys holds the update/tombstone mutation keys THIS
+	// batch conditioned on step 8's own prior-document read (readPriorDocuments)
+	// because no earlier stage had already set ExpectedRevision — i.e. a key
+	// the submitting script never declared in contextHint.reads (typically one
+	// discovered via kv.Links at execution time), keyed to the revision the
+	// batch asserted. Same structurally-benign race shape as the §3.2-defaulted
+	// set (commit_path.go's `defaulted`): the commit path re-probes these for
+	// movement too, both for accurate attribution and retry eligibility.
+	FallbackConditionedKeys map[string]uint64
+	ExpectedRevision        uint64
+	OperationRequestID      string
+	Cause                   error
 }
 
 func (e *ConflictError) Error() string {
@@ -206,6 +215,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	}
 
 	ops := make([]substrate.BatchOp, 0, len(result.Mutations)+1)
+	var fallbackConditioned map[string]uint64
 
 	// Mutation ops.
 	for _, m := range result.Mutations {
@@ -234,14 +244,19 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 			// document read moments ago at step 8 — the whole document, for a
 			// tombstone — so it is conditioned on THAT revision instead. Without
 			// it, a commit landing in the window between that read and this batch
-			// would be silently reverted by the value written here.
-			switch {
-			case m.ExpectedRevision != nil:
+			// would be silently reverted by the value written here. This fallback
+			// case is surfaced on ConflictError.FallbackConditionedKeys so the
+			// commit path can attribute a conflict on it and retry it, exactly as
+			// it already does for a §3.2-defaulted key.
+			if rev, ok, fallback := conditionRevision(m, prior); ok {
 				op.HasRevision = true
-				op.Revision = *m.ExpectedRevision
-			case prior[m.Key].Found:
-				op.HasRevision = true
-				op.Revision = prior[m.Key].Revision
+				op.Revision = rev
+				if fallback {
+					if fallbackConditioned == nil {
+						fallbackConditioned = map[string]uint64{}
+					}
+					fallbackConditioned[m.Key] = rev
+				}
 			}
 		}
 		ops = append(ops, op)
@@ -335,9 +350,10 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 		// revision conflict.
 		if errors.Is(batchErr, substrate.ErrAtomicBatchRejected) {
 			return CommitAck{}, &ConflictError{
-				ConflictingKey:     guessConflictingKey(batchErr, ops),
-				OperationRequestID: rid,
-				Cause:              batchErr,
+				ConflictingKey:          guessConflictingKey(batchErr, ops),
+				FallbackConditionedKeys: fallbackConditioned,
+				OperationRequestID:      rid,
+				Cause:                   batchErr,
 			}
 		}
 		return CommitAck{}, batchErr
@@ -944,6 +960,23 @@ func protectedRootKey(key string) string {
 		return ""
 	}
 	return strings.Join(parts[:3], ".")
+}
+
+// conditionRevision reports the revision an update/tombstone mutation will be
+// batch-conditioned on, and whether that condition is a FALLBACK — step 8's own
+// prior-read rather than an already-set ExpectedRevision (a §3.2 default or an
+// explicit caller CAS, indistinguishable by this point and both handled
+// identically here). ok is false when the mutation has neither an explicit
+// revision nor a prior document to condition on (a write to a key that does
+// not yet exist — stays unconditioned, as today).
+func conditionRevision(m MutationOp, prior priorDocs) (rev uint64, ok bool, fallback bool) {
+	if m.ExpectedRevision != nil {
+		return *m.ExpectedRevision, true, false
+	}
+	if p, found := prior[m.Key]; found && p.Found {
+		return p.Revision, true, true
+	}
+	return 0, false, false
 }
 
 // guessConflictingKey extracts the best-effort key that caused an
