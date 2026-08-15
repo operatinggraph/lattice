@@ -813,6 +813,101 @@ func TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched(t *testing.T) {
 	}
 }
 
+// TestMerge_IndexesRepoint_SkipsIndexAlreadyRepointedAway covers the case the
+// enumeration cannot see: a link that still names the secondary hanging off a
+// vertex the secondary no longer owns.
+//
+// The third-party arm above rests on the enumeration's scope — a vertex nobody
+// linked the secondary to is never named. That argument holds only while a link
+// and its vertex agree about ownership, and two writers can break the agreement
+// after collect_indexes_repoints has run: identity-domain's
+// CreateUnclaimedIdentity repoints a live index off an incumbent whose erasure
+// write path is closed, and privacy-base's dedup sweep tombstones one outright.
+// The repoint carried no revision or content assertion, so it would land anyway
+// and hand the vertex to the primary over its real owner, leaving that owner's
+// live indexes edge beside a second one — two owners of a vertex whose whole
+// job is to name exactly one.
+//
+// The fixture reproduces the STATE, not the timing: the vertex is seeded already
+// naming another identity, with the secondary's stale link still live, which is
+// exactly what the merge would be holding had it lost the race. Driving the real
+// repoint op instead would prove nothing, since its own batch tombstones the
+// stale link and the enumeration would then find nothing.
+func TestMerge_IndexesRepoint_SkipsIndexAlreadyRepointedAway(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "midxrace")
+
+	primaryID := testutil.GenReqID("PrimIdxRace00")
+	secondaryID := testutil.GenReqID("SecIdxRace000")
+	newOwnerID := testutil.GenReqID("NewIdxOwner00")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+	newOwnerKey := "vtx.identity." + newOwnerID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, newOwnerKey, "unclaimed", "")
+
+	// The contested vertex: already repointed to newOwner, with newOwner's own
+	// ownership edge live beside the secondary's stale one.
+	racedHash := testutil.GenReqID("RacedIdxHash00")
+	racedIdxKey := "vtx.identityindex." + racedHash
+	staleLinkKey := "lnk.identityindex." + racedHash + ".indexes.identity." + secondaryID
+	newOwnerLinkKey := "lnk.identityindex." + racedHash + ".indexes.identity." + newOwnerID
+	seedIdentityIndexVertex(t, ctx, conn, racedIdxKey, "email", newOwnerKey)
+	seedLinkVertexWithClass(t, ctx, conn, staleLinkKey, "indexes", false, map[string]any{})
+	seedLinkVertexWithClass(t, ctx, conn, newOwnerLinkKey, "indexes", false, map[string]any{})
+
+	// A control the secondary genuinely still owns. Without it a green result
+	// could mean the gate is right, or that the repoint loop stopped working.
+	ownedHash := testutil.GenReqID("RaceOwnedHash0")
+	ownedIdxKey := "vtx.identityindex." + ownedHash
+	ownedLinkKey := "lnk.identityindex." + ownedHash + ".indexes.identity." + secondaryID
+	seedIdentityIndexVertex(t, ctx, conn, ownedIdxKey, "phone", secondaryKey)
+	seedLinkVertexWithClass(t, ctx, conn, ownedLinkKey, "indexes", false, map[string]any{})
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("MrgIdxRace000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-08-15T10:13:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, []string{}),
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, []string{}),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The contested vertex keeps its real owner, and that owner keeps its edge.
+	racedIdxData := readAspectData(t, ctx, conn, racedIdxKey)
+	if got, _ := racedIdxData["identityKey"].(string); got != newOwnerKey {
+		t.Fatalf("contested identityindex.identityKey = %q, want %s — the merge repointed a vertex the secondary no longer owns, taking it from the identity that legitimately holds it", got, newOwnerKey)
+	}
+	assertLinkLive(t, ctx, conn, newOwnerLinkKey)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket,
+		"lnk.identityindex."+racedHash+".indexes.identity."+primaryID); err == nil {
+		t.Fatal("the merge created an indexes link from the contested vertex to the primary — a second live ownership edge off one index vertex, which is the corruption the gate exists to prevent")
+	}
+
+	// The secondary's own stale edge still retires: it is genuinely the
+	// secondary's, and the merge is what ends the secondary.
+	assertLinkTombstoned(t, ctx, conn, staleLinkKey)
+
+	// The ordinary repoint is untouched by the gate.
+	assertLinkTombstoned(t, ctx, conn, ownedLinkKey)
+	assertLinkLive(t, ctx, conn, "lnk.identityindex."+ownedHash+".indexes.identity."+primaryID)
+	ownedIdxData := readAspectData(t, ctx, conn, ownedIdxKey)
+	if got, _ := ownedIdxData["identityKey"].(string); got != primaryKey {
+		t.Fatalf("owned identityindex.identityKey = %q, want %s — the gate is refusing the ordinary repoint, not just the contested one", got, primaryKey)
+	}
+}
+
 // --- 14. TestMerge_TrustGateAcceptsRealClassLink ---
 
 // TestMerge_TrustGateAcceptsRealClassLink seeds a link touching secondary

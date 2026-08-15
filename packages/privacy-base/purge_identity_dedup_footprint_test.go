@@ -407,6 +407,103 @@ func TestPurgeIdentityDedupFootprint_IndexesBeforeDuplicateOf(t *testing.T) {
 	}
 }
 
+// repointIndexVertex rewrites a live identityindex vertex's owner in place,
+// leaving everything else about it — including the previous owner's inbound
+// indexes link — exactly as it was.
+//
+// It reproduces a STATE, not a timing. The race it stands for is real and has
+// no deterministic timing fixture: identity-domain's CreateUnclaimedIdentity
+// repoints a live index off an incumbent whose erasure write path is closed,
+// which is this subject during precisely this sweep's convergence window. What
+// the sweep can end up holding is an enumerated link to a vertex someone else
+// now owns, and this writes that shape directly rather than trying to lose a
+// race on purpose. Driving the real repoint op instead would prove nothing:
+// its own batch tombstones the link, so the sweep's enumeration would find
+// nothing left to be wrong about.
+func repointIndexVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, indexKey, newOwnerKey string) {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, indexKey)
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s has no data map; doc = %+v — the index shape this fixture repoints has changed", indexKey, doc)
+	}
+	data["identityKey"] = newOwnerKey
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal repointed index %s: %v", indexKey, err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, indexKey, raw); err != nil {
+		t.Fatalf("repoint index %s: %v", indexKey, err)
+	}
+}
+
+// TestPurgeIdentityDedupFootprint_SparesIndexRepointedToAnotherOwner is the
+// confinement case the sweep did not have.
+//
+// Every other confinement test here rests on the enumeration's key filter: the
+// sweep only ever names vertices reached through the subject's own links, so
+// nobody else's footprint is in range. That argument holds only while an
+// enumerated link and its vertex agree about who owns it, and this fire's
+// CreateUnclaimedIdentity repoint is the first writer that can break that
+// agreement mid-sweep. A document-less tombstone carries no content assertion,
+// so without the ownership gate the sweep destroys the vertex the NEW owner
+// legitimately holds, and the live link it left behind lets a later registrant
+// revive the vertex under a second live indexes edge — two owners of one index,
+// which is the corruption the dedup plane is built to make impossible.
+func TestPurgeIdentityDedupFootprint_SparesIndexRepointedToAnotherOwner(t *testing.T) {
+	ctx, conn := setupPurgeEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "purge-repoint-default", v)
+	sysCP, sysCons := newPurgePipeline(t, ctx, conn, "purge-repoint-system")
+
+	subjectKey, subjectID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Purge Repoint Subject", "purge-repoint@example.com", strings.Repeat("a", 64), "PurgeRepSub", nil)
+	newOwnerKey, newOwnerID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Purge Repoint Newcomer", "purge-repoint-other@example.com", strings.Repeat("b", 64), "PurgeRepNew", nil)
+
+	// The contested vertex: the subject's email index, with the subject's own
+	// inbound link still live — which is what the sweep enumerates.
+	contestedIdx := pbContactIndexKey("email", "purge-repoint@example.com")
+	subjectLink := pbIndexesLinkKey(contestedIdx, subjectID)
+
+	// A control on the same subject that nothing repoints. Without it a green
+	// result could mean the gate is right, or simply that the whole indexes
+	// branch stopped sweeping anything.
+	controlIdx := pbContactIndexKey("name", "purge repoint subject")
+	controlLink := pbIndexesLinkKey(controlIdx, subjectID)
+
+	if readIsDeleted(t, ctx, conn, contestedIdx) || readIsDeleted(t, ctx, conn, subjectLink) ||
+		readIsDeleted(t, ctx, conn, controlIdx) || readIsDeleted(t, ctx, conn, controlLink) {
+		t.Fatal("precondition: the subject's footprint is already tombstoned")
+	}
+
+	// The race's outcome, written directly: the vertex now names the newcomer,
+	// with the newcomer's own ownership edge beside it, while the subject's
+	// stale link is still live and still enumerable.
+	repointIndexVertex(t, ctx, conn, contestedIdx, newOwnerKey)
+	newOwnerLink := pbIndexesLinkKey(contestedIdx, newOwnerID)
+	testutil.SeedLink(t, ctx, conn, newOwnerLink, "indexes", contestedIdx, newOwnerKey)
+
+	pbSealForErasure(t, ctx, conn, subjectKey)
+	submitPurge(t, ctx, conn, sysCP, sysCons, subjectKey, "PurgeRepDo", processor.OutcomeAccepted)
+
+	if readIsDeleted(t, ctx, conn, contestedIdx) {
+		t.Error("the sweep tombstoned an index vertex another identity now owns — the new owner's dedup entry is destroyed, and their live indexes link is left pointing at a dead vertex for the next registrant to revive under a second owner")
+	}
+	if readIsDeleted(t, ctx, conn, newOwnerLink) {
+		t.Error("the sweep tombstoned the NEW owner's indexes link; only the subject's own inbound edge is this sweep's to remove")
+	}
+	// The subject's own stale edge still goes: it names an erased person, and
+	// leaving it is what would stall the residue at a number that never falls.
+	if !readIsDeleted(t, ctx, conn, subjectLink) {
+		t.Error("the subject's own stale indexes link survived — the gate spared the link as well as the vertex, so this subject's residue can never reach zero")
+	}
+	// And the ordinary case is untouched by the gate.
+	if !readIsDeleted(t, ctx, conn, controlIdx) || !readIsDeleted(t, ctx, conn, controlLink) {
+		t.Error("an index vertex the subject still owns survived the sweep — the ownership gate is refusing the ordinary case, not just the contested one")
+	}
+}
+
 // TestPurgeIdentityDedupFootprint_UnsealedSubject_Rejected pairs the refusal
 // with its own positive vector over one corpus: the identical envelope against
 // the identical subject, with only the marker changing. Without the accepted

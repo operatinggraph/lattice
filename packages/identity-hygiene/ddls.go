@@ -52,9 +52,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // indexes-driven repoint (same design, §3.4): the secondary's inbound
 // `indexes` links are enumerated (bounded kv.Links, relation "indexes",
 // direction "in" — the second and last enumeration this script performs).
-// For each live one: the owned identityindex vertex is repointed to primary
-// (`identityKey` field), the old link is tombstoned, and a new link to
-// primary is created — no decryption anywhere (linkage is ownership).
+// For each live one: the old link is tombstoned unconditionally, and — only
+// while the vertex still names the secondary as its owner, asserted against the
+// revision that check read — the identityindex vertex is repointed to primary
+// (`identityKey` field) and a new link to primary is created. No decryption
+// anywhere (linkage is ownership). The ownership gate is what keeps a merge
+// from taking a vertex another writer repointed away between the enumeration
+// and the commit; without it the vertex would end up with two live ownership
+// edges.
 //
 // Credential repoint (multi-credential-identity-linking-design.md §3.3):
 // every credential that currently resolves to secondary is repointed to
@@ -280,6 +285,21 @@ def collect_indexes_repoints(secondary_key):
         if cursor == None:
             return repoints
     fail("IdentityIndexFanoutTooLarge: " + secondary_key + " has too many indexes links to enumerate at merge time")
+
+def idx_names_owner(doc, identity_key):
+    # True only when the identityindex vertex is LIVE and CURRENTLY names this
+    # identity as its owner. Absent, tombstoned, or naming anyone else, reads
+    # as not-owned -- a tombstoned vertex whose stale data still names the
+    # secondary must never be revived by this repoint (isDeleted stays
+    # unchecked here would let a sweep-tombstoned vertex spring back to life
+    # under the primary's name).
+    if doc == None or doc.data == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    if "identityKey" not in doc.data:
+        return False
+    return doc.data["identityKey"] == identity_key
 
 NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
 
@@ -707,10 +727,32 @@ def execute(state, op):
         # above (data-derived key: the hash is not dispatch-known ahead of
         # collect_indexes_repoints)
         idx_vtx = kv.Read(idx_vertex_key)
+
+        # The vertex is repointed only while it still names the SECONDARY as its
+        # owner. Between collect_indexes_repoints and this commit, another
+        # writer can take ownership of the same vertex -- identity-domain's
+        # CreateUnclaimedIdentity repoints one off an incumbent whose erasure
+        # write path is closed, and privacy-base's dedup sweep tombstones one
+        # outright -- and this update carried no revision or content assertion,
+        # so it would land regardless and hand the vertex to the primary over
+        # whoever legitimately holds it now, leaving two live indexes out-edges
+        # off one vertex. The old-link tombstone above stays unconditional: that
+        # edge is the secondary's own and is genuinely retiring whoever owns the
+        # vertex now.
+        if not idx_names_owner(idx_vtx, secondary):
+            continue
+
         contact_type = None
-        if idx_vtx != None and idx_vtx.data != None and "contactType" in idx_vtx.data:
+        if idx_vtx.data != None and "contactType" in idx_vtx.data:
             contact_type = idx_vtx.data["contactType"]
+        # Pinned to the revision the ownership check just read, so the check and
+        # the write are atomic. Step 8 would otherwise condition this update on
+        # a prior-document read of its own, taken AFTER the check -- which a
+        # repoint landing in between would satisfy, narrowing the window rather
+        # than closing it. A merge that loses that race fails loudly and is
+        # re-run, which is the right outcome for an op this destructive.
         mutations.append({"op": "update", "key": idx_vertex_key,
+            "expectedRevision": idx_vtx.revision,
             "document": {"class": "identityindex", "isDeleted": False,
                          "data": {"contactType": contact_type, "identityKey": primary}}})
 

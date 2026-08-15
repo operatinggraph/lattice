@@ -482,9 +482,11 @@ func DDLs() []pkgmgr.DDLSpec {
 			Description: "identityindex indexes identity. Ownership edge from a " +
 				"vtx.identityindex.<hash> vertex to the vtx.identity.<NanoID> it currently points at " +
 				"(lnk.identityindex.<hash>.indexes.identity.<NanoID>). Created in the same batch as the " +
-				"index vertex by CreateUnclaimedIdentity; repointed (tombstone + create) by " +
-				"identity-hygiene's MergeIdentity; tombstoned by privacy-base's PurgeIdentityDedupFootprint " +
-				"on erasure. Makes merge repoint and erasure sweep decrypt-free — linkage is ownership, so " +
+				"index vertex by CreateUnclaimedIdentity, which also repoints it (tombstone + create) " +
+				"when the incumbent it names has had its erasure write path closed — a live index owned " +
+				"by an erased person otherwise denies every later registrant on that contact an index of " +
+				"their own. Repointed the same way by identity-hygiene's MergeIdentity; tombstoned by " +
+				"privacy-base's PurgeIdentityDedupFootprint on erasure. Makes merge repoint and erasure sweep decrypt-free — linkage is ownership, so " +
 				"no plaintext lookup is needed. " +
 				"permittedCommands is intentionally empty: multi-writer, open posture (mirrors the " +
 				"identity-anchored aspect DDLs above).",
@@ -617,6 +619,34 @@ def index_vertex_mutation(index_key, contact_type, identity_key, existing):
     if existing != None:
         return {"op": "update", "key": index_key, "document": doc, "expectedRevision": existing.revision}
     return {"op": "create", "key": index_key, "document": doc}
+
+def stale_indexes_tombstone(index_key, hit):
+    # Tombstones the ownership edge from an identityindex vertex to the
+    # identity it currently names, so a repoint of that vertex does not leave
+    # two live indexes out-links. The old link key is a deterministic
+    # derivation off the hit's own body -- no enumeration, no extra read.
+    #
+    # Deliberately unconditioned (no expectedRevision), mirroring
+    # identity-hygiene's MergeIdentity idx_repoints loop. Within THIS op that is
+    # airtight: the tombstone never lands alone, it is always in the same atomic
+    # batch as index_vertex_mutation's CAS-guarded repoint of the very vertex it
+    # hangs off, so anything that races the repoint invalidates the whole batch.
+    #
+    # It says nothing, though, about a DIFFERENT op racing the same vertex, and
+    # two of them do. privacy-base's PurgeIdentityDedupFootprint enumerates a
+    # sealed subject's indexes links and tombstones their source vertices, and
+    # MergeIdentity repoints those vertices to a merge primary; neither carries
+    # a revision or a content assertion. Before this repoint existed neither
+    # could lose that race, because nothing else ever wrote a LIVE index vertex
+    # out from under them. Both now gate on the vertex still naming the identity
+    # they believe owns it (privacy-base's index_owned_by, identity-hygiene's
+    # idx_names_owner), each pinned to the revision that check read: the content
+    # gate answers whether to write at all -- a question no CAS can answer --
+    # and the pin makes the answer atomic with the batch that acts on it.
+    old_identity_id = hit.data["identityKey"][len("vtx.identity."):]
+    return {"op": "update",
+            "key": "lnk." + index_key[len("vtx."):] + ".indexes.identity." + old_identity_id,
+            "document": {"class": "indexes", "isDeleted": True, "data": {}}}
 
 def credential_index_mutation(cred_index_key, existing, actor_key, identity_key, bound_at):
     # multi-credential-identity-linking-design.md §8: UnlinkCredential is the
@@ -1186,24 +1216,37 @@ def execute(state, op):
         def live_hit(hit):
             return hit != None and (not hasattr(hit, "isDeleted") or not hit.isDeleted)
 
+        # The erased flags are computed ONCE per contact type and reused by the
+        # mutation-build block below. match_is_erased does live, undeclared
+        # kv.Reads, so a second call on the same hit would double this path's
+        # round trips for an answer it already has. Each is evaluated only
+        # behind live_hit, so a miss costs nothing.
+        def hit_is_erased(hit):
+            return live_hit(hit) and match_is_erased(hit)
+
         duplicate = False
         matched = {}
+        email_erased = False
+        phone_erased = False
         if email != None:
             email_index_key = identity_index_key("email", email)
             email_hit = state[email_index_key] if email_index_key in state else None
-            if live_hit(email_hit) and not match_is_erased(email_hit):
+            email_erased = hit_is_erased(email_hit)
+            if live_hit(email_hit) and not email_erased:
                 duplicate = True
                 incumbent_key = email_hit.data["identityKey"]
                 matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-email"]
         if phone != None:
             phone_index_key = identity_index_key("phone", phone)
             phone_hit = state[phone_index_key] if phone_index_key in state else None
-            if live_hit(phone_hit) and not match_is_erased(phone_hit):
+            phone_erased = hit_is_erased(phone_hit)
+            if live_hit(phone_hit) and not phone_erased:
                 duplicate = True
                 incumbent_key = phone_hit.data["identityKey"]
                 matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-phone"]
         name_hit = state[name_index_key] if name_index_key in state else None
-        if live_hit(name_hit) and not match_is_erased(name_hit):
+        name_erased = hit_is_erased(name_hit)
+        if live_hit(name_hit) and not name_erased:
             duplicate = True
             incumbent_key = name_hit.data["identityKey"]
             matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-name"]
@@ -1230,7 +1273,9 @@ def execute(state, op):
             mutations.append({"op": "create", "key": identity_key + ".email",
                 "document": {"class": "email", "vertexKey": identity_key, "localName": "email",
                              "isDeleted": False, "data": {"value": email}}})
-            if email_hit == None or (hasattr(email_hit, "isDeleted") and email_hit.isDeleted):
+            if email_hit == None or (hasattr(email_hit, "isDeleted") and email_hit.isDeleted) or email_erased:
+                if email_erased:
+                    mutations.append(stale_indexes_tombstone(email_index_key, email_hit))
                 mutations.append(index_vertex_mutation(email_index_key, "email", identity_key, email_hit))
                 mutations.append({"op": "create", "key": "lnk." + email_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                     "document": {"class": "indexes", "isDeleted": False,
@@ -1240,13 +1285,17 @@ def execute(state, op):
             mutations.append({"op": "create", "key": identity_key + ".phone",
                 "document": {"class": "phone", "vertexKey": identity_key, "localName": "phone",
                              "isDeleted": False, "data": {"value": phone}}})
-            if phone_hit == None or (hasattr(phone_hit, "isDeleted") and phone_hit.isDeleted):
+            if phone_hit == None or (hasattr(phone_hit, "isDeleted") and phone_hit.isDeleted) or phone_erased:
+                if phone_erased:
+                    mutations.append(stale_indexes_tombstone(phone_index_key, phone_hit))
                 mutations.append(index_vertex_mutation(phone_index_key, "phone", identity_key, phone_hit))
                 mutations.append({"op": "create", "key": "lnk." + phone_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                     "document": {"class": "indexes", "isDeleted": False,
                                  "sourceVertex": phone_index_key, "targetVertex": identity_key,
                                  "localName": "indexes", "data": {}}})
-        if name_hit == None or (hasattr(name_hit, "isDeleted") and name_hit.isDeleted):
+        if name_hit == None or (hasattr(name_hit, "isDeleted") and name_hit.isDeleted) or name_erased:
+            if name_erased:
+                mutations.append(stale_indexes_tombstone(name_index_key, name_hit))
             mutations.append(index_vertex_mutation(name_index_key, "name", identity_key, name_hit))
             mutations.append({"op": "create", "key": "lnk." + name_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                 "document": {"class": "indexes", "isDeleted": False,

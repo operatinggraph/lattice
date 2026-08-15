@@ -167,8 +167,15 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 // document from the PRIOR body and layers the script's over it
 // (internal/processor/step8_commit.go), so the bare verb preserves class and
 // data and sets isDeleted — with no per-candidate kv.Read needed to carry that
-// body forward by hand. Skipping those reads is real headroom against the
-// same wall budget that forced SWEEP_LIMIT below the read page size.
+// body forward by hand.
+//
+// The indexes branch does spend one per-candidate read anyway, for a different
+// reason: the vertex tombstone is gated on the vertex still naming this subject
+// as its owner (see sweep_indexes). That is at most SWEEP_LIMIT reads on the
+// one branch that has them, against a collector that has already charged up to
+// MAX_LINK_PAGES pages of LINK_PAGE_LIMIT to get there — a rounding error on
+// the read budget, and the wall cost of 64 sequential GETs is what to watch if
+// SWEEP_LIMIT is ever raised.
 const purgeIdentityDedupFootprintDDLScript = `
 LINK_PAGE_LIMIT = 256
 MAX_LINK_PAGES = 64
@@ -267,15 +274,63 @@ def collect_live_sweep(identity_key, relation, direction):
              direction + ") ahead of its live ones; the sweep cannot page far enough to reach them")
     return hits
 
-def sweep_indexes(hits):
+def index_owned_by(doc, identity_key):
+    # True only when the index vertex is LIVE and CURRENTLY names this
+    # identity as its owner. Absent, already-tombstoned, or naming anyone
+    # else, reads as not-owned -- re-tombstoning an already-dead vertex is
+    # harmless, but the same helper backs identity-hygiene's revive-capable
+    # repoint, where skipping the isDeleted check would let a stale body
+    # spring a sweep-tombstoned vertex back to life.
+    if doc == None or doc.data == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    if "identityKey" not in doc.data:
+        return False
+    return doc.data["identityKey"] == identity_key
+
+def sweep_indexes(hits, subject_key):
     # Each link's SOURCE is meant to be one of the subject's owned identityindex
     # vertices (Contract #1 §1.1: the identityindex vertex is the source, the
     # identity the target). Both the vertex and the link go: the vertex IS the
     # hash of a contact value, and the link is the evidence tying it to this
     # person.
     #
-    # No document on either tombstone -- the commit path seeds it from the prior
-    # body, so class and data survive without a read per hit.
+    # No document on the tombstones -- the commit path seeds it from the prior
+    # body, so class and data survive without a read to carry it forward.
+    #
+    # THE VERTEX TOMBSTONE IS GATED ON CURRENT OWNERSHIP, and that gate is what
+    # keeps this op from destroying a vertex that stopped being the subject's
+    # between the enumeration and the commit. identity-domain's
+    # CreateUnclaimedIdentity repoints a live identityindex vertex off an
+    # incumbent whose erasure write path is closed -- which is precisely this
+    # subject, during precisely this sweep's convergence window, since the
+    # vertex is still live only because the sweep has not reached it yet. A
+    # registrant who commits that repoint first leaves this sweep holding an
+    # enumerated link to a vertex a DIFFERENT person now owns; a tombstone
+    # carries no expectedRevision and no content assertion, so it would land
+    # anyway and destroy the new owner's index. The orphaned live link left
+    # behind then lets a third registrant revive the vertex and create a second
+    # live indexes out-edge off it -- the 1:1 ownership the whole dedup plane
+    # rests on, broken. The same gate covers identity-hygiene's MergeIdentity,
+    # which repoints the same vertices for the same reason.
+    #
+    # The gate is pinned to the revision it READ, and the pin is half the fix.
+    # A tombstone with no expectedRevision is not left unconditioned -- step 8
+    # conditions it on a prior-document read taken moments before the batch
+    # (internal/processor/step8_commit.go) -- but that read happens AFTER this
+    # decision, so a repoint landing between the two would satisfy the condition
+    # and destroy the new owner's vertex anyway: the gate would have narrowed
+    # the window instead of closing it. Carrying this read's own revision makes
+    # the decision and the write atomic. A repoint that beats the batch now
+    # fails the whole commit, and the erasure target re-dispatches against a
+    # residue that has not moved -- a loud retry, which is this op's posture
+    # everywhere else too.
+    #
+    # The LINK tombstone stays unconditional either way. It is the subject's own
+    # inbound edge whatever the vertex now says, removing it is what shrinks the
+    # residue, and if a repoint already tombstoned it this is an idempotent
+    # no-op -- so convergence is unaffected by anything the gate skips.
     #
     # THE SOURCE'S KEY SHAPE IS CHECKED, and it is the only thing standing
     # between this op and an arbitrary-vertex delete primitive. Three facts
@@ -299,7 +354,15 @@ def sweep_indexes(hits):
     mutations = []
     for lk in hits:
         if lk.sourceVertex.startswith("vtx.identityindex."):
-            mutations.append({"op": "tombstone", "key": lk.sourceVertex})
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above -- the hash is not dispatch-known ahead of
+            # collect_live_sweep, so it can no more be declared than
+            # MergeIdentity's own per-repoint read of the same vertex. At most
+            # SWEEP_LIMIT of these per commit, and only on the indexes branch.
+            idx_vtx = kv.Read(lk.sourceVertex)
+            if index_owned_by(idx_vtx, subject_key):
+                mutations.append({"op": "tombstone", "key": lk.sourceVertex,
+                                  "expectedRevision": idx_vtx.revision})
         mutations.append({"op": "tombstone", "key": lk.key})
     return mutations
 
@@ -340,7 +403,7 @@ def execute(state, op):
         hits = collect_live_sweep(subject_key, "indexes", "in")
         if len(hits) > 0:
             relation = "indexes"
-            mutations = sweep_indexes(hits)
+            mutations = sweep_indexes(hits, subject_key)
         else:
             hits = collect_live_sweep(subject_key, "duplicateOf", "out")
             if len(hits) == 0:
@@ -395,14 +458,14 @@ func DedupFootprintSweptEventDDL() pkgmgr.DDLSpec {
 			`"targetKey":{"type":"string","description":"Same value as identityKey, carried so the event's step-7 target names the person rather than whichever index vertex was swept first."},` +
 			`"relation":{"type":"string","description":"The relation this pass swept: indexes, duplicateOf, or empty when nothing live remained."},` +
 			`"purged":{"type":"integer","description":"Live links this pass removed. Zero means the sweep found nothing left."},` +
-			`"mutations":{"type":"integer","description":"Tombstones this pass committed — normally two per indexes hit (the index vertex and the link), one when a foreign-sourced link spares the vertex, one per duplicateOf hit."}}}`,
+			`"mutations":{"type":"integer","description":"Tombstones this pass committed — normally two per indexes hit (the index vertex and the link), one when the vertex is spared because its source lies outside the identityindex keyspace or it has already been repointed to another owner, one per duplicateOf hit."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"identityKey": "The identity whose dedup footprint was swept.",
 			"targetKey":   "Same as identityKey; carried so the event's target names the person on every pass.",
 			"relation":    "Which relation this pass swept, or empty when no live link remained on any of them.",
 			"purged":      "Live links removed by this pass; zero is the convergence signal.",
-			"mutations":   "Tombstones committed. An indexes hit normally costs two (the index vertex and the link) but one when the link's source lies outside the identityindex keyspace and the vertex is spared; a duplicateOf hit always costs one.",
+			"mutations":   "Tombstones committed. An indexes hit normally costs two (the index vertex and the link) but one when the vertex is spared — either the link's source lies outside the identityindex keyspace, or the vertex has already been repointed to another owner; a duplicateOf hit always costs one.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
