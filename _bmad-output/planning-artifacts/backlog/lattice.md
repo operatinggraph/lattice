@@ -130,7 +130,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[location-domain] Retire the `LEGACY_LOCATION_CLASS` widening now the data is clean** | `LEGACY_LOCATION_CLASS = "location"` widens class guards in 7 packages (cafe/clinic/location/loftspace/maintenance/wellness-domain, service-location) for pre-flip data. The 25 legacy roots were repaired 2026-08-10 and commit-time gates stop new ones, so the widening now admits only what cannot exist. | ★★ | S | 📋 ready · unblocks the Contract #1 transitional marker · [why](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §17.22 |
 | **Typed relation signatures — `containedIn: location→location`** | Declare a relation's endpoint types against the taxonomy, enforced at step 6 fail-closed; a signed variable-length hop contributes its endpoint expansion rather than clearing exhaustiveness. Held 2026-08-13: the payoff shrank to 2 lenses, both convertible by a single-hop rewrite (replacement row on verticals). | ★★ | L | 🗄️ shelved (revive: an intermediate containment level, or rewrite-unreachable varlength census) · [design](../../implementation-artifacts/typed-relation-signatures-design.md) |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
 
@@ -153,6 +152,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-15 · `07b1615b` · [location-domain] `LEGACY_LOCATION_CLASS` widening CLOSED — 7 packages; census found the Contract #1 tombstone exemption is a permanent invariant, not the removable marker the row assumed
 - 2026-08-15 · `ada53b37` · [Edge] `SYNC` stream MaxBytes CLOSED — 512 MiB cap mirrors `EnsureAuditStream`; 2 dangling ratified contract edits also committed this fire (`004e079c`)
 - 2026-08-15 · `aa41f292` · [rbac] `vtx.roleindex.<id>` provenance write-once CLOSED — mirrors the role-root guard; 3 cold reviews + 1 fix round, 0 blocking; create-forgery and no-repoint-heal limitations filed, not built
 - 2026-08-15 · (verification, no SHA) · [Edge] cross-lens delete-drop row REMOVED — already closed, proven by the pinned `TestPersonalTarget_ProducesNoDeleteShapedResult`
