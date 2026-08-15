@@ -197,3 +197,100 @@ func TestValidate_UndeclaredClassIsPermissive(t *testing.T) {
 		t.Fatalf("Validate (permissive): %v", err)
 	}
 }
+
+func TestValidate_IsDeletedTypeStringRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.identity." + testNanoID2,
+			Document: map[string]interface{}{
+				"class":     "identity",
+				"isDeleted": "true",
+				"data":      map[string]interface{}{"name": "Andrew"},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "isDeletedType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+	if ddlErr.MutationKey != "vtx.identity."+testNanoID2 {
+		t.Fatalf("MutationKey = %q", ddlErr.MutationKey)
+	}
+}
+
+func TestValidate_IsDeletedTypeNumberOnUpdateRejected(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "update",
+			Key: "vtx.identity." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "identity",
+				// int64, not float64: convert.go's StarlarkValueToGo returns
+				// int64 for a whole-valued Starlark int, the real shape a
+				// script-submitted numeric isDeleted would decode to.
+				"isDeleted": int64(1),
+				"data":      map[string]interface{}{"name": "Andrew"},
+			},
+		}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) {
+		t.Fatalf("expected *DDLViolation, got %T: %v", err, err)
+	}
+	if ddlErr.ViolatedConstraint != "isDeletedType" {
+		t.Fatalf("ViolatedConstraint = %q", ddlErr.ViolatedConstraint)
+	}
+}
+
+// The positive vector for the gate above: a well-typed isDeleted passes.
+func TestValidate_IsDeletedTypeBoolAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.identity." + testNanoID2,
+			Document: map[string]interface{}{
+				"class":     "identity",
+				"isDeleted": false,
+				"data":      map[string]interface{}{"name": "Andrew"},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (well-typed isDeleted): %v", err)
+	}
+}
+
+// An omitted isDeleted stays legal — readers already treat absence as false.
+func TestValidate_IsDeletedTypeAbsentAccepted(t *testing.T) {
+	t.Parallel()
+	v, _, ctx := buildValidatorWithCache(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Mutations: []MutationOp{{
+			Op:  "create",
+			Key: "vtx.identity." + testNanoID2,
+			Document: map[string]interface{}{
+				"class": "identity",
+				"data":  map[string]interface{}{"name": "Andrew"},
+			},
+		}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("Validate (absent isDeleted): %v", err)
+	}
+}
