@@ -253,7 +253,11 @@ func TestBuildInstallBatch_RetentionClassMintsHolderAndResolvesCustody(t *testin
 		t.Fatalf("custody holderKey = %v, want the minted holder %q", cd["holderKey"], holderKey)
 	}
 
-	// Both holder keys must be reclaimable at uninstall.
+	// Both holder keys stay in declaredKeys so the manifest is the complete
+	// record of what the install wrote — even though Uninstall then preserves
+	// rather than tombstones them (only ShredRetentionClassKey may destroy the
+	// class DEK, and it refuses a tombstoned holder). Off the list, the holder
+	// would be unrecorded and unreportable.
 	for _, want := range []string{holderKey, holderKey + ".retentionPolicy"} {
 		found := false
 		for _, d := range declared {
@@ -262,7 +266,7 @@ func TestBuildInstallBatch_RetentionClassMintsHolderAndResolvesCustody(t *testin
 			}
 		}
 		if !found {
-			t.Fatalf("%s is not in declaredKeys, so uninstall would orphan it", want)
+			t.Fatalf("%s is not in declaredKeys, so no manifest records the holder this package minted", want)
 		}
 	}
 }

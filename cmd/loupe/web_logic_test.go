@@ -780,6 +780,17 @@ func TestPkgLogicJS(t *testing.T) {
 			"skipped — same version"},
 		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.0.0"},
 			"upgrade 1.0.0 → 1.0.0 — no changes"},
+		// The apply reply's retention-holder fields are COUNTS — the *Count
+		// suffix is the whole point, since the uninstall reply's same concept
+		// is a key list — and the two buckets read differently on purpose: a
+		// preserved holder is intact custody, an already-tombstoned one is
+		// custody no verb can reach any more.
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"updated": 1, "retentionHoldersPreservedCount": 2},
+			"upgrade 1.0.0 → 1.1.0 — 1 updated · 2 retention-class holder key(s) preserved"},
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"updated": 1, "retentionHoldersPreservedCount": 2, "retentionHoldersAlreadyStrandedCount": 1},
+			"upgrade 1.0.0 → 1.1.0 — 1 updated · 2 retention-class holder key(s) preserved · 1 retention-class holder key(s) ALREADY tombstoned"},
 	} {
 		if got := call(t, vm, "applySummaryLine", tc.res); got != tc.want {
 			t.Errorf("applySummaryLine(%v) = %q, want %q", tc.res, got, tc.want)
@@ -802,6 +813,47 @@ func TestPkgLogicJS(t *testing.T) {
 	}
 	if got := call(t, vm, "uninstallSummary", map[string]any{}); got != "tombstones up to 2 key(s) incl. the manifest + package vertex" {
 		t.Errorf("uninstallSummary empty = %q", got)
+	}
+
+	// A retention-class holder never enters the tombstone set (Contract #8
+	// §8.3), so the preview must not count it — neither in the total nor in
+	// its section's per-kind breakdown, which would otherwise show the class
+	// as something this uninstall is about to soft-delete. The holder here is
+	// one resolved root carrying one folded .retentionPolicy aspect = 2
+	// declared keys, in an "other" section it shares with one ordinary item.
+	withHolder := map[string]any{
+		"declaredCount": 10,
+		"unresolved":    0,
+		"sections": []any{
+			map[string]any{"kind": "entities", "count": 3, "items": []any{
+				map[string]any{"key": "vtx.meta.aaaaaaaaaaaaaaaaaaaa", "found": true},
+				map[string]any{"key": "vtx.meta.bbbbbbbbbbbbbbbbbbbb", "found": true},
+				map[string]any{"key": "vtx.meta.cccccccccccccccccccc", "found": true},
+			}},
+			map[string]any{"kind": "other", "count": 2, "items": []any{
+				map[string]any{"key": "vtx.retentionclass.dddddddddddddddddddd", "found": true, "aspects": 1},
+				map[string]any{"key": "vtx.role.eeeeeeeeeeeeeeeeeeee", "found": true},
+			}},
+		},
+	}
+	if got := call(t, vm, "uninstallSummary", withHolder); got != "tombstones up to 10 key(s) incl. the manifest + package vertex — 3 entities · 1 other; 2 retention-class holder key(s) left untouched (only ShredRetentionClassKey may destroy them)" {
+		t.Errorf("uninstallSummary with a retention holder = %q", got)
+	}
+
+	// A holder root the graph could not resolve is already netted out by
+	// `unresolved`, so it must not be subtracted twice; only its folded aspect
+	// keys still count as held back.
+	unresolvedHolder := map[string]any{
+		"declaredCount": 4,
+		"unresolved":    1,
+		"sections": []any{
+			map[string]any{"kind": "other", "count": 1, "items": []any{
+				map[string]any{"key": "vtx.retentionclass.dddddddddddddddddddd", "found": false, "aspects": 1},
+			}},
+		},
+	}
+	if got := call(t, vm, "uninstallSummary", unresolvedHolder); got != "tombstones up to 4 key(s) incl. the manifest + package vertex; 1 unresolved skipped; 1 retention-class holder key(s) left untouched (only ShredRetentionClassKey may destroy them)" {
+		t.Errorf("uninstallSummary with an unresolved holder = %q", got)
 	}
 }
 

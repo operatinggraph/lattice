@@ -323,25 +323,30 @@ func manifestFromUpload(files []*multipart.FileHeader) (*multipart.FileHeader, e
 }
 
 // applyReply flattens an ApplyResult for the UI (lower-case JSON keys; key
-// lists present only on a dry-run preview).
+// lists present only on a dry-run preview). The retention-holder fields carry
+// a `Count` suffix: the apply path reports numbers while the uninstall reply
+// carries the key lists themselves, so the two shapes never share one JSON
+// name that a client helper reading both replies could confuse.
 func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 	return map[string]any{
-		"packageName":          res.PackageName,
-		"packageKey":           res.PackageKey,
-		"action":               res.Action,
-		"fromVersion":          res.FromVersion,
-		"toVersion":            res.ToVersion,
-		"created":              res.Created,
-		"updated":              res.Updated,
-		"tombstoned":           res.Tombstoned,
-		"revocationsRespected": res.RevocationsRespected,
-		"skipped":              res.Skipped,
-		"dryRun":               res.DryRun,
-		"reason":               res.Reason,
-		"createdKeys":          res.CreatedKeys,
-		"updatedKeys":          res.UpdatedKeys,
-		"tombstonedKeys":       res.TombstonedKeys,
-		"warnings":             res.DependencyWarnings,
+		"packageName":                          res.PackageName,
+		"packageKey":                           res.PackageKey,
+		"action":                               res.Action,
+		"fromVersion":                          res.FromVersion,
+		"toVersion":                            res.ToVersion,
+		"created":                              res.Created,
+		"updated":                              res.Updated,
+		"tombstoned":                           res.Tombstoned,
+		"revocationsRespected":                 res.RevocationsRespected,
+		"retentionHoldersPreservedCount":       res.RetentionHoldersPreserved,
+		"retentionHoldersAlreadyStrandedCount": res.RetentionHoldersAlreadyStranded,
+		"skipped":                              res.Skipped,
+		"dryRun":                               res.DryRun,
+		"reason":                               res.Reason,
+		"createdKeys":                          res.CreatedKeys,
+		"updatedKeys":                          res.UpdatedKeys,
+		"tombstonedKeys":                       res.TombstonedKeys,
+		"warnings":                             res.DependencyWarnings,
 	}
 }
 
@@ -450,7 +455,8 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 // handlePackagesUninstall implements POST /api/packages/uninstall with a JSON
 // {"name": "<canonical package name>"} body. The typed confirm lives in the
 // UI; the server just requires an exact name. Soft-delete only — the
-// UninstallPackage op tombstones every declared key.
+// UninstallPackage op tombstones every declared key except a retention-class
+// holder, which the installer preserves and reports back.
 func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
@@ -494,9 +500,11 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"packageName": res.PackageName,
-		"tombstoned":  res.Tombstoned,
-		"note":        res.Note,
+		"packageName":                     res.PackageName,
+		"tombstoned":                      res.Tombstoned,
+		"retentionHoldersPreserved":       res.RetentionHoldersPreserved,
+		"retentionHoldersAlreadyStranded": res.RetentionHoldersAlreadyStranded,
+		"note":                            res.Note,
 	})
 }
 
