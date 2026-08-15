@@ -173,6 +173,14 @@ const (
 	// meta-root, or any future DDL). It is the kernel/auth bricking guard —
 	// the script-level checks are best-effort defense-in-depth only.
 	ErrCodeProtectedKey ErrorCode = "ProtectedKey"
+	// ErrCodePermissionProvenance is the step-8 rejection when an update would
+	// rewrite a vtx.permission.<id> root's operationType, scope, origin or
+	// declaredBy, or a role's .canonicalName aspect value. Those fields are
+	// write-once once committed, so no path carrying a client-supplied mutation
+	// body — the package-lifecycle primitives named above among them — can
+	// widen an existing grant in place. Terminal: a redelivery replays the
+	// identical rewrite against an unchanged world.
+	ErrCodePermissionProvenance ErrorCode = "PermissionProvenance"
 	// ErrCodeBatchTooLarge is the step-8 rejection when a single operation's
 	// atomic batch exceeds the message-count ceiling (>998 business mutations)
 	// or a value exceeds the payload ceiling (Contract #2 §2.6 / #3 §3.9.1).

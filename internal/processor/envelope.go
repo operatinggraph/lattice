@@ -55,6 +55,7 @@ const (
 	ErrCodeDDLViolation              = opwire.ErrCodeDDLViolation
 	ErrCodeRevisionConflict          = opwire.ErrCodeRevisionConflict
 	ErrCodeProtectedKey              = opwire.ErrCodeProtectedKey
+	ErrCodePermissionProvenance      = opwire.ErrCodePermissionProvenance
 	ErrCodeBatchTooLarge             = opwire.ErrCodeBatchTooLarge
 	ErrCodeAuthInfrastructureFailure = opwire.ErrCodeAuthInfrastructureFailure
 	ErrCodeClaimKeyInvalid           = opwire.ErrCodeClaimKeyInvalid

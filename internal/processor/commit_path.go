@@ -459,6 +459,25 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			return OutcomeRejected, substrate.Term
 		}
 
+		// Permission/role provenance guard: an update rewriting a permission
+		// vertex's operationType/scope/origin/declaredBy, or a role's canonical
+		// name, is rejected before the atomic batch. Terminate — a redelivery
+		// replays the identical rewrite against an unchanged world.
+		var provErr *PermissionProvenanceError
+		if errors.As(err, &provErr) {
+			cp.deps.Metrics.OpsRejected.Add(1)
+			cp.deps.Logger.Info("step 8: permission-provenance rejection",
+				"requestId", env.RequestID,
+				"key", provErr.Key,
+				"field", provErr.Field)
+			cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodePermissionProvenance,
+				provErr.Error(), map[string]any{
+					"key":   provErr.Key,
+					"field": provErr.Field,
+				}))
+			return OutcomeRejected, substrate.Term
+		}
+
 		// Batch-size guard (Contract #3 §3.9.1): a deterministic op that exceeds
 		// the message-count or per-value payload ceiling. Terminate — a
 		// redelivery reproduces the identical over-limit batch and can never

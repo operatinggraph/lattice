@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -662,5 +663,383 @@ func TestCommit_UpdateOverAbsentKeyStampsCreationProvenance(t *testing.T) {
 		if s, ok := doc[f].(string); !ok || s == "" {
 			t.Fatalf("update over absent key left %s unset: %v", f, doc[f])
 		}
+	}
+}
+
+// commitOneErr runs a single-mutation commit with a fresh requestId and returns
+// the commit error rather than failing the test, so a guard's rejection is an
+// assertable outcome.
+func commitOneErr(ctx context.Context, c *CommitterImpl, rid string, m MutationOp) error {
+	env := newTestEnvelope(testNanoID1)
+	env.RequestID = rid
+	tracker := NewTracker(env, time.Now())
+	_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker)
+	return err
+}
+
+// permissionData mirrors the shape a permission body has once it has been
+// through the substrate: every list is a []interface{}, as JSON decoding
+// produces, so a comparison that behaves differently for []string cannot pass
+// here and fail in production.
+func permissionData(operationType, scope, origin, declaredBy, note string, lanes ...string) map[string]interface{} {
+	data := map[string]interface{}{
+		"operationType": operationType,
+		"scope":         scope,
+		"origin":        origin,
+		"declaredBy":    declaredBy,
+		"note":          note,
+	}
+	if lanes != nil {
+		list := make([]interface{}, 0, len(lanes))
+		for _, l := range lanes {
+			list = append(list, l)
+		}
+		data["lanes"] = list
+	}
+	return data
+}
+
+func permissionDocFrom(data map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"class": "permission", "data": data}
+}
+
+func permissionDoc(operationType, scope, origin, declaredBy, note string, lanes ...string) map[string]interface{} {
+	return permissionDocFrom(permissionData(operationType, scope, origin, declaredBy, note, lanes...))
+}
+
+func roleRootDoc() map[string]interface{} {
+	return map[string]interface{}{"class": "role", "data": map[string]interface{}{}}
+}
+
+func roleCanonicalNameDoc(roleKey, value string) map[string]interface{} {
+	return map[string]interface{}{
+		"class":     "canonicalName",
+		"vertexKey": roleKey,
+		"localName": "canonicalName",
+		"data":      map[string]interface{}{"value": value},
+	}
+}
+
+// A permission vertex's operationType/scope/origin/declaredBy/lanes are what
+// authorization reads, and no DDL gates class "permission" or "role" — so an
+// actor holding a package-lifecycle op could otherwise widen a grant it already
+// holds by rewriting the body of the very key its grantedBy link points at, or
+// redirect a role's identity. Those fields, a role root's whole body, and a
+// role's canonicalName aspect are write-once at commit time. data.note carries
+// no authorization weight and stays mutable.
+func TestCommit_PermissionRoleProvenanceIsWriteOnce(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	const (
+		permIDNote         = "Pm4kHj9nbCxz5vQ2yRtw"
+		permIDOpType       = "Qn5jKm8pcDya6wR3zSux"
+		permIDScope        = "Rp6hLn7qdEzb7xS4aTvy"
+		permIDOrigin       = "Sq7gMp6rfFac8yT5bUwz"
+		permIDDeclaredBy   = "Tr8fNq5sgGbd9zU6cVxA"
+		permIDAbsentPrior  = "Us9ePr4thHce1aV7dWyB"
+		permIDLanes        = "Zx5cUw2ypNhj6fA3iBdG"
+		permIDLaneReorder  = "Ay6dVx3zqPik7gB4jCeH"
+		permIDHeal         = "Bz7eWy4arQjm8hC5kDfJ"
+		permIDHealPartial  = "Ca8fXz5bsRkn9jD6mEgK"
+		roleIDNoop         = "Vt1dQs3ujJdf2bW8eXzC"
+		roleIDRewrite      = "Wu2cRt2vkKeg3cX9fYaD"
+		roleIDRootShadow   = "Db9gYa6ctSmp1kE7nFhL"
+		roleIDRootNoop     = "Ec1hZb7duTnq2mF8pGjM"
+		identityIDUnaffect = "Xv3bSu1wmLfh4dY1gZbE"
+	)
+
+	priorPerm := permissionDoc("ReadListing", "own", "package", "listings-domain", "original note", "default")
+
+	tests := []struct {
+		name string
+		key  string
+		// prior is committed as a create before the mutation; nil leaves the key absent.
+		prior map[string]interface{}
+		// op defaults to "update".
+		op        string
+		update    map[string]interface{}
+		wantField string // "" means the mutation must be accepted
+	}{
+		{
+			name:   "permission note changes",
+			key:    "vtx.permission." + permIDNote,
+			prior:  priorPerm,
+			update: permissionDoc("ReadListing", "own", "package", "listings-domain", "revised note", "default"),
+		},
+		{
+			name:   "permission lanes reordered but unchanged as a set",
+			key:    "vtx.permission." + permIDLaneReorder,
+			prior:  permissionDoc("ReadListing", "own", "package", "listings-domain", "n", "default", "urgent"),
+			update: permissionDoc("ReadListing", "own", "package", "listings-domain", "n", "urgent", "default"),
+		},
+		{
+			name:   "role canonicalName rewritten to the same value",
+			key:    "vtx.role." + roleIDNoop + ".canonicalName",
+			prior:  roleCanonicalNameDoc("vtx.role."+roleIDNoop, "consoleOperator"),
+			update: roleCanonicalNameDoc("vtx.role."+roleIDNoop, "consoleOperator"),
+		},
+		{
+			name:   "role root resupplied unchanged",
+			key:    "vtx.role." + roleIDRootNoop,
+			prior:  roleRootDoc(),
+			update: roleRootDoc(),
+		},
+		{
+			name:  "non permission or role class is unaffected",
+			key:   "vtx.identity." + identityIDUnaffect,
+			prior: map[string]interface{}{"class": "identity", "data": map[string]interface{}{"operationType": "ReadListing"}},
+			update: map[string]interface{}{
+				"class": "identity",
+				"data":  map[string]interface{}{"operationType": "ShredRetentionClassKey"},
+			},
+		},
+		{
+			name:      "permission operationType rewritten",
+			key:       "vtx.permission." + permIDOpType,
+			prior:     priorPerm,
+			update:    permissionDoc("ShredRetentionClassKey", "own", "package", "listings-domain", "original note", "default"),
+			wantField: "operationType",
+		},
+		{
+			name:      "permission scope rewritten",
+			key:       "vtx.permission." + permIDScope,
+			prior:     priorPerm,
+			update:    permissionDoc("ReadListing", "any", "package", "listings-domain", "original note", "default"),
+			wantField: "scope",
+		},
+		{
+			name:      "permission origin rewritten",
+			key:       "vtx.permission." + permIDOrigin,
+			prior:     permissionDoc("ReadListing", "own", "runtime", "listings-domain", "original note", "default"),
+			update:    permissionDoc("ReadListing", "own", "package", "listings-domain", "original note", "default"),
+			wantField: "origin",
+		},
+		{
+			name:      "permission declaredBy rewritten",
+			key:       "vtx.permission." + permIDDeclaredBy,
+			prior:     priorPerm,
+			update:    permissionDoc("ReadListing", "own", "package", "rbac-domain", "original note", "default"),
+			wantField: "declaredBy",
+		},
+		{
+			// platformLaneGate honours an entry-level lanes value over the
+			// capability document's own, and the core allowlist sanctions the
+			// meta lane for the package-lifecycle trio — so widening lanes
+			// widens an already-held grant with no new grant step.
+			name:      "permission lanes widened to a privileged lane",
+			key:       "vtx.permission." + permIDLanes,
+			prior:     permissionDoc("UpgradePackage", "any", "package", "console-operator", "n", "default"),
+			update:    permissionDoc("UpgradePackage", "any", "package", "console-operator", "n", "meta"),
+			wantField: "lanes",
+		},
+		{
+			name:      "role canonicalName rewritten to a different value",
+			key:       "vtx.role." + roleIDRewrite + ".canonicalName",
+			prior:     roleCanonicalNameDoc("vtx.role."+roleIDRewrite, "consoleOperator"),
+			update:    roleCanonicalNameDoc("vtx.role."+roleIDRewrite, "operator"),
+			wantField: "value",
+		},
+		{
+			// The rule engine resolves role.canonicalName from the ROOT body
+			// first and only then reads the .canonicalName aspect, so a
+			// top-level field on the root answers the kernel root-grant lens in
+			// the real aspect's place. The role root is write-once in full.
+			name:  "role root gains a shadowing canonicalName field",
+			key:   "vtx.role." + roleIDRootShadow,
+			prior: roleRootDoc(),
+			update: map[string]interface{}{
+				"class":         "role",
+				"data":          map[string]interface{}{},
+				"canonicalName": map[string]interface{}{"data": map[string]interface{}{"value": "operator"}},
+			},
+			wantField: "canonicalName",
+		},
+		{
+			// origin/declaredBy postdate some stored permissions, so the first
+			// upgrade to carry them must be able to fill them in.
+			name:   "permission gains origin and declaredBy for the first time",
+			key:    "vtx.permission." + permIDHeal,
+			prior:  permissionDocFrom(map[string]interface{}{"operationType": "ReadListing", "scope": "own"}),
+			update: permissionDoc("ReadListing", "own", "package", "listings-domain", "n"),
+		},
+		{
+			name:   "permission gains only declaredBy when origin was already stored",
+			key:    "vtx.permission." + permIDHealPartial,
+			prior:  permissionDocFrom(map[string]interface{}{"operationType": "ReadListing", "scope": "own", "origin": "package"}),
+			update: permissionDoc("ReadListing", "own", "package", "listings-domain", "n"),
+		},
+		{
+			name:   "permission key with no prior document",
+			key:    "vtx.permission." + permIDAbsentPrior,
+			prior:  nil,
+			update: permissionDoc("ShredRetentionClassKey", "any", "package", "listings-domain", ""),
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rid := fmt.Sprintf("rid-provenance-%d", i)
+			if tt.prior != nil {
+				commitOne(t, ctx, c, rid+"-create", MutationOp{
+					Op: "create", Key: tt.key, Document: tt.prior,
+				})
+			}
+			op := tt.op
+			if op == "" {
+				op = "update"
+			}
+			err := commitOneErr(ctx, c, rid+"-mutate", MutationOp{
+				Op: op, Key: tt.key, Document: tt.update,
+			})
+			var provErr *PermissionProvenanceError
+			switch {
+			case tt.wantField == "":
+				if err != nil {
+					t.Fatalf("Commit(%s %s): %v, want accepted", op, tt.key, err)
+				}
+			case !errors.As(err, &provErr):
+				t.Fatalf("Commit(%s %s): %v, want *PermissionProvenanceError on field %q",
+					op, tt.key, err, tt.wantField)
+			case provErr.Field != tt.wantField:
+				t.Fatalf("rejected on field %q, want %q", provErr.Field, tt.wantField)
+			case provErr.Key != tt.key:
+				t.Fatalf("rejected key %q, want %q", provErr.Key, tt.key)
+			}
+		})
+	}
+}
+
+// A rejection must leave the stored document untouched — the guard runs before
+// the atomic batch, so the escalated body never lands.
+func TestCommit_PermissionProvenanceRejectionLeavesPriorBody(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	key := "vtx.permission." + testNanoID2
+
+	commitOne(t, ctx, c, "rid-perm-create", MutationOp{
+		Op: "create", Key: key,
+		Document: permissionDoc("ReadListing", "own", "package", "listings-domain", "note"),
+	})
+	if err := commitOneErr(ctx, c, "rid-perm-escalate", MutationOp{
+		Op: "update", Key: key,
+		Document: permissionDoc("ShredRetentionClassKey", "any", "package", "listings-domain", "note"),
+	}); err == nil {
+		t.Fatal("Commit(escalating update): nil error, want rejection")
+	}
+
+	entry, err := c.Conn.KVGet(ctx, testCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	data, _ := doc["data"].(map[string]interface{})
+	if data["operationType"] != "ReadListing" {
+		t.Fatalf("stored operationType = %v, want ReadListing", data["operationType"])
+	}
+}
+
+// Tombstoning first must not launder a rewrite. A revive is necessarily an
+// update — a create asserts revision 0 and the tombstone already sits at a later
+// revision — and a bare tombstone supplies no fields, so the value the guard
+// compares against is still the one that was committed before the tombstone.
+func TestCommit_TombstoneThenReviveCannotRewriteProvenance(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	roleID := "Yw4aTv9xnMgi5eZ2hAcF"
+	key := "vtx.role." + roleID + ".canonicalName"
+
+	commitOne(t, ctx, c, "rid-revive-create", MutationOp{
+		Op: "create", Key: key,
+		Document: roleCanonicalNameDoc("vtx.role."+roleID, "consoleOperator"),
+	})
+	if err := commitOneErr(ctx, c, "rid-revive-tombstone", MutationOp{
+		Op: "tombstone", Key: key,
+	}); err != nil {
+		t.Fatalf("Commit(tombstone): %v", err)
+	}
+
+	err := commitOneErr(ctx, c, "rid-revive-update", MutationOp{
+		Op: "update", Key: key,
+		Document: roleCanonicalNameDoc("vtx.role."+roleID, "operator"),
+	})
+	var provErr *PermissionProvenanceError
+	if !errors.As(err, &provErr) {
+		t.Fatalf("Commit(revive with a new value): %v, want *PermissionProvenanceError", err)
+	}
+	if provErr.Field != "value" {
+		t.Fatalf("rejected on field %q, want value", provErr.Field)
+	}
+}
+
+// buildMutationValue seeds a tombstone's written body from the stored document
+// and then overlays the mutation's own, so a tombstone CARRYING a document
+// rewrites exactly what an update would. parseMutations refuses such a mutation
+// today, but this guard does not depend on that: it holds at step 8 for any
+// path, present or future, that reaches commit with one.
+func TestCommit_TombstoneCarryingDocumentCannotRewriteProvenance(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	roleID := "Fd2jAc8evUor3nG9qHkN"
+	key := "vtx.role." + roleID + ".canonicalName"
+
+	commitOne(t, ctx, c, "rid-tsdoc-create", MutationOp{
+		Op: "create", Key: key,
+		Document: roleCanonicalNameDoc("vtx.role."+roleID, "consoleOperator"),
+	})
+
+	err := commitOneErr(ctx, c, "rid-tsdoc-launder", MutationOp{
+		Op: "tombstone", Key: key,
+		Document: roleCanonicalNameDoc("vtx.role."+roleID, "operator"),
+	})
+	var provErr *PermissionProvenanceError
+	if !errors.As(err, &provErr) {
+		t.Fatalf("Commit(tombstone carrying a rewritten value): %v, want *PermissionProvenanceError", err)
+	}
+	if provErr.Field != "value" {
+		t.Fatalf("rejected on field %q, want value", provErr.Field)
+	}
+
+	// The laundering tombstone left the committed value alone.
+	entry, gerr := c.Conn.KVGet(ctx, testCoreBucket, key)
+	if gerr != nil {
+		t.Fatalf("KVGet %s: %v", key, gerr)
+	}
+	var doc map[string]interface{}
+	if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
+		t.Fatalf("unmarshal %s: %v", key, uerr)
+	}
+	data, _ := doc["data"].(map[string]interface{})
+	if data["value"] != "consoleOperator" {
+		t.Fatalf("stored canonicalName = %v, want consoleOperator", data["value"])
+	}
+}
+
+// readPriorDoc keeps an entry whose body does not parse rather than failing the
+// commit, so the guard sees a key that exists with no readable prior value. It
+// cannot prove such a write leaves the guarded fields alone, and this guard
+// fails closed rather than treating the key as absent.
+func TestCommit_UndecodablePriorDocumentIsRejected(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	key := "vtx.permission.Ge3kBd9fwVps4pH1rJmP"
+
+	if _, err := c.Conn.KVPut(ctx, testCoreBucket, key, []byte("{not json")); err != nil {
+		t.Fatalf("seed corrupt document: %v", err)
+	}
+
+	err := commitOneErr(ctx, c, "rid-corrupt-update", MutationOp{
+		Op: "update", Key: key,
+		Document: permissionDoc("ShredRetentionClassKey", "any", "package", "listings-domain", "n"),
+	})
+	var provErr *PermissionProvenanceError
+	if !errors.As(err, &provErr) {
+		t.Fatalf("Commit(update over a corrupt body): %v, want *PermissionProvenanceError", err)
+	}
+	if provErr.Field != "document" {
+		t.Fatalf("rejected on field %q, want document", provErr.Field)
 	}
 }

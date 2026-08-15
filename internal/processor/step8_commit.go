@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // ConflictError is the typed step-8 failure surfaced when the atomic
@@ -48,6 +50,26 @@ type ProtectedKeyError struct {
 
 func (e *ProtectedKeyError) Error() string {
 	return fmt.Sprintf("ProtectedKey: %s on %s targets protected kernel root %s", e.Op, e.Key, e.Root)
+}
+
+// PermissionProvenanceError is the typed step-8 failure surfaced when an update
+// mutation targets an existing vtx.permission.<id> root and changes
+// data.operationType, data.scope, data.origin or data.declaredBy — the four
+// provenance fields the origin invariant depends on staying write-once. A
+// permission entity key is content-addressed on (package, operationType,
+// scope) (Contract #8 §8.1), so a legitimate upgrade never changes any of the
+// four on a surviving key: a real change produces a different key (create +
+// tombstone), never an update. data.note / data.lanes stay freely mutable.
+// The same error carries a role's .canonicalName aspect rewrite, with Field
+// "value". The commit path maps this onto a `rejected` reply with code
+// `PermissionProvenance`.
+type PermissionProvenanceError struct {
+	Key   string // the offending mutation key
+	Field string // the write-once field the update tried to change
+}
+
+func (e *PermissionProvenanceError) Error() string {
+	return fmt.Sprintf("PermissionProvenance: update on %s attempted to rewrite provenance field %q", e.Key, e.Field)
 }
 
 // BatchTooLargeError is the typed step-8 failure surfaced when the substrate
@@ -171,6 +193,12 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 		return CommitAck{}, err
 	}
 	if err := rejectProtectedMutations(result.Mutations, prior); err != nil {
+		return CommitAck{}, err
+	}
+	// Sibling guard over the same read pass: a permission vertex's provenance
+	// fields and a role's canonical name are write-once once committed, for
+	// every path that can emit a mutation against them.
+	if err := rejectPermissionRoleRewrites(result.Mutations, prior); err != nil {
 		return CommitAck{}, err
 	}
 
@@ -491,6 +519,21 @@ type priorDocs map[string]priorDoc
 
 func (p priorDocs) doc(key string) map[string]interface{} { return p[key].Doc }
 
+// lookup reports the stored document behind a key for a write-once comparison,
+// separating the three states doc() collapses into one. found is false when the
+// key holds nothing at all — unconstrained, there is no earlier value to
+// preserve. decoded is false when an entry exists but its body did not parse:
+// readPriorDoc keeps such an entry rather than failing the commit, so a guard
+// that must fail closed has to treat it as a body it cannot prove unchanged,
+// not as an absent one.
+func (p priorDocs) lookup(key string) (doc map[string]interface{}, found, decoded bool) {
+	pd, ok := p[key]
+	if !ok || !pd.Found {
+		return nil, false, false
+	}
+	return pd.Doc, true, pd.Doc != nil
+}
+
 // priorReadConcurrency bounds the in-flight reads of the step-8 prior-document
 // pass. A cascade may mutate up to substrate.MaxBatchMessages keys, and the
 // substrate exposes no batched get, so a sequential pass would cost that many
@@ -615,6 +658,232 @@ func rejectProtectedMutations(mutations []MutationOp, prior priorDocs) error {
 		}
 	}
 	return nil
+}
+
+// permissionProvenanceFields is the set of vtx.permission.<id> root data fields
+// authorization consumes, all write-once once committed. The origin invariant
+// reads operationType, scope, origin and declaredBy; platformLaneGate
+// (step3_auth_capability.go) reads lanes, where an entry-level value replaces
+// the capability document's own lane set and can reach a privileged lane the
+// core allowlist sanctions for that operationType. data.note carries no
+// authorization weight and stays mutable. Order is fixed so the reported Field
+// is stable.
+var permissionProvenanceFields = []string{"operationType", "scope", "origin", "declaredBy", "lanes"}
+
+// healableProvenanceFields are the provenance fields a stored permission may
+// legitimately be missing, and so may gain a value for the first time. The
+// installer began stamping origin/declaredBy after permissions had already been
+// committed without them, so the first upgrade of such a package must be able
+// to fill them in. Healing an absent value cannot launder a runtime-minted
+// grant into a package-declared one: runtime minting and the origin stamp are
+// halves of the same mechanism, so no permission stored without an origin can
+// ever have been runtime-minted. operationType and scope are deliberately not
+// healable — a permission's key is derived from them, so a stored permission
+// always carries both, and an absent one is a corrupt body rather than an old
+// one.
+var healableProvenanceFields = map[string]bool{"origin": true, "declaredBy": true}
+
+// committerManagedFields are written by the committer on every commit — the key
+// itself, the Contract #1 §1.3 creation triplet restored from the stored
+// document, and the last-modified stamps. They never carry a script's value, so
+// a write-once comparison of a document body must ignore them.
+var committerManagedFields = map[string]bool{
+	"key":              true,
+	"createdAt":        true,
+	"createdBy":        true,
+	"createdByOp":      true,
+	"lastModifiedAt":   true,
+	"lastModifiedBy":   true,
+	"lastModifiedByOp": true,
+}
+
+// rejectPermissionRoleRewrites is the authoritative commit-time guard making a
+// permission vertex's provenance and a role vertex's identity write-once. The
+// package-lifecycle primitives (InstallPackage / UpgradePackage /
+// UninstallPackage) carry client-supplied mutation bodies that no DDL gates —
+// step 6 resolves no governing DDL for class "permission" or "role" — so
+// without this guard an actor holding one of them can rewrite an entity it
+// already holds a grant through, with no new grant step.
+//
+// Three shapes are guarded:
+//
+//   - A vtx.permission.<id> root: every field in permissionProvenanceFields
+//     must match the stored document. A permission's key is content-addressed
+//     on (package, operationType, scope), so a legitimate upgrade never changes
+//     one on a surviving key — a real change yields a different key.
+//
+//   - A vtx.role.<id> root: the whole body is write-once. The installer creates
+//     a role root with an empty data object and UpdateRole mutates only the
+//     .description aspect, so no legitimate path writes this document at all.
+//     Whole-body equality is what stops a top-level field from shadowing a
+//     same-named aspect: the rule engine resolves a node property from the root
+//     body first and only falls back to reading the aspect key, so a root that
+//     gained a canonicalName field would answer every
+//     `role.canonicalName.data.value` read in the real aspect's place —
+//     including the kernel root-grant lens.
+//
+//   - A vtx.role.<id>.canonicalName aspect: its value must match the stored
+//     aspect, closing the same redirection at the aspect itself.
+//
+// Like the protected-key guard this is path-independent — it fires for any
+// script or future primitive emitting such a mutation, and does not rely on a
+// Starlark-layer check to have run. A create is out of scope: there is no
+// stored body to hold write-once. A bare tombstone is out of scope too, because
+// buildMutationValue seeds the written body from the stored document and a
+// tombstone that carries no document has nothing to overlay onto it; a
+// tombstone that DOES carry a document overlays it exactly as an update does,
+// so it is held to the same comparison.
+func rejectPermissionRoleRewrites(mutations []MutationOp, prior priorDocs) error {
+	for _, m := range mutations {
+		switch m.Op {
+		case "update":
+		case "tombstone":
+			if m.Document == nil {
+				continue
+			}
+		default:
+			continue
+		}
+
+		switch {
+		case keys.IsVertexKeyOfType(m.Key, "permission"):
+			priorDoc, found, decoded := prior.lookup(m.Key)
+			if !found {
+				continue
+			}
+			if !decoded {
+				return &PermissionProvenanceError{Key: m.Key, Field: "document"}
+			}
+			priorData, _ := priorDoc["data"].(map[string]interface{})
+			newData, _ := m.Document["data"].(map[string]interface{})
+			for _, f := range permissionProvenanceFields {
+				if _, present := priorData[f]; !present && healableProvenanceFields[f] {
+					continue
+				}
+				if !docFieldEqual(priorData, newData, f) {
+					return &PermissionProvenanceError{Key: m.Key, Field: f}
+				}
+			}
+
+		case keys.IsVertexKeyOfType(m.Key, "role"):
+			priorDoc, found, decoded := prior.lookup(m.Key)
+			if !found {
+				continue
+			}
+			if !decoded {
+				return &PermissionProvenanceError{Key: m.Key, Field: "document"}
+			}
+			// An update writes the whole value rather than merging into the
+			// stored one, so a field dropped from the mutation is erased just as
+			// surely as a changed one — hence the union of both bodies' fields,
+			// walked in a fixed order so the reported Field is stable.
+			//
+			// isDeleted is excluded: it is the entity's liveness flag, which the
+			// tombstone path owns and which readers treat as false when absent,
+			// so it can differ between a stored body and a faithful resupply
+			// without redirecting a single read. Reviving a tombstoned role is a
+			// separate mechanism from rewriting a live one's identity.
+			for _, f := range unionFields(priorDoc, m.Document) {
+				if committerManagedFields[f] || f == "isDeleted" {
+					continue
+				}
+				if !docFieldEqual(priorDoc, m.Document, f) {
+					return &PermissionProvenanceError{Key: m.Key, Field: f}
+				}
+			}
+
+		default:
+			_, vType, _, local, ok := keys.ParseAspectKey(m.Key)
+			if !ok || vType != "role" || local != "canonicalName" {
+				continue
+			}
+			priorDoc, found, decoded := prior.lookup(m.Key)
+			if !found {
+				continue
+			}
+			if !decoded {
+				return &PermissionProvenanceError{Key: m.Key, Field: "document"}
+			}
+			priorData, _ := priorDoc["data"].(map[string]interface{})
+			newData, _ := m.Document["data"].(map[string]interface{})
+			if !docFieldEqual(priorData, newData, "value") {
+				return &PermissionProvenanceError{Key: m.Key, Field: "value"}
+			}
+		}
+	}
+	return nil
+}
+
+// docFieldEqual compares one field across two documents. Presence is compared
+// before value so adding a field where none was stored, or dropping one that
+// was, counts as a change. Values are compared as canonical JSON: the stored
+// document decodes numbers as json.Number where a script supplies float64, and
+// a field may hold a list (data.lanes) or a nested object rather than a scalar.
+func docFieldEqual(prior, next map[string]interface{}, field string) bool {
+	priorVal, priorOK := prior[field]
+	nextVal, nextOK := next[field]
+	if priorOK != nextOK {
+		return false
+	}
+	if field == "lanes" {
+		// platformLaneGate tests membership, so a reordering grants exactly
+		// what the stored order granted and only the set is write-once.
+		if p, ok := stringSet(priorVal); ok {
+			n, ok := stringSet(nextVal)
+			return ok && p == n
+		}
+	}
+	return canonicalJSON(priorVal) == canonicalJSON(nextVal)
+}
+
+// unionFields lists every field name appearing in either document, sorted so a
+// comparison walking them reports the same field on every run.
+func unionFields(a, b map[string]interface{}) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, doc := range []map[string]interface{}{a, b} {
+		for f := range doc {
+			if _, dup := seen[f]; dup {
+				continue
+			}
+			seen[f] = struct{}{}
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// stringSet renders a list of strings order-independently. It reports false for
+// any other shape, so a caller falls back to an exact comparison rather than
+// treating an unexpected value as equal to something.
+func stringSet(v any) (string, bool) {
+	items, ok := v.([]interface{})
+	if !ok {
+		return "", false
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		s, ok := it.(string)
+		if !ok {
+			return "", false
+		}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return strings.Join(out, "\x00"), true
+}
+
+// canonicalJSON renders a value for comparison. json.Marshal sorts map keys, so
+// two equal objects render identically regardless of insertion order. A value
+// that cannot be marshalled renders as a unique token so it never compares
+// equal to anything, including another unmarshallable value.
+func canonicalJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("\x00unmarshallable:%T:%v", v, v)
+	}
+	return string(b)
 }
 
 // docIsProtected reports whether a stored document carries data.protected.
