@@ -180,6 +180,57 @@ Defense-in-depth (clearer per-op error, **not** authoritative):
 Net invariant: an operation cannot disable auth (the Capability lenses) or the kernel (the meta-root
 DDL) by rewriting or tombstoning them.
 
+**Permission/role provenance protection (Processor commit-time, path-independent).** In addition to the
+protected-root guard above, every `update` mutation (and any `tombstone` mutation that carries a
+document) targeting an existing `vtx.permission.<id>` root is rejected — error code
+`PermissionProvenance` — if it would change `data.operationType`, `data.scope`, `data.origin`,
+`data.declaredBy`, or `data.lanes` from the value already committed. These are the fields
+`grant-provenance-runtime-permission-minting-design.md`'s origin invariant and the lane-gate
+(`platformLaneGate`) depend on staying write-once outside the RBAC op surface (which itself never
+rewrites them — `UpdatePermission` is deliberately ungranted to every role). `data.origin`/
+`data.declaredBy` may be set for the first time on a permission stored without them (a pre-existing
+installation predating their introduction); every other guarded field must already be present.
+`data.note` may still change freely. The identical rule makes a role's **entire root document**
+write-once — not only its `.canonicalName` aspect, since a top-level field on the root shadows a
+same-named aspect in every cypher read (`isDeleted` excepted) — and protects the `.canonicalName` aspect
+itself the same way. A `vtx.roleindex.<id>` root (the canonical-name→role lookup, `data.canonicalName` +
+`data.roleId`) is write-once in full by the same rule: a rewritten `data.roleId` would redirect a
+canonical role name to a different role's grants once a consumer resolves through it, with no new grant
+step. Permission entity keys are content-addressed on `(package, operationType, scope)`
+(§8.1), so a legitimate upgrade never needs to change `operationType`/`scope` on a surviving key — a real
+change necessarily produces a different key (a create paired with a tombstone of the old one), never an
+update; a role root carries no field on any legitimate path, and a roleindex root's key is content-addressed
+on `canonicalName` alone, so `data.roleId` for a surviving key never legitimately changes either. This
+closes the channel the protected-root guard does not: an ordinary (non-`protected`) permission/role/
+roleindex vertex, rewritten via `UpgradePackage` or any future path that trusts a client-supplied mutation
+body — see `permission-role-provenance-write-once-design.md`.
+
+**Package-manifest ownership scoping (Processor commit-time, path-independent).** Four further guards, all
+enforced by `PackageScopeError`, running unconditionally for `InstallPackage`/`UpgradePackage`/
+`UninstallPackage` (resolved from `class` with an `operationType` fallback — never `operationType` alone, so
+an envelope can't dodge these by having the two diverge): (1) none of the three may ever mutate a `holdsRole`
+link — no package `Definition` field produces one; (2) a **created** `.manifest` aspect (identified by key
+shape, not by the payload's claimed name) may only declare keys the same batch itself creates, plus its own
+package root — this closes the manifest's own root of trust, on both a real `InstallPackage` and an
+`UpgradePackage` naming a not-yet-installed name; (3) an `UpgradePackage`/`UninstallPackage` `update`/
+`tombstone` must target a key already in the **named package's own** prior `.manifest.declaredKeys` (the
+package's own root and manifest aspect are exempt as self-referential), or a key the SAME batch's own
+manifest update legitimately adds — which itself may only be a batch-created key, an already-declared key,
+or a key whose stored document is already tombstoned **and** is also an update/tombstone target elsewhere in
+the same batch (closes a real revive-after-removal path without re-opening arbitrary live-key rewrite); (4)
+a **created** link's source vertex (never the target — an asymmetric rule; a symmetric one breaks the
+`grantsTo:[operator]` pattern 20+ shipped packages rely on) and a **created** aspect's parent vertex must
+each be in what the batch creates or already owns. `InstallPackage` is create-only and so is naturally
+exempt from rule (3) only — rules (1), (2), and (4) all still apply to it. See
+`permission-role-provenance-write-once-design.md` §19 for the full shape and residuals. **Not closed by this
+guard:** a `create` of a fresh permission/role vertex whose key is self-consistent with the named package's
+own claimed content, `grantedBy`-linked to a role the actor already legitimately holds — closing that needs
+server-side access to a package's real compiled Definition, which does not exist today (§19.6). **Narrowed,
+not closed:** reviving an already-**dead**, non-protected key some other package once declared — no live
+key is reachable by any path above, but per-key ownership provenance (which package legitimately minted a
+given key, tracked durably across time) does not exist today, so a dual-declaration of an orphaned dead key
+remains possible (§19.6).
+
 ---
 
 ## 8.6 `UpgradePackage` op
