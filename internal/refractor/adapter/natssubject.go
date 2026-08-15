@@ -120,6 +120,20 @@ const syncStreamMaxAge = 24 * time.Hour
 // path as falling behind MaxAge.
 const syncStreamMaxMsgsPerSubject = 10_000
 
+// syncStreamMaxBytes bounds the SYNC stream's total storage to a fixed
+// budget — 512 MiB, the same ceiling EnsureAuditStream applies to
+// REFRACTOR_AUDIT (internal/refractor/health/audit_writer.go) — independent
+// of how many actors are attached. syncStreamMaxAge and
+// syncStreamMaxMsgsPerSubject bound one actor's own backlog but not the sum
+// across every actor's subject; live 2026-08-10 measurement: 993 MB / 1.07M
+// msgs of a 1.66 GB JetStream store, unbounded growth toward the same OOM
+// the audit stream's cap was added to prevent. Hitting the cap discards the
+// stream's oldest messages first (JetStream's default DiscardOld policy),
+// which is exactly the existing MaxAge/per-subject fallback: a node that
+// falls behind re-hydrates via personal.hydrate rather than replaying a
+// long backlog.
+const syncStreamMaxBytes = 512 << 20
+
 // syncDurableReapMargin is slack added atop syncStreamMaxAge for
 // SyncConsumerInactiveThreshold: clock skew, plus a node reconnecting right
 // at the retention boundary (edge-sync-orphan-expiry-design.md §4.3).
@@ -190,6 +204,7 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 			Subjects:                  existingSubjects,
 			MaxAge:                    syncStreamMaxAge,
 			MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
+			MaxBytes:                  syncStreamMaxBytes,
 			ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
 			ConsumerMaxAckPending:     SyncConsumerMaxAckPending,
 		})
@@ -199,6 +214,7 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 		Subjects:                  append(existingSubjects, wildcard),
 		MaxAge:                    syncStreamMaxAge,
 		MaxMsgsPerSubject:         syncStreamMaxMsgsPerSubject,
+		MaxBytes:                  syncStreamMaxBytes,
 		ConsumerInactiveThreshold: SyncConsumerInactiveThreshold,
 		ConsumerMaxAckPending:     SyncConsumerMaxAckPending,
 	})

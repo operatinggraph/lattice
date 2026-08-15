@@ -166,6 +166,50 @@ func TestEnsureSyncStream_SubjectAlreadyPresentBranchSetsConsumerInactiveThresho
 		"the subject-already-present branch must itself set ConsumerLimits.InactiveThreshold")
 }
 
+// TestEnsureSyncStream_AppendBranchSetsMaxBytes and
+// TestEnsureSyncStream_SubjectAlreadyPresentBranchSetsMaxBytes prove
+// ensureSyncStream's two branches (subject-append for a brand-new stream,
+// subject-already-present for a restart) both stamp the 512 MiB storage
+// ceiling — mirroring EnsureAuditStream's cap
+// (internal/refractor/health/audit_writer.go), added after the per-lens
+// audit layout it replaced grew unbounded toward a NATS OOM. Live
+// 2026-08-10 measurement: SYNC held 993 MB with no byte limit at all, the
+// same unbounded-growth shape.
+func TestEnsureSyncStream_AppendBranchSetsMaxBytes(t *testing.T) {
+	conn, js := startSyncServer(t)
+	ctx := context.Background()
+
+	_, err := adapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", "lattice.sync.user", "SYNC-BYTES-APPEND", []string{adapter.PersonalActorKeyField})
+	require.NoError(t, err)
+	s, err := js.Stream(ctx, "SYNC-BYTES-APPEND")
+	require.NoError(t, err)
+	assert.EqualValues(t, 512<<20, s.CachedInfo().Config.MaxBytes,
+		"the subject-append branch (brand-new stream) must cap MaxBytes at 512 MiB")
+}
+
+func TestEnsureSyncStream_SubjectAlreadyPresentBranchSetsMaxBytes(t *testing.T) {
+	conn, js := startSyncServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, conn.EnsureStream(ctx, substrate.StreamSpec{
+		Name:              "SYNC-BYTES-PRESENT",
+		Subjects:          []string{"lattice.sync.user.>"},
+		MaxAge:            24 * time.Hour,
+		MaxMsgsPerSubject: 10_000,
+		// MaxBytes deliberately zero: simulates a stream that predates this cap.
+	}))
+	pre, err := js.Stream(ctx, "SYNC-BYTES-PRESENT")
+	require.NoError(t, err)
+	require.EqualValues(t, -1, pre.CachedInfo().Config.MaxBytes, "precondition: the stream must start with no byte cap (nats-server reports unlimited as -1)")
+
+	_, err = adapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", "lattice.sync.user", "SYNC-BYTES-PRESENT", []string{adapter.PersonalActorKeyField})
+	require.NoError(t, err)
+	s, err := js.Stream(ctx, "SYNC-BYTES-PRESENT")
+	require.NoError(t, err)
+	assert.EqualValues(t, 512<<20, s.CachedInfo().Config.MaxBytes,
+		"the subject-already-present branch must itself adopt MaxBytes on a pre-existing stream")
+}
+
 // TestEnsureSyncStream_AdoptsThePolicyOnAStreamThatAlreadyHasConsumers is the
 // live-upgrade case, and the one every other test in this file structurally
 // cannot reach: a SYNC stream provisioned before the policy existed, carrying
