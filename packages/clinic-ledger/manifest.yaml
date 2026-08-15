@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.2.9
+version: 0.2.10
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
