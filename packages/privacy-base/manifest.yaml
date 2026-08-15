@@ -1,5 +1,5 @@
 name: privacy-base
-version: 0.15.2
+version: 0.15.3
 description: |
   The key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2), for both holder kinds.

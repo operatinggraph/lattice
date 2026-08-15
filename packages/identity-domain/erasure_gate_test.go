@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -705,4 +707,181 @@ func TestErasureGate_CreateUnclaimedIdentity_SkipsBareShreddedIncumbent(t *testi
 
 	assertKeyAbsent(t, ctx, conn, duplicateOfLinkKey(afterID, incumbentKey),
 		"a fresh duplicateOf named an identity whose PII key is already destroyed — the erased set grew through the path the operator button has always used")
+}
+
+// identityIndexOwner returns the identity key an identityindex vertex currently
+// names, failing if the vertex is missing or tombstoned. Both are outcomes the
+// repoint tests below must distinguish from "points at the wrong identity": a
+// tombstoned index is what the erasure's own dedup sweep leaves behind, and it
+// would make the repoint assertion vacuous.
+func identityIndexOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, indexKey string) string {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, indexKey)
+	if err != nil {
+		t.Fatalf("KVGet identityindex %s: %v", indexKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal identityindex %s: %v", indexKey, err)
+	}
+	if deleted, _ := doc["isDeleted"].(bool); deleted {
+		t.Fatalf("identityindex %s is tombstoned — nothing in this fixture sweeps it, so the repoint assertion below would prove nothing", indexKey)
+	}
+	data, _ := doc["data"].(map[string]any)
+	owner, _ := data["identityKey"].(string)
+	if owner == "" {
+		t.Fatalf("identityindex %s carries no data.identityKey; doc = %+v", indexKey, doc)
+	}
+	return owner
+}
+
+// assertIndexesLinkDeleted pins an `indexes` link's liveness. A missing key is
+// always a failure: on the wantDeleted side it would mean the ownership edge
+// was hard-removed rather than tombstoned (nothing in Lattice hard-removes),
+// and on the live side it would mean the new registrant never got one.
+func assertIndexesLinkDeleted(t *testing.T, ctx context.Context, conn *substrate.Conn, linkKey string, wantDeleted bool, why string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey)
+	if err != nil {
+		t.Fatalf("KVGet indexes link %s: %v — %s", linkKey, err, why)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal indexes link %s: %v", linkKey, err)
+	}
+	if got, _ := doc["isDeleted"].(bool); got != wantDeleted {
+		t.Fatalf("indexes link %s isDeleted = %v, want %v — %s", linkKey, got, wantDeleted, why)
+	}
+}
+
+// newRepointContactCreator returns the same submit-and-drive closure the two
+// Skip*Incumbent tests above use: one CreateUnclaimedIdentity per call, all
+// sharing ONE email (the contact whose index is contested) and each carrying a
+// distinct name (so the name index never collides and only the email index is
+// under test).
+func newRepointContactCreator(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, sharedEmail, emailIdxKey string) func(label, name string) string {
+	return func(label, name string) string {
+		t.Helper()
+		reqID := testutil.GenReqID(label)
+		env := &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateUnclaimedIdentity",
+			Actor:         staffActorKey,
+			SubmittedAt:   "2026-08-15T10:00:00Z",
+			Class:         "identity",
+			Payload: json.RawMessage(`{"name":"` + name + `","email":"` + sharedEmail +
+				`","claimKeyHash":"` + sha256HexOf("claim-"+label) + `"}`),
+			ContextHint: &processor.ContextHint{OptionalReads: []string{emailIdxKey}},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return identityIDFromRequestID(reqID)
+	}
+}
+
+// assertIndexRepointedOffErasedIncumbent is the shared body of the two tests
+// below: the marker half and the bare-shred half close the write path by
+// different facts, but the index repoint they must produce is identical, and
+// writing it once keeps the two from drifting into proving different things.
+//
+// Skipping the duplicateOf is only HALF of what a live-but-erased incumbent
+// demands. The index vertex it owns stays live and keeps naming it, so every
+// later registrant on that contact takes the same skip and — before this
+// repoint existed — got no index vertex and no `indexes` link of their own.
+// Nothing sweeps that: the erasure's dedup sweep runs off the marker the bare
+// shred never writes, and the pattern's sweep already ran for the sealed one.
+// Dedup coverage for that contact was silently dead forever.
+func assertIndexRepointedOffErasedIncumbent(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	createContact func(label, name string) string, emailIdxKey, prefix string, closeWritePath func(incumbentKey string)) {
+	t.Helper()
+
+	incumbentID := createContact(prefix+"Inc", "Repoint "+prefix+" One")
+	incumbentKey := "vtx.identity." + incumbentID
+
+	// Positive vector FIRST. If the index does not start out owned by the
+	// incumbent, with a live ownership edge, then every assertion below could
+	// hold for reasons that have nothing to do with the repoint.
+	if got := identityIndexOwner(t, ctx, conn, emailIdxKey); got != incumbentKey {
+		t.Fatalf("index owner = %q, want the incumbent %q — the fixture never established the contested index", got, incumbentKey)
+	}
+	assertIndexesLinkDeleted(t, ctx, conn, indexesLinkKey(emailIdxKey, incumbentID), false,
+		"the incumbent's ownership edge must start live, or its tombstone below proves nothing")
+
+	closeWritePath(incumbentKey)
+
+	secondID := createContact(prefix+"Two", "Repoint "+prefix+" Two")
+	secondKey := "vtx.identity." + secondID
+
+	if got := identityIndexOwner(t, ctx, conn, emailIdxKey); got != secondKey {
+		t.Fatalf("index owner = %q, want the new registrant %q — the index still names an erased person, so every later walk-in on this contact is denied an index of their own",
+			got, secondKey)
+	}
+	assertIndexesLinkDeleted(t, ctx, conn, indexesLinkKey(emailIdxKey, incumbentID), true,
+		"the erased incumbent's ownership edge survived the repoint — the index vertex now has two live indexes out-links, and the erasure sweep's decrypt-free linkage no longer identifies one owner")
+	assertIndexesLinkDeleted(t, ctx, conn, indexesLinkKey(emailIdxKey, secondID), false,
+		"the repointed index has no live ownership edge to its new owner, so a later merge or erasure sweep cannot find it from the identity side")
+
+	// The repoint must not smuggle back the correlation the skip exists to
+	// forbid: the new registrant gets the index, never a duplicateOf toward the
+	// erased incumbent.
+	assertKeyAbsent(t, ctx, conn, duplicateOfLinkKey(secondID, incumbentKey),
+		"the repoint minted a fresh duplicateOf naming the erased incumbent — the erased set grew, which is what the skip exists to forbid")
+
+	// The chain must survive being repointed once. A third walk-in on the same
+	// contact now meets a LIVE, un-erased incumbent and must dedup against it
+	// normally — the repoint restored dedup coverage rather than merely moving
+	// the dead spot.
+	thirdID := createContact(prefix+"Thr", "Repoint "+prefix+" Three")
+	assertKeyPresent(t, ctx, conn, duplicateOfLinkKey(thirdID, secondKey),
+		"the third registrant did not dedup against the second — the repoint left the contact's dedup coverage broken")
+	if got := identityIndexOwner(t, ctx, conn, emailIdxKey); got != secondKey {
+		t.Fatalf("index owner = %q after the third create, want %q — a live, un-erased incumbent must keep its index (ownership stays with whoever holds it; only erasure or MergeIdentity moves it)",
+			got, secondKey)
+	}
+	assertIndexesLinkDeleted(t, ctx, conn, indexesLinkKey(emailIdxKey, secondID), false,
+		"the third create tombstoned the live incumbent's ownership edge — the repoint fired on a hit that is not erased")
+}
+
+// TestErasureGate_CreateUnclaimedIdentity_RepointsIndexOffSealedIncumbent is the
+// other half of ...SkipsSealedIncumbent above. That test proves no NEW
+// correlation is written toward a sealed incumbent; this one proves the person
+// standing at the front desk still gets their own index vertex, which the skip
+// alone denied them for as long as the sealed incumbent's index stayed live.
+func TestErasureGate_CreateUnclaimedIdentity_RepointsIndexOffSealedIncumbent(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newCreatePipeline(t, ctx, conn, "ici-repoint-seal")
+
+	const sharedEmail = "repoint.sealed@example.com"
+	emailIdxKey := contactIndexKey("email", sharedEmail)
+
+	assertIndexRepointedOffErasedIncumbent(t, ctx, conn,
+		newRepointContactCreator(t, ctx, conn, cp, cons, sharedEmail, emailIdxKey),
+		emailIdxKey, "Seal",
+		func(incumbentKey string) { sealForErasure(t, ctx, conn, incumbentKey) })
+}
+
+// TestErasureGate_CreateUnclaimedIdentity_RepointsIndexOffBareShreddedIncumbent
+// is the same claim for the population the operator's Shred button produces: no
+// marker, a destroyed PII key, and — because no marker means the erasure
+// pattern's dedup sweep never ran — a live identityindex that nothing else will
+// ever move. This is the case where the stale index is not merely a convergence
+// window but permanent.
+func TestErasureGate_CreateUnclaimedIdentity_RepointsIndexOffBareShreddedIncumbent(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newCreatePipeline(t, ctx, conn, "ici-repoint-shred")
+
+	const sharedEmail = "repoint.shredded@example.com"
+	emailIdxKey := contactIndexKey("email", sharedEmail)
+
+	assertIndexRepointedOffErasedIncumbent(t, ctx, conn,
+		newRepointContactCreator(t, ctx, conn, cp, cons, sharedEmail, emailIdxKey),
+		emailIdxKey, "Shred",
+		func(incumbentKey string) {
+			mutatePiiKey(t, ctx, conn, incumbentKey, "piiKey", true, false)
+			assertKeyAbsent(t, ctx, conn, incumbentKey+".erasureRequested",
+				"the fixture must carry NO marker, or this proves only what the sealed half already proved")
+		})
 }
