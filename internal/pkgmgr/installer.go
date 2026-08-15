@@ -371,7 +371,7 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 // upgrade dedup-short-circuits while distinct versions stay independent);
 // entity keys use entityNanoID, which omits the version (Contract #8 §8.1).
 func deterministicNanoID(name, version, tag string) string {
-	return nanoIDFromSalt("lattice-pkg:" + name + ":" + version + ":" + tag)
+	return substrate.PackageEntityNanoID(name, version+":"+tag)
 }
 
 // contentRequestID derives an op requestId from the package identity AND the
@@ -393,7 +393,7 @@ func contentRequestID(name, versionScope, tag string, mutations []installMutatio
 	if err != nil {
 		return "", err
 	}
-	return nanoIDFromSalt("lattice-pkg:" + name + ":" + versionScope + ":" + tag + ":" + digest), nil
+	return substrate.PackageEntityNanoID(name, versionScope+":"+tag+":"+digest), nil
 }
 
 // mutationsDigest is a stable content hash of a mutation batch. encoding/json
@@ -415,8 +415,13 @@ func mutationsDigest(mutations []installMutation) (string, error) {
 // key across versions, so a version upgrade is an in-place update of stable
 // keys (§8.6) instead of a re-mint that would orphan vertices and break
 // every NanoID cross-reference (a WeaverTarget's lensRef, a grant link).
+//
+// The derivation itself lives in substrate.PackageEntityNanoID: the Processor's
+// package-scope guard resolves a package's own vertex key from the same name
+// string, and a second implementation of the mapping would let the two readers
+// disagree about which package owns a key.
 func entityNanoID(name, tag string) string {
-	return nanoIDFromSalt("lattice-pkg:" + name + ":" + tag)
+	return substrate.PackageEntityNanoID(name, tag)
 }
 
 // RoleID returns the deterministic, version-independent NanoID a package's
@@ -478,21 +483,6 @@ func RetentionClassKey(packageName, canonicalName string) string {
 // validatePermissionIdentityUniqueness before any key is minted.
 func permTag(operationType, scope string) string {
 	return "perm:" + operationType + ":" + scope
-}
-
-// nanoIDFromSalt hashes a salt string into a Contract #1 NanoID-alphabet id
-// of substrate.NanoIDLength characters. Shared by the version-scoped and
-// version-independent derivations above.
-func nanoIDFromSalt(salt string) string {
-	sum := sha256.Sum256([]byte(salt))
-	out := make([]byte, substrate.NanoIDLength)
-	for i := 0; i < substrate.NanoIDLength; i++ {
-		hi := sum[(i*2)%len(sum)]
-		lo := sum[((i*2)+1)%len(sum)]
-		idx := (int(hi)<<8 | int(lo)) % len(substrate.Alphabet)
-		out[i] = substrate.Alphabet[idx]
-	}
-	return string(out)
 }
 
 // replyError renders a rejected reply's error for diagnostics.

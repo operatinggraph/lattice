@@ -58,6 +58,37 @@ func NanoIDFromPCG(src *rand.PCG, n int) string {
 	return string(out)
 }
 
+// PackageEntityNanoID derives the Contract #1 NanoID a Capability Package
+// entity is keyed by, from the package name and an entity tag: the salt is
+// `lattice-pkg:<name>:<tag>` and each id character indexes Alphabet with a pair
+// of digest bytes. The tag is the entity's logical identity within the package
+// ("package", "ddl:<canonicalName>", "lens:<canonicalName>",
+// "perm:<operationType>:<scope>", …); a caller wanting a version-scoped id — an
+// op requestId rather than an entity key — folds the version into the tag.
+//
+// A version is deliberately not part of an entity key (Contract #8 §8.1), so
+// the same logical entity keeps its key across versions and an upgrade is an
+// in-place update rather than a re-mint that would orphan every NanoID
+// cross-reference.
+//
+// This is a different scheme from SHA256NanoID, which seeds a PCG from the
+// digest and rejection-samples the alphabet. Every installed package in every
+// deployment is addressed by the mapping below, so the mapping is fixed: two
+// independent readers — the installer minting a key, and the Processor scoping
+// a package-lifecycle mutation to the package that owns it — must compute the
+// identical id from the identical name.
+func PackageEntityNanoID(name, tag string) string {
+	sum := sha256.Sum256([]byte("lattice-pkg:" + name + ":" + tag))
+	out := make([]byte, NanoIDLength)
+	for i := 0; i < NanoIDLength; i++ {
+		hi := sum[(i*2)%len(sum)]
+		lo := sum[((i*2)+1)%len(sum)]
+		idx := (int(hi)<<8 | int(lo)) % len(Alphabet)
+		out[i] = Alphabet[idx]
+	}
+	return string(out)
+}
+
 // SHA256NanoID derives a valid 20-char Contract #1 NanoID from SHA-256(s) — the
 // content-addressed identity primitive. It seeds a PCG with the first 16 bytes
 // of the digest and rejection-samples the alphabet, so it is deterministic

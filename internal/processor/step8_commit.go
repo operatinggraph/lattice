@@ -84,6 +84,60 @@ func (e *PermissionProvenanceError) Error() string {
 	return fmt.Sprintf("PermissionProvenance: update on %s attempted to rewrite provenance field %q", e.Key, e.Field)
 }
 
+// PackageScopeError is the typed step-8 failure surfaced when a package-
+// lifecycle operation (InstallPackage / UpgradePackage / UninstallPackage)
+// submits a mutation outside the surface the named package owns. Reason
+// distinguishes the rules:
+//
+//   - "holdsRole" — the mutation key is a holdsRole link. No package Definition
+//     field produces one; identity-role assignment is RBAC's op surface, never a
+//     package diff's.
+//
+//   - "linkSource" — a created link hangs off a source endpoint the package
+//     neither created in this batch nor already owned, so the package is minting
+//     an edge on an existing foreign entity (the kernel's own permission, an
+//     identity). Key is the link key.
+//
+//   - "aspectParent" — a created aspect hangs off a vertex root the package
+//     neither created in this batch nor already owned. Key is the aspect key.
+//
+//   - "unscoped" — an update or tombstone targets a key outside the named
+//     package's owned surface, so the package is reaching into another
+//     package's (or the kernel's) entities. Also carries an upgrade or uninstall
+//     whose payload names no package at all, which identifies no surface.
+//
+//   - "manifestClaim" — a manifest the batch creates or updates declares a key
+//     the package cannot claim: on a create, anything it does not also mint
+//     here; on an update, anything it neither creates here, nor already
+//     declared, nor is reviving out of a tombstoned state. Key is the claimed
+//     key, not the manifest. Unchecked, the manifest is a self-serve ownership
+//     grant — and on the create path, one mintable from nothing.
+//
+// All map to the same wire code and the same remediation: this mutation does
+// not belong to the package that submitted it. The commit path maps this onto a
+// `rejected` reply with code `PackageScope`.
+type PackageScopeError struct {
+	Key     string // the offending mutation key, or the claimed key for "manifestClaim"
+	Op      string // the mutation op (create|update|tombstone)
+	Reason  string // "holdsRole" | "linkSource" | "aspectParent" | "unscoped" | "manifestClaim"
+	Package string // the package the operation named (empty for an install)
+}
+
+func (e *PackageScopeError) Error() string {
+	switch e.Reason {
+	case "holdsRole":
+		return fmt.Sprintf("PackageScope: package-lifecycle %s on %s targets a holdsRole link, which no package declares", e.Op, e.Key)
+	case "linkSource":
+		return fmt.Sprintf("PackageScope: %s of link %s hangs off a source endpoint package %q does not own", e.Op, e.Key, e.Package)
+	case "aspectParent":
+		return fmt.Sprintf("PackageScope: %s of aspect %s hangs off a vertex package %q does not own", e.Op, e.Key, e.Package)
+	case "manifestClaim":
+		return fmt.Sprintf("PackageScope: package %q's manifest declares %s, which it does not own and is not minting here", e.Package, e.Key)
+	default:
+		return fmt.Sprintf("PackageScope: %s on %s is outside package %q's owned keys", e.Op, e.Key, e.Package)
+	}
+}
+
 // BatchTooLargeError is the typed step-8 failure surfaced when the substrate
 // pre-flight guard rejects the atomic batch (Contract #3 §3.9.1): the batch
 // exceeds MaxBatchMessages, or a single mutation's value exceeds the
@@ -211,6 +265,14 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// fields and a role's canonical name are write-once once committed, for
 	// every path that can emit a mutation against them.
 	if err := rejectPermissionRoleRewrites(result.Mutations, prior); err != nil {
+		return CommitAck{}, err
+	}
+	// Package-lifecycle scoping, same enforcement point: a package diff hangs
+	// edges only off its own entities, and an upgrade's or uninstall's
+	// update/tombstone set stays inside the surface the named package's own
+	// stored manifest declares — a manifest this guard validates rather than
+	// trusts, since it is the document that set is read from.
+	if err := c.rejectPackageScopeViolations(ctx, env, result.Mutations, prior); err != nil {
 		return CommitAck{}, err
 	}
 
@@ -863,6 +925,366 @@ func rejectPermissionRoleRewrites(mutations []MutationOp, prior priorDocs) error
 		}
 	}
 	return nil
+}
+
+// packageLifecycleOps are the three operation types that carry a client-supplied
+// mutation batch on behalf of a named Capability Package.
+func isPackageLifecycleOp(name string) bool {
+	switch name {
+	case "InstallPackage", "UpgradePackage", "UninstallPackage":
+		return true
+	}
+	return false
+}
+
+// packageManifestLocalName is the aspect a package records its declared-key set
+// under. Its key shape — an aspect of a vtx.package root — is what identifies a
+// manifest, not the name a payload claims: a batch forging one for a package it
+// does not name is still forging a manifest.
+const packageManifestLocalName = "manifest"
+
+// packageLifecycleType names which package-lifecycle primitive an envelope
+// actually runs, or "" for an envelope that runs none.
+//
+// The executing script is selected by CLASS, not by operationType: resolveClass
+// (step4_hydrate.go) prefers env.Class, then payload.class, and only then falls
+// back to the operationType's registered class. Nothing binds the three
+// together, so an envelope carrying class "UpgradePackage" runs the upgrade
+// script whatever operationType it declares — and a guard keyed on operationType
+// alone would stand down for exactly the envelope that most needs it.
+//
+// The first two arms mirror resolveClass exactly. The third does not: resolveClass
+// resolves an absent class through the DDL cache's command reverse index, where
+// this reads the raw operationType. The two agree for the package primitives,
+// whose DDLs register their own name as their only permitted command, and reading
+// the raw value can only widen what this guard covers, never narrow it.
+//
+// payloadClass is only consulted when the envelope carries no class of its own,
+// because that is the only case resolveClass consults it either — which is what
+// lets the caller skip decoding the payload for the overwhelming majority of
+// operations, none of which are package-lifecycle ones.
+func packageLifecycleType(env *OperationEnvelope, payloadClass string) string {
+	for _, candidate := range []string{env.Class, payloadClass, env.OperationType} {
+		if isPackageLifecycleOp(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// packageScope is the key surface one package-lifecycle batch is entitled to
+// touch: the keys it creates in this very batch, plus — for an upgrade or
+// uninstall — the keys the named package's own stored manifest already declared,
+// plus whatever that manifest legitimately claims anew in this same batch.
+type packageScope struct {
+	name        string
+	pkgKey      string
+	manifestKey string
+	// created holds every key this batch creates. A create needs no ownership
+	// proof of its own (create-only conflicts on an existing key), but it is
+	// what makes a freshly minted entity a legitimate link endpoint, a
+	// legitimate aspect parent, and a legitimate new manifest claim.
+	created map[string]struct{}
+	// owned holds the keys an update or tombstone may target: the prior
+	// declared set, the package's own root and manifest aspect, and the new
+	// claims validated against the claim rules below.
+	owned map[string]struct{}
+	// resolved is false when no live manifest backs the name — nothing is
+	// owned, and the batch may create but never update or tombstone.
+	resolved bool
+}
+
+func (s *packageScope) has(set map[string]struct{}, key string) bool {
+	_, ok := set[key]
+	return ok
+}
+
+func (s *packageScope) ownsOrCreates(key string) bool {
+	return s.has(s.created, key) || s.has(s.owned, key)
+}
+
+// rejectPackageScopeViolations is the authoritative commit-time guard binding a
+// package-lifecycle batch to the surface the package it acts for actually owns.
+// The package-lifecycle primitives carry client-supplied mutation bodies that no
+// DDL gates, and step 3 authorizes the VERB rather than the target, so without
+// this nothing at all scopes the batch. Five rules hold it:
+//
+//   - No package-lifecycle mutation may touch a holdsRole link. No Definition
+//     field and none of the three package scripts produce one — binding an
+//     identity to a role is RBAC's own op surface, reached through a grant step
+//     a package diff never takes.
+//
+//   - A manifest is content-validated on CREATE as well as on update. The
+//     manifest is the document every ownership answer here is ultimately read
+//     from, so an unvalidated create is a way to mint that root of trust from
+//     nothing: declare a victim key in a brand-new package's manifest, then
+//     return in a second operation and touch it as a key you now "own". On a
+//     create only this batch's own creates (and the package root) may be
+//     declared — nothing pre-exists to have been declared or dropped before.
+//
+//   - An update or tombstone must target a key in the package's owned set, and
+//     the manifest update that GROWS that set may only add keys the package can
+//     claim: created here, already declared, the package's own root/manifest, or
+//     a key this batch is itself reviving whose stored document is tombstoned (a
+//     dead key has no live owner to displace).
+//
+//   - A created LINK's source endpoint must be a key this batch creates or the
+//     named package already owns. Contract #1 §1.1 makes the source the
+//     later-arriving vertex — the entity whose owner is minting the edge — so
+//     this is the "you may only hang an edge off your own entity" rule. The
+//     TARGET is deliberately unconstrained: a package legitimately grants a
+//     permission to the primordial operator role, offers a pane to a role it did
+//     not declare, and subtypes its DDL under another package's abstract type.
+//     What it closes is an EXISTING foreign entity being linked from — notably a
+//     grantedBy edge minted on the kernel's own permission. It does not reach a
+//     package minting a fresh permission of its own and granting that (the
+//     create-forgery gap, which needs server-side Definition content and stays
+//     open).
+//
+//   - A created ASPECT's parent vertex must likewise be a key this batch creates
+//     or the package already owns. Same principle as the link rule: an aspect is
+//     a new facet bolted onto an existing entity, and a package may only bolt
+//     one onto its own — the more so because a vtx.meta.* write invalidates the
+//     DDL cache in-commit, so a forged aspect on a primordial op-meta root is
+//     live immediately.
+func (c *CommitterImpl) rejectPackageScopeViolations(ctx context.Context, env *OperationEnvelope, mutations []MutationOp, prior priorDocs) error {
+	// Every operation in the platform passes through here, so the envelope's own
+	// fields settle the question before the payload is touched: a class-carrying
+	// envelope needs no decode at all, and only a class-less one pays for the
+	// payload.class arm resolveClass would itself have read.
+	payloadClass := ""
+	if env.Class == "" {
+		if decoded, ok := jsonToGenericMap(env.Payload); ok {
+			payloadClass, _ = decoded["class"].(string)
+		}
+	}
+	lifecycle := packageLifecycleType(env, payloadClass)
+	if lifecycle == "" {
+		return nil
+	}
+	payload, payloadDecoded := jsonToGenericMap(env.Payload)
+
+	for _, m := range mutations {
+		if _, _, linkName, _, _, ok := keys.ParseLinkKey(m.Key); ok && linkName == "holdsRole" {
+			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "holdsRole"}
+		}
+	}
+
+	scope, err := c.resolvePackageScope(ctx, lifecycle, payload, payloadDecoded, mutations, prior)
+	if err != nil {
+		return err
+	}
+
+	if err := rejectForgedManifestCreates(scope, mutations); err != nil {
+		return err
+	}
+
+	for _, m := range mutations {
+		if m.Op == "create" {
+			continue
+		}
+		if !scope.resolved || !scope.has(scope.owned, m.Key) {
+			return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "unscoped", Package: scope.name}
+		}
+	}
+
+	for _, m := range mutations {
+		if m.Op != "create" {
+			continue
+		}
+		if type1, id1, _, _, _, ok := keys.ParseLinkKey(m.Key); ok {
+			if !scope.ownsOrCreates(keys.VertexKey(type1, id1)) {
+				return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "linkSource", Package: scope.name}
+			}
+			continue
+		}
+		if parent, _, _, _, ok := keys.ParseAspectKey(m.Key); ok {
+			if !scope.ownsOrCreates(parent) {
+				return &PackageScopeError{Key: m.Key, Op: m.Op, Reason: "aspectParent", Package: scope.name}
+			}
+		}
+	}
+	return nil
+}
+
+// rejectForgedManifestCreates validates every package-manifest aspect the batch
+// CREATES, whichever package name the payload claims — the key shape is what
+// makes a document a manifest. Nothing pre-exists a created manifest, so the only
+// keys it may declare are the ones this same batch mints, plus the package root
+// it hangs off. A real install satisfies this by construction: build.go's
+// addCreate appends every created key to the very slice that becomes
+// declaredKeys, so the declared set IS the create set.
+func rejectForgedManifestCreates(scope *packageScope, mutations []MutationOp) error {
+	for _, m := range mutations {
+		if m.Op != "create" || m.Document == nil {
+			continue
+		}
+		parent, parentType, _, localName, ok := keys.ParseAspectKey(m.Key)
+		if !ok || parentType != "package" || localName != packageManifestLocalName {
+			continue
+		}
+		for k := range declaredKeySet(m.Document) {
+			if k == parent || scope.has(scope.created, k) {
+				continue
+			}
+			return &PackageScopeError{Key: k, Op: m.Op, Reason: "manifestClaim", Package: scope.name}
+		}
+	}
+	return nil
+}
+
+// resolvePackageScope assembles the surface a batch owns. InstallPackage names
+// no installed package and is create-only, so its surface is exactly what it
+// creates. An upgrade or uninstall resolves the named package's vertex key
+// server-side and reads its manifest: a name that resolves to no live manifest
+// yields an unresolved scope, which owns nothing.
+func (c *CommitterImpl) resolvePackageScope(ctx context.Context, lifecycle string, payload map[string]interface{}, payloadDecoded bool, mutations []MutationOp, prior priorDocs) (*packageScope, error) {
+	scope := &packageScope{
+		created: make(map[string]struct{}, len(mutations)),
+		owned:   map[string]struct{}{},
+	}
+	for _, m := range mutations {
+		if m.Op == "create" {
+			scope.created[m.Key] = struct{}{}
+		}
+	}
+	if lifecycle == "InstallPackage" {
+		return scope, nil
+	}
+
+	name, _ := payload["name"].(string)
+	scope.name = name
+	if !payloadDecoded || name == "" {
+		// An upgrade or uninstall acts FOR a package; a payload that does not
+		// decode, or names none, identifies no surface to act within and no
+		// legitimate submitter produces one. The package scripts validate the
+		// name long before step 8, and this guard is path-independent precisely
+		// because it does not depend on their having run.
+		if len(mutations) > 0 {
+			return nil, &PackageScopeError{Key: mutations[0].Key, Op: mutations[0].Op, Reason: "unscoped"}
+		}
+		return scope, nil
+	}
+	scope.pkgKey = keys.VertexKey("package", substrate.PackageEntityNanoID(name, "package"))
+	scope.manifestKey = keys.AspectKey(scope.pkgKey, packageManifestLocalName)
+
+	// The batch's own prior read is preferred over a fresh one: an upgrade and
+	// an uninstall both mutate the manifest, so it is already loaded AND already
+	// the revision the batch conditions on (conditionRevision's fallback), which
+	// makes the document validated here the document the commit supersedes. A
+	// batch that does not mutate its manifest falls back to an out-of-band read,
+	// which no batch condition covers.
+	manifest, loaded := prior[scope.manifestKey]
+	if !loaded || !manifest.Found {
+		read, err := c.readPriorDoc(ctx, scope.manifestKey)
+		if err != nil {
+			return nil, fmt.Errorf("step 8: read package manifest for %q: %w", name, err)
+		}
+		manifest = read
+	}
+	// A tombstoned manifest is an UNINSTALLED package. Its declaredKeys survive
+	// in the body a tombstone carries forward, and they still list the retention
+	// -class holder keys uninstall deliberately leaves live and undeclared — so
+	// honouring it would hand a dead package's stale set to a live batch.
+	if !manifest.Found || docIsTombstoned(manifest.Doc) {
+		return scope, nil
+	}
+	scope.resolved = true
+
+	priorDeclared := declaredKeySet(manifest.Doc)
+	for k := range priorDeclared {
+		scope.owned[k] = struct{}{}
+	}
+	scope.owned[scope.pkgKey] = struct{}{}
+	scope.owned[scope.manifestKey] = struct{}{}
+
+	claims, err := validatedManifestClaims(scope, priorDeclared, mutations, prior)
+	if err != nil {
+		return nil, err
+	}
+	for k := range claims {
+		scope.owned[k] = struct{}{}
+	}
+	return scope, nil
+}
+
+// validatedManifestClaims reads the declaredKeys the batch's own manifest UPDATE
+// submits and returns the keys it adds to the prior set, having proved each one
+// claimable. A key is claimable when this batch creates it, when it is the
+// package's own root or manifest aspect, or when this batch is itself reviving
+// it — an update or tombstone whose stored document is tombstoned. A dead key has
+// no live owner to displace, and re-adding an entity a previous version dropped
+// is exactly that shape (diffManifest emits the revival as an update, since the
+// key still exists). Anything else is a package writing another package's key
+// into its own ownership record, which is the whole vulnerability wearing the
+// manifest as a disguise.
+//
+// Requiring the claim to be a mutation of this same batch is also what bounds
+// the work: liveness is read from the prior-document map the commit already
+// loaded, so a manifest listing thousands of keys costs no reads at all rather
+// than one round trip each.
+func validatedManifestClaims(scope *packageScope, priorDeclared map[string]struct{}, mutations []MutationOp, prior priorDocs) (map[string]struct{}, error) {
+	revived := map[string]struct{}{}
+	for _, m := range mutations {
+		if m.Op == "update" || m.Op == "tombstone" {
+			revived[m.Key] = struct{}{}
+		}
+	}
+	claims := map[string]struct{}{}
+	for _, m := range mutations {
+		if m.Op != "update" || m.Key != scope.manifestKey || m.Document == nil {
+			continue
+		}
+		for k := range declaredKeySet(m.Document) {
+			if _, already := priorDeclared[k]; already {
+				continue
+			}
+			if k == scope.pkgKey || k == scope.manifestKey || scope.has(scope.created, k) {
+				claims[k] = struct{}{}
+				continue
+			}
+			if _, touched := revived[k]; touched && docIsTombstoned(prior.doc(k)) {
+				claims[k] = struct{}{}
+				continue
+			}
+			return nil, &PackageScopeError{Key: k, Op: m.Op, Reason: "manifestClaim", Package: scope.name}
+		}
+	}
+	return claims, nil
+}
+
+// declaredKeySet reads the key set a package manifest document declares. An
+// unreadable or absent list yields an empty set, which constrains every
+// update/tombstone the operation carries rather than waving them through: a
+// manifest that exists but whose declaredKeys cannot be read is not evidence
+// that a key belongs to the package.
+func declaredKeySet(manifest map[string]interface{}) map[string]struct{} {
+	out := map[string]struct{}{}
+	data, ok := manifest["data"].(map[string]interface{})
+	if !ok {
+		return out
+	}
+	list, ok := data["declaredKeys"].([]interface{})
+	if !ok {
+		return out
+	}
+	for _, k := range list {
+		if s, ok := k.(string); ok {
+			out[s] = struct{}{}
+		}
+	}
+	return out
+}
+
+// docIsTombstoned reports whether a stored document carries the Contract #1
+// liveness flag in its deleted state. An absent or unreadable document is not
+// tombstoned — a guard must not read "I could not tell" as "it is already dead".
+func docIsTombstoned(doc map[string]interface{}) bool {
+	if doc == nil {
+		return false
+	}
+	del, ok := doc["isDeleted"].(bool)
+	return ok && del
 }
 
 // docFieldEqual compares one field across two documents. Presence is compared

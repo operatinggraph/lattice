@@ -480,6 +480,29 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			return OutcomeRejected, substrate.Term
 		}
 
+		// Package-scope guard: a package-lifecycle op reaching outside the
+		// surface the named package owns — a holdsRole link, or an update /
+		// tombstone of a live key its manifest never declared. Terminate — a
+		// redelivery replays the identical out-of-scope mutation.
+		var pkgErr *PackageScopeError
+		if errors.As(err, &pkgErr) {
+			cp.deps.Metrics.OpsRejected.Add(1)
+			cp.deps.Logger.Info("step 8: package-scope rejection",
+				"requestId", env.RequestID,
+				"key", pkgErr.Key,
+				"op", pkgErr.Op,
+				"reason", pkgErr.Reason,
+				"package", pkgErr.Package)
+			cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodePackageScope,
+				pkgErr.Error(), map[string]any{
+					"key":     pkgErr.Key,
+					"op":      pkgErr.Op,
+					"reason":  pkgErr.Reason,
+					"package": pkgErr.Package,
+				}))
+			return OutcomeRejected, substrate.Term
+		}
+
 		// Batch-size guard (Contract #3 §3.9.1): a deterministic op that exceeds
 		// the message-count or per-value payload ceiling. Terminate — a
 		// redelivery reproduces the identical over-limit batch and can never

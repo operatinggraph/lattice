@@ -1142,3 +1142,821 @@ func TestCommit_UndecodablePriorDocumentIsRejected(t *testing.T) {
 		t.Fatalf("rejected on field %q, want document", provErr.Field)
 	}
 }
+
+// packageVertexKey is the Contract #1 vertex key an installed package is
+// recorded under, derived from its name exactly as the installer derives it.
+func packageVertexKey(name string) string {
+	return substrate.VertexKey("package", substrate.PackageEntityNanoID(name, "package"))
+}
+
+// manifestDoc renders a package manifest aspect declaring declaredKeys.
+func manifestDoc(pkgKey, name string, declaredKeys []string) map[string]interface{} {
+	declared := make([]interface{}, 0, len(declaredKeys))
+	for _, k := range declaredKeys {
+		declared = append(declared, k)
+	}
+	return map[string]interface{}{
+		"class":     "manifest",
+		"vertexKey": pkgKey,
+		"localName": "manifest",
+		"data": map[string]interface{}{
+			"name": name, "version": "0.1.0", "declaredKeys": declared,
+		},
+	}
+}
+
+// seedPackage commits a package root vertex and its manifest aspect the way an
+// install does, so a later UpgradePackage/UninstallPackage has a stored
+// declared-key set to be scoped against.
+func seedPackage(t *testing.T, ctx context.Context, c *CommitterImpl, rid, name string, declaredKeys []string) {
+	t.Helper()
+	pkgKey := packageVertexKey(name)
+	commitOne(t, ctx, c, rid+"-pkgroot", MutationOp{
+		Op: "create", Key: pkgKey,
+		Document: map[string]interface{}{
+			"class": "package",
+			"data":  map[string]interface{}{"name": name, "version": "0.1.0"},
+		},
+	})
+	commitOne(t, ctx, c, rid+"-manifest", MutationOp{
+		Op: "create", Key: pkgKey + ".manifest",
+		Document: manifestDoc(pkgKey, name, declaredKeys),
+	})
+}
+
+// commitPackageOpErr runs a package-lifecycle commit for a named package and
+// returns the commit error, so a scope rejection is an assertable outcome. The
+// envelope's class and operationType are set independently: the guard must key
+// on the class that selects the script, not on operationType alone.
+func commitPackageOpErr(ctx context.Context, c *CommitterImpl, rid, operationType, class, packageName string, mutations []MutationOp) error {
+	env := newTestEnvelope(testNanoID1)
+	env.RequestID = rid
+	env.OperationType = operationType
+	env.Class = class
+	payload, _ := json.Marshal(map[string]any{"name": packageName})
+	env.Payload = payload
+	tracker := NewTracker(env, time.Now())
+	_, err := c.Commit(ctx, env, ScriptResult{Mutations: mutations}, tracker)
+	return err
+}
+
+func entityDoc(class string) map[string]interface{} {
+	return map[string]interface{}{"class": class, "data": map[string]interface{}{"note": "n"}}
+}
+
+// scopeCasePackage names the package a table case installs. Every case gets its
+// own so one case's seeded keys can never satisfy — or collide with — another's.
+func scopeCasePackage(caseIndex int) string {
+	return fmt.Sprintf("scope-case-%d", caseIndex)
+}
+
+// scopeCaseKey resolves a case-local symbolic key name to a concrete Contract #1
+// key, minted per case so no two cases share a document. "@pkg"/"@manifest" are
+// the case's own package root and manifest aspect; "@<relation>:<src>:<dst>" is
+// a link between two other symbols; anything else is "<vertexType>:<name>".
+func scopeCaseKey(caseIndex int, symbol string) string {
+	id := func(tag string) string {
+		return substrate.PackageEntityNanoID(scopeCasePackage(caseIndex), tag)
+	}
+	switch symbol {
+	case "":
+		return ""
+	case "@pkg":
+		return packageVertexKey(scopeCasePackage(caseIndex))
+	case "@manifest":
+		return packageVertexKey(scopeCasePackage(caseIndex)) + ".manifest"
+	}
+	if rest, ok := strings.CutPrefix(symbol, "asp|"); ok {
+		parent, localName, found := strings.Cut(rest, "|")
+		if !found {
+			panic("scopeCaseKey: aspect symbol " + symbol + " is not asp|<parent>|<localName>")
+		}
+		return scopeCaseKey(caseIndex, parent) + "." + localName
+	}
+	if rest, ok := strings.CutPrefix(symbol, "@"); ok {
+		parts := strings.Split(rest, "|")
+		if len(parts) != 3 {
+			panic("scopeCaseKey: link symbol " + symbol + " is not @<relation>|<source>|<target>")
+		}
+		srcType, _, _ := strings.Cut(parts[1], ":")
+		dstType, _, _ := strings.Cut(parts[2], ":")
+		return "lnk." + srcType + "." + id(parts[1]) + "." + parts[0] + "." + dstType + "." + id(parts[2])
+	}
+	vertexType, localName, ok := strings.Cut(symbol, ":")
+	if !ok {
+		panic("scopeCaseKey: symbol " + symbol + " is not <vertexType>:<name>")
+	}
+	return substrate.VertexKey(vertexType, id(vertexType+":"+localName))
+}
+
+// A package-lifecycle batch carries client-supplied mutation bodies that no DDL
+// gates, and step 3 authorizes the VERB rather than the target — so nothing but
+// this guard binds the batch to the package it claims to act for. It holds four
+// rules: no holdsRole link at all; a created link may only hang off a source
+// endpoint the package owns; an update or tombstone may only target an owned
+// key; and the manifest the owned set is READ from is itself validated, so it
+// cannot be used to grant ownership to itself.
+func TestCommit_PackageMutationsAreScopedToTheirPackage(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	type mutation struct {
+		op  string
+		key string // a scopeCaseKey symbol
+		// claims, when set on a mutation targeting "@manifest", is the
+		// declaredKeys the submitted manifest document carries.
+		claims []string
+	}
+	tests := []struct {
+		name string
+		// installed seeds the case's own package vertex + manifest aspect.
+		installed bool
+		declared  []string
+		// seed is created before the guarded batch; tombstoned names the subset
+		// of it left in the tombstoned state; uninstalled tombstones the seeded
+		// manifest aspect.
+		seed        []mutation
+		tombstoned  []string
+		uninstalled bool
+		// opType and class default to the case's lifecycle op; a case may set
+		// them independently to prove the guard keys on the executing class.
+		opType     string
+		class      string
+		mutations  []mutation
+		wantReason string
+		wantKey    string
+	}{
+		{
+			name:      "upgrade updates a surviving declared key",
+			installed: true,
+			declared:  []string{"@pkg", "permission:own"},
+			seed:      []mutation{{op: "create", key: "permission:own"}},
+			opType:    "UpgradePackage",
+			mutations: []mutation{{op: "update", key: "permission:own"}},
+		},
+		{
+			name:      "upgrade tombstones a declared key it no longer declares",
+			installed: true,
+			declared:  []string{"@pkg", "meta:droppedLens"},
+			seed:      []mutation{{op: "create", key: "meta:droppedLens"}},
+			opType:    "UpgradePackage",
+			mutations: []mutation{{op: "tombstone", key: "meta:droppedLens"}},
+		},
+		{
+			name:      "upgrade updates its own package root and manifest aspect",
+			installed: true,
+			declared:  []string{"@pkg"},
+			opType:    "UpgradePackage",
+			mutations: []mutation{
+				{op: "update", key: "@pkg"},
+				{op: "update", key: "@manifest", claims: []string{"@pkg"}},
+			},
+		},
+		{
+			name:      "upgrade creates a key its prior manifest never declared",
+			installed: true,
+			declared:  []string{"@pkg"},
+			opType:    "UpgradePackage",
+			mutations: []mutation{
+				{op: "create", key: "meta:freshLens"},
+				{op: "update", key: "@manifest", claims: []string{"@pkg", "meta:freshLens"}},
+			},
+		},
+		{
+			// The legitimate re-add, mirroring diffManifest's revive branch: the
+			// entity a prior version dropped is tombstoned, the new manifest
+			// declares it again, and the diff emits an update rather than a
+			// create because the key still exists.
+			name:       "upgrade revives a tombstoned key its new manifest re-declares",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "meta:revivedLens"}},
+			tombstoned: []string{"meta:revivedLens"},
+			opType:     "UpgradePackage",
+			mutations: []mutation{
+				{op: "update", key: "@manifest", claims: []string{"@pkg", "meta:revivedLens"}},
+				{op: "update", key: "meta:revivedLens"},
+			},
+		},
+		{
+			name:      "uninstall tombstones its whole declared set plus its manifest",
+			installed: true,
+			declared:  []string{"@pkg", "permission:own"},
+			seed:      []mutation{{op: "create", key: "permission:own"}},
+			opType:    "UninstallPackage",
+			mutations: []mutation{
+				{op: "tombstone", key: "permission:own"},
+				{op: "tombstone", key: "@pkg"},
+				{op: "tombstone", key: "@manifest"},
+			},
+		},
+		{
+			// A fresh install mints both endpoints of its own forOperation edge.
+			name:   "install creates a link between two keys it creates here",
+			opType: "InstallPackage",
+			mutations: []mutation{
+				{op: "create", key: "permission:own"},
+				{op: "create", key: "meta:opMeta"},
+				{op: "create", key: "@forOperation|permission:own|meta:opMeta"},
+			},
+		},
+		{
+			// The shape every real package ships: grant a permission it declares
+			// to a role it did not (the primordial operator). The TARGET endpoint
+			// is deliberately unconstrained — constraining it would reject every
+			// package in the repo.
+			name:   "install grants its own permission to a role it never declared",
+			opType: "InstallPackage",
+			mutations: []mutation{
+				{op: "create", key: "permission:own"},
+				{op: "create", key: "@grantedBy|permission:own|role:foreignOperator"},
+			},
+		},
+		{
+			name:      "upgrade grants a surviving declared permission to a foreign role",
+			installed: true,
+			declared:  []string{"@pkg", "permission:own"},
+			seed:      []mutation{{op: "create", key: "permission:own"}},
+			opType:    "UpgradePackage",
+			mutations: []mutation{{op: "create", key: "@grantedBy|permission:own|role:foreignOperator"}},
+		},
+		{
+			// The guard is scoped to the package-lifecycle trio: RBAC's own ops
+			// are exactly how a holdsRole link is meant to be written.
+			name:      "a non package operation may write a holdsRole link",
+			opType:    "GrantRole",
+			mutations: []mutation{{op: "create", key: "@holdsRole|identity:actor|role:operator"}},
+		},
+		{
+			name:       "upgrade updates a live key another package owns",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "permission:foreign"}},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "update", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			name:       "upgrade tombstones a live key another package owns",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "meta:foreignLens"}},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "tombstone", key: "meta:foreignLens"}},
+			wantReason: "unscoped",
+			wantKey:    "meta:foreignLens",
+		},
+		{
+			name:       "uninstall tombstones a live key it never declared",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "permission:foreign"}},
+			opType:     "UninstallPackage",
+			mutations:  []mutation{{op: "tombstone", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			// The confirmed dominant repro: a bare create of a role assignment
+			// inside a package diff, which needs no prior document to rewrite.
+			name:       "upgrade creates a holdsRole link",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "create", key: "@holdsRole|identity:actor|role:operator"}},
+			wantReason: "holdsRole",
+			wantKey:    "@holdsRole|identity:actor|role:operator",
+		},
+		{
+			name:       "install creates a holdsRole link",
+			opType:     "InstallPackage",
+			mutations:  []mutation{{op: "create", key: "@holdsRole|identity:actor|role:operator"}},
+			wantReason: "holdsRole",
+			wantKey:    "@holdsRole|identity:actor|role:operator",
+		},
+		{
+			name:       "uninstall tombstones a holdsRole link it declared",
+			installed:  true,
+			declared:   []string{"@pkg", "@holdsRole|identity:actor|role:operator"},
+			seed:       []mutation{{op: "create", key: "@holdsRole|identity:actor|role:operator"}},
+			opType:     "UninstallPackage",
+			mutations:  []mutation{{op: "tombstone", key: "@holdsRole|identity:actor|role:operator"}},
+			wantReason: "holdsRole",
+			wantKey:    "@holdsRole|identity:actor|role:operator",
+		},
+		{
+			// Grant an EXISTING kernel permission to a role the actor already
+			// holds. Not a holdsRole link, so a name-matching rule misses it; the
+			// source endpoint is a permission this package never owned.
+			name:       "install grants a permission it does not own to a role",
+			opType:     "InstallPackage",
+			seed:       []mutation{{op: "create", key: "permission:kernel"}},
+			mutations:  []mutation{{op: "create", key: "@grantedBy|permission:kernel|role:operator"}},
+			wantReason: "linkSource",
+			wantKey:    "@grantedBy|permission:kernel|role:operator",
+		},
+		{
+			name:       "upgrade grants a permission another package owns to a role",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "permission:kernel"}},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "create", key: "@grantedBy|permission:kernel|role:operator"}},
+			wantReason: "linkSource",
+			wantKey:    "@grantedBy|permission:kernel|role:operator",
+		},
+		{
+			// The manifest is the document the owned set is read FROM, so an
+			// unchecked exemption on it is a self-serve ownership grant.
+			name:      "upgrade claims a live foreign key into its own manifest",
+			installed: true,
+			declared:  []string{"@pkg"},
+			seed:      []mutation{{op: "create", key: "permission:foreign"}},
+			opType:    "UpgradePackage",
+			mutations: []mutation{
+				{op: "update", key: "@manifest", claims: []string{"@pkg", "permission:foreign"}},
+				{op: "update", key: "permission:foreign"},
+			},
+			wantReason: "manifestClaim",
+			wantKey:    "permission:foreign",
+		},
+		{
+			// An absent key is claimable only by creating it here — otherwise a
+			// package could squat a key another package has yet to mint.
+			name:       "upgrade claims an absent key it does not create",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "update", key: "@manifest", claims: []string{"@pkg", "meta:neverMinted"}}},
+			wantReason: "manifestClaim",
+			wantKey:    "meta:neverMinted",
+		},
+		{
+			// Reviving a dead key still needs the manifest to claim it, and the
+			// claim is what the update is then measured against.
+			name:       "upgrade revives a dead key without claiming it",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "meta:foreignDeadLens"}},
+			tombstoned: []string{"meta:foreignDeadLens"},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "update", key: "meta:foreignDeadLens"}},
+			wantReason: "unscoped",
+			wantKey:    "meta:foreignDeadLens",
+		},
+		{
+			name:       "upgrade naming an uninstalled package rejects",
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "update", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			// A tombstoned manifest is an uninstalled package. Its declaredKeys
+			// survive in the body the tombstone carried forward and still list
+			// the retention-class holders uninstall deliberately left live, so
+			// honouring it would hand a dead package's stale set to a live batch.
+			name:        "upgrade naming an already uninstalled package rejects",
+			installed:   true,
+			declared:    []string{"@pkg", "permission:own"},
+			seed:        []mutation{{op: "create", key: "permission:own"}},
+			uninstalled: true,
+			opType:      "UpgradePackage",
+			mutations:   []mutation{{op: "update", key: "permission:own"}},
+			wantReason:  "unscoped",
+			wantKey:     "permission:own",
+		},
+		{
+			name:       "uninstall naming an uninstalled package rejects",
+			opType:     "UninstallPackage",
+			mutations:  []mutation{{op: "tombstone", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			name:      "upgrade naming an uninstalled package may still create",
+			opType:    "UpgradePackage",
+			mutations: []mutation{{op: "create", key: "meta:freshLens"}},
+		},
+		{
+			// The executing script is chosen by CLASS, so an envelope wearing a
+			// granted operationType while running the upgrade script must be
+			// held to the upgrade's rules.
+			name:       "a lifecycle class under an unrelated operationType is still scoped",
+			opType:     "CreateIdentity",
+			class:      "UpgradePackage",
+			mutations:  []mutation{{op: "update", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			name:       "a lifecycle class under an unrelated operationType is still holdsRole gated",
+			opType:     "CreateIdentity",
+			class:      "InstallPackage",
+			mutations:  []mutation{{op: "create", key: "@holdsRole|identity:actor|role:operator"}},
+			wantReason: "holdsRole",
+			wantKey:    "@holdsRole|identity:actor|role:operator",
+		},
+		{
+			// The converse: a lifecycle operationType under a class that runs no
+			// package script is still covered, since operationType is the
+			// fallback resolveClass itself uses.
+			name:       "a lifecycle operationType under an unrelated class is still scoped",
+			opType:     "UpgradePackage",
+			class:      "identity",
+			mutations:  []mutation{{op: "update", key: "permission:foreign"}},
+			wantReason: "unscoped",
+			wantKey:    "permission:foreign",
+		},
+		{
+			// The shape a real install submits: build.go's addCreate appends
+			// every created key to the very slice that becomes declaredKeys, so
+			// an honest manifest declares exactly what its batch mints.
+			name:   "install declares exactly the keys it creates",
+			opType: "InstallPackage",
+			mutations: []mutation{
+				{op: "create", key: "@pkg"},
+				{op: "create", key: "permission:own"},
+				{op: "create", key: "meta:ownLens"},
+				{op: "create", key: "@manifest", claims: []string{"@pkg", "permission:own", "meta:ownLens"}},
+			},
+		},
+		{
+			// A manifest is the document every ownership answer is read from, so
+			// an unvalidated CREATE mints that root of trust from nothing: forge
+			// the declared set here, then return in a second op and touch the
+			// victim key as one you now "own".
+			name:   "install forges a manifest declaring a key it does not create",
+			opType: "InstallPackage",
+			seed:   []mutation{{op: "create", key: "permission:foreign"}},
+			mutations: []mutation{
+				{op: "create", key: "@pkg"},
+				{op: "create", key: "@manifest", claims: []string{"@pkg", "permission:foreign"}},
+			},
+			wantReason: "manifestClaim",
+			wantKey:    "permission:foreign",
+		},
+		{
+			name:   "upgrade on an uninstalled name forges a manifest",
+			opType: "UpgradePackage",
+			seed:   []mutation{{op: "create", key: "permission:foreign"}},
+			mutations: []mutation{
+				{op: "create", key: "@pkg"},
+				{op: "create", key: "@manifest", claims: []string{"@pkg", "permission:foreign"}},
+			},
+			wantReason: "manifestClaim",
+			wantKey:    "permission:foreign",
+		},
+		{
+			// A manifest is identified by its KEY SHAPE, not by the name the
+			// payload claims — forging one for a package the batch does not even
+			// name is still forging a manifest.
+			name:   "install forges a manifest for a package it never names",
+			opType: "InstallPackage",
+			seed:   []mutation{{op: "create", key: "permission:foreign"}},
+			mutations: []mutation{
+				{op: "create", key: "package:unnamed"},
+				{op: "create", key: "asp|package:unnamed|manifest", claims: []string{"permission:foreign"}},
+			},
+			wantReason: "manifestClaim",
+			wantKey:    "permission:foreign",
+		},
+		{
+			name:   "install creates an aspect on a vertex it mints here",
+			opType: "InstallPackage",
+			mutations: []mutation{
+				{op: "create", key: "meta:ownLens"},
+				{op: "create", key: "asp|meta:ownLens|canonicalName"},
+			},
+		},
+		{
+			name:      "upgrade creates an aspect on a vertex it already declared",
+			installed: true,
+			declared:  []string{"@pkg", "meta:ownLens"},
+			seed:      []mutation{{op: "create", key: "meta:ownLens"}},
+			opType:    "UpgradePackage",
+			mutations: []mutation{{op: "create", key: "asp|meta:ownLens|description"}},
+		},
+		{
+			// A vtx.meta.* write invalidates the DDL cache in-commit, so an
+			// aspect forged onto a primordial op-meta root is live immediately.
+			name:       "upgrade creates an aspect on a foreign vertex",
+			installed:  true,
+			declared:   []string{"@pkg"},
+			seed:       []mutation{{op: "create", key: "meta:foreignOpMeta"}},
+			opType:     "UpgradePackage",
+			mutations:  []mutation{{op: "create", key: "asp|meta:foreignOpMeta|dispatch"}},
+			wantReason: "aspectParent",
+			wantKey:    "asp|meta:foreignOpMeta|dispatch",
+		},
+		{
+			name:       "install creates an aspect on a foreign vertex",
+			opType:     "InstallPackage",
+			seed:       []mutation{{op: "create", key: "meta:foreignOpMeta"}},
+			mutations:  []mutation{{op: "create", key: "asp|meta:foreignOpMeta|dispatch"}},
+			wantReason: "aspectParent",
+			wantKey:    "asp|meta:foreignOpMeta|dispatch",
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rid := fmt.Sprintf("rid-pkgscope-%d", i)
+			key := func(symbol string) string { return scopeCaseKey(i, symbol) }
+			pkgName := scopeCasePackage(i)
+			build := func(m mutation) MutationOp {
+				doc := entityDoc("entity")
+				if m.claims != nil {
+					claimed := make([]string, 0, len(m.claims))
+					for _, sym := range m.claims {
+						claimed = append(claimed, key(sym))
+					}
+					doc = manifestDoc(key("@pkg"), pkgName, claimed)
+				}
+				return MutationOp{Op: m.op, Key: key(m.key), Document: doc}
+			}
+
+			if tt.installed {
+				declared := make([]string, 0, len(tt.declared))
+				for _, sym := range tt.declared {
+					declared = append(declared, key(sym))
+				}
+				seedPackage(t, ctx, c, rid, pkgName, declared)
+			}
+			for j, m := range tt.seed {
+				commitOne(t, ctx, c, fmt.Sprintf("%s-seed-%d", rid, j), build(m))
+			}
+			for j, sym := range tt.tombstoned {
+				if err := commitOneErr(ctx, c, fmt.Sprintf("%s-tomb-%d", rid, j),
+					MutationOp{Op: "tombstone", Key: key(sym)}); err != nil {
+					t.Fatalf("seed tombstone %s: %v", key(sym), err)
+				}
+			}
+			if tt.uninstalled {
+				if err := commitOneErr(ctx, c, rid+"-uninstall",
+					MutationOp{Op: "tombstone", Key: key("@manifest")}); err != nil {
+					t.Fatalf("seed manifest tombstone: %v", err)
+				}
+			}
+
+			mutations := make([]MutationOp, 0, len(tt.mutations))
+			for _, m := range tt.mutations {
+				mutations = append(mutations, build(m))
+			}
+			class := tt.class
+			if class == "" {
+				class = tt.opType
+			}
+			err := commitPackageOpErr(ctx, c, rid+"-guarded", tt.opType, class, pkgName, mutations)
+
+			var pkgErr *PackageScopeError
+			switch {
+			case tt.wantReason == "":
+				if err != nil {
+					t.Fatalf("Commit(op %s class %s): %v, want accepted", tt.opType, class, err)
+				}
+			case !errors.As(err, &pkgErr):
+				t.Fatalf("Commit(op %s class %s): %v, want *PackageScopeError with reason %q",
+					tt.opType, class, err, tt.wantReason)
+			case pkgErr.Reason != tt.wantReason:
+				t.Fatalf("rejected with reason %q, want %q (err %v)", pkgErr.Reason, tt.wantReason, err)
+			case pkgErr.Key != key(tt.wantKey):
+				t.Fatalf("rejected key %q, want %q", pkgErr.Key, key(tt.wantKey))
+			}
+		})
+	}
+}
+
+// A rejection runs before the atomic batch, so nothing the out-of-scope batch
+// carried may land — including the mutations that were themselves in scope.
+func TestCommit_PackageScopeRejectionLeavesTheWholeBatchUnwritten(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	const (
+		pkg        = "scope-atomicity-package"
+		ownPermID  = "Ub3wXy6zAbcd9eFg4hjK"
+		foreignID  = "Vc4xYz7aBcde2fGh5jkL"
+		identityID = "Wd5yZa8bCdef3gHj6kmN"
+		roleID     = "Xe6zAb9cDefg4hJk7mnP"
+	)
+	ownKey := "vtx.permission." + ownPermID
+	foreignKey := "vtx.permission." + foreignID
+
+	seedPackage(t, ctx, c, "rid-atomic", pkg, []string{packageVertexKey(pkg), ownKey})
+	commitOne(t, ctx, c, "rid-atomic-own", MutationOp{
+		Op: "create", Key: ownKey, Document: entityDoc("permission"),
+	})
+	commitOne(t, ctx, c, "rid-atomic-foreign", MutationOp{
+		Op: "create", Key: foreignKey, Document: entityDoc("permission"),
+	})
+
+	err := commitPackageOpErr(ctx, c, "rid-atomic-guarded", "UpgradePackage", "UpgradePackage", pkg, []MutationOp{
+		{Op: "update", Key: ownKey, Document: map[string]interface{}{
+			"class": "permission", "data": map[string]interface{}{"note": "in scope, still not written"},
+		}},
+		{Op: "tombstone", Key: foreignKey},
+		{Op: "create", Key: "lnk.identity." + identityID + ".holdsRole.role." + roleID,
+			Document: entityDoc("holdsRole")},
+	})
+	var pkgErr *PackageScopeError
+	if !errors.As(err, &pkgErr) {
+		t.Fatalf("Commit(out-of-scope upgrade batch): %v, want *PackageScopeError", err)
+	}
+
+	entry, err := c.Conn.KVGet(ctx, testCoreBucket, ownKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", ownKey, err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", ownKey, err)
+	}
+	data, _ := doc["data"].(map[string]interface{})
+	if data["note"] != "n" {
+		t.Fatalf("an in-scope mutation of the rejected batch landed: note = %v", data["note"])
+	}
+	foreign, err := c.Conn.KVGet(ctx, testCoreBucket, foreignKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", foreignKey, err)
+	}
+	var foreignDoc map[string]interface{}
+	if err := json.Unmarshal(foreign.Value, &foreignDoc); err != nil {
+		t.Fatalf("unmarshal %s: %v", foreignKey, err)
+	}
+	if del, _ := foreignDoc["isDeleted"].(bool); del {
+		t.Fatalf("%s was tombstoned by a rejected batch", foreignKey)
+	}
+}
+
+// The manifest is read server-side from the package vertex key the NAME derives,
+// so the name a caller asserts buys exactly that package's owned surface and
+// nothing else. The identical batch is accepted for the package that owns the
+// key and rejected for the one that does not.
+func TestCommit_PackageScopeFollowsTheNamedPackagesOwnManifest(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	const (
+		pkgA   = "scope-claimant-a"
+		pkgB   = "scope-claimant-b"
+		permID = "Yf7aBc2dEfgh5jKm8npQ"
+	)
+	permKey := "vtx.permission." + permID
+
+	seedPackage(t, ctx, c, "rid-claim-a", pkgA, []string{packageVertexKey(pkgA), permKey})
+	seedPackage(t, ctx, c, "rid-claim-b", pkgB, []string{packageVertexKey(pkgB)})
+	commitOne(t, ctx, c, "rid-claim-perm", MutationOp{
+		Op: "create", Key: permKey, Document: entityDoc("permission"),
+	})
+
+	update := []MutationOp{{Op: "update", Key: permKey, Document: entityDoc("permission")}}
+	if err := commitPackageOpErr(ctx, c, "rid-claim-owner", "UpgradePackage", "UpgradePackage", pkgA, update); err != nil {
+		t.Fatalf("Commit(upgrade of %q's own key, named as %q): %v, want accepted", pkgA, pkgA, err)
+	}
+
+	err := commitPackageOpErr(ctx, c, "rid-claim-other", "UpgradePackage", "UpgradePackage", pkgB, update)
+	var pkgErr *PackageScopeError
+	if !errors.As(err, &pkgErr) {
+		t.Fatalf("Commit(upgrade of %q's key, named as %q): %v, want *PackageScopeError", pkgA, pkgB, err)
+	}
+	if pkgErr.Reason != "unscoped" || pkgErr.Package != pkgB {
+		t.Fatalf("rejected as %+v, want reason unscoped for package %q", pkgErr, pkgB)
+	}
+}
+
+// The two-operation forge the manifest-create rule exists to stop: op 1 mints a
+// package whose manifest declares a victim key it never created; op 2 comes back
+// as a routine upgrade of that package and touches the key as one it now owns.
+// Op 2 is only reachable if op 1 commits, so the whole sequence has to die at
+// op 1 — the manifest is the root of trust every later ownership answer is read
+// from, and a create that mints it from nothing establishes nothing.
+func TestCommit_ForgedManifestCannotBootstrapOwnership(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	const (
+		pkg      = "scope-forge-bootstrap"
+		victimID = "Ah9cDe4fGhjk7mNp2qrS"
+	)
+	victimKey := "vtx.permission." + victimID
+	pkgKey := packageVertexKey(pkg)
+
+	commitOne(t, ctx, c, "rid-forge-victim", MutationOp{
+		Op: "create", Key: victimKey, Document: entityDoc("permission"),
+	})
+
+	// Op 1 — mint the package and a manifest claiming the victim key.
+	err := commitPackageOpErr(ctx, c, "rid-forge-op1", "InstallPackage", "InstallPackage", pkg, []MutationOp{
+		{Op: "create", Key: pkgKey, Document: entityDoc("package")},
+		{Op: "create", Key: pkgKey + ".manifest",
+			Document: manifestDoc(pkgKey, pkg, []string{pkgKey, victimKey})},
+	})
+	var pkgErr *PackageScopeError
+	if !errors.As(err, &pkgErr) {
+		t.Fatalf("Commit(forged manifest create): %v, want *PackageScopeError", err)
+	}
+	if pkgErr.Reason != "manifestClaim" || pkgErr.Key != victimKey {
+		t.Fatalf("rejected as %+v, want manifestClaim on %s", pkgErr, victimKey)
+	}
+
+	// Nothing from op 1 may have landed, so op 2 has no manifest to read back.
+	if _, err := c.Conn.KVGet(ctx, testCoreBucket, pkgKey+".manifest"); !errors.Is(err, substrate.ErrKeyNotFound) {
+		t.Fatalf("KVGet forged manifest: %v, want ErrKeyNotFound", err)
+	}
+
+	// Op 2 — the follow-up that would have cashed the forged claim.
+	err = commitPackageOpErr(ctx, c, "rid-forge-op2", "UpgradePackage", "UpgradePackage", pkg, []MutationOp{
+		{Op: "update", Key: victimKey, Document: entityDoc("permission")},
+	})
+	if !errors.As(err, &pkgErr) {
+		t.Fatalf("Commit(follow-up upgrade): %v, want *PackageScopeError", err)
+	}
+	if pkgErr.Reason != "unscoped" {
+		t.Fatalf("rejected with reason %q, want unscoped", pkgErr.Reason)
+	}
+
+	entry, err := c.Conn.KVGet(ctx, testCoreBucket, victimKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", victimKey, err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", victimKey, err)
+	}
+	if doc["createdByOp"] == nil {
+		t.Fatalf("victim key lost its creation provenance: %+v", doc)
+	}
+}
+
+// An upgrade or uninstall acts FOR a package. A payload that does not decode
+// names none, so it identifies no surface — and unlike the update path, a
+// create-only batch must not slip through on the technicality that there was
+// nothing to measure against an owned set.
+func TestCommit_PackageScopeRejectsAnUndecodablePayloadIncludingCreates(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+
+	submit := func(rid string, m MutationOp) error {
+		env := newTestEnvelope(testNanoID1)
+		env.RequestID = rid
+		env.OperationType = "UpgradePackage"
+		env.Class = "UpgradePackage"
+		env.Payload = json.RawMessage(`{"name": `)
+		tracker := NewTracker(env, time.Now())
+		_, err := c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, tracker)
+		return err
+	}
+
+	for _, m := range []MutationOp{
+		{Op: "update", Key: "vtx.permission.Bj2dEf5gHjkm8nPq3rtU", Document: entityDoc("permission")},
+		{Op: "create", Key: "vtx.permission.Ck3eFg6hJkmn9pQr4stV", Document: entityDoc("permission")},
+	} {
+		err := submit("rid-malformed-"+m.Op, m)
+		var pkgErr *PackageScopeError
+		if !errors.As(err, &pkgErr) {
+			t.Fatalf("Commit(%s under an undecodable payload): %v, want *PackageScopeError", m.Op, err)
+		}
+		if pkgErr.Reason != "unscoped" {
+			t.Fatalf("%s rejected with reason %q, want unscoped", m.Op, pkgErr.Reason)
+		}
+	}
+}
+
+// resolveClass reads payload.class when the envelope carries no top-level one,
+// so an envelope can run the upgrade script while declaring neither a lifecycle
+// class nor a lifecycle operationType. The guard has to follow the class down
+// the same path, or the cheapest disguise walks straight past it.
+func TestCommit_PackageScopeFollowsAPayloadCarriedClass(t *testing.T) {
+	t.Parallel()
+	ctx, c, _ := buildCommitterPipeline(t)
+	const pkg = "scope-payload-class"
+	victimKey := "vtx.permission.Dm4fGh7jKmnp2qRs5tuW"
+
+	commitOne(t, ctx, c, "rid-payloadclass-seed", MutationOp{
+		Op: "create", Key: victimKey, Document: entityDoc("permission"),
+	})
+
+	env := newTestEnvelope(testNanoID1)
+	env.RequestID = "rid-payloadclass-guarded"
+	env.OperationType = "CreateIdentity"
+	env.Class = ""
+	payload, err := json.Marshal(map[string]any{"class": "UpgradePackage", "name": pkg})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	env.Payload = payload
+	tracker := NewTracker(env, time.Now())
+	_, err = c.Commit(ctx, env, ScriptResult{Mutations: []MutationOp{
+		{Op: "update", Key: victimKey, Document: entityDoc("permission")},
+	}}, tracker)
+
+	var pkgErr *PackageScopeError
+	if !errors.As(err, &pkgErr) {
+		t.Fatalf("Commit(upgrade class carried in the payload): %v, want *PackageScopeError", err)
+	}
+	if pkgErr.Reason != "unscoped" || pkgErr.Key != victimKey {
+		t.Fatalf("rejected as %+v, want unscoped on %s", pkgErr, victimKey)
+	}
+}

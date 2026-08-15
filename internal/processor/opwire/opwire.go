@@ -181,6 +181,20 @@ const (
 	// widen an existing grant in place. Terminal: a redelivery replays the
 	// identical rewrite against an unchanged world.
 	ErrCodePermissionProvenance ErrorCode = "PermissionProvenance"
+	// ErrCodePackageScope is the step-8 rejection when a package-lifecycle
+	// operation submits a mutation outside the surface the named package owns:
+	// a holdsRole link (which no package Definition declares — binding an
+	// identity to a role is RBAC's own op surface); a created link or aspect
+	// hanging off a source endpoint or parent vertex the package neither creates
+	// in the same batch nor already owns; an update or tombstone of a key outside
+	// that owned surface; or a manifest — created or updated — declaring a key
+	// the package cannot claim. The manifest is validated on CREATE too, since it
+	// is the document every ownership answer is read from and an unvalidated one
+	// mints that root of trust from nothing. The primitive is identified by the
+	// CLASS the envelope runs under, not by operationType alone, since class is
+	// what selects the script. Terminal: a redelivery replays the identical
+	// out-of-scope mutation against an unchanged world.
+	ErrCodePackageScope ErrorCode = "PackageScope"
 	// ErrCodeBatchTooLarge is the step-8 rejection when a single operation's
 	// atomic batch exceeds the message-count ceiling (>998 business mutations)
 	// or a value exceeds the payload ceiling (Contract #2 §2.6 / #3 §3.9.1).

@@ -183,3 +183,43 @@ func TestSHA256NanoID_Golden(t *testing.T) {
 		}
 	}
 }
+
+func TestPackageEntityNanoID_Golden(t *testing.T) {
+	// Every package already installed in every deployment is addressed by these
+	// exact bytes, and two independent readers now compute them — the installer
+	// minting an entity key and the Processor scoping a package-lifecycle
+	// mutation to its owning package. A shifted salt format, alphabet order, or
+	// digest-byte pairing would silently re-point both at keys nothing holds.
+	golden := map[[2]string]string{
+		{"x", "package"}:                          "FDYCWXjNqZ5vEPK2FDYC",
+		{"listings-domain", "package"}:            "KnvK2zBwtdPWqBqyKnvK",
+		{"clinic-domain", "perm:ReadListing:own"}: "EGBqpskTwqfUAEk7EGBq",
+		{"", ""}: "YBJB6NUBnHQpv9b1YBJB",
+	}
+	for in, want := range golden {
+		got := PackageEntityNanoID(in[0], in[1])
+		if got != want {
+			t.Errorf("PackageEntityNanoID(%q,%q) = %q, want golden %q", in[0], in[1], got, want)
+		}
+		if len(got) != NanoIDLength || !IsValidNanoID(got) {
+			t.Errorf("PackageEntityNanoID(%q,%q) = %q is not a valid 20-char NanoID", in[0], in[1], got)
+		}
+	}
+}
+
+func TestPackageEntityNanoID_TagAndNameSeparation(t *testing.T) {
+	// Distinct packages must never resolve to one entity key — the property the
+	// Processor's package-scope guard leans on when it derives a package's own
+	// vertex key from the name a caller asserts.
+	if PackageEntityNanoID("listings-domain", "package") == PackageEntityNanoID("clinic-domain", "package") {
+		t.Error("PackageEntityNanoID collapsed two package names onto one key")
+	}
+	if PackageEntityNanoID("p", "lens:x") == PackageEntityNanoID("p", "ddl:x") {
+		t.Error("PackageEntityNanoID collapsed two entity kinds with the same canonical name")
+	}
+	// It is a different scheme from SHA256NanoID over the same salt: the two
+	// are deliberately separate derivations, not interchangeable.
+	if PackageEntityNanoID("p", "package") == SHA256NanoID("lattice-pkg:p:package") {
+		t.Error("PackageEntityNanoID matched SHA256NanoID — the two schemes must stay distinct")
+	}
+}

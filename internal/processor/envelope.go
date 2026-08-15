@@ -56,6 +56,7 @@ const (
 	ErrCodeRevisionConflict          = opwire.ErrCodeRevisionConflict
 	ErrCodeProtectedKey              = opwire.ErrCodeProtectedKey
 	ErrCodePermissionProvenance      = opwire.ErrCodePermissionProvenance
+	ErrCodePackageScope              = opwire.ErrCodePackageScope
 	ErrCodeBatchTooLarge             = opwire.ErrCodeBatchTooLarge
 	ErrCodeAuthInfrastructureFailure = opwire.ErrCodeAuthInfrastructureFailure
 	ErrCodeClaimKeyInvalid           = opwire.ErrCodeClaimKeyInvalid
