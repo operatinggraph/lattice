@@ -69,11 +69,21 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   `golangci-lint`/`lint-conventions`/`go test ./internal/refractor/pipeline/...` all green, no `_test.go`
   file needed changes. `pipeline.go` 3372→3024 lines; new `results.go` 362 lines. CI green
   (`31942573259`).
-- **Inc 3 not started.** `pipeline.go` is 3024 lines post-Inc-2, still the largest file in the package.
-  Next fire: census `grep -n "^func " pipeline.go` fresh (line numbers shift with every increment) and
-  pick the next self-contained thematic group — the `ConsumerFilter`/`NarrowedFilterEligible`/
-  `broadFilterReason` narrowing-decision cluster (~1624–1993 pre-Inc-2) and the `handle`/`evalLinkFanOut`/
-  `evalPlainAspectReprojection`/`evalPlainLinkReprojection`/`evalAspectFanOut`/`dispositionEvalErr`
-  CDC-dispatch cluster (~2430–2875 pre-Inc-2) are both large, roughly contiguous, and thematically
-  coherent — either is a reasonable next cut. Same rule as Inc 2: membership is the named functions, not
-  a forced contiguous span; re-verify live, don't trust these pre-Inc-3 line numbers.
+- **Inc 3: shipped `f90cc686`.** Picked the narrowing-decision cluster over the CDC-dispatch cluster —
+  smaller, more self-contained, lower complications risk. Re-verified live at `75f838b5` (Inc 2's landed
+  shape, `pipeline.go:1624-1993`): `NarrowedFilterEligible`, `narrowedFilterEligible`, `type
+  FilterDecision`, `broadFilterReason`, `registrationFailedDecision`, `RecordFilterDecision`,
+  `ConsumerFilter`, `ConsumerFilterLabels` moved verbatim into new `internal/refractor/pipeline/filter.go`,
+  same package, no import churn for the same-package callers (`rebuild.go` calls `ConsumerFilter`/
+  `RecordFilterDecision`/`registrationFailedDecision`). Zero logic changes — `gofmt`/`go vet`/
+  `golangci-lint`/`lint-conventions` all green; `go test ./internal/refractor/pipeline/...` 30/30 pass.
+  `pipeline.go` 3023→2629 lines; new `filter.go` 404 lines. CI green (`31946411898`).
+  (`go test ./internal/refractor/...` as a whole hit an unrelated pre-existing timeout in
+  `ruleengine/full`'s `TestBranchDecomposition_RandomizedCorporaDifferential` — no dependency edge from
+  this diff onto that package; matches the already-tracked, Whetstone-owned "suite reddens under parallel
+  load" board row, not a regression from this move.)
+- **Inc 4 not started.** `pipeline.go` is 2629 lines post-Inc-3, still the largest file in the package. Next
+  fire: census `grep -n "^func " pipeline.go` fresh and pick the next self-contained thematic group — the
+  `handle`/`evalLinkFanOut`/`evalPlainAspectReprojection`/`evalPlainLinkReprojection`/`evalAspectFanOut`/
+  `dispositionEvalErr` CDC-dispatch cluster (~2430–2875 pre-Inc-3) is the largest remaining candidate.
+  Re-verify live, don't trust these pre-Inc-4 line numbers.
