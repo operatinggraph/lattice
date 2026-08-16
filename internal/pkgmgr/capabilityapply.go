@@ -56,11 +56,10 @@ type CapabilityApplyPlan struct {
 // exists to allow. "Widely depended on" is not by itself a reason to add one —
 // lease-signing, location-domain and service-domain are each depended on
 // across verticals, yet every operation their Permissions() grant is an
-// ordinary business-domain one (CreateLeaseApplication, CreateServiceInstance,
-// …) over the existing operator/consumer/provider role vocabulary, with no
-// authz-plane, identity or capability-grant primitive among them. They are
-// shared vertical packages, not platform-trust ones, and their absence here is
-// a decision rather than an oversight.
+// ordinary business-domain write over the existing operator/consumer/provider
+// role vocabulary, with no authz-plane, identity or capability-grant
+// primitive among them. They are shared vertical packages, not platform-trust
+// ones, and their absence here is a decision rather than an oversight.
 var platformProtectedPackages = map[string]bool{
 	"rbac-domain":            true,
 	"control-authz":          true,
