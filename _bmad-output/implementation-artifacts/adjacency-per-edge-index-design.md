@@ -1260,3 +1260,95 @@ subjects in Core KV where the latch guard needs entries in the stored document (
 of durable state without a named wipe/reconnect boundary; the multi-round read that skips tombstones instead
 of retracting them; and the vendor-behaviour claim asserted in a comment with no pinned `file:line` behind it
 (`kv_multi.go` cites the pinned server source for every constant — the one comment that did not was wrong).
+
+## 17. Enumeration-corpus sweep, Lattice slice (fire brief, build note, 2026-08-15)
+
+Phase-0 compilation for the `backlog/lattice.md` row *"[Perf] Convert the ~85-site `ListKeysPrefix`/
+list-then-get corpus to `KVGetMulti`"* (§14.7 filed it; census there: ~50 files / ~85 sites, of which
+`cmd/loupe` (12 files) and the four P5 vertical apps (~30 sites) are Verticals/Loupe-owned and out of this
+fire — those streams pick their own share). Scout: one read-only `haiku` agent over `internal/pkgmgr`,
+`internal/weaver`, `internal/loom`, and the Refractor rule-engine/health probes; every site below re-verified
+live (`file:line` read directly) before this brief was written.
+
+### 17.1 Scope sentence (verbatim)
+
+> The Lattice-stream slice of the enumeration-corpus sweep: convert genuine list-then-get-each sites in
+> `internal/pkgmgr`, `internal/weaver`, `internal/loom`, and Refractor's health probes to a single
+> `KVGetMulti` (or, where the list itself is already subject-filtered and paginated, one `KVGetMulti` per
+> page) — mirroring the shipped precedent (`step4_hydrate.go:259`, `personalinterest.IsRelevant` via
+> `kv.GetMulti`, `pkgmgr/taxonomy.go:738`, `pkgmgr/installer.go:851`). Read-batching only: no change to
+> list scope, filter semantics, error handling for a since-deleted key, or (where present) the
+> read-revision-then-conditionally-delete pattern.
+
+### 17.2 Scope-diff gate — two sites narrowed OUT, judgment-call sites named
+
+The scout found 11 TRUE candidates (genuine value-reads, not key-name-only checks). Two are excluded from
+this fire — each needs a design judgment call the mechanical mirror doesn't answer, not a mechanical port:
+
+- **`internal/weaver/reconciler.go:155-206` (`sweeper.pass`)** — reads a mark key then its row key
+  *sequentially per entity*, and the reconciliation invariant this loop enforces has not been checked
+  against a joint-snapshot read (whether the mark and the row must be observed at the same beat, or may
+  legitimately straddle two straight-line reads the way today's two independent `KVGet`s do). Runs every
+  minute against the whole live mark set — the highest-traffic site in the corpus. Left for its own pass.
+- **`internal/refractor/ruleengine/full/executor.go:833-890`** (anchor derivation) — already memoizes
+  fetched nodes in `ex.nodes` (`:994`) and exits early on many paths before every listed key is ever
+  touched; batching the full listed set up front could *increase* reads relative to the memoized,
+  short-circuiting per-key path it would replace, not reduce them. Needs a read-count comparison against
+  representative rule shapes, not a mirror of the precedent.
+
+Both are filed to `backlog/lattice.md` as their own row (below), named, not silently dropped.
+
+The remaining **9** sites are mechanical mirrors of the shipped precedent — this fire's scope.
+
+### 17.3 Verified touch-list (`file:line` checked live)
+
+| # | Site | Bucket | Shape |
+|---|---|---|---|
+| 1 | `internal/pkgmgr/installer.go:1191` `Installer.List` | `core-kv` | Lists all keys, filters to `vtx.package.*.manifest` in Go, `KVGet`s each match in a loop. |
+| 2 | `internal/pkgmgr/opmetaretirement.go:62` `cancelOpenTasksForOpMeta` + `:103` `taskIsOpenReferent` | `core-kv` | Per 500-key page from `KVListKeysFilter`, **two** sequential `KVGet`s per referent (the link doc, then the task root). |
+| 3 | `internal/weaver/state.go:589` `markStore.scanEffectMismatches` | `WeaverStateBucket` | Lists all keys, `KVGet`s every `__effect` match to parse its confidence window. |
+| 4 | `internal/weaver/state.go:708` `markStore.deleteEffectWindows` | `WeaverStateBucket` | Lists all keys, `KVGet`s each `__effect` match under a target prefix **to read its revision**, then `KVDeleteRevision` conditioned on that revision — the conditional-delete-on-fresh-revision must survive the conversion unchanged; only the read side batches. |
+| 5 | `internal/weaver/control.go:42` `Engine.seedDisabledTargets` | `WeaverStateBucket` | Lists all keys, reads each `__control` match once at boot to seed the in-memory disabled set. |
+| 6 | `internal/loom/state.go:171` `stateStore.listInstances` | loom bucket | Lists all keys, `KVGet`s every `instance.<id>` match. |
+| 7 | `internal/loom/state.go:287` `stateStore.pinnedDomains` | loom bucket | Lists all keys, `KVGet`s every `instance.*.patternPin` match. |
+| 8 | `internal/loom/health.go:53` `runningInstanceCounter.count` | loom bucket | Lists all keys, `KVGet`s every `instance.<id>` match (mirrors #6, separate heartbeat consumer). |
+| 9 | `internal/refractor/health/registry_probe.go:298` `RegistryProbe.declaredLensIDs` | `core-kv` | Lists `vtx.meta.` prefix, then **two** sequential `KVGet`s per candidate (the vertex root, then its `.spec` aspect) — batch the two aspects as two separate `KVGetMulti` calls (they're different key shapes), not one merged call. |
+
+### 17.4 Precedents to mirror
+
+`internal/processor/step4_hydrate.go:230-262` — validate every key's shape *before* the batch call (an
+unrecognized string is a subject filter to `KVGetMulti`, not a rejected key — the single-key `KVGet` path
+happened to reject `*`/`>` via nats.go's charset check; the batched path won't, so any key built from a
+listed key name is already well-formed and safe, but a validation-worthy site should keep validating).
+`internal/pkgmgr/installer.go:838-851` (`readMetaDocs`) and `internal/pkgmgr/taxonomy.go:641-738` (chunked
+at `abstractGuardReadChunk`) — the two existing pkgmgr `KVGetMulti` call sites in this same file/component,
+closest-precedent shape for sites #1 and #2. `KVEntry` carries `.Revision` (confirmed:
+`internal/substrate/kv_multi.go`), so site #4's revision-then-delete keeps working off the batched entries.
+
+### 17.5 Increment order + runnable green checks
+
+1. `internal/pkgmgr` (sites 1-2) — `go test ./internal/pkgmgr/...`.
+2. `internal/weaver` (sites 3-5) — `go test ./internal/weaver/...`.
+3. `internal/loom` (sites 6-8) — `go test ./internal/loom/...`.
+4. `internal/refractor/health` (site 9) — `go test ./internal/refractor/health/...`.
+5. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./...`.
+
+### 17.6 In-scope gotchas
+
+- Every site's existing skip-on-`ErrKeyNotFound` / skip-on-malformed-value error posture must be preserved
+  exactly — a key absent from a `KVGetMulti` response (hard-deleted or never existed) is the batched
+  equivalent of `ErrKeyNotFound` on the single-key path (`kv_multi.go`'s doc: dropped, not surfaced as an
+  error) and should be handled the same "skip, don't fail" way each site already handles it today.
+- Site #1's `KVListKeys(ctx, CoreBucket)` lists the **whole bucket**, not a `vtx.package.` prefix — that is
+  pre-existing and out of this fire's scope (the fire batches the *get* side only; narrowing the *list* side
+  is a separate, unscoped improvement — do not fold it in).
+- Sites #2 and #9 read two different things per key (a link + a task; a vertex + its `.spec`) — each needs
+  its own `KVGetMulti` call over its own key set, not one merged call across two key shapes.
+
+### 17.7 Non-goals (this fire does not touch)
+
+- `internal/weaver/reconciler.go` `sweeper.pass` and `internal/refractor/ruleengine/full/executor.go`
+  anchor derivation — filed as their own row (§17.2).
+- `cmd/loupe`, the four vertical apps, and the ~30 remaining sites the design's §14.7 census already
+  attributed to Verticals/Loupe streams.
+- Any change to list scope, filter semantics, or delete-conditioning — read-batching only.
