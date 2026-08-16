@@ -1,0 +1,52 @@
+# Refractor `pipeline.go` consolidation — behavior-frozen file split
+
+Board row: `_bmad-output/planning-artifacts/backlog/lattice.md` § Refinements & ops, "[Refractor] A
+behavior-frozen consolidation pass". No prior design doc existed for this item; this doc is that record,
+created at first build per the steward's Phase-0 rule.
+
+## Scope (verbatim, this fire)
+
+`internal/refractor/pipeline/pipeline.go` is 3932 lines — a god-file. This fire moves the **rebuild
+lifecycle** method group into its own file in the same package, with **zero behavior change**: no logic
+edits, no signature changes, no renames. Pure code motion, verified by an unmodified `go test
+./internal/refractor/...` passing byte-identical.
+
+## Ground (census, 2026-08-16)
+
+- `pipeline.go` is 3932 lines, ~90 methods on `*Pipeline`. `grep -n "^func " pipeline.go` shows a
+  self-contained rebuild-lifecycle group at **lines 2469–2981** (~512 lines): `abandonRebuild`,
+  `beginRebuild`, `endRebuild`, `currentRebuildSignal`, `RebuildAndWait`, `waitRebuildSignal`, `Rebuild`,
+  `rebuildWithSignal`, `resolveTruncate`, `rebuild`, `resumeInterruptedRebuild`, `watchRebuildCompletion`,
+  `recordRebuildProgress`, `RebuildProgress` — plus the `rebuildSignal` type (`pipeline.go:2522`), which
+  belongs with this group and is referenced from `pipeline.go:486` (`rebuildWatch *rebuildSignal` field on
+  `Pipeline` — stays in `pipeline.go`, same package, no import needed either way).
+- Considered folding duplicated test-fixture helpers (`newDeleteKeyKV`/`newCollisionKVs`/`newAuditKVs`,
+  `vertexBody`/`seedVertexBody`/`putBody`/`aspectBody`) across the ~40 `pipeline/*_test.go` files instead —
+  censused first. Rejected as the first increment: the bodies are near-duplicate, not identical (different
+  bucket sets per caller), so folding them risks a subtle test-fixture behavior drift for ~80–120 LOC of
+  gain. Lower value, higher risk than a pure production-code file split. Left as a future increment, not a
+  filed row (any future consolidation fire can pick it up from this doc).
+- No frozen contract, no architectural fork, no design decision beyond "which lines move where" — this is
+  implementation-level per steward §0, decided here.
+
+## Increment order
+
+1. **Move the rebuild-lifecycle group** (`pipeline.go:2469-2981` + the `rebuildSignal` type) into a new
+   file `internal/refractor/pipeline/rebuild.go`, same package, own import block (`goimports`-derived).
+   Verify: `go build ./...`, `gofmt -l`, `go vet ./internal/refractor/...`,
+   `golangci-lint run ./internal/refractor/...`, `go test ./internal/refractor/...` — all must be identical
+   to pre-move (no new failures, no skipped tests).
+2. *(stretch, same fire if Inc 1 lands clean)* Move the **result-writing** group
+   (`writeResults`, `enqueueRetry`, `enqueueActorReprojectRetry`, `publishTerminalDLQ`, `writeAudit` —
+   roughly `pipeline.go:3441-3915` pre-Inc-1 line numbers, re-verified live after Inc 1 shifts them) into
+   `internal/refractor/pipeline/results.go`. Same verification.
+
+## Non-goals
+
+- No logic changes, no renamed identifiers, no test-helper deduplication (see Ground above), no split of
+  the remaining ~3000-line `pipeline.go` beyond what's listed — that's future increments of this same item,
+  scoped by whoever picks it up next against this doc.
+
+## Build note
+
+- Inc 1: pending.
