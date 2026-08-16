@@ -1,5 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-14 · `8f421d80` · [Refractor] plain-lens neighbour derivation Inc 3 — the write licence (5 conjuncts) + auth-plane threading; still shadow-only, 3 cold reviews + 1 fix round + 1 verify pass found zero live defects
+- 2026-08-14 · `cdc0b693` · [Refractor] plain-lens divergence Auditor (Fire 2) — a read-only per-row correctness verdict for 65 lenses the sweep never covered
+- 2026-08-13 · `15c46beb` · [Processor] live-read round-trip collapse Fire 1 — KVGetMulti batching + a per-execution instanceOf memo; unblocks verticals.md self-pay; Fires 2–3 shelved
+- 2026-08-11 · `1839f173` · [Bootstrap] a retired kernel entity is finally visible — orphan detector over the shared reconcile plan; review caught an advisory scan that could abort a boot, and a cost premise counting the wrong population
+- 2026-08-11 · `1b3c4737` · [Edge/Refractor/Substrate] the SYNC stream expires what no client can name; review caught a probe transiently absent on every attach, and two streams that would wipe each other
+- 2026-08-11 · `285e1fed` · [Refractor/Substrate] a structural pause probes its own way out on protected + grant lenses, latch-bounded and announced; review caught a silent auth-plane self-heal
+- 2026-08-11 · `59441252` · [Refractor] sibling OPTIONAL branches fold instead of multiplying — capabilityEphemeral 75,000→50 peak rows; review caught two over-grant fail-opens in the reference walk, and a gauge reporting a sum
+- 2026-08-11 · `2bb5a38b` · [Refractor/objects-base] a lens can project a relationship — `type(r)`, `r.key`, `r.data.<field>`; `objectAttachments` now supplies the `linkName` `DetachObject` requires
+- 2026-08-11 · `bfbfe0c9` · [CI] unit sharded 3→4, re-balanced by measured `go test` time not LOC; unit pole 196s→170s, wall-clock 197s→171s; all gates still run, coverage assertion still exact
+- 2026-08-11 · `029ef85b` · [Refractor] grouping-key reduction + `WITH DISTINCT` honoured — 9.7×/118× at 5k anchors; review caught a fail-open refusal path and an undercounted census, both mechanized
+- 2026-08-11 · `942f78df` · [Edge/Substrate] cold sign-in delivery position — both hosts start where their knowledge ends; the discarded prefetch buffer and the boot-time position closed
 - 2026-08-11 · `9ffc8ac8` · [Refractor/Processor/Pkgmgr] auth-plane grant latency CLOSED — Inc 4 close pass: descriptor-floor withdrawal, three install gates onto one entry point, boot meta reads fail closed
 - 2026-08-11 · `d7126548` · [Refractor] 4a-4 — the actor-aware link arm gains a relation gate so the filter may narrow by relation; set-equality with the client arm, capabilityRoles 9 relation-blind subjects → 15 pinned
 - 2026-08-11 · `fba7f172` · [Refractor] 4b — a half-installed pipeline refuses to narrow, reading the lens's declared kind from its own cypher rather than a new latch
