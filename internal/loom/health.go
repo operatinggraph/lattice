@@ -55,14 +55,21 @@ func (r *runningInstanceCounter) count(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	running := 0
+	var recordKeys []string
 	for _, k := range keys {
-		if !isInstanceRecordKey(k) {
-			continue
+		if isInstanceRecordKey(k) {
+			recordKeys = append(recordKeys, k)
 		}
-		entry, err := r.conn.KVGet(ctx, r.bucket, k)
-		if err != nil {
-			r.logger.Warn("loom heartbeat: instance key read failed", "key", k, "err", err)
+	}
+	entries, err := r.conn.KVGetMulti(ctx, r.bucket, recordKeys)
+	if err != nil {
+		r.logger.Warn("loom heartbeat: instance get-multi failed", "count", len(recordKeys), "err", err)
+		return 0, err
+	}
+	running := 0
+	for _, k := range recordKeys {
+		entry, present := entries[k]
+		if !present {
 			continue
 		}
 		var inst Instance

@@ -156,10 +156,16 @@ func (s *stateStore) getInstance(ctx context.Context, instanceID string) (*Insta
 // listInstances reads every instance.<id> cursor record in loom-state (running
 // and retained terminals — only the pattern pin is deleted at terminal, the
 // record persists). The .pattern pin sub-keys are filtered out by
-// isInstanceRecordKey. A per-key read or unmarshal failure SKIPS that record
-// (logged) rather than failing the whole list — one poisoned record must not
-// blind the operator to every other instance (mirrors the heartbeat counter's
-// skip-on-read-error posture).
+// isInstanceRecordKey. The whole set is fetched in one KVGetMulti; a key
+// absent from the response (deleted between the list and the batched read) is
+// skipped, and a per-key unmarshal failure SKIPS that record (logged) rather
+// than failing the whole list — one poisoned record must not blind the
+// operator to every other instance (mirrors the heartbeat counter's
+// skip-on-unmarshal-error posture). A genuine KVGetMulti failure, in
+// contrast, fails the whole call: unlike a single poisoned record, it means
+// this read cannot answer for ANY instance, so returning a partial or empty
+// list would be silently wrong rather than degraded — the same fail-closed
+// posture pinnedDomains below already takes on its own KVGetMulti call.
 //
 // Each record is decoded directly with no isDeleted soft-delete check. That is
 // correct because Loom never soft-deletes an instance cursor record: a terminal
@@ -173,18 +179,21 @@ func (s *stateStore) listInstances(ctx context.Context, logger *slog.Logger) ([]
 	if err != nil {
 		return nil, fmt.Errorf("loom: list instances: %w", err)
 	}
-	out := make([]Instance, 0, len(keys))
+	var recordKeys []string
 	for _, k := range keys {
-		if !isInstanceRecordKey(k) {
-			continue
+		if isInstanceRecordKey(k) {
+			recordKeys = append(recordKeys, k)
 		}
-		entry, err := s.conn.KVGet(ctx, s.bucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				// Deleted between list and read — skip.
-				continue
-			}
-			logger.Warn("loom: instance record read failed; skipping", "key", k, "err", err)
+	}
+	entries, err := s.conn.KVGetMulti(ctx, s.bucket, recordKeys)
+	if err != nil {
+		return nil, fmt.Errorf("loom: list instances: get-multi %d keys: %w", len(recordKeys), err)
+	}
+	out := make([]Instance, 0, len(recordKeys))
+	for _, k := range recordKeys {
+		entry, present := entries[k]
+		if !present {
+			// Deleted between list and read — skip.
 			continue
 		}
 		var inst Instance
@@ -289,18 +298,22 @@ func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (ma
 	if err != nil {
 		return nil, fmt.Errorf("loom: list pinned patterns: %w", err)
 	}
-	domains := make(map[string]struct{})
+	var pinKeys []string
 	for _, k := range keys {
-		if !strings.HasPrefix(k, instancePrefix) || !strings.HasSuffix(k, patternPinSuffix) {
-			continue
+		if strings.HasPrefix(k, instancePrefix) && strings.HasSuffix(k, patternPinSuffix) {
+			pinKeys = append(pinKeys, k)
 		}
-		entry, err := s.conn.KVGet(ctx, s.bucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				// Deleted between list and read (its instance reached terminal).
-				continue
-			}
-			return nil, fmt.Errorf("loom: read pattern pin %q: %w", k, err)
+	}
+	entries, err := s.conn.KVGetMulti(ctx, s.bucket, pinKeys)
+	if err != nil {
+		return nil, fmt.Errorf("loom: read pattern pins: %w", err)
+	}
+	domains := make(map[string]struct{})
+	for _, k := range pinKeys {
+		entry, present := entries[k]
+		if !present {
+			// Deleted between list and read (its instance reached terminal).
+			continue
 		}
 		var p Pattern
 		if err := json.Unmarshal(entry.Value, &p); err != nil {

@@ -1193,7 +1193,7 @@ func (i *Installer) List(ctx context.Context) ([]*installedPackage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pkgmgr: list keys: %w", err)
 	}
-	var out []*installedPackage
+	var manifestKeys []string
 	for _, k := range keys {
 		if len(k) < len(PackageVertexPrefix)+len(".manifest") {
 			continue
@@ -1204,8 +1204,16 @@ func (i *Installer) List(ctx context.Context) ([]*installedPackage, error) {
 		if k[len(k)-len(".manifest"):] != ".manifest" {
 			continue
 		}
-		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
+		manifestKeys = append(manifestKeys, k)
+	}
+	entries, err := i.Conn.KVGetMulti(ctx, CoreBucket, manifestKeys)
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: read %d manifest keys: %w", len(manifestKeys), err)
+	}
+	var out []*installedPackage
+	for _, k := range manifestKeys {
+		entry, present := entries[k]
+		if !present {
 			continue
 		}
 		var env struct {

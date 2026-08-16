@@ -342,7 +342,11 @@ func TestTaskIsOpenReferent(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			taskID := taskIDForCase(idx)
 			taskKey, linkKey := seedLinkAndTaskForTest(t, ctx, conn, taskID, "opMetaFixedTestKey99", c.taskDeleted, c.status, c.expiresAt, c.linkDeleted)
-			got, err := inst.taskIsOpenReferent(ctx, taskKey, linkKey)
+			entries, err := conn.KVGetMulti(ctx, CoreBucket, []string{taskKey, linkKey})
+			if err != nil {
+				t.Fatalf("KVGetMulti: %v", err)
+			}
+			got, err := inst.taskIsOpenReferent(entries[linkKey], entries[taskKey], taskKey, linkKey)
 			if err != nil {
 				t.Fatalf("taskIsOpenReferent: %v", err)
 			}

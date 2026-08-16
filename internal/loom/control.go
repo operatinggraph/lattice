@@ -91,8 +91,9 @@ const pauseDomainStallNote = "in-flight instances awaiting this domain will stal
 // ListInstances returns a snapshot of every Loom instance's cursor record in
 // loom-state — running instances and retained terminals alike (only the pattern
 // pin is deleted at terminal). The .pattern pin sub-keys are filtered out; an
-// unreadable/unparseable record is skipped, not fatal. Results are sorted by
-// instanceId for a stable operator view. Read-only.
+// unparseable record is skipped, not fatal, but a genuine read failure across
+// the batched fetch fails the whole call (listInstances' doc comment). Results
+// are sorted by instanceId for a stable operator view. Read-only.
 //
 // It relies on instance cursor records never being soft-deleted: a terminal is
 // recorded by flipping Status in place, so no isDeleted envelope is ever written

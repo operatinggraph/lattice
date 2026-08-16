@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -44,17 +45,32 @@ func (e *Engine) seedDisabledTargets(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	targetIDForKey := make(map[string]string, len(keys))
+	controlKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
 		targetID, ok := strings.CutSuffix(key, controlKeySuffix)
 		if !ok {
 			continue
 		}
-		disabled, err := e.marks.isDisabledKey(ctx, key)
-		if err != nil {
-			e.logger.Error("weaver: seed disabled-target read failed", "targetId", targetID, "err", err)
+		targetIDForKey[key] = targetID
+		controlKeys = append(controlKeys, key)
+	}
+	entries, err := e.conn.KVGetMulti(ctx, e.cfg.WeaverStateBucket, controlKeys)
+	if err != nil {
+		return err
+	}
+	for _, key := range controlKeys {
+		targetID := targetIDForKey[key]
+		entry, present := entries[key]
+		if !present {
 			continue
 		}
-		if disabled {
+		var cm controlMark
+		if uerr := json.Unmarshal(entry.Value, &cm); uerr != nil {
+			e.logger.Error("weaver: seed disabled-target read failed", "targetId", targetID, "err", uerr)
+			continue
+		}
+		if cm.Disabled {
 			e.disabled.set(targetID, true)
 		}
 	}

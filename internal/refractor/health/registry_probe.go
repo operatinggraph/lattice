@@ -3,7 +3,6 @@ package health
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"slices"
 	"sort"
@@ -301,19 +300,30 @@ func (p *RegistryProbe) declaredLensIDs(ctx context.Context, holderType string) 
 		return nil, err
 	}
 
-	var ids []string
+	idForRootKey := make(map[string]string, len(keys))
+	var rootKeys []string
 	for _, key := range keys {
 		_, id, ok := substrate.ParseVertexKey(key)
 		if !ok {
 			continue // not a 3-segment vertex root (an aspect key, etc.)
 		}
+		idForRootKey[key] = id
+		rootKeys = append(rootKeys, key)
+	}
 
-		entry, err := p.conn.KVGet(ctx, p.bucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // hard-tombstoned since the listing
-			}
-			return nil, err
+	// The vertex roots are one key shape and their `.spec` aspects are
+	// another, so each is its own KVGetMulti call rather than one merged
+	// request across the two shapes.
+	rootEntries, err := p.conn.KVGetMulti(ctx, p.bucket, rootKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	var lensRootKeys []string
+	for _, key := range rootKeys {
+		entry, present := rootEntries[key]
+		if !present {
+			continue // hard-tombstoned since the listing
 		}
 		var vp registryProbeVertexProbe
 		if err := json.Unmarshal(entry.Value, &vp); err != nil {
@@ -322,10 +332,30 @@ func (p *RegistryProbe) declaredLensIDs(ctx context.Context, holderType string) 
 		if vp.Class != "meta.lens" || vp.IsDeleted {
 			continue
 		}
+		lensRootKeys = append(lensRootKeys, key)
+	}
 
-		specEntry, err := p.conn.KVGet(ctx, p.bucket, key+".spec")
+	specKeys := make([]string, len(lensRootKeys))
+	for i, key := range lensRootKeys {
+		specKeys[i] = key + ".spec"
+	}
+	// A spec that fails to read is fail-closed below (unknown counts as
+	// declared) exactly like a single spec's own read error did before this
+	// batched; a whole-call spec-read failure gets the identical treatment by
+	// leaving specEntries empty rather than aborting declaredLensIDs — the
+	// vertex-root scan (this probe's hard-fail leg) already ran clean, so a
+	// spec-only fault must not turn into "reconciled clean" via an error the
+	// caller could mistake for something else, nor into a lost declared set.
+	specEntries, err := p.conn.KVGetMulti(ctx, p.bucket, specKeys)
+	if err != nil {
+		specEntries = map[string]*substrate.KVEntry{}
+	}
+
+	var ids []string
+	for _, key := range lensRootKeys {
+		specEntry, present := specEntries[key+".spec"]
 		var sp registryProbeSpecProbe
-		specRead := err == nil && json.Unmarshal(specEntry.Value, &sp) == nil
+		specRead := present && json.Unmarshal(specEntry.Value, &sp) == nil
 		if specRead && sp.isEventStream() {
 			continue
 		}
@@ -340,7 +370,7 @@ func (p *RegistryProbe) declaredLensIDs(ctx context.Context, holderType string) 
 			continue
 		}
 
-		ids = append(ids, id)
+		ids = append(ids, idForRootKey[key])
 	}
 	return ids, nil
 }

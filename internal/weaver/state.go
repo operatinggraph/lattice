@@ -591,14 +591,24 @@ func (m *markStore) scanEffectMismatches(ctx context.Context) ([]effectMismatch,
 	if err != nil {
 		return nil, err
 	}
-	var out []effectMismatch
+	var effectKeys []string
 	for _, key := range keys {
+		if _, _, _, ok := splitEffectKey(key); ok {
+			effectKeys = append(effectKeys, key)
+		}
+	}
+	entries, err := m.conn.KVGetMulti(ctx, m.bucket, effectKeys)
+	if err != nil {
+		return nil, err
+	}
+	var out []effectMismatch
+	for _, key := range effectKeys {
 		targetID, gapColumn, actionRef, ok := splitEffectKey(key)
 		if !ok {
 			continue
 		}
-		entry, err := m.conn.KVGet(ctx, m.bucket, key)
-		if err != nil {
+		entry, present := entries[key]
+		if !present {
 			continue
 		}
 		var stats effectStats
@@ -711,16 +721,20 @@ func (m *markStore) deleteEffectWindows(ctx context.Context, targetID string) (d
 		return 0, err
 	}
 	prefix := targetID + effectKeyMarker
+	var windowKeys []string
 	for _, key := range keys {
-		if !strings.HasPrefix(key, prefix) {
-			continue
+		if strings.HasPrefix(key, prefix) {
+			windowKeys = append(windowKeys, key)
 		}
-		entry, getErr := m.conn.KVGet(ctx, m.bucket, key)
-		if getErr != nil {
-			if errors.Is(getErr, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return deleted, fmt.Errorf("weaver: read effect window %s: %w", key, getErr)
+	}
+	entries, err := m.conn.KVGetMulti(ctx, m.bucket, windowKeys)
+	if err != nil {
+		return 0, fmt.Errorf("weaver: read effect windows for %s: %w", targetID, err)
+	}
+	for _, key := range windowKeys {
+		entry, present := entries[key]
+		if !present {
+			continue
 		}
 		if delErr := m.conn.KVDeleteRevision(ctx, m.bucket, key, entry.Revision); delErr != nil {
 			if errors.Is(delErr, substrate.ErrRevisionConflict) || errors.Is(delErr, substrate.ErrKeyNotFound) {

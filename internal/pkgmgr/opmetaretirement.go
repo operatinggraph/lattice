@@ -3,7 +3,6 @@ package pkgmgr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -59,6 +58,10 @@ func (i *Installer) enforceOpMetaDisposition(ctx context.Context, def Definition
 // bounded by this op-meta's own referent degree, never the keyspace) and
 // submits CancelTask for each referent whose task is still a live, open,
 // unexpired referent.
+//
+// Each page's link docs and task roots are two independent key shapes, so
+// they're read as two separate KVGetMulti calls rather than one merged
+// request — mirroring registry_probe.go's vertex-root/spec split.
 func (i *Installer) cancelOpenTasksForOpMeta(ctx context.Context, opMetaKey string) error {
 	opMetaID := strings.TrimPrefix(opMetaKey, metaVertexPrefix)
 	filter := "lnk.task.*.forOperation.meta." + opMetaID
@@ -68,13 +71,29 @@ func (i *Installer) cancelOpenTasksForOpMeta(ctx context.Context, opMetaKey stri
 		if err != nil {
 			return fmt.Errorf("list %s: %w", filter, err)
 		}
+		var linkKeys, taskKeys []string
+		taskKeyForLink := make(map[string]string, len(keys))
 		for _, k := range keys {
 			parts := strings.Split(k, ".")
 			if len(parts) != 6 {
 				continue
 			}
 			taskKey := "vtx.task." + parts[2]
-			open, err := i.taskIsOpenReferent(ctx, taskKey, k)
+			linkKeys = append(linkKeys, k)
+			taskKeys = append(taskKeys, taskKey)
+			taskKeyForLink[k] = taskKey
+		}
+		linkEntries, err := i.Conn.KVGetMulti(ctx, CoreBucket, linkKeys)
+		if err != nil {
+			return fmt.Errorf("get-multi %d link keys: %w", len(linkKeys), err)
+		}
+		taskEntries, err := i.Conn.KVGetMulti(ctx, CoreBucket, taskKeys)
+		if err != nil {
+			return fmt.Errorf("get-multi %d task keys: %w", len(taskKeys), err)
+		}
+		for _, k := range linkKeys {
+			taskKey := taskKeyForLink[k]
+			open, err := i.taskIsOpenReferent(linkEntries[k], taskEntries[taskKey], taskKey, k)
 			if err != nil {
 				return err
 			}
@@ -99,14 +118,13 @@ func (i *Installer) cancelOpenTasksForOpMeta(ctx context.Context, opMetaKey stri
 // rather than silently strand it — the opposite fail-closed direction from
 // step 3's ephemeral-grant expiry check, which treats unparseable as "no
 // match" because that check's job is to deny an ambiguous grant, not drain
-// one).
-func (i *Installer) taskIsOpenReferent(ctx context.Context, taskKey, linkKey string) (bool, error) {
-	linkEntry, err := i.Conn.KVGet(ctx, CoreBucket, linkKey)
-	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read %s: %w", linkKey, err)
+// one). linkEntry/taskEntry are nil when their key is absent from the
+// caller's KVGetMulti response — the batched equivalent of ErrKeyNotFound —
+// which this treats exactly as the single-key path treated a not-found GET:
+// not an open referent.
+func (i *Installer) taskIsOpenReferent(linkEntry, taskEntry *substrate.KVEntry, taskKey, linkKey string) (bool, error) {
+	if linkEntry == nil {
+		return false, nil
 	}
 	var linkDoc struct {
 		IsDeleted bool `json:"isDeleted"`
@@ -118,12 +136,8 @@ func (i *Installer) taskIsOpenReferent(ctx context.Context, taskKey, linkKey str
 		return false, nil
 	}
 
-	taskEntry, err := i.Conn.KVGet(ctx, CoreBucket, taskKey)
-	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read %s: %w", taskKey, err)
+	if taskEntry == nil {
+		return false, nil
 	}
 	var taskDoc struct {
 		IsDeleted bool `json:"isDeleted"`
