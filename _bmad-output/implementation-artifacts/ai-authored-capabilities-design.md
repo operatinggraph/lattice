@@ -544,17 +544,37 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   own package — the sharpest privilege-escalation shape) sails through untouched. No ratified pattern
   excludes a package by name anywhere in pkgmgr, so this is a scoped classification call, not a mechanical
   mirror: **platform-protected** = the Makefile `install-packages` core set (`rbac-domain`, `control-authz`,
-  `privacy-base`, `privacy-operator-grant`, `identity-domain`, `identity-hygiene`, `objects-base`,
-  `console-operator`) + the capability-authoring machinery itself (`capability-author`, `augur`) +
-  `orchestration-base` (named in the board row; shared cross-vertical primitive, blast radius spans every
-  vertical) + `semantic-contracts`. A vertical business-domain package (`cafe-domain`, `clinic-domain`, …) is
-  unaffected — `upgradeExisting` there is exactly what Fire 2 shipped to allow. **Touch-list:**
-  `internal/pkgmgr/capabilityapply.go` (the guard, both modes) + a new `internal/pkgmgr/capabilityapply_test.go`
-  + `packages/capability-author/apply_test.go` (one e2e proving the plan-build itself refuses, mirroring
-  `TestCapAuthor_Apply_UnknownPackage_Rejected`'s pattern). **Non-goal:** no attempt to make the set
-  self-deriving from the Makefile — it is a manually maintained, commented allow-into-protected-set list,
-  same shape as `EnabledArtifactKinds` above it in the same file. Capability-plane change → full 3-layer
-  adversarial review regardless of size.
+  `privacy-base`, `privacy-operator-grant`, `identity-domain`, `objects-base`, `console-operator`) +
+  `demo-operator` (console-operator's structural twin — same `Depends`, its own role, a `GrantTable`
+  read-grant producer — no Makefile target installs it) + `identity-hygiene` (identity trust-surface
+  reasoning alone, no Makefile parity) + the capability-authoring machinery itself (`capability-author`,
+  `augur`) + `orchestration-base` (named in the board row; shared cross-vertical primitive, blast radius
+  spans every vertical) + `semantic-contracts`. A vertical business-domain package (`cafe-domain`,
+  `clinic-domain`, …) is unaffected — `upgradeExisting` there is exactly what Fire 2 shipped to allow.
+  **Touch-list:** `internal/pkgmgr/capabilityapply.go` (the guard, both modes) + a new
+  `internal/pkgmgr/capabilityapply_test.go` + `packages/capability-author/apply_test.go` (one e2e proving the
+  plan-build itself refuses, mirroring `TestCapAuthor_Apply_UnknownPackage_Rejected`'s pattern). **Non-goal:**
+  no attempt to make the set self-deriving from the Makefile — it is a manually maintained, commented
+  allow-into-protected-set list, same shape as `EnabledArtifactKinds` above it in the same file.
+  Capability-plane change → full 3-layer adversarial review regardless of size.
+
+  **✅ SHIPPED (`aef8a481`, 2026-08-15; merge `09ccc7fb`).** The 12-name set from the paragraph above shipped
+  as 13 — cold review caught `demo-operator` missing (added, same rationale) and the `identity-hygiene`
+  clause's Makefile-parity claim was factually wrong (it is `verify-package-identity-hygiene`-only; fixed to
+  cite trust-surface reasoning instead, kept protected). The review's real find: **`cmd/loupe`'s Apply and
+  Mark-Applied handlers each had their own path around the plan builder's deny-list** —
+  `reviewCapabilityApply` checks the live install catalog *before* ever calling
+  `CapabilityApplyPlanForProposal`, and `reviewCapabilityMarkApplied` never calls it at all — so an approved
+  proposal naming an already-installed protected package at its current declared version would have been
+  routed to mark-applied and stamped `review.state=applied` with a real `appliedAs` link into the platform
+  package's vertex (no install runs, but the graph records an AI-authored artifact as applied into
+  platform-trust machinery). Fixed by exporting `pkgmgr.PlatformProtectedPackage` and gating both handlers on
+  it independently, mutation-tested. Also closed: the deny-list lookup normalizes case/whitespace now (was
+  exact-byte-match, so `"Rbac-Domain"` / `" rbac-domain "` slipped it). **Deliberately not fixed here** (filed
+  to `lattice.md` as its own row — pre-existing, spans every human package install too, not specific to
+  AI-authored capabilities): `packageName` is still compared byte-exact in `IsPackageInstalled`, and the
+  Starlark `proposal_string` helper (`packages/capability-author/ddls.go`) doesn't `.strip()` the way its
+  `required_string` sibling does.
 - **Fire 3 — Declarative orchestration kinds.** The **weaverTarget** + **loomPattern** kinds in
   the materializer (`validateWeaverTargets`/`validateGapAction`/`validateLoomPatterns`, reused verbatim — plus
   one check *stronger* than the hand-authored path: a loomPattern step's `Guard` is run through the shared
