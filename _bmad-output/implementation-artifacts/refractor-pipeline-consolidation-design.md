@@ -56,9 +56,13 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   `rebuild.go` 575 lines. Zero logic changes — `gofmt`/`go vet`/`golangci-lint`/`lint-conventions`/
   `go test ./internal/refractor/...` all green, no `_test.go` file needed changes. CI green
   (`31939876682`).
-- **Inc 2 (result-writing group) not attempted — re-scope before picking up.** Post-Inc-1 line numbers
-  show the candidate group is **not contiguous**: `Pause`/`awaitStarted` (control-plane methods) sit
-  between `enqueueActorReprojectRetry` and `publishTerminalDLQ`. A future fire should decide whether to
-  (a) pull `Pause`/`awaitStarted` into the same new file too (widens the group's scope beyond
-  "result-writing"), (b) leave a small gap and accept a non-thematic file, or (c) pick a different next
-  group entirely. Do not force a mechanical cut across the gap.
+- **Inc 2 re-scoped 2026-08-16 (option b): move the 5 named result-writing methods as two
+  non-contiguous cuts, leave `Pause`/`awaitStarted`/`Resume`/`RemoveConsumer`/`Delete`/`DeleteAllForActor`
+  in `pipeline.go`.** Re-verified live at `2653b88e` (Inc 1's landed shape): `writeResults` (2881–3053),
+  `enqueueRetry` (3055–3093), `enqueueActorReprojectRetry` (3095–3160) are contiguous; then the
+  control-plane group `Pause`…`DeleteAllForActor` (3162–3304) sits before `publishTerminalDLQ`
+  (3306–3350) and `writeAudit` (3352–3372). The group's *membership* was always the 5 named methods, not
+  "whatever is between two line numbers" — moving them as two cuts into one target file is still pure code
+  motion; it does not force `Pause`/`awaitStarted` into a file named for a theme they don't belong to,
+  which option (a) would. Rejected (c) — a different group — as strictly less value for the same
+  file-split goal this item exists to make progress on.
