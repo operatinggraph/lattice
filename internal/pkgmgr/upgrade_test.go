@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -418,12 +420,25 @@ func TestUpgrade_RetentionHolderAlreadyTombstonedReportedSeparately(t *testing.T
 // grant revoked did something worth naming, and a bare "no changes" would be
 // the one sentence that hides it.
 func TestNoChangesReason(t *testing.T) {
-	plain := noChangesReason("pkg", 0)
+	plain := noChangesReason("pkg", 0, 0)
 	if !strings.Contains(plain, "no changes") {
 		t.Fatalf("no revocations: want the plain no-changes reason, got %q", plain)
 	}
 
-	revoked := noChangesReason("pkg", 3)
+	// A refused secure-column narrowing is the case that most needs naming: the
+	// widen makes the body match what is committed, so the whole upgrade can
+	// come out empty with the author's declared edit silently declined.
+	widened := noChangesReason("pkg", 0, 2)
+	if !strings.Contains(widened, "2 column(s)") || strings.Contains(widened, "no changes") {
+		t.Fatalf("a refused secure-column narrowing must be named, not reported as a plain no-change run: %q", widened)
+	}
+
+	both := noChangesReason("pkg", 1, 2)
+	if !strings.Contains(both, "previously-revoked grant(s)") || !strings.Contains(both, "secure column(s)") {
+		t.Fatalf("both outcomes must survive together: %q", both)
+	}
+
+	revoked := noChangesReason("pkg", 3, 0)
 	if !strings.Contains(revoked, "3 previously-revoked grant(s)") {
 		t.Fatalf("revocations respected must be named: %q", revoked)
 	}
@@ -815,5 +830,354 @@ func TestJSONEqual(t *testing.T) {
 	}
 	if jsonEqual([]any{"x"}, []any{"y"}) {
 		t.Fatalf("different slices should differ")
+	}
+}
+
+// defWithSecureLens returns the sample package plus one Secure Lens whose
+// single secure column declares the supplied holder types, so a test can narrow
+// or widen that declaration on the next version and observe what the diff
+// persists. queryTimeout is the unrelated-field lever a test uses to force an
+// update on a version whose only other change is the narrowing.
+func defWithSecureLens(version string, holderTypes []string, queryTimeout string) Definition {
+	def := sampleDef(version)
+	def.Lenses = append(def.Lenses, LensSpec{
+		CanonicalName: "sampleSecureLens",
+		Class:         "meta.lens",
+		Adapter:       "postgres",
+		Table:         "read_sample_secure",
+		Engine:        "full",
+		Protected:     true,
+		QueryTimeout:  queryTimeout,
+		Spec:          `MATCH (n:sample) RETURN n.key AS key, n.applicant_name AS applicant_name`,
+		Columns: []PostgresColumn{
+			{Name: "key", Type: "text"},
+			{Name: "applicant_name", Type: "text"},
+		},
+		SecureColumns: []SecureColumn{{
+			Column:      "applicant_name",
+			HolderTypes: holderTypes,
+			Field:       "value",
+		}},
+	})
+	return def
+}
+
+// secureLensSpecKey is the Core KV key of defWithSecureLens's spec aspect —
+// the lens NanoID is deterministic in (package name, canonicalName), so it
+// survives the version bump an upgrade carries.
+func secureLensSpecKey(def Definition) string {
+	return metaVertexPrefix + entityNanoID(def.Name, "lens:sampleSecureLens") + ".spec"
+}
+
+// committedHolderTypes reads the persisted holderTypes of a secure lens spec's
+// single secure column, through the same json.Unmarshal round trip the
+// installer's own diff read sees.
+func committedHolderTypes(t *testing.T, doc map[string]any, column string) []string {
+	t.Helper()
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec doc has no data envelope: %+v", doc)
+	}
+	cfg, ok := data["targetConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec data has no targetConfig: %+v", data)
+	}
+	entries, ok := cfg["secureColumns"].([]any)
+	if !ok {
+		t.Fatalf("targetConfig has no secureColumns list: %+v", cfg)
+	}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if entry["column"] != column {
+			continue
+		}
+		held, ok := entry["holderTypes"].([]any)
+		if !ok {
+			t.Fatalf("secure column %q has no holderTypes list: %+v", column, entry)
+		}
+		out := make([]string, 0, len(held))
+		for _, h := range held {
+			s, ok := h.(string)
+			if !ok {
+				t.Fatalf("secure column %q holderTypes carries a non-string %v (%T)", column, h, h)
+			}
+			out = append(out, s)
+		}
+		return out
+	}
+	t.Fatalf("secure column %q absent from the committed spec: %+v", column, cfg)
+	return nil
+}
+
+// TestUpgrade_SecureColumnHolderTypesNeverNarrow proves an upgrade that drops a
+// holder type from a secure column's declaration does not drop it from the
+// persisted spec. Refractor's destruction-readiness oracle and rebuild target
+// lister both answer "which lenses hold ciphertext for this holder type?" from
+// the CURRENT spec, so a narrowed declaration makes pre-upgrade ciphertext
+// invisible to both and the platform attests as covered over rows it can no
+// longer see. The narrowing is the whole diff for this key, so once widened the
+// body matches what is already committed and no update is emitted at all.
+func TestUpgrade_SecureColumnHolderTypesNeverNarrow(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+	if got := committedHolderTypes(t, before, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("post-install holderTypes = %v, want [identity retentionclass]", got)
+	}
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity"}, "")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (narrow holderTypes): %v", err)
+	}
+	// The refusal has to reach the operator. Once widened, this key's body
+	// matches what is committed and the diff skips it, so the counter is the
+	// only trace the declined edit leaves.
+	if res.SecureColumnsWidened != 1 {
+		t.Fatalf("SecureColumnsWidened = %d, want 1 — a refused narrowing that leaves no mutation must still be reported (%+v)", res.SecureColumnsWidened, res)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if got := committedHolderTypes(t, after, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("holderTypes after a narrowing upgrade = %v, want the union [identity retentionclass] — ciphertext held under a dropped holder type would be invisible to the destruction oracle", got)
+	}
+	// Whole-document equality, not merely "retentionclass is still in there":
+	// the widened body is byte-equal to what is committed, so the diff must
+	// skip the key entirely. Any update would restamp provenance, which this
+	// catches — as would a future regression that reorders or duplicates the
+	// list.
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("a widen-only narrowing must collapse to a no-op update:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// TestUpgrade_SecureColumnHolderTypesWiden covers the direction that is not a
+// hazard: a package ADDING a holder type persists exactly what it declared. The
+// union must not double-count the holder types the committed spec already
+// carried.
+func TestUpgrade_SecureColumnHolderTypesWiden(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity", "retentionclass"}, "")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (widen holderTypes): %v", err)
+	}
+	// Nothing was refused here — the package got exactly what it asked for, so
+	// counting it would tell an operator an edit was declined when it landed.
+	if res.SecureColumnsWidened != 0 {
+		t.Fatalf("SecureColumnsWidened = %d, want 0 — a package ADDING a holder type had nothing refused (%+v)", res.SecureColumnsWidened, res)
+	}
+
+	got := committedHolderTypes(t, kvDoc(t, ctx, conn, specKey), "applicant_name")
+	if !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("holderTypes after a widening upgrade = %v, want exactly the declared [identity retentionclass]", got)
+	}
+}
+
+// TestUpgrade_SecureColumnNarrowingBundledWithRealChange proves the widen is not
+// merely a body-equality artifact. Here the narrowing rides along with an
+// unrelated edit (queryTimeout), so the key genuinely updates — and the value it
+// commits must still be the union, not the narrowed declaration.
+func TestUpgrade_SecureColumnNarrowingBundledWithRealChange(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "5s")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity"}, "9s")
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("Upgrade (narrow + unrelated edit): %v", err)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if reflect.DeepEqual(before, after) {
+		t.Fatalf("the unrelated queryTimeout edit must still update %s, but the committed body is unchanged: %+v", specKey, after)
+	}
+	if got := committedHolderTypes(t, after, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("holderTypes after a bundled narrowing = %v, want the union [identity retentionclass]", got)
+	}
+	cfg := after["data"].(map[string]any)["targetConfig"].(map[string]any)
+	if cfg["queryTimeout"] != "9s" {
+		t.Fatalf("the unrelated edit must land too: queryTimeout = %v, want 9s", cfg["queryTimeout"])
+	}
+}
+
+// TestUpgrade_NewSecureColumnLandsAsDeclared covers the column the union logic
+// must never touch: one the committed spec never declared. It has no history to
+// carry, so it lands exactly as authored.
+func TestUpgrade_NewSecureColumnLandsAsDeclared(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity", "retentionclass"}, "")
+	lens := &v2.Lenses[len(v2.Lenses)-1]
+	lens.Columns = append(lens.Columns, PostgresColumn{Name: "applicant_email", Type: "text"})
+	lens.SecureColumns = append(lens.SecureColumns, SecureColumn{
+		Column:      "applicant_email",
+		HolderTypes: []string{"identity"},
+		Field:       "value",
+	})
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("Upgrade (add secure column): %v", err)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if got := committedHolderTypes(t, after, "applicant_email"); !slices.Equal(got, []string{"identity"}) {
+		t.Fatalf("a brand-new secure column's holderTypes = %v, want exactly the declared [identity]", got)
+	}
+	if got := committedHolderTypes(t, after, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("the pre-existing secure column must be undisturbed, got %v", got)
+	}
+}
+
+// TestUpgrade_SecureColumnHolderTypesNeverNarrowOnRevive covers the removal-and-
+// re-add path, which reaches a different diffManifest branch than an ordinary
+// body edit. A package entity key is deterministic in (package, kind,
+// canonicalName), so the key a removal tombstones is the exact key the same lens
+// returns to — the committed spec a revive reads is this lens's own previous
+// incarnation. Meanwhile the removal tombstoned a Core KV definition; it did not
+// go near the Postgres table holding the ciphertext those earlier holder types
+// encrypted. A lens that comes back declaring fewer holder types than it left
+// with therefore strands exactly the rows §24.6 is about, and the revive path
+// has to refuse the narrowing for the same reason the update path does.
+func TestUpgrade_SecureColumnHolderTypesNeverNarrowOnRevive(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	// v2 drops the Secure Lens entirely — the spec key falls into the diff's
+	// old \ new removal partition and is tombstoned.
+	v2 := sampleDef("0.2.0")
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("Upgrade (drop the secure lens): %v", err)
+	}
+	if del, _ := kvDoc(t, ctx, conn, specKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned after the lens leaves the manifest", specKey)
+	}
+
+	// v3 re-adds the same lens (same canonicalName ⇒ same deterministic key),
+	// declaring only the narrower holder set.
+	v3 := defWithSecureLens("0.3.0", []string{"identity"}, "")
+	res, err := inst.Upgrade(ctx, v3)
+	if err != nil {
+		t.Fatalf("Upgrade (re-add the secure lens narrowed): %v", err)
+	}
+	if res.SecureColumnsWidened != 1 {
+		t.Fatalf("SecureColumnsWidened = %d, want 1 on the revive path (%+v)", res.SecureColumnsWidened, res)
+	}
+
+	revived := kvDoc(t, ctx, conn, specKey)
+	if del, _ := revived["isDeleted"].(bool); del {
+		t.Fatalf("%s should be live again after the re-add: %+v", specKey, revived)
+	}
+	if got := committedHolderTypes(t, revived, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("holderTypes after a narrowed re-add = %v, want the union [identity retentionclass] — the removal tombstoned the definition, not the ciphertext the dropped holder type encrypted", got)
+	}
+}
+
+// TestUpgrade_SecureColumnsMatchedByNameNotIndex is the regression that fails if
+// old and new secure columns are ever paired positionally. v2 both reorders the
+// declared list and narrows the column that moved, so an index-based pairing
+// would graft one column's holder-type history onto the other and leave the
+// narrowed column narrowed.
+func TestUpgrade_SecureColumnsMatchedByNameNotIndex(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	// v1 declares [applicant_name, applicant_email] in that order, with
+	// different holder sets, so a positional mix-up is observable.
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	l1 := &v1.Lenses[len(v1.Lenses)-1]
+	l1.Columns = append(l1.Columns, PostgresColumn{Name: "applicant_email", Type: "text"})
+	l1.SecureColumns = append(l1.SecureColumns, SecureColumn{
+		Column:      "applicant_email",
+		HolderTypes: []string{"identity"},
+		Field:       "value",
+	})
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	// v2 reverses the declared order AND narrows applicant_name, which now sits
+	// at the index applicant_email occupied.
+	v2 := defWithSecureLens("0.2.0", []string{"identity"}, "")
+	l2 := &v2.Lenses[len(v2.Lenses)-1]
+	l2.Columns = append(l2.Columns, PostgresColumn{Name: "applicant_email", Type: "text"})
+	l2.SecureColumns = []SecureColumn{
+		{Column: "applicant_email", HolderTypes: []string{"identity"}, Field: "value"},
+		{Column: "applicant_name", HolderTypes: []string{"identity"}, Field: "value"},
+	}
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (reorder + narrow): %v", err)
+	}
+	if res.SecureColumnsWidened != 1 {
+		t.Fatalf("SecureColumnsWidened = %d, want exactly 1 — only applicant_name was narrowed (%+v)", res.SecureColumnsWidened, res)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if got := committedHolderTypes(t, after, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("applicant_name holderTypes = %v, want the union [identity retentionclass]; a positional pairing would have matched it against applicant_email's history and left it narrowed", got)
+	}
+	if got := committedHolderTypes(t, after, "applicant_email"); !slices.Equal(got, []string{"identity"}) {
+		t.Fatalf("applicant_email holderTypes = %v, want its own unchanged [identity]; a positional pairing would have grafted applicant_name's retentionclass onto it", got)
+	}
+}
+
+// TestUpgrade_SecureColumnHolderTypeReorderIsNotAChange pins the ordering rule.
+// Holder-type order means nothing to the decryptor, but reloadpin refuses to
+// hot-reload ANY secureColumns edit, so writing a re-ordered copy of a set that
+// did not actually change would emit a pointless update and tell an operator to
+// re-activate a lens whose behavior is identical.
+func TestUpgrade_SecureColumnHolderTypeReorderIsNotAChange(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"retentionclass", "identity"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity", "retentionclass"}, "")
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (reorder only): %v", err)
+	}
+	if res.SecureColumnsWidened != 0 {
+		t.Fatalf("SecureColumnsWidened = %d, want 0 — a pure reorder refuses nothing (%+v)", res.SecureColumnsWidened, res)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("re-ordering the same holder-type set must not rewrite the spec (it would force a needless lens re-activation):\nbefore %+v\nafter  %+v", before, after)
 	}
 }

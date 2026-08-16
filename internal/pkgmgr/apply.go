@@ -74,6 +74,14 @@ type ApplyResult struct {
 	// pre-existing damage instead of reading a reassuring "preserved" count.
 	RetentionHoldersAlreadyStranded int
 
+	// SecureColumnsWidened counts lens secure columns whose declared
+	// holderTypes this apply refused to narrow, writing the union with the
+	// committed spec instead (retention-class-key-custody-design.md §24.6). The
+	// apply succeeded; the package's narrowed declaration did not take effect,
+	// because ciphertext already written under a dropped holder type would
+	// otherwise become invisible to every destruction-readiness reader.
+	SecureColumnsWidened int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this apply pushed past its
 	// declared LeafBudget. Advisory only — the apply still succeeded. This is
@@ -149,12 +157,13 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		RevocationsRespected:            sum.revocationsRespected,
 		RetentionHoldersPreserved:       sum.retentionHoldersPreserved,
 		RetentionHoldersAlreadyStranded: sum.retentionHoldersAlreadyStranded,
+		SecureColumnsWidened:            sum.secureColumnsWidened,
 		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Action = "skip"
 		res.Skipped = true
-		res.Reason = noChangesReason(def.Name, sum.revocationsRespected)
+		res.Reason = noChangesReason(def.Name, sum.revocationsRespected, sum.secureColumnsWidened)
 		return res, nil
 	}
 	if opts.DryRun {

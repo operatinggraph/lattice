@@ -791,6 +791,13 @@ func TestPkgLogicJS(t *testing.T) {
 		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
 			"updated": 1, "retentionHoldersPreservedCount": 2, "retentionHoldersAlreadyStrandedCount": 1},
 			"upgrade 1.0.0 → 1.1.0 — 1 updated · 2 retention-class holder key(s) preserved · 1 retention-class holder key(s) ALREADY tombstoned"},
+		// A refused secure-column narrowing, and the case that needs the line
+		// most: the narrowing is the whole diff, so the apply commits nothing
+		// and this counter is the only thing separating "your edit was
+		// declined" from "your edit was already in place".
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"secureColumnsWidened": 1},
+			"upgrade 1.0.0 → 1.1.0 — no changes · 1 secure column(s) kept their committed holderTypes"},
 	} {
 		if got := call(t, vm, "applySummaryLine", tc.res); got != tc.want {
 			t.Errorf("applySummaryLine(%v) = %q, want %q", tc.res, got, tc.want)

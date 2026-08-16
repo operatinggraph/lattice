@@ -340,6 +340,7 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 		"revocationsRespected":                 res.RevocationsRespected,
 		"retentionHoldersPreservedCount":       res.RetentionHoldersPreserved,
 		"retentionHoldersAlreadyStrandedCount": res.RetentionHoldersAlreadyStranded,
+		"secureColumnsWidened":                 res.SecureColumnsWidened,
 		"skipped":                              res.Skipped,
 		"dryRun":                               res.DryRun,
 		"reason":                               res.Reason,
