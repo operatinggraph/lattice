@@ -56,13 +56,24 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   `rebuild.go` 575 lines. Zero logic changes — `gofmt`/`go vet`/`golangci-lint`/`lint-conventions`/
   `go test ./internal/refractor/...` all green, no `_test.go` file needed changes. CI green
   (`31939876682`).
-- **Inc 2 re-scoped 2026-08-16 (option b): move the 5 named result-writing methods as two
+- **Inc 2: shipped `75f838b5`.** Re-scoped 2026-08-16 (option b): move the 5 named result-writing methods as two
   non-contiguous cuts, leave `Pause`/`awaitStarted`/`Resume`/`RemoveConsumer`/`Delete`/`DeleteAllForActor`
-  in `pipeline.go`.** Re-verified live at `2653b88e` (Inc 1's landed shape): `writeResults` (2881–3053),
+  in `pipeline.go`. Re-verified live at `2653b88e` (Inc 1's landed shape): `writeResults` (2881–3053),
   `enqueueRetry` (3055–3093), `enqueueActorReprojectRetry` (3095–3160) are contiguous; then the
   control-plane group `Pause`…`DeleteAllForActor` (3162–3304) sits before `publishTerminalDLQ`
   (3306–3350) and `writeAudit` (3352–3372). The group's *membership* was always the 5 named methods, not
   "whatever is between two line numbers" — moving them as two cuts into one target file is still pure code
   motion; it does not force `Pause`/`awaitStarted` into a file named for a theme they don't belong to,
   which option (a) would. Rejected (c) — a different group — as strictly less value for the same
-  file-split goal this item exists to make progress on.
+  file-split goal this item exists to make progress on. Zero logic changes — `gofmt`/`go vet`/
+  `golangci-lint`/`lint-conventions`/`go test ./internal/refractor/pipeline/...` all green, no `_test.go`
+  file needed changes. `pipeline.go` 3372→3024 lines; new `results.go` 362 lines. CI green
+  (`31942573259`).
+- **Inc 3 not started.** `pipeline.go` is 3024 lines post-Inc-2, still the largest file in the package.
+  Next fire: census `grep -n "^func " pipeline.go` fresh (line numbers shift with every increment) and
+  pick the next self-contained thematic group — the `ConsumerFilter`/`NarrowedFilterEligible`/
+  `broadFilterReason` narrowing-decision cluster (~1624–1993 pre-Inc-2) and the `handle`/`evalLinkFanOut`/
+  `evalPlainAspectReprojection`/`evalPlainLinkReprojection`/`evalAspectFanOut`/`dispositionEvalErr`
+  CDC-dispatch cluster (~2430–2875 pre-Inc-2) are both large, roughly contiguous, and thematically
+  coherent — either is a reasonable next cut. Same rule as Inc 2: membership is the named functions, not
+  a forced contiguous span; re-verify live, don't trust these pre-Inc-3 line numbers.
