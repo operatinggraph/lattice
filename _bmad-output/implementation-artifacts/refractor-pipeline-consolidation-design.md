@@ -49,4 +49,16 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
 
 ## Build note
 
-- Inc 1: pending.
+- **Inc 1: shipped `2653b88e`.** The live boundary was `pipeline.go:2428-2985` (558 lines, not
+  2469-2981) — the group's overview doc-comment sits directly above `abandonRebuild`'s own doc comment
+  with no blank line, so it's syntactically one comment block; moved as part of the unit rather than split
+  mid-thought. Nothing non-rebuild-related was interleaved. `pipeline.go` 3932→3372 lines; new
+  `rebuild.go` 575 lines. Zero logic changes — `gofmt`/`go vet`/`golangci-lint`/`lint-conventions`/
+  `go test ./internal/refractor/...` all green, no `_test.go` file needed changes. CI green
+  (`31939876682`).
+- **Inc 2 (result-writing group) not attempted — re-scope before picking up.** Post-Inc-1 line numbers
+  show the candidate group is **not contiguous**: `Pause`/`awaitStarted` (control-plane methods) sit
+  between `enqueueActorReprojectRetry` and `publishTerminalDLQ`. A future fire should decide whether to
+  (a) pull `Pause`/`awaitStarted` into the same new file too (widens the group's scope beyond
+  "result-writing"), (b) leave a small gap and accept a non-thematic file, or (c) pick a different next
+  group entirely. Do not force a mechanical cut across the gap.
