@@ -3266,11 +3266,16 @@ see §29.6 for what was deliberately left undecided):
   versions (legitimate, `secureColumnsEqual` is order-sensitive only for the *hot-reload-refusal* check, not
   for what a package author may author) must not misattribute one column's history to a different column
   that happens to share its position.
-- Only apply the widen in the `survives && committed != nil && body differs` branch (`upgrade.go:361-427`).
-  The `!survives` revive branch (`:367-384`) is a **different lens identity** landing on a reused
-  deterministic key after a prior removal's tombstone — its committed value belongs to whatever was
-  previously tombstoned there, not a living ancestor of the new lens, so union-ing against it would leak an
-  unrelated lens's holder types into this one's. Do not extend the widen there.
+- Apply the widen on **both** `diffManifest` branches that can write an update to an existing `.spec` key —
+  the body-differs branch (`upgrade.go:361-427`) and the `!survives` revive branch (`:367-384`). A package
+  entity's key is deterministic in (package, kind, canonicalName) — `diffManifest`'s own doc (`:332-340`)
+  and the revive branch's own comment (`:374-377`) both say so: "the same key coming back is the same
+  entity." So the committed value the revive branch reads is never a different lens's history to guard
+  against — it is always this lens's own earlier incarnation, tombstoned by a prior removal and now
+  returning. The removal tombstoned the Core KV *definition*; it never touched the target store, so any
+  ciphertext the lens wrote under a holder type it has since stopped declaring is still there. Skipping the
+  widen on this branch reopens exactly the hazard §29.1 exists to close, just via remove-then-readd instead
+  of a plain narrowing upgrade.
 
 ### 29.6 Non-goals (the drift fence)
 
@@ -3284,9 +3289,18 @@ see §29.6 for what was deliberately left undecided):
   need to override.
 - **A whole secure column dropped from the manifest (not just a holder type narrowed within it) is
   unhandled**, same as §24.6 scoped it: "a lens that stopped declaring it" is the holder-type case; a
-  column disappearing entirely is a distinct, deeper hazard (does the target store's schema still hold the
-  ciphertext physically?) this fire does not claim to close.
-- **No change to what the live decryptor accepts.** Widening `holderTypes` only ever makes
-  `NewSecureDecryptor` accept MORE key-holder types for a column — it does not change which plaintext any
-  actor can read, and does not touch the write-path custody decision (`step6.5`, DDL `Custody.Kind`) at all.
-  Confirm this in review; do not let it become a pretext for touching `step65_encrypt.go`.
+  column disappearing entirely causes the identical oracle blindness — `mayHoldHolderType` reads a decoded
+  `targetConfig` with no secure columns as a genuine no, same as it would for any holder type the surviving
+  columns no longer name — this fire deliberately does not close it too.
+- **The live decryptor's accepted holder types do change** — `col.HolderTypes` is a render gate
+  (`internal/refractor/pipeline/secure.go`: a ciphertext whose `keyId` names an undeclared holder type is
+  refused and the column is redacted), not bookkeeping, so widening it does change what a lens projects.
+  What is true: the widen can only ever re-admit a holder type the **same package already declared for the
+  same column on the same lens** at some earlier version — never one the author never sanctioned — and
+  because `secureColumns` is always pinned for hot-reload (`reloadpin.PinnedFields`), a narrowing-only
+  upgrade now persists no spec change at all, so the running decryptor is left exactly as it already was.
+  The fix blocks a de-escalation; it does not escalate relative to the pre-upgrade state. No confused-deputy
+  risk either: custody is read from the ciphertext's own `keyId` as AEAD associated data, so the decryptor
+  never *selects* by holder type — widening the allow-list cannot let a key of one holder type open data
+  custodied under another. The write-path custody decision (`step6.5`, DDL `Custody.Kind`) is untouched and
+  out of scope — don't let this paragraph become a pretext for touching `step65_encrypt.go`.
