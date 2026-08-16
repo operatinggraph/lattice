@@ -260,6 +260,16 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 		logger.Warn("retention-class holder key(s) are ALREADY tombstoned from a prior run — their class key can never be destroyed by ShredRetentionClassKey; pre-existing platform damage, not caused by this upgrade",
 			"count", res.RetentionHoldersAlreadyStranded)
 	}
+	// Third of the same shape: an edit the package asked for did not happen. A
+	// narrowed holderTypes declaration is refused because the ciphertext already
+	// written under the dropped holder type stays in the target store, and a
+	// spec that stopped naming that holder makes those rows invisible to every
+	// destruction-readiness reader. Said out loud because a narrowing that is
+	// the whole diff for its lens leaves no mutation behind to notice.
+	if res.SecureColumnsWidened > 0 {
+		logger.Warn("secure column(s) kept their committed holderTypes — the narrowed declaration was NOT applied; ciphertext written under a dropped holder type would become invisible to key destruction",
+			"count", res.SecureColumnsWidened)
+	}
 	if res.DryRun {
 		logger.Info("dry-run — no changes submitted",
 			"package", res.PackageName,

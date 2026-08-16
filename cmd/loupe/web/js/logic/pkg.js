@@ -47,6 +47,13 @@ function applySummaryLine(res) {
   if (res.retentionHoldersAlreadyStrandedCount) {
     delta += " · " + res.retentionHoldersAlreadyStrandedCount + " retention-class holder key(s) ALREADY tombstoned";
   }
+  // The other edit the platform declined to make. A narrowed holderTypes
+  // declaration is refused, and when it is the whole diff for its lens the
+  // apply reports no mutations at all — so without this the operator reads
+  // "no changes" over an edit that was rejected.
+  if (res.secureColumnsWidened) {
+    delta += " · " + res.secureColumnsWidened + " secure column(s) kept their committed holderTypes";
+  }
   if (res.action === "upgrade") {
     return prefix + "upgrade " + (res.fromVersion || "?") + " → " + (res.toVersion || "?") + " — " + delta;
   }

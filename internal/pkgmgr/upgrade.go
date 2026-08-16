@@ -67,6 +67,14 @@ type UpgradeResult struct {
 	// read a "preserved" count and be reassured.
 	RetentionHoldersAlreadyStranded int
 
+	// SecureColumnsWidened counts lens secure columns whose declared
+	// holderTypes this upgrade refused to narrow, writing the union with the
+	// committed spec instead (retention-class-key-custody-design.md §24.6). The
+	// upgrade succeeded; the package's narrowed declaration did not take effect,
+	// because ciphertext already written under a dropped holder type would
+	// otherwise become invisible to every destruction-readiness reader.
+	SecureColumnsWidened int
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
@@ -129,11 +137,12 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		RevocationsRespected:            sum.revocationsRespected,
 		RetentionHoldersPreserved:       sum.retentionHoldersPreserved,
 		RetentionHoldersAlreadyStranded: sum.retentionHoldersAlreadyStranded,
+		SecureColumnsWidened:            sum.secureColumnsWidened,
 		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Skipped = true
-		res.Reason = noChangesReason(def.Name, sum.revocationsRespected)
+		res.Reason = noChangesReason(def.Name, sum.revocationsRespected, sum.secureColumnsWidened)
 		return res, nil
 	}
 
@@ -241,9 +250,20 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 // field of the .manifest aspect body — so any run that excludes one also
 // rewrites that aspect, which is itself an update mutation. An empty mutation
 // batch and a nonzero holder count cannot co-occur.
-func noChangesReason(pkgName string, revocationsRespected int) string {
-	if revocationsRespected > 0 {
+//
+// A refused secure-column narrowing DOES branch here, and is the case that most
+// needs to: when the narrowing is the only edit to its lens spec, widening it
+// back makes the body match what is already committed, the key is skipped, and
+// the whole upgrade can come out empty. Reporting that as "no changes" would
+// tell the author their edit was already in place when in fact it was declined.
+func noChangesReason(pkgName string, revocationsRespected, secureColumnsWidened int) string {
+	switch {
+	case revocationsRespected > 0 && secureColumnsWidened > 0:
+		return fmt.Sprintf("package %q body matches; %d previously-revoked grant(s) intentionally left revoked; %d secure column(s) kept their committed holderTypes — the narrowed declaration was NOT applied (ciphertext already written under a dropped holder type would become invisible to key destruction)", pkgName, revocationsRespected, secureColumnsWidened)
+	case revocationsRespected > 0:
 		return fmt.Sprintf("package %q body matches; %d previously-revoked grant(s) intentionally left revoked", pkgName, revocationsRespected)
+	case secureColumnsWidened > 0:
+		return fmt.Sprintf("package %q: no mutations, because the only edit was a narrowed secure-column holderTypes declaration on %d column(s), which is refused — ciphertext already written under a dropped holder type would become invisible to key destruction", pkgName, secureColumnsWidened)
 	}
 	return fmt.Sprintf("package %q already matches the requested definition (no changes)", pkgName)
 }
@@ -285,6 +305,16 @@ type diffSummary struct {
 	// correct and lands; what would otherwise be wrong is reporting it as
 	// success with nothing said, while the lens keeps serving its old spec.
 	reactivation []string
+	// secureColumnsWidened counts lens secure columns whose persisted
+	// targetConfig.secureColumns[].holderTypes this diff refused to narrow: the
+	// new definition declared fewer holder types than the committed spec already
+	// carries, and the union was written instead. Without the counter the
+	// refusal is the one outcome an operator cannot see — a narrowing that is
+	// the whole diff for its key collapses back to a no-op update, so the
+	// package author's declared edit would otherwise vanish behind a bare "no
+	// changes". Same reason revocationsRespected and retentionHoldersPreserved
+	// exist.
+	secureColumnsWidened int
 	// tombstonedOpMetas names every op-meta this delta drops (recognized by
 	// the removed key's committed doc: class meta.ddl.vertexType +
 	// data.operationType) — the population the op-meta retirement guard
@@ -379,6 +409,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			// triplet from the stored document for every update and tombstone,
 			// and drops whatever the mutation supplied — so this branch neither
 			// needs to graft it nor could override it.
+			sum.secureColumnsWidened += widenSecureColumnsForUpdate(op.Key, committed, op.Document)
 			out = append(out, installMutation{Op: "update", Key: op.Key, Document: op.Document, ExpectedRevision: &rev})
 			sum.revived++
 			continue
@@ -416,6 +447,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			sum.revocationsRespected++
 			continue
 		}
+		sum.secureColumnsWidened += widenSecureColumnsForUpdate(op.Key, committed, op.Document)
 		if logicalDocEqual(op.Document, committed) {
 			continue // body-equality skip — no update needed
 		}
@@ -568,6 +600,189 @@ func specBodyOf(doc map[string]any) ([]byte, bool) {
 	}
 	raw, err := json.Marshal(data)
 	return raw, err == nil
+}
+
+// widenSecureColumnsForUpdate keeps a lens's persisted
+// targetConfig.secureColumns[].holderTypes monotonically non-shrinking across an
+// upgrade: for every secure column the new spec and the committed spec both
+// declare, the new document's holderTypes becomes the union of the two, matched
+// by column NAME (never by slice position — a package author may legitimately
+// reorder the list, and a positional match would graft one column's history onto
+// another).
+//
+// The destruction-readiness oracle and the rebuild target lister both answer
+// "which lenses hold ciphertext for this holder type?" from the CURRENT spec
+// (internal/refractor/health/registry_probe.go, cmd/refractor/main.go). Rows
+// encrypted under a holder type the package later stops declaring are still
+// physically ciphertext in the target store, but a narrowed declaration makes
+// them invisible to both — the target set goes empty and the system attests as
+// covered over data it can no longer see. Refusing the narrowing at the one site
+// that writes the spec keeps both readers correct by construction, with no
+// second historical shape for either of them to learn.
+//
+// It applies on the revive path as well as the ordinary body-diff path. A
+// package entity key is deterministic in (package, kind, canonicalName), so the
+// key a removal tombstoned is the EXACT key the same lens lands on when the
+// package re-adds it — diffManifest's own contract, and why the revive branch
+// carries the entity's original creation provenance forward. The committed spec
+// a revive reads is therefore this lens's own previous incarnation, not some
+// unrelated lens sharing a slot, and the ciphertext its earlier holder types
+// encrypted is still sitting in the target store that the removal never touched.
+// Skipping the widen there would reopen exactly the hazard the rest of this
+// function closes.
+//
+// A column the committed spec does not declare (genuinely new) and a column the
+// new spec drops entirely are both left alone — dropping a whole column is a
+// distinct hazard (the ciphertext's physical schema, not just its key custody)
+// this does not claim to close. There is deliberately no way to shed a holder
+// type here: shedding one safely requires a sweep that re-keys or destroys the
+// affected rows first, and that verb does not exist yet.
+//
+// When the union's SET matches what is already committed, the committed slice is
+// written back verbatim, order included. Holder-type order carries no meaning to
+// the decryptor, but any secureColumns edit at all is hot-reload-refused
+// (reloadpin.PinnedFields), so re-ordering a set that did not actually change
+// would emit a pointless update and tell an operator to re-activate a lens whose
+// behavior is identical. That case is likewise not counted as a widening.
+//
+// Returns the number of columns whose declared holder types were actually
+// widened — the count that keeps a narrowing-only upgrade from reporting as a
+// silent no-op.
+//
+// Mutates newDoc in place. The two documents carry the same field in two Go
+// shapes — a freshly built document holds []map[string]any with []string
+// holderTypes, a committed one has round-tripped through json.Unmarshal into
+// []any of map[string]any with []any holderTypes — so both are normalized before
+// comparison; asserting only one shape would silently never widen anything.
+func widenSecureColumnsForUpdate(key string, committed, newDoc map[string]any) int {
+	if !strings.HasSuffix(key, ".spec") {
+		return 0
+	}
+	committedEntries := secureColumnsOf(committed)
+	if len(committedEntries) == 0 {
+		return 0
+	}
+	history := make(map[string][]string, len(committedEntries))
+	for _, entry := range committedEntries {
+		column, _ := entry["column"].(string)
+		if column == "" {
+			continue
+		}
+		history[column] = unionStrings(stringsOf(entry["holderTypes"]), nil)
+	}
+	widened := 0
+	for _, entry := range secureColumnsOf(newDoc) {
+		column, _ := entry["column"].(string)
+		if column == "" {
+			continue
+		}
+		held, ok := history[column]
+		if !ok {
+			continue
+		}
+		declared := unionStrings(stringsOf(entry["holderTypes"]), nil)
+		union := unionStrings(declared, held)
+		// union is a superset of both operands, so an equal length is an equal
+		// set.
+		if len(union) == len(held) {
+			entry["holderTypes"] = held
+		} else {
+			entry["holderTypes"] = union
+		}
+		if len(union) > len(declared) {
+			widened++
+		}
+	}
+	return widened
+}
+
+// secureColumnsOf returns a spec document's secureColumns entries as mutable
+// maps, accepting either the freshly-built []map[string]any or the
+// json.Unmarshal-round-tripped []any. Nil-safe; a document that is not a lens
+// spec, or a lens spec with no secure columns, yields nothing.
+func secureColumnsOf(doc map[string]any) []map[string]any {
+	cfg := targetConfigOf(doc)
+	if cfg == nil {
+		return nil
+	}
+	switch raw := cfg["secureColumns"].(type) {
+	case []map[string]any:
+		return raw
+	case []any:
+		out := make([]map[string]any, 0, len(raw))
+		for _, e := range raw {
+			if m, ok := e.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// targetConfigOf pulls targetConfig out of a lens spec document, unwrapping the
+// stored aspect envelope ({class, isDeleted, data, vertexKey, localName} —
+// docAspect's shape, which both a freshly built and a KV-round-tripped document
+// carry) and also accepting a bare spec body. specBodyOf above takes the same
+// two shapes, for the same reason Refractor's own loader does: a spec that
+// reaches a reader unwrapped must not be mistaken for a spec with no
+// targetConfig. Nil for anything else.
+func targetConfigOf(doc map[string]any) map[string]any {
+	if doc == nil {
+		return nil
+	}
+	if cfg, ok := doc["targetConfig"].(map[string]any); ok {
+		return cfg
+	}
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	cfg, _ := data["targetConfig"].(map[string]any)
+	return cfg
+}
+
+// stringsOf normalizes a JSON string list held either as a Go []string (freshly
+// built) or a []any of string (round-tripped through json.Unmarshal).
+func stringsOf(v any) []string {
+	switch raw := v.(type) {
+	case []string:
+		return raw
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, e := range raw {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// unionStrings appends every element of extra that base does not already carry,
+// preserving base's order first so the spec reads as the package author declared
+// it, with the carried-forward history trailing.
+func unionStrings(base, extra []string) []string {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, s := range base {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range extra {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 func (i *Installer) getCommitted(ctx context.Context, key string) (map[string]any, uint64, error) {
