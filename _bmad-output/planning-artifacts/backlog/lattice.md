@@ -148,7 +148,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-15 · `aef8a481` · [Pkgmgr] AI-capability apply platform-package guard CLOSED — review found+fixed a real bypass: both Loupe apply/mark-applied handlers routed around the plan builder's deny-list; normalization gap filed separately
+- 2026-08-15 · `c51746ec` · [Pkgmgr] AI-capability apply platform-package guard CLOSED — review found+fixed a real bypass: both Loupe apply/mark-applied handlers routed around the plan builder's deny-list; normalization gap filed separately
 - 2026-08-15 · `b4eb8fb2` · [Tooling] gofmt CI gate CLOSED — 37 files formatted; dangling ratified §19 contract edit also committed this fire (`0e84769e`)
 - 2026-08-15 · `70bec5e6` · [bootstrap] package-manifest ownership scoping CLOSED — review found+fixed a self-forged-manifest bypass; §8(a)/§15 stay open, narrowed not closed
 - 2026-08-15 · `6ecf3d77` · [Facet] queued ceremony reveal durability CLOSED — reload recovery + a pinned loss signal; review found+fixed 2 real gaps in the sign-out/auth-death purge paths

@@ -558,7 +558,7 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   allow-into-protected-set list, same shape as `EnabledArtifactKinds` above it in the same file.
   Capability-plane change → full 3-layer adversarial review regardless of size.
 
-  **✅ SHIPPED (`aef8a481`, 2026-08-15; merge `09ccc7fb`).** The 12-name set from the paragraph above shipped
+  **✅ SHIPPED (`c51746ec`, 2026-08-15).** The 12-name set from the paragraph above shipped
   as 13 — cold review caught `demo-operator` missing (added, same rationale) and the `identity-hygiene`
   clause's Makefile-parity claim was factually wrong (it is `verify-package-identity-hygiene`-only; fixed to
   cite trust-surface reasoning instead, kept protected). The review's real find: **`cmd/loupe`'s Apply and
