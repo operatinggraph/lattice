@@ -3141,3 +3141,152 @@ tests, `cmd/lattice-pkg/main.go`, `cmd/loupe/{pkg.go,web/**}` + tests, `docs/con
 that same dirty file), `docs/components/_packages.md`, and an unrelated but gate-mandated version bump of
 `packages/edge-manifest` (`lint-package-version.go` fires on any non-test `internal/pkgmgr` change for every
 package declaring `ReadGrantDomains`; edge-manifest is the only one).
+
+---
+
+## 29. Fire brief — §24.6's residual, the write-path half (build note, 2026-08-15)
+
+### 29.1 Scope sentence
+
+Make `internal/pkgmgr`'s upgrade diff **never let a package upgrade narrow a lens's persisted
+`targetConfig.secureColumns[].holderTypes`** — union it with what the currently-committed spec already
+declares, per column matched by name — so §24.6's oracle (which always reads the CURRENT spec) can no
+longer be fed a spec that has forgotten a holder type it once claimed. This closes the vacuous-attestation
+gap at its only write site rather than teaching every reader a second, historical shape.
+
+### 29.2 Verified touch-list (file:line, re-checked live this fire)
+
+- `internal/pkgmgr/upgrade.go:348-427` (`diffManifest`) — the update-mutation branch, specifically the gap
+  between the body-equality check at `:419` (`logicalDocEqual`) and the update's construction at `:425`.
+  This is the **only** site that builds an "update" mutation for an existing `.spec` key from a fresh
+  `lensSpecBody` — the hook point.
+- `internal/pkgmgr/build.go:454-514` (`lensSpecBody`) — the pure function whose output becomes `op.Document`.
+  Confirms `targetConfig["secureColumns"]` on a **freshly built** doc is `[]map[string]any`, each entry's
+  `"holderTypes"` a Go `[]string` (`build.go:501-514`). Contrast with `getCommitted` (`upgrade.go:573-586`),
+  which `json.Unmarshal`s the committed KV entry into a generic `map[string]any` — the identical field
+  round-trips as `[]any` of `map[string]any`, `"holderTypes"` as `[]any` of `string`. **Both shapes must be
+  handled**; asserting only one silently no-ops on the other.
+- `internal/pkgmgr/build.go:998-1009` (`docAspect`) — confirms the envelope shape both documents share:
+  `{"class", "isDeleted", "data": <lensSpecBody() map>, "vertexKey", "localName"}`. `targetConfig` lives at
+  `doc["data"]["targetConfig"]`, identically for the freshly-built and the KV-round-tripped document.
+  `.spec` is lens-exclusive (DDL aspects use `inputSchema`/`outputSchema`/`fieldDescription`/`examples`/
+  `sensitive`/`custody`, `build.go:166-190`) — gating purely on the `.spec` key suffix is sufficient, no
+  class/type check needed.
+- `internal/pkgmgr/upgrade.go:531-548` (`reactivationNote`) + `internal/refractor/reloadpin/reloadpin.go` —
+  the existing, ratified precedent for a **leaf, pkgmgr-importable** function that reasons over two spec
+  documents (old vs new) without pkgmgr importing `internal/refractor/lens` (`definition.go`'s constraint,
+  named in `reloadpin.go`'s own package doc). `reloadpin.PinnedFields` already names
+  `targetConfig.secureColumns` as **always** hot-reload-refused regardless of narrowing vs widening
+  (`reloadpin.go:63-66`) — confirms widening never changes whether reactivation is required, only what the
+  reactivated pipeline decrypts with.
+- `internal/refractor/health/registry_probe.go:74-117` (`mayHoldHolderType`) — the read-side oracle this
+  fire does **not** touch. Reads `targetConfig.secureColumns[].holderTypes` off whatever is currently
+  committed; a write path that never narrows makes this correct by construction, no read-side change needed.
+- `cmd/refractor/main.go:323-345` (`holderTypeRebuildTargets`, the target lister) — also **not** touched;
+  reads the running pipeline's activated `entry.secureColumns`, which is populated from the same persisted
+  spec at (re)activation (`cmd/refractor/reload.go` `newPipelineEntry`). Fixed at the source, both readers
+  inherit the fix without their own change.
+- `cmd/refractor/main.go:2365-2381` (`secureColumnsEqual`) — confirms `HolderTypes` compares
+  order-sensitively for hot-reload-refusal purposes, but per the reloadpin finding above, **any**
+  `secureColumns` change (reordering included) already forces reactivation regardless — this fire's
+  ordering choice (new-declared entries first, historical ones not already present appended) has no
+  correctness consequence for that check, only for readability of a live spec dump.
+- `internal/refractor/classkeyshredded/manager.go:417-420` — the vacuous-attestation comment §24.6 names.
+  Unreached by this fire (the emptiness it warns about can no longer be caused by a narrowing upgrade), left
+  as-is.
+- `internal/pkgmgr/upgrade_test.go` — harness precedent: `newInstallerHarness`, `kvDoc` (reads a committed
+  entry as `map[string]any`), `sampleDef(version string)`. `TestUpgrade_PreservesRetentionClassHolderOnRemoval`
+  / `TestUpgrade_PreservesRetentionClassHolderOnRename` are the closest shape (assert live KV state after an
+  `Upgrade` call, not mutation-list internals). `internal/pkgmgr/build_test.go:391-411`
+  (`TestLensSpecBody_Postgres_SecureColumns`) confirms the exact freshly-built shape to construct fixtures
+  against.
+
+### 29.3 Precedents to mirror
+
+`reloadpin` is the ratified pattern for "a pkgmgr-side function reasoning about two spec documents" — this
+fire's new function lives in `internal/pkgmgr` itself (not a new package), because unlike `reloadpin` it is
+not predicting a Refractor-side refusal, it is deciding what pkgmgr **writes** — a pkgmgr concern, not a
+leaf shared with Refractor. `0bb6daea`'s revocation guard and Fire 28's retention-holder exclusion are the
+two existing "diffManifest gains a narrow, well-commented carve-out right where a mutation is about to be
+emitted" precedents — this is a third, same shape.
+
+### 29.4 Increment order + green checks
+
+Single increment (M, no design fork — the mechanism itself was fully decided during this fire's grounding,
+see §29.6 for what was deliberately left undecided):
+
+1. Add to `internal/pkgmgr/upgrade.go` (near `reactivationNote`/`specBodyOf`):
+   - `widenSecureColumnsForUpdate(key string, committed, newDoc map[string]any)` — no-ops unless `key` has
+     suffix `.spec`; reads `committed`'s `targetConfig.secureColumns` into a `map[string][]string` keyed by
+     column name (tolerating the `[]any`/`map[string]any`/`[]any` round-tripped shape); for each entry in
+     `newDoc`'s `targetConfig.secureColumns` (`[]map[string]any`, mutated **in place** — maps are reference
+     types, no reassignment needed) whose `column` name has a committed entry, sets `"holderTypes"` to the
+     union (new-declared first, then any committed entries not already present, dedup by string equality).
+     A column absent from the committed spec (a genuinely new column) or absent from the new one (dropped
+     entirely) is left alone — matches §29.6's non-goal.
+   - Small helpers: `targetConfigOf(doc) map[string]any` (`doc["data"]["targetConfig"]`, nil-safe),
+     `stringsOf(v any) []string` (normalizes `[]string` or `[]any`-of-string), `unionStrings(base, extra
+     []string) []string` (dedup-preserving-first-occurrence).
+   - Call `widenSecureColumnsForUpdate(op.Key, committed, op.Document)` in `diffManifest` immediately before
+     the `logicalDocEqual` check at `upgrade.go:419` — so a widen-only "narrowing" (the sole diff) collapses
+     back to a no-op update (correctly skipped), and a narrowing bundled with an unrelated real change still
+     updates, carrying the widened set rather than the narrowed one.
+2. Census (grep, read-only, ~5 min): confirm `diffManifest` is the **only** path that can commit an update
+   to an existing lens `.spec` key — check `internal/pkgmgr/apply.go` (does `Apply` route through
+   `diffManifest` too, or build its own mutation set?) and `cmd/loupe/pkg.go` / `cmd/loupe/web/**` (Fire 28
+   found Loupe's apply/mark-applied handlers had independently bypassed a pkgmgr deny-list before — verify
+   no sibling bypass exists for spec updates; if one is found, it is this fire's to fix, not a residual to
+   file, per the steward's own discovery-fixes-now rule).
+3. Tests in `internal/pkgmgr/upgrade_test.go`, mirroring `TestUpgrade_PreservesRetentionClassHolderOnRemoval`'s
+   harness style (`newInstallerHarness` + `kvDoc` assertions on live KV state, not mutation-list internals):
+   - A narrowing-only upgrade (v1 lens declares `secureColumns: [{column: "x", holderTypes: ["identity",
+     "retentionclass"]}]`, v2 declares `holderTypes: ["identity"]` on the same column) — assert the
+     committed `.spec` after `Upgrade` still carries `["identity","retentionclass"]` (order per §29.6), and
+     that this key does **not** appear in the update set (`res.Updated` unaffected by this key specifically —
+     assert via `kvDoc` equality with the pre-upgrade committed value, not merely "still contains
+     retentionclass", so a future regression that reorders/duplicates is also caught).
+   - A widening upgrade (v1 `["identity"]` → v2 `["identity","retentionclass"]`) — assert the committed
+     spec is exactly the v2-declared set (no double-counting, no interference).
+   - A narrowing bundled with an unrelated field change (e.g. a `queryTimeout` edit alongside the narrowed
+     `holderTypes`) — assert the key **does** update (the unrelated change forces it) and the committed
+     `holderTypes` is still the union, not the narrowed value.
+   - A brand-new secure column added in v2 with no v1 counterpart — assert it lands exactly as declared
+     (union logic never fires for it).
+4. `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   `go test ./internal/pkgmgr/... ./internal/refractor/...`.
+
+### 29.5 In-scope gotchas
+
+- The type-shape asymmetry in §29.2 is the one bug this fix is likely to silently swallow: a `committed`
+  read via type-asserting straight to `[]map[string]any` (the fresh-build shape) instead of `[]any` will
+  compile, run, and simply never widen anything — no error, no test failure unless the new tests actually
+  assert the POST-upgrade committed value (which they do, per §29.4 step 3 — do not weaken that assertion to
+  "no panic").
+- Match old-vs-new secure columns **by `column` name**, never by slice index — a column reorder between
+  versions (legitimate, `secureColumnsEqual` is order-sensitive only for the *hot-reload-refusal* check, not
+  for what a package author may author) must not misattribute one column's history to a different column
+  that happens to share its position.
+- Only apply the widen in the `survives && committed != nil && body differs` branch (`upgrade.go:361-427`).
+  The `!survives` revive branch (`:367-384`) is a **different lens identity** landing on a reused
+  deterministic key after a prior removal's tombstone — its committed value belongs to whatever was
+  previously tombstoned there, not a living ancestor of the new lens, so union-ing against it would leak an
+  unrelated lens's holder types into this one's. Do not extend the widen there.
+
+### 29.6 Non-goals (the drift fence)
+
+- **No mechanism for an operator to intentionally shed a holder type once genuinely swept/re-keyed.** This
+  fix makes `secureColumns.holderTypes` monotonically non-shrinking per column — permanently, until some
+  future explicit verb exists. §24.6 named this as future work ("a sweep at the moment a declaration
+  narrows") and it stays future work: no live consumer needs it yet, and building it now would be
+  undesigned scope creep (the sweep's own semantics — what "confirmed migrated" means, who attests it — are
+  a genuine design question, not an execution detail). File a follow-up row naming this fix's own
+  `holderTypesUnion` behavior as the mechanism a future "confirmed swept, now safe to shrink" verb would
+  need to override.
+- **A whole secure column dropped from the manifest (not just a holder type narrowed within it) is
+  unhandled**, same as §24.6 scoped it: "a lens that stopped declaring it" is the holder-type case; a
+  column disappearing entirely is a distinct, deeper hazard (does the target store's schema still hold the
+  ciphertext physically?) this fire does not claim to close.
+- **No change to what the live decryptor accepts.** Widening `holderTypes` only ever makes
+  `NewSecureDecryptor` accept MORE key-holder types for a column — it does not change which plaintext any
+  actor can read, and does not touch the write-path custody decision (`step6.5`, DDL `Custody.Kind`) at all.
+  Confirm this in review; do not let it become a pretext for touching `step65_encrypt.go`.
