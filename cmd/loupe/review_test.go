@@ -592,6 +592,80 @@ func TestReviewCapabilityApply_NotYetInstalledProceeds(t *testing.T) {
 	}
 }
 
+// The console must not be the way around the plan builder's deny-list. An
+// AI-authored proposal need only declare target.newVersion equal to the
+// version a platform package is ALREADY at (trivially guessable) to route
+// apply into the resumable branch, which never calls
+// CapabilityApplyPlanForProposal at all and instead tells the operator to
+// finish via mark-applied. The protected check has to land first.
+func TestReviewCapabilityApply_PlatformProtectedRefusedBeforeResumable(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	putCapProposal(t, put, "prot1", map[string]any{
+		"intent": "approved, targets the authz base", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "rbac-domain",
+		"targetNewVersion": "1.2.0",
+	})
+	// Genuinely installed at exactly the declared version — the state that
+	// makes the resumable branch fire.
+	putInstalledPackage(t, put, "liveRbac", "rbac-domain", "1.2.0", false)
+
+	res, body := postReview(t, client, base, "/api/review/capability/prot1/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("a platform-protected proposal was steered into the mark-applied recovery: %+v", body)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "platform-protected") || !strings.Contains(msg, "rbac-domain") {
+		t.Errorf("want a platform-protected refusal naming rbac-domain, got %+v", body)
+	}
+}
+
+// A near-miss spelling must not walk past the deny-list either: the console
+// check normalizes the same way the plan builder's does.
+func TestReviewCapabilityApply_PlatformProtectedNearMissRefused(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	putCapProposal(t, put, "prot2", map[string]any{
+		"intent": "approved, lookalike name", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": " Rbac-Domain ",
+		"targetNewVersion": "1.2.0",
+	})
+
+	res, body := postReview(t, client, base, "/api/review/capability/prot2/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "platform-protected") {
+		t.Errorf("want a platform-protected refusal, got %+v", body)
+	}
+}
+
+// mark-applied never runs the plan builder, so it owns the same refusal
+// outright: what it relays stamps review.state=applied with a real appliedAs
+// link into the platform package's vertex — a falsified audit record even
+// though no install ran.
+func TestReviewCapabilityMarkApplied_PlatformProtectedRefused(t *testing.T) {
+	client, base, put := newTestReviewServer(t)
+	putCapProposal(t, put, "mkprot1", map[string]any{
+		"intent": "approved, targets the authz base", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "rbac-domain",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "liveRbac", "rbac-domain", "1.2.0", false)
+
+	res, body := postReview(t, client, base, "/api/review/capability/mkprot1/mark-applied")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "platform-protected") || !strings.Contains(msg, "rbac-domain") {
+		t.Errorf("want a platform-protected refusal naming rbac-domain, got %+v", body)
+	}
+}
+
 // putInstalledPackage writes the Core-KV shape mark-applied's resolver reads:
 // a vtx.package.<id> root plus its .manifest aspect carrying name/version.
 func putInstalledPackage(t *testing.T, put func(bucket, key, value string), id, name, version string, deleted bool) {

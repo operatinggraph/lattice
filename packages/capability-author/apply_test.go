@@ -43,6 +43,10 @@ const (
 	capFakePackageKey    = "vtx.package.fakePkgHJKMNPQRSTUVW"
 	capIDApplyGrant      = "CAApprvGrantHJKMNPQR"
 	capHandleApplyGrant  = "CAHNDApGrantHJKMNPQR"
+	capIDApplyProtUpg    = "CAApprvProtUpgHJKMNP"
+	capHandleApplyProtUp = "CAHNDApProtUpgHJKMNP"
+	capIDApplyProtNew    = "CAApprvProtNewHJKMNP"
+	capHandleApplyProtNw = "CAHNDApProtNewHJKMNP"
 )
 
 // applyEnv builds the MarkCapabilityProposalApplied op the operator submits
@@ -66,10 +70,10 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor
 }
 
 // recordEnvForApply mirrors recordEnv (proposal_test.go) but attaches a real
-// target.packageName — the shared recordEnv leaves it empty (Fire 1 never
-// needed to apply anything), so this variant is local to the apply tests
-// rather than widening every existing recordEnv call site.
-func recordEnvForApply(t *testing.T, reqID, handle, packageName string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
+// target.packageName + mode — the shared recordEnv leaves the target empty
+// (Fire 1 never needed to apply anything), so this variant is local to the
+// apply tests rather than widening every existing recordEnv call site.
+func recordEnvForApply(t *testing.T, reqID, handle, packageName, mode string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
 	report, err := pkgmgr.ValidateCapabilityArtifact("lens", content, fullCypherParser{}, nil, nil)
 	if err != nil {
@@ -81,7 +85,7 @@ func recordEnvForApply(t *testing.T, reqID, handle, packageName string, content 
 	result := map[string]any{
 		"kind":       "lens",
 		"content":    string(content),
-		"target":     map[string]any{"mode": "newPackage", "packageName": packageName},
+		"target":     map[string]any{"mode": mode, "packageName": packageName},
 		"rationale":  "reasoned capability authoring proposal",
 		"confidence": confidence,
 		"validation": map[string]any{"state": "valid"},
@@ -236,8 +240,16 @@ func TestCapAuthor_Apply_GrantKind_ClosesLoop(t *testing.T) {
 
 // drivePendingProposalForApply mirrors drivePendingProposal (review_test.go)
 // but records a lens artifact carrying a real target.packageName — required
-// for CapabilityApplyPlanForProposal to build an installable Definition.
+// for CapabilityApplyPlanForProposal to build an installable Definition — in
+// the common newPackage mode.
 func drivePendingProposalForApply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle, packageName string) string {
+	t.Helper()
+	return drivePendingProposalForApplyMode(t, ctx, conn, cp, cons, tag, proposalID, handle, packageName, "newPackage")
+}
+
+// drivePendingProposalForApplyMode is drivePendingProposalForApply with an
+// explicit target.mode, for the cases where the mode itself is under test.
+func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle, packageName, mode string) string {
 	t.Helper()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	req := requestEnv(testutil.GenReqID("CAReq"+tag), proposalID, "a lens listing active providers")
@@ -249,7 +261,7 @@ func drivePendingProposalForApply(t *testing.T, ctx context.Context, conn *subst
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	content := validLensContent(t, "applyLens"+tag)
-	rec := recordEnvForApply(t, testutil.GenReqID("CARec"+tag), handle, packageName, content, 0.86)
+	rec := recordEnvForApply(t, testutil.GenReqID("CARec"+tag), handle, packageName, mode, content, 0.86)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -386,6 +398,52 @@ func TestCapAuthor_Apply_PackageNameMismatch_Rejected(t *testing.T) {
 	driveApply(t, ctx, conn, cp, cons, "mmA", capIDApplyMismatchA, applyResultB.PackageKey, "install:cross@0.1.0", processor.OutcomeRejected)
 	if got := reviewState(t, ctx, conn, pkA); got != "approved" {
 		t.Fatalf("review.state = %q, want approved (unchanged by the rejected cross-proposal apply)", got)
+	}
+}
+
+// TestCapAuthor_Apply_PlatformProtectedUpgrade_Rejected: an APPROVED proposal
+// targeting capability-author — the authoring machinery's OWN package, live in
+// this env — as upgradeExisting never reaches a Definition. The refusal lands
+// in the read-only plan builder, before any InstallPackage/UpgradePackage op is
+// submitted, so the assertion is on CapabilityApplyPlanForProposal directly
+// (applyRealPackage's first step) rather than on an op outcome.
+func TestCapAuthor_Apply_PlatformProtectedUpgrade_Rejected(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-protupg")
+
+	pk := drivePendingProposalForApplyMode(t, ctx, conn, cp, cons, "protupg", capIDApplyProtUpg, capHandleApplyProtUp, "capability-author", "upgradeExisting")
+	driveReview(t, ctx, conn, cp, cons, "protupg", capIDApplyProtUpg, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("precondition: review.state = %q, want approved", got)
+	}
+
+	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, pk)
+	if err == nil {
+		t.Fatalf("CapabilityApplyPlanForProposal returned plan %+v, want a platform-protected refusal", plan)
+	}
+	if !strings.Contains(err.Error(), "platform-protected") || !strings.Contains(err.Error(), "capability-author") {
+		t.Fatalf("error = %v, want one naming capability-author as platform-protected", err)
+	}
+}
+
+// TestCapAuthor_Apply_PlatformProtectedNew_Rejected: the same refusal in
+// newPackage mode, against objects-base — a protected package this env has NOT
+// installed, so the mode/install-catalog check would have let it through. Only
+// the name-based guard refuses it, which is what closes the uninstall-then-
+// reinstall window.
+func TestCapAuthor_Apply_PlatformProtectedNew_Rejected(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-protnew")
+
+	pk := drivePendingProposalForApply(t, ctx, conn, cp, cons, "protnew", capIDApplyProtNew, capHandleApplyProtNw, "objects-base")
+	driveReview(t, ctx, conn, cp, cons, "protnew", capIDApplyProtNew, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+
+	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, pk)
+	if err == nil {
+		t.Fatalf("CapabilityApplyPlanForProposal returned plan %+v, want a platform-protected refusal", plan)
+	}
+	if !strings.Contains(err.Error(), "platform-protected") || !strings.Contains(err.Error(), "objects-base") {
+		t.Fatalf("error = %v, want one naming objects-base as platform-protected", err)
 	}
 }
 

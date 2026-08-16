@@ -21,6 +21,82 @@ type CapabilityApplyPlan struct {
 	Definition  Definition
 }
 
+// platformProtectedPackages is the package-name deny-list an AI-authored
+// capability proposal may never target, in either mode
+// (ai-authored-capabilities-design.md §8 Fire 2). §5's deterministic content
+// validator bounds an ARTIFACT (a lens parses, a grant is a subset of the
+// requester's own held scope); it has no notion of the TARGET's blast radius,
+// so a perfectly well-formed one-artifact Definition diff-applied into a
+// platform-trust package is exactly the shape review is least able to catch.
+// Keys are canonical lowercase (every package name in this repo is
+// lowercase-with-hyphens); look a name up through PlatformProtectedPackage,
+// which normalizes case and surrounding whitespace, never by direct index.
+// Manually maintained, deliberately NOT derived from the Makefile — an
+// install-order refactor must never silently unprotect a package:
+//
+//   - the platform's own authz/identity/privacy trust base: the
+//     `make install-packages` core set (rbac-domain, control-authz,
+//     privacy-base, privacy-operator-grant, identity-domain, objects-base,
+//     console-operator) plus demo-operator, console-operator's structural twin
+//     — same Depends, its own demoOperator role, and a GrantTable read-grant
+//     producer — which no Makefile target installs;
+//   - identity-hygiene, part of the identity trust surface: it shares
+//     identity-domain's KV subtree and carries the credential-repoint /
+//     reconciliation machinery. It is NOT in `make install-packages` (only the
+//     standalone verify-package-identity-hygiene target installs it) — it is
+//     here on that trust-surface reasoning alone, with no Makefile parity;
+//   - the capability-authoring machinery itself — capability-author, augur —
+//     the sharpest privilege-escalation shape there is (a proposal that
+//     rewrites the machinery reviewing it);
+//   - the shared cross-vertical primitives — orchestration-base,
+//     semantic-contracts — whose blast radius spans every vertical.
+//
+// A vertical business-domain package (cafe-domain, clinic-domain, …) is
+// deliberately absent: upgradeExisting there is precisely what this fire
+// exists to allow. "Widely depended on" is not by itself a reason to add one —
+// lease-signing, location-domain and service-domain are each depended on
+// across verticals, yet every operation their Permissions() grant is an
+// ordinary business-domain one (CreateLeaseApplication, CreateServiceInstance,
+// …) over the existing operator/consumer/provider role vocabulary, with no
+// authz-plane, identity or capability-grant primitive among them. They are
+// shared vertical packages, not platform-trust ones, and their absence here is
+// a decision rather than an oversight.
+var platformProtectedPackages = map[string]bool{
+	"rbac-domain":            true,
+	"control-authz":          true,
+	"privacy-base":           true,
+	"privacy-operator-grant": true,
+	"identity-domain":        true,
+	"identity-hygiene":       true,
+	"objects-base":           true,
+	"console-operator":       true,
+	"demo-operator":          true,
+	"capability-author":      true,
+	"augur":                  true,
+	"orchestration-base":     true,
+	"semantic-contracts":     true,
+}
+
+// PlatformProtectedPackage reports whether name is on the platform-protected
+// deny-list — every caller that can reach InstallPackage/UpgradePackage or
+// MarkCapabilityProposalApplied for an AI-authored proposal must refuse
+// before doing so, not just CapabilityApplyPlanForProposal. Loupe's apply
+// endpoint can short-circuit into its resumable-recovery branch before the
+// plan builder ever runs, and its mark-applied endpoint never calls the plan
+// builder at all, so each consults this directly.
+func PlatformProtectedPackage(name string) bool {
+	return platformProtectedPackages[normalizePackageName(name)]
+}
+
+// normalizePackageName folds a proposal-declared package name to the
+// canonical-lowercase form platformProtectedPackages is keyed by, so a
+// near-miss spelling ("Rbac-Domain", " rbac-domain ") cannot walk past an
+// exact-byte map lookup. It is scoped to this guard and deliberately changes
+// no other package-name comparison in the installer.
+func normalizePackageName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // CapabilityApplyPlanForProposal reads an APPROVED vtx.capabilityproposal.<id>
 // vertex's stored artifact + target and materializes the SAME Definition §5
 // already validated (DefinitionForCapabilityArtifact — byte-for-byte what
@@ -41,7 +117,8 @@ type CapabilityApplyPlan struct {
 // requires it IS) — Installer.Apply's own name-based dispatch has no notion
 // of "this AI-authored def is a different lineage" from an unrelated
 // same-named package, so that check belongs here, before a Definition is
-// ever built.
+// ever built. Ahead of both, target.packageName is refused outright when
+// PlatformProtectedPackage accepts it, in either mode.
 func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, proposalKey string) (*CapabilityApplyPlan, error) {
 	proposalID, err := proposalIDFromKey(proposalKey)
 	if err != nil {
@@ -79,6 +156,12 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 	}
 	if packageName == "" {
 		return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s has no target.packageName", proposalKey)
+	}
+	// Refuse a platform-protected target before mode is even considered: the
+	// deny-list binds BOTH modes, so an uninstall leaves no newPackage window
+	// through which a protected name could be re-created AI-authored.
+	if PlatformProtectedPackage(packageName) {
+		return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s targets packageName %q, a platform-protected package that no AI-authored proposal may install or upgrade", proposalKey, packageName)
 	}
 	mode, err := typedStringField(target, "mode")
 	if err != nil {

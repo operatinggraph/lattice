@@ -696,7 +696,19 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 	// in-session failure below does, so one classifier handles both. A proposal
 	// whose read-model row cannot be read at all is left to the plan builder,
 	// which is the authority regardless.
-	if cols, ok := s.capabilityRow(ctx, conn, proposalKey); ok && cols.ReviewState == "approved" {
+	cols, haveRow := s.capabilityRow(ctx, conn, proposalKey)
+	// Refuse a platform-protected target before the resumable classification
+	// below: that branch answers a 409 with resumable:true and sends the
+	// operator to mark-applied, which stamps review.state=applied over the
+	// platform package's real vertex without the plan builder — whose deny-list
+	// would otherwise be the boundary — ever running.
+	if haveRow && pkgmgr.PlatformProtectedPackage(cols.TargetPackageName) {
+		s.writeError(w, http.StatusConflict, fmt.Sprintf(
+			"proposal %s targets %q, a platform-protected package that no AI-authored proposal may install, upgrade or close over",
+			id, cols.TargetPackageName))
+		return
+	}
+	if haveRow && cols.ReviewState == "approved" {
 		if packageKey, installed, err := s.targetInstall(ctx, conn, cols); err == nil && installed {
 			s.writeJSON(w, http.StatusConflict, map[string]any{
 				"error": fmt.Sprintf(
@@ -977,6 +989,17 @@ func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Requ
 	if cols.TargetPackageName == "" {
 		s.writeError(w, http.StatusConflict,
 			"proposal "+id+" records no target.packageName, so the installed package it would close over cannot be resolved")
+		return
+	}
+	// Refuse a platform-protected target before the install is resolved: this
+	// endpoint never runs the plan builder that owns the deny-list, and what it
+	// relays stamps review.state=applied with a real appliedAs link into the
+	// named package's vertex — an audit record of an AI-authored artifact
+	// entering a platform-trust package, whether or not an install ever ran.
+	if pkgmgr.PlatformProtectedPackage(cols.TargetPackageName) {
+		s.writeError(w, http.StatusConflict, fmt.Sprintf(
+			"proposal %s targets %q, a platform-protected package that no AI-authored proposal may install, upgrade or close over",
+			id, cols.TargetPackageName))
 		return
 	}
 
