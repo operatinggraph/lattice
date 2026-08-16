@@ -3169,9 +3169,9 @@ gap at its only write site rather than teaching every reader a second, historica
 - `internal/pkgmgr/build.go:998-1009` (`docAspect`) — confirms the envelope shape both documents share:
   `{"class", "isDeleted", "data": <lensSpecBody() map>, "vertexKey", "localName"}`. `targetConfig` lives at
   `doc["data"]["targetConfig"]`, identically for the freshly-built and the KV-round-tripped document.
-  `.spec` is lens-exclusive (DDL aspects use `inputSchema`/`outputSchema`/`fieldDescription`/`examples`/
-  `sensitive`/`custody`, `build.go:166-190`) — gating purely on the `.spec` key suffix is sufficient, no
-  class/type check needed.
+  `.spec` is not lens-exclusive — weaver-target (`build.go:245`) and loom-pattern (`build.go:254`) bodies use
+  it too — but neither carries a `targetConfig`, so the real gate is "has `data.targetConfig.secureColumns`",
+  which the `.spec`-suffix check narrows to before that lookup runs rather than replaces.
 - `internal/pkgmgr/upgrade.go:531-548` (`reactivationNote`) + `internal/refractor/reloadpin/reloadpin.go` —
   the existing, ratified precedent for a **leaf, pkgmgr-importable** function that reasons over two spec
   documents (old vs new) without pkgmgr importing `internal/refractor/lens` (`definition.go`'s constraint,
