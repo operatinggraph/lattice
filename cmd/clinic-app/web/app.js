@@ -53,6 +53,11 @@ const state = {
   slotApptCache: {}, // providerKey -> existing appointments, for the booking slot picker (invalidated on book)
   slotPatientApptCache: {}, // patientKey -> the patient's appointments across all providers (cross-provider double-book exclusion; invalidated on book)
   slotCalAnchor: null, // UTC-midnight Date for the 1st of the month shown in the booking calendar (null → current UTC month)
+  opCatalog: null, // operationType -> op-catalog descriptor (GET /api/op-catalog), the dispatch shape descriptor-form-migrated forms render from
+  editProvider: undefined, // the #avail-provider value the "Provider details" descriptor form was last rendered for — re-render only on change
+  editProviderHandle: null, // the mounted SetProviderProfile descriptor-form handle saveProviderEdit submits
+  addProviderHandle: null, // the mounted CreateProvider descriptor-form handle submitAddProvider submits
+  assignSiteHandle: null, // the mounted AssignProviderSite descriptor-form handle submitAssignProviderSite submits
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -418,6 +423,112 @@ function rejectionMessage(reply) {
   return null;
 }
 
+// ---- op catalog (staff-descriptor-rendering-design.md §13) ----
+//
+// loadOpCatalog fetches the op-catalog descriptors (GET /api/op-catalog,
+// proxying the edge-manifest opCatalog lens) once and caches them in
+// state.opCatalog. A migrated form's dispatch shape (class, targetField,
+// reads, authContext) is read off the matching row instead of hardcoded
+// here, so a descriptor edit changes the form with no app rebuild. A FAILED
+// load is not cached — opCatalogPromise is cleared — so a transient outage
+// retries on the next call instead of poisoning the page for its whole
+// session. Mirrors loftspace-app/web/app.js's own loadOpCatalog.
+let opCatalogPromise = null;
+async function loadOpCatalog() {
+  if (!opCatalogPromise) {
+    opCatalogPromise = appGet("/api/op-catalog").then(
+      (data) => (data && data.catalog) || {},
+      (e) => {
+        opCatalogPromise = null;
+        throw e;
+      },
+    );
+  }
+  state.opCatalog = await opCatalogPromise;
+  return state.opCatalog;
+}
+
+// loadOpCatalogQuiet keeps a catalog outage from taking a whole panel down: an
+// op whose descriptor did not arrive is simply NOT OFFERED — the same
+// fail-closed answer as an op that carries no descriptor at all.
+async function loadOpCatalogQuiet() {
+  try {
+    await loadOpCatalog();
+  } catch (_) {
+    /* not offered, rather than offered and broken */
+  }
+}
+
+// ---- shared op-form renderer (staff-descriptor-rendering-design.md §13) ----
+//
+// loadDescriptorform imports the shared op-form renderer exactly once —
+// served at /shared/form.mjs by this app's server.go, beside its own
+// embedded web/ FileServer. A dynamic import() keeps app.js a plain
+// (non-module) script, unchanged for every other caller.
+// descriptorformModule caches the resolved module itself (not just the
+// promise); a rejected import clears BOTH so a transient load failure is
+// retried on the next call rather than poisoning the session. Mirrors
+// loftspace-app/web/app.js's own loadDescriptorform.
+let descriptorformPromise = null;
+let descriptorformModule = null;
+function loadDescriptorform() {
+  if (!descriptorformPromise) {
+    descriptorformPromise = import("/shared/form.mjs").then(
+      (mod) => {
+        descriptorformModule = mod;
+        return mod;
+      },
+      (e) => {
+        descriptorformPromise = null;
+        descriptorformModule = null;
+        throw e;
+      },
+    );
+  }
+  return descriptorformPromise;
+}
+
+// submitCatalogOp posts the envelope a descriptorform handle's submit()
+// returns — {operationType, class, payload, reads, optionalReads,
+// authContext} — unchanged, browser-direct to the Gateway's POST
+// /v1/operations, with this session's own bearer (real-actor-write-auth-e2e-
+// design.md §3.1). Shares its network plumbing (base URL, token, the 401
+// forced-renewal retry) with submitOp above; the difference is the shape
+// each takes — submitOp builds the envelope from positional operationType/
+// class/payload/reads/opts arguments, this one takes the whole envelope
+// already assembled (mirrors loftspace-app/web/app.js's own submitOp(body,
+// opts), which takes exactly this shape).
+async function submitCatalogOp(envelope) {
+  const [base, token] = await Promise.all([gatewayURL(), sessionWriteToken()]);
+  const post = (bearer) =>
+    api(base + "/v1/operations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + bearer },
+      body: JSON.stringify(envelope),
+    });
+  const submit = async () => {
+    try {
+      return await post(token);
+    } catch (e) {
+      if (!isAuthLapse(e)) throw e;
+      return post(await sessionWriteToken(true));
+    }
+  };
+  // The bounded isTransientAuthLag retry (unconditional, like loftspace-app's
+  // own submitOp) — a self-scoped submit is the case this actually fires for
+  // in practice (a patient's first-ever payment can outrun its own capability
+  // projection), but the check is on the REPLY's own rejection signature, not
+  // on this envelope's shape, so it costs nothing to apply to every catalog
+  // submission the same way.
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await submit();
+    if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  return reply;
+}
+
 // friendlyBookingRejection maps an op rejection message to operator-readable text
 // for the booking / reschedule paths: a provider double-book (SlotConflict), a
 // patient double-book across providers (PatientDoubleBook), an
@@ -743,7 +854,6 @@ async function loadProviders() {
   // disables the select so there is nothing else to pick.
   populateProviderSelect("#avail-provider", isProvider() && !isFrontDesk() ? { onlyKey: myProviderKey() } : undefined);
   populateProviderSelect("#series-provider");
-  populateProviderSelect("#assign-provider");
   refreshBookEnabled();
   renderSlotCalendar();
   renderAvailEditors();
@@ -777,7 +887,6 @@ async function loadSites() {
   }
   populateSiteSelect();
   populateProviderSelect("#provider", bookFilterOpts());
-  populateAssignSiteSelect();
   renderSitesList();
   renderProviderSitesList();
 }
@@ -804,26 +913,6 @@ function populateSiteSelect() {
   any.value = "";
   any.textContent = "Any site";
   el.append(any);
-  for (const s of state.sites) {
-    const o = document.createElement("option");
-    o.value = s.siteKey;
-    o.textContent = s.name;
-    el.append(o);
-  }
-  el.value = state.sites.some((s) => s.siteKey === prev) ? prev : "";
-}
-
-// populateAssignSiteSelect fills the Sites tab's site picker (for the
-// assign-a-provider form) from the site directory.
-function populateAssignSiteSelect() {
-  const el = $("#assign-site-select");
-  if (!el) return;
-  const prev = el.value;
-  el.innerHTML = "";
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = state.sites.length ? "Select site…" : "No sites yet — add one above";
-  el.append(placeholder);
   for (const s of state.sites) {
     const o = document.createElement("option");
     o.value = s.siteKey;
@@ -925,27 +1014,60 @@ async function submitAddSite() {
   }
 }
 
-// submitAssignProviderSite submits AssignProviderSite(provider, building) —
-// both endpoints pre-exist, so ContextHint.Reads carries both (mirrors
-// AssignUnitOwner's own dispatcher).
-async function submitAssignProviderSite() {
-  const provider = $("#assign-provider").value;
-  const site = $("#assign-site-select").value;
-  if (!provider || !site) {
-    toast("Select a provider and a site.", "err");
+// renderAssignSiteForm mounts AssignProviderSite's descriptor form. Both
+// endpoints (provider, site) pre-exist and neither is "the entity in view" —
+// clinic-domain/opmetas.go's own dispatch note — so the op declares no
+// targetField and this renders once, with no context.target, re-rendering
+// itself after a successful assign for the next one.
+async function renderAssignSiteForm() {
+  const mount = $("#assign-site-fields");
+  const btn = $("#assign-site-submit");
+  state.assignSiteHandle = null;
+  btn.disabled = true;
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the site-assignment form: " + e.message, "err");
     return;
   }
+  const row = (state.opCatalog || {}).AssignProviderSite;
+  const handle = row && renderOpForm(row, {}, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The site-assignment form is unavailable.", "err");
+    return;
+  }
+  state.assignSiteHandle = handle;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
+}
+
+// submitAssignProviderSite submits the mounted AssignProviderSite form.
+async function submitAssignProviderSite() {
+  const handle = state.assignSiteHandle;
+  if (!handle) return;
+
   const btn = $("#assign-site-submit");
   btn.disabled = true;
   try {
-    const reply = await submitOp("AssignProviderSite", "clinicSiteAssignment", { provider, building: site }, [provider, site],
-      { optionalReads: [practicesAtLinkKey(provider, site)] });
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not assign provider to site — " + msg, "err");
       return;
     }
     toast("Provider assigned to site.", "ok");
+    renderAssignSiteForm();
     setTimeout(loadSites, 700);
   } catch (e) {
     toast("Could not assign provider to site: " + e.message, "err");
@@ -971,72 +1093,96 @@ async function submitRemoveProviderSite(provider, site) {
   }
 }
 
-// renderAvailEditors re-seeds (only if the selected provider changed) and renders
-// both Availability-tab editors against #avail-provider. Safe to call any time —
-// after a roster refresh the selection is preserved, so a just-saved draft is kept.
+// renderAvailEditors re-renders the "Provider details" descriptor form
+// (only if the selected provider changed) and the hours / time-off editors
+// against #avail-provider. Safe to call any time — after a roster refresh
+// the selection is preserved, so a just-saved draft is kept.
 function renderAvailEditors() {
-  seedProviderEdit();
+  renderProviderEditForm();
   hoursDraftForSelectedProvider();
   renderHoursDraft();
   timeOffDraftForSelectedProvider();
   renderTimeOffDraft();
 }
 
-// seedProviderEdit fills the "Provider details" editor from the selected provider's
-// projected profile (name / specialty / credentials / bio — all carried by the
-// clinicProviders lens). Like the hours / time-off editors it re-seeds ONLY when
-// the selected provider changes, so an in-progress edit survives a roster refresh;
-// with no provider selected the fields are cleared + disabled.
-function seedProviderEdit() {
+// renderProviderEditForm mounts SetProviderProfile's descriptor form for the
+// selected provider — prefilled from the projected profile (name / specialty
+// / credentials / bio, all carried by the clinicProviders lens). Like the
+// hours / time-off editors it re-renders ONLY when the selected provider
+// changes, so an in-progress edit survives a roster refresh; with no
+// provider selected the mount is cleared and Save disabled. The op REPLACES
+// the whole .profile, so the schema's own required set (fullName, specialty)
+// is what keeps the roster lens from losing the provider — nothing hardcoded
+// here beyond that.
+async function renderProviderEditForm() {
   const prov = $("#avail-provider").value;
   if (prov === state.editProvider) return;
   state.editProvider = prov;
-  const p = providerByKey(prov);
-  $("#edit-prov-name").value = p ? p.name || "" : "";
-  $("#edit-prov-specialty").value = p ? p.specialty || "" : "";
-  $("#edit-prov-credentials").value = p ? p.credentials || "" : "";
-  $("#edit-prov-bio").value = p ? p.bio || "" : "";
-  const disabled = !prov;
-  for (const id of ["#edit-prov-name", "#edit-prov-specialty", "#edit-prov-credentials", "#edit-prov-bio", "#edit-prov-save"]) {
-    $(id).disabled = disabled;
+  const mount = $("#edit-prov-fields");
+  const btn = $("#edit-prov-save");
+  state.editProviderHandle = null;
+  btn.disabled = true;
+  if (!prov) {
+    mount.innerHTML = "";
+    return;
   }
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the provider-edit form: " + e.message, "err");
+    return;
+  }
+  // The selection may have moved on while these awaits were in flight — never
+  // mount a stale form for a provider that is no longer selected.
+  if ($("#avail-provider").value !== prov) return;
+  const row = (state.opCatalog || {}).SetProviderProfile;
+  const p = providerByKey(prov);
+  const handle = row && renderOpForm(row, {
+    target: prov,
+    prefill: p ? { fullName: p.name, specialty: p.specialty, credentials: p.credentials, bio: p.bio } : null,
+  }, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The provider-edit form is unavailable.", "err");
+    return;
+  }
+  state.editProviderHandle = handle;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
 }
 
-// saveProviderEdit submits SetProviderProfile for the selected provider. The op
-// REPLACES the whole .profile, so the form (seeded from the projected profile)
-// carries every field; name + specialty are required so the roster lens never
-// loses the provider. Mirrors saveProviderHours / saveProviderTimeOff (no re-seed
-// after save — the form already shows what was saved, and the projection may lag).
+// saveProviderEdit submits the mounted SetProviderProfile form. Mirrors
+// saveProviderHours / saveProviderTimeOff (no re-render after save — the
+// form already shows what was saved, and the projection may lag).
 async function saveProviderEdit() {
-  const prov = $("#avail-provider").value;
-  if (!prov) {
+  const handle = state.editProviderHandle;
+  if (!handle) {
     toast("Select a provider first.", "err");
     return;
   }
-  const name = $("#edit-prov-name").value.trim();
-  const specialty = $("#edit-prov-specialty").value.trim();
-  const credentials = $("#edit-prov-credentials").value.trim();
-  const bio = $("#edit-prov-bio").value.trim();
-  if (!name || !specialty) {
-    toast("Provider name and specialty are required.", "err");
-    return;
-  }
-  const payload = { providerKey: prov, fullName: name, specialty };
-  if (credentials) payload.credentials = credentials;
-  if (bio) payload.bio = bio;
-
   const btn = $("#edit-prov-save");
   btn.disabled = true;
   try {
-    const reply = await submitOp("SetProviderProfile", "provider", payload, [prov]);
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not save provider details — " + msg, "err");
       return;
     }
     toast("Provider details saved.", "ok");
-    // Refresh the roster so the picker label (name · specialty) reflects the edit;
-    // the selection is preserved, so seedProviderEdit keeps the just-saved form.
+    // Refresh the roster so the picker label (name · specialty) reflects the
+    // edit; the selection is preserved, so renderProviderEditForm keeps the
+    // just-saved form.
     loadProviders();
   } catch (e) {
     toast("Could not save provider details: " + e.message, "err");
@@ -1151,32 +1297,63 @@ function populateSpecialtySelect() {
   el.value = specialties.includes(prev) ? prev : "";
 }
 
-async function submitAddProvider() {
-  const name = $("#np-prov-name").value.trim();
-  const specialty = $("#np-prov-specialty").value.trim();
-  const credentials = $("#np-prov-credentials").value.trim();
-  if (!name || !specialty) {
-    toast("Provider name and specialty are required.", "err");
+// renderAddProviderForm mounts CreateProvider's descriptor form. The op mints
+// a brand-new provider — no pre-existing vertex to derive a target from
+// (clinic-domain/opmetas.go's own note on CreateProvider's dispatch), so
+// this renders once, with no context.target, and re-renders itself after a
+// successful add for the next one (fresh empty fields — the module owns the
+// controls, so there is nothing for this app to clear directly).
+async function renderAddProviderForm() {
+  const mount = $("#np-prov-fields");
+  const btn = $("#add-provider-submit");
+  state.addProviderHandle = null;
+  btn.disabled = true;
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the add-provider form: " + e.message, "err");
     return;
   }
-  const payload = { fullName: name, specialty };
-  if (credentials) payload.credentials = credentials;
+  const row = (state.opCatalog || {}).CreateProvider;
+  const handle = row && renderOpForm(row, {}, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The add-provider form is unavailable.", "err");
+    return;
+  }
+  state.addProviderHandle = handle;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
+}
+
+// submitAddProvider submits the mounted CreateProvider form.
+async function submitAddProvider() {
+  const handle = state.addProviderHandle;
+  if (!handle) return;
 
   const btn = $("#add-provider-submit");
   btn.disabled = true;
   try {
-    const reply = await submitOp("CreateProvider", "provider", payload);
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not add provider — " + msg, "err");
       return;
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
-    $("#np-prov-name").value = "";
-    $("#np-prov-specialty").value = "";
-    $("#np-prov-credentials").value = "";
     $("#add-provider").open = false;
     toast("Provider added.", "ok", key);
+    renderAddProviderForm();
     setTimeout(async () => {
       await loadProviders();
       // The add affordance lives in the Availability tab — select the new provider
@@ -2759,6 +2936,17 @@ async function openLedgerAccount(patientKey) {
 // self (permissions.go grants no self-scope charge) — a patient viewing their
 // own record only ever reaches this path via the payment button, since
 // applyHatGating hides #ledger-charge from non-front-desk sessions.
+//
+// The two ops share ONE visible amount/memo field pair behind two buttons
+// (charge vs payment), and neither op's target (the account) exists until
+// the first transaction — so, unlike every other migrated op, this renders
+// the descriptor form into a detached mount that is never shown, purely to
+// assemble the envelope (payload, reads, and — the one part that genuinely
+// differs per button — authContext) from what was already typed into the
+// visible fields. The visible #ledger-amount/#ledger-memo inputs stay put
+// across both buttons; only the hand-rolled payload/authContext assembly is
+// gone, replaced by the descriptor's own dispatch shape for whichever op
+// this call is.
 async function submitLedgerEntry(opType, what) {
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -2772,20 +2960,27 @@ async function submitLedgerEntry(opType, what) {
     return;
   }
   const cents = Math.round(dollars * 100);
+  const memo = memoInput.value.trim();
   const chargeBtn = $("#ledger-charge");
   const paymentBtn = $("#ledger-payment");
   chargeBtn.disabled = paymentBtn.disabled = true;
-  const asSelf = opType === "ClinicCreditAccount" && actingAsSelf();
   try {
     let accountKey = state.ledger && state.ledger.accountKey;
     if (!accountKey) accountKey = await openLedgerAccount(state.patient);
-    const reply = await submitOp(
-      opType,
-      "clinictransaction",
-      { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined },
-      [accountKey],
-      { asSelf }
-    );
+
+    await loadOpCatalogQuiet();
+    const { renderOpForm } = await loadDescriptorform();
+    const row = (state.opCatalog || {})[opType];
+    if (!row) throw new Error("this action is unavailable");
+    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined } };
+    if (opType === "ClinicCreditAccount") {
+      context.me = patientIdentityKey();
+      context.selfVoice = actingAsSelf();
+    }
+    const handle = renderOpForm(row, context, document.createElement("div"));
+    if (!handle) throw new Error("this action is unavailable");
+    const envelope = handle.submit();
+    const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) throw new Error(msg);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
@@ -4272,6 +4467,14 @@ function init() {
     loadPatients();
     loadProviders();
     loadSites();
+    // Prefetched in parallel so the first descriptor-form render (provider
+    // edit / add provider / assign site / ...) does not itself pay for the
+    // catalog + module round trips — both cache themselves for the page's
+    // lifetime.
+    loadOpCatalogQuiet();
+    loadDescriptorform().catch(() => {});
+    renderAddProviderForm();
+    renderAssignSiteForm();
   });
 
   // Discourage a past booking from the picker itself; refresh on focus so a

@@ -25,6 +25,14 @@
 // itself the value sent, and a caller in no self-voiced surface at all
 // simply never sets it (undefined is falsy, so this defaults closed).
 //
+// An op whose dispatch carries no `targetField` (a free-choice create, or an
+// op with no single pre-existing "entity in view" to derive a subject from —
+// e.g. minting a brand-new vertex, or naming two independent existing ones
+// as plain fields) needs no `context.target` at all: every schema property
+// renders as an ordinary editable field, nothing is auto-filled or excluded,
+// and `submit()` writes no target into the payload. `context.target` is
+// simply ignored for such an op.
+//
 // ANTI-FALLBACK RULE (normative): target resolution is `context.target`
 // alone — never `context.me` or any other context key substituted for an
 // unresolved target. This module's callers resolve `target` themselves
@@ -224,21 +232,21 @@ function buildField(name, schema, isRequired, help, prefill, sensitive) {
 // normalizeCatalogRow turns one raw `/api/op-catalog` row into the shape this
 // module renders from, refusing (returning `null`) rather than
 // half-rendering: no inputSchema means there is nothing to render, no
-// dispatch class/targetField means the envelope could not be assembled even
-// if a form appeared, a declared `visibleWhen` this module ships no
-// evaluator for is treated as unmet (no state, no offer — the honest answer
-// to a condition a client cannot decide, loftspace `catalogDescriptor`'s own
-// rule), and `authContext:"service"` has no source in this module's context
-// shape (`{ target, me, taskKey, workplace, row, prefill, selfVoice }`
-// carries no service key) — refusing it here means a caller never gets a
-// handle back for it, rather than one whose submit() always fails at the
-// Processor.
+// dispatch class means the envelope could not be assembled even if a form
+// appeared (`targetField` itself is optional — see the free-choice/no-target
+// note above), a declared `visibleWhen` this module ships no evaluator for
+// is treated as unmet (no state, no offer — the honest answer to a condition
+// a client cannot decide, loftspace `catalogDescriptor`'s own rule), and
+// `authContext:"service"` has no source in this module's context shape
+// (`{ target, me, taskKey, workplace, row, prefill, selfVoice }` carries no
+// service key) — refusing it here means a caller never gets a handle back
+// for it, rather than one whose submit() always fails at the Processor.
 // canRender (below) is this same refusal, exposed for a caller deciding
 // whether to enable an offer before it has a mount to render into.
 function normalizeCatalogRow(row) {
   if (!row || !row.inputSchema || !row.dispatch) return null;
   const dispatch = row.dispatch;
-  if (!dispatch.class || !dispatch.targetField) return null;
+  if (!dispatch.class) return null;
   if (dispatch.visibleWhen) return null;
   if (dispatch.authContext === "service") return null;
   let schema;
@@ -393,21 +401,34 @@ function buildAuthContext(kind, context) {
 export function renderOpForm(catalogRow, context, mount) {
   const normalized = normalizeCatalogRow(catalogRow);
   if (!normalized) return null;
-  if (!context || !context.target) return null;
 
   const { schema, dispatch, presentation, fieldDescriptions, operationType } = normalized;
-  // A wrong-typed target is a real hazard, not a formality: a caller could
-  // hand this a key it resolved for a DIFFERENT purpose (a task's own key
-  // where the op wants its subject's, say), and submitting it would name the
-  // wrong vertex under real authority. Facet's own resolveTargetKey applies
-  // exactly this check for exactly this reason.
-  if (dispatch.targetType && keyType(context.target) !== dispatch.targetType) return null;
+  const targetField = dispatch.targetField;
+
+  // A targetField-less op (free-choice create, or an op naming two
+  // independent existing entities as plain fields) has no subject to
+  // resolve at all, so context.target is never required and the type check
+  // below has nothing to check against. Every other op needs a resolved,
+  // correctly-typed target before it can render.
+  if (targetField) {
+    if (!context || !context.target) return null;
+    // A wrong-typed target is a real hazard, not a formality: a caller could
+    // hand this a key it resolved for a DIFFERENT purpose (a task's own key
+    // where the op wants its subject's, say), and submitting it would name
+    // the wrong vertex under real authority. Facet's own resolveTargetKey
+    // applies exactly this check for exactly this reason.
+    if (dispatch.targetType && keyType(context.target) !== dispatch.targetType) return null;
+  }
+  // A targetField-less op may be called with no context at all (nothing to
+  // resolve) — default it so the prefill/reads/authContext reads below never
+  // dereference a null.
+  context = context || {};
 
   const props = schema.properties || {};
   const required = new Set(schema.required || []);
-  const targetField = dispatch.targetField;
   // The target field stays out of the form: it is filled from `context.target`,
-  // never typed.
+  // never typed. Filtering by `undefined` (no targetField) excludes nothing —
+  // every schema property renders.
   const fieldNames = Object.keys(props).filter((name) => name !== targetField);
 
   const fields = fieldNames.map((name) =>
@@ -429,8 +450,10 @@ export function renderOpForm(catalogRow, context, mount) {
       // Written FIRST, before any read template is substituted: a declared
       // read of the form `{payload.<targetField>}.suffix` can only resolve
       // once the target is in the payload it names (mirrors Facet
-      // app.js:2748-2754 / loftspace app.js:2313).
-      payload[targetField] = context.target;
+      // app.js:2748-2754 / loftspace app.js:2313). Skipped entirely for a
+      // targetField-less op — there is no key to write it under, and every
+      // field below is a plain typed value instead.
+      if (targetField) payload[targetField] = context.target;
 
       for (const f of fields) {
         const value = f.read();
