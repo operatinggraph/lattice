@@ -8,10 +8,18 @@
 //
 // Environment:
 //
-//	NATS_URL             NATS server URL (default: nats://localhost:4222)
-//	BOOTSTRAP_JSON_PATH  path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
-//	BRIDGE_INSTANCE      instance id (default: auto-generated bridge-<NanoID>)
-//	BRIDGE_LANE          ops lane for result-op submission (default: system)
+//	NATS_URL                  NATS server URL (default: nats://localhost:4222)
+//	BOOTSTRAP_JSON_PATH       path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
+//	BRIDGE_INSTANCE           instance id (default: auto-generated bridge-<NanoID>)
+//	BRIDGE_LANE               ops lane for result-op submission (default: system)
+//	BRIDGE_CAPABILITY_AUTHOR  "real" registers the model-backed capabilityAuthor
+//	                          adapter, which reasons over the capability-author
+//	                          catalog through the model-runner fleet. Any other
+//	                          value, or unset, registers nothing: an authoring
+//	                          request then raises the ordinary adapter-missing
+//	                          health issue, exactly as it does today. Turning it
+//	                          on requires a deployed model-runner (which holds the
+//	                          vendor credential; the bridge never does).
 //
 // Logs to stderr in slog text format. Exits non-zero on any startup failure;
 // graceful shutdown on SIGINT/SIGTERM.
@@ -19,6 +27,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,7 +41,11 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/modelrunner/wire"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
 )
 
 func main() {
@@ -147,6 +160,38 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	// capabilityAuthor — the model-backed AI-authoring adapter, off unless
+	// BRIDGE_CAPABILITY_AUTHOR names it. It is the one adapter whose absence is
+	// the correct default: it spends money at a vendor, and a platform with no
+	// model-runner deployed has nothing for it to talk to. Registering nothing
+	// leaves an authoring request on today's adapter-missing path (ack + a
+	// health issue), which is a visible config gap rather than a fake
+	// fabricating proposals in production.
+	//
+	// Both the validator and the catalog bucket name are resolved here rather
+	// than inside internal/bridge: this is the composition root, so it is the
+	// one place allowed to depend on the installer and on package data. The
+	// bucket name comes from the owning package's own exported constant, so a
+	// rename there cannot leave the adapter reading a bucket nobody projects.
+	if os.Getenv("BRIDGE_CAPABILITY_AUTHOR") == "real" {
+		author, err := bridge.NewCapabilityAuthor(
+			wire.NewClient(conn.NATS()),
+			conn,
+			capabilityauthor.CapabilityAuthorContextBucket,
+			capabilityArtifactVerdict,
+		)
+		if err != nil {
+			return fmt.Errorf("build capabilityAuthor adapter: %w", err)
+		}
+		if err := engine.RegisterAdapter("capabilityAuthor", author); err != nil {
+			return fmt.Errorf("register adapter %q: %w", "capabilityAuthor", err)
+		}
+		logger.Info("bridge: model-backed capabilityAuthor adapter registered",
+			"catalogBucket", capabilityauthor.CapabilityAuthorContextBucket,
+			"runnerSubject", wire.GenerateSubject,
+			"resultsBucket", wire.ResultsBucket)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -171,6 +216,53 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// bridgeCypherParser adapts ruleengine/full to pkgmgr.CypherParser — the same
+// wiring cmd/loupe's review console and the CLI's capability path build. It
+// lives at the composition root, not in internal/pkgmgr, for the import-cycle
+// reason pkgmgr.CypherParser's own doc explains (full's test binary
+// transitively imports pkgmgr).
+type bridgeCypherParser struct{}
+
+func (bridgeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
+	facts, err := full.SpecLabels(ruleBody)
+	if err != nil {
+		return pkgmgr.SpecLabels{}, err
+	}
+	return pkgmgr.SpecLabels{
+		Referenced: facts.Referenced,
+		Exhaustive: facts.Exhaustive,
+		Expansion:  facts.Expansion,
+	}, nil
+}
+
+var _ pkgmgr.CypherParser = bridgeCypherParser{}
+
+// capabilityArtifactVerdict is the capabilityAuthor adapter's deterministic
+// validator: the same pkgmgr.ValidateCapabilityArtifact boundary Loupe re-runs
+// at approve time, so a proposal recorded valid here is one the approve path
+// would also accept. It is built at the composition root and injected, keeping
+// the installer out of internal/bridge.
+//
+// The two optional dependencies are deliberately nil. requesterHeld is read only
+// for the "grant" kind (a conferred-authority subset check) and the
+// sensitive-aspect resolver only for "opMeta"; this adapter authors weaver
+// targets and nothing else, so neither is ever consulted — the same nil pair
+// Loupe's own weaverTarget/lens check passes.
+//
+// A validator ERROR is a malformed artifact, not an unknown verdict: the report
+// carries the reason and the state fails closed to invalid, so an
+// undecodable draft records visibly rather than being admitted for review.
+func capabilityArtifactVerdict(kind string, content []byte) (string, string) {
+	report, err := pkgmgr.ValidateCapabilityArtifact(kind, json.RawMessage(content), bridgeCypherParser{}, nil, nil)
+	if err != nil {
+		return bridge.ValidationStateInvalid, "artifact validation failed: " + err.Error()
+	}
+	if report.Valid {
+		return bridge.ValidationStateValid, ""
+	}
+	return bridge.ValidationStateInvalid, strings.Join(report.Errors, "; ")
 }
 
 // defaultUploadCap bounds a single docGen artifact write (OBJECTS_MAX_UPLOAD_BYTES).

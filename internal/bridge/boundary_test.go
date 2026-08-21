@@ -33,6 +33,15 @@ func TestStart_EmptyActorKeyFails(t *testing.T) {
 // in its dependency tree — the bridge is a leaf on substrate, owning the adapter
 // contract with no dependency on any orchestration engine. All cross-component
 // interaction is over NATS.
+//
+// internal/pkgmgr and the model vendor SDK are on the same list for the
+// capabilityAuthor adapter's sake: its deterministic verdict comes from an
+// injected validator and its model call goes out over NATS through the
+// stdlib-only internal/modelrunner/wire leaf, precisely so the installer and the
+// credential-holding vendor client stay out of the bridge binary. Wiring either
+// in directly would work and would silently undo both boundaries. The SDK is
+// named rather than internal/modelrunner because the runner's own package is
+// what would drag it in, while wire — the half both sides share — is sanctioned.
 func TestModuleBoundary_OnlySubstrate(t *testing.T) {
 	t.Parallel()
 	out, err := exec.Command("go", "list", "-deps", "github.com/operatinggraph/lattice/internal/bridge").Output()
@@ -45,6 +54,8 @@ func TestModuleBoundary_OnlySubstrate(t *testing.T) {
 		"github.com/operatinggraph/lattice/internal/refractor",
 		"github.com/operatinggraph/lattice/internal/weaver",
 		"github.com/operatinggraph/lattice/internal/weaver/nudge",
+		"github.com/operatinggraph/lattice/internal/pkgmgr",
+		"github.com/anthropics/anthropic-sdk-go",
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		dep := strings.TrimSpace(line)

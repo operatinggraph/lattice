@@ -51,6 +51,13 @@ const (
 	// by the Gateway's own events.identity.> consumer, not a Lens target
 	// (gateway-claim-flow-identity-provisioning-design.md §11.0/§11.5 R1).
 	GatewayCredentialBindingsBucket = "credential-bindings"
+	// ModelResultsBucket is the model-runner's per-ref call-result store (must
+	// match internal/modelrunner/wire.ResultsBucket by value — bootstrap does
+	// not import the runner's packages; internal/modelrunner's tests pin the
+	// two together). Written only by the runner, read by whoever dispatched
+	// the ref; every key is TTL'd and none of it is a Lens target
+	// (natural-language-weaver-targets-design.md §3.1).
+	ModelResultsBucket = "model-results"
 
 	// CoreObjectsBucket is the off-graph binary blob store — a JetStream Object
 	// Store (backed by stream OBJ_core-objects), NOT a KV bucket. It is the

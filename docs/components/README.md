@@ -40,6 +40,10 @@ choices live HERE. Per-package capability definitions live under
   the sole writer).
 - [Bridge](./bridge.md) — the external-I/O egress: a durable `events.external.>`
   consumer, the adapter registry, and idempotent result-op submission.
+- [Model-runner](./model-runner.md) — the sole external-model egress: a queue-group NATS
+  micro-service that holds the vendor credential, runs one strict-tool model call per request, and
+  lands results in the `model-results` KV for the caller to poll (domain-free; callers assemble
+  prompts and validate outputs).
 - [The Chronicler](./chronicler.md) — the event-ledger materializer: tails platform event / ledger
   streams (`events.loom.>`, later `events.weaver.>`, the intent ledger) into append-only history read
   models (`orchestration-history`) + verbatim archives — the history counterpart to Refractor's
@@ -115,6 +119,7 @@ between page and code is treated as a documentation bug.
 | Vault, Privacy-worker — per-identity keys, crypto-shredding | ✅ Built (Phase 3) — encrypt-on-write/decrypt-on-read + `ShredIdentityKey`; per-vertical fires ongoing |
 | The Chronicler — event-ledger materializer (durable orchestration history) | ✅ Built (Phase 2, Fork C) — PROJECT mode + `loomFlowHistory` + standalone `cmd/chronicler` host extraction complete |
 | The Augur — the Weaver's L3 AI-assisted reasoning tier | ✅ Built (Phase 3) — escalate → propose → validate → human-gate → dispatch; the `autoApply` autonomy dial designed + Andrew-gated |
+| Model-runner — queue-group external-model egress (vendor credential holder) | ✅ Built (Phase 3, NL-1) — serves the bridge's real `capabilityAuthor` adapter; deploy-opt-in |
 
 Each page's own *Implementation status* / *What's deferred* section is the
 authoritative, fine-grained record for that component.

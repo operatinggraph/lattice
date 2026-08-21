@@ -17,16 +17,16 @@ import "testing"
 // artifacts, so a consumer-reachable grant here would let a caller mint platform
 // capability. That is the human gate the whole design rests on.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 2; got != want {
+	if got, want := len(Package.DDLs), 4; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 6; got != want {
+	if got, want := len(Package.Permissions), 7; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 6; got != want {
+	if got, want := len(Package.OpMetas), 7; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -42,7 +42,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		t.Errorf("Depends: got %v, want [orchestration-base]", Package.Depends)
 	}
 
-	for i, want := range []string{"capabilityproposal", "capabilityauthorclaim"} {
+	for i, want := range []string{"capabilityproposal", "capabilityauthorclaim", "capabilityAuthorClaimDispatch", "capabilityAuthorDispatchMarker"} {
 		if i >= len(Package.DDLs) {
 			break
 		}
@@ -61,6 +61,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	wantPerms := []struct{ op, scope string }{
 		{"RequestCapabilityAuthoring", "any"}, {"CreateAuthoringClaim", "any"},
 		{"SubmitCapabilityProposal", "any"}, {"RecordCapabilityProposal", "any"},
+		{"RecordAuthoringDispatch", "any"},
 		{"ReviewCapabilityProposal", "any"}, {"MarkCapabilityProposalApplied", "any"},
 	}
 	for i, want := range wantPerms {

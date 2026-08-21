@@ -25,6 +25,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - RecordCapabilityProposal — the trusted submitter that has already run the
 //     §5 materializer (the bridge, in the full design); modeled here as
 //     operator-equivalent, mirroring augur's RecordProposal.
+//   - RecordAuthoringDispatch — the trusted submitter (the bridge, once its
+//     real adapter returns Pending) records the pending-dispatch marker for
+//     an in-flight escalation call. Same operator-equivalent posture as
+//     RecordCapabilityProposal, mirroring lease-signing's RecordServiceDispatch.
 //   - ReviewCapabilityProposal — a human operator submits the verdict that
 //     flips a pending proposal to approved/rejected (design §3.3), mirroring
 //     augur's ReviewProposal.
@@ -59,6 +63,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "RecordAuthoringDispatch",
+			Scope:         "any",
+			Note:          "Authorizes the trusted submitter (the bridge, once its real capabilityAuthor adapter returns Pending) to record the pending-dispatch marker for an in-flight escalation call (design §3.4, the async DispatchOp — mirrors lease-signing's RecordServiceDispatch).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "ReviewCapabilityProposal",
 			Scope:         "any",
 			Note:          "Authorizes a human operator to approve or reject a pending capability proposal (design §3.3).",
@@ -84,6 +94,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "CreateAuthoringClaim"},
 		{OperationType: "SubmitCapabilityProposal"},
 		{OperationType: "RecordCapabilityProposal"},
+		{OperationType: "RecordAuthoringDispatch"},
 		{OperationType: "ReviewCapabilityProposal"},
 		{OperationType: "MarkCapabilityProposalApplied"},
 	}

@@ -1,5 +1,5 @@
 name: capability-author
-version: 0.9.2
+version: 0.10.0
 description: |
   AI-authored capabilities — Fire 1 capture + escalation dispatch + review lenses, Fire 2
   review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern
@@ -23,6 +23,12 @@ description: |
   deciding pending | invalid, and a declared provenance.source of 'ai' | 'operator' telling
   the two lanes apart). The AI or an operator proposes; a human decides;
   the operator applies via F-004; the Processor stays sole writer.
+  RecordAuthoringDispatch (natural-language-weaver-targets-design.md §3.2) is the
+  externalTask dispatchOp the bridge submits when its capabilityAuthor adapter
+  returns Pending — a create-only pending marker on the claim vertex, mirroring
+  lease-signing's RecordServiceDispatch. capabilityAuthorContext additionally
+  projects the full `.spec` aspect body (existing lens/weaverTarget bodies), not
+  just self-description.
 depends:
   - orchestration-base
 declares:
@@ -31,6 +37,10 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: capabilityauthorclaim
       class: meta.ddl.vertexType
+    - canonicalName: capabilityAuthorClaimDispatch
+      class: meta.ddl.vertexType
+    - canonicalName: capabilityAuthorDispatchMarker
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: capabilityAuthorPending
       adapter: nats-kv
@@ -57,6 +67,9 @@ declares:
     - operationType: RecordCapabilityProposal
       scope: any
       grantsTo: [operator]
+    - operationType: RecordAuthoringDispatch
+      scope: any
+      grantsTo: [operator]
     - operationType: ReviewCapabilityProposal
       scope: any
       grantsTo: [operator]
@@ -74,5 +87,6 @@ declares:
     - operationType: CreateAuthoringClaim
     - operationType: SubmitCapabilityProposal
     - operationType: RecordCapabilityProposal
+    - operationType: RecordAuthoringDispatch
     - operationType: ReviewCapabilityProposal
     - operationType: MarkCapabilityProposalApplied

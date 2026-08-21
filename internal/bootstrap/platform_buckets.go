@@ -81,6 +81,20 @@ func PlatformBuckets() []PlatformBucket {
 			LensTarget:  true,
 		},
 		{
+			// model-results is the model-runner's per-ref result store: an
+			// in-flight marker CAS-created before the vendor call, replaced by
+			// the terminal result, plus the fleet's daily spend counter. Every
+			// key is per-key TTL'd — nothing here is durable truth, and the
+			// TTL is what reopens a ref after a runner dies mid-call.
+			// Platform-private operational state like weaver-state: not Core
+			// KV, not a lens target. Callers (the bridge's model-backed
+			// adapters) read it; only the runner writes it.
+			Name:        ModelResultsBucket,
+			Description: "Lattice Model Results KV — model-runner call results (per-ref, TTL'd)",
+			PerKeyTTL:   true,
+			Owner:       "model-runner",
+		},
+		{
 			Name:        RefractorAdjacencyKV,
 			Description: "Refractor internal adjacency store (private)",
 			Owner:       "refractor",

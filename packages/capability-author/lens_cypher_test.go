@@ -271,6 +271,7 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	putVertex(t, coreKV, lensKey, "meta.lens")
 	putAspect(t, coreKV, lensKey, "canonicalName", "canonicalName", map[string]any{"value": "capabilityProposals"})
 	putAspect(t, coreKV, lensKey, "description", "description", map[string]any{"text": "The operator review lens."})
+	putAspect(t, coreKV, lensKey, "spec", "spec", map[string]any{"cypherRule": "MATCH (p:provider) RETURN p.key AS key", "engine": "full"})
 
 	rows := projectCapAuthor(t, adjKV, coreKV, capabilityAuthorContextSpec)
 	require.Len(t, rows, 2)
@@ -281,6 +282,7 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	require.Equal(t, "capabilityproposal", ddlRow["canonicalName"])
 	require.Equal(t, []any{"RequestCapabilityAuthoring", "RecordCapabilityProposal"}, ddlRow["permittedCommands"])
 	require.Equal(t, `{"type":"object"}`, ddlRow["inputSchema"])
+	require.Nil(t, ddlRow["spec"], "a DDL carries no .spec aspect (only lens/weaverTarget/loomPattern do) → null")
 
 	lensRow := rowByCapAuthorKey(rows, lensKey)
 	require.NotNil(t, lensRow)
@@ -288,4 +290,6 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	require.Equal(t, "capabilityProposals", lensRow["canonicalName"])
 	require.Nil(t, lensRow["permittedCommands"], "non-DDL meta has no permittedCommands aspect → null")
 	require.Nil(t, lensRow["inputSchema"], "non-DDL meta has no inputSchema aspect → null")
+	require.Equal(t, map[string]any{"cypherRule": "MATCH (p:provider) RETURN p.key AS key", "engine": "full"}, lensRow["spec"],
+		"the full .spec aspect body projects verbatim (Increment 4 — the widening this test proves)")
 }

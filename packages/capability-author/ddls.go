@@ -31,6 +31,18 @@ import (
 //     create-only .claim aspect onto the PROPOSAL vertex itself (closing the
 //     capabilityAuthorPending lens's missing_authoring gap immediately), and
 //     emits the external.capabilityAuthor event.
+//   - RecordAuthoringDispatch (capabilityAuthorClaimDispatch DDL) is the
+//     externalTask dispatchOp the bridge submits when its capabilityAuthor
+//     adapter returns Pending (the reasoning call was submitted but has not
+//     resolved yet) — mirrors lease-signing's RecordServiceDispatch
+//     byte-for-byte in role. Read-free: it reconstructs
+//     vtx.capabilityauthorclaim.<externalRef> from the bare handle
+//     CreateAuthoringClaim already minted and writes a create-only .dispatch
+//     aspect {vendorRef, adapter, replyOp, submittedAt, nextPollAt, deadline}
+//     — the PENDING marker. It writes no .artifact/.review and emits no
+//     completion signal (the reasoning call is not done); the
+//     capabilityAuthorPending lens reads only .claim/.artifact
+//     (lenses.go:111-117), so the marker cannot perturb that gap predicate.
 //   - RecordCapabilityProposal is the bridge replyOp: payload {externalRef,
 //     status, result} — the standard generic reply shape
 //     internal/bridge/dispatch.go's terminal-outcome leg always submits
@@ -48,8 +60,10 @@ import (
 //     re-run cypher parsing or validateAll itself (a Starlark DDL script has no
 //     parser/registry access) — it trusts the decoded verdict from this op's
 //     privileged submitter (the bridge). A decode failure (empty/non-JSON/
-//     non-object result) or status=failed (a modeled refusal) NEVER fail()s the
-//     op — the bridge has already Ack'd the external event, so a reject would
+//     non-object result) or status=failed (a terminal adapter failure — a
+//     modeled refusal or another definitive cause; the real adapter's own
+//     Detail names which one) NEVER fail()s the op — the bridge has already
+//     Ack'd the external event, so a reject would
 //     wedge the episode with no record; both store the proposal review.state=
 //     invalid instead (auditable, never dispatchable). Either way this op only
 //     ever produces a `pending`-or-`invalid` PROPOSAL, never a write to any
@@ -122,7 +136,8 @@ import (
 //	lnk.capabilityproposal.<id>.reviewedBy.<type>.<reviewerId>    proposal reviewedBy reviewer (ReviewCapabilityProposal)
 //
 //	vtx.capabilityauthorclaim.<handle>   root data = {}   CreateAuthoringClaim
-//	  .target  { proposalKey }   the back-pointer to the real vtx.capabilityproposal.<id>
+//	  .target   { proposalKey }   the back-pointer to the real vtx.capabilityproposal.<id>
+//	  .dispatch { vendorRef, adapter, replyOp, submittedAt, nextPollAt, deadline }   RecordAuthoringDispatch (pending marker; async only, closes no gap)
 //
 // review.state ∈ {pending, invalid, approved, rejected} (applied/superseded
 // arrive with the apply increment). Absence of .artifact/.review = the
@@ -132,6 +147,8 @@ func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		capabilityProposalDDL(),
 		capabilityAuthorClaimDDL(),
+		capabilityAuthorClaimDispatchDDL(),
+		capabilityAuthorDispatchMarkerDDL(),
 	}
 }
 
@@ -163,9 +180,12 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"provenance:{model, promptHash, catalogHash, reasonedAt}} — the ALREADY-COMPUTED §5 verdict travels " +
 			"as validation.state/report. Writes review.state=pending only when kind is an enabled artifact kind " +
 			"(increment 1: lens only), validation.state is 'valid', and confidence is a real 0..1 score; " +
-			"otherwise (including status=failed — a modeled refusal — and an empty/non-JSON/non-object " +
-			"completed result) review.state=invalid with an auditable invalidReason — the proposal is ALWAYS " +
-			"recorded (auditability, never fail()ed post-Ack), never applicable when invalid. The script does " +
+			"otherwise (including status=failed — a terminal adapter failure, honestly labeled from the " +
+			"adapter's own Detail: a modeled refusal or another definitive cause such as a timeout, an " +
+			"unusable idempotencyKey, an empty intent, or a vendor call failing outright — and an " +
+			"empty/non-JSON/non-object completed result) review.state=invalid with an auditable invalidReason " +
+			"— the proposal is ALWAYS recorded (auditability, never fail()ed post-Ack), never applicable " +
+			"when invalid. The script does " +
 			"not itself run the openCypher parser or validateAll (no parser/registry access from Starlark) — it " +
 			"trusts the decoded validation verdict from this op's privileged submitter (the bridge in the full " +
 			"design), computed by pkgmgr.ValidateCapabilityArtifact before submission; the kernel's F-004 " +
@@ -235,8 +255,8 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			`"rationale":{"type":"string","description":"SubmitCapabilityProposal only — the operator's own justification for the artifact, stored verbatim on .rationale.text (the human counterpart to the model's rationale)."},` +
 			`"contextRef":{"type":"string","description":"RequestCapabilityAuthoring only — an optional pointer to bounded context the reasoning call hydrates (opaque to this DDL)."},` +
 			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare Loom instanceKey handle CreateAuthoringClaim minted; the op resolves the real proposal vertex via vtx.capabilityauthorclaim.<externalRef>.target (never treated as the proposal's own id)."},` +
-			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
-			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL', or 'opMeta'; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
+			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a terminal adapter failure — stored invalid, never dispatchable; NOT only a modeled refusal — the adapter's own Detail names the real cause, e.g. a timeout, an unusable idempotencyKey, an empty intent, or a vendor call failing outright)."},` +
+			`"result":{"type":"string","description":"RecordCapabilityProposal only — on status=completed, the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail; required. On status=failed, the adapter's own plain-text failure Detail (e.g. 'capabilityAuthor: the model declined to propose (refusal: <category>)' for a genuine refusal, or an unrelated honest cause otherwise) carried verbatim as BOTH .rationale.text and review.invalidReason — never a hardcoded refusal claim. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL', or 'opMeta'; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
 			`"verdict":{"type":"string","description":"ReviewCapabilityProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary via the fresh validation payload field, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field."},` +
 			`"validation":{"type":"object","description":"ReviewCapabilityProposal (approve verdict only) and SubmitCapabilityProposal — the §5 verdict {state,report?,deltaPreview?} the trusted caller computed by running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (the script has no parser/registry access of its own). state must be exactly 'valid': on an approve a missing/stale verdict fail-closes to invalid, and on a submit the proposal is recorded review.state=invalid. Ignored on a reject verdict."},` +
 			`"packageKey":{"type":"string","description":"MarkCapabilityProposalApplied only — the vtx.package.<id> the caller's separate F-004 Installer.Apply produced (pkgmgr.ApplyResult.PackageKey). Verified live (a .manifest aspect must exist) and its recorded name must match this proposal's own target.packageName before it is recorded as the appliedAs link target."},` +
@@ -299,9 +319,18 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{
 					"externalRef": "<claimHandle>",
 					"status":      "failed",
-					"result":      "the requested projection would expose PHI without a masking clause",
+					"result":      "capabilityAuthor: the model declined to propose (refusal: policy)",
 				},
-				ExpectedOutcome: "review.state = invalid, invalidReason = 'model declined to propose (refusal)', .rationale.text carries the result verbatim.",
+				ExpectedOutcome: "review.state = invalid; invalidReason AND .rationale.text both carry the result verbatim ('capabilityAuthor: the model declined to propose (refusal: policy)') — the op never substitutes a hardcoded refusal claim of its own.",
+			},
+			{
+				Name: "RecordCapabilityProposal — a terminal adapter failure that is NOT a refusal",
+				Payload: map[string]any{
+					"externalRef": "<claimHandle>",
+					"status":      "failed",
+					"result":      "capabilityAuthor: both model calls failed (deadline exceeded; deadline exceeded)",
+				},
+				ExpectedOutcome: "review.state = invalid; invalidReason AND .rationale.text both carry the result verbatim. The reviewer sees the real cause (both vendor calls timed out) — the op never claims 'declined (refusal)' for a cause that was never a refusal.",
 			},
 			{
 				Name: "ReviewCapabilityProposal — a human operator approves a pending proposal",
@@ -619,13 +648,25 @@ def execute(state, op):
         reasoned_at = ""
 
         if status == "failed":
-            # A modeled refusal is a definitive verdict, NOT a crash: store the
-            # proposal invalid (auditable, never dispatchable) and ride the
-            # adapter's detail on the rationale for the reviewer (mirrors augur's
-            # RecordProposal refusal branch exactly).
+            # A terminal OutcomeFailed is a definitive verdict, NOT a crash: store
+            # the proposal invalid (auditable, never dispatchable). "failed" is NOT
+            # only a modeled refusal: the real capabilityAuthor adapter
+            # (internal/bridge/capability_author.go) also terminates this way on a
+            # 24h timeout / cold-episode-no-prompt restart, an unusable
+            # idempotencyKey, an empty intent, an invalid-ack from the model
+            # runner, and both model calls failing — each with its OWN honest
+            # prose in Detail, never the word "refusal" unless refusalDetail
+            # actually fired on a genuine vendor policy refusal. dispatch.go:249
+            # carries Result.Detail verbatim as this op's 'result' field, so
+            # threading it through here — never a hardcoded refusal claim — is
+            # what tells the review queue the truth (a down runner must never
+            # read to an operator as "the model refused you").
             review_state = "invalid"
-            invalid_reason = "model declined to propose (refusal)"
-            rationale = optional_string_attr(p, "result")
+            detail = optional_string_attr(p, "result").strip()
+            if detail == "":
+                detail = "adapter reported a failed status with no detail"
+            invalid_reason = detail
+            rationale = detail
         elif status == "completed":
             # Decode with a None default (never raise): an empty / non-JSON /
             # non-object result on a completed reply is a definitive verdict, NOT
@@ -909,7 +950,10 @@ func capabilityAuthorClaimDDL() pkgmgr.DDLSpec {
 			"proposal-id-independent) externalRef. Also writes a create-only .claim aspect onto the SUBJECT " +
 			"proposal vertex itself (no new vertex for that half — the subject already exists), which closes " +
 			"the capabilityAuthorPending lens's missing_authoring gap immediately. Emits the " +
-			"external.capabilityAuthor event via its own transactional outbox.",
+			"external.capabilityAuthor event via its own transactional outbox, its body carrying " +
+			"dispatchOp: RecordAuthoringDispatch — the op the bridge posts back if its capabilityAuthor adapter " +
+			"returns Pending (internal/bridge/dispatch.go's Pending path requires one; see " +
+			"capabilityAuthorClaimDispatchDDL).",
 		Script: capabilityAuthorClaimDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"instanceKey":{"type":"string","description":"The BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.capabilityauthorclaim. Required."},` +
@@ -943,8 +987,9 @@ func capabilityAuthorClaimDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the proposal is alive. Atomically commits vtx.capabilityauthorclaim.<handle> " +
 					"(root {} — D5) + its .target aspect {proposalKey: subjectKey}, and a create-only .claim aspect on " +
 					"the proposal itself. Emits the external.capabilityAuthor event (body {instanceKey, adapter, replyOp, " +
-					"params (resolved), externalRef, idempotencyKey}) off the op's outbox. Returns primaryKey (the " +
-					"proposal key). Rejects with ScriptError if the proposal is absent or the handle is malformed.",
+					"dispatchOp: RecordAuthoringDispatch, params (resolved), externalRef, idempotencyKey}) off the op's " +
+					"outbox. Returns primaryKey (the proposal key). Rejects with ScriptError if the proposal is absent " +
+					"or the handle is malformed.",
 			},
 		},
 	}
@@ -1036,6 +1081,7 @@ def execute(state, op):
             "instanceKey":    handle,
             "adapter":        adapter,
             "replyOp":        reply_op,
+            "dispatchOp":     "RecordAuthoringDispatch",
             "externalRef":    handle,
             "idempotencyKey": handle,
             "params":         resolved_params,
@@ -1045,3 +1091,231 @@ def execute(state, op):
 
     fail("capabilityauthorclaim DDL: unknown operationType: " + ot)
 `
+
+// aspectDeclarationOnlyScript is the Starlark for the aspect-type DDLs. The
+// aspect is written by the capabilityAuthorClaimDispatch vertexType DDL's op
+// script; this aspect-type DDL is a step-6 write gate only, never an op
+// handler — it fails closed if dispatched (mirrors packages/lease-signing's
+// aspectDeclarationOnlyScript).
+const aspectDeclarationOnlyScript = `
+def execute(state, op):
+    fail("aspect-type DDL: not an operation handler: " + op.operationType)
+`
+
+// capabilityAuthorClaimDispatchDDL declares RecordAuthoringDispatch — the
+// externalTask dispatchOp the bridge submits when its capabilityAuthor
+// adapter returns Pending (internal/bridge/dispatch.go:293-298 requires one
+// on every Pending outcome). Mirrors packages/lease-signing's
+// leaseServiceDispatchDDL byte-for-byte in role, adapted to the claim vertex:
+// this op reconstructs vtx.capabilityauthorclaim.<externalRef> from the bare
+// handle CreateAuthoringClaim already minted for it (the SAME vertex, never a
+// new one) and writes a create-only .dispatch aspect, the pending marker.
+//
+// This DDL's CanonicalName is deliberately NOT "capabilityAuthorDispatch" —
+// that name is already the package's escalation-dispatch WEAVER TARGET
+// (targets.go), and a meta canonicalName is a single flat namespace the
+// installer's ErrCanonicalNameCollision enforces kernel-wide (the Processor's
+// DDL cache serves one meta-vertex per canonicalName and drops the other).
+// "capabilityAuthorClaimDispatch" names what this DDL actually does — record
+// a dispatch marker on the CLAIM vertex — with no such collision.
+func capabilityAuthorClaimDispatchDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "capabilityAuthorClaimDispatch",
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"RecordAuthoringDispatch"},
+		Description: "ExternalTask dispatchOp DDL (Contract #10 §10.5/§10.6) for the AI-authored-capabilities " +
+			"escalation dispatch — mirrors lease-signing's RecordServiceDispatch byte-for-byte in role. The op the " +
+			"bridge submits when its capabilityAuthor adapter returns Pending (the reasoning call was submitted " +
+			"but has not resolved yet): payload {externalRef (the bare handle Loom minted for CreateAuthoringClaim), " +
+			"vendorRef (the vendor's opaque pending reference — the poll/webhook key), adapter (which adapter to " +
+			"Poll), replyOp (the result-op to post on resolve/timeout), nextPollAt + deadline (the bridge's " +
+			"schedule instants)}. The bridge submits it with no ContextHint.Reads, so the op reads NOTHING from " +
+			"state: it reconstructs the claim vertex key vtx.capabilityauthorclaim.<externalRef> from the bare " +
+			"handle and writes a create-only .dispatch aspect {vendorRef, adapter, replyOp, submittedAt " +
+			"(canonical-UTC of op.submittedAt), nextPollAt, deadline} — the PENDING MARKER. It writes NO change to " +
+			"the proposal's own .artifact/.review aspects and emits NO completion signal: the reasoning call is " +
+			"NOT done, so capabilityAuthorPending's missing_authoring stays exactly as CreateAuthoringClaim's " +
+			".claim write already left it (closed) — that lens reads only .claim/.artifact (lenses.go:111-117), so " +
+			"the .dispatch aspect cannot perturb the gap predicate either way. It emits " +
+			"capabilityAuthor.dispatchRecorded (provenance, NOT a completion signal). The marker is recorded " +
+			"once: the .dispatch aspect is create-only, so a redelivered Pending conflicts and is rejected (atop " +
+			"the bridge's deterministic dispatch-op requestId collapse).",
+		Script: capabilityAuthorClaimDispatchDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"externalRef":{"type":"string","description":"The BARE instance handle the bridge echoes (no dots / key segments); the op reconstructs vtx.capabilityauthorclaim.<externalRef>. Required."},` +
+			`"vendorRef":{"type":"string","description":"The vendor's opaque pending reference (the poll/webhook key) the bridge got back from its adapter on a Pending outcome. Recorded on the .dispatch marker. Required."},` +
+			`"adapter":{"type":"string","description":"The adapter name to re-call on a poll, recorded on the .dispatch marker for the lens / Weaver read-model (the fired handler reads the adapter from the schedule payload). Required."},` +
+			`"replyOp":{"type":"string","description":"The result-op type the fired handler posts when the poll resolves or the call times out (RecordCapabilityProposal). Required."},` +
+			`"nextPollAt":{"type":"string","description":"RFC3339 instant the next poll is due (the bridge armed schedule.bridge.poll at this instant). Normalized to canonical UTC on the marker. Required."},` +
+			`"deadline":{"type":"string","description":"RFC3339 instant the call gives up (the bridge armed schedule.bridge.timeout at this instant); the marker records the same instant for the lens / Weaver read-model. Normalized to canonical UTC. Required."}},` +
+			`"required":["externalRef","vendorRef","adapter","replyOp","nextPollAt","deadline"]}`,
+		OutputSchema: `{"type":"object","properties":` +
+			`{"primaryKey":{"type":"string","description":"vtx.capabilityauthorclaim.<handle> of the claim vertex the pending marker was recorded on (the operation's principal key)."}}}`,
+		FieldDescription: map[string]string{
+			"externalRef": "The bare instance handle the bridge echoes back (the same handle CreateAuthoringClaim received as instanceKey). The op reconstructs vtx.capabilityauthorclaim.<externalRef> and writes the create-only .dispatch marker on it. Required.",
+			"vendorRef":   "The vendor's opaque pending reference (the poll/webhook key) the bridge received from its adapter when the external call returned Pending. Written to the .dispatch aspect; a later poll resolution carries it back. Required.",
+			"adapter":     "The adapter name to re-call on a poll, recorded on the .dispatch marker for the lens / Weaver read-model (the fired handler reads the adapter from the schedule payload, not the marker). Required.",
+			"replyOp":     "The result-op type (RecordCapabilityProposal) the fired handler posts when the poll resolves or the call times out. Required.",
+			"nextPollAt":  "RFC3339 instant the next poll is due — the instant the bridge armed schedule.bridge.poll.<handle> at. Normalized to canonical UTC on the marker. Required.",
+			"deadline":    "RFC3339 instant the call gives up — the instant the bridge armed schedule.bridge.timeout.<handle> at. The marker records the same instant for the lens / Weaver read-model. Normalized to canonical UTC. Required.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "RecordAuthoringDispatch — record a pending reasoning call",
+				Payload: map[string]any{
+					"externalRef": "<bareHandle>",
+					"vendorRef":   "model-runner-ref-abc123",
+					"adapter":     "capabilityAuthor",
+					"replyOp":     "RecordCapabilityProposal",
+					"nextPollAt":  "2026-08-21T10:00:30Z",
+					"deadline":    "2026-08-21T10:05:00Z",
+				},
+				ExpectedOutcome: "Reads no state (the bridge submits no Reads). Reconstructs vtx.capabilityauthorclaim.<handle> " +
+					"from the bare handle. Writes the .dispatch aspect {vendorRef, adapter, replyOp, submittedAt: " +
+					"canonical-UTC(op.submittedAt), nextPollAt, deadline} as a create-only mutation (the claim root, " +
+					"already {}, is untouched — D5). Writes NO change to the proposal's .artifact/.review and emits NO " +
+					"completion signal (the reasoning call is not done). Emits capabilityAuthor.dispatchRecorded " +
+					"(provenance). Returns primaryKey. Rejects a second dispatch for the same handle (the create-only " +
+					".dispatch once-only guard).",
+			},
+		},
+	}
+}
+
+// capabilityAuthorClaimDispatchDDLScript handles RecordAuthoringDispatch.
+// Read-free: the bridge submits with no ContextHint.Reads (mirrors
+// packages/lease-signing's leaseServiceDispatchDDLScript, scripts.go:1453-1534
+// — every helper below is that script's, ported byte-for-byte with the
+// vertex-type prefix/event names adapted to this package).
+const capabilityAuthorClaimDispatchDDLScript = `
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def required_string(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def required_instant(p, name):
+    # An RFC3339 instant the bridge computed (nextPollAt / deadline), normalized
+    # to canonical UTC so the marker compares lexically with the schedule headers.
+    v = required_string(p, name)
+    return time.rfc3339_utc(v)
+
+def required_bare_handle(p, name):
+    v = required_string(p, name)
+    for bad in [".", "*", ">", " ", "\t", "\n"]:
+        if bad in v:
+            fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
+    return v
+
+def execute(state, op):
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "RecordAuthoringDispatch":
+        handle = required_bare_handle(p, "externalRef")
+        # Reconstruct the claim-vertex key from the bare handle — the SAME
+        # vertex CreateAuthoringClaim minted for this handle. No state read
+        # needed: the reconstruction and the bare-handle validation are both
+        # pure functions of the payload.
+        claim_key = "vtx.capabilityauthorclaim." + handle
+
+        # The vendor's opaque pending reference (the poll/webhook key the bridge
+        # got back from its adapter). Required — a Pending with no ref is meaningless.
+        vendor_ref = required_string(p, "vendorRef")
+
+        # The routing recorded for the lens / Weaver read-model: which adapter to
+        # Poll on a poll firing, and which replyOp to post when the poll resolves or
+        # the call times out. The fired handler reads these from the schedule
+        # payload, not the marker; both are required here for the read-model record.
+        adapter = required_string(p, "adapter")
+        reply_op = required_string(p, "replyOp")
+
+        # The bridge-supplied schedule instants: when the next poll is due and when
+        # the call gives up. Recorded for the lens / Weaver read-model; the timeout
+        # itself fires from the armed schedule, not this marker.
+        next_poll_at = required_instant(p, "nextPollAt")
+        deadline = required_instant(p, "deadline")
+
+        # submittedAt is the op's own timestamp, normalized to canonical UTC. The
+        # bridge supplies no timestamp; this is the dispatch instant.
+        submitted_at = time.rfc3339_utc(op.submittedAt)
+
+        # Write the .dispatch aspect {vendorRef, adapter, replyOp, submittedAt,
+        # nextPollAt, deadline} as a create-only mutation. This create-only IS the
+        # once-only guarantee: a redelivered Pending conflicts on the existing key
+        # and the batch is rejected (atop the bridge's deterministic dispatch
+        # requestId collapse). NO change to the proposal's .artifact/.review and NO
+        # completion signal is emitted — the reasoning call is not done. The claim
+        # root, already {}, is untouched (D5).
+        mutations = [
+            make_aspect(claim_key, "dispatch", "capabilityAuthorDispatchMarker",
+                        {"vendorRef": vendor_ref, "adapter": adapter, "replyOp": reply_op,
+                         "submittedAt": submitted_at, "nextPollAt": next_poll_at, "deadline": deadline}),
+        ]
+
+        # A provenance event marks the submit for the audit join (NOT a completion
+        # signal — the escalation is NOT done).
+        events = [
+            {"class": "capabilityAuthor.dispatchRecorded",
+             "data": {"claimKey": claim_key, "vendorRef": vendor_ref, "submittedAt": submitted_at}},
+        ]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": claim_key}}
+
+    fail("capabilityAuthorClaimDispatch DDL: unknown operationType: " + ot)
+`
+
+// capabilityAuthorDispatchMarkerDDL declares the .dispatch aspect (class
+// capabilityAuthorDispatchMarker) — the step-6 write gate for
+// RecordAuthoringDispatch. Necessary for the SAME reason
+// leaseServiceDispatchAspectDDL is necessary in lease-signing, even though
+// this package's root-vertex resolution otherwise needs no instanceOf
+// indirection (capabilityAuthorClaimDDL's own doc comment): without an exact
+// class match, a .dispatch write would fall back to resolving by the
+// vertex's TYPE segment ("capabilityauthorclaim") to capabilityAuthorClaimDDL
+// — which permits only CreateAuthoringClaim — and fail closed. The vertexType
+// DDL capabilityAuthorClaimDispatch (the op script) and this aspect class
+// share the name capabilityAuthorDispatchMarker; aspectType DDLs are excluded
+// from the operationType->class reverse index, so there is no script-selection
+// ambiguity. Declaration-only.
+func capabilityAuthorDispatchMarkerDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "capabilityAuthorDispatchMarker",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"RecordAuthoringDispatch"},
+		Description: "AI-authored-capabilities claim pending-dispatch aspect. Stored as " +
+			"vtx.capabilityauthorclaim.<handle>.dispatch (class capabilityAuthorDispatchMarker) = {vendorRef, " +
+			"adapter, replyOp, submittedAt, nextPollAt, deadline}. The async PENDING marker (the capabilityAuthor " +
+			"adapter returned Pending). Written ONLY by RecordAuthoringDispatch (whose " +
+			"capabilityAuthorClaimDispatch vertexType DDL owns the script); this aspect-type DDL is the step-6 " +
+			"write gate (exact class match). Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"vendorRef":{"type":"string"},"adapter":{"type":"string"},"replyOp":{"type":"string"},"submittedAt":{"type":"string"},"nextPollAt":{"type":"string"},"deadline":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"vendorRef":   "The vendor's opaque pending reference.",
+			"adapter":     "The adapter to re-call on a poll.",
+			"replyOp":     "The result-op posted on resolve/timeout.",
+			"submittedAt": "RFC3339 instant the pending marker was recorded (canonical UTC).",
+			"nextPollAt":  "RFC3339 instant the next poll is due.",
+			"deadline":    "RFC3339 instant the call gives up.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "capability-author claim dispatch (pending) aspect",
+				Payload: map[string]any{
+					"vendorRef": "model-runner-ref-abc123", "adapter": "capabilityAuthor", "replyOp": "RecordCapabilityProposal",
+				},
+				ExpectedOutcome: "Stored as vtx.capabilityauthorclaim.<handle>.dispatch; written by RecordAuthoringDispatch.",
+			},
+		},
+	}
+}

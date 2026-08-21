@@ -207,7 +207,7 @@ func TestConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
-	if got, want := len(opts.Nkeys), 17; got != want {
+	if got, want := len(opts.Nkeys), 18; got != want {
 		t.Errorf("NKey users = %d, want %d", got, want)
 	}
 	// Every user must carry an explicit publish allow-list (default-deny on
@@ -240,8 +240,8 @@ func TestAuthCalloutConfigured(t *testing.T) {
 	if !nkeys.IsValidPublicCurveKey(ac.XKey) {
 		t.Errorf("auth_callout.xkey = %q, want a valid public CURVE key (day-one encryption, design §7)", ac.XKey)
 	}
-	if len(ac.AuthUsers) != 17 {
-		t.Errorf("auth_callout.auth_users = %d entries, want 17 (every component bypasses the callout)", len(ac.AuthUsers))
+	if len(ac.AuthUsers) != 18 {
+		t.Errorf("auth_callout.auth_users = %d entries, want 18 (every component bypasses the callout)", len(ac.AuthUsers))
 	}
 }
 

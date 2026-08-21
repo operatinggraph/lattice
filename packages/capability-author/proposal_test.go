@@ -82,6 +82,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateAuthoringClaim", Scope: "any"},
 			{OperationType: "SubmitCapabilityProposal", Scope: "any"},
 			{OperationType: "RecordCapabilityProposal", Scope: "any"},
+			{OperationType: "RecordAuthoringDispatch", Scope: "any"},
 			{OperationType: "ReviewCapabilityProposal", Scope: "any"},
 			{OperationType: "MarkCapabilityProposalApplied", Scope: "any"},
 		},
@@ -161,6 +162,40 @@ func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string
 	return doc
 }
 
+// findEmittedEvent reads the committed transactional-outbox aspect for an op's
+// requestId and returns the payload of the first event of the given class.
+// The outbox aspect is the faithful EventList persisted in the step-8 atomic
+// batch (the outbox consumer publishes from it) — reading it asserts the
+// emission without running the outbox consumer in the test harness. Mirrors
+// packages/lease-signing's own helper of the same name.
+func findEmittedEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID, class string) map[string]any {
+	t.Helper()
+	outboxKey := processor.OutboxAspectKey(requestID)
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, outboxKey)
+	if err != nil {
+		t.Fatalf("read outbox aspect %s: %v", outboxKey, err)
+	}
+	ob, err := processor.ParseOutboxAspect(entry.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect %s: %v", outboxKey, err)
+	}
+	for _, e := range ob.Data.Events {
+		if e.EventType == class {
+			return e.Payload
+		}
+	}
+	t.Fatalf("no %s event emitted by op %s (events: %v)", class, requestID, eventClasses(ob.Data.Events))
+	return nil
+}
+
+func eventClasses(evs processor.EventList) []string {
+	out := make([]string, 0, len(evs))
+	for _, e := range evs {
+		out = append(out, e.EventType)
+	}
+	return out
+}
+
 func requestEnv(reqID, proposalID, intent string) *processor.OperationEnvelope {
 	payload := map[string]any{"proposalId": proposalID, "intent": intent}
 	b, _ := json.Marshal(payload)
@@ -204,6 +239,32 @@ func claimEnv(reqID, handle, proposalKey string) *processor.OperationEnvelope {
 	}
 }
 
+// dispatchEnv builds the RecordAuthoringDispatch payload the bridge submits
+// when its capabilityAuthor adapter returns Pending — the same six-field
+// shape internal/bridge/dispatch.go's handlePending posts against every
+// dispatchOp: {externalRef, vendorRef, adapter, replyOp, nextPollAt,
+// deadline}, keyed on the CLAIM HANDLE a prior CreateAuthoringClaim minted.
+func dispatchEnv(reqID, handle, vendorRef string) *processor.OperationEnvelope {
+	payload := map[string]any{
+		"externalRef": handle,
+		"vendorRef":   vendorRef,
+		"adapter":     "capabilityAuthor",
+		"replyOp":     "RecordCapabilityProposal",
+		"nextPollAt":  "2026-08-21T10:00:30Z",
+		"deadline":    "2026-08-21T10:05:00Z",
+	}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordAuthoringDispatch",
+		Actor:         capStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "capabilityAuthorClaimDispatch",
+		Payload:       json.RawMessage(b),
+	}
+}
+
 // recordEnv builds the RecordCapabilityProposal payload in the standard
 // bridge replyOp shape {externalRef, status, result} — externalRef is the
 // CLAIM HANDLE a prior CreateAuthoringClaim minted (never the proposal's own
@@ -239,6 +300,31 @@ func recordEnv(t *testing.T, reqID, handle, kind string, content json.RawMessage
 		"externalRef": handle,
 		"status":      "completed",
 		"result":      string(resultBytes),
+	}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordCapabilityProposal",
+		Actor:         capStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "capabilityproposal",
+		Payload:       json.RawMessage(b),
+	}
+}
+
+// failedRecordEnv builds a RecordCapabilityProposal payload for the bridge's
+// terminal OutcomeFailed leg: status=failed, result = the real adapter's own
+// plain-text Detail string (internal/bridge/capability_author.go's
+// terminalFailure/refusalDetail — never JSON, unlike the completed leg).
+// Exercises the honest-failure-reason fix: the op must thread this string
+// through verbatim as BOTH .rationale.text and review.invalidReason, never
+// substitute a hardcoded refusal claim.
+func failedRecordEnv(reqID, handle, resultDetail string) *processor.OperationEnvelope {
+	payload := map[string]any{
+		"externalRef": handle,
+		"status":      "failed",
+		"result":      resultDetail,
 	}
 	b, _ := json.Marshal(payload)
 	return &processor.OperationEnvelope{
@@ -322,16 +408,23 @@ const (
 	capIDVertexTypeDDL  = "CAcapVertexDHJKMNPQR"
 	capIDOpMeta         = "CAcapMetaXHJKMNPQRST"
 	capIDForgedClaim    = "CAcapForgedHJKMNPQRS"
+	capIDDispatch       = "CAcapDispatchHJKMNPQ"
+	capIDRefused        = "CAcapRefusedHJKMNPQR"
+	capIDTimeout        = "CAcapTimeoutHJKMNPQR"
 
-	capHandlePending        = "CAHNDPendingHJKMNPQR"
-	capHandleBadKind        = "CAHNDBadKindHJKMNPQR"
-	capHandleBadConf        = "CAHNDBadConfHJKMNPQR"
-	capHandleBadSpec        = "CAHNDBadSpecHJKMNPQR"
-	capHandleReplay         = "CAHNDRedoHJKMNPQRSTU"
-	capHandleGrantOverscope = "CAHNDExceedHJKMNPQRS"
-	capHandleVertexTypeDDL  = "CAHNDVertexDHJKMNPQR"
-	capHandleOpMeta         = "CAHNDMetaXHJKMNPQRST"
-	capHandleForgedClaim    = "CAHNDForgedHJKMNPQRS"
+	capHandlePending         = "CAHNDPendingHJKMNPQR"
+	capHandleBadKind         = "CAHNDBadKindHJKMNPQR"
+	capHandleBadConf         = "CAHNDBadConfHJKMNPQR"
+	capHandleBadSpec         = "CAHNDBadSpecHJKMNPQR"
+	capHandleReplay          = "CAHNDRedoHJKMNPQRSTU"
+	capHandleGrantOverscope  = "CAHNDExceedHJKMNPQRS"
+	capHandleVertexTypeDDL   = "CAHNDVertexDHJKMNPQR"
+	capHandleOpMeta          = "CAHNDMetaXHJKMNPQRST"
+	capHandleForgedClaim     = "CAHNDForgedHJKMNPQRS"
+	capHandleDispatch        = "CAHNDDispatchHJKMNPQ"
+	capHandleRefused         = "CAHNDRefusedHJKMNPQR"
+	capHandleTimeout         = "CAHNDTimeoutHJKMNPQR"
+	capHandleDispatchMissing = "CAHNDMissVendorRefHK"
 )
 
 // TestCapAuthor_ClaimByNonLoomOperator_Denied: the primordial actor guard.
@@ -429,6 +522,125 @@ func TestCapAuthor_ValidLens_Pending(t *testing.T) {
 	td, _ := targetDoc["data"].(map[string]any)
 	if got, _ := td["proposalKey"].(string); got != proposalKey {
 		t.Fatalf("claim .target.proposalKey = %q, want %q", got, proposalKey)
+	}
+	// The dispatchOp seam (Increment 3): CreateAuthoringClaim's emitted
+	// external.capabilityAuthor event names RecordAuthoringDispatch, so the
+	// bridge's Pending path (internal/bridge/dispatch.go:293-298) is
+	// dispatchable for this adapter.
+	ev := findEmittedEvent(t, ctx, conn, claim.RequestID, "external.capabilityAuthor")
+	if got, _ := ev["dispatchOp"].(string); got != "RecordAuthoringDispatch" {
+		t.Fatalf("external.capabilityAuthor event dispatchOp = %q, want RecordAuthoringDispatch", got)
+	}
+}
+
+// TestCapAuthor_RecordAuthoringDispatch_RecordsPendingMarker_NoCompletion: the
+// bridge submits RecordAuthoringDispatch when its capabilityAuthor adapter
+// returns Pending — payload {externalRef, vendorRef, adapter, replyOp,
+// nextPollAt, deadline} with NO ContextHint.Reads (the bridge's actuator sets
+// none, mirroring lease-signing's RecordServiceDispatch). It must commit
+// read-free; the .dispatch aspect is written on the CLAIM vertex (root stays
+// {} — D5); the reasoning call stays undone (no .artifact/.review write, only
+// the capabilityAuthor.dispatchRecorded provenance event); and a second
+// dispatch for the same handle is rejected by the create-only .dispatch guard.
+func TestCapAuthor_RecordAuthoringDispatch_RecordsPendingMarker_NoCompletion(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-dispatch")
+
+	proposalKey := "vtx.capabilityproposal." + capIDDispatch
+	req := requestEnv(testutil.GenReqID("CADispReq"), capIDDispatch, "a lens a dispatch test wants pending")
+	testutil.PublishOp(t, conn, req)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	claim := claimEnv(testutil.GenReqID("CADispClaim"), capHandleDispatch, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	claimKey := "vtx.capabilityauthorclaim." + capHandleDispatch
+	vendorRef := "model-runner-ref-abc123"
+	disp := dispatchEnv(testutil.GenReqID("CADispatch1"), capHandleDispatch, vendorRef)
+	testutil.PublishOp(t, conn, disp)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// (a) the .dispatch aspect on the CLAIM vertex — {vendorRef, adapter,
+	// replyOp, submittedAt, nextPollAt, deadline}.
+	ddoc := readDoc(t, ctx, conn, claimKey+".dispatch")
+	dd, _ := ddoc["data"].(map[string]any)
+	if got, _ := dd["vendorRef"].(string); got != vendorRef {
+		t.Fatalf("dispatch.vendorRef = %q, want %q", got, vendorRef)
+	}
+	if got, _ := dd["adapter"].(string); got != "capabilityAuthor" {
+		t.Fatalf("dispatch.adapter = %q, want capabilityAuthor", got)
+	}
+	if got, _ := dd["replyOp"].(string); got != "RecordCapabilityProposal" {
+		t.Fatalf("dispatch.replyOp = %q, want RecordCapabilityProposal", got)
+	}
+	if got, _ := dd["submittedAt"].(string); got == "" {
+		t.Fatalf("dispatch.submittedAt is empty, want a canonical-UTC timestamp")
+	}
+
+	// (b) D5: the claim vertex root data stays {} (CreateAuthoringClaim minted
+	// it {}; the dispatch op reconstructs the key read-free and never touches
+	// the root).
+	claimRoot := readDoc(t, ctx, conn, claimKey)
+	if data, _ := claimRoot["data"].(map[string]any); len(data) != 0 {
+		t.Fatalf("claim vertex root data must stay minimal ({}), got %v", data)
+	}
+
+	// (c) the reasoning call is NOT done: no .artifact aspect on the proposal
+	// (only RecordCapabilityProposal writes one), and the .claim aspect
+	// CreateAuthoringClaim wrote — the thing that actually closes
+	// capabilityAuthorPending's missing_authoring gap (lenses.go:111-117,
+	// which reads only .claim/.artifact) — is untouched by the dispatch.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, proposalKey+".artifact"); err == nil {
+		t.Fatalf("a pending dispatch must NOT write the proposal's .artifact aspect")
+	}
+	claimAspect := readDoc(t, ctx, conn, proposalKey+".claim")
+	cd, _ := claimAspect["data"].(map[string]any)
+	if got, _ := cd["claimedAt"].(string); got == "" {
+		t.Fatalf("proposal .claim aspect must remain from CreateAuthoringClaim, got empty claimedAt")
+	}
+
+	// (d) only the capabilityAuthor.dispatchRecorded provenance event is
+	// emitted (never a completion signal — the escalation is not done).
+	prov := findEmittedEvent(t, ctx, conn, disp.RequestID, "capabilityAuthor.dispatchRecorded")
+	if got, _ := prov["vendorRef"].(string); got != vendorRef {
+		t.Fatalf("capabilityAuthor.dispatchRecorded vendorRef = %q, want %q", got, vendorRef)
+	}
+	if got, _ := prov["claimKey"].(string); got != claimKey {
+		t.Fatalf("capabilityAuthor.dispatchRecorded claimKey = %q, want %q", got, claimKey)
+	}
+
+	// (e) a second dispatch for the same handle is rejected by the create-only
+	// .dispatch conflict (the once-only guarantee at the DDL layer). The
+	// bridge submits no Reads (mirrored here), so the rejection is the batch
+	// conflict on the already-existing .dispatch key.
+	disp2 := dispatchEnv(testutil.GenReqID("CADispatch2"), capHandleDispatch, "model-runner-ref-def456")
+	testutil.PublishOp(t, conn, disp2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestCapAuthor_RecordAuthoringDispatch_VendorRefRequired_Rejected: vendorRef
+// is REQUIRED (mirrors lease-signing's RecordServiceDispatch). A dispatch
+// with no vendorRef is rejected (InvalidArgument), read-free, and writes no
+// .dispatch aspect.
+func TestCapAuthor_RecordAuthoringDispatch_VendorRefRequired_Rejected(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-dispatch-vendorref-required")
+
+	handle := capHandleDispatchMissing
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("CADispMiss1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordAuthoringDispatch",
+		Actor:         capStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "capabilityAuthorClaimDispatch",
+		Payload:       json.RawMessage(`{"externalRef":"` + handle + `"}`),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.capabilityauthorclaim."+handle+".dispatch"); err == nil {
+		t.Fatalf("a rejected dispatch must not write the .dispatch aspect")
 	}
 }
 
@@ -651,6 +863,82 @@ func TestCapAuthor_GrantExceedsRequesterScope_Invalid(t *testing.T) {
 
 	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
 		t.Fatalf("review.state = %q, want invalid (grant exceeds requester's held scope — never dispatchable)", got)
+	}
+}
+
+// TestCapAuthor_RecordFailed_HonestReason proves the honest-failure-reason
+// fix: RecordCapabilityProposal's status=failed branch records the adapter's
+// OWN result text as review.invalidReason (and .rationale.text) verbatim,
+// never a hardcoded "model declined to propose (refusal)" claim. The real
+// capabilityAuthor adapter (internal/bridge/capability_author.go's
+// terminalFailure/refusalDetail) routes many distinct terminal causes through
+// status=failed — a genuine vendor refusal is only one of them (a 24h
+// timeout, a cold-episode-no-prompt restart, an unusable idempotencyKey, an
+// empty intent, an invalid model-runner ack, and both model calls failing are
+// the others) — so a reviewer must see the real cause, not a refusal claim
+// that was never true (a down runner must never read as "the model refused
+// you").
+func TestCapAuthor_RecordFailed_HonestReason(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-failed-reason")
+
+	// A genuine vendor refusal: the adapter's Detail legitimately says
+	// "declined ... (refusal: ...)" because refusalDetail actually fired.
+	refusedKey := "vtx.capabilityproposal." + capIDRefused
+	req1 := requestEnv(testutil.GenReqID("CARefReq"), capIDRefused, "a lens the vendor's policy declines")
+	testutil.PublishOp(t, conn, req1)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	claim1 := claimEnv(testutil.GenReqID("CARefClaim"), capHandleRefused, refusedKey)
+	testutil.PublishOp(t, conn, claim1)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	refusalDetail := "capabilityAuthor: the model declined to propose (refusal: policy)"
+	rec1 := failedRecordEnv(testutil.GenReqID("CARefRecord"), capHandleRefused, refusalDetail)
+	testutil.PublishOp(t, conn, rec1)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, refusedKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid", got)
+	}
+	reviewDoc := readDoc(t, ctx, conn, refusedKey+".review")
+	rd, _ := reviewDoc["data"].(map[string]any)
+	if got, _ := rd["invalidReason"].(string); got != refusalDetail {
+		t.Fatalf("invalidReason = %q, want the adapter's own detail verbatim %q", got, refusalDetail)
+	}
+	rationaleDoc := readDoc(t, ctx, conn, refusedKey+".rationale")
+	rat, _ := rationaleDoc["data"].(map[string]any)
+	if got, _ := rat["text"].(string); got != refusalDetail {
+		t.Fatalf(".rationale.text = %q, want the adapter's own detail verbatim %q", got, refusalDetail)
+	}
+
+	// A terminal failure that is NOT a refusal — e.g. both model calls timing
+	// out. The op must NEVER substitute "declined (refusal)" for this: the
+	// review queue has to tell the operator the truth (a down/slow runner,
+	// not a policy decline).
+	timeoutKey := "vtx.capabilityproposal." + capIDTimeout
+	req2 := requestEnv(testutil.GenReqID("CATmoReq"), capIDTimeout, "a lens whose reasoning call times out")
+	testutil.PublishOp(t, conn, req2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	claim2 := claimEnv(testutil.GenReqID("CATmoClaim"), capHandleTimeout, timeoutKey)
+	testutil.PublishOp(t, conn, claim2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	timeoutDetail := "capabilityAuthor: both model calls failed (deadline exceeded; deadline exceeded)"
+	rec2 := failedRecordEnv(testutil.GenReqID("CATmoRecord"), capHandleTimeout, timeoutDetail)
+	testutil.PublishOp(t, conn, rec2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, timeoutKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid", got)
+	}
+	timeoutReviewDoc := readDoc(t, ctx, conn, timeoutKey+".review")
+	trd, _ := timeoutReviewDoc["data"].(map[string]any)
+	got, _ := trd["invalidReason"].(string)
+	if got != timeoutDetail {
+		t.Fatalf("invalidReason = %q, want the adapter's own detail verbatim %q", got, timeoutDetail)
+	}
+	if strings.Contains(got, "declined") || strings.Contains(got, "refusal") {
+		t.Fatalf("invalidReason %q falsely claims a refusal for a cause that was never one", got)
 	}
 }
 

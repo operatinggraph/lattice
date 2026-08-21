@@ -23,6 +23,13 @@
 //     design, computed by the bridge via pkgmgr.ValidateCapabilityArtifact
 //     before submission) and stores review.state = pending | invalid.
 //
+//   - RecordAuthoringDispatch is the externalTask dispatchOp the bridge
+//     submits when its capabilityAuthor adapter returns Pending instead of
+//     resolving synchronously (natural-language-weaver-targets-design.md
+//     §3.2) — a create-only .dispatch pending marker on the claim vertex,
+//     mirroring lease-signing's RecordServiceDispatch. CreateAuthoringClaim's
+//     emitted external.capabilityAuthor event names it as the dispatchOp.
+//
 //     Proposal shape (D5 — minimal root, business data in aspects):
 //
 //     vtx.capabilityproposal.<id>   root data = {}
@@ -118,8 +125,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.9.2",
-	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, and Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart.",
+	Version:       "0.10.0",
+	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds, and the async DispatchOp + catalog widening for the real model-backed adapter (natural-language-weaver-targets-design.md): the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/RecordAuthoringDispatch/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses (the latter now also projecting the full `.spec` aspect body so a reasoning model sees existing lens/weaverTarget bodies, not just self-description). SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart. RecordAuthoringDispatch is the externalTask dispatchOp CreateAuthoringClaim's emitted event now names, so the bridge's async Pending/poll path is dispatchable for this adapter.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),
 	Permissions:   Permissions(),

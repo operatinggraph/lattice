@@ -282,6 +282,21 @@ warning for each `pausedStructural` consumer plus the dispatch-path alerts (`Bri
 (`aggregateStatus`, mirroring Loom/Weaver), so a heartbeat carrying an issue can never self-report
 `healthy`.
 
+### Model-runner
+
+Source package: `internal/modelrunner/`
+
+| Key Pattern | Frequency | Source File | Emitter | TTL |
+|---|---|---|---|---|
+| `health.model-runner.<instance>` | ≥ 10s heartbeat | `internal/modelrunner` (via `internal/healthkv`) | `healthkv.Reporter` | Category A — `interval×10`, re-armed |
+
+**`<instance>`** follows the convention `model-runner-<NanoID>` (`cmd/model-runner`).
+
+The heartbeat `metrics` carry the service counters (`acceptedTotal`, `busyTotal`, `completedTotal`,
+`refusedTotal`, `failedTotal`, `invalidTotal`, `dedupTotal`, `inFlight`), the vendor usage counters
+(`vendorInputTokens`, `vendorOutputTokens`), and the spend gauges (`dailyCount`, `dailyCap` — today's
+vendor-call count against `MODEL_RUNNER_DAILY_CAP`). `status` follows Contract #5 §5.2/§5.3.
+
 ### Gateway
 
 Source package: `internal/gateway/`

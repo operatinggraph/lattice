@@ -163,17 +163,26 @@ RETURN
 
 // capabilityAuthorContextSpec projects one row per installed meta-vertex,
 // keyed by the meta's own key. canonicalName + class populate for every row;
-// the remaining five self-description columns (the DDL self-description
-// aspects internal/aiagent's cold-start traversal also reads) populate only
-// for meta.ddl.vertexType/meta.ddl.eventType rows and project null
-// otherwise — the same shape buildOpGroups already handles by skipping any
-// meta with an empty permittedCommands.
+// description populates for any meta carrying one (a DDL, lens, weaverTarget,
+// or the weaverTarget's own authored `.description` aspect); spec is the
+// FULL aspect-body projection (in-repo precedent: identity-domain's
+// `u.credentialBinding.data AS binding`) and populates only for
+// meta.lens/meta.weaverTarget/meta.loomPattern rows — the `.spec` aspect
+// internal/pkgmgr/build.go writes for those three kinds (existing lens
+// bodies: what cypher looks like, which columns exist; existing weaverTarget
+// bodies: style + collision avoidance), never for a DDL. The remaining five
+// self-description columns (the DDL self-description aspects
+// internal/aiagent's cold-start traversal also reads) populate only for
+// meta.ddl.vertexType/meta.ddl.eventType rows and project null otherwise —
+// the same shape buildOpGroups already handles by skipping any meta with an
+// empty permittedCommands.
 const capabilityAuthorContextSpec = `MATCH (m:meta)
 RETURN
   m.key AS key,
   m.class AS class,
   m.canonicalName.data.value AS canonicalName,
   m.description.data.text AS description,
+  m.spec.data AS spec,
   m.permittedCommands.data.commands AS permittedCommands,
   m.inputSchema.data.schema AS inputSchema,
   m.outputSchema.data.schema AS outputSchema,

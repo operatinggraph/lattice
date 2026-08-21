@@ -279,8 +279,12 @@ Crash points and their recovery:
 - **Decision #10 / "everything is a package"** — the bridge engine is generic; adapters + event-types +
   patterns are package data. A new external integration is **just a new adapter registration + a Loom
   pattern** — no new component.
-- **Module boundary** — `bridge` imports only `substrate/*`; it talks to the Processor / Loom via NATS,
-  never Go calls.
+- **Module boundary** — `bridge` imports only `substrate/*` plus `modelrunner/wire` (the stdlib-only
+  request/result types the model-runner call shares, so the vendor SDK and its credential stay in the
+  runner); it talks to the Processor / Loom / model-runner via NATS, never Go calls. `internal/pkgmgr`
+  is out too: the `capabilityAuthor` adapter takes its deterministic validator as an injected function,
+  built at the `cmd/bridge` composition root. All three exclusions are gated by
+  `TestModuleBoundary_OnlySubstrate`.
 
 ---
 

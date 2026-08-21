@@ -214,6 +214,16 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 		return nil, fmt.Errorf("pkgmgr: capability apply: %w", err)
 	}
 
+	// Dispatch-side privilege gate, the complement to the protected-PACKAGE
+	// check above: an authored weaverTarget's gaps run under the Weaver's
+	// operator@any authority, so refuse any gap that would dispatch a
+	// platform-privileged operation or loom pattern, or bind to a protected/
+	// secure lens (authored_dispatch_scope.go). Runs only for a weaverTarget
+	// artifact — def.WeaverTargets is empty for every other kind.
+	if err := enforceAuthoredWeaverTargetScope(ctx, conn, proposalKey, def.WeaverTargets); err != nil {
+		return nil, err
+	}
+
 	return &CapabilityApplyPlan{ProposalID: proposalID, PackageName: packageName, Definition: def}, nil
 }
 

@@ -343,7 +343,15 @@ var Matrix = []Component{
 		// Processor-hosted Contract #4 tracker projection (Fire 1 of
 		// op-status-read-surface-design.md); replaces the direct core-kv
 		// DIRECT.GET the B2 read-tightening denied below.
-		ExtraPubAllow: []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.decryptref", "lattice.op.status"},
+		// svc.model.> — the request side of the model-runner call (natural-
+		// language-weaver-targets-design.md §3.1). The bridge is the caller,
+		// so it needs publish on the runner's subject space; the runner
+		// answers via its own allow_responses. This grants no write on
+		// model-results: the runner is that bucket's sole writer (registry-
+		// derived), the bridge only reads results, and a consumed ref is
+		// reaped by the bucket's per-key TTL rather than deleted by the
+		// reader.
+		ExtraPubAllow: []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.decryptref", "lattice.op.status", "svc.model.>"},
 		// The registry-derived denies (Deny) cover the core-kv/capability-kv
 		// WRITE side (the $KV.<b>.> publish subject + every registered bucket's
 		// backing-stream admin verbs). The two extra denies below close the
@@ -353,8 +361,18 @@ var Matrix = []Component{
 		// JetStream KV read, not a write, and not covered by the registry deny
 		// loop — so a decrypt-RPC-holding bridge could otherwise reach the whole
 		// core-kv corpus via the backing-stream side channel. Denying them here
-		// pins the bridge's reachable read set to the ONE lens bucket
-		// (privacy-pii-key-envelopes) its egress unwrap actually needs.
+		// closes the CORE-KV read side channel specifically; the bridge's overall
+		// read set remains whatever $JS.API.> reaches minus these denies — which
+		// legitimately includes its lens read-models (privacy-pii-key-envelopes
+		// for the egress unwrap, capability-author-context for the authoring
+		// catalog) and the model-results bucket it polls. The guarantee is
+		// scoped precisely: these denies close the core-KV read side channel;
+		// core-EVENTS reads remain open (protectedStreamDenies does not deny
+		// MSG.GET/DIRECT.GET on the core-events stream — a pre-existing posture,
+		// not this change's concern), so this is not a claim that all Core state
+		// is unreadable, only that the core-KV bucket is
+		// (TestCapabilityAuthorCatalogAccess pins the capability-author-context
+		// direction).
 		ExtraPubDeny: []string{
 			// The BARE form (no trailing token) is also a live request shape —
 			// nats.go's direct-get-by-sequence (KeyValue.GetRevision) publishes to
@@ -391,6 +409,25 @@ var Matrix = []Component{
 		// weaver-targets/loom-state), so chronicler only ever needs the ordinary
 		// $KV. publish subject, never stream administration.
 		ExtraPubAllow: []string{"$JS.API.>", "$JS.ACK.>"},
+	},
+	{
+		Name: "model-runner",
+		Desc: "external-model egress; holds the vendor credential, serves svc.model.> in a queue group, writes only model-results + health-kv",
+		// $JS.API.> is the whole publish surface this component needs beyond
+		// its registry-derived bucket grant: opening the model-results KV
+		// handle is a STREAM.INFO, and reading a result back is a DIRECT.GET.
+		// Deliberately absent, each for a reason rather than an oversight:
+		//   - no ops.> — the runner submits no operations and touches no Core
+		//     KV at all; a model call is not a state change (P2 stays whole).
+		//   - no $JS.ACK.> — it runs no JetStream consumer. Its work arrives
+		//     as micro request/reply, never as a durable delivery, so there is
+		//     no ack lane to grant.
+		//   - no publish grant on svc.model.> — it is the RESPONDER, not the
+		//     caller. It subscribes (reads are unrestricted) and replies
+		//     through allow_responses, exactly like the Weaver's control
+		//     plane; the bridge is the one that needs the publish side.
+		ExtraPubAllow:  []string{"$JS.API.>"},
+		AllowResponses: true, // micro responder (svc.model.> + $SRV.> discovery)
 	},
 	{
 		Name: "bootstrap",
