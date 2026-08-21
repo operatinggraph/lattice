@@ -393,6 +393,59 @@ test("an unrecognized read template throws instead of silently dropping", () => 
   assert.throws(() => handle.submit(), /unrecognized read template/);
 });
 
+// ---- targetField-less ops (free-choice create / no single subject) ----
+
+test("a row with no dispatch.targetField renders every schema property as a field, with no context.target required", () => {
+  const schema = {
+    type: "object",
+    properties: { fullName: { type: "string" }, specialty: { type: "string" } },
+    required: ["fullName"],
+  };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "provider", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const mount = new FakeElement("div");
+
+  assert.equal(canRender(row), true, "targetField is no longer required to exist, only dispatch.class is");
+
+  const handle = renderOpForm(row, {}, mount);
+  assert.ok(handle, "no context.target needed when the op declares no targetField");
+  assert.ok(controlByName(mount, "fullName"), "every schema property renders — nothing is auto-filled or excluded");
+  assert.ok(controlByName(mount, "specialty"));
+
+  const handleNoContext = renderOpForm(row, undefined, new FakeElement("div"));
+  assert.ok(handleNoContext, "a targetField-less op renders even with no context object at all");
+});
+
+test("submit() on a targetField-less op never writes an undefined-keyed entry into the payload", () => {
+  const schema = {
+    type: "object",
+    properties: { fullName: { type: "string" } },
+    required: ["fullName"],
+  };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "provider", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {}, mount);
+  controlByName(mount, "fullName").value = "Dr. Sam Okafor";
+  const envelope = handle.submit();
+  assert.deepEqual(envelope.payload, { fullName: "Dr. Sam Okafor" });
+  assert.equal("undefined" in envelope.payload, false);
+});
+
+// Regression guard: a targetField-BEARING row must still refuse without a
+// resolved context.target — this must NOT have changed by loosening the
+// targetField-less case above.
+test("a targetField-bearing row still refuses to render without a resolved context.target", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.targetField: "renewalKey"
+  assert.equal(renderOpForm(row, {}, new FakeElement("div")), null);
+  assert.equal(renderOpForm(row, undefined, new FakeElement("div")), null);
+});
+
 // ---- numeric coercion ----
 
 test("a money field submits cents, and a non-numeric value throws rather than serializing NaN", () => {

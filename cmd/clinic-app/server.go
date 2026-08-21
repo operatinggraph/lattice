@@ -67,6 +67,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.Handle("/", http.FileServer(http.FS(sub)))
 	inner.Handle("/shared/", http.StripPrefix("/shared/", http.FileServer(descriptorform.FS())))
 
+	inner.HandleFunc("/api/op-catalog", s.handleOpCatalog)
 	inner.HandleFunc("/api/providers", s.handleProviders)
 	inner.HandleFunc("/api/sites", s.handleSites)
 	inner.HandleFunc("/api/provider-sites", s.handleProviderSites)

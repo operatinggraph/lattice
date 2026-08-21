@@ -238,21 +238,8 @@
         <p class="lead">Add or edit a provider, and manage their recurring bookable hours and date-specific time-off.</p>
         <details class="inline-add" id="add-provider">
           <summary>＋ Add a provider</summary>
-          <div class="field">
-            <label for="np-prov-name">Full name</label>
-            <input type="text" id="np-prov-name" placeholder="Dr. Sam Okafor" />
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="np-prov-specialty">Specialty</label>
-              <input type="text" id="np-prov-specialty" placeholder="Cardiology" />
-            </div>
-            <div class="field">
-              <label for="np-prov-credentials">Credentials <span class="opt">(optional)</span></label>
-              <input type="text" id="np-prov-credentials" placeholder="MD" />
-            </div>
-          </div>
-          <button type="button" id="add-provider-submit">Add provider</button>
+          <div id="np-prov-fields"></div>
+          <button type="button" id="add-provider-submit" disabled>Add provider</button>
         </details>
         <div class="field">
           <label for="avail-provider">Provider</label>
@@ -261,25 +248,8 @@
         <div class="avail-editor" id="avail-profile">
           <h3>✏️ Provider details</h3>
           <p class="hint">Edit the selected provider's name, specialty, and credentials. Saving replaces the whole profile — name and specialty are required.</p>
-          <div class="field">
-            <label for="edit-prov-name">Full name</label>
-            <input type="text" id="edit-prov-name" placeholder="Dr. Sam Okafor" />
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="edit-prov-specialty">Specialty</label>
-              <input type="text" id="edit-prov-specialty" placeholder="Cardiology" />
-            </div>
-            <div class="field">
-              <label for="edit-prov-credentials">Credentials <span class="opt">(optional)</span></label>
-              <input type="text" id="edit-prov-credentials" placeholder="MD" />
-            </div>
-          </div>
-          <div class="field">
-            <label for="edit-prov-bio">Bio <span class="opt">(optional)</span></label>
-            <textarea id="edit-prov-bio" placeholder="Short provider bio"></textarea>
-          </div>
-          <button type="button" id="edit-prov-save">Save provider details</button>
+          <div id="edit-prov-fields"></div>
+          <button type="button" id="edit-prov-save" disabled>Save provider details</button>
         </div>
         <div class="avail-editor" id="avail-hours">
           <h3>🕑 Bookable hours (UTC)</h3>
@@ -356,21 +326,9 @@
         <div id="sites-list" class="hours-list" aria-live="polite"></div>
         <div class="avail-editor" id="assign-site">
           <h3>🔗 Assign a provider to a site</h3>
-          <p class="hint">A provider may practice at many sites; a site may host many providers.</p>
-          <div class="field-row">
-            <div class="field">
-              <label for="assign-provider">Provider</label>
-              <select id="assign-provider" aria-label="Provider to assign"></select>
-            </div>
-            <div class="field">
-              <label for="assign-site-select">Site</label>
-              <select id="assign-site-select" aria-label="Site to assign the provider to"></select>
-            </div>
-            <div class="field hours-add-field">
-              <label>&nbsp;</label>
-              <button type="button" id="assign-site-submit">Assign</button>
-            </div>
-          </div>
+          <p class="hint">A provider may practice at many sites; a site may host many providers. Provider and site are each named by their vtx key.</p>
+          <div id="assign-site-fields"></div>
+          <button type="button" id="assign-site-submit" disabled>Assign</button>
           <div id="provider-sites-list" class="hours-list" aria-live="polite"></div>
         </div>
       </div>
