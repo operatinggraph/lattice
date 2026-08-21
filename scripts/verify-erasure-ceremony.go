@@ -693,6 +693,8 @@ func intField(payload map[string]any, field string) int {
 // enumerating the subject's `indexes` links, never by key — so there is no
 // derive_reads for the owning package to compute in its place.
 func identityIndexKey(contactType, normalized string) string {
+	// derived-key: an assertion target, not a declared read — no submission here
+	// names this key, so no derive_reads could compute it for this caller.
 	return "vtx.identityindex." + substrate.SHA256NanoID(contactType+":"+normalized)
 }
 
@@ -703,6 +705,8 @@ func identityIndexKey(contactType, normalized string) string {
 // enumerated boundTo link's source, so it is a read of no submission here and
 // no package derive_reads produces it for this caller.
 func credentialIndexKey(actorKey string) string {
+	// derived-key: an assertion target, not a declared read — step 3 reaches this
+	// vertex from the enumerated boundTo link, never by a key any caller derives.
 	return "vtx.credentialindex." + substrate.SHA256NanoID(actorKey)
 }
 
