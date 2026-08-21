@@ -3422,10 +3422,15 @@ finds zero live links in both directions and emits **no mutations at all** (`swe
 `sweep_outbound` are both hit-gated), and the five-arm residue lens + `SealIdentityForErasureComplete`'s
 own re-walk read zero on every arm. The result: a `.erasure` attestation reading `violating=false` while
 N `vtx.credentialindex.<hash>` vertices — plaintext `{actorKey, identityKey, boundAt}`, i.e.
-`sha256(raw sign-in id) → the erased person` — are still live and readable. **Population is capped**:
+`sha256(raw sign-in id) → the erased person` — are still live and readable. ~~**Population is capped**:
 the producer (the pre-narrowing cascade) was deleted by `54b3c8c7`; every post-narrowing erasure runs
 `UnbindIdentityCredentials`, which tombstones the index and the link together, so no new instance of
-this shape can be created going forward. This is a cleanup of existing residue, not a recurring gap.
+this shape can be created going forward. This is a cleanup of existing residue, not a recurring gap.~~
+**The struck claim is FALSE — corrected 2026-08-21, see the close-out note at the end of this section.**
+The population is not capped: `ReconcileCredentialBinding`'s own never-linked corpus becomes this exact
+shape whenever one of its endpoints is later sealed or shredded, which is ongoing. The op as built is
+framed as a general erased-endpoint / no-live-link residue verb, with the pre-narrowing corpus as its
+currently-known instance. The scope stated below is also **half the class** — see the same note.
 
 **Verified touch-list (live at fire start, from the Phase-0 scout + Winston's own reads).**
 - `packages/identity-domain/ddls.go:686-720` — `write_path_closed(identity_key)`, the existing dual
@@ -3571,11 +3576,54 @@ gone; no consumer needs `coverage.credentials` to reflect this historical adjust
 exact live count of affected subjects on any particular deployment — that is what `--dry-run` is for,
 run by an operator, not something this fire computes or bounds further. Extending
 `SealIdentityForErasureComplete`'s own walk to cover this class going forward — the class is provably
-unwalkable in-Starlark (no link exists to enumerate from) and the population is capped by `54b3c8c7`,
-so there is no recurring gap to close in the op itself, only historical residue to clean up once.
+unwalkable in-Starlark (no link exists to enumerate from), ~~and the population is capped by
+`54b3c8c7`, so there is no recurring gap to close in the op itself, only historical residue to clean up
+once~~ (the capped-population half of that reason is false — see the close-out note; the walk is still
+not the fix, because no link survives to enumerate from).
 
 **Adjacent finds filed to the board now:** none expected — this fire closes the already-filed row
 directly.
 
 **Review depth:** full 3-layer adversarial (security/PII-plane: this mints a new tombstone-authority
 operation over identity-adjacent data) — per steward SKILL.md §4, regardless of S size.
+
+**Close-out note — 2026-08-21, post-review. Two claims above were falsified; the op as built is wider
+than the brief that scoped it.** Recorded here rather than by rewriting the brief, so the brief still
+reads as what was scoped and this note as what review found.
+
+1. **The residue is bidirectional; the brief scoped only the inbound half.** `54b3c8c7^`'s
+   `collect_bound_to_links` tombstoned `boundTo` in **both** directions ("in" + "out"), so a
+   pre-narrowing shred left two residue shapes, not one:
+   - *inbound* — the erased subject S is the link's target, i.e. the row's OWNER. The surviving index
+     at `sha256(C)` reads `{actorKey: C, identityKey: S}`.
+   - *outbound* — S is the link's **source**, i.e. S is itself a credential of some other identity O
+     (a merged-away identity folded into its survivor as an implicit self-credential; a Scenario-B
+     identity later linked to another). The surviving index at `sha256(S)` reads
+     `{actorKey: S, identityKey: O}` — keyed by a derivative of the **destroyed** identity and naming
+     S in the clear. Same leak, same plaintext, same erased person.
+
+   The op's first cut gated `NotErased` on `write_path_closed(identityKey)` alone, so it accepted the
+   inbound shape and refused the outbound one — which the CLI driver then silently skipped, since it
+   classified on the same one-sided rule. **Fixed:** the discriminator is now symmetric —
+   `write_path_closed(identityKey) OR write_path_closed(credentialActorKey)` — in the script
+   (`tombstone_orphaned_credential_index.go`) and in the driver
+   (`cmd/lattice/identity/credential_residue.go`). Nothing else about the op changed: still one
+   mutation on `index_key` only, `OwnerMismatch`/`StillBound`/`CredentialIndexAlreadyClear` unchanged.
+   Widening the gate does not widen what the verb can **reach**, because `OwnerMismatch` already forces
+   the stored row to name both endpoints exactly as the payload does — no caller can invent a row whose
+   `actorKey` is some erased identity in order to reach a live person's index.
+
+2. **The population is not capped.** The brief's "no new instance of this shape can be created going
+   forward" is false: the op also (correctly) accepts the *legacy-binding, link-never-existed* corpus —
+   `ReconcileCredentialBinding`'s own population — the moment either of its endpoints is later sealed
+   or shredded, and that keeps happening. **Fixed:** the DDL comment, the permission Note, the manifest
+   description and the CLI `Long` no longer frame this as a one-shot cleanup; they state a general
+   *erased-endpoint, no-live-link* residue verb whose **currently-known** instance is the pre-narrowing
+   (2026-08-07 and earlier) population.
+
+**Deliberately still out of scope — filed, not deferred.** The outbound arm leaves a stale phantom
+entry in the LIVE owner's own `credentialBinding` array (the precedent for rewriting it is
+`unbind_identity_credentials.go`'s `owner_binding_rewrite`). That is a **different** concern: data
+hygiene in a live third party's sign-in-methods list, not a privacy leak of the erased person —
+tombstoning the index alone already fully closes the plaintext-correlation leak this fire exists to
+fix. Filed as its own row on `backlog/lattice.md` (Component maintenance, ★, XS–S).
