@@ -75,3 +75,26 @@ func TestLensSpecJoin(t *testing.T) {
 		t.Errorf("malformed spec = %+v, want zero", got)
 	}
 }
+
+// TestProtectedFlag pins the fail-toward-visible posture: a present but
+// non-bool "protected" value must read as protected (never silently as
+// unprotected), while an absent key is the genuine unprotected default.
+func TestProtectedFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  map[string]any
+		want bool
+	}{
+		{"absent key", map[string]any{}, false},
+		{"explicit false", map[string]any{"protected": false}, false},
+		{"explicit true", map[string]any{"protected": true}, true},
+		{"malformed string", map[string]any{"protected": "true"}, true},
+		{"malformed number", map[string]any{"protected": float64(1)}, true},
+		{"malformed nil", map[string]any{"protected": nil}, true},
+	}
+	for _, c := range cases {
+		if got := protectedFlag(c.cfg); got != c.want {
+			t.Errorf("%s: protectedFlag(%+v) = %v, want %v", c.name, c.cfg, got, c.want)
+		}
+	}
+}

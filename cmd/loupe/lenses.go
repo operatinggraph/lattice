@@ -42,12 +42,29 @@ func lensSpec(get kvGetter, id string) lensSpecInfo {
 	}
 	info := lensSpecInfo{TargetType: dataString(d, "targetType")}
 	if cfg, ok := d["targetConfig"].(map[string]any); ok {
-		info.Protected, _ = cfg["protected"].(bool)
+		info.Protected = protectedFlag(cfg)
 		info.GrantTable, _ = cfg["grantTable"].(bool)
 		info.Personal, _ = cfg["personal"].(bool)
 		info.Stream, _ = cfg["stream"].(string)
 	}
 	return info
+}
+
+// protectedFlag reads targetConfig's "protected" flag, treating a PRESENT but
+// malformed (non-bool) value as protected rather than silently reading it as
+// unprotected — every installer-written config emits a literal Go bool here,
+// so a malformed value can only come from a hand-edited or corrupted config,
+// and this is the one flag on this read path worth failing toward the
+// cautious/visible badge state rather than toward silence. An absent key
+// still reads as unprotected — that is the genuine default, not a malformed
+// value.
+func protectedFlag(cfg map[string]any) bool {
+	v, present := cfg["protected"]
+	if !present {
+		return false
+	}
+	b, ok := v.(bool)
+	return !ok || b
 }
 
 // computeLenses assembles the lens roster from the Health KV key set: every

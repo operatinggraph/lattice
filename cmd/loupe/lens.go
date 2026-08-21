@@ -80,7 +80,7 @@ func readLensFullSpec(get kvGetter, id string) lensFullSpec {
 func (s lensFullSpec) specInfo() lensSpecInfo {
 	info := lensSpecInfo{TargetType: s.TargetType}
 	if s.Target != nil {
-		info.Protected, _ = s.Target["protected"].(bool)
+		info.Protected = protectedFlag(s.Target)
 		info.GrantTable, _ = s.Target["grantTable"].(bool)
 	}
 	return info
