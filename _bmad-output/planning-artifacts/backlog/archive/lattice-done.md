@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-14 · `acecf6f9` · [platform] primordialActor ownership guard CLOSED — 7 `Scope:"any"` ops restricted to their dispatching engine; lint gate default-denies the class
 - 2026-08-14 · `83891a8c` · [natsperm] core-events JS.API side channel CLOSED — 6-consumer registry + matrix-wide SNAPSHOT/RESTORE; ack-forgery residual filed
 - 2026-08-14 · `f464c7a5` · [rbac] grant-provenance Inc 3 CLOSED — origin stamp + reserved-set refusal; review found + fixed a real grant-laundering bypass; 28-pkg migration verified live
 - 2026-08-14 · `1208e638` · [rbac] grant-provenance Inc 1+2 — UpdatePermission's grant withdrawn, structural lint gate blocks re-granting it; review found a live UpgradePackage escalation, filed separately; Inc 3 remains

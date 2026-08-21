@@ -143,6 +143,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `8f49c13b` · [Pkgmgr/Weaver/Loupe] weaverTarget `.description` aspect end-to-end — installer emission, Studio field + intent, roster render, 25-target backfill + lint gate; live diff-apply verified. CI green
 - 2026-08-21 · `a0bc24e` · [Refractor] two miscompiled clause shapes CLOSED — `*` projection bodies + required MATCH binding nothing new refused at parse; corpus census green, 2 pins moved not loosened
 - 2026-08-21 · `ad18c5a5` · [privacy-base] pre-narrowing shred residue CLOSED — TombstoneOrphanedCredentialIndex + CLI sweep, both directions; 3-layer review found+fixed outbound gap + robustness bugs; owner-array hygiene follow-on filed
 - 2026-08-21 · `f60565cf` · [Tooling] lint-doc-orphan gate — twice-seen orphaned-doc class mechanized; 9 genuine orphans found + repaired; lint-package-version narrowed to ignore comment-only pkgmgr edits
@@ -169,6 +170,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 
 - 2026-08-15 · `034ab1f1` · [bootstrap] permission/role provenance write-once CLOSED — review closed a role-root shadow bypass beyond the design's sketch; contract §8.4 staged uncommitted for Andrew; 2 adjacent gaps filed
 - 2026-08-14 · `8796e6e9` · [Pkgmgr] renamed/uninstalled retention class no longer strands its DEK CLOSED — diffManifest + Uninstall exclude the holder; contract §8.3/§8.6 staged uncommitted for Andrew
-- 2026-08-14 · `acecf6f9` · [platform] primordialActor ownership guard CLOSED — 7 `Scope:"any"` ops restricted to their dispatching engine; lint gate default-denies the class
 
-- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `8f421d80`)*
+- *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `acecf6f9`)*
