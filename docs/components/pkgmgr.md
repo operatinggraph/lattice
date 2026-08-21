@@ -39,7 +39,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   enforces the interface and sees nothing at the injection site, so a fixture that builds the struct by hand
   runs the gate as a no-op and reports green on code the real entry point refuses. Minted:
   dynamic-type-taxonomy C3.7 (`Installer.SpecParser`; 30 of 34 fixtures unwired). Check:
-  `scripts/lint-conventions.go` pins `pkgmgr.NewInstaller` to its sanctioned callers.
+  `scripts/lint-conventions.go` pins `pkgmgr.NewInstaller` to its sanctioned callers. **Second sighting
+  (descriptor-floor template coverage, `39d6cb6`), in the thinner shape: the RULE was covered twelve ways
+  and the line DELIVERING it was covered zero — deleting `def.ValidateOpDispatchTemplates` from
+  `validateAll`'s list broke no test anywhere, because every refusal test called the exported rule directly
+  and the corpus census walked `Definition`s structurally. A corpus test can never supply that coverage
+  either, since a healthy corpus contains no violating input. Check (mandated test shape): every member of
+  `validateAll` carries at least one test that drives `def.validateAll()` — not the rule — over a fixture
+  legal in all other respects, asserting wording only that member emits, so a short-circuit from an earlier
+  validator cannot pass for it. `packagename_test.go` is the idiom.**
 - **A gate that cannot price one input must not present the remaining sum as a worst case** — an
   unresolvable expansion label contributed 0 to a total the refusal message then called "the worst case",
   sending an author to shrink the wrong budget. Minted: dynamic-type-taxonomy C3.7. Check: the un-priced

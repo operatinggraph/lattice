@@ -582,12 +582,17 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   its read floor into it). Check: for any lint rule about package content, name the `pkgmgr` counterpart that
   enforces the same invariant at install — and put it in the shared batch builder so fresh install, upgrade
   and dry-run all see it.
-- **A key-template vocabulary the server can only half-resolve makes a contract clause partial** — the §2.5
-  floor resolves `{actor}`/`{service}`/`{payload.*}` and silently skips `{me.*}`/`{entity.*}`, which live
-  descriptors already use, so the clause reads unconditional while its enforcement is not. Minted: auth-plane
-  close pass (`cafe-domain`'s Charge/Settle). Check: a clause stated unconditionally in `docs/contracts/*`
-  needs a corpus census of the shapes its implementation declines, each declined member named as a residual
-  or a row.
+- **A guard whose SUBJECT is computed from submitter-supplied input is not a guard** — the §2.5 floor's
+  required-wins exclusion set was resolved from the descriptor's `reads` templates against the caller's own
+  envelope, and every live descriptor's required templates are `{payload.<field>}`-rooted, so a submitter
+  could place the key they were probing into that field and buy an exemption from the control — in both the
+  demotion and the egress arms. Minted: descriptor-floor template coverage (`387ad81`); found independently
+  by two cold reviews, one of which executed it against `cafe-domain` Charge's real descriptor. Note the
+  shape: the mechanism was correct, its *input set* was attacker-addressable, and the code and design both
+  described the set as "structural". Check: for any exclusion / allow / exemption set, state in one sentence
+  what it is a function of; if a submitter-controlled field appears anywhere in that derivation, the control
+  is submitter-revocable and the sentence is the bug. Pair it with a test that steers the field and asserts
+  the control still fires.
 - **"Degrade instead of refuse" on a cache load path is fail-open when the cache has ONE load point** —
   `DDLCache.Refresh` runs at construction, so a meta root skipped on a read error is missing for the process
   lifetime, not until a retry; and because the failing read is the ROOT read every loader starts from, the

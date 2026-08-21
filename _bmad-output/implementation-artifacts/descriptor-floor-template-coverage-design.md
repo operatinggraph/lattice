@@ -117,6 +117,16 @@ for the whole class (adversarial-pass finding 2, §10). A required key the serve
 key the floor machinery can never reason about; an op that genuinely needs one keeps it out of the
 descriptor and lets the script's own declared-read discipline govern it.
 
+> **AMENDED 2026-08-21, at build (`387ad81`) — two rules, not one.** This section as ratified relied on
+> §3.3's gate to keep a required *pattern* from arising. That is not sufficient, for the reason §3.3 itself
+> states: the direct `InstallPackage`/`UpgradePackage` channel reaches the kernel install script without
+> pkgmgr's preflight, so the runtime must carry its own rule rather than inherit one. And the deeper problem
+> is not patterns at all — see §5.2 bound 1: a required template resolving from `{payload.*}` lets the
+> **submitter** choose the exclusion set. As built, a required template contributes an exclusion only when
+> **both** hold: (a) it compiles concretely (no wildcard), and (b) every placeholder in it is
+> non-submitter-controlled. Otherwise it excludes nothing and says so at Warn. The two rules compose; (b) is
+> the security-critical half and (a) the class-blanket half.
+
 Index-shape rules ride the existing §22.2 fix unchanged: `floorsByOpType` unions **both** lists per
 contributor order-independently, and `Invalidate` rebuilds both from `byOpMetaRoot` — the union is never the
 thing a withdrawal subtracts from.
@@ -188,17 +198,56 @@ Shape-match is not an approximation of resolution; for this vocabulary it is the
 
 Demoting a key the op genuinely requires turns `HydrationMiss` into silent `None`. Bounds:
 
-1. **Required-wins** (§3.2): any key matching the descriptor's own `reads` templates is never demoted. The
-   descriptor is the op's submission recipe — its required reads are exactly the ones a data-driven client
-   declares hardened, so the recipe's own required set is protected structurally.
+1. **Required-wins** (§3.2), **over an exclusion set the submitter cannot steer.** A key matching the
+   descriptor's own `reads` templates is excluded from demotion — but *only* where the required template
+   carries no submitter-controlled placeholder (`{actor}`, `{service}`, validated `{scopedTo}`, literal text).
+
+   > **AMENDED 2026-08-21, at build (`387ad81`).** As ratified this bound read: *"any key matching the
+   > descriptor's own `reads` templates is never demoted … so the recipe's own required set is protected
+   > structurally."* **That claim was false and is struck.** The required set is not fixed — it is computed
+   > from the templates against *this* envelope, and every live descriptor's `reads` list is
+   > `{payload.<field>}`-rooted. Two independent cold reviews found it and one **executed** it: a submitter
+   > places the key they are probing into that payload field, the key enters `required`, and `floored()`
+   > excludes it from **both** the demotion and the egress arms — re-opening the `HydrationMiss` oracle on
+   > cafe `Charge`'s real descriptor, this design's own headline consumer (§4). For a concretely-resolving
+   > optional template this was also *weaker than the shipped floor*, not merely unbuilt coverage.
+   >
+   > The rule as built: **the exclusion set is a function of (descriptor, authenticated identity) only.** A
+   > required template containing any `{payload.*}` contributes no exclusion, Warn-logged — the same
+   > "no contribution + Warn" posture an uncompilable template already gets. **Live cost: zero**, pinned by
+   > census: across every op-meta carrying a floor there are 43 payload-derived required templates, **0**
+   > templates shared across the two lists, and **5** same-segment-count required/optional pairs (all
+   > `lease-signing`), every one of which differs in a literal segment — so no required/optional pair can
+   > resolve to one key for any payload. The residual this leaves is the *over-demotion* direction bounded
+   > by (2) below, not the oracle direction.
 2. **Pattern tightness:** every server-resolvable placeholder stays concrete inside a pattern, so the live
    patterns fix 5 of 6 link-key segments. The one loose class is the whole-key `{me.<type>}` form
    (`vtx.<type>.<nanoid*>` — demotes any declared root of that type): zero live instances, and a
    submitter-added extra hardened read of the same type *would* be softened. That is the documented cost of
    declaring "the caller's own `<type>` vertex is optional" — the descriptor author's declaration governs the
    shape, and a script whose correctness requires a same-shaped key must put it in the descriptor's `reads`
-   (which then wins). Recorded as a residual, not designed around: no live consumer can express the failure
-   today (census §6), and the structural guard for the expressible case ships with it.
+   (which then wins, subject to bound 1's restriction). Recorded as a residual, not designed around: no live
+   consumer can express the failure today (census §6), and the structural guard for the expressible case
+   ships with it.
+
+   > **AMENDED 2026-08-21, at build.** The cost of the whole-key form is **larger than "a silent `None`"**,
+   > which is all this bound claimed. For an **egress** key the same pattern sets `EgressAbsenceTolerant`,
+   > which routes a missing key into `knownAbsent` rather than `requiredAbsent`
+   > (`step4_hydrate.go`); `firstRequiredAbsentMutation` (`starlark_runner.go`) guards only
+   > `requiredAbsent`, and `applyHydratedRevisions` (`commit_path.go`) leaves an `update`/`tombstone` on a
+   > step-4-absent key **unconditioned**. So the form can drop a *write-side* guard, not merely soften a
+   > read. Still zero live instances — all three live client-only templates are `{me.leaseapp:id}`
+   > fragments, never the whole-key form — and §3.3's gate still permits the form deliberately.
+
+### 5.2.1 Residual: a wildcard is NanoID-constrained at every segment position
+
+Found at build (cold review, executed). `keyPattern.matches` requires `substrate.IsValidNanoID` of every
+wildcard segment, at whatever position it falls. A **localName** position is not a NanoID
+(`IsValidLocalName` is a different alphabet and length), so a template like
+`vtx.<type>.{payload.x}.{me.y:id}` **under-covers** the real aspects of that vertex — they simply do not
+match, and their disposition stands as the envelope declared it. Zero live instances; fails toward no-floor,
+i.e. the pre-design status quo, never toward over-demotion. §3.3's gate deliberately does not refuse the
+shape (it is a Processor-side coverage question, not an authoring rule).
 
 ### 5.3 The exposure this closes, stated honestly
 
@@ -515,3 +564,75 @@ Parts 2–4 diffed item-by-item against part 1: every touch traces to the scope 
 `.dispatch` aspect's on-wire `reads` field (load-bearing, present — `build.go:699`) and
 `AuthTargetValidated` being set before step 4 (load-bearing, confirmed — `commit_path.go:273`); no unlisted
 dependency surfaced.
+
+---
+
+## Build close-out (2026-08-21) — SHIPPED
+
+Merged to `main` as `f28f832` (Inc 1 `387ad81` · Inc 2 `39d6cb6` · review round `5d08026`). One fire, both
+increments, no in-flight tail.
+
+### Deviations from the ratified body (each amended where it stands, above)
+
+1. **§5.2 bound 1 / §3.2 — required-wins restricted to a non-steerable exclusion set.** The ratified
+   "protected structurally" claim was false; struck and rewritten. Census pins the live cost at zero.
+2. **§3.3's validator is EXPORTED** (`Definition.ValidateOpDispatchTemplates`), not the lowercase name the
+   body gives. §6 requires the whole corpus to be run through *this very rule* as the "gate breaks nothing"
+   proof, and the corpus lives in `internal/pkgregistry`, which imports `pkgmgr` — an unexported method is
+   unreachable there, and the alternative is a re-implementation of the rule inside the test, which is the
+   guard-diverges-from-oracle defect this component's dossier has minted five times. Precedent in the same
+   test file: `Definition.ExpandReadGrantWalks()`.
+3. **§3.3's gate also pins template WELL-FORMEDNESS**, not vocabulary alone: an unbalanced brace (an
+   unterminated `{` contains no placeholder match at all, so a vocabulary-only check waves it through as
+   literal text) and an empty dot-delimited segment. Both zero-instance in the corpus. The gate explicitly
+   does **not** claim to be a Contract #1 key-grammar validator, and does not refuse a wildcard in a
+   localName position (§5.2.1's residual).
+4. **§5.6's corpus count.** The body calls the mid-segment *resolvable* `:id` fragment idiom "live wellness
+   corpus". It is live in **two** packages, three entries — wellness-domain `CreateBooking`/`JoinWaitlist`
+   and clinic-reminders `StartVisitSeries`. A gate sparing only wellness would have refused a shipped
+   package.
+
+### Review accounting (every finding resolved to a fix — no residual row filed)
+
+Two cold adversarial reviews (security lens; state/lifecycle/concurrency lens) plus a 40-mutation
+test-honesty pass, none by the implementer.
+
+- **Security, MATERIAL, executed → FIXED** (`387ad81`): the payload-steerable exclusion set above. Both
+  reviewers found it independently; one reproduced it on cafe `Charge`'s real descriptor and on the egress
+  arm. Pinned by `TestDescriptorFloor_PayloadSteeredRequiredTemplateCannotSuppressTheFloor`, verified to
+  fail against the pre-fix code.
+- **Security/state, MATERIAL, executed → FIXED** (`387ad81`): the `me.` branch was not default-deny —
+  `{me.instructor?}` compiled silently to a never-matching pattern with no Warn, and `?` is live client
+  vocabulary. A `me.` body must now be a bare Contract #1 type token.
+- **State/lifecycle → REFUTED, no change:** §22.2 Refresh/Invalidate parity for the widened index
+  (duplicate-claimant, edit, withdrawal orderings all executed against a full-Refresh oracle); slice
+  aliasing (real but inert — no consumer mutates, `unionTemplates` allocates); locking discipline
+  (`-race` clean under an 8-reader/4000-write probe); tombstone semantics incl. tombstoned-root-with-live-
+  dispatch; nothing memoized across OCC retries; the envelope's backing arrays never written.
+- **Security → REFUTED, no change:** `{scopedTo}` steering (`AuthTargetValidated` is `json:"-"` and stamped
+  in step 3), `{service}` steering, `{actor}` steering, all-wildcard patterns (segment 0 is always a literal
+  key-kind token), NanoID under-coverage at *id* positions (step 4 already refuses a `KindUnknown` key), and
+  egress collision/plaintext (the arm marks, never moves).
+- **Test honesty:** 34/40 mutations caught, every security-relevant one among them. Three claims with no
+  test behind them → FIXED (`5d08026`): the `validateAll` wiring line (deletable with nothing failing), the
+  placeholder mask in the empty-segment check (whose stated rationale inspection disproved — removed rather
+  than softened, which is strictly stronger), and `unionTemplates`' duplicate-free half (both fixtures used
+  disjoint claimant lists). Each verified by executing its mutation and watching the test fail.
+- **Accepted unpinned, with reason:** the demotion `Info` log (the header's claim is about *Warn*
+  visibility, and every Warn is asserted) and the `val == ""` early refusal (near-redundant with the final
+  empty-segment check).
+
+### Residuals — named, zero live instances, none filed as a row
+
+§5.2 bound 2 (whole-key `{me.<type>}`, now including its write-side-guard cost) and §5.2.1 (NanoID
+constraint at a localName position). Both are recorded in `keyPattern`'s doc comment, both fail toward
+no-floor, and neither is expressible by a live consumer. The `derive_reads` sibling stays its own board row
+per §8, deliberately unchanged.
+
+### Gates
+
+`go build ./...` · `make vet` · `golangci-lint run ./...` (0 issues) ·
+`STRICT=1 lint-conventions` (0, re-run **after** staging — it does not scan untracked files) ·
+`STRICT=1 lint-package-standard` (0 across 31 packages) · `gofmt` clean ·
+`go test ./... -p 4` — **128 packages ok, exit 0**. `verify-kernel` / stack-gates run in CI (this fire ran
+in a remote container with no shared stack).
