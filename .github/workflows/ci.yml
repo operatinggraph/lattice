@@ -43,7 +43,10 @@ on:
 #                                                                     service container;
 #                                                                     otherwise no Docker,
 #                                                                     embedded NATS)
-#   unit-shard-coverage — asserts unit-1's..unit-4's package globs union to
+#                         unit-4 additionally runs internal/natsperm as its own
+#                         step, outside its glob, so that package alone can take
+#                         a higher -parallel (see the step for why).
+#   unit-shard-coverage — asserts those globs plus internal/natsperm union to
 #                         EXACTLY `go list ./...`, so a newly added package
 #                         that isn't sorted into any shard fails CI loudly
 #                         instead of silently skipping                (no Docker)
@@ -319,7 +322,10 @@ jobs:
         run: make test-control-plane-authz
 
   # Shard package globs (also referenced verbatim by unit-shard-coverage below —
-  # keep the four in sync; the coverage job fails CI if they ever drift).
+  # keep the four in sync; the coverage job fails CI if they ever drift). One
+  # package, internal/natsperm, is deliberately absent from all four globs and
+  # runs as its own step in unit-4 for its -parallel setting (see there); the
+  # coverage job lists it so the union still accounts for every package.
   # All four carry their own Postgres service (not the docker-compose stack)
   # so whichever shard an RLS integration test (skipIfNoPostgres) lands in —
   # today that's internal/refractor's adapter + ruleengine/full subtrees,
@@ -489,12 +495,34 @@ jobs:
           ./cmd/processor/... ./cmd/weaver/... ./deploy/... ./examples/...
           ./internal/bypass/... ./internal/capabilitykv/... ./internal/edge/...
           ./internal/guardgrammar/... ./internal/healthkv/... ./internal/jsstore/...
-          ./internal/lenstest/... ./internal/natsperm/... ./internal/opstatus/...
+          ./internal/lenstest/... ./internal/opstatus/...
           ./internal/spike/... ./internal/starlarksandbox/... ./internal/substrate/...
           ./packages/clinic-domain/... ./packages/clinic-reminders/...
           ./packages/control-authz/... ./packages/location-domain/...
           ./packages/loftspace-domain/... ./packages/maintenance-domain/...
           ./packages/privacy-base/... ./scripts/...
+
+      - name: Run the NATS permission-matrix suite (own -parallel budget)
+        # This package gets its own invocation for one reason: -parallel.
+        # Its cost is ~528 leaf subtests that each open an auth-callout
+        # connection and then wait out the full 500ms deniedTimeout, because a
+        # denied publish never receives a reply — so the suite is ~13% CPU and
+        # essentially all waiting. At the default -parallel (GOMAXPROCS, 4 on
+        # this runner) only four of those waits overlap and the package alone
+        # runs ~3 minutes, enough to make it the pipeline's long pole; at 24 it
+        # runs ~30s. Every other package stays on the default, which is why
+        # this is a separate step rather than a flag on the shard glob above.
+        # (-p tunes package-level concurrency and is moot for a single package.)
+        #
+        # 24, not higher: 32 is measurably faster still but buys no wall-clock,
+        # since another job is the pipeline pole well above either figure — the
+        # slack is worth more as headroom against a contended runner. The
+        # fixture's own AuthTimeout override is what makes that headroom real.
+        # Coverage is unchanged: same suite, same vectors, more of the waiting
+        # overlapped. unit-shard-coverage below counts this package as covered.
+        env:
+          POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
+        run: go test -count=1 -parallel 24 -timeout 10m ./internal/natsperm/...
 
   edge-browser-store:
     runs-on: ubuntu-latest
@@ -541,10 +569,12 @@ jobs:
           go-version: "1.26"
           check-latest: true
 
-      - name: Assert unit-1..unit-4 package globs union to exactly `go list ./...`
+      - name: Assert the unit jobs' package globs union to exactly `go list ./...`
         # A fast (no Docker) guard against silent coverage loss: a package
         # added later that isn't sorted into any shard's glob list above
-        # would otherwise never run in CI again.
+        # would otherwise never run in CI again. The list below is unit-1..
+        # unit-4's four globs plus internal/natsperm, which unit-4 runs as its
+        # own step rather than inside its glob.
         run: |
           go list ./... | sort -u > /tmp/all.txt
           go list \
