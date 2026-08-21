@@ -114,6 +114,117 @@ func TestVaultShreds_ListsBucket(t *testing.T) {
 	}
 }
 
+// TestVaultRetentionKeys_ListsBucket pins the read seam of the retention-key
+// operator surface: entries in the privacy-retention-keys bucket come back as
+// sorted rows including LIVE (never-shredded) classes, and a doc-less/
+// unparseable entry still lists by key.
+func TestVaultRetentionKeys_ListsBucket(t *testing.T) {
+	ns := natsfixture.StartServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loupe-test"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: privacybase.RetentionKeyStatusBucket}); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	put := func(key, value string) {
+		t.Helper()
+		if _, err := conn.KVPut(ctx, privacybase.RetentionKeyStatusBucket, key, []byte(value)); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	put("vtx.retentionclass.aaa111", `{"canonicalName":"seven-year","policy":"eraseOnExpiry","retentionPeriod":"P7Y"}`)
+	put("vtx.retentionclass.zzz999", `{"canonicalName":"one-year","policy":"eraseOnExpiry","retentionPeriod":"P1Y",`+
+		`"shredded":true,"shreddedAt":"2026-07-05T10:00:00Z","vaultKeyDestroyed":true}`)
+
+	srv := &server{conn: conn, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), natsTimeout: 5 * time.Second}
+	mux := http.NewServeMux()
+	srv.registerRoutes(mux)
+	hs := httptest.NewServer(mux)
+	defer hs.Close()
+
+	res, err := hs.Client().Get(hs.URL + "/api/vault/retention-keys")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var body struct {
+		RetentionKeys []retentionKeyRow `json:"retentionKeys"`
+		Count         int               `json:"count"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 2 || len(body.RetentionKeys) != 2 {
+		t.Fatalf("count = %d, rows = %+v, want 2", body.Count, body.RetentionKeys)
+	}
+	r0 := body.RetentionKeys[0]
+	if r0.RetentionClassKey != "vtx.retentionclass.aaa111" || r0.Shredded || r0.CanonicalName != "seven-year" {
+		t.Errorf("row 0 = %+v, want live seven-year class", r0)
+	}
+	r1 := body.RetentionKeys[1]
+	if r1.RetentionClassKey != "vtx.retentionclass.zzz999" || !r1.Shredded || !r1.VaultKeyDestroyed || r1.ProjectionsRebuilt {
+		t.Errorf("row 1 = %+v, want shredded+vaultKeyDestroyed, projectionsRebuilt still pending", r1)
+	}
+
+	// A read endpoint on the retention-key ledger answers only GET.
+	res2, err := hs.Client().Post(hs.URL+"/api/vault/retention-keys", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST status = %d, want 400", res2.StatusCode)
+	}
+}
+
+// TestVaultRetentionKeys_BucketMissing pins the degraded shape: a stack whose
+// privacy-base package isn't installed has no privacy-retention-keys bucket,
+// and the endpoint reports that as an upstream error, not a falsely clean
+// empty list.
+func TestVaultRetentionKeys_BucketMissing(t *testing.T) {
+	ns := natsfixture.StartServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loupe-test"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	srv := &server{conn: conn, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), natsTimeout: 5 * time.Second}
+	mux := http.NewServeMux()
+	srv.registerRoutes(mux)
+	hs := httptest.NewServer(mux)
+	defer hs.Close()
+
+	res, err := hs.Client().Get(hs.URL + "/api/vault/retention-keys")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", res.StatusCode)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil || body.Error == "" {
+		t.Fatalf("want an {error} body, got err=%v body=%+v", err, body)
+	}
+}
+
 // TestVaultShreds_BucketMissing pins the degraded shape: a stack whose
 // privacy-base package isn't installed has no privacy-shreds bucket, and the
 // endpoint reports that as an upstream error, not a falsely clean empty list.

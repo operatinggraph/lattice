@@ -940,3 +940,44 @@ func TestScrubberLogicJS(t *testing.T) {
 		t.Errorf("framesFromFlows with step=1 over a 24h window = %d frames, want clamped to <=2001", len(huge))
 	}
 }
+
+// TestRetentionLogicJS pins the Vault page's retention-key shaping
+// (logic/retention.js): a live (never-shredded) class shows its declared
+// policy/period with no finalization progress; a shredded class shows
+// finalization progress instead, and stays "in flight" until BOTH async
+// halves land.
+func TestRetentionLogicJS(t *testing.T) {
+	vm := logicVM(t, "retention.js")
+
+	live := map[string]any{"canonicalName": "seven-year", "policy": "eraseOnExpiry", "retentionPeriod": "P7Y"}
+	shredding := map[string]any{"shredded": true, "vaultKeyDestroyed": true, "projectionsRebuilt": false}
+	done := map[string]any{"shredded": true, "vaultKeyDestroyed": true, "projectionsRebuilt": true}
+
+	if got := call(t, vm, "retentionKeyShredded", live); got != false {
+		t.Errorf("retentionKeyShredded(live) = %v, want false", got)
+	}
+	if got := call(t, vm, "retentionKeyInFlight", live); got != false {
+		t.Errorf("retentionKeyInFlight(live) = %v, want false (never shredded, nothing pending)", got)
+	}
+	if got := call(t, vm, "retentionKeyInFlight", shredding); got != true {
+		t.Errorf("retentionKeyInFlight(shredding) = %v, want true (projectionsRebuilt still pending)", got)
+	}
+	if got := call(t, vm, "retentionKeyInFlight", done); got != false {
+		t.Errorf("retentionKeyInFlight(done) = %v, want false (both halves landed)", got)
+	}
+
+	if got := call(t, vm, "retentionKeyStatusLine", live); got != "eraseOnExpiry · P7Y" {
+		t.Errorf("retentionKeyStatusLine(live) = %v, want the declared policy/period", got)
+	}
+	if got := call(t, vm, "retentionKeyStatusLine", shredding); got != "vaultKeyDestroyed ✓ · projectionsRebuilt …" {
+		t.Errorf("retentionKeyStatusLine(shredding) = %v, want in-flight progress", got)
+	}
+
+	summary := call(t, vm, "retentionFleetSummary", []any{live, shredding, done})
+	if summary != "3 retention classes declared · 2 shredded · 1 finalization in flight" {
+		t.Errorf("retentionFleetSummary = %v", summary)
+	}
+	if got := call(t, vm, "retentionFleetSummary", []any{live}); got != "1 retention class declared · 0 shredded · 0 finalizations in flight" {
+		t.Errorf("retentionFleetSummary singular = %v", got)
+	}
+}

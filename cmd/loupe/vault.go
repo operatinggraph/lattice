@@ -87,6 +87,91 @@ func (s *server) handleVaultShreds(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"shreds": rows, "count": len(rows)})
 }
 
+// retentionKeyRow is one retention-class holder's row in the GET
+// /api/vault/retention-keys reply — the retentionKeyStatus lens's per-class
+// declaration plus its shred-finalization progress (packages/privacy-base
+// Lenses(): retention-class-key-custody-design.md §4.4). Unlike shredRow,
+// every declared class projects here, shredded or not — the lens's anchor is
+// the class's own declaration, not a shredded=true filter, because "which
+// classes are still live" is itself the operator question.
+type retentionKeyRow struct {
+	RetentionClassKey    string `json:"retentionClassKey"`
+	CanonicalName        string `json:"canonicalName"`
+	Policy               string `json:"policy"`
+	RetentionPeriod      string `json:"retentionPeriod"`
+	Description          string `json:"description,omitempty"`
+	Shredded             bool   `json:"shredded"`
+	ShreddedAt           string `json:"shreddedAt,omitempty"`
+	VaultKeyDestroyed    bool   `json:"vaultKeyDestroyed"`
+	VaultKeyDestroyedAt  string `json:"vaultKeyDestroyedAt,omitempty"`
+	ProjectionsRebuilt   bool   `json:"projectionsRebuilt"`
+	ProjectionsRebuiltAt string `json:"projectionsRebuiltAt,omitempty"`
+}
+
+// handleVaultRetentionKeys implements GET /api/vault/retention-keys: the
+// retentionKeyStatus lens's privacy-retention-keys bucket rows, read straight
+// off the bucket (P5 — a lens target, not Core KV), mirroring
+// handleVaultShreds. A row whose doc fails to parse still lists under its
+// bucket key, and a key removed between list and get drops rather than
+// failing the whole page.
+func (s *server) handleVaultRetentionKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusBadRequest, "GET required")
+		return
+	}
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	keys, err := conn.KVListKeys(ctx, privacybase.RetentionKeyStatusBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "list "+privacybase.RetentionKeyStatusBucket+": "+err.Error())
+		return
+	}
+	rows := make([]retentionKeyRow, 0, len(keys))
+	for _, k := range keys {
+		entry, err := conn.KVGet(ctx, privacybase.RetentionKeyStatusBucket, k)
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, "get "+k+": "+err.Error())
+			return
+		}
+		row := retentionKeyRow{RetentionClassKey: k}
+		var doc struct {
+			CanonicalName        string `json:"canonicalName"`
+			Policy               string `json:"policy"`
+			RetentionPeriod      string `json:"retentionPeriod"`
+			Description          string `json:"description"`
+			Shredded             bool   `json:"shredded"`
+			ShreddedAt           string `json:"shreddedAt"`
+			VaultKeyDestroyed    bool   `json:"vaultKeyDestroyed"`
+			VaultKeyDestroyedAt  string `json:"vaultKeyDestroyedAt"`
+			ProjectionsRebuilt   bool   `json:"projectionsRebuilt"`
+			ProjectionsRebuiltAt string `json:"projectionsRebuiltAt"`
+		}
+		if json.Unmarshal(entry.Value, &doc) == nil {
+			row.CanonicalName = doc.CanonicalName
+			row.Policy = doc.Policy
+			row.RetentionPeriod = doc.RetentionPeriod
+			row.Description = doc.Description
+			row.Shredded = doc.Shredded
+			row.ShreddedAt = doc.ShreddedAt
+			row.VaultKeyDestroyed = doc.VaultKeyDestroyed
+			row.VaultKeyDestroyedAt = doc.VaultKeyDestroyedAt
+			row.ProjectionsRebuilt = doc.ProjectionsRebuilt
+			row.ProjectionsRebuiltAt = doc.ProjectionsRebuiltAt
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].RetentionClassKey < rows[j].RetentionClassKey })
+	s.writeJSON(w, http.StatusOK, map[string]any{"retentionKeys": rows, "count": len(rows)})
+}
+
 // vaultDecryptRequest is the POST /api/vault/decrypt body: the caller names
 // the sensitive aspect to reveal by key; Loupe re-reads both the ciphertext
 // and the anchoring identity's wrapped-DEK envelope server-side rather than

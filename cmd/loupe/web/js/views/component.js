@@ -13,6 +13,7 @@ import { metricsLine, eventSummary, controlSurface } from "../logic/component.js
 import { authFailureRate, pctLabel, jwksRows, revocationStatus, revokeActorValid, revokeConfirmReady } from "../logic/gateway.js";
 import { plannerPanels } from "../logic/planner.js";
 import { shredFleetSummary, shredFinalizationLine, shredInFlight } from "../logic/shred.js";
+import { retentionFleetSummary, retentionKeyStatusLine } from "../logic/retention.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 
 const state = { id: null, modal: null, revokeTimers: [] };
@@ -393,6 +394,10 @@ function renderVaultInfo(col) {
   const box = el("div");
   col.appendChild(box);
   loadVaultShreds(box);
+  col.appendChild(el("h4", "comp-subsection", "Retention classes"));
+  const rkBox = el("div");
+  col.appendChild(rkBox);
+  loadVaultRetentionKeys(rkBox);
 }
 
 // loadVaultShreds fetches the privacy-shreds bucket rows and renders the
@@ -408,6 +413,26 @@ async function loadVaultShreds(box) {
     const line = el("div", "control-item");
     line.appendChild(keyLinkEl(r.identityKey, "cid"));
     line.appendChild(el("span", "muted small", shredFinalizationLine(r)));
+    box.appendChild(line);
+  });
+}
+
+// loadVaultRetentionKeys fetches the privacy-retention-keys bucket rows and
+// renders the fleet summary plus every declared class — live or shredded —
+// so an operator can see policy/period alongside destruction progress
+// (retention-class-key-custody-design.md §4.4).
+async function loadVaultRetentionKeys(box) {
+  box.appendChild(el("div", "muted small", "loading…"));
+  const body = await api("/api/vault/retention-keys");
+  box.innerHTML = "";
+  if (body.error) { box.appendChild(el("div", "error-text small", body.error)); return; }
+  const rows = body.retentionKeys || [];
+  box.appendChild(el("div", "comp-metrics", retentionFleetSummary(rows)));
+  rows.forEach((r) => {
+    const line = el("div", "control-item");
+    line.appendChild(el("span", "cid", r.canonicalName || r.retentionClassKey));
+    line.appendChild(keyLinkEl(r.retentionClassKey, "muted small"));
+    line.appendChild(el("span", "muted small", retentionKeyStatusLine(r)));
     box.appendChild(line);
   });
 }

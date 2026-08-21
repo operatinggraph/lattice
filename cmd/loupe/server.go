@@ -142,6 +142,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/edge/device", s.handleEdgeDevice)
 	mux.HandleFunc("/api/edge/hydrate", s.handleEdgeHydrateRequest)
 	mux.HandleFunc("/api/vault/shreds", s.handleVaultShreds)
+	mux.HandleFunc("/api/vault/retention-keys", s.handleVaultRetentionKeys)
 	mux.HandleFunc("/api/vault/decrypt", s.handleVaultDecrypt)
 	mux.HandleFunc("/api/vault/erase", s.handleVaultErase)
 	mux.HandleFunc("/api/review/", s.handleReview)
