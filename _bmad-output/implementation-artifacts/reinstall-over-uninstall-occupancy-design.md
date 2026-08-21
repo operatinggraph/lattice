@@ -82,11 +82,30 @@ This converts a permanent, silent, invisible failure into a loud one at the only
 watching, and it covers **both** paths of §1 — the ≤24h duplicate *and* the >24h bare conflict — because
 it runs before the op is submitted at all.
 
-**The remedy the message names is real, and was verified, not assumed.** `ShredIdentityKey` is not in
-the core-reserved set (`internal/processor/step3_auth_capability.go:478-481`), and rbac-domain grants
-`CreatePermission` to `operator` (`packages/rbac-domain/permissions.go:34-44`), so an operator can mint
-the grant back as a `runtime`-origin permission today. The gate's message points there rather than
-leaving the operator with a refusal and nowhere to go.
+**The remedy the message names must be true in every state the message can be printed in — and the
+first draft of this clause was not.** ~~`ShredIdentityKey` is not in the core-reserved set, and rbac-domain
+grants `CreatePermission` to `operator`, so an operator can mint the grant back as a `runtime`-origin
+permission today.~~ **Struck 2026-08-21**, falsified by the cold security review of the first build:
+`CreatePermission` mints the permission **vertex** only, and authority flows exclusively through the
+`grantedBy` edge that `cap.roles.<actor>` projects (`packages/rbac-domain/lenses.go:93`). Restoring a grant
+takes a second verb, `GrantPermission { permKey, roleKey }` (`ddls.go:126`) — also granted to `operator`
+(`permissions.go:41`). A remedy naming only the first is a success reply with no grant behind it: the very
+defect this gate exists to kill, reproduced in its own refusal text.
+
+Three further states make the generic advice false, so the message qualifies itself rather than printing
+one sentence for every package:
+
+- a declared permission carrying `Lanes` (live today: `packages/console-operator/permissions.go:79`) — the
+  runtime mint writes no `lanes` (`ddls.go:323`) and the lane cannot be added afterwards, `UpdatePermission`
+  being both core-reserved and deliberately ungranted;
+- a declared permission whose operationType is core-reserved — a `runtime`-origin entry can never confer it
+  (Contract #6 §6.1 rule 3), and the attempt raises `AlertCodeReservedOperationGrantRejected`, which the
+  platform's own alerting reads as a self-mint;
+- the package that declares the remedy verbs themselves — uninstall `rbac-domain` and the grantor is among
+  what was revoked.
+
+The message also states that a restored grant is `runtime`-origin: no `declaredBy`, in no manifest, and
+never retracted by a future uninstall. An operator is entitled to that before being told to mint one.
 
 **Fail-closed, not fail-quiet.** A batched read that *fails* is not evidence of a clean bucket, so a read
 error refuses the install — the same posture `readMetaDocs` already states for the install gates
@@ -106,6 +125,13 @@ separately and naming the operator's remedy — so that a reinstall over an unin
 | `internal/pkgmgr/installer.go:170-196` | new step between `buildManifestBatch` and the submit |
 | `internal/pkgmgr/installer.go` (new helper + sentinel) | the occupancy probe and its typed error |
 | `internal/pkgmgr/installer_test.go` | the reinstall-after-uninstall regression + the live-occupant case |
+| `internal/pkgmgr/apply.go:227-247` | the dry-run preview runs the same probe |
+| `internal/pkgmgr/apply_test.go` | the dry-run and `--force` cases over an uninstalled package |
+
+`applyFreshInstall`'s dry-run branch is in scope because it bypasses `Install` entirely: without the probe
+it previews `install, N keys created` for an install that cannot commit one of them — the same false green,
+one layer up. The non-dry-run `--force` path needs nothing: `Apply` dispatches on `existing == nil`
+(`apply.go:136-142`), so a forced install over an uninstalled package reaches `Install` and the gate.
 
 **Precedents to mirror — copy these, do not invent:**
 
