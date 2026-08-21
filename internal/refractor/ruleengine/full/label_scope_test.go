@@ -15,9 +15,13 @@ import (
 //
 // The three scopes, and what makes each one what it is:
 //
-//	required MATCH  constrains the whole segment, both directions — applied to
-//	                an already-bound variable it DROPS the bindings that fail,
-//	                pruning an earlier whole-bucket seed (executor.applyMatch)
+//	required MATCH  constrains the whole segment, both directions — a label it
+//	                puts on an already-bound variable DROPS the bindings that
+//	                fail, pruning an earlier whole-bucket seed
+//	                (executor.applyMatch). It carries that constraint only
+//	                alongside a variable it introduces: a required MATCH that
+//	                binds nothing new does not parse (requiredmatch.go), so a
+//	                bare re-labeling clause is never one of these scopes
 //	OPTIONAL MATCH  constrains from its own clause onward — the path binds as a
 //	                unit or null-binds the variables NEW to it, and a failed
 //	                match restores any earlier binding intact
@@ -39,13 +43,17 @@ func labelsOf(t *testing.T, spec string) (map[string]struct{}, bool) {
 }
 
 func TestReferencedLabels_RequiredMatchConstrainsBothDirections(t *testing.T) {
+	// The second clause reaches a unit as well as re-labeling `a`: a required
+	// MATCH has to introduce a new named variable to be parseable at all
+	// (requiredmatch.go), and the label question here is about `a`, which the
+	// first clause already bound unlabeled.
 	labels, exhaustive := labelsOf(t, `
 MATCH (a)-[:manages]->(b:role)
-MATCH (a:identity)
+MATCH (a:identity)-[:residesIn]->(u:unit)
 RETURN b.key AS key`)
 	require.True(t, exhaustive,
 		"a required label prunes the bindings an earlier clause made, so it constrains backward too")
-	require.Equal(t, map[string]struct{}{"identity": {}, "role": {}}, labels)
+	require.Equal(t, map[string]struct{}{"identity": {}, "role": {}, "unit": {}}, labels)
 }
 
 func TestReferencedLabels_OptionalLabelCannotExcuseAnEarlierSighting(t *testing.T) {

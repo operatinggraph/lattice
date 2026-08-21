@@ -138,7 +138,10 @@ miscompiles* (`backlog/lattice.md`, ★★, XS–S).
 "0 live lenses" claim holds. (A prior scout reported "44 `WITH *` in packages" — a BRE artifact: the
 pattern `WITH \*` unescaped matches `WIT` + `H` + zero-or-more spaces, i.e. every plain `WITH`. The
 corrected fixed-string count in `packages/` is 0. Recorded because the false number would have reframed
-this fire as corpus-wide.)
+this fire as corpus-wide.) The **required-MATCH** half cannot be counted by grep — it needs binding-scope
+analysis — so it was settled empirically instead: with both refusals in place the whole
+`*_corpus_census_test.go` family, which parses the live lens corpus, stays green. That is the census, and
+it is stronger than a grep would have been.
 
 **The two mechanisms, precisely.**
 - **`WITH *`** — `visitWith` (`visitor.go:168-183`) copies `AllOC_ProjectionItem()` into `w.Items`; the
@@ -186,9 +189,12 @@ the message, PLUS a table of neighbouring bodies that must still parse.
 - The corpus-census tests (`*_corpus_census_test.go` in `internal/refractor/`) parse the **live** lens
   corpus; they are the real safety net for a new parse refusal. A refusal that reddens one of them means
   the census was wrong and the refusal is too broad — widen the exemption, never loosen the test.
-- `withScopeReject`'s `WITH *` arm becomes unreachable-by-parse once the refusal lands. Leave it: it is
-  reached by AST paths built in tests without going through `Parse`, and `hopindex_test.go:448-453` pins
-  it. Removing it is a separate cleanup with its own blast radius.
+- `withScopeReject`'s `WITH *` arm becomes unreachable-by-parse once the refusal lands. Leave it, but the
+  pin has to move: **`hopindex_test.go:448-453` does NOT bypass `Parse`** — `indexOf` → `parseFull` →
+  `New().Parse`, so that row goes red the moment the refusal lands (corrected 2026-08-21, during the build;
+  this brief originally claimed the opposite). Re-pin the arm with a clause list built directly
+  (`&With{}`, no items), which is the only way the shape now reaches `withScopeReject`. Removing the arm is
+  a separate cleanup with its own blast radius.
 - `fail` is first-error-wins, so refusal ORDER decides the message a multiply-invalid body gets. Keep the
   new refusals after the existing structural ones so an unsupported-clause body still reports that first.
 

@@ -174,6 +174,12 @@ func (v *astVisitor) visitWith(ctx cypher.IOC_WithContext) *With {
 			for _, it := range items.AllOC_ProjectionItem() {
 				w.Items = append(w.Items, v.visitProjectionItem(it))
 			}
+			if projectionCarriesStar(items) {
+				v.fail("a WITH projection may not use `*` — the star reaches the engine as no " +
+					"projection item at all, so the bindings it stands for are dropped and every later " +
+					"clause reads them as unbound; name the variables the WITH carries (`WITH a, b`)")
+				return w
+			}
 		}
 	}
 	if where := ctx.OC_Where(); where != nil {
@@ -191,9 +197,33 @@ func (v *astVisitor) visitReturn(ctx cypher.IOC_ReturnContext) *Return {
 			for _, it := range items.AllOC_ProjectionItem() {
 				r.Items = append(r.Items, v.visitProjectionItem(it))
 			}
+			if projectionCarriesStar(items) {
+				v.fail("a RETURN projection may not use `*` — the star reaches the engine as no " +
+					"projection item at all, so the columns it stands for are dropped from every row " +
+					"the lens emits; name the columns the RETURN projects (`RETURN a.key AS key`)")
+				return r
+			}
 		}
 	}
 	return r
+}
+
+// projectionCarriesStar reports whether a projection body's item list opens
+// with the `*` sigil.
+//
+// The grammar (Cypher.g4's oC_ProjectionItems) admits the star as a bare
+// terminal that no oC_ProjectionItem wraps, so it reaches the context only as a
+// terminal child and ANTLR emits no accessor for it. The star-with-items forms
+// (`WITH *, x AS y`) yield a NON-empty item list with the star dropped, so the
+// list's length says nothing about whether the star was written — the terminal
+// is the only evidence. The list's other terminal children are `,` and SP.
+func projectionCarriesStar(items cypher.IOC_ProjectionItemsContext) bool {
+	for _, child := range items.GetChildren() {
+		if t, isTerminal := child.(antlr.TerminalNode); isTerminal && t.GetText() == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *astVisitor) visitProjectionItem(ctx cypher.IOC_ProjectionItemContext) ProjectionItem {

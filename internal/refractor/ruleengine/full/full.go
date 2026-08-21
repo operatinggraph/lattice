@@ -114,6 +114,16 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 			Message: reject,
 		}
 	}
+	// A required MATCH that binds nothing new expands into no row the executor
+	// recognises as a match, so it drops the rows it reads as filtering
+	// (requiredmatch.go). The judgement needs the clause list in source order,
+	// which is why it runs here rather than in the visitor.
+	if reject := requiredMatchReject(v.query); reject != "" {
+		return nil, &ruleengine.ParseError{
+			Engine:  ruleengine.EngineFull,
+			Message: reject,
+		}
+	}
 
 	branchStages, branchDeferred := analyseBranchDecomposition(v.query)
 	return &CompiledRule{
