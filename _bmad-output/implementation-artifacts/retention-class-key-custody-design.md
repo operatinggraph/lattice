@@ -3465,3 +3465,131 @@ mutation that restores the `Uninstall` misattribution and fails the distinctness
 **Unclosed, and why:** an operator who has genuinely swept and re-keyed a target store still cannot shrink
 a declaration except by attesting it. §29.6's "confirmed swept, now safe to shrink" verb stays future
 work; `RetiredSecureColumns` is the declaration point it would hang off.
+
+## 31. Fire brief — Uninstall's unattested secure-lens erasure (build note, 2026-08-21)
+
+### 31.1 Scope sentence
+
+`Uninstall` tombstones a Secure Lens `.spec`, so `registry_probe` stops seeing holder types whose
+ciphertext still stands in the target store — the destruction oracle attests coverage it lacks.
+Upgrade/Apply refuse this; uninstall does not. Close it with an **operator-attested `UninstallOptions`,
+never the Definition** (reading `Definition.RetiredSecureColumns` here would let a package author
+pre-declare a retirement and disarm §30's upgrade gate from inside the package file).
+
+**Green bar:** an uninstall that would newly erase a live Secure Lens's custody record from the oracle's
+view is **refused** unless the operator attests it, per lens, with a Note; an attested one proceeds and is
+counted; an erasure the oracle was already blind to needs no attestation; the refusal renders as a 4xx on
+every surface.
+
+### 31.2 Verified touch-list (`file:line`, re-checked live this fire)
+
+| Site | Line | What changes |
+|---|---|---|
+| `internal/pkgmgr/installer.go` | 1649 | `Uninstall(ctx, packageName)` → `Uninstall(ctx, packageName, opts UninstallOptions)` |
+| `internal/pkgmgr/installer.go` | 1762-1796 | the report-only comment + spec scan; classification predicate corrected (below) |
+| `internal/pkgmgr/installer.go` | 1800-1817 | gate runs before both return paths |
+| `internal/pkgmgr/installer.go` | 1865-1912 | `UninstallResult` gains the attested count + unused labels |
+| `internal/pkgmgr/uninstallsecurelensretirement.go` | new | `UninstallOptions`, `RetiredSecureLens`, validation, gate, refusal text |
+| `cmd/lattice-pkg/main.go` | 116-124, 145-160, 352-430 | `--retire-secure-lens lens=note` (repeatable), usage, result rendering |
+| `cmd/loupe/pkg.go` | 502-533 | request field `retiredSecureLenses`; **error status via `packageApplyStatus`, not the 502 default** |
+| `cmd/loupe/pkg.go` | 369-378 | new sentinel added to the 409 arm |
+| `internal/pkgmgr/installer_test.go` | 813, 849, 872 | existing uninstall secure-column tests (14 `.Uninstall(` call sites repointed) |
+
+Anchors verified live: `enforceSecureColumnRetirement` `securecolumnretirement.go:113`;
+`undeclaredSecureColumnDropError` `:214`; `RetiredSecureColumn` `definition.go:1215`;
+`secureColumnsOf` / `lensCanonicalNameOf` / `unionStrings` / `stringsOf` `upgrade.go:890/876/955/935`;
+`LensID` derivation used by the installer to mint the spec key; `declaredLensIDs`
+`internal/refractor/health/registry_probe.go:297-376`; the oracle gate
+`cmd/refractor/main.go:2144-2154`. **Rotted lead:** §30.6 cited `installer.go:1286-1300`; the uninstall
+body now lives at `1649-1845`.
+
+### 31.3 Precedents to mirror
+
+- The gate itself mirrors `enforceSecureColumnRetirement` (`securecolumnretirement.go:113`) —
+  same pure-function shape, same `(excused int, unused []string, err error)` return, same
+  `spellings(trimmed, raw)` double-reading of an authored canonicalName, same
+  `LensID(packageName, lens)+".spec"` resolution (never a string compare against a key).
+- Validation mirrors `Definition.validateRetiredSecureColumns` (`:42`): Lens required, Note required,
+  no duplicate selector.
+- The refusal's prose mirrors `undeclaredSecureColumnDropError` (`:214`) — name the lens, its key, the
+  columns, the holder types, then the **exact** remedy; the remedy is never "drop it from the manifest".
+- Options struct mirrors `ApplyOptions` (`apply.go:11-23`) — an operator-supplied value at the call site.
+- Result counters mirror `UpgradeResult.SecureColumnsRetired` / `.SecureColumnRetirementsUnused`
+  (`upgrade.go:78-94`).
+- Status mapping mirrors `packageApplyStatus` (`cmd/loupe/pkg.go:369`).
+
+**Deliberately NOT mirrored:** `RetiredSecureColumn` is not reused as the attestation type. Uninstall's
+erasure is always whole-spec, so its `Column` selector has no meaning here, and a structurally identical
+type is the thing that invites someone to wire `def.RetiredSecureColumns` into this gate — the disarm
+this item exists to prevent. A distinct `RetiredSecureLens{Lens, Note}` makes that a compile error.
+
+### 31.4 Increment order + green checks
+
+1. **Inc 1 — the gate.** `UninstallOptions` / `RetiredSecureLens` / validation / gate / refusal sentinel
+   `ErrUndeclaredSecureLensErasure`; `Uninstall` signature + wiring; the classification correction below.
+   Green: `go build ./...`, `go test ./internal/pkgmgr/ -run 'Uninstall|SecureLens' -count=1`.
+2. **Inc 2 — the surfaces.** CLI flag + usage + rendering; Loupe request field + `packageApplyStatus`.
+   Green: `go build ./...`, `go test ./cmd/lattice-pkg/... ./cmd/loupe/... -count=1`.
+3. **Inc 3 — the proof.** Refusal, attested-proceeds, already-blind-no-attestation, the
+   spec-tombstoned-root-live bypass, unused-attestation reporting, both validation refusals; each guard
+   mutation-verified (revert it, watch its test fail).
+   Green: `go test ./internal/pkgmgr/ ./cmd/loupe/... -count=1`.
+4. **Inc 4 — docs.** `docs/components/pkgmgr.md`, this §31 built-shape, the board row.
+   Green: `STRICT=1 go run ./scripts/lint-conventions.go`, `go run ./scripts/lint-board.go`.
+
+Fire green bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`go test ./internal/pkgmgr/... ./cmd/loupe/... ./cmd/lattice-pkg/... ./internal/refractor/health/... -count=1`
+· `STRICT=1 go run ./scripts/lint-conventions.go`.
+
+### 31.5 In-scope gotchas
+
+**The classification predicate is the gate.** The shipped split keys "already erased" on the **`.spec`
+aspect's own** `isDeleted` (`installer.go:1790`). The oracle does not: `declaredLensIDs` drops a lens on
+the **vertex ROOT** (`registry_probe.go:332` — root absent, `class != "meta.lens"`, or root `isDeleted`)
+and on the spec's `source.kind: eventStream` (`:359`), and it reads a soft-deleted `.spec`'s body
+perfectly well. Two consequences, both load-bearing for a gate that fires on "newly erased":
+
+- **Under-refusal (a real bypass):** hand-tombstone the `.spec`, leave the root live, and the oracle still
+  sees the lens as declaring — so this uninstall's root tombstone *is* the erasure, while the shipped
+  predicate files it under "already erased" and would wave it past the new gate.
+- **Over-refusal:** root already tombstoned with a live `.spec` — the oracle was already blind, yet the
+  shipped predicate calls it new.
+
+So the NEW/already split must mirror the oracle's own visibility predicate: root present **and**
+`class == "meta.lens"` **and** root not `isDeleted` **and** the spec is not an `eventStream` source.
+This corrects the reported buckets too — one predicate, one source of truth.
+
+**Only NEW erasures need attestation.** Refusing on a population the uninstall neither caused nor can undo
+would make pre-existing damage un-uninstallable, which is the opposite of the
+`RetentionHoldersAlreadyStranded` design (`installer.go:1878-1885`).
+
+**Dossier entries copied in** (`docs/components/pkgmgr.md`):
+- *A guard protecting what a consumer READS must enumerate every condition under which that consumer
+  stops seeing the thing* — the oracle drops a lens on three independent conditions; a guard built against
+  one leaves the others as silent erasures with a clean report. **This is §31.5's whole first paragraph.**
+- *A new failure mode is not shipped until every surface that renders it says the right thing* — the new
+  sentinel is grepped across every `errors.Is` status/UX mapping in `cmd/`; the uninstall handler
+  currently falls through to **502**, the code Loupe's own front end retries, for a state that fails
+  identically forever.
+- *A refusal's stated remedy must not be a move that defeats the gate* — the remedy is the attestation
+  flag, traced to the outcome it promises, never "tombstone it out of band first".
+- *An injected dependency held in a nil-able field silently disables the gate it feeds* — the zero
+  `UninstallOptions` must be the REFUSING state, not the permissive one.
+- Standing checklist #3 (every refusal proven by a positive vector and mutation-verified), #4 (the
+  counter on `UninstallResult` is the observer), #6 (the mirrored precedent carries the spec-vs-root debt
+  above — verified, not copied).
+
+### 31.6 Adjacent finds
+
+- The uninstall handler's 502 default arm (`cmd/loupe/pkg.go:522`) mis-renders the *existing*
+  `ErrUninstallConflict` and `ErrNotInstalled` too. **Absorbed into this fire** — same edit.
+- No third path taken: nothing here is filed for later.
+
+### 31.7 Non-goals (the drift fence)
+
+- **No read-side change.** `declaredLensIDs`, `mayHoldHolderType`, `holderTypeRebuildTargets` untouched —
+  the gate mirrors the oracle's predicate, it does not move it.
+- **No sweep/re-key verb.** An attestation is an operator's word, exactly as §30's is an author's; the
+  platform verifies no ciphertext. §29.6's "confirmed swept" verb stays future work.
+- **No change to `Definition`.** The attestation never becomes a package-authored field.
+- **No change to what uninstall tombstones**, to the retention-holder exclusion, or to the OCC batch.
