@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-14 · `f464c7a5` · [rbac] grant-provenance Inc 3 CLOSED — origin stamp + reserved-set refusal; review found + fixed a real grant-laundering bypass; 28-pkg migration verified live
 - 2026-08-14 · `1208e638` · [rbac] grant-provenance Inc 1+2 — UpdatePermission's grant withdrawn, structural lint gate blocks re-granting it; review found a live UpgradePackage escalation, filed separately; Inc 3 remains
 - 2026-08-14 · `0bb6daea` · [Pkgmgr] un-tombstone prerequisite CLOSED — a revoked grant/role key no longer silently revives on the next upgrade; Contract #8 §8.6 edit staged uncommitted for Andrew
 - 2026-08-14 · `63f53d67` · [Refractor] personal-lens D1 grant-change trigger CLOSED — Inc 1 `b69487ef` (notification edge) + Inc 2 `63f53d67` (convergence sweep); adversarial pass caught a Health-entry resurrection, fixed same commit
