@@ -940,3 +940,30 @@ ran.
 **Census closed as re-run; not re-opened per-fire.** The next package added to the corpus is what should
 trigger the next spot-check, not a calendar re-audit — S1/S6/S7/S10 already re-check themselves every CI
 run.
+
+## 15. S1's app seam — an op an application wires UI to is user-facing by demonstration (📐 awaiting-Andrew, 2026-08-20)
+
+**The rule (normative once ratified):** an operationType a `cmd/*-app` source references is
+user-facing regardless of its grant roles — a shipped screen is proof a person triggers it — so it
+owes its owning package a full `OpMetaSpec` or a client-mechanism `[no-op-meta:]` exemption. Two
+hard failures: a machinery-family exemption (`engine-op` / `reply-op` / `lifecycle-op`) reached by
+app UI (the UI falsifies the exemption's own "no person dispatches this"), and an op literal no
+registered package declares (a rename/withdrawal must break CI, not a person's click at runtime).
+
+**Why S1's own census could not see this:** S1 keys user-facing on grants and lists `operator` in
+`trustedToolRoles` ("the trusted admin tool hardcodes its own dispatch"). The four vertical FEs
+ship real operator forms — the 2026-08-20 audit
+(`docs/reviews/vertical-app-descriptor-audit-2026-08-20.md`) found 16 references to **15**
+operator-granted ops with no descriptor and no exemption, across clinic-domain (5),
+loftspace-domain (3), objects-base (2), wellness-domain (2), location-domain, loftspace-ledger and
+lease-signing (1 each). The carve-out's premise fails exactly where a staff surface exists — and
+the staff-worlds catalog (edge-manifest's held-role walk) cannot render what nothing describes.
+
+**The gate ships with the rule** (the S1 lint doctrine): `scripts/lint-app-op-descriptors.go`,
+blocking in CI over `cmd/*-app` non-test sources, mutation-tested in all four failure directions,
+with the 15 ops as its shrink-only `appOpDebt` baseline — an entry that stops violating fails the
+gate too. The baseline is the descriptor sweep's work-list, filed on the verticals lane. The gate
+deliberately does **not** ban hand-built forms: that migration waits on the op-catalog read model +
+shared renderer item (filed, needs design), whose own design carries the shrink-only surface
+baseline; until then the gate prints each app's op-literal count every run, so the trend is
+measured.

@@ -173,6 +173,18 @@ jobs:
         # falls back to free-text for.
         run: STRICT=1 go run ./scripts/lint-facet-renderer-drift.go
 
+      - name: App op-descriptor lint (vertical apps wire UI only to described ops)
+        # The app seam of the Standard's S1: every operationType a cmd/*-app
+        # wires UI to must be registered (a package rename/withdrawal breaks
+        # CI here, not a person's click at runtime) and described by its
+        # owning package — full OpMetaSpec, or a client-side [no-op-meta:]
+        # exemption. UI wired to a machinery-exempted op (engine-op/reply-op/
+        # lifecycle-op) falsifies that exemption's "no person dispatches
+        # this" and fails. The shrink-only appOpDebt baseline holds the ops
+        # the apps already reach undescribed — the descriptor sweep's
+        # work-list; an entry that stops violating fails too.
+        run: STRICT=1 go run ./scripts/lint-app-op-descriptors.go
+
       - name: Manifest entityKey/entityType pairing lint (edge-manifest)
         # Every edge-manifest lens tail's `"<literal>" AS entityType` must
         # equal the label its `<var>.key AS entityKey` variable is bound to in

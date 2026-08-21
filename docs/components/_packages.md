@@ -410,13 +410,25 @@ reads all `vtx.package.>` keys and prints them.
 ## Authoring a new package — quick reference
 
 1. `mkdir packages/my-package/`
-2. Author `manifest.yaml`, `ddls.go`, `lenses.go` (if any), `permissions.go`, `README.md`.
+2. Author `manifest.yaml`, `ddls.go`, `lenses.go` (if any), `permissions.go`,
+   `opmetas.go` (a full `OpMetaSpec` — Presentation + InputSchema +
+   FieldDescriptions + Dispatch — for every op a person may trigger), `README.md`.
 3. Export a single `var Package = pkgmgr.Definition{...}` in `package.go`.
 4. Register the package in `cmd/lattice-pkg/main.go`'s install dispatch.
 5. Install with `lattice-pkg install packages/my-package`.
 
 See `packages/identity-hygiene/` for the canonical example (DDL + Lens +
 permission), or `packages/rbac-domain/` for paired forward/inverse ops.
+
+The normative bar is the Vertical Package Standard
+(`_bmad-output/implementation-artifacts/vertical-package-standard.md`, S1–S10) —
+its mechanical subset is CI-blocking via `scripts/lint-package-standard.go`
+(descriptor completeness, structure pins, manifest hygiene, pinned guard
+helpers) and `scripts/lint-app-op-descriptors.go` (the app seam: an op a
+`cmd/*-app` wires UI to is user-facing by demonstration and must be described
+here, in its owning package — `[no-op-meta: <code> — <reason>]` in the
+permission Note is the only exemption, from the gate's closed vocabulary).
+The descriptor idiom to copy is `packages/clinic-domain/opmetas.go`.
 
 ## Review keeps catching (dossier)
 

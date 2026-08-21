@@ -32,6 +32,34 @@ you are building*:
   (engine / op / substrate / orchestration) is a Lattice gap → file it to `lattice.md` and block the FE item on
   it. Either way, build the rest of the view.
 
+## Descriptor discipline — the op is described in the PACKAGE, not in your JS
+
+Every user-facing op ships a full `OpMetaSpec` (Presentation / InputSchema / FieldDescriptions /
+Dispatch) in its owning package — the Standard's S1 (`vertical-package-standard.md`, blocking gate).
+The vertical FEs still hand-build their forms today (tolerated, measured debt — the descriptor-driven
+staff render path doesn't exist yet), but the debt has rules, and two are CI-blocking
+(`scripts/lint-app-op-descriptors.go`):
+
+- **Wire UI only to described ops.** Before adding any button/form that submits an op, open the
+  owning package's `opmetas.go`. No full descriptor and no client-side `[no-op-meta:]` exemption ⇒
+  **add the descriptor to the package FIRST** (clinic-domain/opmetas.go idiom — package work in your
+  own stream), or the gate refuses the wiring. Never grow the gate's `appOpDebt` baseline — it
+  shrinks only. An op literal no package registers is also refused (a rename should break CI, not a
+  person's click).
+- **The descriptor/DDL is the authority your form transcribes.** Hand-built field lists, labels,
+  validation bounds, and enum options are copied FROM the op's `InputSchema`/`FieldDescriptions`
+  (cite the source in a comment), never invented — an invented bound or enum is drift that surfaces
+  as a Processor rejection in production, not in your console. Same for `reads`/`optionalReads`:
+  the descriptor's `Dispatch.Reads` templates (+ `derive_reads` for computed keys) are the declared
+  source — transcribe them. If you're hand-splicing a 6-segment `lnk.*` key the descriptor doesn't
+  declare, the descriptor is incomplete: fix it in the package, then transcribe.
+- **A bare NanoID is never a primary label** (display-name-convention-design.md D4 — ratified, and
+  it binds every renderer, not just Facet). Fallback ladder: `displayName` → composed relational
+  label ("Lease application · Unit 2") → `<Type> · <short-id>`. If the read model carries no display
+  column, add it to the lens — package work, and the recurring "renders as a raw key" board rows are
+  exactly this class. Never echo a full `vtx.*` key into a toast or success message; never ask a
+  person to type a raw key into a field (give them a picker).
+
 ## Surfaces
 
 - **Loupe operator UI** — `cmd/loupe/web/{index.html,style.css,app.js}` (**vanilla HTML/CSS/JS, no
@@ -93,7 +121,9 @@ you are building*:
    embedded in-process NATS, no Docker) are also useful when no live stack is up.
    (`make verify-package-*` is not self-contained — it targets the shared stack's `NATS_URL`.))
 4. **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
-   `STRICT=1 go run ./scripts/lint-conventions.go`, and `go test ./cmd/loupe/...`.
+   `STRICT=1 go run ./scripts/lint-conventions.go`, and `go test ./cmd/loupe/...`. Vertical-app FE
+   work adds `STRICT=1 go run ./scripts/lint-app-op-descriptors.go` (op literals resolve against
+   package descriptors — see Descriptor discipline above).
 5. **Hand up** to Winston with a screenshot / proof + the gate results. **Out-of-scope finds go in the
    hand-up for Winston to triage into a board row — do NOT `spawn_task` a user-facing chip yourself** (the
    board row is the canonical demand; a chip is Winston's routed convenience and must name the skill to run).
