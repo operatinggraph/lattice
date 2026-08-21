@@ -85,17 +85,6 @@ func flowLiveness(rowStatus, engineStatus string, engineKnown, engineHas bool) s
 	return livenessLive
 }
 
-// computeFlows assembles the Flows-tab rows from the orchestration-history
-// bucket's keys (each key is a bare instanceId per the Fire-2 as-built row
-// key). A row that fails to decode is skipped — a durable read model
-// tolerates a poison entry rather than failing the whole list. statusFilter
-// "" or "all" returns every row; otherwise only rows whose status matches.
-// engineStatuses maps instanceId to the status Loom's `loom.list` control read
-// reports for it; engineKnown is false when that control read itself failed
-// (§2.5.2: a terminal row is never badged regardless — it is just done — and a
-// "running" row stays unbadged, not falsely "orphaned", when the engine's
-// answer is unavailable). patternName resolves a patternRef to its human
-// name; nil leaves every name empty.
 // flowCols is the Chronicler's on-the-wire read-model row (snake_case,
 // orchestration-history-read-model-design.md §2.6) — shared by every handler
 // that reads the `orchestration-history` bucket so the decode rule (and its
@@ -121,6 +110,17 @@ func decodeFlowCols(raw []byte) (flowCols, bool) {
 	return cols, true
 }
 
+// computeFlows assembles the Flows-tab rows from the orchestration-history
+// bucket's keys (each key is a bare instanceId per the Fire-2 as-built row
+// key). A row that fails to decode is skipped — a durable read model
+// tolerates a poison entry rather than failing the whole list. statusFilter
+// "" or "all" returns every row; otherwise only rows whose status matches.
+// engineStatuses maps instanceId to the status Loom's `loom.list` control read
+// reports for it; engineKnown is false when that control read itself failed
+// (§2.5.2: a terminal row is never badged regardless — it is just done — and a
+// "running" row stays unbadged, not falsely "orphaned", when the engine's
+// answer is unavailable). patternName resolves a patternRef to its human
+// name; nil leaves every name empty.
 func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string, engineKnown bool, statusFilter string, patternName func(string) string) []flowRow {
 	rows := make([]flowRow, 0)
 	for _, k := range keys {

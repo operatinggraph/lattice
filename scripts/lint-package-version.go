@@ -29,7 +29,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +84,7 @@ func main() {
 		contentChanged[pkg]++
 	}
 	generatorDriven := map[string]bool{}
-	for _, pkg := range walkGeneratorConsumers(changed) {
+	for _, pkg := range walkGeneratorConsumers(rangeMode, base, head, changed) {
 		if contentChanged[pkg] == 0 {
 			generatorDriven[pkg] = true
 		}
@@ -297,6 +301,62 @@ func gitLines(args ...string) []string {
 // one file: splitting the generator across files must not reopen the gap.
 const walkGeneratorDir = "internal/pkgmgr/"
 
+// commentOnlyGoChange reports whether a Go file's only change is to its
+// comments. It compares the two revisions as ASTs parsed WITHOUT comments and
+// re-printed canonically, rather than by inspecting diff lines: this directory
+// emits Cypher, where `//` opens a comment too, so a changed line inside a raw
+// string literal reads exactly like a Go comment to any line-based test. The
+// AST cannot be fooled that way — if a single token of code moved, the printed
+// forms differ.
+//
+// A parse failure on either side answers false, so an unreadable revision is
+// treated as a real change and the gate stays fail-closed.
+func commentOnlyGoChange(rangeMode bool, base, head, path string) bool {
+	oldRef := "HEAD"
+	if rangeMode {
+		oldRef = base
+	}
+	oldSrc, err := exec.Command("git", "show", oldRef+":"+path).Output()
+	if err != nil {
+		return false
+	}
+
+	var newSrc []byte
+	if rangeMode {
+		newSrc, err = exec.Command("git", "show", head+":"+path).Output()
+	} else {
+		newSrc, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return false
+	}
+
+	oldAST, ok := canonicalGo(path, oldSrc)
+	if !ok {
+		return false
+	}
+	newAST, ok := canonicalGo(path, newSrc)
+	if !ok {
+		return false
+	}
+	return bytes.Equal(oldAST, newAST)
+}
+
+// canonicalGo renders src as source text with every comment dropped, so two
+// revisions differing only in comments render identically.
+func canonicalGo(path string, src []byte) ([]byte, bool) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0) // no parser.ParseComments
+	if err != nil {
+		return nil, false
+	}
+	var buf bytes.Buffer
+	if err := (&printer.Config{Mode: printer.RawFormat, Tabwidth: 8}).Fprint(&buf, fset, file); err != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
 // readGrantDomainDecl is the declaration that makes a package a consumer of the
 // walk generator.
 const readGrantDomainDecl = "ReadGrantDomains"
@@ -306,11 +366,19 @@ const readGrantDomainDecl = "ReadGrantDomains"
 // then every package declaring a ReadGrantDomain. Those packages need a version
 // bump exactly as an in-package edit would, because the content that reaches a
 // running stack changed for them too.
-func walkGeneratorConsumers(changed []string) []string {
+func walkGeneratorConsumers(rangeMode bool, base, head string, changed []string) []string {
 	touched := false
 	for _, path := range changed {
 		if strings.HasPrefix(path, walkGeneratorDir) && strings.HasSuffix(path, ".go") &&
 			!strings.HasSuffix(path, "_test.go") {
+			// A change that survives comment-stripping is a real one; a pure
+			// comment edit cannot alter a single byte the generator emits, and
+			// extorting a version bump for one would publish a package revision
+			// asserting a content change that did not happen — every stack then
+			// diff-applies the package for nothing. Mirrors importOnly above.
+			if commentOnlyGoChange(rangeMode, base, head, path) {
+				continue
+			}
 			touched = true
 			break
 		}

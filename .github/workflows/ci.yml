@@ -182,6 +182,16 @@ jobs:
         # `===`, silently, so a drifted literal breaks that entity kind alone.
         run: STRICT=1 go run ./scripts/lint-manifest-entity-type.go
 
+      - name: Orphaned doc-comment lint (a doc comment names what it sits above)
+        # A Go doc comment sits directly above its declaration with NO blank
+        # line, so a cut taken at the declaration line leaves the comment
+        # behind — welded onto the next declaration's own doc block. The moved
+        # declaration goes undocumented and its former neighbour is
+        # misdocumented, invisibly to the compiler, gofmt, vet, golangci-lint
+        # and every test. Minted twice (pipeline.go Inc 2's `writeResults`,
+        # executor.go's `propertyOf`), so it is mechanized rather than trusted.
+        run: STRICT=1 go run ./scripts/lint-doc-orphan.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

@@ -84,6 +84,79 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 	return rs.reprojectLabels, true
 }
 
+// FilterDecision is ConsumerFilter's account of the filter it just derived, in
+// the health entry's vocabulary (health.FilterMode* / health.FilterBroadReason*).
+//
+// It is returned BY the derivation rather than reconstructed from its result so
+// the report and the filter cannot drift: there is one traversal of the
+// conditions, and every arm that returns a filter returns the decision that
+// produced it. Reading it changes nothing — a caller that discards it gets
+// byte-identical filter subjects.
+type FilterDecision struct {
+	// Mode is which filter was chosen: health.FilterModeNarrowedRelation,
+	// health.FilterModeNarrowedLabel, or health.FilterModeBroad.
+	Mode string
+	// LabelCount is how many labels the narrowed filter carries, 0 when broad.
+	LabelCount int
+	// BroadReason is why the broad filter was chosen, "" when narrowed. Never
+	// "" when Mode is broad — see broadFilterReason.
+	BroadReason string
+}
+
+// broadFilterReason names WHY a lens that reached one of ConsumerFilter's
+// not-narrowed arms takes the broad filter. It is total over those states, with
+// no default arm to hide a shape nobody enumerated:
+//
+//   - the rule itself could not produce an exhaustive label set — the snapshot
+//     carries the site's own reason (non-exhaustive or taxonomy-unarmed), which
+//     is available precisely because reprojectAll and that reason are published
+//     together;
+//   - everything else is not-eligible: no rule compiled at all, a non-full
+//     engine, or an actor-aware lens missing one of §4.2's INSTALLED conjuncts
+//     (pattern-closure, sweep plan, anchor type, secure holder types). Those
+//     four are properties of how the lens was wired, not of its cypher, and a
+//     narrowing that never begins for one of them has no per-site cause to
+//     carry.
+//
+// It deliberately does not cover the label cap: that arm is reached only after
+// the derivation SUCCEEDED, so it names its own reason at the site.
+func broadFilterReason(rs ruleState) string {
+	if rs.narrowingBlocked != "" {
+		return rs.narrowingBlocked
+	}
+	return health.FilterBroadReasonNotEligible
+}
+
+// registrationFailedDecision is the footprint a lens ends up with when its
+// derived narrowed filter was refused and it fell back to the broad one. It has
+// one definition because two paths must agree on it byte-for-byte:
+// registerWithFilterFallback writes it the moment the fallback fires, and a
+// caller that also reports its own derivation rewrites the SAME value rather
+// than skipping its write. Making the two idempotent is what removes the
+// ordering question entirely — there is no branch left in which a derivation
+// can overwrite a refusal that came after it.
+func registrationFailedDecision() FilterDecision {
+	return FilterDecision{
+		Mode:        health.FilterModeBroad,
+		BroadReason: health.FilterBroadReasonRegistrationFailed,
+	}
+}
+
+// RecordFilterDecision reports a ConsumerFilter decision on this lens's health
+// entry. It never returns an error and never propagates one: a health write is
+// an observation of a filter that is already registered (or about to be), so
+// failing an activation or a rebuild over it would trade a working lens for a
+// missing metric. Mirrors the posture every neighbouring health call on those
+// two paths already takes — log and carry on.
+func (p *Pipeline) RecordFilterDecision(ctx context.Context, dec FilterDecision) {
+	if p.reporter == nil {
+		return
+	}
+	if err := p.reporter.SetFilterState(ctx, dec.Mode, dec.LabelCount, dec.BroadReason); err != nil {
+		slog.Error("pipeline: record consumer-filter footprint state", "ruleId", p.ruleID, "err", err)
+	}
+}
+
 // ConsumerFilter derives this lens's Core KV consumer filter from its CURRENT
 // compiled rule: a narrowed, server-side FilterSubjects set when the lens
 // qualifies (NarrowedFilterEligible, and the deduped label count at or under
@@ -174,79 +247,6 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // re-projection from the DeliverLastPerSubject snapshot) or the convergence
 // sweep, which is why a sweep plan is one of §4.2's conjuncts rather than a
 // nice-to-have: a narrowed lens must always have a standing healer.
-// FilterDecision is ConsumerFilter's account of the filter it just derived, in
-// the health entry's vocabulary (health.FilterMode* / health.FilterBroadReason*).
-//
-// It is returned BY the derivation rather than reconstructed from its result so
-// the report and the filter cannot drift: there is one traversal of the
-// conditions, and every arm that returns a filter returns the decision that
-// produced it. Reading it changes nothing — a caller that discards it gets
-// byte-identical filter subjects.
-type FilterDecision struct {
-	// Mode is which filter was chosen: health.FilterModeNarrowedRelation,
-	// health.FilterModeNarrowedLabel, or health.FilterModeBroad.
-	Mode string
-	// LabelCount is how many labels the narrowed filter carries, 0 when broad.
-	LabelCount int
-	// BroadReason is why the broad filter was chosen, "" when narrowed. Never
-	// "" when Mode is broad — see broadFilterReason.
-	BroadReason string
-}
-
-// broadFilterReason names WHY a lens that reached one of ConsumerFilter's
-// not-narrowed arms takes the broad filter. It is total over those states, with
-// no default arm to hide a shape nobody enumerated:
-//
-//   - the rule itself could not produce an exhaustive label set — the snapshot
-//     carries the site's own reason (non-exhaustive or taxonomy-unarmed), which
-//     is available precisely because reprojectAll and that reason are published
-//     together;
-//   - everything else is not-eligible: no rule compiled at all, a non-full
-//     engine, or an actor-aware lens missing one of §4.2's INSTALLED conjuncts
-//     (pattern-closure, sweep plan, anchor type, secure holder types). Those
-//     four are properties of how the lens was wired, not of its cypher, and a
-//     narrowing that never begins for one of them has no per-site cause to
-//     carry.
-//
-// It deliberately does not cover the label cap: that arm is reached only after
-// the derivation SUCCEEDED, so it names its own reason at the site.
-func broadFilterReason(rs ruleState) string {
-	if rs.narrowingBlocked != "" {
-		return rs.narrowingBlocked
-	}
-	return health.FilterBroadReasonNotEligible
-}
-
-// registrationFailedDecision is the footprint a lens ends up with when its
-// derived narrowed filter was refused and it fell back to the broad one. It has
-// one definition because two paths must agree on it byte-for-byte:
-// registerWithFilterFallback writes it the moment the fallback fires, and a
-// caller that also reports its own derivation rewrites the SAME value rather
-// than skipping its write. Making the two idempotent is what removes the
-// ordering question entirely — there is no branch left in which a derivation
-// can overwrite a refusal that came after it.
-func registrationFailedDecision() FilterDecision {
-	return FilterDecision{
-		Mode:        health.FilterModeBroad,
-		BroadReason: health.FilterBroadReasonRegistrationFailed,
-	}
-}
-
-// RecordFilterDecision reports a ConsumerFilter decision on this lens's health
-// entry. It never returns an error and never propagates one: a health write is
-// an observation of a filter that is already registered (or about to be), so
-// failing an activation or a rebuild over it would trade a working lens for a
-// missing metric. Mirrors the posture every neighbouring health call on those
-// two paths already takes — log and carry on.
-func (p *Pipeline) RecordFilterDecision(ctx context.Context, dec FilterDecision) {
-	if p.reporter == nil {
-		return
-	}
-	if err := p.reporter.SetFilterState(ctx, dec.Mode, dec.LabelCount, dec.BroadReason); err != nil {
-		slog.Error("pipeline: record consumer-filter footprint state", "ruleId", p.ruleID, "err", err)
-	}
-}
-
 func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string, decision FilterDecision) {
 	// One snapshot for both dimensions: the label set and the relation set must
 	// come from the SAME compiled rule, or a hot-reload landing between the two

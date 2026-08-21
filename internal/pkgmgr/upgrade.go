@@ -545,10 +545,6 @@ func (i *Installer) readDeclaredKeys(ctx context.Context, pkgKey string) ([]stri
 	return keys, nil
 }
 
-// getCommitted reads a key's committed value as a generic map plus the
-// read-time revision (the per-subject OCC token diffManifest conditions its
-// update/tombstone mutations on — F-011/Contract #8 §8.6). A missing key
-// returns (nil, 0, nil) so callers can treat it as "absent" rather than an error.
 // reactivationNote reports, for one updated key, whether the edit is a lens spec
 // change a running Refractor will refuse to hot-reload — in which case the
 // upgrade lands in Core KV and the lens keeps serving its old spec until it is
@@ -785,6 +781,10 @@ func unionStrings(base, extra []string) []string {
 	return out
 }
 
+// getCommitted reads a key's committed value as a generic map plus the
+// read-time revision (the per-subject OCC token diffManifest conditions its
+// update/tombstone mutations on — F-011/Contract #8 §8.6). A missing key
+// returns (nil, 0, nil) so callers can treat it as "absent" rather than an error.
 func (i *Installer) getCommitted(ctx context.Context, key string) (map[string]any, uint64, error) {
 	entry, err := i.Conn.KVGet(ctx, CoreBucket, key)
 	if err != nil {

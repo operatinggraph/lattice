@@ -596,7 +596,6 @@ type capIssue struct {
 	message  string
 }
 
-// LatticeHealthDoc mirrors Contract #5 §5.2 (same shape as Processor).
 // TaxonomyLivenessSnapshot is the taxonomy resolver's currency claim as the
 // heartbeat renders it. It mirrors lens.TaxonomyLivenessStatus rather than
 // importing it: internal/refractor/health does not depend on
@@ -618,6 +617,7 @@ type TaxonomyLivenessSnapshot struct {
 	ProbeFailures int
 }
 
+// LatticeHealthDoc mirrors Contract #5 §5.2 (same shape as Processor).
 type LatticeHealthDoc struct {
 	Key         string         `json:"key"`
 	Component   string         `json:"component"`
@@ -1758,14 +1758,6 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	return metric, h.reconcileLensIssues(active, now)
 }
 
-// addLensSweepMetrics publishes the sweep's own state alongside the lens's
-// liveness, mirroring the capability path's fields.
-//
-// `sweepEnrolled` is the one field the cap path has no need of: enrolment there
-// is universal, while here the install gate declines any lens that cannot scope
-// a listing to its own rows. That decision is otherwise a line in the
-// activation log, and a lens quietly running without its only stale-row
-// detector reads exactly like a lens whose sweep keeps finding nothing.
 // evalSecureRedaction returns the alert token for a lens that has projected one
 // or more secure columns as null because it could not resolve them, appending
 // its label to the report list.
@@ -1864,6 +1856,14 @@ func structuralRecoveryLabel(name string, rec structuralRecovery) string {
 	return fmt.Sprintf("%s (attempt %d, recovered from: %s)", name, rec.attempts, cause)
 }
 
+// addLensSweepMetrics publishes the sweep's own state alongside the lens's
+// liveness, mirroring the capability path's fields.
+//
+// `sweepEnrolled` is the one field the cap path has no need of: enrolment there
+// is universal, while here the install gate declines any lens that cannot scope
+// a listing to its own rows. That decision is otherwise a line in the
+// activation log, and a lens quietly running without its only stale-row
+// detector reads exactly like a lens whose sweep keeps finding nothing.
 func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
 	enrolled := s.SweepInterval > 0
 	m["sweepEnrolled"] = enrolled

@@ -39,16 +39,6 @@ import (
 	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
-// InstallPhase1Packages installs rbac-domain, privacy-base, identity-domain,
-// and identity-hygiene in dependency order against the given substrate
-// connection by submitting InstallPackage ops through a real meta-lane
-// CommitPath. The caller is responsible for having called
-// bootstrap.LoadOrGenerate + bootstrap.SeedPrimordial first so the
-// kernel (incl. the primordial InstallPackage DDL) + admin identity
-// exist.
-//
-// Each install is idempotent; calling this helper twice with the same
-// connection is safe.
 // StandardRoleIDs is the role-name → NanoID map a test installer needs to
 // resolve `GrantsTo` entries, matching what cmd/lattice-pkg builds in
 // production (roleIDsFromBootstrap): the primordial `operator` plus every role
@@ -69,6 +59,16 @@ func StandardRoleIDs() map[string]string {
 	return ids
 }
 
+// InstallPhase1Packages installs rbac-domain, privacy-base, identity-domain,
+// and identity-hygiene in dependency order against the given substrate
+// connection by submitting InstallPackage ops through a real meta-lane
+// CommitPath. The caller is responsible for having called
+// bootstrap.LoadOrGenerate + bootstrap.SeedPrimordial first so the
+// kernel (incl. the primordial InstallPackage DDL) + admin identity
+// exist.
+//
+// Each install is idempotent; calling this helper twice with the same
+// connection is safe.
 func InstallPhase1Packages(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
 

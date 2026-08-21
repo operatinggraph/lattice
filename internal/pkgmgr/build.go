@@ -705,16 +705,6 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 	return body
 }
 
-// opCeremonyBody emits an op meta's `.ceremony` aspect body, including only
-// the fields the author populated. A client reads MintedSecretHashField to
-// know which field it fills rather than renders.
-//
-// An emitted body MISSING that field is not covered by the client's
-// fail-closed rule, and must not be relied on to be: the client cannot
-// distinguish an empty field name from "declares no ceremony", so it renders
-// the hash field as an ordinary input — fail-OPEN. The check that catches
-// that lives where the author is, in lint-package-standard's S1 descriptor
-// completeness, not here and not in the client.
 // paneSurface resolves a PaneSpec's declared surface to the value that
 // travels in the descriptor. The zero value IS the work surface, and
 // collapsing it here means every consumer compares one string rather than
@@ -743,6 +733,16 @@ func custodyBody(pkgName string, c CustodySpec) map[string]any {
 	return body
 }
 
+// opCeremonyBody emits an op meta's `.ceremony` aspect body, including only
+// the fields the author populated. A client reads MintedSecretHashField to
+// know which field it fills rather than renders.
+//
+// An emitted body MISSING that field is not covered by the client's
+// fail-closed rule, and must not be relied on to be: the client cannot
+// distinguish an empty field name from "declares no ceremony", so it renders
+// the hash field as an ordinary input — fail-OPEN. The check that catches
+// that lives where the author is, in lint-package-standard's S1 descriptor
+// completeness, not here and not in the client.
 func opCeremonyBody(c *OpCeremonySpec) map[string]any {
 	body := map[string]any{}
 	if c.MintedSecretHashField != "" {

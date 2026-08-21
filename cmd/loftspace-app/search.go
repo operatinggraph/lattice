@@ -80,10 +80,6 @@ FROM read_landlord_lease_applications
 WHERE applicant IS NOT NULL AND applicant_name ILIKE $1
 LIMIT 20`
 
-// selectLandlordRowsForApplicantsSQL and selectLandlordRowsForUnitsSQL reuse
-// read_landlord_lease_applications' full column set (selectLandlordApplicationsSQL's
-// SELECT list) narrowed by an applicant/unit-key set, ranked active/signed-first
-// per the design's consumer shape (§0a).
 const searchLandlordColumns = `entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        landlord_key, unit_key, unit_address, unit_city,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
@@ -93,6 +89,10 @@ const searchLandlordColumns = `entity_key, applicant, applicant_name, applicant_
        reference_count, has_co_applicant, has_guarantor,
        guarantor_income_to_rent_met, COALESCE(qualified, false)`
 
+// selectLandlordRowsForApplicantsSQL and selectLandlordRowsForUnitsSQL reuse
+// read_landlord_lease_applications' full column set (selectLandlordApplicationsSQL's
+// SELECT list) narrowed by an applicant/unit-key set, ranked active/signed-first
+// per the design's consumer shape (§0a).
 const selectLandlordRowsForApplicantsSQL = `
 SELECT ` + searchLandlordColumns + `
 FROM read_landlord_lease_applications
