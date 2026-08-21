@@ -761,13 +761,19 @@ type installedPackage struct {
 
 // checkCoreBucketExists probes the core-kv bucket and returns
 // ErrBootstrapRequired if it is absent (bootstrap has not been run).
-// The probe is a lightweight KVListKeys call that fails fast if the
-// underlying NATS stream does not exist.
+// The probe is a stream-status read (KVStatus), not a key listing: existence
+// is a property of the backing stream, so learning it does not require walking
+// every key in the `vtx.op.*` churn namespace on every Install/Upgrade/Apply.
+// KVStatus classifies the two failures the listing conflated — a missing
+// bucket/stream (the bootstrap-not-run condition, mapped to the actionable
+// ErrBootstrapRequired) versus a transient/infra fault (surfaced verbatim, not
+// mis-reported as "run bootstrap").
 func (i *Installer) checkCoreBucketExists(ctx context.Context) error {
-	_, err := i.Conn.KVListKeys(ctx, CoreBucket)
-	if err != nil {
-		// Any error opening the bucket means it doesn't exist yet.
-		return fmt.Errorf("%w", ErrBootstrapRequired)
+	if err := i.Conn.KVStatus(ctx, CoreBucket); err != nil {
+		if errors.Is(err, substrate.ErrBucketNotFound) {
+			return fmt.Errorf("%w", ErrBootstrapRequired)
+		}
+		return fmt.Errorf("pkgmgr: probe core-kv bucket: %w", err)
 	}
 	return nil
 }
@@ -805,29 +811,42 @@ func IsPackageInstalled(ctx context.Context, conn *substrate.Conn, name string) 
 // from this call rather than swallowing it into "not installed" — so the
 // near-miss refuses the operation instead of resolving it.
 func (i *Installer) findInstalledPackage(ctx context.Context, name string) (*installedPackage, error) {
-	keys, err := i.Conn.KVListKeys(ctx, CoreBucket)
+	// Scope the listing to `vtx.package.>` server-side rather than walking the
+	// whole bucket: the package namespace is bounded by the install count,
+	// while the full bucket carries the unbounded `vtx.op.*` churn. Then read
+	// every manifest aspect in ONE batched round trip (KVGetMulti) instead of a
+	// serial KVGet per manifest — the readMetaDocs precedent, and the same
+	// point-in-time snapshot semantics.
+	keys, err := i.Conn.KVListKeysPrefix(ctx, CoreBucket, PackageVertexPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("pkgmgr: list keys: %w", err)
+		return nil, fmt.Errorf("pkgmgr: list package keys: %w", err)
 	}
-	normalizedName := normalizePackageName(name)
-	var nearMiss string
+	manifestKeys := make([]string, 0, len(keys))
 	for _, k := range keys {
-		// Match `vtx.package.<NanoID>.manifest`.
+		// Match `vtx.package.<NanoID>.manifest` (the prefix is already
+		// guaranteed by the server-side filter; check the suffix + a non-empty
+		// middle segment).
 		if len(k) < len(PackageVertexPrefix)+len(".manifest") {
-			continue
-		}
-		if k[:len(PackageVertexPrefix)] != PackageVertexPrefix {
 			continue
 		}
 		if k[len(k)-len(".manifest"):] != ".manifest" {
 			continue
 		}
-		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("pkgmgr: get %s: %w", k, err)
+		manifestKeys = append(manifestKeys, k)
+	}
+	entries, err := i.Conn.KVGetMulti(ctx, CoreBucket, manifestKeys)
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: read %d package manifests: %w", len(manifestKeys), err)
+	}
+	normalizedName := normalizePackageName(name)
+	var nearMiss string
+	for _, k := range manifestKeys {
+		// A key absent from the batched map is the analog of ErrKeyNotFound —
+		// genuinely absent or hard-deleted/purged since the listing — and is
+		// skipped exactly as the serial path skipped a not-found key.
+		entry, present := entries[k]
+		if !present {
+			continue
 		}
 		var env struct {
 			IsDeleted bool           `json:"isDeleted"`
