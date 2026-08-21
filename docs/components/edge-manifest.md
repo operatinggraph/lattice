@@ -146,6 +146,18 @@ the descriptor-vocabulary fields `edgeCatalog` (both `Walk`s) read back off each
 `edge-manifest Fire 1 increment 1`) — an op meta that never adopted the vocabulary still projects a row,
 just with those fields null (design §3.3: "ops without descriptors still render, degraded").
 
+**Rendering the catalog: `internal/descriptorform`** (staff-descriptor-rendering-design.md §13) is the
+shared op-form renderer every staff vertical app (`cmd/{loftspace,clinic,cafe,wellness}-app`) mounts at
+its own `/shared/` path, beside its `//go:embed web` FileServer — a `//go:embed form.mjs` served through
+an exported `http.FS`, so `GET /shared/form.mjs` answers identically from every app with no per-app copy.
+It is a second consumer of the `opCatalog` row shape above: `renderOpForm(catalogRow, context, mount)`
+does its own normalization (schema parse, dispatch-shape refusal, `visibleWhen` fail-closed) and owns
+field-kind detection, template substitution (`{payload.X}`/`{me}`/`{taskKey}`/`{context.<field>}`), and
+`dispatch.authContext` assembly, so an app's server stops re-declaring op shapes the owning package
+already declares. `scripts/lint-facet-renderer-drift.go` holds it to the same schema-to-field-kind
+vocabulary as `cmd/facet/web/app.js` and `FacetManifestKit/DescriptorForm.swift` — three renderers, one
+marker-parity gate.
+
 ## Server panes
 
 `Panes()` (`panes.go`) declares a second, unrelated mechanism riding in the same package:

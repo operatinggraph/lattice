@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/descriptorform"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -71,6 +72,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	}
 	inner := http.NewServeMux()
 	inner.Handle("/", http.FileServer(http.FS(sub)))
+	inner.Handle("/shared/", http.StripPrefix("/shared/", http.FileServer(descriptorform.FS())))
 
 	inner.HandleFunc("/api/listings", s.handleListings)
 	inner.HandleFunc("/api/op-catalog", s.handleOpCatalog)

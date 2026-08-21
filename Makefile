@@ -1939,6 +1939,20 @@ test-facet-web:
 	@echo "==> Running the Facet renderer unit vectors (feed-source swap, node --test)..."
 	node --test cmd/facet/web/*.test.mjs
 
+## test-descriptorform — the shared staff-plane op-form renderer's unit
+## vectors (node --test), staff-descriptor-rendering-design.md §13.
+## internal/descriptorform/form.mjs is the ES module every
+## cmd/{loftspace,clinic,cafe,wellness}-app mounts at /shared/form.mjs; these
+## vectors pin the schema-to-field-kind table, envelope assembly per
+## dispatch.authContext, the wholeKey drop, and the anti-fallback target
+## refusal. Node only, no Docker. The glob is deliberate, matching
+## test-facet-web's own rationale: an enumerated list silently drops a file
+## nobody remembers to add.
+.PHONY: test-descriptorform
+test-descriptorform:
+	@echo "==> Running the shared descriptor-form renderer unit vectors (node --test)..."
+	node --test internal/descriptorform/*.test.mjs
+
 ## build-edge-wasm — the browser Edge node's wasm artifact
 ## (edge-browser-node-design.md §3.3). Compiles cmd/edge-wasm (the same
 ## semantics engine cmd/facet embeds natively) to js/wasm and copies the

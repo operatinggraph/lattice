@@ -15,6 +15,11 @@ const state = {
   // surface is gated on; canSignOut distinguishes a real cookie session.
   applicant: null, identityId: null, anchors: [], canSignOut: false,
   current: null, currentTask: null, view: "browse", highlight: null,
+  // formHandle is the shared internal/descriptorform module's live
+  // { descriptor, submit() } for the currently-open catalog-sourced
+  // completion — null when a COMPLETIONS (hand-built) form is open, or when
+  // nothing is open at all.
+  formHandle: null,
   mode: "applicant",
   // opCatalog maps operationType → the op's own descriptor, read from the
   // edge-manifest `opCatalog` lens (GET /api/op-catalog). It is what the
@@ -192,159 +197,92 @@ async function loadOpCatalogQuiet() {
 
 // descriptorFor resolves HOW a completion is built: the residue map first (the
 // two ops whose reads need renewal-row context the vocabulary cannot express),
-// then the op's own catalog descriptor. Null means "not completable in this
-// app" — the card offers Loupe instead — and that is the right answer for an op
-// the catalog has not projected, projected bare, or projected without the
-// dispatch fields an envelope cannot be assembled without.
+// then the op's own raw catalog row. Null means "not completable in this app"
+// — the card offers Loupe instead — and that is the right answer for an op
+// the catalog has not projected. A COMPLETIONS entry is this app's own
+// hand-built descriptor; a catalog row is handed straight to the shared
+// internal/descriptorform module (loadDescriptorform, below), which owns ALL
+// normalization for it (schema parse, dispatch-shape refusal, visibleWhen
+// fail-closed) — this function is a lookup only, nothing more.
 function descriptorFor(operationName) {
   if (COMPLETIONS[operationName]) return COMPLETIONS[operationName];
-  return catalogDescriptor((state.opCatalog || {})[operationName]);
+  return (state.opCatalog || {})[operationName] || null;
 }
 
-// catalogDescriptor turns one catalog row into the same internal shape
-// COMPLETIONS entries carry, so openComplete/submitComplete stay one code path
-// over both sources.
-//
-// It refuses (returns null) rather than half-rendering: no inputSchema means
-// there is nothing to render, and no dispatch class / target field means the
-// envelope could not be assembled even if a form appeared. An envelope without
-// `class` is rejected outright by the Processor, so offering the form would
-// promise something that cannot be kept.
-//
-// AuthContext is read straight off the descriptor and decides which leg the
-// submit takes — the value is the package's own statement of which grant path
-// the performer walks, and getting it wrong is a refusal every time:
-//
-//	"task"     the performer holds no standing grant and is authorized by the
-//	           task's own §10.7 ephemeral grant, so the envelope carries
-//	           {task, target} and the Processor's §10.6 auto-complete closes
-//	           the task on the same commit (no separate CompleteTask).
-//	"self"     a scope=self grant checked as authContext.target == actor —
-//	           this app's landlord hat, so it rides landlordSubmit().
-//	"standing" a scope=any role grant with no relationship to any target: no
-//	           authContext object at all.
-//
-// A declared `visibleWhen` is refused outright — see below.
-function catalogDescriptor(row) {
-  if (!row || !row.inputSchema || !row.dispatch) return null;
-  const d = row.dispatch;
-  if (!d.class || !d.targetField) return null;
-  // visibleWhen gates whether the op is OFFERED at all, against a column of
-  // the resolved target row ("offer only when row[field] equals equals" —
-  // pkgmgr.OpDispatchSpec.VisibleWhen). This increment ships no evaluator for
-  // it, and the honest answer to a condition you cannot evaluate is the
-  // descriptor's own rule for a client that cannot decide it: treat the
-  // condition as UNMET. No state, no offer.
-  //
-  // Ignoring the field instead would fail OPEN, silently, on the day a package
-  // author first adds one — offering a state-machine pair's wrong half, which
-  // is the exact thing the field exists to prevent. The op stays reachable in
-  // Loupe meanwhile, which is what the card already says.
-  if (d.visibleWhen) return null;
-  let schema;
+// descriptorTitle answers a display title for either shape descriptorFor
+// returns, before a form has necessarily been rendered (openRenewalAction's
+// synthetic task needs one up front): a COMPLETIONS entry's own `title`, or a
+// catalog row's `presentation.title` — the same fallback order
+// internal/descriptorform's renderOpForm uses internally for the descriptor
+// it hands back once the form actually opens.
+function descriptorTitle(desc) {
+  if (!desc) return "";
+  if (desc.title) return desc.title;
+  return (desc.presentation && desc.presentation.title) || desc.operationType || "";
+}
+
+// loadDescriptorform imports the shared op-form renderer
+// (staff-descriptor-rendering-design.md §13) exactly once — served at
+// /shared/form.mjs by this app's server.go, beside its own embedded web/
+// FileServer. A dynamic import() keeps app.js a plain (non-module) script,
+// unchanged for every other caller. descriptorformModule caches the
+// resolved module itself (not just the promise) so a synchronous caller —
+// renderTaskCard's canComplete check, which runs over a whole list with no
+// per-row await — can consult it once it has landed; a rejected import
+// clears BOTH the promise and the module so a transient load failure is
+// retried on the next call rather than poisoning the session.
+let descriptorformPromise = null;
+let descriptorformModule = null;
+function loadDescriptorform() {
+  if (!descriptorformPromise) {
+    descriptorformPromise = import("/shared/form.mjs").then(
+      (mod) => {
+        descriptorformModule = mod;
+        return mod;
+      },
+      (e) => {
+        descriptorformPromise = null;
+        descriptorformModule = null;
+        throw e;
+      },
+    );
+  }
+  return descriptorformPromise;
+}
+
+// loadDescriptorformQuiet mirrors loadOpCatalogQuiet: a load failure leaves
+// descriptorformModule null, which canRenderCatalogRow reads as "not
+// completable YET" (fail closed) rather than throwing into a render pass.
+async function loadDescriptorformQuiet() {
   try {
-    schema = JSON.parse(row.inputSchema);
+    await loadDescriptorform();
   } catch (_) {
-    return null;
+    /* not offered, rather than offered and broken */
   }
-  if (!schema || typeof schema !== "object") return null;
-  const presentation = row.presentation || {};
-  return {
-    fromCatalog: true,
-    title: presentation.title || row.operationType,
-    submitLabel: presentation.submitLabel || "Complete",
-    klass: d.class,
-    targetField: d.targetField,
-    targetType: d.targetType || "",
-    sensitive: !!row.sensitive,
-    taskLeg: d.authContext === "task",
-    landlordLeg: d.authContext === "self",
-    fields: schemaFields(schema, d.targetField, row.fieldDescriptions || {}),
-    // The declared read posture (Contract #2 §2.5), templated. Substituted at
-    // submit time, once the payload exists.
-    readTemplates: d.reads || [],
-    optionalReadTemplates: d.optionalReads || [],
-  };
 }
 
-// schemaFields turns an InputSchema's properties into the modal's field list,
-// in declaration order. The TARGET FIELD is dropped: it is filled from the
-// task's own scopedTo, never typed, and rendering it would invite someone to
-// hand-edit a vtx key that is already decided.
-//
-// Bounds come from the schema and ONLY from the schema (minimum / maximum /
-// integer step). The app does not invent them: a hardcoded floor here is a
-// magic number that can only agree with the script's real guard by luck, which
-// is the class of drift the descriptor exists to end. A field whose bound
-// matters and is unstated is a descriptor to fix, not a constant to add here.
-function schemaFields(schema, targetField, fieldHelp) {
-  const properties = schema.properties || {};
-  const required = new Set(schema.required || []);
-  const fields = [];
-  for (const name of Object.keys(properties)) {
-    if (name === targetField) continue;
-    const p = properties[name] || {};
-    const f = {
-      name,
-      label: p.title || prettyFieldName(name),
-      required: required.has(name),
-      help: fieldHelp[name] || p.description || "",
-      type: "text",
-    };
-    if (p.type === "number" || p.type === "integer") {
-      f.type = "number";
-      if (p.type === "integer") f.step = "1";
-      if (p.minimum !== undefined) f.min = String(p.minimum);
-      if (p.maximum !== undefined) f.max = String(p.maximum);
-    } else if (p.type === "string" && p.format === "date") {
-      f.type = "date";
-    } else if (p.type === "string" && p.format === "date-time") {
-      f.type = "datetime-local";
-    }
-    fields.push(f);
-  }
-  return fields;
+// canRenderCatalogRow answers whether the shared module would ever hand back
+// a working form for this catalog row — the module's OWN structural refusal
+// (unrenderable schema, an unevaluated visibleWhen, an authContext this
+// module's context shape can't build, …), consulted here so a task card's
+// Complete button is disabled for exactly the ops that would otherwise open
+// a modal and then fail on submit. Answers false (not true) until the module
+// has loaded — loadTasks awaits loadDescriptorformQuiet before rendering, so
+// by the time a card asks this is already resolved for the common path; a
+// caller reached before that (or after a load failure) gets the safe,
+// button-disabled answer rather than an optimistic one it cannot back up.
+function canRenderCatalogRow(row) {
+  return !!(descriptorformModule && descriptorformModule.canRender(row));
 }
 
-// prettyFieldName is the label fallback for a schema property that declares no
-// title: "leaseTermMonths" → "Lease term months".
-function prettyFieldName(name) {
-  const spaced = String(name).replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().trim();
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
-
-// substituteReads resolves a descriptor's declared read templates against the
-// assembled payload and the signed-in identity. Two forms carry the five ops
-// this app renders from the catalog: `{payload.<field>}` and `{me}` / `{actor}`,
-// each optionally suffixed `:id` for the bare NanoID a 6-segment link key needs.
-//
-// WHOLE-KEY RULE: a template with any segment that does not resolve is DROPPED,
-// never sent half-substituted — a malformed read key is a hard Processor
-// rejection (HydrationMiss) on a key that describes nothing, which reads to a
-// person as "the op is broken" rather than "that field was empty".
-function substituteReads(templates, payload) {
-  const out = [];
-  for (const template of templates || []) {
-    if (typeof template !== "string") continue;
-    let whole = true;
-    const key = template.replace(/\{([^}]+)\}/g, (_m, expr) => {
-      const bare = expr.endsWith(":id");
-      const path = bare ? expr.slice(0, -3) : expr;
-      let value = null;
-      if (path.startsWith("payload.")) {
-        value = payload[path.slice("payload.".length)];
-      } else if (path === "me" || path === "actor") {
-        value = state.applicant;
-      }
-      if (typeof value !== "string" || value === "") {
-        whole = false;
-        return "";
-      }
-      return bare ? shortKey(value) : value;
-    });
-    if (whole && key) out.push(key);
-  }
-  return out;
+// canCompleteOp answers whether task-completion offers a working "Complete"
+// button for this op: a COMPLETIONS entry always can (they are this app's
+// own hand-built forms), and a catalog row can only when the shared module
+// itself would render it.
+function canCompleteOp(operationName) {
+  if (COMPLETIONS[operationName]) return true;
+  const row = (state.opCatalog || {})[operationName];
+  return !!row && canRenderCatalogRow(row);
 }
 
 // manageLinkKey reconstructs the signed-in landlord's management link to a unit
@@ -2065,9 +2003,10 @@ async function loadTasks() {
     return;
   }
   $("#tasks-summary").textContent = "loading…";
-  // The catalog decides which tasks offer a Complete button at all, so it has
-  // to be in hand before the cards render — not fetched per card.
-  await loadOpCatalogQuiet();
+  // The catalog AND the shared renderer module decide which tasks offer a
+  // working Complete button (canCompleteOp), so both have to be in hand
+  // before the cards render — neither is fetched per card.
+  await Promise.all([loadOpCatalogQuiet(), loadDescriptorformQuiet()]);
   try {
     const data = await appGet("/api/tasks");
     state.tasks = data.tasks || [];
@@ -2131,7 +2070,7 @@ function renderTaskCard(t) {
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
     badge.textContent = "open";
-    const canComplete = !!descriptorFor(t.operationName);
+    const canComplete = canCompleteOp(t.operationName);
     btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
     btn.disabled = !canComplete;
     btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
@@ -2238,6 +2177,13 @@ async function reportIssue(ev) {
 // exact fallback is the filed defect (vertical-package-standard.md §8) that
 // wrote a walk-in's SSN onto the operator's own vertex, create-only. No target,
 // no form.
+// openComplete resolves target the same way regardless of source (task's own
+// scopedTo — never the signed-in identity, and never a guess) then branches
+// on the descriptor's shape: a COMPLETIONS entry renders through the
+// unchanged hand-built path (openLegacyComplete); a catalog row is handed to
+// the shared internal/descriptorform module, which owns field rendering,
+// validation, and envelope assembly for every op the owning package
+// describes.
 function openComplete(task) {
   const desc = descriptorFor(task.operationName);
   if (!desc) return;
@@ -2246,6 +2192,25 @@ function openComplete(task) {
     return;
   }
   state.currentTask = task;
+  state.formHandle = null;
+
+  if (COMPLETIONS[task.operationName]) {
+    openLegacyComplete(task, desc);
+    return;
+  }
+  // openCatalogComplete is async (it awaits the module load); any throw
+  // inside it — before or after that await — becomes a REJECTED promise,
+  // never a synchronous exception this caller could catch, so it needs its
+  // own catch here or a failure surfaces as a silent, toast-less dead click.
+  openCatalogComplete(task, desc).catch((e) => toast("Could not open this action: " + e.message, "err"));
+}
+
+// openLegacyComplete renders a COMPLETIONS entry's own hand-built field list
+// — SignRenewal/VerifyGuarantor, whose reads need renewal-row context that
+// this hand-built path splices in directly, rather than through the shared
+// module's declarative template vocabulary (staff-descriptor-rendering-
+// design.md §13 non-goals).
+function openLegacyComplete(task, desc) {
   $("#complete-title").textContent = desc.title;
   $("#complete-desc").textContent = task.operationDescription || "";
   $("#tc-target").textContent = task.scopedTo;
@@ -2287,9 +2252,62 @@ function openComplete(task) {
   if (first) first.focus();
 }
 
+// openCatalogComplete renders a raw op-catalog row through the shared
+// internal/descriptorform module: it mounts the op's fields into #tc-fields
+// and hands back { descriptor, submit() }, which submitComplete calls at
+// submit time. A null handle means the module itself refused to offer the
+// op (unrenderable schema, an unevaluated visibleWhen, …) — the module owns
+// that fail-closed judgment entirely; this app only checks whether it got a
+// handle back.
+async function openCatalogComplete(task, desc) {
+  $("#complete-title").textContent = descriptorTitle(desc);
+  $("#complete-desc").textContent = task.operationDescription || "";
+  $("#tc-target").textContent = task.scopedTo;
+  const host = $("#tc-fields");
+  host.innerHTML = "";
+
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    toast("Could not load the action form: " + e.message, "err");
+    return;
+  }
+  // The open task may have changed (closed, or a different one opened) while
+  // the module loaded — never mount a stale form into the now-current modal.
+  if (state.currentTask !== task) return;
+
+  const handle = renderOpForm(desc, {
+    target: task.scopedTo,
+    me: state.applicant,
+    taskKey: task.taskKey || null,
+    row: null,
+    prefill: null,
+    // Mirrors landlordSubmit()'s own gate exactly: a self-authContext op only
+    // sends {target: me} when the session is actually in the landlord hat —
+    // never unconditionally, since an actor's platform grants can legitimately
+    // carry a broader scope=any row alongside a scope=self one for the same
+    // op, and sending a self-voiced target only belongs to a caller that
+    // knows it means it (module doc comment, buildAuthContext).
+    selfVoice: isLandlord(),
+  }, host);
+  if (!handle) {
+    toast("This action can't be completed here — try Loupe.", "err");
+    return;
+  }
+  state.formHandle = handle;
+  $("#complete-title").textContent = handle.descriptor.title;
+  $("#tc-sensitive").hidden = !handle.descriptor.sensitive;
+  $("#complete-submit").textContent = handle.descriptor.submitLabel;
+  $("#complete-overlay").hidden = false;
+  const first = host.querySelector("input, select, textarea");
+  if (first) first.focus();
+}
+
 function closeComplete() {
   $("#complete-overlay").hidden = true;
   state.currentTask = null;
+  state.formHandle = null;
 }
 
 async function submitComplete(ev) {
@@ -2299,6 +2317,18 @@ async function submitComplete(ev) {
   const desc = descriptorFor(task.operationName);
   if (!desc) return;
 
+  if (COMPLETIONS[task.operationName]) {
+    await submitLegacyComplete(task, desc);
+    return;
+  }
+  await submitCatalogComplete(task, desc);
+}
+
+// submitLegacyComplete is the unchanged submission path for a COMPLETIONS
+// entry: it splices the renewal row's own fields into the payload and into
+// composite link-key reads (renewsLinkKey/applicationForLinkKey), a shape
+// `{context.<field>}` will let a later increment migrate onto the module.
+async function submitLegacyComplete(task, desc) {
   // The target is the task's OWN subject — never the signed-in identity, and
   // never a guess (see openComplete's fail-closed note).
   const target = task.scopedTo || "";
@@ -2365,25 +2395,14 @@ async function submitComplete(ev) {
     const extra = desc.extraReads(target, renewalRow);
     if (extra.reads) reads.push(...extra.reads);
     optionalReads = extra.optionalReads;
-  } else if (desc.fromCatalog) {
-    // The descriptor's OWN declared read posture, substituted against the
-    // payload just assembled. `reads` already holds the target key; the
-    // descriptor's `{payload.<targetField>}` resolves to the same key, so the
-    // two are unioned rather than concatenated — a duplicate read key is a
-    // hydration request repeated, not a second fact.
-    for (const key of substituteReads(desc.readTemplates, payload)) {
-      if (!reads.includes(key)) reads.push(key);
-    }
-    const optional = substituteReads(desc.optionalReadTemplates, payload);
-    if (optional.length > 0) optionalReads = optional;
   }
 
-  // The auth path the descriptor names (catalogDescriptor's own note): a
-  // task-voice op is authorized by the task's §10.7 ephemeral grant and needs
-  // the task key, a self-voice op rides this app's landlord hat, and a standing
-  // op sends no authContext at all. A task-voice op reached WITHOUT a real task
-  // (the synthetic renewal-card path) has no grant to submit under, so it is
-  // refused here rather than sent with a null task the Gateway cannot match.
+  // The auth path the descriptor names: a task-voice op is authorized by the
+  // task's §10.7 ephemeral grant and needs the task key, a self-voice op
+  // rides this app's landlord hat, and a standing op sends no authContext at
+  // all. A task-voice op reached WITHOUT a real task (the synthetic renewal-
+  // card path) has no grant to submit under, so it is refused here rather
+  // than sent with a null task the Gateway cannot match.
   if (desc.taskLeg && !task.taskKey) {
     toast("This action can only be taken from its task.", "err");
     return;
@@ -2428,6 +2447,52 @@ async function submitComplete(ev) {
     if (desc.klass === "renewal") {
       loadRenewals();
     } else if (desc.klass === "workOrder") {
+      loadTasks();
+    } else {
+      loadTasks();
+      loadApplications();
+    }
+  } catch (e) {
+    toast("Could not complete: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// submitCatalogComplete calls the mounted form handle's submit() — required-
+// field validation, numeric coercion, target/read template substitution, and
+// authContext assembly all happen inside it (internal/descriptorform's own
+// contract) — and posts the resulting envelope unchanged.
+async function submitCatalogComplete(task, desc) {
+  const handle = state.formHandle;
+  if (!handle) return;
+
+  const submit = $("#complete-submit");
+  submit.disabled = true;
+  try {
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitOp(envelope);
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not complete — " + msg, "err");
+      return;
+    }
+    // A task-voice op's §10.7 ephemeral grant already closed the task on the
+    // same commit (Contract #10 §10.6 auto-complete); every other leg submits
+    // under the signed-in identity's own standing grant, so it is retired
+    // explicitly through the retained out-of-band CompleteTask path.
+    if (desc.dispatch.authContext !== "task") await completeTask(task.taskKey);
+    closeComplete();
+    toast(handle.descriptor.title + " — done.", "ok");
+    if (desc.dispatch.class === "renewal") {
+      loadRenewals();
+    } else if (desc.dispatch.class === "workOrder") {
       loadTasks();
     } else {
       loadTasks();
@@ -2635,7 +2700,7 @@ function openRenewalAction(row, operationName) {
   openComplete({
     taskKey: null,
     operationName,
-    operationDescription: desc.title,
+    operationDescription: descriptorTitle(desc),
     scopedTo: row.entityKey,
   });
 }

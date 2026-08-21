@@ -701,3 +701,11 @@ jobs:
       # + boot.mjs's wiring. Node only, so it rides this Node-equipped job.
       - name: Run the Facet renderer unit vectors (feed-source swap)
         run: make test-facet-web
+
+      # The shared staff-plane op-form renderer (internal/descriptorform/
+      # form.mjs, staff-descriptor-rendering-design.md §13): schema-to-
+      # field-kind detection, template substitution, and authContext
+      # assembly for every cmd/{loftspace,clinic,cafe,wellness}-app. Node
+      # only, so it rides this same Node-equipped job.
+      - name: Run the shared descriptor-form renderer unit vectors
+        run: make test-descriptorform
