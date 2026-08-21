@@ -64,6 +64,29 @@ const defaultPostgresURL = "postgres://lattice:lattice_dev@localhost:5432/lattic
 // ~486ms (Health KV NFR-O3); the reported NFR-P3 SLA remains 500ms (PRD).
 const nfrP3ProjectionCIDeadline = 2000 * time.Millisecond
 
+// lensColdStartConvergeDeadline bounds lens COLD-START convergence: the window
+// from a lens meta-vertex being committed to its first rows landing in the
+// target. That window is dominated by the drain of the Refractor lens registry's
+// own `vtx.meta.>` + `lnk.meta.*.subtypeOf.>` watch, which replays with
+// IncludeHistory and runs strictly serially at MaxPrefetch 1 because a single
+// event can do real work (a lens activation). A newly committed lens is therefore
+// handled only after every meta event already queued ahead of it, so this window
+// scales with the meta-event backlog standing in front of that lens — in CI, the
+// twelve package installs that run immediately before this suite. It does NOT
+// scale with any probe or retry interval and must not be resized in those terms.
+//
+// 30s is headroom over that backlog drain, not a derived bound. On a cold native
+// stack running CI's identical twelve-package install sequence the whole
+// Milestone 4 body — cold-start convergence plus the steady-state probe — takes
+// ~42ms; the budget exists for a contended runner where the same serial drain is
+// orders of magnitude slower.
+//
+// This is NOT the NFR-P3 latency budget and must never be used for a latency
+// assertion: it bounds registry drain and pipeline stand-up, not CDC-to-projection
+// lag. Steady-state per-event latency is asserted separately against
+// nfrP3ProjectionCIDeadline.
+const lensColdStartConvergeDeadline = 30 * time.Second
+
 // bookDDLScript is the Starlark source for the tutorial "book" DDL.
 const bookDDLScript = `def execute(state, op):
     p = op.payload
@@ -102,6 +125,13 @@ var bookVertexKey string
 
 // lensMetaKey holds the meta-vertex key for the books Lens (set in Milestone 4).
 var lensMetaKey string
+
+// lensLive records that the books Lens reached cold-start convergence in
+// Milestone 4 — its pipeline is stood up and projecting into Postgres. Milestone
+// 5 requires it before asserting anything about the Postgres path, so a lens that
+// never came live reports as one cold-start failure rather than as a second,
+// misattributed projection-latency failure.
+var lensLive bool
 
 // milestonePassed[N] records whether Milestone N completed without any test
 // failure. Each milestone sets its slot from !t.Failed() as its final line; the
@@ -486,18 +516,28 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 		t.Errorf(".spec aspect data contains old 'source' key — SD-1 fix not applied correctly")
 	}
 
-	// Poll Postgres for the book row within the NFR-P3 projection CI regression guard.
 	db, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
 		t.Fatalf("connect postgres: %v", err)
 	}
 	defer db.Close(ctx)
 
+	// Step A — burst-backlog convergence: the lens was committed moments ago, so
+	// the Milestone 3 book row can only appear once the Refractor's lens registry
+	// has drained its serial vtx.meta.> watch down to the new meta-vertex, stood
+	// the lens pipeline up and backfilled the book vertices that already exist.
+	// That is cold-start convergence, not per-event projection lag, so it runs
+	// against lensColdStartConvergeDeadline. The measured duration is logged rather
+	// than asserted: the budget is wide enough to swallow a cold-start regression,
+	// so that number in the CI output is what keeps one visible. The row is matched
+	// on the primary key of the vertex this run created, so a row left in the
+	// target by an earlier run cannot satisfy the wait.
 	bookTitle := "The Pragmatic Programmer"
 	var foundTitle string
-	deadline := time.Now().Add(nfrP3ProjectionCIDeadline)
+	convergeStart := time.Now()
+	deadline := convergeStart.Add(lensColdStartConvergeDeadline)
 	for {
-		row := db.QueryRow(ctx, "SELECT title FROM books WHERE title = $1", bookTitle)
+		row := db.QueryRow(ctx, "SELECT COALESCE(title, '') FROM books WHERE book_id = $1", bookVertexKey)
 		if scanErr := row.Scan(&foundTitle); scanErr == nil {
 			break
 		}
@@ -518,15 +558,75 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 			} else {
 				t.Logf("refractor.log: read error: %v", logErr)
 			}
-			t.Fatalf("book row with title %q not found in Postgres within the NFR-P3 projection CI regression guard (%v); "+
-				"check that Refractor is running (make up) and lens was accepted", bookTitle, nfrP3ProjectionCIDeadline)
+			t.Fatalf("book row %s not found in Postgres within the lens cold-start convergence window (%v); "+
+				"check that Refractor is running (make up) and lens was accepted", bookVertexKey, lensColdStartConvergeDeadline)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	convergeElapsed := time.Since(convergeStart)
 	if foundTitle != bookTitle {
 		t.Errorf("postgres title = %q, want %q", foundTitle, bookTitle)
 	}
-	t.Logf("Postgres row found: title=%q", foundTitle)
+	t.Logf("Postgres row found: book_id=%s title=%q", bookVertexKey, foundTitle)
+	t.Logf("lens cold-start convergence = %v (budget %v)", convergeElapsed, lensColdStartConvergeDeadline)
+	lensLive = true
+
+	// Step B (NFR-P3 projection CI regression guard): the books lens is now proven
+	// live, so measure STEADY-STATE per-event projection latency on the Postgres
+	// path rather than the burst-backlog convergence above. Each attempt commits a
+	// fresh book and times commit -> row visible in Postgres. Best-of-3 absorbs the
+	// >p95 tail (measured p95 ~486ms via Health KV NFR-O3); the deadline is the
+	// coarse CI regression guard (runner-floor headroom), while the reported SLA
+	// stays 500ms.
+	const nfrP3Budget = nfrP3ProjectionCIDeadline
+	var bestLatency time.Duration = -1
+	metP3 := false
+	for attempt := 1; attempt <= 3 && !metP3; attempt++ {
+		probeTitle := fmt.Sprintf("Structure and Interpretation of Computer Programs (probe %d)", attempt)
+		probeReply := submitOp(t, ctx, "CreateBook", "book", processor.LaneDefault,
+			bootstrap.BootstrapIdentityKey, map[string]any{"title": probeTitle})
+		if probeReply.Status != processor.ReplyStatusAccepted {
+			t.Fatalf("NFR-P3 probe CreateBook rejected: status=%s error=%+v", probeReply.Status, probeReply.Error)
+		}
+		probeKey := probeReply.PrimaryKey
+		if !strings.HasPrefix(probeKey, "vtx.book.") {
+			t.Fatalf("NFR-P3 probe book key not a vtx.book.* key: %q", probeKey)
+		}
+		t0 := time.Now()
+		latency := time.Duration(-1)
+		latencyDeadline := t0.Add(nfrP3Budget)
+		for {
+			var probeFound string
+			row := db.QueryRow(ctx, "SELECT COALESCE(title, '') FROM books WHERE book_id = $1", probeKey)
+			if scanErr := row.Scan(&probeFound); scanErr == nil {
+				latency = time.Since(t0)
+				if probeFound != probeTitle {
+					t.Errorf("postgres title for %s = %q, want %q", probeKey, probeFound, probeTitle)
+				}
+				break
+			}
+			if time.Now().After(latencyDeadline) {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if latency < 0 {
+			t.Logf("NFR-P3 probe %d: book row %s did not land within %v", attempt, probeKey, nfrP3Budget)
+			continue
+		}
+		if bestLatency < 0 || latency < bestLatency {
+			bestLatency = latency
+		}
+		t.Logf("NFR-P3 probe %d: per-event Postgres projection latency = %v", attempt, latency)
+		if latency <= nfrP3Budget {
+			metP3 = true
+		}
+	}
+	if !metP3 {
+		t.Fatalf("NFR-P3 violated: steady-state per-event Postgres projection did not meet %v in 3 attempts (best=%v)",
+			nfrP3Budget, bestLatency)
+	}
+	t.Logf("NFR-P3 satisfied: best steady-state per-event Postgres projection latency = %v (<= %v)", bestLatency, nfrP3Budget)
 
 	t.Logf("milestone 4 elapsed: %v", time.Since(start))
 	milestonePassed[4] = !t.Failed()
@@ -799,29 +899,37 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 
 	// Step 12: poll Postgres for the agent's book row within the NFR-P3 projection
 	// CI regression guard.
-	if lensMetaKey != "" {
+	if lensMetaKey != "" && lensLive {
 		db2, err := pgx.Connect(ctx, pgURL)
 		if err != nil {
 			t.Fatalf("connect postgres: %v", err)
 		}
 		defer db2.Close(ctx)
 
+		// The row is matched on the primary key of the vertex the agent created in
+		// this run, so a row left in the target by an earlier run cannot satisfy the
+		// poll; the scanned title then proves the projection carries the right value.
 		deadline := time.Now().Add(nfrP3ProjectionCIDeadline)
 		for {
 			var found string
-			row := db2.QueryRow(ctx, "SELECT title FROM books WHERE title = $1", agentBookTitle)
+			row := db2.QueryRow(ctx, "SELECT COALESCE(title, '') FROM books WHERE book_id = $1", agentBookKey)
 			if scanErr := row.Scan(&found); scanErr == nil {
-				t.Logf("Postgres row found for AI agent book: title=%q", found)
+				if found != agentBookTitle {
+					t.Errorf("postgres title for %s = %q, want %q", agentBookKey, found, agentBookTitle)
+				}
+				t.Logf("Postgres row found for AI agent book: book_id=%s title=%q", agentBookKey, found)
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Errorf("AI agent book row not found in Postgres within the NFR-P3 projection CI regression guard (%v)", nfrP3ProjectionCIDeadline)
+				t.Errorf("AI agent book row %s not found in Postgres within the NFR-P3 projection CI regression guard (%v)", agentBookKey, nfrP3ProjectionCIDeadline)
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-	} else {
+	} else if lensMetaKey == "" {
 		t.Log("lensMetaKey not set — skipping Postgres assertion for agent book (run Milestone4 first)")
+	} else {
+		t.Log("books lens never reached cold-start convergence in Milestone4 — skipping Postgres assertion for agent book")
 	}
 
 	t.Logf("milestone 5 elapsed: %v", time.Since(start))
