@@ -59,6 +59,25 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   the exclusion is argued at the call site rather than assumed.
 - **RETIRED (the model of a retired entry):** a package-content edit without a version bump silently
   no-ops on a live stack — mechanized: `scripts/lint-package-version.go`.
+- **A guard protecting what a consumer READS must enumerate every condition under which that consumer
+  stops seeing the thing** — the retention-class destruction oracle drops a lens on THREE independent
+  conditions (secure-column content, the vertex root's `class`, an `eventStream` source), and a guard built
+  against one of them left the other two as silent erasures with a clean "0 retired" report. Minted:
+  retention-class-key-custody §30 (both found by cold review executing them, not by reading). Check: the
+  brief names the consumer's full exclusion set, and the guard carries one test vector per condition.
+- **A field validated after normalization must be MATCHED after the same normalization** — `Lens` was
+  `TrimSpace`-checked for emptiness but resolved to its deterministic key raw, so a declaration with a
+  trailing space was refused with a remedy visually identical to the line already in the author's file: an
+  unbreakable loop whose only exit is deleting the thing the guard protects. Minted: §30 fix round; second
+  sighting is the byte-exact `packageName` comparison (`IsPackageInstalled` + `proposal_string`). Check
+  (test shape, not a lint — a lint here false-positives on deliberate both-spelling matching): an identity
+  string that resolves a declaration to a deterministic key carries a whitespace/case-variant vector in its
+  own test.
+- **A version bump can be silently unified away by a rebase** — two concurrent fires bumped the same
+  package to the same next version; the rebase merged the identical lines with no conflict, so against the
+  merged base the version read unchanged while `internal/pkgmgr/` still differed, and the gate that passed
+  locally failed in CI. Minted: §30's CI red. Check: re-run the gate with CI's own base —
+  `DIFF_BASE=<merge-base> go run ./scripts/lint-package-version.go` — after committing, never only locally.
 - **A security-plane skip guard keyed on tombstone-state alone, with no anchor-type check, silently widens
   past its ratified scope** — a fix scoped to "respect a revoked grant" first-cut as "respect any
   surviving tombstoned key," quietly covering package definitions (`vtx.meta.*`) the design never
