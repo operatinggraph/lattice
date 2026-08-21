@@ -123,3 +123,89 @@ Two structural checks proposed so the inflation cannot recur (see the closing su
 gate at filing** (residuals sharing a root cause file as one row) and an **honest-gate check** (a `📐 needs
 designer pass` label must name the *specific absent ratified pattern* — if a precedent exists in the touched
 file, it is a steward `📋`, not a designer `📐`).
+
+## Fire brief — refuse-at-parse for two miscompiled clause shapes (Steward, 2026-08-21)
+
+**Scope sentence.** Refuse at parse time the two clause shapes the full engine accepts and silently
+miscompiles — a `WITH *` projection body, and a required (non-`OPTIONAL`) `MATCH` that introduces no new
+named variable — closing the board row *[Refractor] Two clause shapes the full engine accepts and silently
+miscompiles* (`backlog/lattice.md`, ★★, XS–S).
+
+**Census (re-verified live at fire start, not inherited).** Literal `WITH *` across the whole repo
+(every file type, not just `lenses.go`): **10 occurrences, 0 of them a lens** — 3 in planning docs, 4 in
+`internal/refractor/ruleengine/full/{labels.go,withscope.go}` comments + the existing reject string, 3 in
+`hopindex_test.go`. Literal `RETURN *`: **2, both in design prose, 0 in code or tests.** The row's
+"0 live lenses" claim holds. (A prior scout reported "44 `WITH *` in packages" — a BRE artifact: the
+pattern `WITH \*` unescaped matches `WIT` + `H` + zero-or-more spaces, i.e. every plain `WITH`. The
+corrected fixed-string count in `packages/` is 0. Recorded because the false number would have reframed
+this fire as corpus-wide.) The **required-MATCH** half cannot be counted by grep — it needs binding-scope
+analysis — so it was settled empirically instead: with both refusals in place the whole
+`*_corpus_census_test.go` family, which parses the live lens corpus, stays green. That is the census, and
+it is stronger than a grep would have been.
+
+**The two mechanisms, precisely.**
+- **`WITH *`** — `visitWith` (`visitor.go:168-183`) copies `AllOC_ProjectionItem()` into `w.Items`; the
+  grammar's `oC_ProjectionItems : ( '*' (',' oC_ProjectionItem)* ) | (oC_ProjectionItem ...)`
+  (`cypher/Cypher.g4:171`) yields **no** `oC_ProjectionItem` children for a bare `*`, so `w.Items` is
+  empty and the carried set is lost. It IS already refused — but only by `withScopeReject`
+  (`withscope.go:80-85`), invoked solely from `hopindex.go:197` and `:318`. A lens that never reaches
+  hop-index planning keeps the miscompile. The fix hoists the refusal to parse, where it binds every path.
+- **required anonymous `MATCH`** — `isNonNullExpansion` (`executor.go:525-551`) skips pattern elements
+  with `Variable == ""` and elements already bound in `b`, so a required MATCH whose every element is
+  anonymous or already-bound returns false for **every** expanded row. `applyMatch` (`executor.go:486-492`)
+  then keeps such a row only `if m.Optional` — so the required form **drops every row** where it should
+  have **filtered** them, and the lens silently projects the empty set. The named-relationship form
+  (`-[r:rel]->`) introduces `r`, returns true, and filters correctly — which is why only the anonymous
+  shape is wrong.
+
+**Sibling shapes this fire also closes (same mechanism, found during grounding, zero live uses).** The
+grammar admits `WITH *, x AS y` and `RETURN *` / `RETURN *, x AS y`. The star-with-items form parses to a
+**non-empty** `Items` list with the `*` silently discarded, so an emptiness test alone would miss it; and
+`visitReturn` (`visitor.go:185-197`) is byte-identical in shape to `visitWith` with no refusal anywhere for
+`RETURN *`. Refusing on the presence of the `*` token — rather than on `len(Items) == 0` — covers all four
+forms in one predicate. Shipping the `WITH *` half alone would leave a known, identical hole one clause
+keyword away; that is the whole-scope close, not scope creep.
+
+**Precedent to mirror.** `v.fail(format, ...)` (`visitor.go:44-48`, first-error-wins), the idiom already
+carrying the two closest refusals: the label-expansion sigil ambiguity (`visitor.go:270`) and the
+relationship-type alternation (`visitor.go:306`). Both share this fire's exact rationale — *the engine
+would execute a defensible reading of this text that is not what it says, so refuse it at parse rather
+than miscompile it* — and both state the refusal AND the rewrite in the message. The refusal-test shape to
+mirror is `TestParse_RelationshipTypeAlternationRejected`
+(`alternation_and_distinct_test.go:24-48`): a table of rejected bodies asserted with `require.Contains` on
+the message, PLUS a table of neighbouring bodies that must still parse.
+
+**Increment order + green check.**
+1. `visitor.go` — star refusal in `visitWith`/`visitReturn` via one shared helper that detects the `*`
+   terminal in the projection body. Green: `go test ./internal/refractor/ruleengine/full/ -count=1`.
+2. `visitor.go` — required-MATCH refusal in `visitMatch`: refuse when `Optional` is false and no pattern
+   element introduces a new **named** variable. The visitor sees one clause at a time and has no binding
+   scope, so "new" is decided against the variables named by earlier clauses in the same query; that
+   ordering is available because `appendReadingClause` appends in source order. Green: same package test.
+3. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+   ./scripts/lint-conventions.go`, `go test ./internal/refractor/... -count=1`, then `go test ./... -p 4`.
+
+**In-scope gotchas.**
+- The corpus-census tests (`*_corpus_census_test.go` in `internal/refractor/`) parse the **live** lens
+  corpus; they are the real safety net for a new parse refusal. A refusal that reddens one of them means
+  the census was wrong and the refusal is too broad — widen the exemption, never loosen the test.
+- `withScopeReject`'s `WITH *` arm becomes unreachable-by-parse once the refusal lands. Leave it, but the
+  pin has to move: **`hopindex_test.go:448-453` does NOT bypass `Parse`** — `indexOf` → `parseFull` →
+  `New().Parse`, so that row goes red the moment the refusal lands (corrected 2026-08-21, during the build;
+  this brief originally claimed the opposite). Re-pin the arm with a clause list built directly
+  (`&With{}`, no items), which is the only way the shape now reaches `withScopeReject`. Removing the arm is
+  a separate cleanup with its own blast radius.
+- `fail` is first-error-wins, so refusal ORDER decides the message a multiply-invalid body gets. Keep the
+  new refusals after the existing structural ones so an unsupported-clause body still reports that first.
+
+**Non-goals.** Making either shape *work* (carrying a `WITH *` set, or compiling an anonymous required
+MATCH into a semijoin filter) — both are real features with real design cost and no consumer; the row asks
+for refusal, and refusal is what a silent miscompile actually needs. Removing the now-redundant
+`withScopeReject` arm. Any change to `executor.go`'s runtime behaviour — the drop-vs-filter bug is fixed by
+making the shape unreachable, not by rewriting the executor.
+
+**Adjacent finds filed to the board now:** none — the sibling star shapes are closed in this fire rather
+than filed, per the steward's fix-what-you-discover rule.
+
+**Review depth:** lead review (XS–S, no security/capability plane, no contract). The corpus-census suite
+is the blast-radius gate.

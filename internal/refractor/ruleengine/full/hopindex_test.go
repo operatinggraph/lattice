@@ -444,14 +444,6 @@ RETURN i.key AS k, p.key AS pk`,
 			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i, count(r.key) AS r RETURN i.key AS k, r AS n`,
 			reject: "projecting a computed value under `r`",
 		},
-		{
-			// `WITH *` reaches the AST as an EMPTY projection list, so the
-			// surviving set is indistinguishable from "carries nothing".
-			// Reporting the shape beats reporting every variable as dropped.
-			name:   "a WITH * carries a set the AST does not record",
-			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH * MATCH (r)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
-			reject: "a `WITH *`",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ix := indexOf(t, tc.body)
@@ -465,6 +457,29 @@ RETURN i.key AS k, p.key AS pk`,
 			require.Contains(t, ix.Incomplete, tc.reject)
 		})
 	}
+}
+
+// TestWithScopeReject_EmptyProjectionList pins the WITH conjunct's answer for a
+// projection body that carries no item at all: the surviving set is not merely
+// unknown, it is indistinguishable from "carries nothing", so the walk names the
+// shape rather than reporting every variable as dropped.
+//
+// The conjunct runs over a clause list, not over cypher text, so it is held to
+// one here — the cypher that reaches this shape, `WITH *`, is refused by Parse
+// before any index is built.
+func TestWithScopeReject_EmptyProjectionList(t *testing.T) {
+	clauses := []Clause{
+		&Match{Patterns: []PathPattern{{
+			Nodes: []NodePattern{
+				{Variable: "i", Label: "identity"},
+				{Variable: "r", Label: "role"},
+			},
+			Rels: []RelPattern{{Type: "holdsRole", Direction: DirOut, MinHops: 1, MaxHops: 1}},
+		}}},
+		&With{},
+		&Return{Items: []ProjectionItem{{Expr: &PropertyAccess{Target: &VariableRef{Name: "i"}, Key: "key"}, Alias: "k"}}},
+	}
+	require.Contains(t, withScopeReject(clauses), "a `WITH *`")
 }
 
 // TestAnchorHopIndex_WithScopeStagedLensWalks walks the accepted staging shape
