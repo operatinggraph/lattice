@@ -1005,4 +1005,37 @@ authContext-adjacent module (`internal/descriptorform` owns `authContext` assemb
 authorization-bug fix. Full 3-layer adversarial pass mandatory before admit, cold reviewer, per the
 Inc 2/3a/3b/3c precedent (§14/§15/§16/§17 each found real regressions this way).
 
+## 19. Inc 3d outcome — loftspace tail, shipped `77aab58c`
+
+Built per §18, with the mandatory full adversarial pass (cold, capability-plane-adjacent). The
+builder caught and corrected §18's own grounding error before it shipped: `applicant`'s
+`{context.<field>}` template must read `{context.tenant}`, not `{context.applicant}` — the renewals
+row's real column name (`renewalsReadSpec`'s alias differs from the op's own payload field name).
+Shipping §18 verbatim would have made `SignRenewal` refuse on every submission. The four
+`op_catalog.go` files are not fully byte-identical (two comment paragraphs differ), contradicting
+§18's Fact 1 claim; the struct region the fix touches is identical across all four, which is what
+mattered.
+
+The cold review found no blockers. One real-but-minor finding, fixed before merge: the shipped
+`ContextParams` doc comment in `permissions.go` cited `renewalsReadSpec`'s RETURN aliases as the
+`{context.<field>}` source — those are snake_case (`lease_app`) and never resolve; the actual source
+is the client's own row shape (`renewals.go`'s JSON tags). Corrected in both descriptors, both citing
+the client struct instead. Second finding (not fixed, not blocking): the new `contextParams`
+exclusion in `form.mjs` is unconditional across the whole vocabulary, but only two of five template
+forms are implemented (`{me.<type>}`/`{entity.<column>}` throw) — a live regression IF a future op
+declaring one of those two forms is ever migrated onto this module. Census confirmed no such op is
+migrated today. Flagged for whichever increment adopts the next `ContextParams`-bearing op.
+
+CI's `convergence` job failed on push (`TestLeaseConvergence_BgcheckFreshness_EagerReopen`, an
+unrelated background-check/PII-key-envelope freshness scenario, timing-window test under
+`-tags leaseshortwindow`) — confirmed pre-existing host-timing flake, not a regression: the
+immediately-prior commit's CI ran this same job green, this fire's diff never touches bgcheck
+freshness/PII-envelope code, and a single re-run of just that job passed clean.
+
+**Checkpoint for the next fire:** no worktree held once this lands. Inc 3 is DONE except for the
+named per-app blockers left behind (clinic's five §15, wellness's four §16, café's four §17,
+loftspace's `CreateLocation`/`AttachObject`/`DetachObject` — unaffected by this fire). Next up per §7:
+**Inc 4, the ratchet** (per-app ceilings on the ungated `COMPLETIONS`-style debt, mutation-tested) —
+posture-changing (new gate rule), full review depth.
+
 census named. See `backlog/lattice.md`.
