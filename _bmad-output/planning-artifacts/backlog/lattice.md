@@ -145,7 +145,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-21 · `69a1b1ac` · [Pkgmgr] uninstall secure-lens attestation CLOSED — operator-attested `UninstallOptions`, CLI/Loupe/UI; 4 cold reviews found 2 bypasses; guard-vs-oracle agreement test mechanizes the class
+- 2026-08-21 · `dd22e08c` · [Pkgmgr] uninstall secure-lens attestation CLOSED — operator-attested `UninstallOptions`, CLI/Loupe/UI; 4 cold reviews found 2 bypasses; guard-vs-oracle agreement test mechanizes the class
 - 2026-08-21 · `84d5aee` · [CI/hellolattice] main-red CLOSED — model-runner's 3 packages sorted into a unit shard (tests had never run in CI); the 2s NFR-P3 guard no longer spans lens cold start; 3 title-keyed Postgres polls key-scoped
 - 2026-08-21 · `2df02bfd` · [model-runner/bridge/pkgmgr] NL-1 — model-runner service (sole vendor credential) + real capabilityAuthor adapter + authored-target dispatch-authority containment; 4 cold reviews, mutation-proven; env-opt-in. CI green
 - 2026-08-21 · `a0b5238` · [Tooling] history-comment gate reads the whole comment — mid-sentence clauses + the Before-the-fix family now screened; 13 comments repaired, 2 noisy candidates rejected on measurement
