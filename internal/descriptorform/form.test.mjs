@@ -343,11 +343,120 @@ test("a {context.<field>} read resolves against the caller's companion row", () 
   assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
+// ---- dispatch.contextParams — a field the CLIENT fills and never renders ----
+
+const LEASE_APP = "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC";
+const TENANT = "vtx.identity.DDDDDDDDDDDDDDDDDDDD";
+
+// lease-signing's SignRenewal, whole: renewalKey is the task's subject,
+// leaseApp/applicant are the renewal row's own facts, and the person sees a
+// single confirm button.
+function signRenewalRow() {
+  const schema = {
+    type: "object",
+    properties: { renewalKey: { type: "string" } },
+    required: ["renewalKey"],
+  };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.authContext = "task";
+  row.dispatch.contextParams = { leaseApp: "{context.leaseApp}", applicant: "{context.tenant}" };
+  row.dispatch.reads = [
+    "{payload.renewalKey}",
+    "lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",
+    "lnk.leaseapp.{payload.leaseApp:id}.applicationFor.identity.{payload.applicant:id}",
+  ];
+  return row;
+}
+
+test("a contextParams field is filled from context and never rendered", () => {
+  const schema = {
+    type: "object",
+    properties: { renewalKey: { type: "string" }, leaseApp: { type: "string" }, note: { type: "string" } },
+    required: ["renewalKey", "leaseApp"],
+  };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseApp: "{context.leaseApp}" };
+
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: LEASE_APP } }, mount);
+  assert.equal(controlByName(mount, "leaseApp"), undefined,
+    "a contextParams field is excluded from the form the same way the target field is");
+  assert.ok(controlByName(mount, "note"), "an ordinary field still renders");
+
+  const envelope = handle.submit();
+  assert.equal(envelope.payload.leaseApp, LEASE_APP,
+    "the descriptor said where the value comes from, so submit() fills it");
+});
+
+test("contextParams are filled BEFORE the read templates that name them", () => {
+  const handle = renderOpForm(signRenewalRow(), {
+    target: TARGET,
+    taskKey: "manifest.task.x",
+    row: { leaseApp: LEASE_APP, tenant: TENANT },
+  }, new FakeElement("div"));
+  const envelope = handle.submit();
+
+  assert.deepEqual(envelope.payload, { renewalKey: TARGET, leaseApp: LEASE_APP, applicant: TENANT });
+  assert.deepEqual(envelope.reads, [
+    TARGET,
+    "lnk.renewal.AAAAAAAAAAAAAAAAAAAA.renews.leaseapp.CCCCCCCCCCCCCCCCCCCC",
+    "lnk.leaseapp.CCCCCCCCCCCCCCCCCCCC.applicationFor.identity.DDDDDDDDDDDDDDDDDDDD",
+  ], "both 6-segment link reads resolve, which they only can if the params landed in the payload first");
+  assert.deepEqual(envelope.authContext, { task: "manifest.task.x", target: TARGET });
+});
+
+// A contextParams field has no control to fail required-field validation on —
+// the person never saw it — so an unresolvable template has to refuse here or
+// the op reaches the Processor with an empty key it can only reject, with
+// nothing in the UI to explain why.
+test("submit() refuses when a contextParams template resolves to nothing", () => {
+  const handle = renderOpForm(signRenewalRow(), {
+    target: TARGET,
+    taskKey: "manifest.task.x",
+    row: { leaseApp: LEASE_APP }, // no tenant column
+  }, new FakeElement("div"));
+  assert.throws(() => handle.submit(), /applicant/);
+});
+
+test("submit() refuses a contextParams template with no companion row at all", () => {
+  const handle = renderOpForm(signRenewalRow(), {
+    target: TARGET,
+    taskKey: "manifest.task.x",
+    row: null,
+  }, new FakeElement("div"));
+  assert.throws(() => handle.submit(), /leaseApp/);
+});
+
+// The `?` OPTIONAL marker is real descriptor vocabulary this module does not
+// implement. What matters is that NOT implementing it fails loud rather than
+// silently filling the wrong value: the `?` survives into the placeholder
+// name, nothing answers to it, and the refusal above fires.
+test("an unadopted `?` optional marker refuses rather than resolving to nothing", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseApp: "{context.leaseApp?}" };
+
+  const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: LEASE_APP } }, new FakeElement("div"));
+  assert.throws(() => handle.submit(), /leaseApp/);
+});
+
+test("an op declaring no contextParams renders and submits exactly as before", () => {
+  const schema = {
+    type: "object",
+    properties: { renewalKey: { type: "string" }, note: { type: "string" } },
+    required: [],
+  };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, { target: TARGET }, mount);
+  assert.ok(controlByName(mount, "note"));
+  assert.deepEqual(handle.submit().payload, { renewalKey: TARGET });
+});
+
 // ---- {actor} alias, the `:id` bare-NanoID modifier, and unrecognized
 // templates — the exact composite-link-key shape loftspace's SignRenewal/
-// VerifyGuarantor completions need (VerifyGuarantor's real read is
-// `lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}`),
-// so a later increment can adopt the template form with no module change. ----
+// VerifyGuarantor completions declare (VerifyGuarantor's real read is
+// `lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}`). ----
 
 test("{actor} is an alias for {me}", () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };

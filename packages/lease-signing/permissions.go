@@ -222,8 +222,9 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     (a directOp/operator action, never an assignTask target), so its meta is
 //     owed to S1 rather than to forOperation resolution. All four carry full
 //     descriptors below: SignRenewal's tenant leg is a real loftspace-app
-//     screen (web/app.js COMPLETIONS.SignRenewal), which is the app-seam rule
-//     (vertical-package-standard.md §15) — a shipped screen is proof a person
+//     screen (web/app.js — the Tasks-inbox completion modal, and the "Sign
+//     renewal" button on the tenant's own renewal card), which is the app-seam
+//     rule (vertical-package-standard.md §15) — a shipped screen is proof a person
 //     triggers the op, whatever its grant roles (permissions.go grants only
 //     `operator`; the tenant reaches it via the §10.7 ephemeral task grant
 //     alone, so its Dispatch.AuthContext is "task", not "standing" — the
@@ -531,14 +532,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
-				`"leaseApp":{"type":"string","title":"Application","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
-				`"applicant":{"type":"string","title":"Tenant","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."},` +
 				`"method":{"type":"string","title":"How you verified","description":"How the guarantor was verified, e.g. phone call, updated pay stub. Optional."}},` +
-				`"required":["renewalKey","leaseApp","applicant"]}`,
+				`"required":["renewalKey"]}`,
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
-				"leaseApp":   "The application this cycle renews. Verified against the renewal's own renews link, so a tampered value is rejected.",
-				"applicant":  "The tenant. Verified against the application's own applicationFor link — a payload-consistency check that the caller-supplied applicant is genuinely this leaseApp's applicant, not an authorization check. Standing to act comes from require_manages on the renewal's unit (walked renewal→renews→leaseapp→appliesToUnit); the leaseApp itself is bound to this renewal via the renewal's OWN renews link, not this field.",
 				"method":     "Optional free text recording how you verified, kept alongside the verification timestamp.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -546,8 +543,35 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "renewalKey",
 				TargetType:  "renewal",
+				// leaseApp/applicant are the renewal's own facts, never the
+				// landlord's to type: the script re-derives both from the
+				// renewal's renews link and the application's applicationFor
+				// link and rejects a mismatch, so a typed value could only ever
+				// agree with what the graph already knows, or fail. They are
+				// declared here instead: the client fills each from the renewal
+				// row it opened the form from and renders no field for either,
+				// which is why neither appears in InputSchema's properties or
+				// its required list above.
+				//
+				// `{context.<field>}` names a column of the CALLER's own
+				// companion row (form.mjs's doc comment), not this lens's SQL —
+				// renewalsReadSpec's actual RETURN aliases are snake_case
+				// (`lease_app`, renewal_lenses.go), which is not what resolves
+				// here. What resolves is loftspace-app's `renewalRow` JSON shape
+				// (renewals.go: `LeaseApp string \`json:"leaseApp"\``), the same
+				// row `SetRenewalTerms`/`CancelRenewal`'s catalog form already
+				// reads by name — `tenant` is that struct's spelling of the
+				// identity this op's payload calls `applicant`. A future
+				// contextParam on this lens must name the CLIENT's row shape,
+				// not the lens's own RETURN alias.
+				ContextParams: map[string]string{
+					"leaseApp":  "{context.leaseApp}",
+					"applicant": "{context.tenant}",
+				},
 				// Both link reads are required — the script verifies the pair
-				// before it trusts the leaseApp's applicationSignals.
+				// before it trusts the leaseApp's applicationSignals. Both
+				// resolve off the contextParams above, which a client fills
+				// BEFORE it substitutes any read template.
 				Reads: []string{
 					"{payload.renewalKey}",
 					"lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",
@@ -599,20 +623,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		// task grant the renewalComplete goal's assignTask leg mints
 		// (renewal_targets.go), so Dispatch.AuthContext is "task", not "self"
 		// or "standing" (the RecordIdentityPII precedent,
-		// identity-domain/opmetas.go). leaseApp/applicant are neither typed nor
-		// template-resolved from the task itself (assignTask carries only
-		// assignee/scopedTo/forOperation, §10.5) — a descriptor-driven client
-		// sources them the same way it sources every other field of "the
-		// entity being viewed": from the renewalsRead lens row for the
-		// renewal the task's scopedTo names (mirrors loftspace-app's own
-		// completion dispatcher, web/app.js COMPLETIONS.SignRenewal.
-		// extraFromRenewal). Reads/OptionalReads below are copied verbatim
-		// from that same shipped dispatcher's extraReads — the two validation
-		// links (renews, applicationFor), the required .tenancy read
-		// (renewal_scripts.go SignRenewal reads it via state[], so it is
-		// class-(a) despite being conditionally reached), and three
-		// absence-tolerant class-(d) ordering probes (.terms,
-		// .applicationSignals, .guarantorVerification).
+		// identity-domain/opmetas.go). leaseApp/applicant cannot come from the
+		// task itself (assignTask carries only assignee/scopedTo/forOperation,
+		// §10.5), so Dispatch.ContextParams below sources them the way a
+		// descriptor-driven client sources every other field of "the entity
+		// being viewed": from the renewalsRead lens row for the renewal the
+		// task's scopedTo names. Reads/OptionalReads are this op's own
+		// read-posture declaration — the two validation links (renews,
+		// applicationFor), the required .tenancy read (renewal_scripts.go
+		// SignRenewal reads it via state[], so it is class-(a) despite being
+		// conditionally reached), and three absence-tolerant class-(d)
+		// ordering probes (.terms, .applicationSignals,
+		// .guarantorVerification).
 		{
 			OperationType: "SignRenewal",
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -625,20 +647,43 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Group:       "Renewals",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle being signed — the task's own subject."},` +
-				`"leaseApp":{"type":"string","title":"Application","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
-				`"applicant":{"type":"string","title":"Tenant","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."}},` +
-				`"required":["renewalKey","leaseApp","applicant"]}`,
+				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle being signed — the task's own subject."}},` +
+				`"required":["renewalKey"]}`,
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle being signed — filled from the task's own scopedTo subject, never typed.",
-				"leaseApp":   "The application this cycle renews — resolved from the renewal's own record, never typed. Verified against the renewal's own renews link (LeaseAppMismatch on mismatch).",
-				"applicant":  "You — resolved from the renewal's own record, never typed. Verified against the application's own applicationFor link (ApplicantMismatch on mismatch) before anything is extended.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "renewal",
 				AuthContext: "task",
 				TargetField: "renewalKey",
 				TargetType:  "renewal",
+				// The tenant signs a renewal they can already see, and leaseApp
+				// and applicant are that renewal's own facts: the script rejects
+				// a value disagreeing with the renews / applicationFor links
+				// (LeaseAppMismatch / ApplicantMismatch), so a typed value could
+				// only ever agree with what the graph already knows, or fail.
+				// Declaring them here is what makes this form a single confirm
+				// button: the client fills both from the renewal row and renders
+				// no field for either, so neither appears in InputSchema above.
+				//
+				// `{context.<field>}` names a column of the CALLER's own
+				// companion row (form.mjs's doc comment), not this lens's SQL —
+				// renewalsReadSpec's actual RETURN aliases are snake_case
+				// (`lease_app`, renewal_lenses.go), which is not what resolves
+				// here. What resolves is loftspace-app's `renewalRow` JSON shape
+				// (renewals.go: `LeaseApp string \`json:"leaseApp"\``), the same
+				// row `SetRenewalTerms`/`CancelRenewal`'s catalog form already
+				// reads by name — `tenant` is that struct's spelling of the
+				// identity this op's payload calls `applicant`. A future
+				// contextParam on this lens must name the CLIENT's row shape,
+				// not the lens's own RETURN alias.
+				ContextParams: map[string]string{
+					"leaseApp":  "{context.leaseApp}",
+					"applicant": "{context.tenant}",
+				},
+				// Every entry naming leaseApp or applicant resolves off the
+				// contextParams above, which a client fills BEFORE it
+				// substitutes any read template.
 				Reads: []string{
 					"{payload.renewalKey}",
 					"lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",

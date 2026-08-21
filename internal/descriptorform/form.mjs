@@ -11,18 +11,19 @@
 //
 // `catalogRow` is the raw `/api/op-catalog` row shape: `operationType`,
 // `presentation`, `inputSchema` (a JSON string), `fieldDescriptions`,
-// `dispatch.{class,authContext,targetField,targetType,reads,optionalReads,
-// visibleWhen}`, `sensitive`.
+// `dispatch.{class,authContext,targetField,targetType,contextParams,reads,
+// optionalReads,visibleWhen}`, `sensitive`.
 //
 // `context` is `{ target, me, taskKey, workplace, row, prefill, selfVoice }`
 // — `target` is the resolved subject key the caller already knows (a task's
 // `scopedTo`, or an explicit entity key for a non-task surface); `taskKey`
-// names a task-voice submission; `row`/`prefill` back `{context.<field>}`
-// reads and pre-filled values; `me` is the signed-in identity key — never a
-// target fallback (see the anti-fallback rule below), but whenever it is
-// set, `submit()` auto-pushes it onto `reads` (mirroring Facet's own
-// renderer) since a script gating on the caller's own hub commonly needs it
-// in state regardless of authContext kind. `selfVoice` gates WHETHER a
+// names a task-voice submission; `row` backs every `{context.<field>}`
+// template — in a read declaration and in a `dispatch.contextParams` entry
+// alike — while `prefill` backs pre-filled values; `me` is the signed-in
+// identity key — never a target fallback (see the anti-fallback rule below),
+// but whenever it is set, `submit()` auto-pushes it onto `reads` (mirroring
+// Facet's own renderer) since a script gating on the caller's own hub commonly
+// needs it in state regardless of authContext kind. `selfVoice` gates WHETHER a
 // `self`-authContext op actually sends `{target: me}` at all (see
 // buildAuthContext) — it is not itself the value sent, and a caller in no
 // self-voiced surface at all simply never sets it (undefined is falsy, so
@@ -299,8 +300,9 @@ function keyType(key) {
   return typeof key === "string" && key.startsWith("vtx.") ? key.split(".")[1] : undefined;
 }
 
-// substituteTemplate resolves one read template against the assembled
-// payload and the caller-supplied context. Five forms: `{me}` / `{actor}`
+// substituteTemplate resolves one declared template — a read, or a
+// `dispatch.contextParams` entry — against the assembled payload and the
+// caller-supplied context. Five forms: `{me}` / `{actor}`
 // (aliases — both read straight off `context.me`) / `{taskKey}` (bare
 // tokens), `{payload.<field>}` (the payload just assembled), and
 // `{context.<field>}` (a column of the caller's companion row — the staff
@@ -407,6 +409,11 @@ export function renderOpForm(catalogRow, context, mount) {
 
   const { schema, dispatch, presentation, fieldDescriptions, operationType } = normalized;
   const targetField = dispatch.targetField;
+  // dispatch.contextParams maps a schema field the CLIENT fills from context
+  // to the template it fills it from (pkgmgr.OpDispatchSpec.ContextParams).
+  // An op that declares none gets an empty map, which excludes nothing and
+  // fills nothing — every schema property renders as an ordinary field.
+  const contextParams = dispatch.contextParams || {};
 
   // A targetField-less op (free-choice create, or an op naming two
   // independent existing entities as plain fields) has no subject to
@@ -431,8 +438,13 @@ export function renderOpForm(catalogRow, context, mount) {
   const required = new Set(schema.required || []);
   // The target field stays out of the form: it is filled from `context.target`,
   // never typed. Filtering by `undefined` (no targetField) excludes nothing —
-  // every schema property renders.
-  const fieldNames = Object.keys(props).filter((name) => name !== targetField);
+  // every schema property renders. A contextParams field is excluded on the
+  // same principle and for the same reason: the descriptor already says where
+  // its value comes from, so rendering it would ask a person to type a raw
+  // `vtx.<type>.<NanoID>` the package's own field help promises they will
+  // never see.
+  const fieldNames = Object.keys(props).filter(
+    (name) => name !== targetField && !(name in contextParams));
 
   const fields = fieldNames.map((name) =>
     buildField(name, props[name] || {}, required.has(name), fieldDescriptions[name], context.prefill, !!catalogRow.sensitive));
@@ -465,6 +477,36 @@ export function renderOpForm(catalogRow, context, mount) {
           continue;
         }
         payload[f.name] = value;
+      }
+
+      // Filled AFTER every typed field (so a contextParams template may name
+      // one via `{payload.<field>}`) and BEFORE the read templates below (so a
+      // read of the form `{payload.<contextParam>}` resolves — which is
+      // exactly how lease-signing's SignRenewal/VerifyGuarantor declare their
+      // renews/applicationFor link reads, and the order
+      // scripts/lint-package-standard.go's checkReadTemplates already assumes
+      // when it counts a contextParams field as guaranteed-present).
+      //
+      // A template that does not resolve to a whole value REFUSES, rather than
+      // writing "" or omitting the key: the person never saw this field, so
+      // there is no control to fail validation on and no way for them to
+      // discover what went wrong from a Processor rejection. An empty key is
+      // also worse than absent — a read built around it is malformed rather
+      // than merely missing (wholeKey's own rationale, reused here because a
+      // contextParam's value IS a key by the vocabulary's definition).
+      //
+      // The `?` OPTIONAL marker (`{me.leaseapp?}`, definition.go) is real
+      // vocabulary this module does not adopt: no descriptor it renders
+      // declares one, and an unbuilt branch would ship untested. It fails LOUD
+      // rather than silently, which is why leaving it out is safe — the `?`
+      // survives into the placeholder name, resolves to nothing, and refuses
+      // here.
+      for (const [field, template] of Object.entries(contextParams)) {
+        const value = substituteTemplate(template, context, payload);
+        if (!wholeKey(value)) {
+          throw new Error("This action could not fill in its " + field + ". Reload and try again.");
+        }
+        payload[field] = value;
       }
 
       const reads = substituteTemplates(dispatch.reads, context, payload);

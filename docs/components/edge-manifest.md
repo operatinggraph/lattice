@@ -154,9 +154,15 @@ It is a second consumer of the `opCatalog` row shape above: `renderOpForm(catalo
 does its own normalization (schema parse, dispatch-shape refusal, `visibleWhen` fail-closed) and owns
 field-kind detection, template substitution (`{payload.X}`/`{me}`/`{taskKey}`/`{context.<field>}`), and
 `dispatch.authContext` assembly, so an app's server stops re-declaring op shapes the owning package
-already declares. `scripts/lint-facet-renderer-drift.go` holds it to the same schema-to-field-kind
-vocabulary as `cmd/facet/web/app.js` and `FacetManifestKit/DescriptorForm.swift` — three renderers, one
-marker-parity gate.
+already declares. It also honours **`dispatch.contextParams`** — the schema fields the client fills from
+its own context and never renders: each is excluded from the rendered form and substituted into the
+payload at submit, after the typed fields and before the read templates that name them, refusing outright
+rather than sending an empty key for one that cannot be resolved. `context.row` is what a
+`{context.<field>}` template resolves against, so a caller passes the record the action was opened from
+(loftspace's renewal row, for `SignRenewal`/`VerifyGuarantor`'s `leaseApp`/`applicant`).
+`scripts/lint-facet-renderer-drift.go` holds it to the same descriptor vocabulary as
+`cmd/facet/web/app.js` and `FacetManifestKit/DescriptorForm.swift` — three renderers, one marker-parity
+gate, covering the six field kinds plus `contextParams`.
 
 ## Server panes
 

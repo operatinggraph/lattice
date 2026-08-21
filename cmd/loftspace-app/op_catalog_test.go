@@ -131,6 +131,50 @@ func TestComputeOpCatalog_VisibleWhenAloneStillYieldsADispatch(t *testing.T) {
 	}
 }
 
+// contextParams names the schema fields the CLIENT fills from context and
+// never renders. Losing it in the proxy does not degrade the form, it breaks
+// the op: the field renders as a raw-key text input the descriptor promised
+// nobody would ever see, and once the owning package drops it from `required`
+// (which declaring a contextParam is precisely the licence to do), the value
+// never reaches the Processor at all.
+func TestComputeOpCatalog_CarriesContextParamsThroughToTheFE(t *testing.T) {
+	entries := map[string]string{
+		"SignRenewal": `{"operationType":"SignRenewal","opMetaKey":"vtx.meta.rn",` +
+			`"inputSchema":"{\"type\":\"object\",\"properties\":{\"renewalKey\":{\"type\":\"string\"}},\"required\":[\"renewalKey\"]}",` +
+			`"dispatchClass":"renewal","dispatchAuthContext":"task","dispatchTargetField":"renewalKey",` +
+			`"dispatchTargetType":"renewal",` +
+			`"dispatchContextParams":{"leaseApp":"{context.leaseApp}","applicant":"{context.tenant}"},` +
+			`"dispatchReads":["{payload.renewalKey}"]}`,
+	}
+	got := computeOpCatalog(keysOf(entries), fakeKV(entries))
+	d, ok := got["SignRenewal"]
+	if !ok {
+		t.Fatalf("want a SignRenewal descriptor, got %+v", got)
+	}
+	if d.Dispatch == nil {
+		t.Fatal("dispatch: nil")
+	}
+	if d.Dispatch.ContextParams["leaseApp"] != "{context.leaseApp}" ||
+		d.Dispatch.ContextParams["applicant"] != "{context.tenant}" {
+		t.Errorf("contextParams: %+v", d.Dispatch.ContextParams)
+	}
+}
+
+// A row whose ONLY dispatch content is its contextParams must still carry a
+// dispatch object, for the same reason the visibility-only row above does:
+// gating the object on the other columns would drop the one thing this
+// descriptor had to say.
+func TestComputeOpCatalog_ContextParamsAloneStillYieldsADispatch(t *testing.T) {
+	entries := map[string]string{
+		"OpenTab": `{"operationType":"OpenTab","dispatchContextParams":{"leaseAppKey":"{me.leaseapp}"}}`,
+	}
+	got := computeOpCatalog(keysOf(entries), fakeKV(entries))
+	d := got["OpenTab"]
+	if d.Dispatch == nil || d.Dispatch.ContextParams["leaseAppKey"] != "{me.leaseapp}" {
+		t.Fatalf("a contextParams-only dispatch must survive, got %+v", d)
+	}
+}
+
 // An unreadable key, a torn body, and a row with no operationType are all
 // skipped rather than emitted under an empty key — the lens keys on
 // operationType, so a row without one is not addressable as an op at all.

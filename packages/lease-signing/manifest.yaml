@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.2
+version: 0.31.3
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete

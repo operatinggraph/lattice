@@ -41,13 +41,15 @@ const (
 // vocabMember.markers uses.
 var renderers = []string{appJS, descriptorSwift, formJS}
 
-// vocabMember is one field kind every renderer must detect from the same
-// `inputSchema` shape. markers maps a renderer's source path to the literal
-// substring(s) that must ALL appear in it for that renderer to count as
-// detecting this kind — not an AST comparison (deliberately: a substring
-// match is cheap, has no per-language parser to maintain, and is exactly as
-// strict as the covenant needs it to be — a renderer that stops detecting a
-// kind stops containing its marker).
+// vocabMember is one capability of the descriptor vocabulary every renderer
+// must implement — mostly a field kind detected from the same `inputSchema`
+// shape, and otherwise a `dispatch` column a renderer has to honour for one
+// descriptor to mean the same thing wherever it is rendered. markers maps a
+// renderer's source path to the literal substring(s) that must ALL appear in
+// it for that renderer to count as implementing the member — not an AST
+// comparison (deliberately: a substring match is cheap, has no per-language
+// parser to maintain, and is exactly as strict as the covenant needs it to be
+// — a renderer that stops implementing a member stops containing its marker).
 type vocabMember struct {
 	name    string
 	markers map[string][]string
@@ -83,6 +85,25 @@ var vocabulary = []vocabMember{
 		appJS:           {`schema["x-entityRef"]`},
 		descriptorSwift: {`x-entityRef`},
 		formJS:          {`schema["x-entityRef"]`},
+	}},
+	// contextParams is a dispatch column rather than a field kind, and it is
+	// the member whose loss in a single renderer is silent AND wrong in both
+	// directions at once: that renderer asks a person to type a raw vertex key
+	// the descriptor promised they would never see, and — for a field the
+	// owning package dropped from `required` precisely because it declared a
+	// contextParam — sends no value at all. Café's OpenTab spent an increment
+	// unmigratable for exactly that reason.
+	//
+	// It takes TWO markers per renderer because the column has two halves and
+	// shipping one without the other is the failure above: the field must be
+	// EXCLUDED from what renders, and it must be FILLED at submit. Both are
+	// spelled from the local variable rather than from the column name, which
+	// keeps a prose mention of `dispatch.contextParams` in a doc comment from
+	// satisfying the marker on its own.
+	{name: "contextParams", markers: map[string][]string{
+		appJS:           {`!(f in contextParams)`, `Object.entries(contextParams)`},
+		descriptorSwift: {`!contextParamKeys.contains($0)`, `for (field, template) in contextParams`},
+		formJS:          {`!(name in contextParams)`, `Object.entries(contextParams)`},
 	}},
 }
 

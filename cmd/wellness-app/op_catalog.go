@@ -38,6 +38,18 @@ type opCatalogProjection struct {
 	DispatchReads         []string `json:"dispatchReads"`
 	DispatchOptionalReads []string `json:"dispatchOptionalReads"`
 
+	// DispatchContextParams names the schema fields the CLIENT fills from its
+	// own context and never renders, each mapped to the template it fills them
+	// from (pkgmgr.OpDispatchSpec.ContextParams: "how a self-scope entity-key
+	// param is declared rather than asked of the visitor as a raw vertex key").
+	// Dropping it here would not degrade the FE, it would break the op in two
+	// directions at once: the field renders after all, asking a person to type
+	// a `vtx.<type>.<NanoID>` the descriptor promised they would never see —
+	// and once the owning package stops marking that field required BECAUSE it
+	// delegated the value to this column, the field renders empty and the
+	// payload reaches the Processor without a value the script requires.
+	DispatchContextParams map[string]string `json:"dispatchContextParams"`
+
 	// DispatchVisibleWhen gates whether the op is OFFERED at all, against the
 	// state of the target row (pkgmgr.OpDispatchSpec.VisibleWhen: "offered only
 	// when the row's Field column equals Equals"). Dropping it here would not
@@ -77,13 +89,14 @@ type opDescriptor struct {
 }
 
 type opDispatch struct {
-	Class         string         `json:"class,omitempty"`
-	AuthContext   string         `json:"authContext,omitempty"`
-	TargetField   string         `json:"targetField,omitempty"`
-	TargetType    string         `json:"targetType,omitempty"`
-	Reads         []string       `json:"reads,omitempty"`
-	OptionalReads []string       `json:"optionalReads,omitempty"`
-	VisibleWhen   *opVisibleWhen `json:"visibleWhen,omitempty"`
+	Class         string            `json:"class,omitempty"`
+	AuthContext   string            `json:"authContext,omitempty"`
+	TargetField   string            `json:"targetField,omitempty"`
+	TargetType    string            `json:"targetType,omitempty"`
+	ContextParams map[string]string `json:"contextParams,omitempty"`
+	Reads         []string          `json:"reads,omitempty"`
+	OptionalReads []string          `json:"optionalReads,omitempty"`
+	VisibleWhen   *opVisibleWhen    `json:"visibleWhen,omitempty"`
 }
 
 // computeOpCatalog assembles the operationType-keyed descriptor map from the
@@ -142,13 +155,14 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 	// other field was set would restore the fail-open this column exists to
 	// close.
 	if p.DispatchClass != "" || p.DispatchAuthContext != "" || p.DispatchTargetField != "" ||
-		p.DispatchTargetType != "" || len(p.DispatchReads) > 0 || len(p.DispatchOptionalReads) > 0 ||
-		p.DispatchVisibleWhen != nil {
+		p.DispatchTargetType != "" || len(p.DispatchContextParams) > 0 || len(p.DispatchReads) > 0 ||
+		len(p.DispatchOptionalReads) > 0 || p.DispatchVisibleWhen != nil {
 		d.Dispatch = &opDispatch{
 			Class:         p.DispatchClass,
 			AuthContext:   p.DispatchAuthContext,
 			TargetField:   p.DispatchTargetField,
 			TargetType:    p.DispatchTargetType,
+			ContextParams: p.DispatchContextParams,
 			Reads:         p.DispatchReads,
 			OptionalReads: p.DispatchOptionalReads,
 			VisibleWhen:   p.DispatchVisibleWhen,
