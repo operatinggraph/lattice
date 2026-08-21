@@ -134,12 +134,55 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   every one behavior-frozen and byte-identity-proven**, into `rebuild.go` · `results.go` · `filter.go` ·
   `dispatch.go` · `ruleinstall.go` · `rulestate.go`. What remains in `pipeline.go` is the irreducible core:
   the ~470-line `Pipeline` struct, `New`, the setter/accessor surface, `Run`, and consumer lifecycle.
-- **What this item did NOT do — stated plainly so nobody reads the close as completion of the whole row.**
-  The board row also named `executor.go` ≈2.1K and "fold test scaffolding". Neither was done. Test-helper
-  folding was considered and **rejected in Ground above** (near-duplicate, not identical, bodies — real drift
-  risk for ~80-120 LOC); `internal/refractor/ruleengine/full/executor.go` (2426 lines) was never scoped into
-  an increment. After Inc 5, `pipeline.go` is no longer the largest hand-written file in Refractor —
-  `health/lattice_heartbeater.go` (2486) and `executor.go` (2426) both exceed it, and test:prod is still
-  ≈1.17:1. **No successor row was filed**: this is hygiene with no driver, and the board does not grow by
-  reviewing. A future fire that acquires a real driver can pick up the method from this doc — the cut
-  procedure and its standing checks are the durable output.
+  *(Superseded 2026-08-20: the close after Inc 5 left `executor.go` and the test fold untaken and said so.
+  Andrew reopened the item — "finish the job that item was created for, do not defer" — and the two
+  remaining halves shipped as Inc 6 below. The row's whole scope is now done.)*
+
+- **Inc 6: shipped `603eae2c` + `515cb8e7` — the two halves the Inc-5 close had left untaken.**
+
+  **(a) `executor.go`, `603eae2c`.** Four cuts into `seed_nodes.go` (candidate-set discovery + anchor
+  seeding), `rel_traverse.go` (variable-length hop expansion), `expr_eval.go` (expression evaluation +
+  function dispatch), `values.go` (property resolution, value coercion/comparison, normalized-key
+  serialization). Taken in **descending** line order so earlier ranges could not shift. `executor` /
+  `nodeRef` / `binding` and all three package-level declarations stay put — same package, so every moved
+  method compiles unchanged. `executor.go` **2426 → 1407**. Zero added lines; three of the four files
+  byte-identical to their source ranges, `values.go` identical as a line multiset (it carried a
+  pre-existing orphaned doc comment, repaired in place — see below).
+
+  **(b) The test fold, `515cb8e7`.** Four helpers in `package pipeline` each booted an embedded NATS
+  server and opened a bucket set with structurally identical bodies; all four now delegate to one variadic
+  `newTestKVs(t, buckets...)`. Names and signatures unchanged, so **none of the ~57 call sites moved**
+  (`newCollisionKVs` alone has 49).
+
+  **The Ground section's rejection of this fold was wrong, and specifically wrong.** It argued the bodies
+  were "near-duplicate, not identical (different bucket sets per caller)" — but the bucket set is exactly
+  the parameterizable part. The real difference was elsewhere and nobody had noticed it: `newCollisionKVs`
+  and `newActorEnumeratorAdjKV` **lacked the `testing.Short()` guard** their two siblings carried. They
+  inherit it now, deliberately — all four are NATS-backed, so its absence was an oversight, and nothing in
+  `ci.yml` or the `Makefile` runs `-short`, so no CI or local gate path changes. Proven, not assumed:
+  `go test ./internal/refractor/pipeline/ -short` now SKIPs every newly-guarded family cleanly. No
+  parameter was added to preserve the missing guard — a parameter whose only purpose is to keep an
+  oversight alive is not a fold.
+
+- **Inc 6 also mechanized this campaign's own recurring defect: `f60565cf`.** The standing doc-comment
+  check recorded at Inc 4 failed a second time — `executor.go`'s `propertyOf` doc welded above
+  `resolveProperty`, exactly the Inc-2 `writeResults` shape. Twice-seen ⇒ mechanized (SKILL.md §4), so the
+  check is now **`scripts/lint-doc-orphan.go`**, wired into `ci.yml` under STRICT and as
+  `make lint-doc-orphan`. Turning it on found **nine** genuine orphans across pkgmgr, refractor, testutil,
+  loftspace-app and loupe — all nine repaired as pure relocations (per-file non-blank line multiset
+  unchanged, so no code moved). The first-line-only rule that Inc 4's note insisted on is what makes it
+  usable: prototyped over whole comment blocks it was 66% false positives. `lint-package-version` took a
+  matching narrowing — it now skips a `internal/pkgmgr/` file whose change is provably comment-only,
+  compared as comment-free ASTs rather than diff lines (that directory emits Cypher, where `//` also opens
+  a comment, so a raw-string line would fool any line-based test). Mutation-tested: a real code change
+  there still fails the gate.
+
+- **FINAL STATE — the row's whole scope, done.** `pipeline.go` **3932 → 1326** (−66%) and `executor.go`
+  **2426 → 1407** (−42%), across six increments, every one behavior-frozen and proven rather than asserted.
+  Twelve files now carry what two god-files did. The test fold removed the four duplicated fixture bodies.
+  Remaining largest hand-written file in Refractor is `health/lattice_heartbeater.go` (2487) — untouched by
+  this item and never in its scope; `cypher_parser.go` (22K) is generated. **No successor row filed**: the
+  scope this row named is complete, and the board does not grow by reviewing. The durable output beyond the
+  line counts is the method — cut on verified blank-line boundaries, descending order, prove zero added
+  lines and a byte-identical or multiset-identical body — plus the gate that now enforces its one recurring
+  failure mode automatically.

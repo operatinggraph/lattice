@@ -142,7 +142,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-21 · `06874635` · [Refractor] behavior-frozen `pipeline.go` consolidation CLOSED (Andrew: Inc 5 is the last) — 3932→1326 lines across 5 byte-identity-proven increments; `executor.go` + test-fold not taken, no successor row
+- 2026-08-21 · `f60565cf` · [Tooling] lint-doc-orphan gate — twice-seen orphaned-doc class mechanized; 9 genuine orphans found + repaired; lint-package-version narrowed to ignore comment-only pkgmgr edits
+- 2026-08-21 · `603eae2c` · [Refractor] behavior-frozen consolidation CLOSED, whole scope — `pipeline.go` 3932→1326 + `executor.go` 2426→1407 over 6 increments, plus the test-fixture fold; no successor row
 - 2026-08-21 · `a7c94ef` · [CI] lease-convergence's async trio parallelized as its own group — convergence job's pole; same 14 tests, no gate weakened
 - 2026-08-21 · `fc49b7c` · [CI] `internal/natsperm` given its own `-parallel` budget — the unit-4 pole; same 1501 vectors, no gate weakened
 - 2026-08-16 · (verification, no SHA) · [privacy-base] merge-concurrent-erasure-step-1 row REMOVED — already closed by `a0d762f3`'s dual-condition `write_path_closed` gate
@@ -168,6 +169,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-08-14 · `acecf6f9` · [platform] primordialActor ownership guard CLOSED — 7 `Scope:"any"` ops restricted to their dispatching engine; lint gate default-denies the class
 - 2026-08-14 · `83891a8c` · [natsperm] core-events JS.API side channel CLOSED — 6-consumer registry + matrix-wide SNAPSHOT/RESTORE; ack-forgery residual filed
 - 2026-08-14 · `f464c7a5` · [rbac] grant-provenance Inc 3 CLOSED — origin stamp + reserved-set refusal; review found + fixed a real grant-laundering bypass; 28-pkg migration verified live
-- 2026-08-14 · `1208e638` · [rbac] grant-provenance Inc 1+2 — UpdatePermission's grant withdrawn, structural lint gate blocks re-granting it; review found a live UpgradePackage escalation, filed separately; Inc 3 remains
 
 - *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `8f421d80`)*
