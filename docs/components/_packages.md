@@ -288,7 +288,8 @@ install operation — not a synthetic substitute.
 
 ## Uninstall semantics
 
-`lattice-pkg uninstall <package-canonical-name>` reads the package's `.manifest`
+`lattice-pkg uninstall [--retire-secure-lens '<lens>=<note>']... <package-canonical-name>`
+reads the package's `.manifest`
 aspect (`declaredKeys`) and submits `UninstallPackage`, which tombstones each
 declared key (cascade-style) except a `vtx.retentionclass.*` holder — those the
 client excludes from the payload and reports back instead, since tombstoning one
@@ -298,10 +299,38 @@ protected key** (defense in depth). Uninstall is soft-delete only — tombstoned
 audit; physical removal is out of scope. The Refractor reprojects (lens output
 disappears; permissions drop out of cap entries within NFR-P3 lag).
 
-The script accepts an optional per-key `expectedRevision` for OCC; the client
-currently submits tombstones unconditionally — see the
-[package-install contract](/docs/contracts/08-package-install.md) for the
-documented race window and the per-key-revision follow-up.
+Each tombstone carries the `expectedRevision` the client's own read observed, so
+the batch is per-key OCC ([Contract #8 §8.3](/docs/contracts/08-package-install.md)):
+a concurrent write to any declared key between that read and the commit fails the
+whole batch loudly (`ErrUninstallConflict`) rather than being silently overwritten,
+and the package is left fully installed — never a partial state.
+
+### Secure-Lens key custody: the operator attests, or the uninstall is refused
+
+A Secure Lens's `targetConfig.secureColumns` is the only record of which key
+holders a target store's ciphertext was written under, and Refractor's
+destruction-readiness oracle (`internal/refractor/health/registry_probe.go`)
+answers "which lenses hold ciphertext for this holder type?" from the live
+registry alone. Tombstoning such a lens erases that record while every row it
+encrypted stays in the target store, so the oracle would go on attesting
+destruction coverage over rows it can no longer see.
+
+Uninstall therefore **refuses** to erase a lens the oracle can still see unless
+the operator attests the retirement, per lens, with a note
+(`--retire-secure-lens '<lens canonicalName>=<why this history is safe to stop
+carrying>'`, repeatable; `retiredSecureLenses` on Loupe's endpoint). The
+attestation is the operator's, supplied at the call site — never
+`Definition.RetiredSecureColumns`, which is the package author's declaration for
+the [Upgrade](#upgrade--in-place-dev-loop-refresh-f-004) path: a package able to
+pre-declare its own uninstall retirement would ship the excuse for its own
+erasure. The platform verifies nothing about the ciphertext; the note is the
+only record of who decided it was safe.
+
+A lens the oracle **already** could not see needs no attestation — its vertex
+root absent, not `meta.lens`, or soft-deleted, or its spec an `eventStream`
+source. Those are reported as `secureColumnsAlreadyErased`: pre-existing damage
+this uninstall neither caused nor can undo, and gating on it would make that
+damage un-uninstallable.
 
 ## Upgrade / in-place dev-loop refresh (F-004)
 
@@ -414,7 +443,7 @@ write is needed.
 ```
 lattice-pkg install [--force] [--dry-run] <path-to-package-dir>
 lattice-pkg upgrade [--dry-run] <path-to-package-dir>
-lattice-pkg uninstall <package-canonical-name>
+lattice-pkg uninstall [--retire-secure-lens '<lens>=<note>']... <package-canonical-name>
 lattice-pkg list
 ```
 

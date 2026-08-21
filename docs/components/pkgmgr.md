@@ -54,6 +54,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   OUTCOME it promises, through the projection or consumer that delivers it, not to the existence of its
   first step; and a remedy printed for every caller must be qualified per caller — name the states it is
   false in (a reserved operationType, a declared `Lanes`, the package that grants the remedy verbs itself).
+  Third sighting (§31): the unattested-erasure refusal printed a correct flag, correctly spelled, with the
+  package name ahead of it — and Go's `flag` stops at the first positional, so the one string a refused
+  operator pastes exited 2 on a usage error. Every reviewer who *read* it passed it; all three who *ran*
+  it caught it. Check extended: a refusal that renders a command feeds that exact rendered string through
+  the real parser in a test, and a placeholder that can repeat is numbered so the paste does not collide
+  with itself.
 - **A new failure mode is not shipped until every surface that renders it says the right thing** — the
   message, the error's own shape, and each status/UX mapping downstream. `ErrDeclaredKeysOccupied` fell
   through `cmd/loupe`'s default arm to **502**, the code that UI's own front end treats as a transport blip
@@ -62,7 +68,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   suite by lowercasing one word. Minted: reinstall-over-uninstall-occupancy close review. Check: a new
   sentinel is grepped across every `errors.Is` status/UX mapping in `cmd/` before it ships (and duplicated
   mappings are folded into one helper so they cannot drift); a distinction the code MAKES is carried in
-  fields and asserted from fields, never scraped from the rendered message.
+  fields and asserted from fields, never scraped from the rendered message. **Adding the sentinel to the
+  map proves nothing on its own** (§31): the uninstall path listed `ErrNotInstalled` in the 409 arm and a
+  table test went green while the producing call site returned a BARE `fmt.Errorf`, so the real request
+  still 502'd — a code that UI treats as a retryable blip. The row must be driven from the entry point
+  that produces the error, not asserted against the mapping function in isolation.
 - **A corpus-wide guard read must exclude the churn namespaces** — an install-time scan over every vertex
   root also walks `vtx.op.<requestId>` idempotency trackers, a 24h-horizon population that is millions of
   keys on a busy kernel, against a 45-60s install deadline (and the long-lived Loupe process). Minted:
@@ -77,10 +87,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   retention-class-key-custody §30 (both found by cold review executing them, not by reading). Second
   sighting: the occupancy probe reads DOCUMENTS via `KVGetMulti`, which drops delete/purge markers, while
   the commit's `CreateOnly` fails against a marker exactly as against a document — so the probe's "free" is
-  narrower than the commit's, in the one state an operator reaches by clearing a key by hand. Check: the
-  brief names the consumer's full exclusion set and the guard carries one test vector per condition; where
-  a condition is deliberately left uncovered, the code says so as a named narrowing with its direction
-  (under- vs over-reporting), and the operator-facing text closes the path that leads into it.
+  narrower than the commit's, in the one state an operator reaches by clearing a key by hand. Third,
+  fourth and fifth sightings, retention-class-key-custody §31, all in the *same* guard and all found by
+  executing it beside the reader: enumerating the right conditions is not enough when the guard **decodes
+  more loosely** than the reader (a map read never type-errors, so it skipped an eventStream spec the
+  oracle's typed probe still counts), reads **fewer nesting levels** (one `targetConfig` where the reader
+  unions two), or **stops at a narrower unusable-input set** (an absent spec reported, a present-but-
+  undecodable one not). Check (mechanized for this pair):
+  `TestUninstallGuardAgreesWithDestructionOracleOnEveryLensShape` drives the REAL `health.RegistryProbe`
+  and the guard over one committed KV state per lens shape and fails on any unexplained disagreement —
+  a new spec shape is a new row. Elsewhere the check stands: the brief names the consumer's full exclusion
+  set, the guard carries one vector per condition, and a deliberately uncovered condition is a named
+  narrowing with its direction (under- vs over-reporting) stated in the code.
 - **A field validated after normalization must be MATCHED after the same normalization — but folding a
   DESTRUCTIVE resolver's match set is the wrong cure.** `Lens` was `TrimSpace`-checked for emptiness and
   resolved raw, so a declaration with a trailing space was refused with a remedy identical to the line

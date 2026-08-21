@@ -3445,9 +3445,13 @@ Landed as briefed, plus two evasions the brief did not know about. Deviations fr
   charset-validated, so a name carrying whitespace is representable and a trim-only match would have
   introduced a fresh miss where the guard refuses and prints a remedy identical to what is already in the file.
 - **`Uninstall` reports two populations, not one** — `SecureColumnsErased` and
-  `SecureColumnsAlreadyErased`, split on the committed tombstone exactly as the retention-holder pair is,
-  so a pre-existing tombstone is not attributed to this uninstall. Its unparseable-`.spec` path now errors
-  instead of silently reporting "nothing erased".
+  `SecureColumnsAlreadyErased`, ~~split on the committed tombstone exactly as the retention-holder pair
+  is~~, so a pre-existing tombstone is not attributed to this uninstall. Its unparseable-`.spec` path now
+  errors instead of silently reporting "nothing erased". **Struck 2026-08-21 (§31):** the split is on the
+  **oracle's own visibility predicate** (vertex root absent / not `meta.lens` / soft-deleted, or an
+  `eventStream` spec), not on the committed tombstone of the `.spec` key. The two coincide for an uninstall
+  that tombstones root and aspect together, and diverge in both directions otherwise — a `.spec` tombstoned
+  out of band under a live root is still fully visible to the oracle, so it IS this uninstall's erasure.
 - **§30.4 Inc 2 under-specified the manifest block.** It compares `canonicalName`, `policy` and
   `retentionPeriod`: identity alone would let a controller's retention period go from years to days with a
   zero-line manifest diff, in the one construct whose purpose is a reviewable declaration.
@@ -3593,3 +3597,57 @@ would make pre-existing damage un-uninstallable, which is the opposite of the
   platform verifies no ciphertext. §29.6's "confirmed swept" verb stays future work.
 - **No change to `Definition`.** The attestation never becomes a package-authored field.
 - **No change to what uninstall tombstones**, to the retention-holder exclusion, or to the OCC batch.
+
+### 31.8 Built shape (2026-08-21)
+
+Landed as §31.1 scoped it, plus one regression this fire introduced and four divergences from the oracle
+that only execution found. Deviations from §31.1–31.7:
+
+- **The Loupe console would have been left unable to uninstall at all.** The gate is server-side, and
+  `web/js/views/package.js` posted `{name}` only — so any package holding a live Secure Lens
+  (identity-domain does) became un-uninstallable from the console the moment the refusal shipped. Closed
+  in the same fire: the refusal is a **typed** `*UndeclaredSecureLensErasureError` carrying every
+  unattested erasure in FIELDS, `uninstallErrorResponse` renders them on the 409, and the confirm modal
+  becomes a per-lens note form and re-submits. The dossier's own rule — a distinction the code makes is
+  carried in fields, never scraped from the rendered message — is why the UI does not parse the prose.
+- **The refusal states the WHOLE bill, not the first item.** An uninstall takes the package at once, so
+  refusing per-lens would have made the operator attest, re-run, and be refused again.
+- **The classification mirrors the oracle's decoder, not just its conditions** (§31.5 got the conditions
+  right and the strictness wrong). `declaredLensIDs` gates its eventStream skip on a *clean typed decode*;
+  a map-based read never type-errors, so a spec carrying `eventStream` beside a `holderTypes: ["identity", 5]`
+  was filed as pre-existing damage and committed with zero attestations. The predicate now decodes into a
+  structural mirror of `registryProbeSpecProbe`; a spec that fails that decode is visible, i.e. gated.
+- **Erasure DETECTION had the same shape of hole, one layer up.** `secureColumnsOf` read one
+  `targetConfig` level where `mayHoldHolderType` unions two, so a decoy top-level `targetConfig` hid the
+  real columns entirely and no erasure was constructed at all. Now unioned — which strengthens §30's
+  Upgrade/Apply guard by the same edit, and `widenSecureColumnsForUpdate`'s history unions across levels
+  rather than last-wins.
+- **A third population had to be reported**, not gated: a `meta.lens` root this uninstall tombstones whose
+  spec the oracle cannot use (absent, undecodable, or carrying no `targetConfig` at either level). The
+  oracle counts such a lens for EVERY holder type — fail-closed — so the tombstone removes a maximally
+  conservative signal. There is nothing to attest about (no declared holder types survive), and gating
+  would make a hand-purged spec un-uninstallable, so it reports.
+- **`ErrNotInstalled` was listed in Loupe's 409 arm while the producing call site returned a bare error**,
+  so uninstalling an absent package still 502'd. The table test went green throughout. Malformed
+  attestations get their own `ErrInvalidUninstallOptions` → 400.
+- **The attestation is a distinct type, never `RetiredSecureColumn`.** Reusing the author's type is what
+  would invite someone to wire `Definition.RetiredSecureColumns` into this gate — the disarm the item
+  exists to prevent. A distinct `RetiredSecureLens` makes that a compile error.
+- **Counting is by DECLARED entries, not nameable column names** — `Columns` skips an unnamed entry, so a
+  three-column spec with one unnamed reported two.
+- **`targetConfigOf` was deleted**, orphaned by the union; the write path goes through `secureColumnsOf`.
+
+Every guard is mutation-verified — each reverted individually, its test observed failing. The widen's
+union limb is pinned **jointly** with the producer-side merge, not independently: once `secureColumnsOf`
+merges, the widen can no longer see two entries for one column.
+
+**Mechanized, not just recorded:** `TestUninstallGuardAgreesWithDestructionOracleOnEveryLensShape`
+(`internal/pkgmgr/oracle_agreement_test.go`) drives the real `health.RegistryProbe` and the guard over one
+committed KV state per lens shape — twelve today — and fails on any disagreement the row does not
+explain. Reverting the typed-decode gate makes it fail on its own. It retires this component's
+longest-running review class for this pair; adding a spec shape means adding a row.
+
+**Unclosed, and why:** `cmd/loupe/pkg.go`'s handler→helper wiring line and the modal's DOM behavior are
+inspection-only — pinning the first needs an embedded-NATS Loupe harness that does not exist, and the
+second is the logic/view split working as designed. Neither carries a decision the pure, tested halves do
+not already make.
