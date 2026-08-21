@@ -113,6 +113,28 @@ jobs:
           version: v2.11.4
           skip-cache: true
 
+      - name: Gofmt (whole tree, including build-ignored files)
+        # golangci-lint's gofmt linter only analyses files that belong to a
+        # package go/packages can load, and every scripts/*.go opens with
+        # `//go:build ignore` — so that whole tree is invisible to the Lint
+        # step above. This walks the working tree directly.
+        run: |
+          # gofmt -l exits non-zero with EMPTY stdout and a stderr diagnostic
+          # when a file will not parse, so the listing alone cannot be the
+          # verdict — an unparseable file would otherwise read as "clean".
+          # The status is checked explicitly rather than left to set -e, which
+          # does not reliably fire on a command substitution in an assignment.
+          if ! unformatted=$(gofmt -l .); then
+            echo "gofmt: failed to parse one or more files (diagnostic above)"
+            exit 1
+          fi
+          if [ -n "$unformatted" ]; then
+            echo "gofmt: the following files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt: clean"
+
       - name: Conventions lint (CLAUDE.md key-shapes + no history comments)
         # Static check: rejects `asp.` key prefixes (Contract #1) and
         # history/changelog comments. STRICT=1 fails the build on any finding.
