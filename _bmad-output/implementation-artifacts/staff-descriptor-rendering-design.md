@@ -658,7 +658,7 @@ whole. Inc 3 migrates clinic (biggest surface) → wellness → café → loftsp
 §14's `contextParams` gap against each app's migrating ops before assuming Inc 2's module handles
 every read-template shape they'll need.
 
-## 15. Inc 3a outcome — clinic (partial), shipped `<pending>`
+## 15. Inc 3a outcome — clinic (partial), shipped `a6be8314`
 
 Migrated five of clinic's ops onto `internal/descriptorform`: **SetProviderProfile**, **CreateProvider**,
 **AssignProviderSite** (both `CreateProvider`/`AssignProviderSite` have no `dispatch.targetField` at
