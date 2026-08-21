@@ -30,6 +30,13 @@
 //	                 header); this happened three separate times (92e8e1f0,
 //	                 8f9b0633, c97b784f all landed with the row left dangling
 //	                 after the State flip) before this check existed.
+//	FAIL  designer — a "needs designer pass" row that does not NAME the absent
+//	                 ratified pattern (`no-pattern: <primitive>`). The §2.5
+//	                 honest-gate: a precedent in the touched file means the item
+//	                 is a steward 📋, not a designer 📐. Default-deny the bare
+//	                 label, make the filer declare — the shipped `# read-posture:`
+//	                 shape (lint-conventions.go). Backstops the filing-inflation
+//	                 the 2026-08-20 backlog audit found (📐 rows 0→12 in 9 days).
 //	WARN  dep      — a 🚧/🏗️/📋/📐 row "behind X / blocked-on X" where X reads done.
 //	WARN  openrows — a lane has more than openRowWarnMax open (non-Done-log)
 //	                 rows. Never fails, even under --strict: closure pressure
@@ -72,6 +79,13 @@ var (
 	// design (no "shipped" text) and not an open row (📐/🏗️/📋/🚧) whose prose
 	// merely mentions that one increment among several has shipped.
 	shippedRe = regexp.MustCompile(`(?i)^✅.*\b(shipped|closed)\b`)
+	// designerPassRe matches the design-WANTED filing marker ("needs designer
+	// pass") — distinct from "📐 awaiting-Andrew", which is a FINISHED design.
+	// noPatternRe is its required honest-gate declaration: the filer must NAME
+	// the specific absent ratified pattern, so a row that has a precedent in the
+	// touched file cannot hide behind the designer out (§2.5).
+	designerPassRe = regexp.MustCompile(`(?i)needs designer pass`)
+	noPatternRe    = regexp.MustCompile(`(?i)no-pattern:\s*\S`)
 )
 
 type finding struct {
@@ -208,6 +222,10 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 					if shippedRe.MatchString(state) {
 						out = append(out, finding{path, n, "shipped", false,
 							fmt.Sprintf("row state %q reads as shipped but the row is still in the open-items table — delete the row (its Done-log line already carries the record)", state)})
+					}
+					if designerPassRe.MatchString(state) && !noPatternRe.MatchString(state) {
+						out = append(out, finding{path, n, "designer", false,
+							"'needs designer pass' row does not name the absent ratified pattern — add `no-pattern: <named primitive>`; a precedent in the touched file means it is a steward 📋, not a designer 📐 (§2.5 honest-gate)"})
 					}
 				}
 			}

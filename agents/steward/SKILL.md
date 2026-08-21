@@ -523,8 +523,14 @@ running; the **browser tab** you do not.
   a discovery may produce, each stating its out: **(1) it needs ANDREW** — a standing Andrew block, a
   frozen-contract *commit*, or a named architectural fork (prepare + flag per §0 — and the buildable
   remainder around it is still this run's to fix); **(2) it needs a DESIGNER pass** — a genuinely
-  substantial new design with no ratified pattern to extend (§2.5's test), filed naming the design need —
-  and everything around it that needs no design is still this run's to fix. When a discovery lands on an
+  substantial new design with no ratified pattern to extend (§2.5's test), filed **declaring the specific
+  absent pattern** — `📐 needs designer pass · no-pattern: <named primitive>` (`lint-board` default-denies
+  the bare label, the way `# read-posture:` binds a script author; a precedent in the touched file makes it a
+  steward `📋`, not a designer `📐`) — and everything around it that needs no design is still this run's to fix.
+  **Consolidate at filing:** when a run surfaces several residuals that share one root cause, file **one** row
+  naming the shared missing primitive, not N (the 2026-08-20 audit found one fire's 8 residuals were ~3 real
+  units). This is filing judgment a lint can't make; the honest-gate lint catches only the mis-routed
+  *designer* out. When a discovery lands on an
   existing named row, prefer **fixing that row now** over annotating it. **The backlog shrinks by building,
   not grows by reviewing.**
   Same discipline for forward-references: code/comments must
