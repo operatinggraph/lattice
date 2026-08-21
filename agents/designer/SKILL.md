@@ -722,7 +722,17 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   `InstallActorAggregate`, so on the plain pipeline the field is `false` **by construction** and the guard
   can never fire, with a test that would pass vacuously. **For every conjunct you write on a component
   field, grep its setters and confirm the field can be non-zero on the arm you are guarding**; a guard that
-  cannot fire is worse than an absent one, because it buys the reader's confidence. A third, cheaper face
+  cannot fire is worse than an absent one, because it buys the reader's confidence. **A second face, on the
+  guard's JUSTIFICATION rather than the guard:** a design usually introduces several refusals at once, and
+  a later one can make an earlier one's *stated reason* unreachable — the guard still fires, but the harm
+  it cites can no longer occur, so the reader and the builder inherit a false model of what holds the
+  invariant up, and a future simplification deletes the guard on the strength of the dead rationale. For
+  every *"we refuse X because otherwise Y"*, evaluate Y against **the rest of this same design**, not
+  against main. (Trialed 2026-08-21, the capability-apply removal refusal: a same-version
+  `upgradeExisting` was refused *"because Apply would otherwise skip and the CLI would stamp `applied`
+  over an artifact that never landed"* — while the same design set `RequireInstalled: true`, a conjunct of
+  that very skip branch, so the skip was already defeated. The rule survived on an independent reason; the
+  draft's reason could not fire.) A third, cheaper face
   from the same pass: **when you cite another design's rejected alternative, re-read the rejection** — I
   argued at length against a position §8.1 never held (it had already singled out the variant I was
   rejecting, and deferred it with a named trigger my own design would produce). The ledger rule — cite the
