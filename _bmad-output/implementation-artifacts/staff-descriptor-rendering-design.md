@@ -616,3 +616,44 @@ precedent other Lattice work will copy).
 **Verify:** headless — node tests, `go build`, then (if a writable stack is up) `curl` each app's
 `/shared/form.mjs` for a 200 + the loftspace pilot's `SignLease`/`SetRenewalTerms` flow in one
 reused browser tab, closed when done; otherwise note pending.
+
+## 14. Inc 2 outcome — shipped `4cc3a3f1`
+
+Built per §13, with a mandatory full adversarial pass (capability-plane-adjacent: the module owns
+authContext assembly) run before admit, cold against the first build. It found the mount genuinely
+broken — `http.Handle("/shared/", ...)` with no `http.StripPrefix` means every request resolves
+against `shared/form.mjs`, not `form.mjs`, so all five migrated ops 404'd — plus the node suite
+wasn't wired into CI, and five further regressions against the pre-migration behavior it was
+supposed to preserve exactly: fail-open button enablement for bare/unsupported ops, an
+unconditional `self`-authContext send (`landlordSubmit()`'s gate had no module-side equivalent),
+silently-dropped `{actor}`/`:id` template forms with no replacement for a required-read failure,
+lost CSS classing/label-input pairing, and no `targetType` assertion against the resolved target's
+own key. All fixed in the same worktree by the original builder (resumed, not a fresh implementer)
+and independently re-verified — live `curl` against a standalone `go run ./cmd/loftspace-app` (no
+docker) proved an authenticated 200 serving the real module body; the node tier grew from 11 to 19
+tests, closing the two vacuous ones the review caught (an entity-ref assertion indistinguishable
+from its own removal; `{me}`/`{taskKey}` substitution with zero coverage) and adding the sharpest
+anti-fallback vector directly: `renderOpForm(row, {me: X, target: undefined}, mount) === null` even
+with `me` present.
+
+**Not run — no live stack in this build environment** (only `lattice-nats`/`lattice-postgres`
+containers were up, no app binaries running): an in-browser exercise of the loftspace pilot flow
+against the real stack. CI's `stack-gates` job independently installs + verifies against a real
+Docker stack; owed anyway once a writable stack is up.
+
+**Known gap surfaced, not built (small, no live consumer today):** `cmd/loftspace-app/op_catalog.go`'s
+proxy struct never carries `dispatch.contextParams` even though the `opCatalog` lens cypher projects
+it — the Go proxy silently drops it before the browser ever sees it. No op migrated in Inc 1 or Inc 2
+declares `ContextParams`, so this has zero live effect today, and wiring it through without a
+consumer would be untestable dead code. **Inc 3's brief must re-check this before assuming
+`{context.<field>}`-shaped ops are the only gap** — if a clinic/wellness/café op needing migration
+declares `ContextParams`, the proxy needs the field added (mechanical) and `form.mjs` needs a
+grounded decision on how it composes with the existing template forms (not mechanical — new
+semantics, not a mirror of anything shipped).
+
+**Checkpoint for the next fire (Inc 3 — per-app migration, §7):** no worktree held; Inc 2 landed
+whole. Inc 3 migrates clinic (biggest surface) → wellness → café → loftspace's remaining
+`SignRenewal`/`VerifyGuarantor` (now unblocked: `{context.<field>}` ships in this increment).
+`CreateLocation` and `AttachObject`/`DetachObject` stay hand-built per §7's named blockers. Check
+§14's `contextParams` gap against each app's migrating ops before assuming Inc 2's module handles
+every read-template shape they'll need.
