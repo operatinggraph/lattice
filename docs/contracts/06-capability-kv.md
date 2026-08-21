@@ -72,12 +72,12 @@ designator; it retains only its anti-brick meaning (the step-8 update/tombstone 
 - The **ordinary-actor** platform path and every scoped (task / service) path read **exactly one**
   disjoint key (§2.8) — ordinary actor → `cap.roles.<actor>`, task → `cap.ephemeral.<actor>`,
   service → `cap.svc.<actor>` — preserving the single-GET **user hot path**.
-- The **system-actor** platform path (a kernel-seeded root-topology identity, the same
+- The **system-actor** platform path (a role-derived root-topology identity, the
   `holdsRole → operator` predicate) is the one bounded exception: it reads the core `cap.<actor>`
   anchor **∪** `cap.roles.<actor>` and **unions** them (concat `platformPermissions`, union `lanes`).
   The anchor is the rbac-independent kernel floor; `cap.roles.<actor>` the rbac-derived extension.
   The union is **deny-closed** — a grant appears iff some slice grants it; both keys absent →
-  `AuthDenied` (§6.8) — and bounded to the kernel-seeded root actors, never the user hot path.
+  `AuthDenied` (§6.8) — and bounded to the role-derived root actors (holders of the operator role), never the user hot path.
 - **Absent `rbac-domain`**, the derivation degrades to `cap.<actor>` for all actors (floor only;
   ordinary actors deny by absence).
 
