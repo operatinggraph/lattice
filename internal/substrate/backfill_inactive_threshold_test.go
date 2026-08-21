@@ -102,14 +102,18 @@ func TestBackfillConsumerInactiveThreshold_PreservesDeliveryPositionAndAckFloor(
 	}
 
 	// Ack two messages so the consumer carries a non-zero ack floor — the
-	// thing a delete-then-create would silently discard.
+	// thing a delete-then-create would silently discard. DoubleAck (not Ack)
+	// so the ack is confirmed by the server before the "before" snapshot
+	// below reads AckFloor: Ack() returns as soon as the ack is written to
+	// the client's outbound buffer, racing the server's floor update under
+	// load and flaking this test's equality assertion.
 	batch, err := cons.Fetch(2)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	acked := 0
 	for msg := range batch.Messages() {
-		if err := msg.Ack(); err != nil {
+		if err := msg.DoubleAck(ctx); err != nil {
 			t.Fatalf("ack: %v", err)
 		}
 		acked++
