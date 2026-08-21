@@ -60,8 +60,10 @@ greenfield.
   from these fields, and shipping one that cannot be honoured is worse than the debt. Bare `{OperationType}` metas
   exist only for orchestration `forOperation` resolution; a package never declares a meta for an op another
   package owns (the lease-signing `RecordIdentityPII` shadow hazard — collision checking is per-package
-  only). *Idiom: `packages/clinic-domain/opmetas.go`; structural-auth variant: service-domain
-  `RequestService`.*
+  only). **The grant census is not the whole test:** an op a `cmd/*-app` wires UI to is user-facing *by
+  demonstration*, whatever its roles — §15's app-seam rule (ratified 2026-08-20), gated by
+  `lint-app-op-descriptors`. *Idiom: `packages/clinic-domain/opmetas.go`; structural-auth variant:
+  service-domain `RequestService`.*
 - **S2 — Archetype-complete grants, documented.** The package's `permissions.go` opens with the grant-matrix
   doc block (identity-domain format) and covers every archetype the vertical serves (consumer / front /
   back / provider / operator), each grant's Note naming its in-script binder. Assigned work prefers
@@ -941,9 +943,9 @@ ran.
 trigger the next spot-check, not a calendar re-audit — S1/S6/S7/S10 already re-check themselves every CI
 run.
 
-## 15. S1's app seam — an op an application wires UI to is user-facing by demonstration (📐 awaiting-Andrew, 2026-08-20)
+## 15. S1's app seam — an op an application wires UI to is user-facing by demonstration (✅ ANDREW-RATIFIED 2026-08-20)
 
-**The rule (normative once ratified):** an operationType a `cmd/*-app` source references is
+**The rule (normative):** an operationType a `cmd/*-app` source references is
 user-facing regardless of its grant roles — a shipped screen is proof a person triggers it — so it
 owes its owning package a full `OpMetaSpec` or a client-mechanism `[no-op-meta:]` exemption. Two
 hard failures: a machinery-family exemption (`engine-op` / `reply-op` / `lifecycle-op`) reached by
