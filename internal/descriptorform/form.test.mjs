@@ -292,7 +292,9 @@ test("submit() drops a read whose template left an unresolved segment, and resol
 
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
   const envelope = handle.submit();
-  assert.deepEqual(envelope.reads, [TARGET + ".terms"],
+  // TARGET itself trails the declared read: the targetField fallback (below)
+  // pushes it too, and it is a distinct string from TARGET + ".terms".
+  assert.deepEqual(envelope.reads, [TARGET + ".terms", TARGET],
     "the target written into payload BEFORE substitution makes {payload.<targetField>}.<suffix> resolve, " +
     "and the unresolvable template is dropped rather than sent as a hole");
 });
@@ -336,7 +338,9 @@ test("a {context.<field>} read resolves against the caller's companion row", () 
   row.dispatch.reads = ["{context.leaseApp}"];
 
   const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC" } }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC"]);
+  // TARGET trails: the targetField fallback pushes it too, since it never
+  // appeared in the declared {context.leaseApp} read.
+  assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
 // ---- {actor} alias, the `:id` bare-NanoID modifier, and unrecognized
@@ -352,7 +356,10 @@ test("{actor} is an alias for {me}", () => {
   const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
 
   const handle = renderOpForm(row, { target: TARGET, me: ME }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, [ME]);
+  // TARGET trails: the targetField fallback pushes it (not yet in reads);
+  // the context.me fallback then no-ops since ME is already present via
+  // {actor}'s own resolution.
+  assert.deepEqual(handle.submit().reads, [ME, TARGET]);
 });
 
 test("the :id modifier substitutes the bare NanoID, composing into a 6-segment link key", () => {
@@ -367,8 +374,10 @@ test("the :id modifier substitutes the bare NanoID, composing into a 6-segment l
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, { target: TARGET }, mount);
   controlByName(mount, "leaseApp").value = "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC";
+  // TARGET trails: the targetField fallback pushes it too, since the
+  // composite link key above never resolves to the bare TARGET string.
   assert.deepEqual(handle.submit().reads,
-    ["lnk.renewal.AAAAAAAAAAAAAAAAAAAA.renews.leaseapp.CCCCCCCCCCCCCCCCCCCC"]);
+    ["lnk.renewal.AAAAAAAAAAAAAAAAAAAA.renews.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
 test("{me:id} and {taskKey:id} also take the modifier", () => {
@@ -381,7 +390,11 @@ test("{me:id} and {taskKey:id} also take the modifier", () => {
     me: "vtx.identity.BBBBBBBBBBBBBBBBBBBB",
     taskKey: "manifest.task.DDDDDDDDDDDDDDDDDDDD",
   }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, ["BBBBBBBBBBBBBBBBBBBB", "DDDDDDDDDDDDDDDDDDDD"]);
+  // TARGET and the full context.me key both trail: the :id modifier's bare
+  // NanoIDs above are distinct strings from the FULL keys the two fallbacks
+  // push, so both land, in fallback order (targetField, then context.me).
+  assert.deepEqual(handle.submit().reads,
+    ["BBBBBBBBBBBBBBBBBBBB", "DDDDDDDDDDDDDDDDDDDD", TARGET, "vtx.identity.BBBBBBBBBBBBBBBBBBBB"]);
 });
 
 test("an unrecognized read template throws instead of silently dropping", () => {
@@ -459,4 +472,55 @@ test("a money field submits cents, and a non-numeric value throws rather than se
 
   controlByName(mount, "rentCents").value = "not-a-number";
   assert.throws(() => handle.submit(), /valid number/);
+});
+
+// ---- targetField / context.me read fallbacks (mirrors cmd/facet/web/app.js
+// :2790-2804 — a script gating on its own target or the caller's own hub can
+// need either key in `state` even when the owning package's Dispatch forgot
+// to declare it; this module must not depend on every package getting that
+// declaration right, the same way Facet's own renderer never has) ----
+
+test("submit() auto-pushes the resolved targetField value onto reads when the descriptor didn't declare it", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.reads: [] — nothing declared
+  const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, [TARGET],
+    "a script's vertex_alive/class_of check on its own target needs the target key in state " +
+    "regardless of whether the descriptor declared it");
+});
+
+test("submit() does not duplicate the targetField push when a declared read already resolved to the same key", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.reads = ["{payload.renewalKey}"]; // already declares it
+  const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, [TARGET], "no duplicate entry for the same key");
+});
+
+test("submit() auto-pushes context.me onto reads when set and not already declared", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.reads = []; // no targetField push either would occur without a real targetField...
+  row.dispatch.targetField = undefined; // ...isolate the context.me push specifically
+  row.dispatch.targetType = undefined;
+  const me = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
+  const handle = renderOpForm(row, { me }, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, [me]);
+});
+
+test("submit() does not duplicate context.me when it's already the resolved target", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  const handle = renderOpForm(row, { target: TARGET, me: TARGET }, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, [TARGET], "the targetField push and the context.me push must not both add the same key");
+});
+
+test("submit() pushes neither fallback when targetField is absent and context.me is unset", () => {
+  const schema = { type: "object", properties: { fullName: { type: "string" } }, required: [] };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "provider", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const handle = renderOpForm(row, {}, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, []);
 });

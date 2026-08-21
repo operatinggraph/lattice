@@ -18,12 +18,15 @@
 // — `target` is the resolved subject key the caller already knows (a task's
 // `scopedTo`, or an explicit entity key for a non-task surface); `taskKey`
 // names a task-voice submission; `row`/`prefill` back `{context.<field>}`
-// reads and pre-filled values; `me` is the signed-in identity key, read only
-// for a `self`-authContext op — never as a target fallback (see the
-// anti-fallback rule below). `selfVoice` gates WHETHER a `self`-authContext
-// op actually sends `{target: me}` at all (see buildAuthContext) — it is not
-// itself the value sent, and a caller in no self-voiced surface at all
-// simply never sets it (undefined is falsy, so this defaults closed).
+// reads and pre-filled values; `me` is the signed-in identity key — never a
+// target fallback (see the anti-fallback rule below), but whenever it is
+// set, `submit()` auto-pushes it onto `reads` (mirroring Facet's own
+// renderer) since a script gating on the caller's own hub commonly needs it
+// in state regardless of authContext kind. `selfVoice` gates WHETHER a
+// `self`-authContext op actually sends `{target: me}` at all (see
+// buildAuthContext) — it is not itself the value sent, and a caller in no
+// self-voiced surface at all simply never sets it (undefined is falsy, so
+// this defaults closed).
 //
 // An op whose dispatch carries no `targetField` (a free-choice create, or an
 // op with no single pre-existing "entity in view" to derive a subject from —
@@ -466,6 +469,25 @@ export function renderOpForm(catalogRow, context, mount) {
 
       const reads = substituteTemplates(dispatch.reads, context, payload);
       const optionalReads = substituteTemplates(dispatch.optionalReads, context, payload);
+
+      // Two Facet-side fallbacks this module mirrors (design §2.2), pushed
+      // AFTER template substitution so they land alongside whatever the
+      // descriptor already declared rather than replacing it: a script that
+      // gates on its own target (vertex_alive/class_of on `state[target]`)
+      // needs that key in state even when the owning package's own Dispatch
+      // forgot to declare it as a Read — Facet's own renderer has always
+      // auto-pushed it (app.js:2790-2797) and never depended on every
+      // package getting the declaration right; a targetField-less op has no
+      // such key to push. The signed-in caller's own identity is pushed the
+      // same way (app.js:2798-2804) — a standing-guard script that checks
+      // `op.actor` against a link touching the caller's own hub (e.g. an
+      // own-binding probe) commonly needs the actor's key in state too, and
+      // `context.me` is cheap to have on hand whenever it's set. Both are
+      // idempotent against a template that already produced the same key.
+      if (targetField && payload[targetField] && !reads.includes(payload[targetField])) {
+        reads.push(payload[targetField]);
+      }
+      if (context.me && !reads.includes(context.me)) reads.push(context.me);
 
       return {
         operationType,
