@@ -28,7 +28,6 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine (L2-full + L3)** | L1 is satisfied by the shipped Flows tab and L2 v1 by the flow-liveness scrubber; scrubbing past the live window and browsing the ledger both need history Loupe cannot read yet. | ★★★ | L | 🚧 blocked-on: Chronicler archive mode (lattice, Andrew-deferred) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
-| **Weaver Studio NL assist — Describe + Load-into-Author (NL-2)** | The Author stage gains a Describe panel (plain-language intent → `RequestCapabilityAuthoring` relay under the operator's token) and the review console a "Load into Author" hydration for weaverTarget proposals — the AI-draft→human-edit loop the Studio lacks. | ★★★ | M | 🏗️ building · owner: `fire/nl-model-runner` (attended, w/ NL-1) · [design](../../implementation-artifacts/natural-language-weaver-targets-design.md) §3.4 |
 | **[capability-author] Authored weaverTarget naming a protected op is refused only at apply (409), not at check/approve** | The dispatch-authority guard (`enforceAuthoredWeaverTargetScope`) is authoritative at apply, but an author/reviewer learns a target names a protected op only at the final apply click. An advisory call at check/approve (`freshCapabilityVerdict`) would surface it early. | ★ | S | 📋 ready · consumer: an operator authoring a target that names a protected op · [why](../../implementation-artifacts/natural-language-weaver-targets-design.md) §For-Andrew |
 
 ## Component maintenance
@@ -69,6 +68,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `2df02bfd` · [Loupe/NL-2] Weaver Studio Describe panel (NL intent → `RequestCapabilityAuthoring`) + Load-into-Author hydration; fixes the Studio apply path (newPackage + resolved lensRef + target-only propose). Tests, CI green
 - 2026-08-21 · `3c185e9b` · [Loupe/maint] `retentionKeyStatus` operator surface — `/api/vault/retention-keys` + Vault page Retention classes panel. Tests, live-verified, CI green
 - 2026-08-21 · `6d34b1d3` · [Loupe/maint] `protectedFlag` — a malformed (non-bool) `targetConfig.protected` now reads as protected, not silently unprotected. Tests, CI green
 - 2026-08-21 · `fb6a637d` · [Loupe/maint] Shred button now starts the identityErasure pattern, not a bare key shred; panel gains a five-step erasure progress list. Tests, live-verified, CI green
