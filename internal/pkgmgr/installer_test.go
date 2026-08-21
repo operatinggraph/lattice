@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -1112,36 +1111,27 @@ func TestInstaller_SubmitOp_UsesSubmitFieldWhenSet(t *testing.T) {
 	}
 }
 
-// bucketRevisions snapshots every key in core-kv with the revision it currently
-// holds. Two snapshots that compare equal prove no commit landed between them:
-// a write to a new key adds an entry, and a write to an existing one advances
-// its revision, so neither can hide inside an equal map.
-func bucketRevisions(t *testing.T, ctx context.Context, conn *substrate.Conn) map[string]uint64 {
-	t.Helper()
-	keys, err := conn.KVListKeys(ctx, CoreBucket)
-	if err != nil {
-		t.Fatalf("KVListKeys: %v", err)
+// recordingSubmit replaces an Installer's op submission with one that records
+// what it was asked to send and never reaches the Processor. An assertion that
+// nothing was recorded is what proves a refusal happened BEFORE the submit —
+// checking Core KV instead proves nothing here, because an install whose batch
+// is create-only over occupied keys commits nothing whether it is refused up
+// front or rejected atomically at the end.
+func recordingSubmit(sent *[]string) func(context.Context, string, string, string, map[string]any) (*processor.OperationReply, error) {
+	return func(_ context.Context, operationType, _, requestID string, _ map[string]any) (*processor.OperationReply, error) {
+		*sent = append(*sent, operationType)
+		return &processor.OperationReply{Status: processor.ReplyStatusAccepted, RequestID: requestID}, nil
 	}
-	out := make(map[string]uint64, len(keys))
-	for _, k := range keys {
-		entry, err := conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
-			t.Fatalf("KVGet %s: %v", k, err)
-		}
-		out[k] = entry.Revision
-	}
-	return out
 }
 
-// TestInstaller_RefusesReinstallOverUninstall pins the occupancy gate on the
-// case it was built for: an uninstall tombstones every declared key without
-// freeing it, and the version-independent keys a reinstall mints are the exact
-// same ones. Before the gate this reported `install committed` while committing
-// nothing (the first install's idempotency tracker is still live, so the
-// Processor replies Duplicate and Install reads Duplicate as success) — a false
-// statement about a security grant, with no signal that the verb is still gone.
+// TestInstaller_RefusesReinstallOverUninstall pins the occupancy gate on an
+// install whose own declared keys are all occupied by tombstones: an uninstall
+// soft-deletes every declared key without freeing it, and the
+// version-independent keys a fresh manifest mints are the exact same ones. The
+// install is refused before it is submitted, and the refusal names the keys,
+// the two-verb restore, and what that restore does and does not put back.
 func TestInstaller_RefusesReinstallOverUninstall(t *testing.T) {
-	ctx, conn, inst := newInstallerHarness(t)
+	ctx, _, inst := newInstallerHarness(t)
 	def := sampleDef("0.1.0")
 
 	res, err := inst.Install(ctx, def)
@@ -1152,7 +1142,8 @@ func TestInstaller_RefusesReinstallOverUninstall(t *testing.T) {
 		t.Fatalf("Uninstall: %v", err)
 	}
 
-	before := bucketRevisions(t, ctx, conn)
+	var sent []string
+	inst.Submit = recordingSubmit(&sent)
 
 	_, err = inst.Install(ctx, def)
 	if err == nil {
@@ -1161,40 +1152,71 @@ func TestInstaller_RefusesReinstallOverUninstall(t *testing.T) {
 	if !errors.Is(err, ErrDeclaredKeysOccupied) {
 		t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
 	}
+	if len(sent) != 0 {
+		t.Fatalf("the refusal must precede the submit; ops sent: %v", sent)
+	}
+
+	// Bucket membership is read from the typed error, not from the prose.
+	var occ *DeclaredKeysOccupiedError
+	if !errors.As(err, &occ) {
+		t.Fatalf("refusal must be a *DeclaredKeysOccupiedError, got %T", err)
+	}
+	if occ.PackageName != def.Name {
+		t.Errorf("PackageName = %q, want %q", occ.PackageName, def.Name)
+	}
+	wantTombstoned := append([]string{}, res.DeclaredKeys...)
+	slices.Sort(wantTombstoned)
+	if !slices.Equal(occ.Tombstoned, wantTombstoned) {
+		t.Errorf("Tombstoned = %v, want every declared key %v", occ.Tombstoned, wantTombstoned)
+	}
+	// Nothing this package declared is live, so a bucket that also collects the
+	// tombstoned keys shows up here rather than hiding behind matching prose.
+	if len(occ.Live) != 0 {
+		t.Errorf("Live = %v, want empty — no declared key survives this uninstall", occ.Live)
+	}
+
 	msg := err.Error()
 	if !strings.Contains(msg, def.Name) {
 		t.Errorf("refusal must name the package; got %v", msg)
 	}
 	// The sample is the sorted head of the tombstoned bucket, which here is
 	// every declared key — so the lowest-sorting declared key must appear.
-	sorted := append([]string{}, res.DeclaredKeys...)
-	slices.Sort(sorted)
-	if !strings.Contains(msg, sorted[0]) {
-		t.Errorf("refusal must name a sample of the tombstoned keys (expected %q); got %v", sorted[0], msg)
+	if !strings.Contains(msg, wantTombstoned[0]) {
+		t.Errorf("refusal must name a sample of the tombstoned keys (expected %q); got %v", wantTombstoned[0], msg)
 	}
 	if !strings.Contains(msg, "tombstoned by an uninstall") {
 		t.Errorf("refusal must say the keys were tombstoned by an uninstall; got %v", msg)
 	}
-	if !strings.Contains(msg, "CreatePermission") {
-		t.Errorf("refusal must name the operator's remedy for restoring a grant; got %v", msg)
+	// The restore remedy is two verbs, in order, and the SECOND is the one that
+	// confers authority — a message naming only the mint sends the operator to a
+	// success reply with no grant behind it.
+	mintAt, grantAt := strings.Index(msg, restoreMintVerb), strings.Index(msg, restoreGrantVerb)
+	if mintAt < 0 || grantAt < 0 {
+		t.Errorf("refusal must name both %s and %s; got %v", restoreMintVerb, restoreGrantVerb, msg)
+	} else if mintAt > grantAt {
+		t.Errorf("the restore verbs must be named in execution order (%s then %s); got %v",
+			restoreMintVerb, restoreGrantVerb, msg)
 	}
-	// Nothing this package declared is live, so conflating the buckets would
-	// show up here as a LIVE sentence with no live occupant behind it.
-	if strings.Contains(msg, "LIVE") {
-		t.Errorf("no declared key is live after the uninstall; the live bucket must stay empty: %v", msg)
+	if !strings.Contains(msg, "grantedBy") {
+		t.Errorf("refusal must say the grant EDGE is what confers authority; got %v", msg)
 	}
-
-	if after := bucketRevisions(t, ctx, conn); !maps.Equal(before, after) {
-		t.Fatalf("a refused install committed something: %d keys before, %d after", len(before), len(after))
+	// What the remedy produces is runtime-origin, which the operator has to know
+	// before choosing it: no manifest carries it and no uninstall retracts it.
+	if !strings.Contains(msg, "declaredBy") || !strings.Contains(msg, "UninstallPackage") {
+		t.Errorf("refusal must say the restored grant is runtime-origin and never retracted by a future uninstall; got %v", msg)
+	}
+	// Clearing the key by hand is the obvious next move after "cannot be
+	// re-created", and it does not work either. The message has to say so.
+	if !strings.Contains(msg, "nats kv del") || !strings.Contains(msg, "Nats-Expected-Last-Subject-Sequence") {
+		t.Errorf("refusal must close the KV delete/purge trap it otherwise opens; got %v", msg)
 	}
 }
 
 // TestInstaller_RefusesLiveDeclaredKeyOccupant is the other bucket: a declared
 // key that is occupied and NOT tombstoned, with no live package manifest
-// anywhere. The occupant here is seeded directly (the shape a retention-class
-// holder an uninstall preserved, or a foreign writer's key, presents), so the
-// refusal must report it as live — the operator's next move is to read the
-// occupant, not to mint a grant back.
+// anywhere. The occupant seeded here is a FOREIGN one — not under the
+// retention-class prefix — so it must draw the foreign instruction (read it,
+// then rename or upgrade the owner), never the holder one.
 func TestInstaller_RefusesLiveDeclaredKeyOccupant(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 	def := sampleDef("0.1.0")
@@ -1225,6 +1247,17 @@ func TestInstaller_RefusesLiveDeclaredKeyOccupant(t *testing.T) {
 	if !errors.Is(err, ErrDeclaredKeysOccupied) {
 		t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
 	}
+	var occ *DeclaredKeysOccupiedError
+	if !errors.As(err, &occ) {
+		t.Fatalf("refusal must be a *DeclaredKeysOccupiedError, got %T", err)
+	}
+	if !slices.Equal(occ.Live, []string{occupied}) {
+		t.Errorf("Live = %v, want exactly [%s]", occ.Live, occupied)
+	}
+	if len(occ.Tombstoned) != 0 {
+		t.Errorf("Tombstoned = %v, want empty — this occupant is live", occ.Tombstoned)
+	}
+
 	msg := err.Error()
 	if !strings.Contains(msg, "LIVE") || !strings.Contains(msg, occupied) {
 		t.Errorf("refusal must report %s in the live bucket; got %v", occupied, msg)
@@ -1235,6 +1268,15 @@ func TestInstaller_RefusesLiveDeclaredKeyOccupant(t *testing.T) {
 	if !strings.Contains(msg, "1 already-committed key(s)") {
 		t.Errorf("exactly one key is occupied; got %v", msg)
 	}
+	// A foreign occupant gets the foreign instruction. Reporting it under the
+	// retention-holder clause would tell the operator a key another writer owns
+	// is expected and untouchable.
+	if !strings.Contains(msg, "held by a writer other than this package") {
+		t.Errorf("a foreign occupant must draw the foreign-occupant instruction; got %v", msg)
+	}
+	if strings.Contains(msg, "retention-class holder") {
+		t.Errorf("a foreign occupant must not be described as a retention-class holder; got %v", msg)
+	}
 
 	// Nothing installed: the refusal precedes the submit.
 	pkg, err := inst.findInstalledPackage(ctx, def.Name)
@@ -1244,6 +1286,328 @@ func TestInstaller_RefusesLiveDeclaredKeyOccupant(t *testing.T) {
 	if pkg != nil {
 		t.Fatalf("a refused install left a package vertex behind: %+v", pkg)
 	}
+}
+
+// TestInstaller_ReinstallOverUninstall_ReportsRetentionHolderAsHolder is the
+// routine two-bucket case, not an exotic one: a package declaring a retention
+// class has its holder keys in declaredKeys, and uninstall deliberately leaves
+// them LIVE while tombstoning everything else. So an uninstall→reinstall of any
+// such package prints both clauses every time — and the holder's key is derived
+// from this package's own name and the class's canonicalName, so the foreign
+// occupant's "install under a name whose keys are free" is not a move that
+// exists for it under this package name at all.
+func TestInstaller_ReinstallOverUninstall_ReportsRetentionHolderAsHolder(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithRetentionClass("0.1.0", "sampleClass1")
+
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrDeclaredKeysOccupied) {
+		t.Fatalf("want ErrDeclaredKeysOccupied on reinstall, got %v", err)
+	}
+	holderKey := RetentionClassKey(def.Name, "sampleClass1")
+	wantLive := []string{holderKey, holderKey + ".retentionPolicy"}
+	slices.Sort(wantLive)
+
+	var occ *DeclaredKeysOccupiedError
+	if !errors.As(err, &occ) {
+		t.Fatalf("refusal must be a *DeclaredKeysOccupiedError, got %T", err)
+	}
+	if !slices.Equal(occ.Live, wantLive) {
+		t.Errorf("Live = %v, want exactly the two holder keys %v", occ.Live, wantLive)
+	}
+	if len(occ.Tombstoned) == 0 {
+		t.Errorf("Tombstoned is empty; the rest of the declared set is tombstoned by the uninstall")
+	}
+	for _, k := range occ.Tombstoned {
+		if slices.Contains(wantLive, k) {
+			t.Errorf("holder key %s is reported in BOTH buckets: %v", k, occ.Tombstoned)
+		}
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, holderKey) {
+		t.Errorf("refusal must name the live holder key %s; got %v", holderKey, msg)
+	}
+	if !strings.Contains(msg, "retention-class holder") || !strings.Contains(msg, "ShredRetentionClassKey") {
+		t.Errorf("a live holder must draw the holder clause, which names the one verb that may destroy it; got %v", msg)
+	}
+	// The holder's key comes from this package's own name, so the foreign
+	// remedy is unactionable for it and must not be applied to it.
+	if strings.Contains(msg, "held by a writer other than this package") {
+		t.Errorf("this package's own retention holder is not a foreign occupant; got %v", msg)
+	}
+	// Both buckets are reported, and neither absorbs the other.
+	if !strings.Contains(msg, "tombstoned by an uninstall") {
+		t.Errorf("the rest of the declared set is tombstoned and must be reported as such; got %v", msg)
+	}
+}
+
+// TestDeclaredKeyOccupants_FailsClosedOnReadError pins the ratified fail-closed
+// posture: a batched read that FAILS is not evidence of a clean bucket. A probe
+// that swallowed the error would report every key free and hand the install
+// straight back to the silent failure the gate exists to replace, so the error
+// has to reach the caller. A cancelled context is the cheapest read failure
+// that needs no fault injection.
+func TestDeclaredKeyOccupants_FailsClosedOnReadError(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Sanity: the same call over the same keys succeeds on a live context, so a
+	// failure below is the cancellation and not an empty key set.
+	if _, live, err := inst.declaredKeyOccupants(ctx, res.DeclaredKeys); err != nil || len(live) == 0 {
+		t.Fatalf("precondition: declaredKeyOccupants over an installed package = (live %d, %v), want a live set and no error", len(live), err)
+	}
+
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	tombstoned, live, err := inst.declaredKeyOccupants(dead, res.DeclaredKeys)
+	if err == nil {
+		t.Fatalf("a failed read must refuse the install, not report a clean bucket (tombstoned %v, live %v)", tombstoned, live)
+	}
+	if tombstoned != nil || live != nil {
+		t.Errorf("a failed read must return no buckets at all, got tombstoned %v live %v", tombstoned, live)
+	}
+}
+
+// TestReadDeclaredKeyOccupants_ClassifiesAcrossChunkBoundaries drives the
+// batched read across several requests with a chunk size small enough to make
+// the boundary reachable. Every key must be classified regardless of which
+// request carried it: a loop that stops after the first chunk, or one that
+// mis-slices at the boundary, silently reports the rest of a package's keys as
+// free — the same false green as swallowing a read error, arriving by a
+// different route.
+func TestReadDeclaredKeyOccupants_ClassifiesAcrossChunkBoundaries(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	live := []string{"vtx.sample.Live1AaBbCcDdEeFfGg", "vtx.sample.Live2AaBbCcDdEeFfGg", "vtx.sample.Live3AaBbCcDdEeFfGg"}
+	tombstoned := []string{"vtx.sample.Dead1AaBbCcDdEeFfGg", "vtx.sample.Dead2AaBbCcDdEeFfGg"}
+	absent := "vtx.sample.Gone1AaBbCcDdEeFfGg"
+
+	seed := func(key string, deleted bool) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"class": "sample", "isDeleted": deleted, "data": map[string]any{}})
+		if err != nil {
+			t.Fatalf("marshal %s: %v", key, err)
+		}
+		if _, err := conn.KVCreate(ctx, CoreBucket, key, raw); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	for _, k := range live {
+		seed(k, false)
+	}
+	for _, k := range tombstoned {
+		seed(k, true)
+	}
+
+	// Interleaved so no chunk holds only one class, and the absent key sits at a
+	// boundary rather than at either end.
+	declared := []string{live[0], tombstoned[0], absent, live[1], tombstoned[1], live[2]}
+	for _, chunkSize := range []int{1, 2, 4, len(declared), len(declared) + 3} {
+		gotTombstoned, gotLive, err := inst.readDeclaredKeyOccupants(ctx, declared, chunkSize)
+		if err != nil {
+			t.Fatalf("chunkSize %d: %v", chunkSize, err)
+		}
+		wantLive := append([]string{}, live...)
+		slices.Sort(wantLive)
+		wantTombstoned := append([]string{}, tombstoned...)
+		slices.Sort(wantTombstoned)
+		if !slices.Equal(gotLive, wantLive) {
+			t.Errorf("chunkSize %d: live = %v, want %v", chunkSize, gotLive, wantLive)
+		}
+		if !slices.Equal(gotTombstoned, wantTombstoned) {
+			t.Errorf("chunkSize %d: tombstoned = %v, want %v", chunkSize, gotTombstoned, wantTombstoned)
+		}
+		if slices.Contains(gotLive, absent) || slices.Contains(gotTombstoned, absent) {
+			t.Errorf("chunkSize %d: a key absent from the bucket must be reported in neither bucket", chunkSize)
+		}
+	}
+}
+
+// TestPartitionLiveOccupants pins the split the live clauses key their differing
+// instructions on: this package's own retention-class holders, which an
+// uninstall preserves on purpose and whose keys derive from the package's own
+// name, versus everything else.
+func TestPartitionLiveOccupants(t *testing.T) {
+	holderKey := RetentionClassKey("sample-pkg", "sampleClass1")
+	holders, foreign := partitionLiveOccupants([]string{
+		"vtx.permission.Frozen1PermKeyAbcdef",
+		holderKey,
+		holderKey + ".retentionPolicy",
+		"vtx.meta.Frozen1MetaKeyAbcdef",
+	})
+	wantHolders := []string{holderKey, holderKey + ".retentionPolicy"}
+	if !slices.Equal(holders, wantHolders) {
+		t.Errorf("holders = %v, want %v", holders, wantHolders)
+	}
+	wantForeign := []string{"vtx.permission.Frozen1PermKeyAbcdef", "vtx.meta.Frozen1MetaKeyAbcdef"}
+	if !slices.Equal(foreign, wantForeign) {
+		t.Errorf("foreign = %v, want %v", foreign, wantForeign)
+	}
+}
+
+// clauseWith returns the one clause containing every token, or "". Assertions
+// run against a single clause rather than the concatenated message so a token
+// belonging to one claim can never satisfy an assertion about another.
+func clauseWith(clauses []string, tokens ...string) string {
+	for _, c := range clauses {
+		hit := true
+		for _, tok := range tokens {
+			if !strings.Contains(c, tok) {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return c
+		}
+	}
+	return ""
+}
+
+// TestClassifyRestorePermissions pins the partition the refusal's honesty rests
+// on: which declared grants the two-verb runtime restore can actually put back.
+// Reserved outranks the lane note (an operationType that can never authorize
+// from a runtime mint has no partial restore to describe), and an operationType
+// declared at two scopes is named once.
+func TestClassifyRestorePermissions(t *testing.T) {
+	adv := classifyRestorePermissions([]PermissionSpec{
+		{OperationType: "SampleOp", Scope: "any"},
+		{OperationType: "SampleOp", Scope: "self"},
+		{OperationType: "UpdatePermission", Scope: "any"},
+		{OperationType: "ShredRetentionClassKey", Scope: "any"},
+		{OperationType: "PrivilegedOp", Scope: "any", Lanes: []string{"meta"}},
+		{OperationType: restoreMintVerb, Scope: "any"},
+		{OperationType: restoreGrantVerb, Scope: "any"},
+	})
+
+	wantRestorable := []string{restoreMintVerb, restoreGrantVerb, "SampleOp"}
+	slices.Sort(wantRestorable)
+	if !slices.Equal(adv.restorable, wantRestorable) {
+		t.Errorf("restorable = %v, want %v", adv.restorable, wantRestorable)
+	}
+	if !slices.Equal(adv.reserved, []string{"ShredRetentionClassKey", "UpdatePermission"}) {
+		t.Errorf("reserved = %v, want the two core-reserved operationTypes", adv.reserved)
+	}
+	if !slices.Equal(adv.lanePartial, []string{"PrivilegedOp (lane meta)"}) {
+		t.Errorf("lanePartial = %v, want PrivilegedOp rendered with its lane", adv.lanePartial)
+	}
+	wantGrantors := []string{restoreMintVerb, restoreGrantVerb}
+	slices.Sort(wantGrantors)
+	if !slices.Equal(adv.grantorVerbs, wantGrantors) {
+		t.Errorf("grantorVerbs = %v, want %v", adv.grantorVerbs, wantGrantors)
+	}
+
+	// The claim that would be false if a qualification were folded back into the
+	// general advice: nothing unrestorable may appear as restorable.
+	for _, op := range []string{"UpdatePermission", "ShredRetentionClassKey", "PrivilegedOp"} {
+		if slices.Contains(adv.restorable, op) {
+			t.Errorf("%s is not restorable by the two-verb runtime mint; restorable = %v", op, adv.restorable)
+		}
+	}
+
+	// The reserved test is the Processor's own predicate, so a change to the
+	// reserved set moves both sides together. Anchor that it is really consulted.
+	if !processor.WouldRefuseReservedGrant("UpdatePermission", "runtime") {
+		t.Fatal("UpdatePermission is expected to be core-reserved against a runtime origin")
+	}
+}
+
+// TestTombstonedOccupancyClauses_QualifyPerDeclaredPermission pins the refusal
+// text against the state it is printed in. The generic advice — "mint it back
+// at runtime" — is true for an ordinary grant, partial for a lane-bearing one,
+// false for a core-reserved one, and possibly unrunnable when the uninstalled
+// package is the one that grants the restore verbs.
+func TestTombstonedOccupancyClauses_QualifyPerDeclaredPermission(t *testing.T) {
+	occupied := []string{"vtx.permission.Frozen1PermKeyAbcdef"}
+
+	t.Run("MixedRestorability", func(t *testing.T) {
+		def := Definition{
+			Name: "qualified-pkg",
+			Permissions: []PermissionSpec{
+				{OperationType: "SampleOp", Scope: "any"},
+				{OperationType: "PrivilegedOp", Scope: "any", Lanes: []string{"meta"}},
+				{OperationType: "UpdatePermission", Scope: "any"},
+				{OperationType: restoreGrantVerb, Scope: "any"},
+			},
+		}
+		clauses := tombstonedOccupancyClauses(def, occupied)
+
+		remedy := clauseWith(clauses, restoreMintVerb, restoreGrantVerb, "grantedBy")
+		if remedy == "" {
+			t.Fatalf("no clause names both restore verbs and the grant edge: %v", clauses)
+		}
+		if strings.Index(remedy, restoreMintVerb) > strings.Index(remedy, restoreGrantVerb) {
+			t.Errorf("the verbs must be named in execution order (%s then %s): %q",
+				restoreMintVerb, restoreGrantVerb, remedy)
+		}
+		if clauseWith(clauses, "declaredBy", "UninstallPackage") == "" {
+			t.Errorf("no clause states the restored grant is runtime-origin and never retracted: %v", clauses)
+		}
+		if clauseWith(clauses, "nats kv del", "Nats-Expected-Last-Subject-Sequence") == "" {
+			t.Errorf("no clause closes the KV delete/purge trap: %v", clauses)
+		}
+
+		// The fully-restorable list is the assertion that fails if any
+		// qualification is dropped back into the general claim.
+		restorable := clauseWith(clauses, "fully restorable")
+		if restorable == "" || !strings.Contains(restorable, "SampleOp") {
+			t.Fatalf("the ordinary grant must be named as fully restorable: %v", clauses)
+		}
+		for _, op := range []string{"UpdatePermission", "PrivilegedOp"} {
+			if strings.Contains(restorable, op) {
+				t.Errorf("%s is named as fully restorable: %q", op, restorable)
+			}
+		}
+
+		if clauseWith(clauses, "UpdatePermission", processor.AlertCodeReservedOperationGrantRejected) == "" {
+			t.Errorf("the core-reserved grant must be named alongside the alert its mint raises: %v", clauses)
+		}
+		if clauseWith(clauses, "PrivilegedOp (lane meta)", "UpdatePermission") == "" {
+			t.Errorf("the lane-bearing grant must be named with its lane and with the reason the lane is unrecoverable: %v", clauses)
+		}
+		if clauseWith(clauses, "declares "+restoreGrantVerb+" itself") == "" {
+			t.Errorf("a package declaring a restore verb must be warned the uninstall revoked it: %v", clauses)
+		}
+	})
+
+	t.Run("NothingRestorable", func(t *testing.T) {
+		def := Definition{
+			Name:        "reserved-only-pkg",
+			Permissions: []PermissionSpec{{OperationType: "UpdatePermission", Scope: "any"}},
+		}
+		clauses := tombstonedOccupancyClauses(def, occupied)
+		if c := clauseWith(clauses, restoreGrantVerb); c != "" {
+			t.Errorf("no declared grant is restorable, so the two-verb remedy must not be offered: %q", c)
+		}
+		if clauseWith(clauses, "only route back is installing under a package name") == "" {
+			t.Errorf("a package with nothing restorable must be told what IS available: %v", clauses)
+		}
+	})
+
+	t.Run("NoDeclaredPermissions", func(t *testing.T) {
+		def := Definition{Name: "no-perms-pkg"}
+		clauses := tombstonedOccupancyClauses(def, occupied)
+		if c := clauseWith(clauses, restoreMintVerb); c != "" {
+			t.Errorf("a package that declared no permission has no grant to restore: %q", c)
+		}
+		// The create-only wall and the delete/purge trap still apply.
+		if clauseWith(clauses, "cannot be re-created") == "" ||
+			clauseWith(clauses, "nats kv del") == "" {
+			t.Errorf("the create-only fact and the KV-delete trap are independent of any grant: %v", clauses)
+		}
+	})
 }
 
 // TestInstaller_OccupancyGateLeavesCleanInstallsAlone is the negative vector on

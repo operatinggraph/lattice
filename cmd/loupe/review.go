@@ -732,11 +732,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 
 	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
 	if err != nil {
-		status := http.StatusBadGateway
-		if errors.Is(err, pkgmgr.ErrNotInstalled) || errors.Is(err, pkgmgr.ErrCanonicalNameCollision) {
-			status = http.StatusConflict
-		}
-		s.writeError(w, status, "apply "+plan.PackageName+": "+err.Error())
+		s.writeError(w, packageApplyStatus(err), "apply "+plan.PackageName+": "+err.Error())
 		return
 	}
 

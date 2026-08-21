@@ -190,7 +190,7 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		return nil, err
 	}
 	if len(tombstoned) > 0 || len(liveOccupants) > 0 {
-		return nil, occupiedDeclaredKeysError(def.Name, tombstoned, liveOccupants)
+		return nil, occupiedDeclaredKeysError(def, tombstoned, liveOccupants)
 	}
 
 	// Step 4 — submit the InstallPackage op to the Processor. The op
@@ -707,17 +707,46 @@ var ErrOpMetaOperationTypeCollision = errors.New("pkgmgr: operationType already 
 // uninstall to retry against the current state.
 var ErrUninstallConflict = errors.New("pkgmgr: uninstall conflict — a declared key changed concurrently")
 
-// ErrDeclaredKeysOccupied is returned by Install when a key of the package's
-// freshly-built declared set is already committed in Core KV.
+// ErrDeclaredKeysOccupied is the sentinel every occupancy refusal wraps, for
+// callers that only need to know an install was refused for this reason —
+// cmd/loupe maps it to 409, because an install whose own keys are already
+// committed fails identically on every retry.
 //
 // An InstallPackage batch is create-only (Contract #8 §8.2), so an occupied key
 // is not something the install can write over: every occupied key is a
-// CreateOnly assertion the commit will fail. Refusing before the op is
-// submitted is what makes that fact visible — submitted, the same install
-// either replays the original install's still-live idempotency tracker and
-// reports success having committed nothing, or fails with a bare
-// RevisionConflict that names neither the cause nor a remedy.
+// CreateOnly assertion the commit will fail. The refusal happens before the op
+// is submitted because the two things that happen when it IS submitted are both
+// silent about the cause: a still-live idempotency tracker for the same
+// deterministic requestId makes the Processor reply Duplicate, which Install
+// reads as success, and once that tracker expires the batch instead fails with
+// a bare RevisionConflict naming neither the occupied key nor a remedy.
 var ErrDeclaredKeysOccupied = errors.New("pkgmgr: install refused — declared keys are already committed in the kernel")
+
+// DeclaredKeysOccupiedError is the typed occupancy refusal. Error() renders the
+// operator-facing message, and the fields carry the same answer structurally so
+// a caller (or a test) reads bucket membership from data rather than by
+// scraping prose — the two buckets mean different things and must never be
+// conflated by a reader either.
+//
+// Unwrap yields ErrDeclaredKeysOccupied, so errors.Is keeps working for callers
+// that only need the class.
+type DeclaredKeysOccupiedError struct {
+	// PackageName is the package whose install was refused.
+	PackageName string
+	// Tombstoned names the declared keys occupied by an `isDeleted=true`
+	// document — this package's own uninstall. Sorted.
+	Tombstoned []string
+	// Live names the declared keys occupied by a live document: a
+	// retention-class holder an uninstall preserved on purpose, a foreign
+	// writer's key, or a document that would not decode (fail-closed). Sorted.
+	Live []string
+
+	message string
+}
+
+func (e *DeclaredKeysOccupiedError) Error() string { return e.message }
+
+func (e *DeclaredKeysOccupiedError) Unwrap() error { return ErrDeclaredKeysOccupied }
 
 // ErrBootstrapRequired is returned when the core-kv bucket is absent,
 // indicating bootstrap has not been run.
@@ -911,11 +940,12 @@ func (i *Installer) readMetaDocs(ctx context.Context, keys []string) (map[string
 	return entries, nil
 }
 
-// occupancySampleCap bounds how many keys of each occupancy bucket the refusal
-// names. A package's declared set runs to hundreds of keys and an uninstall
-// tombstones nearly all of them, so naming every one buries the two sentences
-// that tell the operator what to do. The sample is sorted, so the same
-// occupied kernel always names the same keys — a refusal an operator can
+// occupancySampleCap bounds how many items any one clause of the refusal names
+// — occupied keys, or the operationTypes a restore clause qualifies. A
+// package's declared set runs to hundreds of keys and an uninstall tombstones
+// nearly all of them, so naming every one buries the clauses that tell the
+// operator what to do. Every list is sorted before it is sampled, so the same
+// occupied kernel always names the same items — a refusal an operator can
 // compare across two runs.
 const occupancySampleCap = 5
 
@@ -933,10 +963,30 @@ const occupancySampleCap = 5
 // the set is bounded by the package, chunked at abstractGuardReadChunk so even
 // a corpus-sized package stays on KVGetMulti's fast path.
 //
-// A key absent from the returned map is absent from the bucket (KVGetMulti
-// drops hard-delete/purge markers), the batched equivalent of ErrKeyNotFound.
-// A FAILED batch is never that: it returns an error and Install refuses on it,
-// because a probe that cannot read the kernel has not found the kernel empty.
+// A FAILED batch is never read as an empty one: it returns an error and Install
+// refuses on it, because a probe that cannot read the kernel has not found the
+// kernel clean.
+//
+// KNOWN NARROWING — "free" here is narrower than "free" at the commit, and the
+// gap is one-directional. KVGetMulti returns documents and DROPS delete/purge
+// markers (parseDirectGetEntry, internal/substrate/kv_multi.go), so a key whose
+// only occupant is a NATS-level marker is absent from the map and reads as free
+// to this probe. The commit disagrees: an install `create` is rendered
+// CreateOnly as the raw header `Nats-Expected-Last-Subject-Sequence: 0`
+// (internal/substrate/batch.go) with no marker-aware retry, and a marker is
+// still a message on the subject — the same fact internal/processor's
+// step8_commit records from the other side ("the tombstone's DEL marker still
+// occupies the subject"). So the gate under-reports; it never over-reports.
+// Everything it names is genuinely occupied, and a marker-only key it misses
+// fails loudly one step later instead of silently succeeding.
+//
+// The probe is deliberately not marker-aware: reading markers needs a batched
+// primitive the substrate does not offer, and nothing in production puts a
+// marker on a declared key — the only KVDelete against Core KV is the outbox
+// consumer's, on `vtx.op.<requestId>.events`, which no package declares, and no
+// production path calls KVPurge on the bucket at all. The one way a marker gets
+// onto a declared key is an operator clearing it by hand, and the refusal text
+// names that as the trap it is rather than leaving the probe to mis-read it.
 //
 // A document that will not decode is reported as LIVE, never dropped. Dropping
 // it would read an occupied key as a free one and hand the install straight
@@ -946,8 +996,17 @@ const occupancySampleCap = 5
 // document does not support; the live bucket's "inspect this occupant" is the
 // right instruction for a key whose content nothing can characterize.
 func (i *Installer) declaredKeyOccupants(ctx context.Context, declared []string) (tombstoned, live []string, err error) {
-	for start := 0; start < len(declared); start += abstractGuardReadChunk {
-		end := start + abstractGuardReadChunk
+	return i.readDeclaredKeyOccupants(ctx, declared, abstractGuardReadChunk)
+}
+
+// readDeclaredKeyOccupants is declaredKeyOccupants with the request size as a
+// parameter. The split exists so the chunk-boundary behavior — that a set
+// spanning several requests is classified whole, not truncated at the first —
+// is decidable without a set the size of the production cap; the exported
+// behavior is pinned by its one caller above passing abstractGuardReadChunk.
+func (i *Installer) readDeclaredKeyOccupants(ctx context.Context, declared []string, chunkSize int) (tombstoned, live []string, err error) {
+	for start := 0; start < len(declared); start += chunkSize {
+		end := start + chunkSize
 		if end > len(declared) {
 			end = len(declared)
 		}
@@ -980,35 +1039,214 @@ func (i *Installer) declaredKeyOccupants(ctx context.Context, declared []string)
 	return tombstoned, live, nil
 }
 
-// occupiedDeclaredKeysError renders the refusal for a declared set whose keys
-// are already committed. Each bucket contributes its own sentence, with its own
-// count, its own bounded sample, and its own next move — the two occupancies
-// have nothing in common but the wall they hit.
-func occupiedDeclaredKeysError(packageName string, tombstoned, live []string) error {
-	var parts []string
-	if len(tombstoned) > 0 {
-		parts = append(parts, fmt.Sprintf(
-			"%d key(s) were tombstoned by an uninstall of this package and cannot be re-created (sample: %s) — an InstallPackage batch is create-only, so re-running this install will fail identically forever; to restore a grant this package's uninstall revoked, mint it as a runtime-origin permission with CreatePermission (rbac-domain grants CreatePermission to the operator role) instead of reinstalling",
-			len(tombstoned), strings.Join(sampleKeys(tombstoned), ", ")))
-	}
-	if len(live) > 0 {
-		parts = append(parts, fmt.Sprintf(
-			"%d key(s) are LIVE (sample: %s) — a live occupant is either a retention-class holder an uninstall preserved on purpose (only ShredRetentionClassKey may ever destroy one; tombstoning it strands the key it custodies) or a key another writer owns, so read each one before anything else and give this package keys it does not share rather than removing the occupant",
-			len(live), strings.Join(sampleKeys(live), ", ")))
-	}
-	return fmt.Errorf("%w: package %q declares %d already-committed key(s): %s",
-		ErrDeclaredKeysOccupied, packageName, len(tombstoned)+len(live), strings.Join(parts, "; "))
+// The two rbac-domain verbs the tombstoned bucket's remedy is built out of.
+// They are named as a pair everywhere because either one alone restores
+// nothing: CreatePermission mints the permission vertex and GrantPermission
+// attaches it to a role, and it is the `grantedBy` edge the second writes that
+// carries authority (capabilityRoles matches `(role)<-[:grantedBy]-(perm)`, so
+// a minted vertex with no edge projects into no actor's capability set). An
+// uninstall revokes both halves — the permission vertex and the grant link are
+// each declared keys — so a remedy naming only the mint hands the operator a
+// success reply and no grant.
+const (
+	restoreMintVerb  = "CreatePermission"
+	restoreGrantVerb = "GrantPermission"
+)
+
+// restoreAdvice partitions a package's declared permissions by whether the
+// two-verb runtime restore can actually put each one back. The partition is
+// what keeps the refusal honest at per-permission resolution: a package with
+// three restorable grants and one that is not is entitled to be told which is
+// which, rather than given one blanket claim that is false for a quarter of it.
+type restoreAdvice struct {
+	// restorable names the operationTypes the two verbs fully restore.
+	restorable []string
+	// reserved names the operationTypes a runtime-origin grant can never
+	// authorize: step 3 refuses the projected entry outright and raises
+	// AlertCodeReservedOperationGrantRejected, whose own contract reads that
+	// signal as someone minting themselves a grant the platform reserves to
+	// package declaration (Contract #6 §6.1). Advising the mint would drive an
+	// operator into the action the platform's alerting treats as an attack.
+	reserved []string
+	// lanePartial names the operationTypes whose grant survives the restore but
+	// whose privileged lane does not: CreatePermission's script writes only
+	// {operationType, scope, origin}, and the one verb that could add `lanes`
+	// afterwards — UpdatePermission — is core-reserved AND deliberately
+	// ungranted, so the lane is unrecoverable at runtime. Rendered with the
+	// lanes so the operator sees exactly what is lost.
+	lanePartial []string
+	// grantorVerbs names the restore verbs THIS package declares itself. When
+	// non-empty the uninstall being reported revoked the very grants the remedy
+	// depends on, and the primordial anchor lens does not carry them.
+	grantorVerbs []string
 }
 
-// sampleKeys returns the first occupancySampleCap keys of an already-sorted
-// bucket, noting how many it left unnamed so the sample never reads as the
-// whole set.
-func sampleKeys(keys []string) []string {
-	if len(keys) <= occupancySampleCap {
-		return keys
+// classifyRestorePermissions computes the partition. The reserved test is the
+// Processor's own predicate rather than a restatement of its set, so the two
+// cannot drift (the same reason HeldPermission.covers imports it).
+func classifyRestorePermissions(perms []PermissionSpec) restoreAdvice {
+	var adv restoreAdvice
+	seen := map[string]struct{}{}
+	appendOnce := func(dst *[]string, entry, dedupeOn string) {
+		if _, dup := seen[dedupeOn]; dup {
+			return
+		}
+		seen[dedupeOn] = struct{}{}
+		*dst = append(*dst, entry)
 	}
-	out := append([]string{}, keys[:occupancySampleCap]...)
-	return append(out, fmt.Sprintf("and %d more", len(keys)-occupancySampleCap))
+	for _, p := range perms {
+		if p.OperationType == restoreMintVerb || p.OperationType == restoreGrantVerb {
+			appendOnce(&adv.grantorVerbs, p.OperationType, "grantor:"+p.OperationType)
+		}
+		switch {
+		// Reserved outranks the lane note: an operationType that can never be
+		// authorized from a runtime mint has no partial restore to describe.
+		case processor.WouldRefuseReservedGrant(p.OperationType, "runtime"):
+			appendOnce(&adv.reserved, p.OperationType, "reserved:"+p.OperationType)
+		case len(p.Lanes) > 0:
+			appendOnce(&adv.lanePartial,
+				fmt.Sprintf("%s (lane %s)", p.OperationType, strings.Join(p.Lanes, "+")),
+				"lane:"+p.OperationType)
+		default:
+			appendOnce(&adv.restorable, p.OperationType, "ok:"+p.OperationType)
+		}
+	}
+	sort.Strings(adv.restorable)
+	sort.Strings(adv.reserved)
+	sort.Strings(adv.lanePartial)
+	sort.Strings(adv.grantorVerbs)
+	return adv
+}
+
+// tombstonedOccupancyClauses renders the tombstoned bucket: the fact, then the
+// restore advice qualified down to what is actually true of THIS package's
+// declared grants. Every clause is conditional on the state that makes it true,
+// because the refusal is printed in states where the generic advice is false.
+func tombstonedOccupancyClauses(def Definition, tombstoned []string) []string {
+	clauses := []string{fmt.Sprintf(
+		"%d key(s) were tombstoned by an uninstall of this package and cannot be re-created (sample: %s) — an InstallPackage batch is create-only, so re-running this install will fail identically forever",
+		len(tombstoned), boundedSample(tombstoned))}
+	// The trap this refusal would otherwise open. "Cannot be re-created" invites
+	// clearing the key by hand, and both hand tools leave a NATS delete marker
+	// on the subject. A marker satisfies no more of the CreateOnly assertion
+	// than a document does — the assertion is rendered as the raw header
+	// `Nats-Expected-Last-Subject-Sequence: 0` with no marker-aware retry — so
+	// the install still dies, now at commit and with a bare RevisionConflict.
+	// Saying so is the difference between a refusal that closes the door and one
+	// that points at it.
+	clauses = append(clauses,
+		"deleting or purging the keys at the KV level does not free them either — `nats kv del` / `nats kv purge` leaves a delete marker on the subject, and the install's create-only assertion (`Nats-Expected-Last-Subject-Sequence: 0`) fails against a marker exactly as it fails against a document, so the batch is rejected the same way")
+	if len(def.Permissions) == 0 {
+		return clauses
+	}
+
+	adv := classifyRestorePermissions(def.Permissions)
+	if len(adv.restorable) > 0 || len(adv.lanePartial) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"the uninstall revoked this package's permission grants too; restoring one at runtime takes TWO rbac-domain ops IN ORDER — %s{operationType, scope, note?} mints the permission vertex, then %s{permKey, roleKey} attaches it to the role, and only the second confers authority (capabilityRoles projects `(role)<-[:grantedBy]-(perm)`, so a minted vertex with no grant edge authorizes nobody); rbac-domain grants both to the operator role",
+			restoreMintVerb, restoreGrantVerb))
+		clauses = append(clauses,
+			"what that restores is runtime-origin: it carries no `declaredBy`, appears in no package manifest, is invisible to `lattice-pkg list` and every other package tool, and no future UninstallPackage will ever retract it — retracting it is a manual RevokePermission + TombstonePermission")
+	}
+	if len(adv.restorable) > 0 {
+		clauses = append(clauses, "fully restorable this way: "+boundedSample(adv.restorable))
+	}
+	if len(adv.lanePartial) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"restorable WITHOUT the declared lane: %s — %s writes only {operationType, scope, origin}, and UpdatePermission (the only verb that could add `lanes` afterwards) is core-reserved and deliberately ungranted, so a re-minted grant is default-lane-only and the privileged lane cannot be recovered at runtime",
+			boundedSample(adv.lanePartial), restoreMintVerb))
+	}
+	if len(adv.reserved) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"NOT restorable at runtime at all: %s — a runtime-origin grant of a core-reserved operationType is refused at step 3 and raises the %s alert, which the platform reads as a self-mint attempt; package declaration is deliberately the only channel for these (Contract #6 §6.1)",
+			boundedSample(adv.reserved), processor.AlertCodeReservedOperationGrantRejected))
+	}
+	if len(adv.grantorVerbs) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"and this package declares %s itself, so the uninstall being reported revoked the very verb(s) the restore needs — the primordial anchor grants do not carry them, so confirm some actor still holds them before relying on any of the above",
+			boundedSample(adv.grantorVerbs)))
+	}
+	if len(adv.restorable) == 0 && len(adv.lanePartial) == 0 {
+		clauses = append(clauses,
+			"no declared grant of this package can be restored at runtime; the only route back is installing under a package name whose derived keys are free")
+	}
+	return clauses
+}
+
+// partitionLiveOccupants splits the live bucket into this package's own
+// retention-class holders and everything else. Membership is decided by the
+// Contract #1 type segment, the only thing about a key that says what it is.
+func partitionLiveOccupants(live []string) (holders, foreign []string) {
+	holderPrefix := "vtx." + RetentionClassVertexType + "."
+	for _, k := range live {
+		if strings.HasPrefix(k, holderPrefix) {
+			holders = append(holders, k)
+			continue
+		}
+		foreign = append(foreign, k)
+	}
+	return holders, foreign
+}
+
+// liveOccupancyClauses renders the live bucket, split by what the occupant IS.
+// The two live shapes have different remedies and only one of them has the
+// obvious one: a retention-class holder's key is derived from this package's
+// own name and the class's canonicalName (RetentionClassKey), so "give this
+// package keys it does not share" is not a move that exists for it — and this
+// is the routine branch, printed on every uninstall→reinstall of any package
+// declaring a retention class, not an exotic one.
+func liveOccupancyClauses(live []string) []string {
+	holders, foreign := partitionLiveOccupants(live)
+
+	var clauses []string
+	if len(holders) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"%d LIVE retention-class holder key(s) (sample: %s) — expected after an uninstall of this package, which leaves a holder live and undeclared on purpose: only ShredRetentionClassKey may ever destroy the class key it custodies, and that verb's vertex_alive guard refuses a tombstoned holder forever. A holder's key is derived from this package's name and the class's canonicalName, so no edit to this package under this name frees it, and shredding the class does not free it either (a shred flags the `.piiKey` aspect; the holder root stays live by design). Install under a different package name, or rename the retention class — both leave the existing holder, and the data it custodies, intact and still shreddable",
+			len(holders), boundedSample(holders)))
+	}
+	if len(foreign) > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"%d key(s) are LIVE and held by a writer other than this package (sample: %s) — a create-only install cannot write over one, and removing the occupant is not a remedy (whatever wrote it still expects it). Read each one, then either install under a package name whose derived keys are free or upgrade the package that already owns the occupant",
+			len(foreign), boundedSample(foreign)))
+	}
+	return clauses
+}
+
+// occupiedDeclaredKeysError renders the refusal for a declared set whose keys
+// are already committed. Each occupancy contributes its own clauses, with its
+// own count, its own bounded sample, and its own next move — they have nothing
+// in common but the wall they hit.
+//
+// It takes the whole Definition because an honest tombstoned clause is a
+// function of what the package DECLARED, not only of which keys are occupied:
+// the restore advice is true for an ordinary grant, partial for a lane-bearing
+// one, false for a core-reserved one, and possibly unrunnable when the package
+// being reinstalled is the one that grants the restore verbs.
+func occupiedDeclaredKeysError(def Definition, tombstoned, live []string) error {
+	var clauses []string
+	if len(tombstoned) > 0 {
+		clauses = append(clauses, tombstonedOccupancyClauses(def, tombstoned)...)
+	}
+	clauses = append(clauses, liveOccupancyClauses(live)...)
+	return &DeclaredKeysOccupiedError{
+		PackageName: def.Name,
+		Tombstoned:  tombstoned,
+		Live:        live,
+		message: fmt.Sprintf("%s: package %q declares %d already-committed key(s): %s",
+			ErrDeclaredKeysOccupied, def.Name, len(tombstoned)+len(live), strings.Join(clauses, "; ")),
+	}
+}
+
+// boundedSample renders the first occupancySampleCap items of an
+// already-ordered list, noting how many it left unnamed so a sample never reads
+// as the whole set.
+func boundedSample(items []string) string {
+	if len(items) <= occupancySampleCap {
+		return strings.Join(items, ", ")
+	}
+	head := append([]string{}, items[:occupancySampleCap]...)
+	head = append(head, fmt.Sprintf("and %d more", len(items)-occupancySampleCap))
+	return strings.Join(head, ", ")
 }
 
 // metaScanResult carries the single Core KV key list + its derived

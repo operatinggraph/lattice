@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"mime/multipart"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -178,5 +181,29 @@ func TestApplyReplyShape(t *testing.T) {
 	}
 	if keys := got["createdKeys"].([]string); len(keys) != 2 {
 		t.Errorf("createdKeys = %v", keys)
+	}
+}
+
+// TestPackageApplyStatus pins the classification both Apply call sites share.
+// The 502 default reads, in this UI, as "the substrate is unreachable, retry" —
+// so every deterministic package-state conflict has to be 409 instead, or the
+// operator is told to wait out a condition that is permanent. ErrDeclaredKeys-
+// Occupied is exactly that shape: an install refused because its own keys are
+// already committed fails identically on every retry.
+func TestPackageApplyStatus(t *testing.T) {
+	conflicts := []error{
+		pkgmgr.ErrNotInstalled,
+		pkgmgr.ErrCanonicalNameCollision,
+		pkgmgr.ErrDeclaredKeysOccupied,
+	}
+	for _, base := range conflicts {
+		// Wrapped, as every production path returns them.
+		wrapped := fmt.Errorf("apply demo-domain: %w", base)
+		if got := packageApplyStatus(wrapped); got != http.StatusConflict {
+			t.Errorf("packageApplyStatus(%v) = %d, want %d", base, got, http.StatusConflict)
+		}
+	}
+	if got := packageApplyStatus(errors.New("nats: no responders available")); got != http.StatusBadGateway {
+		t.Errorf("an unclassified failure must stay %d, got %d", http.StatusBadGateway, got)
 	}
 }

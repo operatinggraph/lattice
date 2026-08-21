@@ -353,6 +353,30 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 	}
 }
 
+// packageApplyStatus maps a pkgmgr install/apply failure to its HTTP status.
+//
+// The default is 502: an apply talks to NATS and the Processor, so an
+// unclassified failure is most likely the substrate being unreachable, and
+// Loupe's UI treats 502 as exactly that — a transient condition worth retrying
+// (web/login.html, web/js/pulse.js).
+//
+// Every error in the 409 arm is the opposite: a deterministic conflict with the
+// kernel's current package state that no amount of retrying resolves. Reporting
+// one as 502 tells an operator to wait out a condition that will still be there
+// tomorrow. Both Apply call sites (the multipart install/upgrade handlers and
+// the capability-proposal apply in review.go) share this function so the two
+// cannot classify the same error differently.
+func packageApplyStatus(err error) int {
+	switch {
+	case errors.Is(err, pkgmgr.ErrNotInstalled),
+		errors.Is(err, pkgmgr.ErrCanonicalNameCollision),
+		errors.Is(err, pkgmgr.ErrDeclaredKeysOccupied):
+		return http.StatusConflict
+	default:
+		return http.StatusBadGateway
+	}
+}
+
 // handlePackagesInstall implements POST /api/packages/install (multipart:
 // files=manifest.yaml, force=, dryRun=). Upgrade-aware per pkgmgr.Apply:
 // fresh install / same-version skip (force = dev refresh) / cross-version
@@ -445,11 +469,7 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 	defer cancel()
 	res, err := inst.Apply(ctx, def, opts)
 	if err != nil {
-		status := http.StatusBadGateway
-		if errors.Is(err, pkgmgr.ErrNotInstalled) || errors.Is(err, pkgmgr.ErrCanonicalNameCollision) {
-			status = http.StatusConflict
-		}
-		s.writeError(w, status, err.Error())
+		s.writeError(w, packageApplyStatus(err), err.Error())
 		return
 	}
 	s.writeJSON(w, http.StatusOK, applyReply(res))

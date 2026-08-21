@@ -233,10 +233,10 @@ func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts 
 		// The occupancy gate, run on the preview for the same reason the
 		// Secure-Lens retirement guard runs before Apply's dry-run return: a
 		// preview whose real run would be refused must say so, not describe the
-		// batch it would have submitted. Without it a dry-run over an
-		// UNINSTALLED package reports "install, N keys created" for an install
-		// that cannot commit a single one of them — the very false green the
-		// gate exists to kill, one layer up.
+		// batch it would have submitted. This branch never calls Install, so it
+		// carries the gate itself; the real fresh-install branch below inherits
+		// it. Over an uninstalled package an ungated preview would report
+		// "install, N keys created" for a batch that cannot commit one of them.
 		//
 		// It refuses with the sentinel rather than annotating the ApplyResult
 		// because there is no honest ApplyResult here: Created/CreatedKeys are
@@ -250,7 +250,7 @@ func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts 
 			return nil, err
 		}
 		if len(tombstoned) > 0 || len(liveOccupants) > 0 {
-			return nil, occupiedDeclaredKeysError(def.Name, tombstoned, liveOccupants)
+			return nil, occupiedDeclaredKeysError(def, tombstoned, liveOccupants)
 		}
 		res := &ApplyResult{
 			PackageName:        def.Name,
