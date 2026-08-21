@@ -657,3 +657,67 @@ whole. Inc 3 migrates clinic (biggest surface) → wellness → café → loftsp
 `CreateLocation` and `AttachObject`/`DetachObject` stay hand-built per §7's named blockers. Check
 §14's `contextParams` gap against each app's migrating ops before assuming Inc 2's module handles
 every read-template shape they'll need.
+
+## 15. Inc 3a outcome — clinic (partial), shipped `<pending>`
+
+Migrated five of clinic's ops onto `internal/descriptorform`: **SetProviderProfile**, **CreateProvider**,
+**AssignProviderSite** (both `CreateProvider`/`AssignProviderSite` have no `dispatch.targetField` at
+all — a real gap Inc 1/2 never hit, since every op either touched was a task-voice completion against
+an existing target; closed with a small, backward-compatible loosening: `normalizeCatalogRow` now
+requires only `dispatch.class`, and `renderOpForm`/`submit()` only require/use `context.target` when
+`dispatch.targetField` is present — 3 new regression tests in `form.test.mjs` cover both the new and
+the unchanged old behavior), **ClinicDebitAccount** + **ClinicCreditAccount** (the self-authContext
+pair — `context.me`/`context.selfVoice` wired from the app's own `patientIdentityKey()`/
+`actingAsSelf()`, independently re-verified by a cold adversarial pass to be value-identical to the
+pre-migration `{target: patientIdentityKey()}}` send, with zero self-grant reachable on the debit leg
+by design, `packages/clinic-ledger/permissions.go:53`). `submitCatalogOp` (clinic's new
+envelope-taking submit helper, mirroring loftspace's `submitOp(body, opts)`) gained the same
+`isTransientAuthLag` bounded retry loftspace's own submit path already carries — the adversarial pass
+caught its absence, a real reliability regression on the patient first-payment path (fails closed, not
+a security hole, but real).
+
+**Left hand-built — real blockers, not slices to avoid work, each closing a distinct future
+increment:**
+- **`RescheduleAppointment`/`CreateAppointment`** — both wrap a slot/duration-picker calendar UI; the
+  vocabulary's raw `date-time` field would regress a working booking flow to two unaided timestamp
+  inputs. No scheduling-widget field kind exists yet.
+- **`SetProviderHours`/`SetProviderTimeOff`** — `windows`/`ranges` are `type: array` of objects; the
+  vocabulary has no array field kind at all (nothing built for it anywhere, including Facet).
+- **`RecordEncounter`** — clinical `summary`/`assessment`/`plan` are hand-rolled `<textarea>`s;
+  migrated once, then reverted after review, because the vocabulary has no multiline text kind.
+  Facet already has one (`app.js:2515`, keyed on `schema.maxLength > 120`) but `RecordEncounter`'s own
+  schema in `packages/clinic-domain/opmetas.go` declares no `maxLength` on any of the three fields, so
+  even mirroring Facet's exact rule needs a package-level schema edit too — bundle both in the same
+  future increment. The follow-up-date visibility toggle (`hidden` until the checkbox is checked) is
+  the same increment's to restore; the module has no per-field conditional visibility.
+- **`CreateUnclaimedIdentity`** — an `OpCeremonySpec` mint-hash-then-reveal-once flow; the module has
+  no ceremony support (Facet's own `ceremonyField` handling is the pattern to eventually mirror).
+  **`CreatePatient`** rides the same exclusion: its own hand-built handler mints the identity first,
+  then submits `CreatePatient` with the resulting key — a compound, two-op submission, not a 1:1
+  op-to-form mapping the module's single-envelope contract can express as-is.
+- **`StartVisitSeries`** — carries no `OpMetaSpec`/descriptor at all (only referenced from tests and
+  `permissions.go`); needs an Inc-0-style descriptor sweep entry before it is even catalog-visible.
+- **`RemoveProviderSite`** — invoked parameter-already-known from a list row's one-click "Remove"; no
+  dedicated form exists to migrate, and mounting one would be a UX downgrade for no gain.
+- **`ClinicCreateAccount`** — a single-field op with no user-facing form at all (auto-opened
+  programmatically on a patient's first ledger transaction); same reasoning as `RemoveProviderSite`.
+- **`CreateLocation`** / **`AttachObject`/`DetachObject`** — unchanged from §7's original blockers.
+
+**Also found, accepted as-is (usability, not security — confirmed by adversarial pass):**
+`AssignProviderSite`'s provider/site `<select>` pickers are gone — the schema declares both fields as
+plain strings (no `x-entityRef`), so the module renders free-text `vtx.*` key inputs. No wrong-target
+hazard: `clinicSiteAssignmentDDLScript` (`packages/clinic-domain/site.go:332-341`) validates shape,
+type segment, and aliveness server-side, and the grant is operator-only unconfined. A future
+entity-ref picker (still generally unbuilt anywhere in this module) fixes this for every op at once,
+not just this one.
+
+**Blast-radius note for the next engineer touching `internal/descriptorform`:** the `targetField`
+loosening applies to loftspace/café/wellness too (one shared module). Swept every `OpDispatchSpec` in
+`packages/` — zero ops currently declare `targetType` without `targetField`, and zero targetField-less
+ops declare `authContext: "task"`, so loftspace's task-modal `canCompleteOp` gains no live-reachable
+new offer from this change today; re-check both invariants if a future package adds either shape.
+
+**Checkpoint for the next fire:** no worktree held once this lands. Inc 3 continues with **wellness**
+next per §7's sequence (clinic's remaining ops are blocked on the five increments named above, not on
+more clinic-specific migration work — pick them up as their own future increments once each
+blocker's fix is designed, not folded silently into "more clinic").
