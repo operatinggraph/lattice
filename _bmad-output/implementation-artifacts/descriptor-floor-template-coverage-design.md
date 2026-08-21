@@ -345,3 +345,173 @@ read-template vocabulary (default-deny unknown placeholders at install). That tr
 for the guarantee that enforcement can never silently lag vocabulary again — the same trade the
 `# read-posture:` annotation made, and reversible by ordinary design work if a future vocabulary need
 arrives.
+
+---
+
+## Descriptor-floor template coverage fire brief (build note, 2026-08-21)
+
+Compiled at selection, before the first edit, from two read-only scouts + a structural census.
+One brief for the whole ITEM (both increments); a resume runs a delta-scout, not a recompile.
+
+### 1. Scope sentence (verbatim, §9)
+
+> **Inc 1 — Processor: pattern floor + required-wins.** `descriptor_floor.go` compilation/matching per
+> §3.1–3.2; `ddl_cache.go` loader + index carry `reads` templates; `{scopedTo}` concrete-when-validated.
+> **Inc 2 — pkgmgr: `validateOpDispatchTemplates`.** Vocabulary pin per §3.3 (incl. the OptionalReads-only
+> and whole-segment rules for client-only placeholders).
+
+Green bar (§9): the standard suite + `verify-kernel`; no live-stack step is required.
+
+### 2. Verified touch-list (`file:line` re-checked live; the design's citations were leads)
+
+**Processor**
+- `internal/processor/descriptor_floor.go:82` `applyDescriptorFloor`; `:147` `resolveDescriptorFloor`;
+  `:187` `substituteDescriptorTemplate`; `:164` the not-server-resolvable Warn (design §2 anchor ✓).
+- `internal/processor/step4_hydrate.go:204-206` — the only call site; floor applied before `derive_reads` (✓ §2).
+- `internal/processor/derive_reads.go:25-66` — `declaredReads{Reads, OptionalReads, EgressReads, EgressAbsenceTolerant}`.
+- `internal/processor/ddl_cache.go:274-297` `byOpType` (+ its doc); `:298-309` `byOpMetaRoot`;
+  `:356-363` `opMetaDescriptor{operationType, optionalReads}`; `:508-575` `loadOpMetaDispatch`
+  (reads `data.optionalReads` at `:574` only — the `reads` field is ignored, ✓ §2);
+  `:577-589` `DispatchOptionalReads`; `:1268-1284` `unionTemplates`; `:1286-1326` `floorsByOpType`
+  (sorted roots, union-on-duplicate); Refresh at `:417/:465/:490-491`; Invalidate arms at
+  `:959`, `:993-994` (edit), `:1007-1009` (withdrawal).
+- `internal/processor/opwire/opwire.go:104` `MaxDeclaredReads = 1000`; `:119-123` `AuthContext{Service,Task,Target}`;
+  `:141-151` `AuthTargetValidated` (`json:"-"`, unforgeable from the wire).
+- `internal/processor/commit_path.go:273` — `AuthTargetValidated` stamped in step 3, **before** step 4 (✓ §10).
+- `internal/substrate/keys.go:85` `IsValidNanoID` re-exports `internal/substrate/keys/nanoid.go:90`
+  (20 chars, 58-char alphabet). The design's `substrate.IsValidNanoID` resolves.
+
+**pkgmgr**
+- `internal/pkgmgr/definition.go:30-57` `validateAll` — 15 validators, fixed order, short-circuit on first error.
+- `:640-676` the vocabulary doc comment (the authoring authority to amend); `:677-734` `OpDispatchSpec`
+  (`Reads` `:705`, `OptionalReads` `:707-722`).
+- `:218` `Definition.OpMetas` → `:563` `OpMetaSpec` → `:584` `Dispatch *OpDispatchSpec`. **The only carrier**
+  of an `OpDispatchSpec` in a `Definition` — verified, so the walk has no second entry point to miss.
+- `internal/pkgmgr/build.go:694-706` — the `.dispatch` aspect emits **both** `reads` (`:699`) and
+  `optionalReads` (`:706`). Design §2's "already on the wire" claim **verified**: no package re-emission.
+- `internal/pkgmgr/capabilitymaterializer_starlark.go:73` `readPlaceholderRe` — anchored
+  `{actor}|{scopedTo}|{service}|{payload.*}` only, a strict subset of §3.3's set: no interaction (✓ §3.3).
+
+**Tests to extend**
+- `internal/processor/descriptor_floor_test.go` — 8 funcs; fixtures `floorEnv`/`floorPayload` (`:9-24`).
+- `internal/processor/ddl_cache_opmeta_test.go` — `seedOpMeta`/`dispatchAspect` (`:14-45`); **15**
+  `DispatchOptionalReads` call sites move with the accessor change.
+- `internal/pkgregistry/registry_test.go` — the corpus-walk idiom (`TestEveryShippedPackageIsRegistered`,
+  `TestEveryPackageCompilesItsReadGrantWalks`) and the only place that can walk every `Definition`
+  without an import cycle. Home for §6's census.
+
+### 3. Precedents to mirror
+
+| Edit site | Precedent |
+|---|---|
+| structural walk over every package's dispatch read templates | `scripts/lint-package-standard.go:1028` `checkReadTemplates` + `placeholderRe:1093` — same `Definition→OpMetas→Dispatch.{Reads,OptionalReads}` traversal |
+| a checker shared by an install gate **and** a corpus test | `pkgstd.GrantAuthoringIssues` (called at `lint-package-standard.go:231`) — the exported-pure-function shape, so the test drives the real rule instead of a copy |
+| validator style / refusal wording | `definition.go:73-81` `validatePackageName`, `:99-127` `validateCanonicalNameUniqueness` — name the offending value and the fix |
+| index rebuild determinism | `floorsByOpType:1307` — sorted roots, union-on-duplicate, single writer; extend both lists, never replace the shape |
+| floor tests | `descriptor_floor_test.go:31` (assert the key LEFT `Reads`, not just that it reached `OptionalReads`) |
+
+### 4. Increment order + runnable green checks
+
+**Inc 1 — Processor (posture-changing: a new matcher decides a security control's subject ⇒ full 3-layer review).**
+`descriptor_floor.go` compiles each template to a segment pattern (whole-segment NanoID wildcards only);
+`ddl_cache.go` carries the descriptor's `reads` templates beside `optionalReads` through
+`opMetaDescriptor` → `floorsByOpType` → one atomic accessor; required-wins excludes matching keys.
+Green: `go test ./internal/processor/... -count=1`
+
+**Inc 2 — pkgmgr gate + corpus census (mechanical ⇒ lead review).**
+`validateOpDispatchTemplates` wired into `validateAll`; the vocabulary rule exported as a pure checker so
+`internal/pkgregistry`'s corpus test runs the **real** rule over all 31 packages.
+Green: `go test ./internal/pkgmgr/... ./internal/pkgregistry/... -count=1`
+and `STRICT=1 go run ./scripts/lint-package-standard.go`
+
+**Fire gates:** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` ·
+`go test ./internal/processor/... ./internal/pkgmgr/... ./internal/pkgregistry/... ./packages/cafe-domain/... -count=1`
+· then the full `go test ./... -p 4`. `verify-kernel`/`stack-gates` run in CI (remote container has no shared stack).
+
+### 5. In-scope gotchas
+
+**§6's census, re-run structurally at Phase 0 (the premise, pinned).** A walk over
+`pkgregistry.Names()` → `Definition.OpMetas[].Dispatch.{Reads,OptionalReads}` — 31 packages, **123**
+read-template entries:
+
+| shape | count | where |
+|---|---|---|
+| client-only (`{me.*}`) in `OptionalReads` | **3** | cafe-domain `Charge` ×1, `Settle` ×2 — all `{me.leaseapp:id}`, all whole-segment |
+| client-only in `Reads` | **0** | — |
+| `{entity.*}` in either read list | **0** | (`{entity.*}` is live **ContextParams** vocabulary only) |
+| `{scopedTo}` in either read list | **0** | — |
+| `?`-marked entries in either read list | **0** | (`?` is live ContextParams vocabulary only) |
+| mid-segment **client-only** fragments | **0** | — |
+| mid-segment **server-resolvable** fragments | **3** | wellness-domain `CreateBooking`/`JoinWaitlist` `…bkr{actor:id}`; clinic-reminders `StartVisitSeries` `…activeVisitSeriesWith{payload.providerKey:id}` |
+
+Every §6 count reproduces. **One correction to the design's prose:** §5.6 names the mid-segment resolvable
+idiom as "live wellness corpus" — it is live in **two** packages (three entries), clinic-reminders included.
+The gate must accept all three; a rule that only spared wellness would refuse a shipped package.
+
+**A hand-tuned grep does not reproduce this census** — a scout's regex sweep returned 0 client-only
+read-template entries against the true 3, because `{me.*}` is overwhelmingly ContextParams vocabulary in the
+same files. That is §6's own finding, re-earned. Trust the structural walk.
+
+**Touched components' "Review keeps catching" (copied in):**
+
+*Processor* — a read disposition the CLIENT declares is not a server policy (the enforcement point is the
+descriptor-pinned disposition; test any indistinguishability claim with a HAND-ROLLED `contextHint`, not the
+shipped one) · a gate's negative test must first prove its positive vector reaches the gate (three sightings) ·
+a tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
+declaration as live · **a key-template vocabulary the server can only half-resolve makes a contract clause
+partial — this item's own minting entry; it retires when this ships** · "degrade instead of refuse" on a cache
+load path is fail-open when the cache has ONE load point.
+
+*Pkgmgr* — a refusal's stated remedy must not be a move that defeats the gate, and must be traced to the
+OUTCOME it promises · a new failure mode is not shipped until every surface that renders it says the right
+thing · a per-`Definition` gate needs its `pkgmgr` counterpart at install for every channel (fresh install,
+upgrade, dry-run) · a local gate run and CI's gate run do not see the same tree (run gates **after**
+committing) · normalize symmetrically only where a match GRANTS nothing.
+
+**Standing checklist** (walked before the first edit, and by the reviewers after): new state needs a
+LIFETIME not a data structure · every census is a premise · a negative test needs its positive vector proven
+first, and every fix is proven by reverting it · removal needs a transport AND an observer · one
+deterministic key, one writer · precedent may carry debt.
+
+Specific to this fire:
+- **The accessor must stay atomic.** `reads` and `optionalReads` are read together at
+  `step4_hydrate.go:204`; two accessors = two `RLock`s = a rebuild can interleave and hand step 4 a
+  mismatched pair. One accessor returning both, one index entry holding both.
+- **`floorsByOpType` is the ONLY writer of `byOpType`** and both Refresh and Invalidate hand it the whole
+  root set. Widening the value to two lists must keep that: union **both** lists per contributor,
+  order-independently, and re-derive (never subtract) on withdrawal — the §22.2 shape.
+- **A required template that compiles to a PATTERN contributes no exclusion, and says so at Warn.**
+  §3.2 argues a loose required pattern blankets a whole class out of demotion and quietly preserves the
+  oracle; §3.3's gate makes it unauthorable, but the direct-op install channel is not bound by that gate
+  (§3.3, §5.5). Runtime rule, decided here: required templates contribute **only** their concrete
+  resolutions. Same "no contribution + Warn" posture the file already takes for an unresolvable template,
+  applied symmetrically — and it fails toward the floor still applying rather than toward the oracle.
+- **The demotion MOVES a key out of `Reads`** (`descriptor_floor.go:120-128`) — step 4's both-lists rule
+  re-hardens anything left behind. Pattern demotion must move every match, not the first.
+- **Egress is marked, never moved** (`EgressAbsenceTolerant`) — pattern matching changes *which* keys, never
+  that rule.
+- **No history/changelog comments** (CLAUDE.md): the new comments describe the matcher as it is.
+
+### 6. Adjacent finds
+
+None requiring a row. The design's own §8 already separates the derived-`reads` sibling
+(*"a derived `reads` can harden a floored key the envelope never declared"*, a filed `📋` row) as
+deliberately out of scope, and Phase 0 found no new defect in the touched files. The one prose correction
+(§5.6's mid-segment corpus count) is folded above rather than filed.
+
+### 7. Non-goals
+
+`derive_reads`' interaction with the floor beyond the existing ordering; the `{entity.*}`/`?` vocabulary as
+**ContextParams** (untouched — only their use in *read templates* is refused); fragment-wildcard matching
+(§5.6 — ships with its own demand); the hostile package-author channel (§3.3 — the
+package-authority-minting design's scope); any change to Contract #2 §2.5's text.
+
+### Scope-diff gate
+
+Parts 2–4 diffed item-by-item against part 1: every touch traces to the scope sentence; the only
+**narrowing** is that `{entity.*}`/`?` are removed from the *read-template* vocabulary alone, exactly as
+§3.1/§3.3 state. No adjacent mechanism substituted. Declared dependencies re-verified both ways: the
+`.dispatch` aspect's on-wire `reads` field (load-bearing, present — `build.go:699`) and
+`AuthTargetValidated` being set before step 4 (load-bearing, confirmed — `commit_path.go:273`); no unlisted
+dependency surfaced.
