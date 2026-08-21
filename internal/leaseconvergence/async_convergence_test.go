@@ -140,6 +140,7 @@ func (h *harness) failedBgcheckInstances(applicantID string) int {
 // load-bearing one). The call then resolves on a later poll → exactly ONE external
 // call, and the bgcheck gap closes.
 func TestAsyncConvergence_NoDoubleDispatch_AcrossSweepTick(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines async convergence e2e in -short mode")
 	}
@@ -219,6 +220,7 @@ func TestAsyncConvergence_NoDoubleDispatch_AcrossSweepTick(t *testing.T) {
 // instances accrue (the timed-out one + the retry), bounded to one fresh call per
 // timeout — never a double-dispatch within a single in-flight window.
 func TestAsyncConvergence_Timeout_FailedThenOneRetry(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines async convergence e2e in -short mode")
 	}
@@ -267,6 +269,7 @@ func TestAsyncConvergence_Timeout_FailedThenOneRetry(t *testing.T) {
 // (a dispatch-count, not a projected lens column), so the test asserts exhaustion
 // BEHAVIORALLY — the bgcheck instance count plateaus at the cap.
 func TestAsyncConvergence_BoundedRetry_Exhausted(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines async convergence e2e in -short mode")
 	}

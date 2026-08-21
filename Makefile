@@ -1752,19 +1752,26 @@ test-rollback:
 ## with -tags leaseshortwindow so the freshness window is short enough to watch a
 ## lapse in bounded wall-clock (the production window stays 5m).
 ##
-## The filter also covers the ASYNC external-reply legs (TestAsyncConvergence):
+## A second invocation covers the ASYNC external-reply legs (TestAsyncConvergence):
 ## an async adapter's call stays single-dispatch across a sweep tick, a timed-out
 ## call retries exactly once as a fresh call, and the retry chain plateaus at the
 ## package's maxretries budget. Those legs drive the same live stack with a short
 ## Weaver mark lease and bridge poll cadence so the sweep reclaim and the bridge
 ## give-up horizon both tick inside the run; they hold in real time, so they cost
-## wall-clock rather than CPU. Measured on an M-series dev box: 60s wall before
-## the async legs, 129s after (+69s). The CI convergence job ran this step in
-## 86-88s pre-widening, so expect ~3min there — inside both this 10m timeout and
-## the job's own 15m ceiling, which it shares with six shorter gates (~17s total).
+## wall-clock rather than CPU. All three run t.Parallel() against each other.
+##
+## Two SEPARATE `go test` invocations, not one `-run` covering both groups: each
+## group's tests run t.Parallel() against the OTHER members of their own group
+## only, bounded by -parallel's default GOMAXPROCS — so peak concurrent embedded-
+## stack count per invocation stays 4 either way. Merging both groups into one
+## pool raises that ceiling for tests whose margins were never measured against
+## it (a starvation signature per CLAUDE.md's flake-triage rule, `found=map[]`,
+## on a lens-activation wait) — keep the groups apart rather than re-measure
+## every test's margin against a wider pool for a few seconds of overlap.
 .PHONY: test-lease-convergence
 test-lease-convergence:
-	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run 'TestLeaseConvergence|TestRenewalConvergence|TestAsyncConvergence' -v -p 1 -count=1 -timeout 10m
+	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run 'TestLeaseConvergence|TestRenewalConvergence' -v -p 1 -count=1 -timeout 10m
+	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run 'TestAsyncConvergence' -v -p 1 -count=1 -timeout 10m
 
 ## test-object-gc — v1b object-GC Loop A+B convergence gate. Self-contained:
 ## embedded NATS, boots Processor + outbox + Refractor + Weaver + the
