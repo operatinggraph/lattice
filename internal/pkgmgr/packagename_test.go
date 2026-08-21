@@ -128,7 +128,7 @@ func TestFindInstalledPackage_NearMissRefusesLoudly(t *testing.T) {
 	})
 
 	t.Run("Uninstall_RefusesAndTombstonesNothing", func(t *testing.T) {
-		if _, err := inst.Uninstall(ctx, probe); err == nil {
+		if _, err := inst.Uninstall(ctx, probe, UninstallOptions{}); err == nil {
 			t.Fatalf("Uninstall(%q): expected a near-miss error, got nil", probe)
 		}
 		// The legacy manifest is untouched — still live, still isDeleted=false.

@@ -638,7 +638,7 @@ func TestInstaller_Uninstall(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -707,7 +707,7 @@ func TestInstaller_Uninstall_PreservesRetentionClassHolder(t *testing.T) {
 		}
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -785,7 +785,7 @@ func TestInstaller_Uninstall_ReportsAlreadyStrandedHolderSeparately(t *testing.T
 		t.Fatalf("KVPut stranded holder: %v", err)
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -805,11 +805,11 @@ func TestInstaller_Uninstall_ReportsAlreadyStrandedHolderSeparately(t *testing.T
 // TestInstaller_Uninstall_ReportsSecureColumnsErased is Uninstall's half of
 // §30.6's adjacent find: a lens's committed secureColumns describe key-custody
 // history the tombstone erases from the destruction-readiness oracle's view
-// (registry_probe.declaredLensIDs skips a tombstoned lens outright) without
-// touching the ciphertext still sitting in the target store. Uninstall takes a
-// package NAME, not a Definition, so there is no declaration point the way
-// Upgrade/Apply's RetiredSecureColumns is — this is report-only, never a
-// refusal, and the tombstone still commits.
+// (registry_probe.declaredLensIDs stops seeing the lens) without touching the
+// ciphertext still sitting in the target store. Uninstall takes a package NAME,
+// not a Definition, so the attestation is the OPERATOR's, supplied through
+// UninstallOptions; with it in hand the tombstone commits and the erasure is
+// reported key by key.
 func TestInstaller_Uninstall_ReportsSecureColumnsErased(t *testing.T) {
 	ctx, _, inst := newInstallerHarness(t)
 	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
@@ -817,7 +817,10 @@ func TestInstaller_Uninstall_ReportsSecureColumnsErased(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{
+		Lens: "sampleSecureLens",
+		Note: "test fixture — no ciphertext was ever written",
+	}}})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -853,7 +856,7 @@ func TestInstaller_Uninstall_ReportsNoSecureColumnsErasedWithoutSecureLens(t *te
 		t.Fatalf("Install: %v", err)
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -863,13 +866,76 @@ func TestInstaller_Uninstall_ReportsNoSecureColumnsErasedWithoutSecureLens(t *te
 }
 
 // TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately is B4's
-// regression: a lens `.spec` tombstoned out-of-band before this uninstall ran
-// already dropped out of declaredLensIDs's view — re-tombstoning it here
-// erases nothing NEW, so it must land in SecureColumnsAlreadyErased (pre-
-// existing damage to escalate), never in SecureColumnsErased (blaming this
-// run for something it did not do), mirroring the retention-holder
+// regression, keyed on the predicate the destruction-readiness oracle actually
+// uses: declaredLensIDs enumerates vertex ROOTS, so a lens whose root was
+// tombstoned out-of-band before this uninstall ran had already dropped out of
+// its view — re-tombstoning it here erases nothing NEW. It must land in
+// SecureColumnsAlreadyErased (pre-existing damage to escalate) and need no
+// operator attestation, never in SecureColumnsErased (blaming this run for
+// something it did not do), mirroring the retention-holder
 // preserved/already-stranded split for the identical reason.
 func TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	tombstoneKey(t, ctx, conn, strings.TrimSuffix(specKey, ".spec"))
+
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if len(uninst.SecureColumnsErased) != 0 {
+		t.Fatalf("SecureColumnsErased = %+v, want none — the lens root was already tombstoned before this run", uninst.SecureColumnsErased)
+	}
+	if len(uninst.SecureColumnsAlreadyErased) != 1 || uninst.SecureColumnsAlreadyErased[0].Key != specKey {
+		t.Fatalf("SecureColumnsAlreadyErased = %+v, want exactly one entry for %s", uninst.SecureColumnsAlreadyErased, specKey)
+	}
+	if uninst.SecureLensRetirementsAttested != 0 {
+		t.Fatalf("SecureLensRetirementsAttested = %d, want 0 — nothing new was erased to attest", uninst.SecureLensRetirementsAttested)
+	}
+}
+
+// tombstoneKey flips a committed Core-KV document's isDeleted in place, the
+// out-of-band soft delete a test uses to stand up a key state some earlier run
+// left behind. It writes through KVPut rather than an op deliberately: the
+// point is a state the installer did not create and must classify correctly.
+func tombstoneKey(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, CoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	doc["isDeleted"] = true
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal tombstoned %s: %v", key, err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, key, raw); err != nil {
+		t.Fatalf("KVPut tombstoned %s: %v", key, err)
+	}
+}
+
+// TestInstaller_Uninstall_EventStreamSpecNeedsNoAttestation covers the third
+// leg of the oracle's visibility predicate: declaredLensIDs skips a spec whose
+// source.kind is "eventStream" (Chronicler owns those) no matter how live its
+// vertex root is, so tombstoning one erases nothing from the oracle's view and
+// needs no attestation.
+//
+// The state is written out-of-band because that is the only way it can exist:
+// validateSecureLensBuckets refuses SecureColumns on an eventStream Source at
+// install and upgrade alike, so a spec carrying both was hand-written into Core
+// KV — and a guard that mirrors a reader's predicate has to agree with it on
+// exactly the states the reader can encounter, not only the ones a package can
+// produce.
+func TestInstaller_Uninstall_EventStreamSpecNeedsNoAttestation(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
 	if _, err := inst.Install(ctx, def); err != nil {
@@ -885,24 +951,750 @@ func TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately(t *test
 	if err := json.Unmarshal(entry.Value, &doc); err != nil {
 		t.Fatalf("unmarshal %s: %v", specKey, err)
 	}
-	doc["isDeleted"] = true
+	body, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec %s carries no data envelope: %s", specKey, entry.Value)
+	}
+	body["source"] = map[string]any{"kind": "eventStream"}
 	raw, err := json.Marshal(doc)
 	if err != nil {
-		t.Fatalf("marshal already-tombstoned spec: %v", err)
+		t.Fatalf("marshal eventStream spec: %v", err)
 	}
 	if _, err := conn.KVPut(ctx, CoreBucket, specKey, raw); err != nil {
-		t.Fatalf("KVPut already-tombstoned spec: %v", err)
+		t.Fatalf("KVPut eventStream spec: %v", err)
 	}
 
-	uninst, err := inst.Uninstall(ctx, def.Name)
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 	if len(uninst.SecureColumnsErased) != 0 {
-		t.Fatalf("SecureColumnsErased = %+v, want none — the spec was already tombstoned before this run", uninst.SecureColumnsErased)
+		t.Fatalf("SecureColumnsErased = %+v, want none — the oracle skips an eventStream spec", uninst.SecureColumnsErased)
 	}
 	if len(uninst.SecureColumnsAlreadyErased) != 1 || uninst.SecureColumnsAlreadyErased[0].Key != specKey {
 		t.Fatalf("SecureColumnsAlreadyErased = %+v, want exactly one entry for %s", uninst.SecureColumnsAlreadyErased, specKey)
+	}
+}
+
+// TestInstaller_Uninstall_PoisonedEventStreamSpecStillNeedsAttestation closes
+// the gate bypass the eventStream leg opened. The oracle skips an eventStream
+// spec ONLY when the whole spec probe decodes cleanly (registry_probe.go's
+// `specRead := present && json.Unmarshal(...) == nil` guarding the skip), and
+// its probe types holderTypes as []string — so a holderTypes list carrying a
+// non-string fails that decode, the skip does not apply, and the lens stays
+// DECLARED and counted for every holder type.
+//
+// A map-based "does source.kind say eventStream" test disagrees in the unsafe
+// direction: it calls the lens invisible, files a live custody record under
+// already-erased, and commits the uninstall with a zero UninstallOptions. Any
+// document that fails the typed decode is declared, so it must read as visible
+// here — attest it, or be refused.
+func TestInstaller_Uninstall_PoisonedEventStreamSpecStillNeedsAttestation(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	entry, err := conn.KVGet(ctx, CoreBucket, specKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", specKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", specKey, err)
+	}
+	body, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec %s carries no data envelope: %s", specKey, entry.Value)
+	}
+	body["source"] = map[string]any{"kind": "eventStream"}
+	// The poison: a holderTypes list the oracle's []string probe cannot decode.
+	cfg, ok := body["targetConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec %s carries no targetConfig: %s", specKey, entry.Value)
+	}
+	cols, ok := cfg["secureColumns"].([]any)
+	if !ok || len(cols) == 0 {
+		t.Fatalf("spec %s carries no secureColumns: %s", specKey, entry.Value)
+	}
+	cols[0].(map[string]any)["holderTypes"] = []any{"identity", 5}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal poisoned spec: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, specKey, raw); err != nil {
+		t.Fatalf("KVPut poisoned spec: %v", err)
+	}
+	// The premise, asserted rather than assumed: this document really does
+	// defeat the oracle's typed decode, which is the only reason its eventStream
+	// skip does not apply.
+	var probe uninstallSpecProbe
+	if json.Unmarshal(raw, &probe) == nil {
+		t.Fatal("the poisoned spec decodes cleanly — the fixture no longer reproduces the bypass")
+	}
+
+	_, err = inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse: the oracle still declares a lens whose spec fails its typed decode")
+	}
+	if !errors.Is(err, ErrUndeclaredSecureLensErasure) {
+		t.Fatalf("Uninstall error = %v, want one wrapping ErrUndeclaredSecureLensErasure", err)
+	}
+}
+
+// TestInstaller_Uninstall_SecureColumnsUnderDecoyTargetConfigAreFound closes the
+// detection-side twin of the same class. The oracle's mayHoldHolderType reads
+// BOTH targetConfig levels "never one in preference to the other"; a detection
+// that reads only the level it finds first sees a decoy top-level targetConfig,
+// concludes the lens has no secure columns, constructs no erasure at all — and
+// the gate is never consulted, so the custody record leaves in silence.
+func TestInstaller_Uninstall_SecureColumnsUnderDecoyTargetConfigAreFound(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	entry, err := conn.KVGet(ctx, CoreBucket, specKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", specKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", specKey, err)
+	}
+	// The real secureColumns stay untouched under data.targetConfig; a decoy
+	// top-level targetConfig declares none.
+	doc["targetConfig"] = map[string]any{"bucket": "decoy"}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal decoy spec: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, specKey, raw); err != nil {
+		t.Fatalf("KVPut decoy spec: %v", err)
+	}
+
+	_, err = inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse: data.targetConfig still declares a live secure column")
+	}
+	if !errors.Is(err, ErrUndeclaredSecureLensErasure) {
+		t.Fatalf("Uninstall error = %v, want one wrapping ErrUndeclaredSecureLensErasure", err)
+	}
+	if !strings.Contains(err.Error(), "applicant_name") {
+		t.Errorf("refusal does not name the secure column hidden under data.targetConfig: %v", err)
+	}
+}
+
+// TestInstaller_Uninstall_ReportsLensTombstonedWithUnusableSpec covers the third
+// population. The oracle is fail-closed on a spec it cannot read: the lens
+// counts as declared AND its holder-type filter never runs, so it counts for
+// EVERY holder type. Tombstoning the root removes that signal — but there are
+// no declared holder types left to attest ABOUT, and refusing would make a
+// package whose spec was purged out of band permanently un-uninstallable. So
+// the uninstall proceeds and REPORTS, rather than gating.
+func TestInstaller_Uninstall_ReportsLensTombstonedWithUnusableSpec(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	rootKey := strings.TrimSuffix(specKey, ".spec")
+	if err := conn.KVPurge(ctx, CoreBucket, specKey); err != nil {
+		t.Fatalf("KVPurge %s: %v", specKey, err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if !slices.Equal(uninst.LensesTombstonedWithUnusableSpec, []string{rootKey}) {
+		t.Fatalf("LensesTombstonedWithUnusableSpec = %v, want exactly [%s] (%+v)", uninst.LensesTombstonedWithUnusableSpec, rootKey, uninst)
+	}
+	if len(uninst.SecureColumnsErased) != 0 || len(uninst.SecureColumnsAlreadyErased) != 0 {
+		t.Fatalf("a lens with no readable spec declares no columns to bucket: erased=%+v alreadyErased=%+v",
+			uninst.SecureColumnsErased, uninst.SecureColumnsAlreadyErased)
+	}
+	if !slices.Contains(uninst.Tombstoned, rootKey) {
+		t.Fatalf("the lens root was not tombstoned: %v", uninst.Tombstoned)
+	}
+}
+
+// TestInstaller_Uninstall_ReportsLensTombstonedWithUnusableSpecShapes covers
+// the two present-but-unusable shapes beside the absent one. The oracle's
+// holder-type filter runs only on a spec that decoded into its probe, and that
+// filter answers "may hold" for EVERY holder type when there is no targetConfig
+// at either level — so on both of these shapes it counts the lens for every
+// holder type, exactly as it does for a spec it could not fetch.
+//
+// Neither shape declares a secure column this scan can read, so neither builds
+// an erasure and neither reaches the gate. Without this population they would
+// be tombstoned in complete silence.
+func TestInstaller_Uninstall_ReportsLensTombstonedWithUnusableSpecShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		corrupt func(doc, body map[string]any)
+	}{
+		{
+			name: "no targetConfig at either level",
+			corrupt: func(doc, body map[string]any) {
+				delete(body, "targetConfig")
+			},
+		},
+		{
+			name: "secureColumns is not a list",
+			corrupt: func(doc, body map[string]any) {
+				body["targetConfig"].(map[string]any)["secureColumns"] = "not-a-list"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn, inst := newInstallerHarness(t)
+			def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+			if _, err := inst.Install(ctx, def); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			specKey := secureLensSpecKey(def)
+			rootKey := strings.TrimSuffix(specKey, ".spec")
+			entry, err := conn.KVGet(ctx, CoreBucket, specKey)
+			if err != nil {
+				t.Fatalf("KVGet %s: %v", specKey, err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(entry.Value, &doc); err != nil {
+				t.Fatalf("unmarshal %s: %v", specKey, err)
+			}
+			tc.corrupt(doc, doc["data"].(map[string]any))
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal corrupted spec: %v", err)
+			}
+			if _, err := conn.KVPut(ctx, CoreBucket, specKey, raw); err != nil {
+				t.Fatalf("KVPut corrupted spec: %v", err)
+			}
+
+			uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+			if err != nil {
+				t.Fatalf("Uninstall: %v", err)
+			}
+			if !slices.Equal(uninst.LensesTombstonedWithUnusableSpec, []string{rootKey}) {
+				t.Fatalf("LensesTombstonedWithUnusableSpec = %v, want exactly [%s] (%+v)",
+					uninst.LensesTombstonedWithUnusableSpec, rootKey, uninst)
+			}
+		})
+	}
+}
+
+// TestInstaller_Uninstall_PlainLensIsNotReportedAsUnusable is the negative
+// vector that keeps the population meaningful: a lens with a real targetConfig
+// and no secure columns is a genuine "holds no ciphertext" — the oracle's
+// filter excludes it from every holder type, so tombstoning it loses nothing
+// and it must not appear beside the corrupted shapes.
+func TestInstaller_Uninstall_PlainLensIsNotReportedAsUnusable(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if len(uninst.LensesTombstonedWithUnusableSpec) != 0 {
+		t.Fatalf("LensesTombstonedWithUnusableSpec = %v, want none — a plain lens declares no custody to lose",
+			uninst.LensesTombstonedWithUnusableSpec)
+	}
+}
+
+// TestInstaller_Uninstall_RefusesUnattestedSecureLensErasure is §31's green
+// bar: an uninstall that would newly erase a live Secure Lens's key-custody
+// record from the destruction-readiness oracle's view is refused outright, and
+// refused BEFORE the UninstallPackage op is submitted — once that batch
+// commits, the oracle stops seeing the lens and nothing records which holder
+// types its ciphertext was written under, so there is no later moment at which
+// the operator could be asked. The refusal names the lens, its spec key, the
+// columns and the holder types, because an operator who cannot see what they
+// are attesting to cannot attest to it.
+func TestInstaller_Uninstall_RefusesUnattestedSecureLensErasure(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	_, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse an unattested secure-lens erasure, got nil error")
+	}
+	if !errors.Is(err, ErrUndeclaredSecureLensErasure) {
+		t.Fatalf("Uninstall error = %v, want one wrapping ErrUndeclaredSecureLensErasure", err)
+	}
+	specKey := secureLensSpecKey(def)
+	for _, want := range []string{"sampleSecureLens", specKey, "applicant_name", "identity", "--retire-secure-lens"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+
+	// Nothing was submitted: every declared key is still live, so the package
+	// is exactly as installed and the operator can re-run with an attestation.
+	for _, k := range []string{specKey, strings.TrimSuffix(specKey, ".spec")} {
+		entry, getErr := conn.KVGet(ctx, CoreBucket, k)
+		if getErr != nil {
+			t.Fatalf("post-refusal read %s: %v", k, getErr)
+		}
+		if contains(string(entry.Value), `"isDeleted":true`) {
+			t.Fatalf("key %s was tombstoned by a refused uninstall: %s", k, entry.Value)
+		}
+	}
+}
+
+// TestInstaller_Uninstall_RefusalNamesEverySecureLensAtOnce pins that a refusal
+// states the WHOLE bill. An uninstall is all-or-nothing over a whole package,
+// so a guard that stopped at the first unattested lens would hand a two-lens
+// package back one lens at a time — attest, re-run, get refused over the lens
+// the first refusal never mentioned. The typed error carries all of them in
+// Unattested, and the message names all of them, so the operator's next run is
+// their last.
+//
+// Read from the typed error's FIELDS, never scraped from the prose: that is
+// what makes Loupe's per-lens re-prompt possible without a regex over an error
+// message.
+func TestInstaller_Uninstall_RefusalNamesEverySecureLensAtOnce(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithTwoSecureLenses("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// One of the two attested: the refusal must still name the other, and must
+	// not be satisfied by the partial attestation.
+	_, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{
+		Lens: "sampleSecureLens",
+		Note: "test fixture — no ciphertext was ever written",
+	}}})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse: the second secure lens is unattested")
+	}
+	var partial *UndeclaredSecureLensErasureError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Uninstall error = %v, want a *UndeclaredSecureLensErasureError", err)
+	}
+	if len(partial.Unattested) != 1 || partial.Unattested[0].Lens != "otherSecureLens" {
+		t.Fatalf("Unattested = %+v, want exactly the unattested lens otherSecureLens", partial.Unattested)
+	}
+
+	// Neither attested: ONE refusal, naming BOTH, in fields and in prose.
+	_, err = inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse both unattested secure lenses")
+	}
+	var refusal *UndeclaredSecureLensErasureError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("Uninstall error = %v, want a *UndeclaredSecureLensErasureError", err)
+	}
+	if !errors.Is(err, ErrUndeclaredSecureLensErasure) {
+		t.Fatalf("the typed refusal must still unwrap to the sentinel: %v", err)
+	}
+	if refusal.PackageName != def.Name {
+		t.Errorf("PackageName = %q, want %q", refusal.PackageName, def.Name)
+	}
+	if len(refusal.Unattested) != 2 {
+		t.Fatalf("Unattested = %+v, want both lenses in ONE refusal", refusal.Unattested)
+	}
+	named := []string{refusal.Unattested[0].Lens, refusal.Unattested[1].Lens}
+	slices.Sort(named)
+	if !slices.Equal(named, []string{"otherSecureLens", "sampleSecureLens"}) {
+		t.Fatalf("Unattested lenses = %v, want both secure lenses", named)
+	}
+	for _, want := range []string{"sampleSecureLens", "otherSecureLens", "applicant_name", "tenant_email"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+	// The remedy is one runnable command line carrying BOTH flags — a remedy
+	// that only fixes half of what it refused sends the operator back for a
+	// second refusal.
+	if n := strings.Count(err.Error(), "--retire-secure-lens"); n != 2 {
+		t.Errorf("refusal carries %d --retire-secure-lens flags, want one per unattested lens (2): %v", n, err)
+	}
+	// And it actually RUNS: Go's flag package stops parsing at the first
+	// non-flag argument, so a command line with the package name ahead of the
+	// flags exits 2 without doing anything. Counting flags alone would not
+	// catch that; their position relative to the name is the whole test.
+	remedy := err.Error()[strings.Index(err.Error(), "lattice-pkg uninstall"):]
+	firstFlag := strings.Index(remedy, "--retire-secure-lens")
+	namePos := strings.Index(remedy, " "+def.Name+"`")
+	if firstFlag < 0 || namePos < 0 || firstFlag > namePos {
+		t.Errorf("the printed remedy does not parse: flags must precede the package name, got %q", remedy)
+	}
+
+	// And both attested at once: one re-run, done, counting both lenses' columns.
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{
+		{Lens: "sampleSecureLens", Note: "test fixture — no ciphertext was ever written"},
+		{Lens: "otherSecureLens", Note: "test fixture — no ciphertext was ever written"},
+	}})
+	if err != nil {
+		t.Fatalf("Uninstall with both attestations: %v", err)
+	}
+	if uninst.SecureLensRetirementsAttested != 2 {
+		t.Fatalf("SecureLensRetirementsAttested = %d, want 2 (one secure column per lens)", uninst.SecureLensRetirementsAttested)
+	}
+}
+
+// TestEnforceUninstallSecureLensRetirement_CountsEveryDeclaredColumn pins the
+// unit of SecureLensRetirementsAttested. A committed spec entry whose `column`
+// field is unnameable still recorded holder types, so it is still one custody
+// record leaving the oracle's view; counting only the nameable subset would
+// report three retired records as two and quietly under-state exactly the
+// number an operator is meant to notice.
+func TestEnforceUninstallSecureLensRetirement_CountsEveryDeclaredColumn(t *testing.T) {
+	erasure := UninstallSecureColumnErasure{
+		Key:      metaVertexPrefix + LensID("sample-pkg", "aLens") + ".spec",
+		Lens:     "aLens",
+		Columns:  []string{"named_one", "named_two"},
+		Declared: 3, // the third entry carried no nameable column
+		Holders:  []string{"identity"},
+	}
+	attested, unused, err := enforceUninstallSecureLensRetirement("sample-pkg",
+		UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{Lens: "aLens", Note: "why"}}},
+		[]UninstallSecureColumnErasure{erasure})
+	if err != nil {
+		t.Fatalf("enforce: %v", err)
+	}
+	if attested != 3 {
+		t.Fatalf("attested = %d, want 3 — every DECLARED entry is a custody record, not just the nameable ones", attested)
+	}
+	if len(unused) != 0 {
+		t.Fatalf("unused = %v, want none", unused)
+	}
+}
+
+// TestEnforceUninstallSecureLensRetirement_OneAttestationExcusesOneLens pins
+// the "one erasure, one attestation" invariant against the double-spelling
+// match. Both readings of an operator's string are registered as candidate keys
+// so a stray space still resolves — but "foo" and " foo" are two different
+// lenses holding two different custody records, and canonicalName uniqueness is
+// an exact-string check, so a package can declare both. One Note must never
+// excuse both.
+func TestEnforceUninstallSecureLensRetirement_OneAttestationExcusesOneLens(t *testing.T) {
+	trimmed := UninstallSecureColumnErasure{
+		Key: metaVertexPrefix + LensID("sample-pkg", "foo") + ".spec", Lens: "foo", Declared: 1,
+	}
+	spaced := UninstallSecureColumnErasure{
+		Key: metaVertexPrefix + LensID("sample-pkg", " foo") + ".spec", Lens: " foo", Declared: 1,
+	}
+	_, _, err := enforceUninstallSecureLensRetirement("sample-pkg",
+		UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{Lens: " foo", Note: "one note"}}},
+		[]UninstallSecureColumnErasure{trimmed, spaced})
+	if err == nil {
+		t.Fatal("one attestation excused two lenses' custody records — the second erasure must be refused")
+	}
+	var refusal *UndeclaredSecureLensErasureError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("enforce error = %v, want a *UndeclaredSecureLensErasureError", err)
+	}
+	if len(refusal.Unattested) != 1 {
+		t.Fatalf("Unattested = %+v, want exactly the one lens the attestation did not cover", refusal.Unattested)
+	}
+}
+
+// TestEnforceUninstallSecureLensRetirement_RepeatsValidation keeps validate()'s
+// own doc claim true: the enforcer is the fail-closed floor for any path that
+// reaches it with unvalidated options, so it repeats every check — including
+// the duplicate-Lens one. Without it, a direct caller passing {"aLens"} and
+// {" aLens"} gets a clean run that reports one of them as UNUSED: a lens named
+// as unmatched when it did in fact match.
+func TestEnforceUninstallSecureLensRetirement_RepeatsValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		atts  []RetiredSecureLens
+		wants string
+	}{
+		{"empty lens", []RetiredSecureLens{{Lens: " ", Note: "why"}}, "names no Lens"},
+		{"empty note", []RetiredSecureLens{{Lens: "aLens", Note: " "}}, "empty Note"},
+		{"duplicate lens", []RetiredSecureLens{
+			{Lens: "aLens", Note: "first"}, {Lens: "aLens", Note: "second"},
+		}, "twice"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := enforceUninstallSecureLensRetirement("sample-pkg",
+				UninstallOptions{RetiredSecureLenses: tc.atts}, nil)
+			if err == nil {
+				t.Fatal("expected the enforcer to repeat the validation refusal, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Fatalf("enforce error = %v, want one naming %q", err, tc.wants)
+			}
+			if !errors.Is(err, ErrInvalidUninstallOptions) {
+				t.Fatalf("enforce error = %v, want one wrapping ErrInvalidUninstallOptions (Loupe maps it to 400)", err)
+			}
+		})
+	}
+}
+
+// TestEnforceUninstallSecureLensRetirement_WhitespaceTwinsAreTwoLenses pins
+// that "duplicate" is judged on the RAW Lens. LensID salts the raw string, so
+// "l1" and " l1 " address two different keyspaces holding two different custody
+// records — a package can declare both. Treating them as a duplicate pair would
+// make the refusal over the second one print a remedy that is itself refused as
+// a duplicate when pasted beside the first: a different error, and no way out.
+func TestEnforceUninstallSecureLensRetirement_WhitespaceTwinsAreTwoLenses(t *testing.T) {
+	trimmed := UninstallSecureColumnErasure{
+		Key: metaVertexPrefix + LensID("sample-pkg", "l1") + ".spec", Lens: "l1", Declared: 1,
+	}
+	spaced := UninstallSecureColumnErasure{
+		Key: metaVertexPrefix + LensID("sample-pkg", " l1 ") + ".spec", Lens: " l1 ", Declared: 1,
+	}
+	attested, unused, err := enforceUninstallSecureLensRetirement("sample-pkg",
+		UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{
+			{Lens: "l1", Note: "the trimmed lens"},
+			{Lens: " l1 ", Note: "the spaced lens — a different keyspace"},
+		}},
+		[]UninstallSecureColumnErasure{trimmed, spaced})
+	if err != nil {
+		t.Fatalf("two attestations for two genuinely distinct lenses must be accepted: %v", err)
+	}
+	if attested != 2 {
+		t.Fatalf("attested = %d, want 2 — one custody record per lens", attested)
+	}
+	if len(unused) != 0 {
+		t.Fatalf("unused = %v, want none — each attestation matched its own lens", unused)
+	}
+	// The same pair through the pre-read validator, which is the path the
+	// pasted remedy actually takes.
+	if err := (UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{
+		{Lens: "l1", Note: "the trimmed lens"},
+		{Lens: " l1 ", Note: "the spaced lens"},
+	}}).validate(); err != nil {
+		t.Fatalf("validate rejected two distinct lenses as duplicates: %v", err)
+	}
+}
+
+// TestUndeclaredSecureLensErasureError_NumbersUnreadableLensNames pins that a
+// refusal over two lenses whose canonicalNames could not be read prints two
+// DISTINCT placeholders. Printing the same literal twice makes the remedy
+// self-collide on validate()'s duplicate-Lens check, so an operator who pastes
+// it is handed a different error than the one they set out to fix.
+func TestUndeclaredSecureLensErasureError_NumbersUnreadableLensNames(t *testing.T) {
+	err := undeclaredSecureLensErasureError("demo-domain", []UninstallSecureColumnErasure{
+		{Key: "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec", Declared: 2},
+		{Key: "vtx.meta.bbbbbbbbbbbbbbbbbbbb.spec", Declared: 1},
+	})
+	msg := err.Error()
+	// An erasure with no nameable columns must still say how many custody
+	// records it covers — a bill line reading "named []" and nothing else names
+	// no subject the operator could attest about.
+	if !strings.Contains(msg, "2 declared secure column(s)") {
+		t.Errorf("refusal does not carry the declared count for an erasure with no nameable columns: %v", msg)
+	}
+	for _, want := range []string{"<lens canonicalName #1>", "<lens canonicalName #2>"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal does not carry a distinct placeholder %q: %v", want, msg)
+		}
+	}
+	if strings.Contains(msg, "<lens canonicalName>=") {
+		t.Errorf("refusal still prints an unnumbered placeholder, which collides when pasted: %v", msg)
+	}
+}
+
+// defWithTwoSecureLenses returns the sample package carrying a SECOND Secure
+// Lens beside defWithSecureLens's, so a test can observe how a refusal handles
+// a package whose erasures are plural — the shape one uninstall actually takes.
+func defWithTwoSecureLenses(version string) Definition {
+	def := defWithSecureLens(version, []string{"identity"}, "")
+	def.Lenses = append(def.Lenses, LensSpec{
+		CanonicalName: "otherSecureLens",
+		Class:         "meta.lens",
+		Adapter:       "postgres",
+		Table:         "read_other_secure",
+		Engine:        "full",
+		Protected:     true,
+		Spec:          `MATCH (n:sample) RETURN n.key AS key, n.tenant_email AS tenant_email`,
+		Columns: []PostgresColumn{
+			{Name: "key", Type: "text"},
+			{Name: "tenant_email", Type: "text"},
+		},
+		SecureColumns: []SecureColumn{{
+			Column:      "tenant_email",
+			HolderTypes: []string{"retentionclass"},
+			Field:       "value",
+		}},
+	})
+	return def
+}
+
+// TestInstaller_Uninstall_AttestedSecureLensErasureProceeds is the positive
+// vector for the refusal above: the SAME uninstall carrying the operator's
+// attestation commits, and reports the retirement in the unit
+// UpgradeResult.SecureColumnsRetired uses — secure COLUMNS, so the two counts
+// are comparable as one measure of custody history leaving the system.
+func TestInstaller_Uninstall_AttestedSecureLensErasureProceeds(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{
+		Lens: "sampleSecureLens",
+		Note: "test fixture — no ciphertext was ever written",
+	}}})
+	if err != nil {
+		t.Fatalf("Uninstall with attestation: %v", err)
+	}
+	if uninst.SecureLensRetirementsAttested != 1 {
+		t.Fatalf("SecureLensRetirementsAttested = %d, want 1 (the lens's single secure column)", uninst.SecureLensRetirementsAttested)
+	}
+	if len(uninst.SecureLensRetirementsUnused) != 0 {
+		t.Fatalf("SecureLensRetirementsUnused = %v, want none — the attestation matched the erasure", uninst.SecureLensRetirementsUnused)
+	}
+	if !slices.Contains(uninst.Tombstoned, secureLensSpecKey(def)) {
+		t.Fatalf("secure lens spec key not tombstoned: %v", uninst.Tombstoned)
+	}
+}
+
+// TestInstaller_Uninstall_RefusesErasureOfTombstonedSpecUnderLiveRoot is the
+// bypass the classification predicate exists to close. A lens `.spec` soft-
+// deleted out of band still decodes and still declares its secureColumns, and
+// declaredLensIDs reads it off a lens it selected by the vertex ROOT — so with
+// the root live the oracle STILL sees this lens, and the root tombstone this
+// uninstall is about to commit is precisely what erases it. Classifying on the
+// spec's own isDeleted would file it under "already erased" and wave the
+// erasure straight past the guard with a clean report.
+func TestInstaller_Uninstall_RefusesErasureOfTombstonedSpecUnderLiveRoot(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	tombstoneKey(t, ctx, conn, specKey)
+
+	_, err := inst.Uninstall(ctx, def.Name, UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall to refuse: the lens ROOT is live, so the oracle still sees this lens and this run erases it")
+	}
+	if !errors.Is(err, ErrUndeclaredSecureLensErasure) {
+		t.Fatalf("Uninstall error = %v, want one wrapping ErrUndeclaredSecureLensErasure", err)
+	}
+
+	// And with the attestation it proceeds, counted as a real retirement — the
+	// erasure is genuine, not an artefact of the tombstoned spec.
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{
+		Lens: "sampleSecureLens",
+		Note: "test fixture — no ciphertext was ever written",
+	}}})
+	if err != nil {
+		t.Fatalf("Uninstall with attestation: %v", err)
+	}
+	if len(uninst.SecureColumnsErased) != 1 || uninst.SecureColumnsErased[0].Key != specKey {
+		t.Fatalf("SecureColumnsErased = %+v, want exactly one entry for %s", uninst.SecureColumnsErased, specKey)
+	}
+	if uninst.SecureLensRetirementsAttested != 1 {
+		t.Fatalf("SecureLensRetirementsAttested = %d, want 1", uninst.SecureLensRetirementsAttested)
+	}
+}
+
+// TestInstaller_Uninstall_ReportsUnusedSecureLensAttestation pins the reporting
+// half: an attestation that matched no erasure is inert, never a refusal — the
+// uninstall is not the operator's chance to be told their spelling was wrong by
+// having the whole run rejected. It IS reported, because a misspelled
+// canonicalName is otherwise indistinguishable from one that covered something.
+func TestInstaller_Uninstall_ReportsUnusedSecureLensAttestation(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name, UninstallOptions{RetiredSecureLenses: []RetiredSecureLens{{
+		Lens: "noSuchLens",
+		Note: "attests to an erasure this package does not have",
+	}}})
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if !slices.Equal(uninst.SecureLensRetirementsUnused, []string{"noSuchLens"}) {
+		t.Fatalf("SecureLensRetirementsUnused = %v, want [noSuchLens]", uninst.SecureLensRetirementsUnused)
+	}
+	if uninst.SecureLensRetirementsAttested != 0 {
+		t.Fatalf("SecureLensRetirementsAttested = %d, want 0", uninst.SecureLensRetirementsAttested)
+	}
+}
+
+// TestInstaller_Uninstall_NotInstalledWrapsTheSentinel keeps Loupe's status
+// mapping honest: the uninstall path is the only caller that reported "not
+// installed" as a bare error, so the 409 row covering ErrNotInstalled pinned
+// nothing here and the console rendered a permanent condition as the 502 its
+// own front end retries.
+func TestInstaller_Uninstall_NotInstalledWrapsTheSentinel(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	_, err := inst.Uninstall(ctx, "never-installed-package", UninstallOptions{})
+	if err == nil {
+		t.Fatal("expected Uninstall of an absent package to fail")
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("Uninstall error = %v, want one wrapping ErrNotInstalled", err)
+	}
+}
+
+// TestInstaller_Uninstall_RefusesMalformedSecureLensAttestation pins the
+// validation floor and the moment it runs. Each case names a package that is
+// not installed, so the "not installed" error is what a run that read anything
+// at all would return: getting the validation error instead is the proof that a
+// malformed attestation is refused on EVERY run, not only on the ones whose
+// erasures happen to reach the enforcement half.
+func TestInstaller_Uninstall_RefusesMalformedSecureLensAttestation(t *testing.T) {
+	cases := []struct {
+		name  string
+		atts  []RetiredSecureLens
+		wants string
+	}{
+		{
+			name:  "empty lens",
+			atts:  []RetiredSecureLens{{Lens: "  ", Note: "why this is safe"}},
+			wants: "names no Lens",
+		},
+		{
+			name:  "empty note",
+			atts:  []RetiredSecureLens{{Lens: "sampleSecureLens", Note: "  "}},
+			wants: "empty Note",
+		},
+		{
+			name: "duplicate lens",
+			atts: []RetiredSecureLens{
+				{Lens: "sampleSecureLens", Note: "first reason"},
+				{Lens: "sampleSecureLens", Note: "second reason"},
+			},
+			wants: "twice",
+		},
+	}
+	ctx, _, inst := newInstallerHarness(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := inst.Uninstall(ctx, "never-installed-package", UninstallOptions{RetiredSecureLenses: tc.atts})
+			if err == nil {
+				t.Fatal("expected Uninstall to refuse a malformed attestation, got nil error")
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Fatalf("Uninstall error = %v, want one naming %q", err, tc.wants)
+			}
+			if errors.Is(err, ErrNotInstalled) {
+				t.Fatalf("the attestation was validated only after the installed-package read: %v", err)
+			}
+			if !errors.Is(err, ErrInvalidUninstallOptions) {
+				t.Fatalf("Uninstall error = %v, want one wrapping ErrInvalidUninstallOptions (Loupe maps it to 400)", err)
+			}
+		})
 	}
 }
 
@@ -923,7 +1715,7 @@ func TestInstaller_Uninstall_ReturnsErrorOnUnparseableSpec(t *testing.T) {
 		t.Fatalf("KVPut malformed spec: %v", err)
 	}
 
-	if _, err := inst.Uninstall(ctx, def.Name); err == nil {
+	if _, err := inst.Uninstall(ctx, def.Name, UninstallOptions{}); err == nil {
 		t.Fatal("expected Uninstall to fail on an unparseable spec, got nil error")
 	}
 }
@@ -1070,7 +1862,7 @@ func TestInstaller_Uninstall_RaceOnDeclaredKeyRejected(t *testing.T) {
 
 	// A subsequent, ordinary uninstall (re-reading fresh) succeeds — the
 	// documented retry story.
-	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+	if _, err := inst.Uninstall(ctx, def.Name, UninstallOptions{}); err != nil {
 		t.Fatalf("retry Uninstall after conflict: %v", err)
 	}
 }
@@ -1138,7 +1930,7 @@ func TestInstaller_RefusesReinstallOverUninstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Install: %v", err)
 	}
-	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+	if _, err := inst.Uninstall(ctx, def.Name, UninstallOptions{}); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 
@@ -1303,7 +2095,7 @@ func TestInstaller_ReinstallOverUninstall_ReportsRetentionHolderAsHolder(t *test
 	if _, err := inst.Install(ctx, def); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+	if _, err := inst.Uninstall(ctx, def.Name, UninstallOptions{}); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 

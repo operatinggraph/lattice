@@ -7,7 +7,10 @@
 
 import { $, el, demoHide, api, setStatus, toast } from "../api.js";
 import { navigate, replaceRoute } from "../router.js";
-import { manifestCandidate, applySummaryLine, uninstallSummary, uninstallResultLines } from "../logic/pkg.js";
+import {
+  manifestCandidate, applySummaryLine, uninstallSummary, uninstallResultLines,
+  uninstallAttestationPrompts, attestationSubjectLine, uninstallRetryBody,
+} from "../logic/pkg.js";
 import { deleteConfirmReady } from "../logic/lens.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 
@@ -331,10 +334,35 @@ function openApplyModal(opts) {
 
 // openUninstallModal: destructive-styled typed confirm ("type the package
 // name") + the resolved-contents summary of what will be tombstoned.
+//
+// Two steps, because the server has two answers. The first POST carries the
+// name alone. If the package holds a Secure Lens whose key-custody record this
+// uninstall would erase from the destruction-readiness oracle's view, the
+// server refuses with 409 and names every such lens in
+// `unattestedSecureLenses`; the modal then asks for one required note per lens
+// — the operator's attestation that the ciphertext those columns encrypted is
+// safe to stop tracking — and re-submits. Which lenses to ask about and when
+// the answers are complete are both decided in logic/pkg.js
+// (uninstallAttestationPrompts / uninstallRetryBody), goja-tested; this view
+// is the DOM around them.
 function openUninstallModal(pkg) {
   const token = pkg.name || pkg.key;
   let inFlight = false;
-  const { modal, close } = modalShell("Uninstall package", () => [input, cancel, confirm], () => inFlight);
+  // The operator's typed notes, keyed by the lens spec key they answer, and
+  // OUTSIDE renderAttestation: a second refusal (or a substrate blip on the
+  // re-submit) re-renders the step, and retyping an attestation the operator
+  // already wrote is both an invitation to write a shorter one and a way to
+  // lose the considered wording of the first.
+  const noteByKey = {};
+  let activePrompts = [];
+  let noteInputs = [];
+  let attestBtn = null;
+  // Filled by the attestation step; modalShell calls focusables() per Tab, so
+  // fields that appear mid-flow join the focus trap without rebuilding it.
+  let attestFocusables = [];
+  const { modal, close } = modalShell("Uninstall package",
+    () => [input, cancel, confirm].concat(attestFocusables).filter((x) => x && x.isConnected),
+    () => inFlight);
 
   modal.appendChild(el("p", "muted",
     "Soft-deletes this package's declared keys — " + uninstallSummary(pkg) +
@@ -351,46 +379,52 @@ function openUninstallModal(pkg) {
   actions.appendChild(cancel);
   actions.appendChild(confirm);
   modal.appendChild(actions);
+  // Two children, never one: transient status ("uninstalling…", a failure) has
+  // its own node, so writing it can never clobber the attestation fields — or
+  // the submit button — the operator is in the middle of filling in.
   const msg = el("div", "small");
+  const statusLine = el("div", "muted small");
+  const outBox = el("div");
+  msg.appendChild(statusLine);
+  msg.appendChild(outBox);
   modal.appendChild(msg);
   input.focus();
+
+  const setModalStatus = (text, cls) => {
+    statusLine.className = cls;
+    statusLine.textContent = text;
+  };
+  const notesInPromptOrder = () => activePrompts.map((p) => noteByKey[p.key] || "");
+  // setBusy drives only controls that are still in the DOM, and never enables
+  // a submit its own readiness rule says is not ready.
+  const setBusy = (busy) => {
+    cancel.disabled = busy;
+    if (input.isConnected) input.disabled = busy;
+    if (confirm.isConnected) confirm.disabled = busy || !deleteConfirmReady(input.value, token);
+    noteInputs.forEach((n) => { n.disabled = busy; });
+    if (attestBtn) {
+      attestBtn.disabled = busy || !uninstallRetryBody(pkg.name, activePrompts, notesInPromptOrder());
+    }
+  };
 
   cancel.addEventListener("click", () => { if (!inFlight) close(); });
   input.addEventListener("input", () => {
     confirm.disabled = !deleteConfirmReady(input.value, token);
   });
-  confirm.addEventListener("click", async () => {
-    inFlight = true;
-    confirm.disabled = true;
-    cancel.disabled = true;
-    input.disabled = true;
-    msg.className = "muted small";
-    msg.textContent = "uninstalling…";
-    const body = await api("/api/packages/uninstall", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: pkg.name }),
-    });
-    inFlight = false;
-    if (body.error) {
-      msg.className = "error-text small";
-      msg.textContent = "uninstall failed: " + body.error;
-      cancel.disabled = false;
-      input.disabled = false;
-      return;
-    }
-    // Render the full reply — the tombstoned key list, linkified (dimmed;
-    // they are soft-deleted now) — before the operator closes out. The
-    // classification of every other line (which population is benign,
-    // which is escalate-this) lives in uninstallResultLines — pure, and
-    // goja-tested — so this view is just a thin DOM wrapper around it.
+
+  // renderDone renders a committed uninstall — the tombstoned key list,
+  // linkified (dimmed; they are soft-deleted now) — before the operator closes
+  // out. The classification of every other line (which population is benign,
+  // which is escalate-this, what the attestation retired) lives in
+  // uninstallResultLines — pure, and goja-tested.
+  const renderDone = (body) => {
     const keys = body.tombstoned || [];
-    msg.className = "small";
-    msg.innerHTML = "";
-    msg.appendChild(el("div", null, "uninstalled — " + keys.length + " key(s) tombstoned" +
+    setModalStatus("", "muted small");
+    outBox.innerHTML = "";
+    outBox.appendChild(el("div", null, "uninstalled — " + keys.length + " key(s) tombstoned" +
       (body.note ? " (" + body.note + ")" : "")));
     uninstallResultLines(body).forEach((line) => {
-      msg.appendChild(el("div", line.warn ? "warn-text" : null, line.text));
+      outBox.appendChild(el("div", line.warn ? "warn-text" : null, line.text));
     });
     const keyBox = el("div", "pkg-modal-out pkg-item-deleted");
     keys.forEach((k) => {
@@ -399,15 +433,94 @@ function openUninstallModal(pkg) {
       line.appendChild(keyLinkEl(k, "small"));
       keyBox.appendChild(line);
     });
-    msg.appendChild(keyBox);
+    outBox.appendChild(keyBox);
     input.remove();
+    noteInputs = [];
+    attestBtn = null;
+    attestFocusables = [];
     cancel.disabled = false;
     cancel.textContent = "Close";
     cancel.addEventListener("click", () => {
       toast("package " + body.packageName + " uninstalled");
       navigate("#/packages");
     });
-  });
+  };
+
+  // renderAttestation is the second step: one note field per lens the server
+  // named, each showing the columns and holder types the operator is attesting
+  // ABOUT — an attestation nobody can see the subject of is not one. A lens
+  // whose canonicalName the server could not read gets the CLI remedy instead
+  // of a field, since the attestation is keyed by that name. Fields are seeded
+  // from noteByKey, so a re-render keeps whatever was already typed.
+  const renderAttestation = (prompts, reason) => {
+    activePrompts = prompts;
+    noteInputs = [];
+    setModalStatus("uninstall refused: " + reason, "error-text small");
+    outBox.innerHTML = "";
+    input.remove();
+    confirm.remove();
+    attestBtn = demoHide(el("button", "danger-btn", "Attest & uninstall"));
+    attestFocusables = [];
+    prompts.forEach((p) => {
+      const box = el("div", "pkg-modal-out");
+      box.appendChild(el("div", null, p.lens || p.key));
+      box.appendChild(el("div", "muted small", attestationSubjectLine(p)));
+      box.appendChild(el("div", "muted small", p.key));
+      if (p.resolvable) {
+        const note = el("input");
+        note.type = "text";
+        note.placeholder = "why this history is safe to stop carrying (required)";
+        note.value = noteByKey[p.key] || "";
+        note.addEventListener("input", () => { noteByKey[p.key] = note.value; setBusy(false); });
+        box.appendChild(note);
+        noteInputs.push(note);
+        attestFocusables.push(note);
+      } else {
+        box.appendChild(el("div", "warn-text small",
+          "this lens's canonicalName could not be read from Core KV — attest it from the CLI, " +
+          "which takes the name the installed package declares"));
+      }
+      outBox.appendChild(box);
+    });
+    attestFocusables.push(attestBtn);
+    const attestActions = el("div", "modal-actions");
+    attestActions.appendChild(attestBtn);
+    outBox.appendChild(attestActions);
+    attestBtn.addEventListener("click", () => {
+      const retry = uninstallRetryBody(pkg.name, activePrompts, notesInPromptOrder());
+      if (retry) attempt(retry);
+    });
+    setBusy(false);
+    // Focus the first field there is something to type in. With every lens
+    // unresolvable the submit can never arm, and focusing a permanently
+    // disabled button strands the operator on a control that does nothing.
+    if (noteInputs.length) noteInputs[0].focus();
+    else cancel.focus();
+  };
+
+  // attempt posts one uninstall payload and routes the three outcomes: a
+  // refusal that names lenses to attest, any other failure, or a commit.
+  const attempt = async (payload) => {
+    inFlight = true;
+    setBusy(true);
+    setModalStatus("uninstalling…", "muted small");
+    const body = await api("/api/packages/uninstall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    inFlight = false;
+    if (body.error) {
+      const prompts = uninstallAttestationPrompts(body);
+      if (prompts.length) { renderAttestation(prompts, body.error); return; }
+      setModalStatus("uninstall failed: " + body.error, "error-text small");
+      setBusy(false);
+      return;
+    }
+    renderDone(body);
+  };
+
+  confirm.addEventListener("click", () => { attempt({ name: pkg.name }); });
 }
 
 function init() {}

@@ -103,23 +103,44 @@ function applySummaryLine(res) {
 //     ShredRetentionClassKey may destroy the class key) — plain.
 //   - retentionHoldersAlreadyStranded: pre-existing damage this uninstall did
 //     not cause and cannot undo — warn.
-//   - secureColumnsErased: THIS run tombstoned a lens whose committed secure
-//     columns still held key-custody history — warn. Unlike a retention
-//     holder, Uninstall never protects a secure column, so there is no
-//     benign bucket for this concept at all.
-//   - secureColumnsAlreadyErased: the same shape of loss, but the spec was
-//     ALREADY tombstoned before this run read it (B4: misattributing this to
-//     "secureColumnsErased" would blame a run for damage that predates it) —
-//     warn, with wording that says "prior run", not "this uninstall".
+//   - secureColumnsErased: THIS run erased a lens whose committed secure
+//     columns still held key-custody history from the destruction-readiness
+//     oracle's view — warn. Unlike a retention holder, Uninstall never
+//     protects a secure column, so there is no benign bucket for this concept
+//     at all; every entry here carries an operator attestation, since the
+//     server refuses the uninstall outright without one.
+//   - secureColumnsAlreadyErased: the same shape of loss, for a lens the
+//     oracle already could not see when this run read it — its vertex root
+//     absent, not a `meta.lens`, or soft-deleted, or its spec an eventStream
+//     source (B4: misattributing this to "secureColumnsErased" would blame a
+//     run for damage that predates it) — warn, with wording that says "prior
+//     run", not "this uninstall".
 // The last two are kept as SEPARATE entries rather than merged into one
 // count: merging them would be the exact misattribution bug this split
 // exists to prevent.
+//
+//   - lensesTombstonedWithUnusableSpec: a meta.lens root tombstoned while the
+//     oracle could not USE its `.spec` — absent, undecodable, or carrying no
+//     targetConfig — warn. The oracle is fail-closed on such a spec, so it
+//     counted that lens for EVERY holder type and now counts it for none; no
+//     package can produce this state.
+//
+// Two more lines close it out, both about the attestation the server demanded
+// before it would erase anything: how many custody records left on the
+// operator's word (plain — it is what they asked for, said out loud because
+// the platform verified nothing about the ciphertext), and any attestation
+// that matched no erasure (warn — that is the shape of a misspelled lens
+// name, and a clean uninstall would otherwise read as confirmation it was
+// right).
 function uninstallResultLines(body) {
   var b = body || {};
   var preserved = b.retentionHoldersPreserved || [];
   var stranded = b.retentionHoldersAlreadyStranded || [];
   var secureErased = b.secureColumnsErased || [];
   var secureAlreadyErased = b.secureColumnsAlreadyErased || [];
+  var attested = b.secureLensRetirementsAttested || 0;
+  var unusedAttestations = b.secureLensRetirementsUnused || [];
+  var unusableSpec = b.lensesTombstonedWithUnusableSpec || [];
   var lines = [];
   if (preserved.length) {
     lines.push({
@@ -147,12 +168,114 @@ function uninstallResultLines(body) {
   if (secureAlreadyErased.length) {
     lines.push({
       warn: true,
-      text: secureAlreadyErased.length + " secure lens(es) with committed key-custody history were ALREADY tombstoned from a prior run — " +
-        "the destruction-readiness oracle already could not see them. Pre-existing platform damage, not caused by this uninstall; escalate: " +
+      text: secureAlreadyErased.length + " secure lens(es) with committed key-custody history were ALREADY invisible to the " +
+        "destruction-readiness oracle from a prior run — vertex root absent, not a meta.lens, or soft-deleted, or an eventStream spec. " +
+        "Pre-existing platform damage, not caused by this uninstall; escalate: " +
         secureAlreadyErased.map(function (e) { return (e && (e.lens || e.key)) || ""; }).join(", "),
     });
   }
+  if (unusableSpec.length) {
+    lines.push({
+      warn: true,
+      text: unusableSpec.length + " meta.lens root(s) were tombstoned while the destruction-readiness oracle could not use their .spec " +
+        "— absent, undecodable, or carrying no targetConfig. The oracle counted each of these for every holder type and now counts " +
+        "them for none. No package can produce this state; escalate: " + unusableSpec.join(", "),
+    });
+  }
+  if (attested) {
+    lines.push({
+      warn: false,
+      text: attested + " secure-column key-custody record(s) retired on your attestation — the destruction-readiness oracle no longer " +
+        "sees them, and the platform did not verify their ciphertext is gone.",
+    });
+  }
+  if (unusedAttestations.length) {
+    lines.push({
+      warn: true,
+      text: unusedAttestations.length + " attestation(s) matched no erasure in this uninstall — check the canonicalName against the one " +
+        "the installed package declares: " + unusedAttestations.join(", "),
+    });
+  }
   return lines;
+}
+
+// uninstallAttestationPrompts reads a REFUSED uninstall reply and returns what
+// the confirm modal must ask for: one prompt per Secure Lens whose key-custody
+// record this uninstall would erase from the destruction-readiness oracle's
+// view without an operator attestation. Empty for every other reply — a
+// success, or a failure of any other kind — so the caller's whole test is
+// "did this come back with prompts".
+//
+// It reads the server's `unattestedSecureLenses` FIELD, never the refusal
+// prose. The message is for a human; the lens names, keys, columns and holder
+// types the operator is attesting ABOUT are data, and parsing them back out of
+// a sentence is the defect the typed server-side error exists to prevent.
+//
+// `resolvable` is false when the server could not read a lens's canonicalName
+// (its `.canonicalName` aspect was unreadable). Such a lens cannot be attested
+// from this modal — the attestation is keyed by the name the installed package
+// declares, and the console has nothing to key it with — so the view shows the
+// CLI remedy instead of an input that would submit a name nobody verified.
+function uninstallAttestationPrompts(body) {
+  var list = (body || {}).unattestedSecureLenses || [];
+  var prompts = [];
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i] || {};
+    var lens = String(e.lens || "");
+    prompts.push({
+      lens: lens,
+      key: String(e.key || ""),
+      columns: e.columns || [],
+      declaredColumns: e.declaredColumns || 0,
+      holderTypes: e.holderTypes || [],
+      resolvable: lens !== "",
+    });
+  }
+  return prompts;
+}
+
+// attestationSubjectLine renders what the operator is attesting ABOUT for one
+// prompt: the secure columns and the holder types whose ciphertext stays in the
+// target store after this erasure.
+//
+// The declared count is shown whenever it exceeds the number of columns that
+// can be named, because those two differ exactly when a committed spec carries
+// an entry with no column name — and a line reading "secure column(s): —"
+// beside "holder type(s): —" names no subject at all, which is an attestation
+// nobody can give.
+function attestationSubjectLine(prompt) {
+  var p = prompt || {};
+  var columns = p.columns || [];
+  var holders = p.holderTypes || [];
+  var declared = p.declaredColumns || 0;
+  var names = columns.length ? columns.join(", ") : "none could be named";
+  var count = declared > columns.length ? declared + " declared secure column(s), " : "";
+  return count + "secure column(s): " + names +
+    " · holder type(s): " + (holders.length ? holders.join(", ") : "none declared");
+}
+
+// uninstallRetryBody builds the second POST from the operator's typed notes —
+// notes[i] answering prompts[i] — or null when the modal is not ready to
+// submit, which is the view's "keep the button disabled" test.
+//
+// Not ready means: no prompts at all (there is nothing to re-submit), a note
+// left blank or all-whitespace (the Note is the whole content of an
+// attestation — an empty one attests nothing and the server refuses it), or a
+// lens whose canonicalName the server could not resolve (see
+// uninstallAttestationPrompts). One rule, one place, so the disabled state and
+// the payload can never disagree.
+function uninstallRetryBody(name, prompts, notes) {
+  var list = prompts || [];
+  var typed = notes || [];
+  if (!list.length) return null;
+  var retired = [];
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i].resolvable) return null;
+    var note = String(typed[i] || "").trim();
+    if (!note) return null;
+    retired.push({ lens: list[i].lens, note: note });
+  }
+  return { name: name, retiredSecureLenses: retired };
 }
 
 function uninstallSummary(pkg) {
@@ -185,4 +308,4 @@ function uninstallSummary(pkg) {
   return line;
 }
 
-export { manifestCandidate, applySummaryLine, uninstallSummary, uninstallResultLines };
+export { manifestCandidate, applySummaryLine, uninstallSummary, uninstallResultLines, uninstallAttestationPrompts, attestationSubjectLine, uninstallRetryBody };

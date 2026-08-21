@@ -291,7 +291,7 @@ func TestApply_OverUninstalledPackageRefuses(t *testing.T) {
 	if _, err := inst.Install(ctx, def); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+	if _, err := inst.Uninstall(ctx, def.Name, UninstallOptions{}); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 

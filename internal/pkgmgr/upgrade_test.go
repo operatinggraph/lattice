@@ -895,6 +895,88 @@ func TestJSONEqual(t *testing.T) {
 	}
 }
 
+// TestSecureColumnsOf_MergesOneColumnAcrossLevels pins the read path's
+// treatment of a document carrying the same secure column at BOTH targetConfig
+// levels. Both levels must be read — that is what keeps the erasure detection
+// agreeing with the destruction-readiness oracle — but the column is ONE column
+// and ONE custody record, so it must be emitted once, carrying the union of
+// what each level recorded. Emitting it twice makes every consumer that counts
+// entries report one erasure as two and print the column twice in a refusal.
+//
+// An entry with no column name is never merged: unnameable is not an identity,
+// and two of them are two records.
+func TestSecureColumnsOf_MergesOneColumnAcrossLevels(t *testing.T) {
+	doc := map[string]any{
+		"targetConfig": map[string]any{"secureColumns": []any{
+			map[string]any{"column": "applicant_name", "holderTypes": []any{"identity"}},
+			map[string]any{"column": "", "holderTypes": []any{"retentionclass"}},
+		}},
+		"data": map[string]any{"targetConfig": map[string]any{"secureColumns": []any{
+			map[string]any{"column": "applicant_name", "holderTypes": []any{"retentionclass"}},
+			map[string]any{"column": "", "holderTypes": []any{"identity"}},
+		}}},
+	}
+	entries := secureColumnsOf(doc)
+	named := 0
+	unnamed := 0
+	for _, e := range entries {
+		if column, _ := e["column"].(string); column == "" {
+			unnamed++
+			continue
+		}
+		named++
+		holders := stringsOf(e["holderTypes"])
+		slices.Sort(holders)
+		if !slices.Equal(holders, []string{"identity", "retentionclass"}) {
+			t.Errorf("merged holderTypes = %v, want the union of both levels", holders)
+		}
+	}
+	if named != 1 {
+		t.Errorf("secureColumnsOf emitted %d entries for one column name, want 1", named)
+	}
+	if unnamed != 2 {
+		t.Errorf("secureColumnsOf emitted %d unnamed entries, want 2 — unnameable is not an identity", unnamed)
+	}
+}
+
+// TestWidenSecureColumns_UnionsAcrossTargetConfigLevels pins the write path's
+// half of the same shape: the committed custody history for a column is
+// everything EITHER targetConfig level recorded, and the widen must carry all
+// of it forward. Losing one level's holder types means ciphertext written under
+// a holder the persisted spec no longer names — invisible to every
+// destruction-readiness reader, which is the exact loss the widen exists to
+// prevent.
+//
+// The fixture is built to be able to FAIL: the surviving declaration names only
+// the second level's holder, so a history that kept just that level produces a
+// spec identical to the declaration and the loss leaves no other trace.
+//
+// Two mechanisms hold this jointly — secureColumnsOf merges a column across
+// levels, and the history build unions rather than assigns — so this asserts
+// the INVARIANT, not either limb: it fails when both are broken and passes
+// while either stands.
+func TestWidenSecureColumns_UnionsAcrossTargetConfigLevels(t *testing.T) {
+	committed := map[string]any{
+		"targetConfig": map[string]any{"secureColumns": []any{
+			map[string]any{"column": "applicant_name", "holderTypes": []any{"alpha"}},
+		}},
+		"data": map[string]any{"targetConfig": map[string]any{"secureColumns": []any{
+			map[string]any{"column": "applicant_name", "holderTypes": []any{"beta"}},
+		}}},
+	}
+	newDoc := map[string]any{
+		"data": map[string]any{"targetConfig": map[string]any{"secureColumns": []map[string]any{
+			{"column": "applicant_name", "holderTypes": []string{"beta"}},
+		}}},
+	}
+	widenSecureColumnsForUpdate("vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec", committed, newDoc)
+	got := stringsOf(secureColumnsOf(newDoc)[0]["holderTypes"])
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Fatalf("widened holderTypes = %v, want both levels' committed holders carried forward", got)
+	}
+}
+
 // defWithSecureLens returns the sample package plus one Secure Lens whose
 // single secure column declares the supplied holder types, so a test can narrow
 // or widen that declaration on the next version and observe what the diff

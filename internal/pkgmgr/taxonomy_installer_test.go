@@ -171,7 +171,7 @@ func TestInstaller_SubtypeOf_FailsClosed_Tombstoned(t *testing.T) {
 	if _, err := inst.Install(ctx, abstractPkgDef("location-domain", "location")); err != nil {
 		t.Fatalf("install abstract package: %v", err)
 	}
-	if _, err := inst.Uninstall(ctx, "location-domain"); err != nil {
+	if _, err := inst.Uninstall(ctx, "location-domain", UninstallOptions{}); err != nil {
 		t.Fatalf("uninstall abstract package: %v", err)
 	}
 	_, err := inst.Install(ctx, leafPkgDef("unit-domain", "unit", "location"))

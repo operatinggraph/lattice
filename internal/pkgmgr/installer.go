@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1646,13 +1647,22 @@ func (p *installedPackage) PackageKey() string { return p.Key }
 // holder is still live.
 //
 // Soft-delete only — vertices remain queryable for audit.
-func (i *Installer) Uninstall(ctx context.Context, packageName string) (*UninstallResult, error) {
+//
+// opts carries the operator's secure-lens retirement attestations. An uninstall
+// that would newly erase a live Secure Lens's key-custody record from the
+// destruction-readiness oracle's view is refused unless opts attests that lens
+// (retention-class-key-custody-design.md §31); the attestations are validated
+// before anything is read, so a malformed one is refused on every run.
+func (i *Installer) Uninstall(ctx context.Context, packageName string, opts UninstallOptions) (*UninstallResult, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	ip, err := i.findInstalledPackage(ctx, packageName)
 	if err != nil {
 		return nil, err
 	}
 	if ip == nil {
-		return nil, fmt.Errorf("pkgmgr: package %q not installed", packageName)
+		return nil, fmt.Errorf("%w: %q", ErrNotInstalled, packageName)
 	}
 	manifestKey := ip.Key + ".manifest"
 	entry, err := i.Conn.KVGet(ctx, CoreBucket, manifestKey)
@@ -1751,52 +1761,128 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	tombstoned := make([]string, 0, len(keys))
 	var secureColumnsErased []UninstallSecureColumnErasure
 	var secureColumnsAlreadyErased []UninstallSecureColumnErasure
+	var unusableSpecs []unusableSpecCandidate
 	for _, k := range keys {
 		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
 		if err != nil {
 			if errors.Is(err, substrate.ErrKeyNotFound) {
+				// Nothing to tombstone under this key. A lens `.spec` is the one
+				// absence that still costs something, because the oracle reads a
+				// spec it cannot use as maximally relevant; noted here and
+				// resolved against the lens root after the scan.
+				if strings.HasSuffix(k, ".spec") {
+					unusableSpecs = append(unusableSpecs, unusableSpecCandidate{specKey: k})
+				}
 				continue
 			}
 			return nil, fmt.Errorf("pkgmgr: uninstall read %s: %w", k, err)
 		}
 		// A lens `.spec` key's committed secureColumns names key-custody
 		// history this tombstone takes with it (retention-class-key-custody-
-		// design.md §30.6): the ciphertext those columns wrote is still
+		// design.md §30.6, §31): the ciphertext those columns wrote is still
 		// sitting in the target store, untouched by the tombstone, but
-		// registry_probe.declaredLensIDs skips a tombstoned lens outright, so
-		// nothing else will ever attest this lens's coverage again. Uninstall
-		// takes a package NAME, not a Definition — there is no place for an
-		// author to declare the retirement the way RetiredSecureColumns does
-		// for Upgrade/Apply — so this is report-only, never a refusal.
+		// registry_probe.declaredLensIDs stops seeing the lens, so nothing
+		// else will ever attest this lens's coverage again. Uninstall takes a
+		// package NAME, not a Definition, so the attestation comes from the
+		// OPERATOR through UninstallOptions — the gate below refuses every
+		// erasure that is NEW and unattested.
 		if strings.HasSuffix(k, ".spec") {
 			var doc map[string]any
 			if err := json.Unmarshal(entry.Value, &doc); err != nil {
 				return nil, fmt.Errorf("pkgmgr: uninstall parse %s: %w", k, err)
 			}
 			if entries := secureColumnsOf(doc); len(entries) > 0 {
-				erasure := UninstallSecureColumnErasure{Key: k, Lens: i.lensCanonicalNameOf(ctx, k)}
+				erasure := UninstallSecureColumnErasure{
+					Key: k, Lens: i.lensCanonicalNameOf(ctx, k),
+					// Every declared entry is one custody record, whether or not
+					// its column can be named; Columns below is only the nameable
+					// subset, which is what a message can print.
+					Declared: len(entries),
+				}
 				for _, sc := range entries {
 					if column, _ := sc["column"].(string); column != "" {
 						erasure.Columns = append(erasure.Columns, column)
 					}
 					erasure.Holders = unionStrings(erasure.Holders, stringsOf(sc["holderTypes"]))
 				}
-				// A spec already isDeleted when THIS uninstall read it was already
-				// invisible to declaredLensIDs before this run touched anything —
-				// pre-existing damage this uninstall did not cause and cannot
-				// undo, exactly the split the retention-holder classification
-				// above makes for the identical reason (a tombstone re-applied to
-				// an already-tombstoned key is not a NEW erasure).
-				if alreadyDeleted, _ := doc["isDeleted"].(bool); alreadyDeleted {
-					secureColumnsAlreadyErased = append(secureColumnsAlreadyErased, erasure)
-				} else {
-					secureColumnsErased = append(secureColumnsErased, erasure)
+				// NEW versus already-gone is decided by the oracle's OWN
+				// visibility predicate (lensDeclaredToDestructionOracle), never
+				// by this key's isDeleted: the reader whose view is at stake
+				// enumerates vertex roots and reads a soft-deleted spec's body
+				// perfectly well. A lens the oracle can no longer see was already
+				// invisible before this run touched anything — pre-existing
+				// damage this uninstall did not cause and cannot undo, exactly
+				// the split the retention-holder classification above makes for
+				// the identical reason.
+				//
+				// The predicate re-reads the lens ROOT without an OCC condition
+				// of its own, and does not need one: that root is itself a
+				// declared key, so it enters declaredEntries below carrying the
+				// revision this scan observed, in the SAME atomic batch. A
+				// concurrent flip of the root between the predicate's read and
+				// the commit therefore fails the batch (ErrUninstallConflict)
+				// rather than slipping a re-classified lens past the gate. The
+				// only other order — the root changing before the predicate
+				// reads it — is just a later state read consistently.
+				visible, err := i.lensDeclaredToDestructionOracle(ctx, k, entry.Value)
+				if err != nil {
+					return nil, err
 				}
+				if visible {
+					secureColumnsErased = append(secureColumnsErased, erasure)
+				} else {
+					secureColumnsAlreadyErased = append(secureColumnsAlreadyErased, erasure)
+				}
+			} else if specUnusableToOracle(entry.Value) {
+				// The spec is present and declares no secure column this scan can
+				// read — but the oracle cannot use it either, so it counts the
+				// lens for EVERY holder type rather than for none. Same standing
+				// as an absent spec; resolved with the rest after the scan.
+				unusableSpecs = append(unusableSpecs, unusableSpecCandidate{specKey: k, raw: entry.Value})
 			}
 		}
 		declaredEntries = append(declaredEntries, map[string]any{"key": k, "expectedRevision": entry.Revision})
 		tombstoned = append(tombstoned, k)
 	}
+	// A `meta.lens` root this run tombstones whose `.spec` the destruction-
+	// readiness oracle cannot use is its own reported population, resolved here
+	// because the scan above cannot know what an absent key was for until it has
+	// finished, and because either shape lands in the same place.
+	//
+	// "Cannot use" is the oracle's own condition, not a guess: it is fail-closed
+	// on a spec it cannot read, so the lens counts as declared AND its
+	// holder-type filter never runs — the lens counts for EVERY holder type.
+	// This tombstone takes that maximally-conservative signal away.
+	//
+	// The visibility predicate is the same one the erasure split uses, called
+	// with whatever bytes there were. An absent spec passes nil, which cannot
+	// decode as an eventStream source — which is exactly why the oracle does not
+	// skip it either.
+	var lensesTombstonedWithUnusableSpec []string
+	for _, candidate := range unusableSpecs {
+		rootKey := strings.TrimSuffix(candidate.specKey, ".spec")
+		if !slices.Contains(tombstoned, rootKey) {
+			continue
+		}
+		visible, err := i.lensDeclaredToDestructionOracle(ctx, candidate.specKey, candidate.raw)
+		if err != nil {
+			return nil, err
+		}
+		if visible {
+			lensesTombstonedWithUnusableSpec = append(lensesTombstonedWithUnusableSpec, rootKey)
+		}
+	}
+
+	// The gate runs before the op is submitted, because the tombstone IS the
+	// erasure: once the batch commits the oracle stops seeing the lens, and
+	// nothing in the platform records which holder types its ciphertext was
+	// written under, so this is the last moment at which the operator can be
+	// asked. It covers the NEW erasures only.
+	attested, unusedRetirements, err := enforceUninstallSecureLensRetirement(packageName, opts, secureColumnsErased)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(declaredEntries) == 0 {
 		// Every tombstonable key is already gone. "Nothing to uninstall" is only
 		// the whole truth when nothing was deliberately held back either: with a
@@ -1807,12 +1893,15 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 			note = strings.Join(append([]string{"nothing to tombstone"}, parts...), "; ")
 		}
 		return &UninstallResult{
-			PackageName:                     packageName,
-			Note:                            note,
-			RetentionHoldersPreserved:       retentionHoldersPreserved,
-			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
-			SecureColumnsErased:             secureColumnsErased,
-			SecureColumnsAlreadyErased:      secureColumnsAlreadyErased,
+			PackageName:                      packageName,
+			Note:                             note,
+			RetentionHoldersPreserved:        retentionHoldersPreserved,
+			RetentionHoldersAlreadyStranded:  retentionHoldersAlreadyStranded,
+			SecureColumnsErased:              secureColumnsErased,
+			SecureColumnsAlreadyErased:       secureColumnsAlreadyErased,
+			SecureLensRetirementsAttested:    attested,
+			SecureLensRetirementsUnused:      unusedRetirements,
+			LensesTombstonedWithUnusableSpec: lensesTombstonedWithUnusableSpec,
 		}, nil
 	}
 
@@ -1828,12 +1917,15 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	switch reply.Status {
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
 		return &UninstallResult{
-			PackageName:                     packageName,
-			Tombstoned:                      tombstoned,
-			RetentionHoldersPreserved:       retentionHoldersPreserved,
-			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
-			SecureColumnsErased:             secureColumnsErased,
-			SecureColumnsAlreadyErased:      secureColumnsAlreadyErased,
+			PackageName:                      packageName,
+			Tombstoned:                       tombstoned,
+			RetentionHoldersPreserved:        retentionHoldersPreserved,
+			RetentionHoldersAlreadyStranded:  retentionHoldersAlreadyStranded,
+			SecureColumnsErased:              secureColumnsErased,
+			SecureColumnsAlreadyErased:       secureColumnsAlreadyErased,
+			SecureLensRetirementsAttested:    attested,
+			SecureLensRetirementsUnused:      unusedRetirements,
+			LensesTombstonedWithUnusableSpec: lensesTombstonedWithUnusableSpec,
 		}, nil
 	default:
 		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
@@ -1842,6 +1934,41 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 		}
 		return nil, fmt.Errorf("pkgmgr: UninstallPackage rejected: %s", replyError(reply))
 	}
+}
+
+// unusableSpecCandidate is one lens `.spec` key the scan met in a state the
+// destruction-readiness oracle cannot narrow with, held until the scan has
+// finished and the tombstone set is known. raw is the spec's committed bytes,
+// or nil when the key was absent.
+type unusableSpecCandidate struct {
+	specKey string
+	raw     []byte
+}
+
+// specUnusableToOracle reports whether the destruction-readiness oracle would
+// count the lens carrying these spec bytes for EVERY holder type rather than
+// for the ones it declares — the fail-closed answer it gives when a spec cannot
+// narrow anything.
+//
+// It is the oracle's own condition, in its own terms: declaredLensIDs runs its
+// holder-type filter only on a spec that decoded cleanly into the probe, and
+// that filter (mayHoldHolderType) answers yes for every holder type when there
+// is no targetConfig at either level. So: the bytes fail the typed decode, or
+// they decode with both targetConfig levels absent.
+//
+// Only reached for a spec whose secureColumns this scan read as empty. A spec
+// that declares secure columns is classified by them instead, and a spec with a
+// targetConfig that simply has no secure columns is a plain lens — a genuine
+// "holds no ciphertext", which is what the narrowing is for.
+func specUnusableToOracle(raw []byte) bool {
+	var probe uninstallSpecProbe
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return true
+	}
+	if probe.TargetConfig != nil {
+		return false
+	}
+	return probe.Data == nil || probe.Data.TargetConfig == nil
 }
 
 // retentionHolderNotes renders the operator-facing sentences for an
@@ -1884,31 +2011,80 @@ type UninstallResult struct {
 	// reading it as a benign preservation.
 	RetentionHoldersAlreadyStranded []string
 
-	// SecureColumnsErased names every lens `.spec` key THIS uninstall newly
-	// tombstoned (it was live when read) whose committed
-	// targetConfig.secureColumns was non-empty (retention-class-key-custody-
-	// design.md §30.6) — the same key-custody history Upgrade/Apply refuse to
-	// erase without a declared RetiredSecureColumn, except Uninstall takes a
-	// package NAME, not a Definition, so there is no place for an author to
-	// declare the retirement. This is report-only, never a refusal: the
-	// tombstone commits regardless, and the ciphertext those columns
-	// encrypted stays untouched in the target store while
-	// registry_probe.declaredLensIDs stops seeing the tombstoned lens at all.
-	// Reported so an operator sees custody coverage leaving the destruction-
-	// readiness oracle, exactly as RetentionHoldersAlreadyStranded exists so
-	// real stranded custody is never read as benign.
+	// SecureColumnsErased names every lens `.spec` key whose committed
+	// targetConfig.secureColumns was non-empty and whose lens THIS uninstall
+	// newly erases from the destruction-readiness oracle's view (it was still
+	// visible to registry_probe.declaredLensIDs when read) — the same
+	// key-custody history Upgrade/Apply refuse to erase without a declared
+	// RetiredSecureColumn (retention-class-key-custody-design.md §30.6, §31).
+	// Every entry here is attested: the uninstall is refused unless
+	// UninstallOptions.RetiredSecureLenses names the lens, because the
+	// ciphertext those columns encrypted stays untouched in the target store
+	// while the oracle stops seeing the lens at all. Reported so an operator
+	// sees custody coverage leaving the oracle, exactly as
+	// RetentionHoldersAlreadyStranded exists so real stranded custody is never
+	// read as benign.
 	SecureColumnsErased []UninstallSecureColumnErasure
 
 	// SecureColumnsAlreadyErased names the same shape of entry as
-	// SecureColumnsErased, for a `.spec` key that was ALREADY tombstoned when
-	// this uninstall read it — mirroring the RetentionHoldersPreserved /
-	// RetentionHoldersAlreadyStranded split above for the identical reason: a
-	// spec tombstoned out-of-band before this run already dropped out of
-	// declaredLensIDs's view, so re-tombstoning it here erases nothing NEW.
-	// Reported separately so this uninstall is never blamed for custody loss
-	// it did not cause and cannot undo — the operator still needs to see it,
-	// but as pre-existing damage to escalate, not as this run's own effect.
+	// SecureColumnsErased, for a lens the destruction-readiness oracle already
+	// could not see when this uninstall read it — its vertex root absent,
+	// non-`meta.lens`, or soft-deleted, or its spec an eventStream source.
+	// Mirrors the RetentionHoldersPreserved / RetentionHoldersAlreadyStranded
+	// split above for the identical reason: a lens that dropped out of
+	// declaredLensIDs's view before this run erases nothing NEW here, so it
+	// needs no attestation. Reported separately so this uninstall is never
+	// blamed for custody loss it did not cause and cannot undo — the operator
+	// still needs to see it, but as pre-existing damage to escalate, not as
+	// this run's own effect.
 	SecureColumnsAlreadyErased []UninstallSecureColumnErasure
+
+	// SecureLensRetirementsAttested counts the secure COLUMNS whose custody
+	// record this uninstall erased from the destruction-readiness oracle's view
+	// because the operator attested the retirement in
+	// UninstallOptions.RetiredSecureLenses — the same unit
+	// UpgradeResult.SecureColumnsRetired counts, so a removed lens that took
+	// twenty secure columns with it reports twenty, not one. Each is an
+	// operator attestation that the ciphertext those holder types encrypted is
+	// safe to stop tracking; the platform verified nothing. Reported so an
+	// operator sees custody history leaving the system rather than only its
+	// arrival.
+	SecureLensRetirementsAttested int
+
+	// SecureLensRetirementsUnused names every
+	// UninstallOptions.RetiredSecureLenses entry this uninstall matched to no
+	// actual erasure. An unused attestation excused nothing here, but it sits
+	// in the operator's command line looking load-bearing, and an attestation
+	// carrying a misspelled canonicalName is otherwise indistinguishable from
+	// one that covered something.
+	SecureLensRetirementsUnused []string
+
+	// LensesTombstonedWithUnusableSpec names every `meta.lens` vertex root this
+	// uninstall tombstoned whose `.spec` aspect the destruction-readiness oracle
+	// could not USE — three shapes, all of which land in the same place:
+	//
+	//   - the `.spec` key was absent from Core KV;
+	//   - it was present but did not decode into the oracle's own typed probe
+	//     (a holderTypes list carrying a non-string, a secureColumns field that
+	//     is not a list, …);
+	//   - it decoded but carried no targetConfig at either level.
+	//
+	// On every one of them the oracle's holder-type filter cannot exclude the
+	// lens, so it counts the lens as declaring for EVERY holder type — the most
+	// conservative answer it has. Tombstoning the root removes that signal.
+	//
+	// Report-only, and deliberately NOT gated. There are no declared holder
+	// types left to attest ABOUT, and refusing would make a package whose spec
+	// was corrupted or purged out of band permanently un-uninstallable, which is
+	// the mistake RetentionHoldersAlreadyStranded exists to avoid, in reverse.
+	// So the operator is told, not stopped.
+	//
+	// No package can produce any of these shapes: install writes root and spec
+	// in one atomic batch, uninstall tombstones rather than purges, and
+	// bucketguard refuses a malformed secure-lens declaration outright. A spec
+	// that is present but is not JSON at all is a hard error instead — the scan
+	// refuses to guess at a document it could not read.
+	LensesTombstonedWithUnusableSpec []string
 }
 
 // UninstallSecureColumnErasure names one lens whose committed secure-column
@@ -1922,8 +2098,21 @@ type UninstallSecureColumnErasure struct {
 	// aspect (lensCanonicalNameOf) since a lens NanoID is a salted hash and
 	// does not invert. Empty when that aspect could not be read.
 	Lens string `json:"lens"`
-	// Columns names every committed secure column this lens's spec carried.
+	// Columns names the committed secure columns this lens's spec carried whose
+	// `column` field is a non-empty string — the nameable subset, which is what
+	// a refusal or a warning can print. It is NOT the count of custody records
+	// lost; Declared is.
 	Columns []string `json:"columns"`
+	// Declared counts every entry in the committed targetConfig.secureColumns,
+	// nameable or not: one entry is one key-custody record, and an entry whose
+	// column cannot be named still recorded holder types. This is the unit
+	// SecureLensRetirementsAttested reports, chosen to stay comparable with
+	// UpgradeResult.SecureColumnsRetired beside it — that upgrade-side counter
+	// derives from the nameable subset and so under-counts the same way Columns
+	// would; the two remain comparable because both describe secure columns, and
+	// the divergence only shows on a document carrying an unnameable entry,
+	// which bucketguard refuses at install.
+	Declared int `json:"declaredColumns"`
 	// Holders names every holder type those columns declared, deduplicated
 	// across all of them.
 	Holders []string `json:"holderTypes"`

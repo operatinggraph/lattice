@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -184,17 +185,101 @@ func TestApplyReplyShape(t *testing.T) {
 	}
 }
 
-// TestPackageApplyStatus pins the classification both Apply call sites share.
-// The 502 default reads, in this UI, as "the substrate is unreachable, retry" —
-// so every deterministic package-state conflict has to be 409 instead, or the
-// operator is told to wait out a condition that is permanent. ErrDeclaredKeys-
-// Occupied is exactly that shape: an install refused because its own keys are
-// already committed fails identically on every retry.
+// TestUninstallErrorResponse pins the uninstall handler's whole error contract
+// without a NATS harness: the status AND the body, including the fields the
+// confirm modal re-prompts from.
+//
+// The fields are the point. A console that had to regex lens names out of the
+// refusal prose would break the first time the message was reworded — and the
+// operator would be left with a package that cannot be uninstalled from the
+// UI at all. So the refusal's own Unattested entries are asserted here, key by
+// key, alongside the 409.
+func TestUninstallErrorResponse(t *testing.T) {
+	refusal := &pkgmgr.UndeclaredSecureLensErasureError{
+		PackageName: "demo-domain",
+		Unattested: []pkgmgr.UninstallSecureColumnErasure{
+			{Key: "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec", Lens: "clinicEncountersRead", Columns: []string{"summary"}, Holders: []string{"retentionclass"}},
+			{Key: "vtx.meta.bbbbbbbbbbbbbbbbbbbb.spec", Lens: "", Columns: nil, Declared: 2, Holders: []string{"identity"}},
+		},
+	}
+	// Wrapped, as every production path returns them.
+	status, body := uninstallErrorResponse(fmt.Errorf("uninstall demo-domain: %w", refusal))
+	if status != http.StatusConflict {
+		t.Errorf("status = %d, want %d — an unattested erasure fails identically on every retry", status, http.StatusConflict)
+	}
+	if _, ok := body["error"].(string); !ok {
+		t.Errorf("body carries no error string, so it does not match writeError's shape: %+v", body)
+	}
+	lenses, ok := body["unattestedSecureLenses"].([]map[string]any)
+	if !ok || len(lenses) != 2 {
+		t.Fatalf("unattestedSecureLenses = %+v, want both refused lenses as data", body["unattestedSecureLenses"])
+	}
+	if lenses[0]["lens"] != "clinicEncountersRead" || lenses[0]["key"] != "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec" {
+		t.Errorf("unattestedSecureLenses[0] = %+v, want the lens named with its spec key", lenses[0])
+	}
+	if cols, _ := lenses[0]["columns"].([]string); !slices.Equal(cols, []string{"summary"}) {
+		t.Errorf("unattestedSecureLenses[0].columns = %v, want [summary] — the operator attests ABOUT these", lenses[0]["columns"])
+	}
+	if holders, _ := lenses[0]["holderTypes"].([]string); !slices.Equal(holders, []string{"retentionclass"}) {
+		t.Errorf("unattestedSecureLenses[0].holderTypes = %v, want [retentionclass]", lenses[0]["holderTypes"])
+	}
+	// A lens with no nameable columns renders as an empty array, never null:
+	// the console iterates these fields without a per-field guard. Its declared
+	// count is what gives the modal a subject to show at all.
+	if cols, ok := lenses[1]["columns"].([]string); !ok || len(cols) != 0 {
+		t.Errorf("unattestedSecureLenses[1].columns = %#v, want an empty array rather than null", lenses[1]["columns"])
+	}
+	if lenses[1]["declaredColumns"] != 2 {
+		t.Errorf("unattestedSecureLenses[1].declaredColumns = %v, want 2 — without it the modal shows an empty subject",
+			lenses[1]["declaredColumns"])
+	}
+
+	// A malformed attestation is a bad REQUEST, not a package-state conflict and
+	// not a substrate fault. The console can build one, and 502 would tell the
+	// operator to retry a body that will be rejected identically every time.
+	badStatus, badBody := uninstallErrorResponse(fmt.Errorf("uninstall demo-domain: %w", pkgmgr.ErrInvalidUninstallOptions))
+	if badStatus != http.StatusBadRequest {
+		t.Errorf("a malformed attestation = %d, want %d", badStatus, http.StatusBadRequest)
+	}
+	if _, has := badBody["unattestedSecureLenses"]; has {
+		t.Errorf("a malformed-options refusal names no lenses to attest: %+v", badBody)
+	}
+
+	// The uninstall's own not-installed refusal reaches this helper wrapped, so
+	// the 409 row in TestPackageApplyStatus actually covers the uninstall path.
+	if got, _ := uninstallErrorResponse(fmt.Errorf("uninstall: %w", pkgmgr.ErrNotInstalled)); got != http.StatusConflict {
+		t.Errorf("ErrNotInstalled from uninstall = %d, want %d", got, http.StatusConflict)
+	}
+
+	// Anything else keeps the plain shape and the 502 the UI retries.
+	plainStatus, plainBody := uninstallErrorResponse(errors.New("nats: no responders available"))
+	if plainStatus != http.StatusBadGateway {
+		t.Errorf("an unclassified failure must stay %d, got %d", http.StatusBadGateway, plainStatus)
+	}
+	if _, has := plainBody["unattestedSecureLenses"]; has {
+		t.Errorf("a non-refusal must not carry unattestedSecureLenses: %+v", plainBody)
+	}
+	if plainBody["error"] != "nats: no responders available" {
+		t.Errorf("plain body = %+v, want writeError's {error} shape verbatim", plainBody)
+	}
+}
+
+// TestPackageApplyStatus pins the classification every package-verb call site
+// shares. The 502 default reads, in this UI, as "the substrate is unreachable,
+// retry" — so every deterministic package-state conflict has to be 409 instead,
+// or the operator is told to wait out a condition that is permanent.
+// ErrDeclaredKeysOccupied is exactly that shape: an install refused because its
+// own keys are already committed fails identically on every retry. So is
+// ErrUndeclaredSecureLensErasure, which fails forever until an operator supplies
+// the attestation, and ErrUninstallConflict, whose re-run is an operator's
+// decision about a changed package rather than a transient to retry blind.
 func TestPackageApplyStatus(t *testing.T) {
 	conflicts := []error{
 		pkgmgr.ErrNotInstalled,
 		pkgmgr.ErrCanonicalNameCollision,
 		pkgmgr.ErrDeclaredKeysOccupied,
+		pkgmgr.ErrUndeclaredSecureLensErasure,
+		pkgmgr.ErrUninstallConflict,
 	}
 	for _, base := range conflicts {
 		// Wrapped, as every production path returns them.

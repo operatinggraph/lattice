@@ -4,7 +4,7 @@
 // Usage:
 //
 //	lattice-pkg install <path-to-package-dir>
-//	lattice-pkg uninstall <package-canonical-name>
+//	lattice-pkg uninstall [--retire-secure-lens <lens>=<note>]... <package-canonical-name>
 //	lattice-pkg list
 //
 // The operator credential is the admin actor NanoID read from
@@ -114,11 +114,18 @@ func main() {
 			os.Exit(1)
 		}
 	case "uninstall":
-		if len(args) != 1 {
-			fmt.Fprintln(os.Stderr, "uninstall requires <package-canonical-name>")
+		fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+		var retired retiredSecureLensFlag
+		fs.Var(&retired, "retire-secure-lens",
+			"attest that a Secure Lens's key-custody record may leave the destruction-readiness oracle's view: <lens canonicalName>=<why this history is safe to stop carrying> (repeatable)")
+		_ = fs.Parse(args)
+		rest := fs.Args()
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "uninstall requires [--retire-secure-lens <lens>=<note>] <package-canonical-name>")
 			os.Exit(2)
 		}
-		if err := runUninstall(args[0], natsURL, bootstrapPath, logger); err != nil {
+		opts := pkgmgr.UninstallOptions{RetiredSecureLenses: retired.attestations}
+		if err := runUninstall(rest[0], natsURL, bootstrapPath, opts, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "uninstall failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -148,7 +155,7 @@ func usage() {
 Usage:
   lattice-pkg install [--force] [--dry-run] <path-to-package-dir>
   lattice-pkg upgrade [--dry-run] <path-to-package-dir>
-  lattice-pkg uninstall <package-canonical-name>
+  lattice-pkg uninstall [--retire-secure-lens <lens>=<note>]... <package-canonical-name>
   lattice-pkg list
   lattice-pkg apply-proposal <capability-proposal-id>
 
@@ -158,6 +165,13 @@ install dispatches on installed state:
   different version    → in-place upgrade (diff-apply)
 upgrade is the explicit in-place diff-apply (errors if not installed).
 --dry-run previews the create/update/tombstone delta without submitting.
+
+uninstall refuses to tombstone a Secure Lens the destruction-readiness oracle
+can still see, because the ciphertext its secure columns encrypted stays in the
+target store while the oracle stops seeing the lens at all. --retire-secure-lens
+is the operator's per-lens attestation that the history is safe to stop
+carrying; it is repeatable, and the note after the '=' is the only record of who
+decided that and why.
 
 apply-proposal materializes an APPROVED AI-authored capability proposal
 (see "lattice capability review") into a Definition and installs/upgrades
@@ -349,7 +363,51 @@ func logKeys(logger *slog.Logger, op string, keys []string) {
 	}
 }
 
-func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logger) error {
+// retiredSecureLensFlag collects the repeatable `--retire-secure-lens
+// <lens>=<note>` operator attestations into pkgmgr.RetiredSecureLens values.
+//
+// The note is everything after the FIRST `=`, so a reason that itself contains
+// an equals sign survives intact. The lens canonicalName is therefore assumed
+// not to contain one, and nothing enforces that: canonicalName is not
+// charset-validated anywhere, so a lens whose name carries an `=` (or a `'`,
+// which the refusal's own single-quoted remedy cannot render either) is not
+// attestable through this flag at all. Such a name goes through Loupe's
+// POST /api/packages/uninstall instead, whose retiredSecureLenses entries carry
+// the name as a JSON string with no shell or delimiter in the way.
+//
+// Both halves are required here as well as in pkgmgr: a flag rejected at parse
+// time names the flag the operator typed, which the installer's own refusal —
+// one call away from the command line — cannot.
+type retiredSecureLensFlag struct {
+	attestations []pkgmgr.RetiredSecureLens
+}
+
+// String renders the collected attestations for flag's own usage output.
+func (f *retiredSecureLensFlag) String() string {
+	names := make([]string, 0, len(f.attestations))
+	for _, a := range f.attestations {
+		names = append(names, a.Lens)
+	}
+	return strings.Join(names, ",")
+}
+
+// Set parses one `<lens>=<note>` occurrence of the flag.
+func (f *retiredSecureLensFlag) Set(v string) error {
+	lens, note, ok := strings.Cut(v, "=")
+	if !ok {
+		return fmt.Errorf("expected <lens canonicalName>=<why this history is safe to stop carrying>, got %q", v)
+	}
+	if strings.TrimSpace(lens) == "" {
+		return fmt.Errorf("%q names no lens — the canonicalName as the INSTALLED package declares it goes before the '='", v)
+	}
+	if strings.TrimSpace(note) == "" {
+		return fmt.Errorf("%q carries no note — the attestation's whole content is why the ciphertext that lens's secure columns encrypted is safe to stop tracking; state it after the '='", v)
+	}
+	f.attestations = append(f.attestations, pkgmgr.RetiredSecureLens{Lens: lens, Note: note})
+	return nil
+}
+
+func runUninstall(packageName, natsURL, bootstrapPath string, opts pkgmgr.UninstallOptions, logger *slog.Logger) error {
 	_, adminActor, err := loadBootstrap(bootstrapPath)
 	if err != nil {
 		return err
@@ -369,7 +427,7 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 	inst := newInstaller(conn, adminActor)
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
-	res, err := inst.Uninstall(ctx, packageName)
+	res, err := inst.Uninstall(ctx, packageName, opts)
 	if err != nil {
 		return err
 	}
@@ -394,11 +452,11 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 			"keys", res.RetentionHoldersAlreadyStranded,
 		)
 	}
-	// Report-only, never a refusal: Uninstall takes a package NAME, not a
-	// Definition, so there is no place for an author to declare the retirement
-	// Upgrade/Apply's RetiredSecureColumns guard would demand. The ciphertext
-	// these columns encrypted stays in the target store; the operator needs to
-	// know the destruction-readiness oracle just stopped seeing it.
+	// Every entry here was attested by a --retire-secure-lens flag on this very
+	// command line — an unattested one is a refusal, and this line is never
+	// reached. Said out loud anyway: the ciphertext these columns encrypted
+	// stays in the target store, and the operator's own attestation is the only
+	// thing that let the destruction-readiness oracle stop seeing it.
 	for _, e := range res.SecureColumnsErased {
 		logger.Warn("uninstall tombstoned a lens whose committed secure columns still held key-custody history — the destruction-readiness oracle no longer sees this lens; ciphertext those columns encrypted stays in the target store",
 			"lens", e.Lens,
@@ -419,6 +477,36 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 			"key", e.Key,
 			"columns", e.Columns,
 			"holderTypes", e.Holders,
+		)
+	}
+	// The count beside the per-lens warnings above, in the unit an upgrade's
+	// SecureColumnsRetired uses (secure columns, not lenses) so the two read as
+	// the same measure of custody history leaving the system. The platform
+	// verified nothing about the ciphertext — the attestation is the operator's
+	// word, and this is the receipt for it.
+	if res.SecureLensRetirementsAttested > 0 {
+		logger.Warn("secure-column key-custody record(s) retired on the operator's --retire-secure-lens attestation — the destruction-readiness oracle no longer sees them, and the platform did not verify their ciphertext is gone",
+			"count", res.SecureLensRetirementsAttested)
+	}
+	// An attestation that matched no erasure is not a failure — it excused
+	// nothing, and the uninstall stands. But it is the shape a misspelled
+	// canonicalName takes: the flag was accepted, the lens it named was not the
+	// one being erased, and without this line the operator would read a clean
+	// uninstall as confirmation that the name was right.
+	if len(res.SecureLensRetirementsUnused) > 0 {
+		logger.Warn("--retire-secure-lens attestation(s) matched no erasure in this uninstall — check the canonicalName against the one the installed package declares",
+			"lenses", res.SecureLensRetirementsUnused)
+	}
+	// A lens root tombstoned while the oracle could not use its `.spec` at all —
+	// absent, undecodable to the oracle's probe, or carrying no targetConfig. On
+	// each of those the oracle counts the lens for EVERY holder type, so this
+	// tombstone removes a conservative signal while leaving nothing declared to
+	// attest about. Not a refusal for exactly that reason; named so the operator
+	// can escalate a state no package can produce.
+	if len(res.LensesTombstonedWithUnusableSpec) > 0 {
+		logger.Warn("tombstoned meta.lens root(s) whose .spec the destruction-readiness oracle could not use — absent, undecodable, or carrying no targetConfig; the oracle counted each of these for EVERY holder type and now counts them for none; no package can produce this state, escalate it",
+			"count", len(res.LensesTombstonedWithUnusableSpec),
+			"keys", res.LensesTombstonedWithUnusableSpec,
 		)
 	}
 	logger.Info("uninstall committed",

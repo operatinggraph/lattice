@@ -945,6 +945,157 @@ func TestPkgLogicJS(t *testing.T) {
 	if strings.Contains(alreadyErasedLine["text"].(string), "clinicEncountersRead") {
 		t.Errorf("uninstallResultLines alreadyErased line = %v, must NOT name the this-run-erased lens", alreadyErasedLine)
 	}
+
+	// The attestation's own two lines: what the operator's word retired (plain
+	// — it is what they asked for) and any attestation that matched nothing
+	// (warn — the shape of a misspelled lens name, which a clean uninstall
+	// would otherwise read as confirmation the spelling was right).
+	attestLines, ok := call(t, vm, "uninstallResultLines", map[string]any{
+		"secureLensRetirementsAttested": 3,
+		"secureLensRetirementsUnused":   []any{"mispelledLens"},
+	}).([]any)
+	if !ok || len(attestLines) != 2 {
+		t.Fatalf("uninstallResultLines(attested+unused) = %v, want exactly 2 lines", attestLines)
+	}
+	retiredLine := attestLines[0].(map[string]any)
+	if retiredLine["warn"] != false || !strings.Contains(retiredLine["text"].(string), "3 secure-column") {
+		t.Errorf("uninstallResultLines retired line = %v, want warn=false naming the count", retiredLine)
+	}
+	if !strings.Contains(retiredLine["text"].(string), "did not verify") {
+		t.Errorf("uninstallResultLines retired line = %v, must say the platform verified nothing", retiredLine)
+	}
+	unusedLine := attestLines[1].(map[string]any)
+	if unusedLine["warn"] != true || !strings.Contains(unusedLine["text"].(string), "mispelledLens") {
+		t.Errorf("uninstallResultLines unused line = %v, want warn=true naming the unmatched attestation", unusedLine)
+	}
+	// The unusable-spec population: its own line, warn, naming the root keys.
+	// The oracle counted each of these for EVERY holder type and now counts them
+	// for none, and no package can produce the state.
+	unusableLines, ok := call(t, vm, "uninstallResultLines", map[string]any{
+		"lensesTombstonedWithUnusableSpec": []any{"vtx.meta.cccccccccccccccccccc"},
+	}).([]any)
+	if !ok || len(unusableLines) != 1 {
+		t.Fatalf("uninstallResultLines(unusable spec) = %v, want 1 line", unusableLines)
+	}
+	if line := unusableLines[0].(map[string]any); line["warn"] != true ||
+		!strings.Contains(line["text"].(string), "vtx.meta.cccccccccccccccccccc") ||
+		!strings.Contains(line["text"].(string), "every holder type") {
+		t.Errorf("uninstallResultLines(unusable spec)[0] = %v, want warn=true naming the root and what the oracle lost", line)
+	}
+
+	// Neither line appears when there was nothing to attest.
+	if got, _ := call(t, vm, "uninstallResultLines", map[string]any{"secureLensRetirementsAttested": 0}).([]any); len(got) != 0 {
+		t.Errorf("uninstallResultLines(nothing attested) = %v, want zero lines", got)
+	}
+
+	// uninstallAttestationPrompts / uninstallRetryBody are the two-step retry:
+	// the console reads WHICH lenses to ask about from the server's fields, and
+	// re-submits only when every one of them has a note. Without this pair a
+	// package holding a live Secure Lens is un-uninstallable from the console —
+	// the server refuses, and the modal has nowhere to put the answer.
+	if got, ok := call(t, vm, "uninstallAttestationPrompts", map[string]any{}).([]any); !ok || len(got) != 0 {
+		t.Fatalf("uninstallAttestationPrompts(success reply) = %v, want no prompts", got)
+	}
+	if got, ok := call(t, vm, "uninstallAttestationPrompts", map[string]any{
+		"error": "uninstall failed: nats: no responders available",
+	}).([]any); !ok || len(got) != 0 {
+		t.Fatalf("uninstallAttestationPrompts(unrelated failure) = %v, want no prompts", got)
+	}
+
+	refusal := map[string]any{
+		"error": "pkgmgr: uninstall refused — …",
+		"unattestedSecureLenses": []any{
+			map[string]any{"lens": "clinicEncountersRead", "key": "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec",
+				"columns": []any{"summary"}, "declaredColumns": 3, "holderTypes": []any{"retentionclass"}},
+			map[string]any{"lens": "leaseApplicationsRead", "key": "vtx.meta.bbbbbbbbbbbbbbbbbbbb.spec",
+				"columns": []any{"applicant_name"}, "holderTypes": []any{"identity"}},
+		},
+	}
+	prompts, ok := call(t, vm, "uninstallAttestationPrompts", refusal).([]any)
+	if !ok || len(prompts) != 2 {
+		t.Fatalf("uninstallAttestationPrompts(refusal) = %v, want one prompt per refused lens", prompts)
+	}
+	first := prompts[0].(map[string]any)
+	if first["lens"] != "clinicEncountersRead" || first["key"] != "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec" || first["resolvable"] != true {
+		t.Errorf("uninstallAttestationPrompts[0] = %v, want the lens, its key, and resolvable", first)
+	}
+	if cols, _ := first["columns"].([]any); len(cols) != 1 || cols[0] != "summary" {
+		t.Errorf("uninstallAttestationPrompts[0].columns = %v — the operator attests ABOUT these", first["columns"])
+	}
+	if toFloat(first["declaredColumns"]) != 3 {
+		t.Errorf("uninstallAttestationPrompts[0].declaredColumns = %v, want 3 carried through from the server", first["declaredColumns"])
+	}
+
+	// attestationSubjectLine names what the operator is attesting ABOUT. With
+	// every column nameable the declared count is redundant and stays out of the
+	// way; when a committed spec carries an entry with no column name the count
+	// is the only thing that names a subject at all, and an attestation whose
+	// subject is invisible is not one.
+	plain := call(t, vm, "attestationSubjectLine", map[string]any{
+		"columns": []any{"summary"}, "declaredColumns": 1, "holderTypes": []any{"retentionclass"},
+	}).(string)
+	if !strings.Contains(plain, "summary") || !strings.Contains(plain, "retentionclass") {
+		t.Errorf("attestationSubjectLine(named) = %q, want the column and holder type", plain)
+	}
+	if strings.Contains(plain, "declared") {
+		t.Errorf("attestationSubjectLine(named) = %q, must not clutter the line when every column is nameable", plain)
+	}
+	subjectless := call(t, vm, "attestationSubjectLine", map[string]any{
+		"columns": []any{}, "declaredColumns": 2, "holderTypes": []any{"identity"},
+	}).(string)
+	if !strings.Contains(subjectless, "2 declared secure column(s)") {
+		t.Errorf("attestationSubjectLine(unnameable) = %q, want the declared count — it is the only visible subject", subjectless)
+	}
+	if strings.Contains(subjectless, ": ·") || strings.Contains(subjectless, "—") {
+		t.Errorf("attestationSubjectLine(unnameable) = %q, want words rather than an empty dash", subjectless)
+	}
+
+	// Not ready: no notes at all, one note left blank, one note all whitespace.
+	if got := call(t, vm, "uninstallRetryBody", "demo-domain", prompts, []any{}); got != nil {
+		t.Errorf("uninstallRetryBody(no notes) = %v, want null so the button stays disabled", got)
+	}
+	if got := call(t, vm, "uninstallRetryBody", "demo-domain", prompts, []any{"a reason", ""}); got != nil {
+		t.Errorf("uninstallRetryBody(one note missing) = %v, want null — every lens needs its own note", got)
+	}
+	if got := call(t, vm, "uninstallRetryBody", "demo-domain", prompts, []any{"a reason", "   "}); got != nil {
+		t.Errorf("uninstallRetryBody(whitespace note) = %v, want null — an empty attestation attests nothing", got)
+	}
+	if got := call(t, vm, "uninstallRetryBody", "demo-domain", []any{}, []any{}); got != nil {
+		t.Errorf("uninstallRetryBody(no prompts) = %v, want null — there is nothing to re-submit", got)
+	}
+
+	// Ready: the payload the server's own request struct expects, notes trimmed.
+	retry, ok := call(t, vm, "uninstallRetryBody", "demo-domain", prompts, []any{" swept 2026-08 ", "no ciphertext written"}).(map[string]any)
+	if !ok {
+		t.Fatalf("uninstallRetryBody(complete) = %v, want a submittable body", retry)
+	}
+	if retry["name"] != "demo-domain" {
+		t.Errorf("uninstallRetryBody name = %v, want demo-domain", retry["name"])
+	}
+	retired, ok := retry["retiredSecureLenses"].([]any)
+	if !ok || len(retired) != 2 {
+		t.Fatalf("uninstallRetryBody retiredSecureLenses = %v, want one per lens", retry["retiredSecureLenses"])
+	}
+	att0 := retired[0].(map[string]any)
+	if att0["lens"] != "clinicEncountersRead" || att0["note"] != "swept 2026-08" {
+		t.Errorf("uninstallRetryBody retiredSecureLenses[0] = %v, want the lens keyed to its own trimmed note", att0)
+	}
+
+	// A lens whose canonicalName the server could not read cannot be attested
+	// from the modal — the attestation is keyed by that name, so the console
+	// has nothing to key it with and must send the operator to the CLI rather
+	// than submit a name nobody verified.
+	unnamed, ok := call(t, vm, "uninstallAttestationPrompts", map[string]any{
+		"unattestedSecureLenses": []any{
+			map[string]any{"lens": "", "key": "vtx.meta.cccccccccccccccccccc.spec", "columns": []any{}, "holderTypes": []any{"identity"}},
+		},
+	}).([]any)
+	if !ok || len(unnamed) != 1 || unnamed[0].(map[string]any)["resolvable"] != false {
+		t.Fatalf("uninstallAttestationPrompts(unreadable canonicalName) = %v, want one unresolvable prompt", unnamed)
+	}
+	if got := call(t, vm, "uninstallRetryBody", "demo-domain", unnamed, []any{"a reason"}); got != nil {
+		t.Errorf("uninstallRetryBody(unresolvable lens) = %v, want null even with a note typed", got)
+	}
 }
 
 // TestScrubberLogicJS pins the map scrubber's pure frame math (logic/scrubber.js,

@@ -204,7 +204,17 @@ func TestInstallFlow_F001_ReinstallNoOrphans(t *testing.T) {
 	assertRoleKeysDeclared(t, res.DeclaredKeys)
 
 	// Uninstall — every declared key must end up tombstoned (no live orphan).
-	if _, err := inst.Uninstall(ctx, "identity-domain"); err != nil {
+	// identity-domain ships a Secure Lens, so the uninstall carries the
+	// operator attestation pkgmgr demands before a live lens's key-custody
+	// record may leave the destruction-readiness oracle's view; without it the
+	// uninstall is refused and this test would be asserting nothing about
+	// orphans at all.
+	if _, err := inst.Uninstall(ctx, "identity-domain", pkgmgr.UninstallOptions{
+		RetiredSecureLenses: []pkgmgr.RetiredSecureLens{{
+			Lens: "identityCredentialsRead",
+			Note: "test harness — this package's credential ciphertext exists only for the life of this run",
+		}},
+	}); err != nil {
 		t.Fatalf("uninstall identity-domain: %v", err)
 	}
 	for _, k := range res.DeclaredKeys {

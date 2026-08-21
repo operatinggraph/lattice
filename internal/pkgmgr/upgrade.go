@@ -737,7 +737,11 @@ func widenSecureColumnsForUpdate(key string, committed, newDoc map[string]any) i
 		if column == "" {
 			continue
 		}
-		history[column] = unionStrings(stringsOf(entry["holderTypes"]), nil)
+		// Union, not assign: a column can appear at both targetConfig levels, and
+		// the committed custody history is everything either level recorded. A
+		// plain assignment is last-wins, which drops one level's holder types on
+		// the floor — the same shape of loss the widen exists to prevent.
+		history[column] = unionStrings(history[column], stringsOf(entry["holderTypes"]))
 	}
 	widened := 0
 	for _, entry := range secureColumnsOf(newDoc) {
@@ -887,11 +891,59 @@ func (i *Installer) lensCanonicalNameOf(ctx context.Context, specKey string) str
 // maps, accepting either the freshly-built []map[string]any or the
 // json.Unmarshal-round-tripped []any. Nil-safe; a document that is not a lens
 // spec, or a lens spec with no secure columns, yields nothing.
+//
+// BOTH targetConfig levels are read — the bare-body one and the
+// stored-envelope (`data`) one — never one in preference to the other, because
+// the destruction-readiness oracle's own mayHoldHolderType loops both for the
+// same reason. Reading only the level a single-level lookup happens to pick
+// leaves a document carrying a decoy top-level targetConfig beside a real
+// `data.targetConfig.secureColumns` looking like a lens with no secure columns
+// at all: no erasure is constructed for it, so no guard is ever consulted, and
+// the custody record leaves silently.
+//
+// A column NAME appearing at both levels yields ONE entry carrying the union of
+// both levels' holderTypes, because it is one column and one custody record:
+// emitting it twice would make every consumer that counts entries — the
+// retirement counters, the refusal's own printed bill — report one erasure as
+// two. Entries with no column name are never merged: unnameable is not an
+// identity, and two of them are two records.
+//
+// The returned maps are the document's OWN, so the write path can widen
+// holderTypes in place. The one exception is a merged entry, which is a fresh
+// map: writing to it would not reach the document. That costs nothing because
+// only a hand-corrupted document can carry a column at both levels at all —
+// make_aspect writes the envelope only — and the write path's input is always a
+// document this process just built.
 func secureColumnsOf(doc map[string]any) []map[string]any {
-	cfg := targetConfigOf(doc)
-	if cfg == nil {
-		return nil
+	var out []map[string]any
+	byColumn := make(map[string]int)
+	for _, cfg := range targetConfigsOf(doc) {
+		for _, entry := range secureColumnEntriesOf(cfg) {
+			column, _ := entry["column"].(string)
+			if column == "" {
+				out = append(out, entry)
+				continue
+			}
+			idx, seen := byColumn[column]
+			if !seen {
+				byColumn[column] = len(out)
+				out = append(out, entry)
+				continue
+			}
+			merged := make(map[string]any, len(out[idx]))
+			for k, v := range out[idx] {
+				merged[k] = v
+			}
+			merged["holderTypes"] = unionStrings(stringsOf(out[idx]["holderTypes"]), stringsOf(entry["holderTypes"]))
+			out[idx] = merged
+		}
 	}
+	return out
+}
+
+// secureColumnEntriesOf normalizes one targetConfig's secureColumns list into
+// mutable maps, tolerating both in-memory shapes the field takes.
+func secureColumnEntriesOf(cfg map[string]any) []map[string]any {
 	switch raw := cfg["secureColumns"].(type) {
 	case []map[string]any:
 		return raw
@@ -908,26 +960,30 @@ func secureColumnsOf(doc map[string]any) []map[string]any {
 	}
 }
 
-// targetConfigOf pulls targetConfig out of a lens spec document, unwrapping the
+// targetConfigsOf returns every targetConfig a lens spec document carries — the
+// bare-body one and the stored-envelope (`data`) one — in that order, skipping
+// absent levels.
+//
+// Both shapes are accepted because a spec reaches its readers either way: the
 // stored aspect envelope ({class, isDeleted, data, vertexKey, localName} —
 // docAspect's shape, which both a freshly built and a KV-round-tripped document
-// carry) and also accepting a bare spec body. specBodyOf above takes the same
-// two shapes, for the same reason Refractor's own loader does: a spec that
-// reaches a reader unwrapped must not be mistaken for a spec with no
-// targetConfig. Nil for anything else.
-func targetConfigOf(doc map[string]any) map[string]any {
+// carry) and the bare spec body. specBodyOf above takes the same two, for the
+// same reason Refractor's own loader does — a spec that arrives unwrapped must
+// not be mistaken for a spec with no targetConfig.
+func targetConfigsOf(doc map[string]any) []map[string]any {
 	if doc == nil {
 		return nil
 	}
+	var out []map[string]any
 	if cfg, ok := doc["targetConfig"].(map[string]any); ok {
-		return cfg
+		out = append(out, cfg)
 	}
-	data, ok := doc["data"].(map[string]any)
-	if !ok {
-		return nil
+	if data, ok := doc["data"].(map[string]any); ok {
+		if cfg, ok := data["targetConfig"].(map[string]any); ok {
+			out = append(out, cfg)
+		}
 	}
-	cfg, _ := data["targetConfig"].(map[string]any)
-	return cfg
+	return out
 }
 
 // stringsOf normalizes a JSON string list held either as a Go []string (freshly

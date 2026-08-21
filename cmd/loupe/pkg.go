@@ -5,7 +5,8 @@ package main
 //	GET  /api/package?key=          → manifest + graph-resolved contents
 //	POST /api/packages/install     → multipart manifest.yaml; upgrade-aware Apply
 //	POST /api/packages/upgrade     → same, but a missing base install is an error
-//	POST /api/packages/uninstall   → JSON {name}; tombstones the declared keys
+//	POST /api/packages/uninstall   → JSON {name, retiredSecureLenses}; tombstones
+//	                                  the declared keys
 //
 // A package is a compiled-in Go Definition (internal/pkgmgr); the uploaded
 // manifest.yaml only names + cross-checks it. Install/upgrade/uninstall are
@@ -363,18 +364,87 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 // Every error in the 409 arm is the opposite: a deterministic conflict with the
 // kernel's current package state that no amount of retrying resolves. Reporting
 // one as 502 tells an operator to wait out a condition that will still be there
-// tomorrow. Both Apply call sites (the multipart install/upgrade handlers and
-// the capability-proposal apply in review.go) share this function so the two
-// cannot classify the same error differently.
+// tomorrow. Every call site that runs a pkgmgr package verb shares this function
+// — the multipart install/upgrade handlers, the capability-proposal apply in
+// review.go, and the uninstall handler — so no two can classify the same error
+// differently. An unattested Secure-Lens erasure is exactly the 409 shape: it
+// fails identically forever until an operator supplies the attestation. So is a
+// raced declared key: the batch was rejected against the state this run read,
+// and re-running is an operator's decision about a changed package, not a
+// transient the UI should retry on its own.
 func packageApplyStatus(err error) int {
 	switch {
 	case errors.Is(err, pkgmgr.ErrNotInstalled),
 		errors.Is(err, pkgmgr.ErrCanonicalNameCollision),
-		errors.Is(err, pkgmgr.ErrDeclaredKeysOccupied):
+		errors.Is(err, pkgmgr.ErrDeclaredKeysOccupied),
+		errors.Is(err, pkgmgr.ErrUndeclaredSecureLensErasure),
+		errors.Is(err, pkgmgr.ErrUninstallConflict):
 		return http.StatusConflict
 	default:
 		return http.StatusBadGateway
 	}
+}
+
+// uninstallErrorResponse maps an uninstall failure to its HTTP status and the
+// JSON body the console receives — pure, so the whole decision is testable
+// without a NATS-backed handler harness.
+//
+// The body always carries the same {"error": msg} shape writeError produces, so
+// every existing client path keeps working unchanged. On the unattested
+// Secure-Lens refusal it carries one MORE field: unattestedSecureLenses, each
+// entry naming the lens, its spec key, its secure columns and their holder
+// types, read from the typed error's own fields via errors.As.
+//
+// Three statuses, not two: 400 for a malformed attestation (a bad request the
+// console itself can build), 409 for every deterministic package-state
+// refusal via packageApplyStatus, and its 502 default for the rest.
+//
+// Those fields exist so the confirm modal can re-prompt for a note per lens
+// from DATA. The alternative is a regex over the refusal prose, which is the
+// defect the typed error was introduced to prevent: a distinction the code
+// MAKES is carried in fields, never scraped from a rendered message.
+func uninstallErrorResponse(err error) (int, map[string]any) {
+	body := map[string]any{"error": err.Error()}
+	if errors.Is(err, pkgmgr.ErrInvalidUninstallOptions) {
+		// A malformed attestation is a bad REQUEST, not a conflict with the
+		// kernel's package state and certainly not a substrate fault: the
+		// console can produce one (two refused erasures sharing a lens name
+		// would have the confirm modal submit two attestations under it), and
+		// 502 would tell the operator to retry a body that will be rejected
+		// identically every time.
+		return http.StatusBadRequest, body
+	}
+	var refusal *pkgmgr.UndeclaredSecureLensErasureError
+	if errors.As(err, &refusal) {
+		lenses := make([]map[string]any, 0, len(refusal.Unattested))
+		for _, erasure := range refusal.Unattested {
+			lenses = append(lenses, map[string]any{
+				"lens": erasure.Lens,
+				"key":  erasure.Key,
+				// columns is the NAMEABLE subset; declaredColumns is how many
+				// custody records the erasure actually covers. They differ on a
+				// spec carrying an entry with no column name, and the console
+				// needs the count or it renders an attestation with no visible
+				// subject.
+				"columns":         stringsOrEmpty(erasure.Columns),
+				"declaredColumns": erasure.Declared,
+				"holderTypes":     stringsOrEmpty(erasure.Holders),
+			})
+		}
+		body["unattestedSecureLenses"] = lenses
+	}
+	return packageApplyStatus(err), body
+}
+
+// stringsOrEmpty renders a nil string slice as an empty JSON array rather than
+// null, so the console can iterate every field of an unattestedSecureLenses
+// entry without a per-field guard — a lens whose columns were all unnameable
+// is the one case that produces nil, and it must not read as a missing field.
+func stringsOrEmpty(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 // handlePackagesInstall implements POST /api/packages/install (multipart:
@@ -476,10 +546,16 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 }
 
 // handlePackagesUninstall implements POST /api/packages/uninstall with a JSON
-// {"name": "<canonical package name>"} body. The typed confirm lives in the
-// UI; the server just requires an exact name. Soft-delete only — the
-// UninstallPackage op tombstones every declared key except a retention-class
-// holder, which the installer preserves and reports back.
+// {"name": "<canonical package name>", "retiredSecureLenses": [{lens, note}]}
+// body. The typed confirm lives in the UI; the server just requires an exact
+// name. Soft-delete only — the UninstallPackage op tombstones every declared
+// key except a retention-class holder, which the installer preserves and
+// reports back.
+//
+// retiredSecureLenses carries the operator attestation pkgmgr demands before it
+// will erase a Secure Lens's key-custody record from the destruction-readiness
+// oracle's view; without it such an uninstall is refused, and the refusal is a
+// 409 (packageApplyStatus) because it fails identically on every retry.
 func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
@@ -501,6 +577,14 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 	}
 	var req struct {
 		Name string `json:"name"`
+		// RetiredSecureLenses carries the operator's per-lens attestation that
+		// this uninstall may erase a Secure Lens's key-custody record from the
+		// destruction-readiness oracle's view. Absent one, an uninstall that
+		// would newly erase such a record is refused (409, below).
+		RetiredSecureLenses []struct {
+			Lens string `json:"lens"`
+			Note string `json:"note"`
+		} `json:"retiredSecureLenses"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "parse body: "+err.Error())
@@ -510,6 +594,10 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	opts := pkgmgr.UninstallOptions{}
+	for _, att := range req.RetiredSecureLenses {
+		opts.RetiredSecureLenses = append(opts.RetiredSecureLenses, pkgmgr.RetiredSecureLens{Lens: att.Lens, Note: att.Note})
+	}
 
 	inst := newInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
@@ -517,19 +605,23 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 
 	ctx, cancel := s.pkgContext(r)
 	defer cancel()
-	res, err := inst.Uninstall(ctx, req.Name)
+	res, err := inst.Uninstall(ctx, req.Name, opts)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway, err.Error())
+		status, body := uninstallErrorResponse(err)
+		s.writeJSON(w, status, body)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"packageName":                     res.PackageName,
-		"tombstoned":                      res.Tombstoned,
-		"retentionHoldersPreserved":       res.RetentionHoldersPreserved,
-		"retentionHoldersAlreadyStranded": res.RetentionHoldersAlreadyStranded,
-		"secureColumnsErased":             res.SecureColumnsErased,
-		"secureColumnsAlreadyErased":      res.SecureColumnsAlreadyErased,
-		"note":                            res.Note,
+		"packageName":                      res.PackageName,
+		"tombstoned":                       res.Tombstoned,
+		"retentionHoldersPreserved":        res.RetentionHoldersPreserved,
+		"retentionHoldersAlreadyStranded":  res.RetentionHoldersAlreadyStranded,
+		"secureColumnsErased":              res.SecureColumnsErased,
+		"secureColumnsAlreadyErased":       res.SecureColumnsAlreadyErased,
+		"secureLensRetirementsAttested":    res.SecureLensRetirementsAttested,
+		"secureLensRetirementsUnused":      res.SecureLensRetirementsUnused,
+		"lensesTombstonedWithUnusableSpec": res.LensesTombstonedWithUnusableSpec,
+		"note":                             res.Note,
 	})
 }
 
