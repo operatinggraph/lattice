@@ -1,5 +1,9 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-14 · `0bb6daea` · [Pkgmgr] un-tombstone prerequisite CLOSED — a revoked grant/role key no longer silently revives on the next upgrade; Contract #8 §8.6 edit staged uncommitted for Andrew
+- 2026-08-14 · `63f53d67` · [Refractor] personal-lens D1 grant-change trigger CLOSED — Inc 1 `b69487ef` (notification edge) + Inc 2 `63f53d67` (convergence sweep); adversarial pass caught a Health-entry resurrection, fixed same commit
+- 2026-08-14 · `afdbc5f4` · [Processor] a degraded DDL cache no longer trusts a stale-or-chain-walked answer; empty-class arm re-filed as its own gap
+- 2026-08-14 · `0a9ff629` · [Refractor] plain-lens neighbour derivation Inc 4b CLOSED — the seeded branch's multi-position gap; Inc 5 stays deferred behind its own trigger
 - 2026-08-14 · `8f421d80` · [Refractor] plain-lens neighbour derivation Inc 3 — the write licence (5 conjuncts) + auth-plane threading; still shadow-only, 3 cold reviews + 1 fix round + 1 verify pass found zero live defects
 - 2026-08-14 · `cdc0b693` · [Refractor] plain-lens divergence Auditor (Fire 2) — a read-only per-row correctness verdict for 65 lenses the sweep never covered
 - 2026-08-13 · `15c46beb` · [Processor] live-read round-trip collapse Fire 1 — KVGetMulti batching + a per-execution instanceOf memo; unblocks verticals.md self-pay; Fires 2–3 shelved

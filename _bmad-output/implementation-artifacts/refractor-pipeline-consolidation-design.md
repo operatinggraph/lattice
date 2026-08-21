@@ -116,8 +116,30 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   the **whole tree in 88s with zero failures**. A bare `go test` defaults `-p` to `NumCPU` (8 here), running
   8 concurrent embedded-NATS test binaries; capping to `-p 2` held total test-binary RSS at ~128 MB. Use the
   capped form on this box — it is a host-contention signature, not a code defect (Whetstone-owned board row).
-- **Inc 5 not started.** `pipeline.go` is 2238 lines post-Inc-4. Largest remaining self-contained candidates,
-  ranked: (1) the rule-installation / taxonomy-expansion cluster — `useFullEngineBranches` plus
-  `narrowingBlockRankOf`, `sortedLabelList`, `labelsWithoutExpansion` (~704-1125, ~420 lines, contiguous);
-  (2) the narrowing/relevance predicate cluster — `plainReactsTo` … `LinkEventRelevant` (~1298-1567, ~270
-  lines, contiguous). Re-verify live; do not trust these pre-Inc-5 numbers.
+- **Inc 5: shipped `06874635` — the FINAL increment (Andrew, 2026-08-20: "make it the last one").** Both
+  remaining candidates taken in one fire, as two cuts re-verified live at `a7c94ef3`: `pipeline.go:651-1114`
+  → new `ruleinstall.go` (`UseFullEngine`, `UseFullEngineBranches`, `var narrowingBlockRank`,
+  `narrowingBlockRankOf`, `UseFullEngineBranchesForReDerivation`, `useFullEngineBranches`,
+  `sortedLabelList`, `labelsWithoutExpansion` — installing/compiling a rule + taxonomy label expansion);
+  `pipeline.go:1116-1560` → new `rulestate.go` (`type ruleState` through `LinkEventRelevant`, 17 decls — the
+  compiled-rule snapshot and the event-relevance predicates derived from it, keeping the type with its own
+  methods). Cut the LATER range first so the earlier range's numbers could not shift. Zero logic changes,
+  proven not asserted: `pipeline.go`'s diff has **zero added lines**, and both moved bodies are
+  **byte-identical** (464 + 445 lines). Every other deletion accounted for: the now-unused `sort` import, and
+  a net **−2** blank lines where the two cuts left three consecutive separators that `gofmt` collapses to one
+  (HEAD 132 blanks − 26 in-cut = 106 vs 104 actual). `pipeline.go` **2238→1326**.
+  `narrowingBlockRank` is a package-level `var` that moved: confirmed read only inside `narrowingBlockRankOf`
+  (moved with it), never at package-init time, so initialization order is unaffected.
+- **Item CLOSED after Inc 5. Final state: `pipeline.go` 3932 → 1326 lines (−66%) across five increments,
+  every one behavior-frozen and byte-identity-proven**, into `rebuild.go` · `results.go` · `filter.go` ·
+  `dispatch.go` · `ruleinstall.go` · `rulestate.go`. What remains in `pipeline.go` is the irreducible core:
+  the ~470-line `Pipeline` struct, `New`, the setter/accessor surface, `Run`, and consumer lifecycle.
+- **What this item did NOT do — stated plainly so nobody reads the close as completion of the whole row.**
+  The board row also named `executor.go` ≈2.1K and "fold test scaffolding". Neither was done. Test-helper
+  folding was considered and **rejected in Ground above** (near-duplicate, not identical, bodies — real drift
+  risk for ~80-120 LOC); `internal/refractor/ruleengine/full/executor.go` (2426 lines) was never scoped into
+  an increment. After Inc 5, `pipeline.go` is no longer the largest hand-written file in Refractor —
+  `health/lattice_heartbeater.go` (2486) and `executor.go` (2426) both exceed it, and test:prod is still
+  ≈1.17:1. **No successor row was filed**: this is hygiene with no driver, and the board does not grow by
+  reviewing. A future fire that acquires a real driver can pick up the method from this doc — the cut
+  procedure and its standing checks are the durable output.

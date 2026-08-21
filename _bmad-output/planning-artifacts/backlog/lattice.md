@@ -61,9 +61,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[privacy-base] No verification tooling — no `verify-package-*` target, never run e2e live** | The erasure spine (pattern, weaver target, residue lens, seal, 6 DDLs) is asserted by nothing after a diff-apply, and no subject has run all four steps on a live stack (a real run destroys a key). | ★★ | S | 📋 ready · mirror `verify-package-identity` + a `verify-claim-ceremony.go`-style one-shot on a disposable subject · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 11 |
 | **[Processor] Sensitive resolution trusts a mutation's self-reported `class`, never the key's localName** | Step 6/6.5 resolve an aspect's DDL off `Document["class"]` only; nothing checks it against the key's own localName. Omitted/wrong `class` on a sensitive key commits PHI plaintext, cache healthy or not. | ★★ | M | 📐 needs designer pass · [why](../../implementation-artifacts/ddl-cache-invalidation-fault-signal-design.md) §1 |
 | **[Pkgmgr] A plain `Columns` entry can still collide with a platform-reserved name** | Only `SecureColumns` is checked against the four reserved RLS columns (`authz_anchors`/`projection_seq`/`is_deleted`/`deleted_at`); an ordinary `Columns` entry with one of those names installs and fails only at Postgres activation (42701 duplicate column). | ★ | XS | 📋 ready · consumer: the next package declaring a plain column named one of the four |
-| **[Refractor] `dispositionEvalErr` has no `CatPrivacyCritical` arm** | The category is defined and classified (`classify.go:149`) but `pipeline/pipeline.go:2809-2830` routes it to the default `Nak`. Unreachable today — it is only ever constructed inside `keyshredded`, which handles its own pause and never returns it up the evaluation path. | ★ | XS–S | 📋 ready · consumer: the first caller wrapping an evaluation-path error as `PrivacyCritical` · line cite corrected 2026-08-16 |
+| **[Refractor] `dispositionEvalErr` has no `CatPrivacyCritical` arm** | The category is defined and classified (`classify.go:149`) but `pipeline/dispatch.go:364-386` routes it to the default `Nak`. Unreachable today — it is only ever constructed inside `keyshredded`, which handles its own pause and never returns it up the evaluation path. | ★ | XS–S | 📋 ready · consumer: the first caller wrapping an evaluation-path error as `PrivacyCritical` |
 | **[Pkgmgr] The manifest verifier skips retention classes** | `ManifestBlock` (`manifest.go:133-152`) compares DDLs/lenses/permissions/weaverTargets/loomPatterns/opMetas/panes; `RetentionClasses` has no field and no comparison, so a package mints a `vtx.retentionclass` holder its manifest never declares. | ★ | XS–S | 📋 ready · consumers: clinic `clinicalRecord`, lease-signing `underwritingRecord` · mirror the opMetas block |
-| **[Refractor] A behavior-frozen consolidation pass — 105K LOC at ×1.8 in 39 days** | test:prod ≈1:1, `pipeline.go` ≈3.2K, `executor.go` ≈2.1K; fold test scaffolding, split god-files — LOC + CI time down, suite green. | ★★ | M–L | 📋 ready · [design](../../implementation-artifacts/refractor-pipeline-consolidation-design.md) · Inc 1–4 shipped, next: pick Inc 5 group |
 
 ### Survey log (round-robin rotation)
 
@@ -137,6 +136,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `06874635` · [Refractor] behavior-frozen `pipeline.go` consolidation CLOSED (Andrew: Inc 5 is the last) — 3932→1326 lines across 5 byte-identity-proven increments; `executor.go` + test-fold not taken, no successor row
 - 2026-08-21 · `a7c94ef` · [CI] lease-convergence's async trio parallelized as its own group — convergence job's pole; same 14 tests, no gate weakened
 - 2026-08-21 · `fc49b7c` · [CI] `internal/natsperm` given its own `-parallel` budget — the unit-4 pole; same 1501 vectors, no gate weakened
 - 2026-08-16 · (verification, no SHA) · [privacy-base] merge-concurrent-erasure-step-1 row REMOVED — already closed by `a0d762f3`'s dual-condition `write_path_closed` gate
@@ -163,9 +163,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-08-14 · `83891a8c` · [natsperm] core-events JS.API side channel CLOSED — 6-consumer registry + matrix-wide SNAPSHOT/RESTORE; ack-forgery residual filed
 - 2026-08-14 · `f464c7a5` · [rbac] grant-provenance Inc 3 CLOSED — origin stamp + reserved-set refusal; review found + fixed a real grant-laundering bypass; 28-pkg migration verified live
 - 2026-08-14 · `1208e638` · [rbac] grant-provenance Inc 1+2 — UpdatePermission's grant withdrawn, structural lint gate blocks re-granting it; review found a live UpgradePackage escalation, filed separately; Inc 3 remains
-- 2026-08-14 · `0bb6daea` · [Pkgmgr] un-tombstone prerequisite CLOSED — a revoked grant/role key no longer silently revives on the next upgrade; Contract #8 §8.6 edit staged uncommitted for Andrew
-- 2026-08-14 · `63f53d67` · [Refractor] personal-lens D1 grant-change trigger CLOSED — Inc 1 `b69487ef` (notification edge) + Inc 2 `63f53d67` (convergence sweep); adversarial pass caught a Health-entry resurrection, fixed same commit
-- 2026-08-14 · `afdbc5f4` · [Processor] a degraded DDL cache no longer trusts a stale-or-chain-walked answer; empty-class arm re-filed as its own gap
 
-- 2026-08-14 · `0a9ff629` · [Refractor] plain-lens neighbour derivation Inc 4b CLOSED — the seeded branch's multi-position gap; Inc 5 stays deferred behind its own trigger
 - *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `8f421d80`)*
