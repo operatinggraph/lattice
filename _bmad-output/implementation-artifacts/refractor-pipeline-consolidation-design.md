@@ -82,8 +82,42 @@ edits, no signature changes, no renames. Pure code motion, verified by an unmodi
   `ruleengine/full`'s `TestBranchDecomposition_RandomizedCorporaDifferential` — no dependency edge from
   this diff onto that package; matches the already-tracked, Whetstone-owned "suite reddens under parallel
   load" board row, not a regression from this move.)
-- **Inc 4 not started.** `pipeline.go` is 2629 lines post-Inc-3, still the largest file in the package. Next
-  fire: census `grep -n "^func " pipeline.go` fresh and pick the next self-contained thematic group — the
-  `handle`/`evalLinkFanOut`/`evalPlainAspectReprojection`/`evalPlainLinkReprojection`/`evalAspectFanOut`/
-  `dispositionEvalErr` CDC-dispatch cluster (~2430–2875 pre-Inc-3) is the largest remaining candidate.
-  Re-verify live, don't trust these pre-Inc-4 line numbers.
+- **Inc 4: shipped `3a3124ba`.** The CDC-dispatch cluster, moved into new
+  `internal/refractor/pipeline/dispatch.go` as **two cuts**. Re-verified live at `28dd09f5` (Inc 3's landed
+  shape): cut A `pipeline.go:2033-2335` (`handleTracked`, `handle`, `evalLinkFanOut`,
+  `evalPlainAspectReprojection`, `evalPlainLinkReprojection`), cut B `pipeline.go:2372-2437`
+  (`evalAspectFanOut`, `dispositionEvalErr`). Two cuts because `evaluatePlainFromVertex` (2337-2356) and
+  `dedupeKeyFor` (2358-2370) sit physically between them and are **also called from
+  `anchor_derivation_plain.go`** — they belong with the plain-derivation machinery, so they stayed.
+  `supersededRule` stayed for the same reason (`results.go`, `audit.go`, `reproject.go` all call it: a
+  cross-cutting rule-generation guard, not dispatch-private). Zero logic changes, **proven not asserted** —
+  `pipeline.go`'s diff has **zero added lines**, and the 370 moved lines are **byte-identical** to the two
+  source ranges; the only non-cut deletions are the `strings` + `adjacency` imports, which move to the new
+  file. `gofmt`/`go vet`/`golangci-lint`/`STRICT=1 lint-conventions`/`lint-lens-anchors`/
+  `lint-manifest-entity-type`/`lint-package-standard`/`lint-package-version` all green; no `_test.go` needed
+  changes. `pipeline.go` 2629→2238 lines (3932 before Inc 1); new `dispatch.go` 386 lines.
+- **Inc 4 also repaired an Inc 2 regression.** Inc 2 moved `writeResults` to `results.go` but left its
+  18-line doc comment behind at `pipeline.go:2439-2456`, where — with no blank line between them — it had
+  welded onto `supersededRule`'s own doc block. Net: `writeResults` undocumented, `supersededRule`
+  misdocumented by 18 lines describing a different function, with the compiler, `gofmt`, `golangci-lint`
+  and every test blind to it. Restored above `writeResults`, verbatim.
+- **Standing check for every future increment** (Inc 1 already logged a near-miss of this class): a doc
+  comment sits directly above its declaration with **no blank line**, so a cut taken at the `func` line
+  silently orphans it. After each cut assert (a) every moved declaration still carries its doc comment in
+  the NEW file, and (b) no comment block left behind opens by naming a declaration that no longer lives
+  there. Match a comment block's **FIRST line only** — a naive grep over whole blocks false-positives on
+  docs that merely *mention* another function (2 of 3 hits when this was first run were exactly that:
+  `AuditOptions`' doc naming `AuthPlane`, `registrationFailedDecision`'s naming
+  `registerWithFilterFallback`). Checked at Inc 4: `rebuild` (Inc 1) and `ConsumerFilter` (Inc 3) are
+  undocumented in their new files, but git shows both were already undocumented **before** their moves —
+  pre-existing, not regressions.
+- **Test-parallelism note.** Inc 3 saw `ruleengine/full`'s `TestBranchDecomposition_RandomizedCorporaDifferential`
+  time out on a whole-tree run. At Inc 4 `go test ./internal/refractor/... -count=1 -p 2 -parallel 4` passed
+  the **whole tree in 88s with zero failures**. A bare `go test` defaults `-p` to `NumCPU` (8 here), running
+  8 concurrent embedded-NATS test binaries; capping to `-p 2` held total test-binary RSS at ~128 MB. Use the
+  capped form on this box — it is a host-contention signature, not a code defect (Whetstone-owned board row).
+- **Inc 5 not started.** `pipeline.go` is 2238 lines post-Inc-4. Largest remaining self-contained candidates,
+  ranked: (1) the rule-installation / taxonomy-expansion cluster — `useFullEngineBranches` plus
+  `narrowingBlockRankOf`, `sortedLabelList`, `labelsWithoutExpansion` (~704-1125, ~420 lines, contiguous);
+  (2) the narrowing/relevance predicate cluster — `plainReactsTo` … `LinkEventRelevant` (~1298-1567, ~270
+  lines, contiguous). Re-verify live; do not trust these pre-Inc-5 numbers.
