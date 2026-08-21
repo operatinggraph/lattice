@@ -1,8 +1,11 @@
 package processor
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -18,9 +21,33 @@ func floorEnv(payload string) *OperationEnvelope {
 
 const floorTarget = "vtx.identity.Aa1Bb2Cc3Dd4Ee5Ff6Gg"
 
+// The ids a pattern's wildcard segment is asked to cover. floorLeaseVictim is
+// deliberately never derivable from the envelope: it stands for an entity the
+// submitter names but the caller's own projected view would not.
+const (
+	floorLeaseMine   = "Mm4Nn5Pp6Qq7Rr8Ss9Tt"
+	floorLeaseVictim = "Vv7Ww8Xx9Yy1Zz2Aa3Bb"
+	floorTabID       = "Cc3Dd4Ee5Ff6Gg7Hh8Jj"
+)
+
 func floorPayload() string {
 	b, _ := json.Marshal(map[string]string{"targetIdentityKey": floorTarget})
 	return string(b)
+}
+
+// floorFor is the descriptor shape most of this file exercises: an
+// optionalReads floor and no required templates.
+func floorFor(templates ...string) DispatchTemplates {
+	return DispatchTemplates{OptionalReads: templates}
+}
+
+// capturingLogger records what the floor SAYS as well as what it does. A
+// template that contributes nothing is only observable through its Warn, so a
+// test asserting the no-contribution posture has to read the log to tell it
+// from a template that silently never reached the compiler.
+func capturingLogger() (*slog.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})), buf
 }
 
 // TestDescriptorFloor_DemotesEnvelopeReads is the mechanism the contract asks
@@ -32,7 +59,7 @@ func TestDescriptorFloor_DemotesEnvelopeReads(t *testing.T) {
 	base := declaredReads{
 		Reads: []string{floorTarget, floorTarget + ".state", "vtx.task." + testNanoID2},
 	}
-	templates := []string{"{payload.targetIdentityKey}", "{payload.targetIdentityKey}.state"}
+	templates := floorFor("{payload.targetIdentityKey}", "{payload.targetIdentityKey}.state")
 
 	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
 
@@ -55,7 +82,7 @@ func TestDescriptorFloor_DemotesEnvelopeReads(t *testing.T) {
 // soften reads the operation genuinely depends on.
 func TestDescriptorFloor_NoDescriptorTemplatesLeavesEnvelopeAlone(t *testing.T) {
 	base := declaredReads{Reads: []string{floorTarget, floorTarget + ".state"}}
-	got := applyDescriptorFloor(base, nil, floorEnv(floorPayload()), testLogger())
+	got := applyDescriptorFloor(base, DispatchTemplates{}, floorEnv(floorPayload()), testLogger())
 	if !slices.Equal(got.Reads, base.Reads) || len(got.OptionalReads) != 0 {
 		t.Fatalf("got %+v, want the envelope's declaration verbatim", got)
 	}
@@ -63,13 +90,12 @@ func TestDescriptorFloor_NoDescriptorTemplatesLeavesEnvelopeAlone(t *testing.T) 
 
 // TestDescriptorFloor_DescriptorReadsAreNotAFloor is the negative control the
 // contract names explicitly: "a descriptor that declares a key under `reads` is
-// unaffected". Only the descriptor's optionalReads list is a floor, so a
-// descriptor-`reads` key handed here as a template it does not own must not be
-// demoted. Modelled by passing the empty optional list a reads-only descriptor
-// produces.
+// unaffected". A descriptor whose only templates are required ones floors
+// nothing at all.
 func TestDescriptorFloor_DescriptorReadsAreNotAFloor(t *testing.T) {
 	base := declaredReads{Reads: []string{floorTarget}}
-	got := applyDescriptorFloor(base, []string{}, floorEnv(floorPayload()), testLogger())
+	templates := DispatchTemplates{Reads: []string{"{payload.targetIdentityKey}"}}
+	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
 	if !slices.Equal(got.Reads, []string{floorTarget}) {
 		t.Fatalf("Reads = %v, want the key still fail-closed", got.Reads)
 	}
@@ -88,7 +114,7 @@ func TestDescriptorFloor_KeyInBothEnvelopeListsIsRemovedFromReads(t *testing.T) 
 		Reads:         []string{floorTarget},
 		OptionalReads: []string{floorTarget},
 	}
-	got := applyDescriptorFloor(base, []string{"{payload.targetIdentityKey}"}, floorEnv(floorPayload()), testLogger())
+	got := applyDescriptorFloor(base, floorFor("{payload.targetIdentityKey}"), floorEnv(floorPayload()), testLogger())
 	if slices.Contains(got.Reads, floorTarget) {
 		t.Fatalf("Reads = %v, want %q gone — leaving it lets the both-lists rule keep the fail-closed reading", got.Reads, floorTarget)
 	}
@@ -112,7 +138,7 @@ func TestDescriptorFloor_EgressIsMarkedNotMoved(t *testing.T) {
 		Reads:       []string{floorTarget},
 		EgressReads: []string{floorTarget + ".ssn"},
 	}
-	templates := []string{"{payload.targetIdentityKey}", "{payload.targetIdentityKey}.ssn"}
+	templates := floorFor("{payload.targetIdentityKey}", "{payload.targetIdentityKey}.ssn")
 	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
 
 	if !slices.Equal(got.EgressReads, []string{floorTarget + ".ssn"}) {
@@ -206,59 +232,138 @@ func TestHydrate_FlooredEgressAbsenceIsKnownNotRequired(t *testing.T) {
 	}
 }
 
-// TestDescriptorFloor_UnresolvableTemplateDemotesNothing: `{me.<type>}` names
-// a vertex out of the caller's own projected view, which the Processor does
-// not have. It resolves to no key, so it floors nothing — and specifically it
-// must not become a wildcard that softens whatever the envelope happened to
-// declare.
-func TestDescriptorFloor_UnresolvableTemplateDemotesNothing(t *testing.T) {
-	base := declaredReads{Reads: []string{floorTarget, "vtx.leaseapp." + testNanoID2}}
-	templates := []string{"{me.leaseapp}", "{entity.unitKey}", "{payload.notInPayload}"}
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
-	if !slices.Equal(got.Reads, base.Reads) {
-		t.Fatalf("Reads = %v, want unchanged — an unresolvable template names no key", got.Reads)
+// TestDescriptorFloor_UncompilableTemplateDemotesNothing: a template outside
+// the vocabulary, or one whose server-side placeholder this envelope does not
+// satisfy, names neither a key nor a shape — so it floors nothing, and
+// specifically it must not become a wildcard that softens whatever the envelope
+// happened to declare.
+//
+// The resolvable sibling in the same descriptor is the positive vector: it
+// proves the envelope's keys reach the floor at all, so the untouched keys
+// below are the refusals' doing rather than a floor that never ran.
+func TestDescriptorFloor_UncompilableTemplateDemotesNothing(t *testing.T) {
+	reachable := "vtx.leaseapp." + floorLeaseMine
+	unnamed := "vtx.instructor." + floorLeaseVictim
+	base := declaredReads{Reads: []string{floorTarget, reachable, unnamed}}
+	templates := floorFor(
+		"{entity.unitKey}",       // the row the client is displaying, not a server value
+		"{payload.notInPayload}", // no such payload field on this envelope
+		"{scopedTo}",             // a target step 3 did not validate
+		"bkr{me.instructor:id}",  // a client-only placeholder sharing a segment
+		"{me.instructor?}",       // `?` is ContextParams vocabulary, not read-template
+		"{me.}",                  // a self-anchor naming no type
+		"{payload.targetIdentityKey}",
+	)
+	logger, log := capturingLogger()
+	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), logger)
+
+	if slices.Contains(got.Reads, floorTarget) {
+		t.Fatalf("Reads = %v, want the resolvable template's key demoted — the positive vector must reach the floor", got.Reads)
 	}
-	if len(got.OptionalReads) != 0 {
-		t.Fatalf("OptionalReads = %v, want empty", got.OptionalReads)
+	for _, want := range []string{reachable, unnamed} {
+		if !slices.Contains(got.Reads, want) {
+			t.Fatalf("Reads = %v, want %q untouched — an uncompilable template names no key", got.Reads, want)
+		}
+	}
+	for _, tpl := range []string{"{entity.unitKey}", "{payload.notInPayload}", "{scopedTo}", "bkr{me.instructor:id}", "{me.instructor?}", "{me.}"} {
+		if !strings.Contains(log.String(), tpl) {
+			t.Fatalf("log = %q, want a Warn naming %q — a control that did not apply must be as visible as one that fired", log.String(), tpl)
+		}
 	}
 }
 
-// TestSubstituteDescriptorTemplate covers the server-resolvable vocabulary and
-// every way a substitution is refused. A refusal is always "no key", never a
-// partial one: a hole leaves a DIFFERENT key, not a shorter one.
-func TestSubstituteDescriptorTemplate(t *testing.T) {
+// TestCompileDescriptorTemplate walks the vocabulary one row at a time: what
+// substitutes concretely, what compiles to a key SHAPE, and every way a
+// template is refused. A refusal is always "no key", never a partial one: a
+// hole leaves a DIFFERENT key, not a shorter one, and an over-wide wildcard
+// leaves a floor over keys no descriptor named.
+func TestCompileDescriptorTemplate(t *testing.T) {
 	actor := "vtx.identity." + testNanoID2
-	env := floorEnv(floorPayload())
+	patient := "vtx.patient." + floorTabID
+	env := floorEnv(`{"targetIdentityKey":"` + floorTarget + `","session":"vtx.session.` + tplID +
+		`","patientKey":"` + patient + `","providerKey":"vtx.provider.` + instID + `"}`)
 	env.Actor = actor
-	env.AuthContext = &AuthContext{Service: "vtx.service." + testNanoID1}
+	env.AuthContext = &AuthContext{Service: "vtx.service." + testNanoID1, Target: floorTarget}
+	payload := mustPayload(t, env)
 
-	ok := map[string]string{
+	concrete := map[string]string{
+		"vtx.identity." + testNanoID3:          "vtx.identity." + testNanoID3,
 		"{actor}":                              actor,
 		"{actor}.state":                        actor + ".state",
 		"{payload.targetIdentityKey}":          floorTarget,
 		"{payload.targetIdentityKey}.claimKey": floorTarget + ".claimKey",
 		"{service}":                            "vtx.service." + testNanoID1,
 		"lnk.task." + testNanoID1 + ".assignedTo.identity.{actor:id}": "lnk.task." + testNanoID1 + ".assignedTo.identity." + testNanoID2,
-		"vtx.session.{payload.targetIdentityKey:id}.bkr{actor:id}":    "vtx.session.Aa1Bb2Cc3Dd4Ee5Ff6Gg.bkr" + testNanoID2,
+		// The mid-segment `:id` fragment idiom, live in two packages. With
+		// server-resolvable placeholders it substitutes concretely and needs no
+		// wildcard at all — the two live shapes the matcher must not disturb.
+		"vtx.session.{payload.session:id}.bkr{actor:id}":                     "vtx.session." + tplID + ".bkr" + testNanoID2,
+		"{payload.patientKey}.activeVisitSeriesWith{payload.providerKey:id}": patient + ".activeVisitSeriesWith" + instID,
 	}
-	for tpl, want := range ok {
-		got, resolved := substituteDescriptorTemplate(tpl, env, mustPayload(t, env))
-		if !resolved || got != want {
-			t.Fatalf("substitute(%q) = (%q, %v), want (%q, true)", tpl, got, resolved, want)
+	for tpl, want := range concrete {
+		pattern, ok := compileDescriptorTemplate(tpl, env, payload)
+		if !ok {
+			t.Fatalf("compile(%q) refused, want the concrete key %q", tpl, want)
+		}
+		key, isConcrete := pattern.concrete()
+		if !isConcrete {
+			t.Fatalf("compile(%q) = the pattern %q, want the concrete key %q — a template with no client-only vocabulary must take the exact-match path", tpl, patternString(pattern), want)
+		}
+		if key != want {
+			t.Fatalf("compile(%q) = %q, want %q", tpl, key, want)
+		}
+	}
+
+	// `{me.<type>}` is the client-only half: the Processor has no value for it,
+	// so it compiles to a whole-segment NanoID wildcard. `*` below is that
+	// wildcard, never a fragment of a segment.
+	patterns := map[string]string{
+		"{me.leaseapp:id}":    "*",
+		"{me.leaseapp}":       "vtx.leaseapp.*",
+		"{me.leaseapp}.terms": "vtx.leaseapp.*.terms",
+		"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}": "lnk.leaseapp.*.applicationFor.identity." + testNanoID2,
+		"lnk.tab.{payload.session:id}.chargedTo.leaseapp.{me.leaseapp:id}": "lnk.tab." + tplID + ".chargedTo.leaseapp.*",
+	}
+	for tpl, want := range patterns {
+		pattern, ok := compileDescriptorTemplate(tpl, env, payload)
+		if !ok {
+			t.Fatalf("compile(%q) refused, want the pattern %q", tpl, want)
+		}
+		if _, isConcrete := pattern.concrete(); isConcrete {
+			t.Fatalf("compile(%q) resolved concretely; the Processor has no value for a client-only placeholder", tpl)
+		}
+		if got := patternString(pattern); got != want {
+			t.Fatalf("compile(%q) = %q, want %q", tpl, got, want)
 		}
 	}
 
 	refused := []string{
-		"{me.leaseapp}",              // the caller's projected view, not the Processor's
-		"{entity.unitKey}",           // ditto
-		"{scopedTo}",                 // a task's target, resolved client-side
+		"{entity.unitKey}",           // the row being displayed, not a server value
+		"{ancestor.orgKey}",          // outside the vocabulary entirely
 		"{payload.missing}",          // no such payload field
 		"{payload.targetIdentityKey", // unterminated
-		"{actor:id}.{me.thing:id}",   // one resolvable half is not enough
+		"{actor}..state",             // a hole is a different key, not a shorter one
+		"",                           // nothing at all
+		"bkr{me.instructor:id}",      // a client-only placeholder sharing a segment
+		"{me.instructor:id}bkr",      // the same, on the other side
+		"{me.a}{me.b}",               // two shapes with no segment boundary between them
+		"{me.}",                      // a self-anchor naming no type
+		"{me.a.b:id}",                // a type name is one segment
+		// The `?` optional marker is live ContextParams vocabulary and is not
+		// part of the read-template vocabulary. It must be refused audibly
+		// rather than swallowed into a literal segment, where it would compile
+		// to a pattern that matches nothing and warns about nothing —
+		// §5.5's residual argument rests on the Warn being the backstop.
+		"{me.instructor?}",
+		"{me.leaseapp:id?}",
+		"{actor?}",
+		"{payload.targetIdentityKey?}",
+		"{me.Leaseapp}",  // a type token is [a-z][a-z0-9]*
+		"{me.lease_app}", // ditto
 	}
 	for _, tpl := range refused {
-		if got, resolved := substituteDescriptorTemplate(tpl, env, mustPayload(t, env)); resolved {
-			t.Fatalf("substitute(%q) = (%q, true), want refused", tpl, got)
+		if pattern, ok := compileDescriptorTemplate(tpl, env, payload); ok {
+			t.Fatalf("compile(%q) = %q, want refused", tpl, patternString(pattern))
 		}
 	}
 
@@ -266,9 +371,297 @@ func TestSubstituteDescriptorTemplate(t *testing.T) {
 	// than truncated — a bare id taken off a malformed key addresses something
 	// else.
 	badIDEnv := floorEnv(`{"targetIdentityKey":"notakey"}`)
-	if got, resolved := substituteDescriptorTemplate("lnk.task.x.assignedTo.identity.{payload.targetIdentityKey:id}", badIDEnv, mustPayload(t, badIDEnv)); resolved {
-		t.Fatalf("substitute over a malformed :id source = (%q, true), want refused", got)
+	if pattern, ok := compileDescriptorTemplate("lnk.task.x.assignedTo.identity.{payload.targetIdentityKey:id}", badIDEnv, mustPayload(t, badIDEnv)); ok {
+		t.Fatalf("compile over a malformed :id source = %q, want refused", patternString(pattern))
 	}
+}
+
+// TestCompileDescriptorTemplate_ScopedToNeedsAValidatedTarget: `authContext.
+// target` is client-supplied except where step 3 proved it, so resolving an
+// unvalidated one would let a lying submitter steer the floor away from the key
+// they are probing. It never patterns either: the target's TYPE is unknown, and
+// `vtx.<any>.<nanoid>` would demote every declared vertex root.
+//
+// The validated arm is the positive vector — without it, "refused" would be
+// satisfied by a `{scopedTo}` nothing ever resolves.
+func TestCompileDescriptorTemplate_ScopedToNeedsAValidatedTarget(t *testing.T) {
+	env := floorEnv(floorPayload())
+	env.AuthContext = &AuthContext{Target: floorTarget}
+
+	env.AuthTargetValidated = false
+	for _, tpl := range []string{"{scopedTo}", "{scopedTo:id}", "{scopedTo}.state"} {
+		if pattern, ok := compileDescriptorTemplate(tpl, env, mustPayload(t, env)); ok {
+			t.Fatalf("compile(%q) = %q over an unvalidated target, want refused", tpl, patternString(pattern))
+		}
+	}
+
+	env.AuthTargetValidated = true
+	want := map[string]string{
+		"{scopedTo}":       floorTarget,
+		"{scopedTo}.state": floorTarget + ".state",
+		"lnk.task." + testNanoID1 + ".scopedTo.identity.{scopedTo:id}": "lnk.task." + testNanoID1 + ".scopedTo.identity." + testNanoID3,
+	}
+	for tpl, key := range want {
+		pattern, ok := compileDescriptorTemplate(tpl, env, mustPayload(t, env))
+		if !ok {
+			t.Fatalf("compile(%q) refused over a target step 3 validated, want %q", tpl, key)
+		}
+		got, isConcrete := pattern.concrete()
+		if !isConcrete || got != key {
+			t.Fatalf("compile(%q) = (%q, concrete=%v), want (%q, true)", tpl, patternString(pattern), isConcrete, key)
+		}
+	}
+
+	// A validated flag with no target still names nothing.
+	env.AuthContext = nil
+	if _, ok := compileDescriptorTemplate("{scopedTo}", env, mustPayload(t, env)); ok {
+		t.Fatalf("compile({scopedTo}) resolved with no authContext at all")
+	}
+}
+
+// TestDescriptorFloor_PatternDemotesEveryMatch pins the matcher's three
+// answers at the demotion site: every same-shaped key the envelope declares is
+// demoted (not the first), a same-shaped key whose wildcard segment is not a
+// NanoID is not, and neither is a key of a different segment count.
+//
+// "Every match" is the load-bearing half. A submitter probing fifty ids in one
+// envelope is exactly the enumeration the floor exists to close, and a matcher
+// that stopped at the first hit would leave forty-nine oracles open.
+func TestDescriptorFloor_PatternDemotesEveryMatch(t *testing.T) {
+	mine := "vtx.leaseapp." + floorLeaseMine
+	victim := "vtx.leaseapp." + floorLeaseVictim
+	notAnID := "vtx.leaseapp.not-a-nanoid"
+	deeper := "vtx.leaseapp." + floorLeaseMine + ".terms"
+	otherType := "vtx.tab." + floorTabID
+	base := declaredReads{Reads: []string{mine, victim, notAnID, deeper, otherType}}
+
+	got := applyDescriptorFloor(base, floorFor("{me.leaseapp}"), floorEnv(floorPayload()), testLogger())
+
+	for _, want := range []string{mine, victim} {
+		if slices.Contains(got.Reads, want) {
+			t.Fatalf("Reads = %v, want %q demoted — a pattern demotes EVERY match, not the first", got.Reads, want)
+		}
+		if !slices.Contains(got.OptionalReads, want) {
+			t.Fatalf("OptionalReads = %v, want %q", got.OptionalReads, want)
+		}
+	}
+	for _, keep := range []string{notAnID, deeper, otherType} {
+		if !slices.Contains(got.Reads, keep) {
+			t.Fatalf("Reads = %v, want %q still fail-closed — a wildcard segment matches a NanoID and nothing else, and a pattern never matches across segment counts", got.Reads, keep)
+		}
+	}
+}
+
+// TestDescriptorFloor_RequiredTemplateWinsOverOptional: where a descriptor's
+// two lists name one key, the required reading stands. Wrong-demotion is the
+// dangerous direction — it turns the HydrationMiss the script's author expected
+// into a silent None.
+//
+// The required templates here are the only kind that can carry an exclusion:
+// `{actor}` is the step-3-authenticated identity and the literal is the
+// descriptor's own text, so the excluded key is a function of the descriptor
+// and the caller — nothing a request body can address.
+//
+// The peer key demoted by the same pattern in the same call is the positive
+// vector: it proves the optional template really does cover this shape, so the
+// surviving keys are the exclusion's doing.
+func TestDescriptorFloor_RequiredTemplateWinsOverOptional(t *testing.T) {
+	env := floorEnv(floorPayload())
+	self := "vtx.identity." + testNanoID2 // env.Actor
+	literal := "vtx.identity." + testNanoID1
+	other := "vtx.identity." + floorLeaseVictim
+	base := declaredReads{
+		Reads:       []string{self, literal, other},
+		EgressReads: []string{self + ".ssn"},
+	}
+	templates := DispatchTemplates{
+		Reads:         []string{"{actor}", "{actor}.ssn", literal},
+		OptionalReads: []string{"{me.identity}", "{me.identity}.ssn"},
+	}
+
+	got := applyDescriptorFloor(base, templates, env, testLogger())
+
+	for _, kept := range []string{self, literal} {
+		if !slices.Contains(got.Reads, kept) {
+			t.Fatalf("Reads = %v, want %q kept — the descriptor's own required template excludes it from demotion", got.Reads, kept)
+		}
+	}
+	if slices.Contains(got.Reads, other) {
+		t.Fatalf("Reads = %v, want %q demoted — without it the exclusions above prove nothing", got.Reads, other)
+	}
+	if _, tolerant := got.EgressAbsenceTolerant[self+".ssn"]; tolerant {
+		t.Fatalf("EgressAbsenceTolerant = %v, want the required egress key untouched — required-wins binds both arms", got.EgressAbsenceTolerant)
+	}
+}
+
+// TestDescriptorFloor_PayloadSteeredRequiredTemplateCannotSuppressTheFloor is
+// the control's integrity property: the exclusion set is a function of the
+// descriptor and the authenticated identity, never of the request body.
+//
+// The descriptor is cafe-domain Charge's, verbatim: its required templates are
+// all `{payload.<field>}`-rooted, and its floor is the lease-ownership link the
+// caller must not be able to probe. If a payload-derived required template
+// contributed an exclusion, the submitter would only have to spell their probe
+// key into `menuItemKey` — a field the op reads for something else entirely —
+// to lift the floor off it for that request and get HydrationMiss +
+// details.missingKey back. The honest payload in the same shape is the positive
+// vector: it proves the floor covers this key, so the hostile arm is testing
+// the steering and not a floor that never applied.
+func TestDescriptorFloor_PayloadSteeredRequiredTemplateCannotSuppressTheFloor(t *testing.T) {
+	templates := DispatchTemplates{
+		Reads: []string{
+			"{payload.tabKey}", "{payload.tabKey}.status",
+			"{payload.menuItemKey}", "{payload.menuItemKey}.price",
+		},
+		OptionalReads: []string{"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}"},
+	}
+	probe := "lnk.leaseapp." + floorLeaseVictim + ".applicationFor.identity." + testNanoID2
+
+	honest := floorEnv(`{"tabKey":"vtx.tab.` + floorTabID + `","menuItemKey":"vtx.menuitem.` + floorLeaseMine + `"}`)
+	control := applyDescriptorFloor(declaredReads{Reads: []string{probe}}, templates, honest, testLogger())
+	if slices.Contains(control.Reads, probe) {
+		t.Fatalf("Reads = %v, want %q demoted under an honest payload — the floor must cover this key before the steering means anything", control.Reads, probe)
+	}
+
+	// The same descriptor, the same probe, one payload field aimed at it.
+	hostile := floorEnv(`{"tabKey":"vtx.tab.` + floorTabID + `","menuItemKey":"` + probe + `"}`)
+	logger, log := capturingLogger()
+	got := applyDescriptorFloor(
+		declaredReads{Reads: []string{probe}, EgressReads: []string{probe + ".terms"}},
+		DispatchTemplates{
+			Reads: templates.Reads,
+			OptionalReads: append(slices.Clone(templates.OptionalReads),
+				"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}.terms"),
+		},
+		hostile, logger)
+
+	if slices.Contains(got.Reads, probe) {
+		t.Fatalf("Reads = %v, want %q still demoted — a payload field must not be able to buy an exclusion from the floor", got.Reads, probe)
+	}
+	if !slices.Contains(got.OptionalReads, probe) {
+		t.Fatalf("OptionalReads = %v, want %q", got.OptionalReads, probe)
+	}
+	if _, tolerant := got.EgressAbsenceTolerant[probe+".terms"]; !tolerant {
+		t.Fatalf("EgressAbsenceTolerant = %v, want the egress probe marked — the steering reaches this arm the same way", got.EgressAbsenceTolerant)
+	}
+	if !strings.Contains(log.String(), "{payload.menuItemKey}") || !strings.Contains(log.String(), "excludes no key") {
+		t.Fatalf("log = %q, want a Warn naming the payload-derived required template it refused to honour", log.String())
+	}
+}
+
+// TestDescriptorFloor_RequiredPatternExcludesNothing: a required template
+// carrying client-only vocabulary compiles to a SHAPE, and a shape excluded
+// from demotion blankets every key of that shape — one `{me.<type>}` on the
+// required side would preserve the oracle for every declared root of the type.
+// So it contributes no exclusion at all and says so at Warn: the same posture
+// an uncompilable optional template gets, failing toward the floor still
+// applying rather than toward the oracle.
+func TestDescriptorFloor_RequiredPatternExcludesNothing(t *testing.T) {
+	self := "vtx.identity." + testNanoID2 // env.Actor
+	base := declaredReads{Reads: []string{self}}
+	templates := DispatchTemplates{
+		Reads:         []string{"{me.identity}"},
+		OptionalReads: []string{"{me.identity}"},
+	}
+	logger, log := capturingLogger()
+
+	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), logger)
+
+	if slices.Contains(got.Reads, self) {
+		t.Fatalf("Reads = %v, want %q demoted — a required SHAPE excludes nothing", got.Reads, self)
+	}
+	if !slices.Contains(got.OptionalReads, self) {
+		t.Fatalf("OptionalReads = %v, want %q", got.OptionalReads, self)
+	}
+	if !strings.Contains(log.String(), "{me.identity}") || !strings.Contains(log.String(), "excludes no key") {
+		t.Fatalf("log = %q, want a Warn naming the required template it could not honour", log.String())
+	}
+
+	// The same call with a required template that resolves to ONE key from the
+	// authenticated identity excludes it, which is what shows the Warn above is
+	// about the shape and not about the required list being ignored wholesale.
+	concrete := DispatchTemplates{Reads: []string{"{actor}"}, OptionalReads: []string{"{me.identity}"}}
+	if kept := applyDescriptorFloor(declaredReads{Reads: []string{self}}, concrete, floorEnv(floorPayload()), testLogger()); !slices.Contains(kept.Reads, self) {
+		t.Fatalf("Reads = %v, want %q kept by the actor-rooted required template", kept.Reads, self)
+	}
+}
+
+// TestDescriptorFloor_EgressPatternIsMarkedInPlace: a pattern decides WHICH
+// egress keys are floored and changes nothing about what happens to one. The
+// key stays in EgressReads — presence still authors the `$sensitiveRef` the
+// bridge opens — and only its absence becomes tolerant.
+func TestDescriptorFloor_EgressPatternIsMarkedInPlace(t *testing.T) {
+	matched := "vtx.leaseapp." + floorLeaseVictim + ".ssn"
+	unmatched := "vtx.tab." + floorTabID + ".ssn"
+	base := declaredReads{EgressReads: []string{matched, unmatched}}
+
+	got := applyDescriptorFloor(base, floorFor("vtx.leaseapp.{me.leaseapp:id}.ssn"), floorEnv(floorPayload()), testLogger())
+
+	if !slices.Equal(got.EgressReads, []string{matched, unmatched}) {
+		t.Fatalf("EgressReads = %v, want both keys still declared egress — moving one swaps a bridge-opened ref for plaintext", got.EgressReads)
+	}
+	if slices.Contains(got.Reads, matched) || slices.Contains(got.OptionalReads, matched) {
+		t.Fatalf("the pattern-matched egress key was pulled into a read list: %+v", got)
+	}
+	if _, tolerant := got.EgressAbsenceTolerant[matched]; !tolerant {
+		t.Fatalf("EgressAbsenceTolerant = %v, want %q — its absence otherwise faults HydrationMiss and echoes the key back", got.EgressAbsenceTolerant, matched)
+	}
+	if _, tolerant := got.EgressAbsenceTolerant[unmatched]; tolerant {
+		t.Fatalf("EgressAbsenceTolerant = %v, want %q untouched — it is a different key shape", got.EgressAbsenceTolerant, unmatched)
+	}
+}
+
+// TestDescriptorFloor_DecoupledProbeIsDemoted is the vector that keeps the
+// negative claim honest, over cafe-domain's real template strings.
+//
+// A client-faithful resolution of `{me.leaseapp}` would name the CALLER's own
+// lease. It is the wrong key to floor: the script recovers the lease from the
+// tab's own `.status`, never from anything the caller supplied, so a submitter
+// who names someone else's tab makes the script touch the VICTIM's lease link —
+// a key the caller's own projected view would never produce. The pattern covers
+// the honest key and the decoupled one alike, which is why shape-matching is
+// the correct semantics here rather than an approximation of resolution.
+func TestDescriptorFloor_DecoupledProbeIsDemoted(t *testing.T) {
+	env := floorEnv(`{"tabKey":"vtx.tab.` + floorTabID + `"}`)
+	templates := floorFor(
+		"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
+		"lnk.tab.{payload.tabKey:id}.chargedTo.leaseapp.{me.leaseapp:id}",
+	)
+
+	victimOwnership := "lnk.leaseapp." + floorLeaseVictim + ".applicationFor.identity." + testNanoID2
+	victimCharge := "lnk.tab." + floorTabID + ".chargedTo.leaseapp." + floorLeaseVictim
+	// Anchored on someone else's actor: the pattern fixes that segment
+	// concretely from the step-3-authenticated actor, so it is out of reach.
+	someoneElsesProbe := "lnk.leaseapp." + floorLeaseVictim + ".applicationFor.identity." + testNanoID3
+	base := declaredReads{Reads: []string{victimOwnership, victimCharge, someoneElsesProbe}}
+
+	got := applyDescriptorFloor(base, templates, env, testLogger())
+
+	for _, demoted := range []string{victimOwnership, victimCharge} {
+		if slices.Contains(got.Reads, demoted) {
+			t.Fatalf("Reads = %v, want %q demoted — a probe the caller's own view would never name is exactly the key the script touches", got.Reads, demoted)
+		}
+		if !slices.Contains(got.OptionalReads, demoted) {
+			t.Fatalf("OptionalReads = %v, want %q", got.OptionalReads, demoted)
+		}
+	}
+	if !slices.Contains(got.Reads, someoneElsesProbe) {
+		t.Fatalf("Reads = %v, want %q untouched — every server-resolvable placeholder stays CONCRETE inside a pattern", got.Reads, someoneElsesProbe)
+	}
+}
+
+// patternString renders a compiled template for a failure message: literal
+// segments as themselves, wildcard segments as `*`.
+func patternString(p keyPattern) string {
+	out := make([]string, len(p.segments))
+	for i, seg := range p.segments {
+		if seg.wildcard {
+			out[i] = "*"
+			continue
+		}
+		out[i] = seg.literal
+	}
+	return strings.Join(out, ".")
 }
 
 func mustPayload(t *testing.T, env *OperationEnvelope) map[string]interface{} {
