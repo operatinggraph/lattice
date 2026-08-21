@@ -71,9 +71,9 @@ func (i *Installer) buildInstallBatch(
 		declared = append(declared, key)
 	}
 
-	// Role vertices + aspects + canonical-name index (Story 1.5.5: folded
-	// into the install batch — formerly identity-domain's substrate-direct
-	// PreInstall). Deterministic NanoIDs make re-install idempotent; the
+	// Role vertices + aspects + canonical-name index, created in the SAME
+	// install batch as everything else (Story 1.5.5), so uninstall can
+	// reclaim them. Deterministic NanoIDs make re-install idempotent; the
 	// roleindex vertex lets cross-package canonical lookups resolve.
 	for idx, r := range def.Roles {
 		roleKey := "vtx.role." + roleIDs[idx]

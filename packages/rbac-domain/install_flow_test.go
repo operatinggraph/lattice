@@ -173,8 +173,9 @@ func TestInstallFlow_M5B2_DomainOpWithoutRestart(t *testing.T) {
 	}
 }
 
-// TestInstallFlow_F001_ReinstallNoOrphans installs identity-domain (which
-// declares roles formerly seeded substrate-direct — the F-001 surface),
+// TestInstallFlow_F001_ReinstallNoOrphans installs identity-domain (whose
+// declared roles are the F-001 orphan surface — role/roleindex vertices
+// that must be captured in declaredKeys so uninstall reclaims them),
 // uninstalls it, and asserts every declared key is tombstoned (no live
 // orphan), then re-installs onto a fresh keyspace and asserts it succeeds.
 func TestInstallFlow_F001_ReinstallNoOrphans(t *testing.T) {
@@ -415,10 +416,9 @@ func containsStr(haystack, needle string) bool {
 	return false
 }
 
-// assertRoleKeysDeclared confirms the folded user-facing roles (formerly
-// substrate-direct PreInstall) are in the install's declaredKeys: >=3 role
-// vertices + >=3 roleindex vertices. This is the F-001 fix — these keys are
-// now reclaimed at uninstall instead of orphaned.
+// assertRoleKeysDeclared confirms the user-facing roles are in the install's
+// declaredKeys: >=3 role vertices + >=3 roleindex vertices. This is the
+// F-001 fix — these keys are reclaimed at uninstall instead of orphaned.
 func assertRoleKeysDeclared(t *testing.T, declared []string) {
 	t.Helper()
 	roleVtx, roleIdx := 0, 0

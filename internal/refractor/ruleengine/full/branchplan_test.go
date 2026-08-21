@@ -97,8 +97,9 @@ func TestClassifyBranchReturnColumns_WalkOwnedAndAnchorDerived(t *testing.T) {
 // alongside the real dependency (`anchor`, common to every branch) — the
 // shape packages/edge-manifest's catalog unification needs for
 // `viaServices` (refractor-shared-keyspace-arbitration-design.md §13.7
-// build order (c)). Before the fix, `psvc` was indistinguishable from a
-// genuine cross-walk variable and refused the column as ambiguous.
+// build order (c)). ClassifyBranchReturnColumns must recognize `psvc` as
+// comprehension-local rather than treat it as a genuine cross-walk variable,
+// or it refuses the column as ambiguous.
 func TestClassifyBranchReturnColumns_PatternComprehensionLocalVarIsNotADependency(t *testing.T) {
 	branches := twoWalkBranches(t,
 		`RETURN anchor.key AS anchorKey, [(anchor)<-[:offers]-(psvc:service) | psvc.key] AS viaServices, role.name AS viaRole`)

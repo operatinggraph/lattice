@@ -220,7 +220,23 @@ import (
 )
 
 var (
-	historyComment = regexp.MustCompile(`//[ \t]*(Story [0-9]|Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b)`)
+	// historyPhrases are the change-narration phrases banned anywhere in a
+	// comment (CLAUDE.md's "no history / changelog comments" rule), kept in their
+	// own literal so the alternation reads as a list rather than as noise inside
+	// a longer pattern.
+	//
+	// Phrases are admitted on evidence: a candidate is measured across the whole
+	// tree first, and one whose hits are dominated by legitimate prose is
+	// rejected rather than gated. "used to" (96 hits) and "no longer" (255) were
+	// rejected on exactly that test.
+	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b`
+	// historyComment flags a comment carrying one of those phrases. The
+	// changelog-tag shape stays anchored to a comment's lead, unlike the rest: a
+	// whole-tree measurement unanchored produced 86 hits, nearly all a
+	// traceability citation mid-sentence, which is an accepted convention here
+	// rather than a narrated change. Every other phrase matches anywhere on the
+	// line, so a clause buried mid-sentence is not invisible to the gate.
+	historyComment = regexp.MustCompile(`//[ \t]*Story [0-9]|` + "//" + `.*\b(` + historyPhrases + `)`)
 	// reviewFindingLabel anchors a bare parenthesized reviewer-finding label
 	// trailing a comment — the shape a review-fix round leaves behind when a
 	// fix note ends "... (A2)" instead of being cleaned up into a
@@ -1003,13 +1019,19 @@ func scanSource(path string, data []byte) []finding {
 	if kvBatchScoped {
 		out = append(out, checkListThenGet(path, string(data), annotationSpans(strings.Split(string(data), "\n"), kvBatchShape))...)
 	}
+	// A lint script's source is fixture text for this check: these scripts detect
+	// change-narration comments and DOCUMENT the shapes they detect, so their own
+	// comments quote the banned phrases legitimately (lint-board's header lists
+	// `"Was:"` among the cell shapes it fails). Same exemption idiom, and the same
+	// reason, as derivedKeyScoped/grantChangeScoped above.
+	historyScoped := !strings.HasPrefix(slash, "scripts/lint-")
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
 	for sc.Scan() {
 		ln++
 		line := sc.Text()
-		if historyComment.MatchString(line) {
+		if historyScoped && historyComment.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "history/changelog comment — git blame + the commit message are the record"})
 		}
 		if reviewFindingLabel.MatchString(line) {

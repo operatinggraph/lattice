@@ -172,7 +172,7 @@ func TestRevocationMaterializer_LiveRevokeThenUnrevoke(t *testing.T) {
 // the revocationWriteFailed unit test): an actor key NATS-KV genuinely
 // refuses (a space, outside its `^[-/_=.a-zA-Z0-9]+$` key charset) must be
 // dropped — never written, and critically never blocking the consumer from
-// processing the next, valid event. Before this fix the same failure Nak'd
+// processing the next, valid event: an un-dropped poison key would Nak
 // forever with no MaxDeliver, permanently stalling kill-switch sync.
 func TestRevocationMaterializer_PoisonKeyDroppedNotStuck(t *testing.T) {
 	conn, ctx := newRevocationTestConn(t)

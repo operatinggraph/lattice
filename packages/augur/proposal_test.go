@@ -423,7 +423,7 @@ func TestAugur_ScopeEscape_Invalid(t *testing.T) {
 // vertex key under a different param name (assignTask's `assignee`, which grants
 // authority to that entity on Fire-2 dispatch). The default-deny scope check now
 // rejects ANY vtx-shaped value that isn't the escalated candidate, under any param
-// name, so this lands invalid (never dispatchable). Before the fix it was pending.
+// name, so this lands invalid (never dispatchable).
 func TestAugur_ForeignParamUnderUnlistedKey_Invalid(t *testing.T) {
 	ctx, conn := setupAugurEnv(t)
 	cp, cons := newProposalPipeline(t, ctx, conn, "ap-foreign")
@@ -464,8 +464,8 @@ func TestAugur_ScopelessProposal_Invalid(t *testing.T) {
 // invariant: a status=completed reply whose result is NOT a decodable JSON object
 // (an adapter-wiring fault or a malformed model output) is a definitive verdict —
 // the proposal is STILL recorded with review.state=invalid (the replyOp ACCEPTS,
-// it never fail()s). Before the fix this fail()ed the op, leaving the episode
-// wedged with no .review after the bridge had already Ack'd the external event.
+// it never fail()s) — a fail()ed op would leave the episode wedged with no
+// .review after the bridge had already Ack'd the external event.
 func TestAugur_MalformedCompletedResult_StoredInvalid(t *testing.T) {
 	ctx, conn := setupAugurEnv(t)
 	cp, cons := newProposalPipeline(t, ctx, conn, "ap-malform")

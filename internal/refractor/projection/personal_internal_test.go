@@ -206,10 +206,9 @@ RETURN task.key AS anchor, "otherKind" AS kind
 // TestInstallPersonalLens_MultiBranch_KeyColumnNotReturnAliasInSecondBranch_Refuses
 // is the failure-mode mirror: a second branch whose RETURN clause lacks one
 // of the declared business key columns must fail installation, not silently
-// install with that branch's rows missing the key. Before the fix this
-// passed incorrectly — ValidateKeyColumns no-ops on an unthreaded (nil)
-// KeyColumns, so a branch that could never produce a business key went
-// unvalidated.
+// install with that branch's rows missing the key. This pins ValidateKeyColumns
+// against no-op'ing on an unthreaded (nil) KeyColumns — a branch that could
+// never produce a business key must not go unvalidated.
 func TestInstallPersonalLens_MultiBranch_KeyColumnNotReturnAliasInSecondBranch_Refuses(t *testing.T) {
 	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor", "kind"})
 

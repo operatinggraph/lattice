@@ -118,8 +118,8 @@ func TestExecuteFullForActor_MultiBranch_SingleBranchIsUnaffected(t *testing.T) 
 // that a reload (cmd/refractor/reload.go calls UseFullEngineBranches on an
 // EXISTING Pipeline) which edits a lens from 2+ Walks down to 1 clears
 // fullCRBranches and fullCRWalkOwnedColumns — not just skips re-setting them.
-// Before this fix the len>1 branch had no else, so a downgraded lens kept
-// evaluating (and merging) the removed Walk forever.
+// The len==1 path must clear both explicitly: without it, a downgraded lens
+// keeps evaluating (and merging) the removed Walk forever.
 func TestUseFullEngineBranches_DowngradeToSingleBranchClearsMultiWalkState(t *testing.T) {
 	eng := full.New()
 	branch0Cr, err := eng.Parse(`MATCH (identity:identity {key: $actorKey})-[:hasService]->(svc:service) ` +
