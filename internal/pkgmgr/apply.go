@@ -226,9 +226,31 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 // the canonical-name collision guard) and adapts its result.
 func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts ApplyOptions) (*ApplyResult, error) {
 	if opts.DryRun {
-		ops, _, pkgKey, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, metaScanResult{})
+		ops, declared, pkgKey, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, metaScanResult{})
 		if err != nil {
 			return nil, err
+		}
+		// The occupancy gate, run on the preview for the same reason the
+		// Secure-Lens retirement guard runs before Apply's dry-run return: a
+		// preview whose real run would be refused must say so, not describe the
+		// batch it would have submitted. This branch never calls Install, so it
+		// carries the gate itself; the real fresh-install branch below inherits
+		// it. Over an uninstalled package an ungated preview would report
+		// "install, N keys created" for a batch that cannot commit one of them.
+		//
+		// It refuses with the sentinel rather than annotating the ApplyResult
+		// because there is no honest ApplyResult here: Created/CreatedKeys are
+		// the fields a caller reads to learn what an apply would do, and any
+		// value in them describes writes that will not happen. An error has no
+		// clean-preview reading.
+		//
+		// A read, never a write, so a preview stays a preview.
+		tombstoned, liveOccupants, err := i.declaredKeyOccupants(ctx, declared)
+		if err != nil {
+			return nil, err
+		}
+		if len(tombstoned) > 0 || len(liveOccupants) > 0 {
+			return nil, occupiedDeclaredKeysError(def, tombstoned, liveOccupants)
 		}
 		res := &ApplyResult{
 			PackageName:        def.Name,

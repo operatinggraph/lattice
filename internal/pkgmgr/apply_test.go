@@ -1,6 +1,7 @@
 package pkgmgr
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -271,6 +272,94 @@ func TestApply_DryRunFreshInstall(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("dry-run fresh install actually installed the package: %+v", got)
+	}
+}
+
+// TestApply_OverUninstalledPackageRefuses covers both fresh-install branches
+// Apply reaches when no LIVE manifest carries the name but the package's own
+// keys are still occupied by its uninstall's tombstones.
+//
+// The dry-run branch never calls Install, so it needs the gate of its own: left
+// ungated it previews "install, N keys created" for a batch that cannot create
+// one of them. The real branch (including `--force`, which routes here too
+// because the dispatch is on `existing == nil`, not on Force) inherits the gate
+// through Install.
+func TestApply_OverUninstalledPackageRefuses(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	t.Run("DryRun", func(t *testing.T) {
+		res, err := inst.Apply(ctx, def, ApplyOptions{DryRun: true})
+		if err == nil {
+			t.Fatalf("dry-run over an uninstalled package must refuse, got a preview: %+v", res)
+		}
+		if !errors.Is(err, ErrDeclaredKeysOccupied) {
+			t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+		}
+		// No ApplyResult at all: a caller reading Created / CreatedKeys must have
+		// nothing there to read as a clean preview.
+		if res != nil {
+			t.Fatalf("a refused preview must return no ApplyResult, got %+v", res)
+		}
+	})
+
+	t.Run("Force", func(t *testing.T) {
+		res, err := inst.Apply(ctx, def, ApplyOptions{Force: true})
+		if err == nil {
+			t.Fatalf("a forced apply over an uninstalled package must refuse, got: %+v", res)
+		}
+		if !errors.Is(err, ErrDeclaredKeysOccupied) {
+			t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+		}
+	})
+}
+
+// TestApply_DryRunOverLiveOccupantRefuses is the preview path's other bucket: a
+// declared key held by a LIVE document, with nothing tombstoned anywhere. The
+// preview's gate has to consult both buckets — a gate reading only the
+// tombstoned one previews a create batch whose very first CreateOnly assertion
+// the commit rejects.
+func TestApply_DryRunOverLiveOccupantRefuses(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	perm := def.Permissions[0]
+	occupied := "vtx.permission." + entityNanoID(def.Name, permTag(perm.OperationType, perm.Scope))
+	raw, err := json.Marshal(map[string]any{
+		"class":     "permission",
+		"isDeleted": false,
+		"data":      map[string]any{"operationType": perm.OperationType, "scope": perm.Scope, "origin": "runtime"},
+	})
+	if err != nil {
+		t.Fatalf("marshal live occupant: %v", err)
+	}
+	if _, err := conn.KVCreate(ctx, CoreBucket, occupied, raw); err != nil {
+		t.Fatalf("seed live occupant %s: %v", occupied, err)
+	}
+
+	res, err := inst.Apply(ctx, def, ApplyOptions{DryRun: true})
+	if err == nil {
+		t.Fatalf("dry-run over a live occupant must refuse, got a preview: %+v", res)
+	}
+	if res != nil {
+		t.Fatalf("a refused preview must return no ApplyResult, got %+v", res)
+	}
+	var occ *DeclaredKeysOccupiedError
+	if !errors.As(err, &occ) {
+		t.Fatalf("want *DeclaredKeysOccupiedError, got %T (%v)", err, err)
+	}
+	if !slices.Equal(occ.Live, []string{occupied}) {
+		t.Errorf("Live = %v, want exactly [%s]", occ.Live, occupied)
+	}
+	if len(occ.Tombstoned) != 0 {
+		t.Errorf("Tombstoned = %v, want empty — nothing here was ever uninstalled", occ.Tombstoned)
 	}
 }
 
