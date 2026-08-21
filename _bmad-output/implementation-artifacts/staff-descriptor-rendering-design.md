@@ -882,5 +882,127 @@ named blockers each increment left behind (clinic's five, wellness's four, café
 loftspace's `CreateLocation`/`AttachObject`/`DetachObject`) — each is its own future increment per §7,
 not "more Inc 3."
 
+## 18. Inc 3d fire brief (Vertical Steward, committed before code) — loftspace tail
+
+**Scope sentence (verbatim from §7):** *loftspace's remaining `SignRenewal`/`VerifyGuarantor`* — the
+last two ops in the `COMPLETIONS` residue map (`cmd/loftspace-app/web/app.js:113-143`), migrating
+both onto `internal/descriptorform`, closing Inc 3 except for the named `CreateLocation`/
+`AttachObject`/`DetachObject` blockers.
+
+**The `{context.<field>}` READS template Inc 2 shipped is NOT what unblocks this** — re-verified
+against the live descriptors (`packages/lease-signing/permissions.go:510-661`, shipped in Inc 0):
+`SignRenewal`/`VerifyGuarantor`'s `Reads`/`OptionalReads` already resolve fine today via
+`{payload.leaseApp}`/`{payload.applicant}`, because both fields are declared as **typed, required
+`InputSchema` properties** — the actual blocker is that `leaseApp`/`applicant` must reach the
+**payload** without the person typing them (both field descriptions say "resolved from the renewal's
+own record, never typed"; the legacy hand-built path splices them in via `extraFromRenewal`, and
+neither field is ever rendered). `context.row`/`{context.<field>}` has no reach into payload
+construction at all in the shipped module — it only substitutes *read templates*.
+
+**The real mechanism, grounded against an ALREADY-SHIPPED precedent, not invented:**
+`pkgmgr.OpDispatchSpec.ContextParams` (`internal/pkgmgr/definition.go:704`, doc at :640-676) is
+exactly "a schema field the client fills from context and never renders" — three packages already
+declare it (`packages/cafe-domain/opmetas.go:92`, `packages/clinic-domain/opmetas.go:94`,
+`packages/wellness-domain/opmetas.go`) — and **Facet's renderer already consumes it live**
+(`cmd/facet/web/app.js` — `contextParams` excludes the field from `fieldNames` at :2419, resolves each
+template via `substituteTemplate` (:2540-2564, including the `{entity.<column>}` form —
+`form.mjs`'s own doc comment at :17-20 already calls `{context.<field>}` "the staff analog of Facet's
+`{entity.<column>}`") and writes it into `payload` at submit (:2736-2747, `submitDescriptorForm`).
+Adding `contextParams` support to `form.mjs` is a **mirror of Facet's shipped mechanism**, using the
+`substituteTemplate` function `form.mjs` already has (:321-341) — not new invented semantics, and NOT
+the same class of gap Inc 3a/3b left hand-built (`CreateStudio`/`CreateMenuItem`'s auto-derived
+`location` fields have no Facet precedent to mirror at all; this one does).
+
+**Fact 1 — mechanical Go gap, confirmed live:** the `opCatalog` lens cypher already projects
+`dispatchContextParams` (`packages/edge-manifest/lenses.go:642,717` — identical to the
+`personalManifest` lens Facet reads), but **none of the four apps' `opCatalogProjection` /
+`opDispatch` structs carry it** (`cmd/{loftspace,clinic,wellness,cafe}-app/op_catalog.go` — byte-
+identical files, confirmed by `diff`). Add `DispatchContextParams map[string]string
+\`json:"dispatchContextParams"\`` to `opCatalogProjection`, `ContextParams map[string]string
+\`json:"contextParams,omitempty"\`` to `opDispatch`, wire both in `toDescriptor()` and the "has a
+dispatch" OR-condition — mirror `DispatchReads`/`Reads` exactly, in **all four** files (they must stay
+byte-identical, per their own doc comments).
+
+**Fact 2 — a live bug on the exact surface being migrated, fix in this fire (§4 "what a fire
+discovers, this run fixes"):** `COMPLETIONS.SignRenewal` (`app.js:114-129`) declares neither
+`taskLeg` nor `landlordLeg`. In `submitLegacyComplete` (`app.js:2413-2418`), `opts = desc.landlordLeg
+? landlordSubmit() : desc.taskLeg ? {authContext:{task,target}} : undefined` — so for `SignRenewal`,
+`opts` is **always `undefined`**, and `submitOp` (`app.js:553-561`) only sets `authContext` when
+`opts.authContext` is truthy. `SignRenewal`'s **only** grant path is the §10.7 ephemeral task grant
+(no scope=self, no standing role — `permissions.go:594-608`'s own comment, confirmed by
+`TestPackage_TaskLegDescriptorsNameTheTaskPath`, `package_test.go:91-115`, whose own doc comment
+already claims "the client reading these rows... is loftspace-app's task modal, which renders from
+the descriptor" — aspirational today, true once this fire ships), and
+`matchEphemeralGrant` (`internal/processor/step3_auth_capability.go:326-336`) denies outright on a
+nil `env.AuthContext`. **`SignRenewal` is AuthDenied on every submission today**, both from the real
+Tasks-tab entry and the synthetic renewal-card entry — nobody has signed a lease renewal through
+loftspace-app's UI. Migrating onto the catalog module (`buildAuthContext("task", context)` already
+builds `{task, target}` correctly) fixes this **once a genuine `taskKey` reaches it** — which the
+synthetic card path does not today (next fact).
+
+**Fact 3 — the synthetic renewal-card path needs a real task, not a fabricated one:**
+`openRenewalAction` (`app.js:2694-2706`) builds a synthetic task with `taskKey: null`. `form.mjs`'s
+`buildAuthContext` correctly throws `"This action can only be taken from its task."` on a falsy
+`context.taskKey` (`form.mjs:397`) — the right fail-closed answer to a fabricated grant, but it means
+the "Sign renewal" button on the renewal card would stop working post-migration unless it resolves
+the tenant's **real** task first. `state.tasks` (populated by `loadTasks`, `app.js:1994-2016`) carries
+`{taskKey, scopedTo, operationName, ...}` rows; `openRenewalAction`'s `SignRenewal` branch must look
+up `state.tasks.find(t => t.operationName === "SignRenewal" && t.scopedTo === row.entityKey)` and use
+its real `taskKey` — ensuring `state.tasks` is loaded first (a `loadTasks()`/quiet-equivalent call, or
+reuse if already resident) — and refuse cleanly (no button, or a toast) if no matching real task is
+found yet, never a null/fabricated key. `VerifyGuarantor`/`SetRenewalTerms`/`CancelRenewal` are
+self-voice (`AuthContext:"self"`, landlord hat) and are UNAFFECTED — `completeTask` already no-ops on
+a falsy key for those, this refusal is `SignRenewal`-only.
+
+**Fact 4 — `context.row` wiring:** `openCatalogComplete` (`app.js:2280-2293`) hardcodes `row: null`.
+Resolve the matching `state.renewals` row (fetch via the existing `loadRenewalsQuiet()` fallback,
+mirroring `submitLegacyComplete`'s own lookup at `app.js:2378-2389`) whenever the catalog row's
+`dispatch.class === "renewal"`, and pass it as `context.row`. Harmless for `SetRenewalTerms`/
+`CancelRenewal` (they declare no `contextParams`, so the row goes unused).
+
+**Increment order:**
+1. **Go proxy fix (mechanical, all four apps):** wire `dispatchContextParams` through, per Fact 1.
+2. **`form.mjs` capability (the one genuinely new-code step):** exclude `contextParams`-named fields
+   from `fieldNames` (mirror the existing `targetField` exclusion at :435); after building the typed-
+   field payload and BEFORE computing `reads`/`optionalReads`, resolve each `dispatch.contextParams`
+   entry via the existing `substituteTemplate(template, context, payload)` and write it into `payload`
+   — this ordering is load-bearing: `SignRenewal`/`VerifyGuarantor`'s `Reads` stay
+   `{payload.leaseApp}`-shaped unchanged (Fact-check before "fixing" them to `{context.leaseApp}` —
+   they must NOT change). A template that fails to resolve to a whole value for a **required**
+   contextParams field must refuse the same way a required typed field does (`throw`, not a silent
+   `undefined` payload key) — required vs. the `?`-suffix optional form (`definition.go:659-664`) is
+   real vocabulary; build the optional form too only if grounding it is free (neither op here needs
+   it — don't invent an untested branch for no live consumer).
+3. **Package edit (`lease-signing`):** `SignRenewal`/`VerifyGuarantor` `Dispatch` gains
+   `ContextParams: map[string]string{"leaseApp": "{context.leaseApp}", "applicant":
+   "{context.applicant}"}`; `InputSchema` drops `leaseApp`/`applicant` from `properties` AND
+   `required` (down to `["renewalKey"]` / `["renewalKey"]` — `VerifyGuarantor` keeps `method`
+   optional, unaffected); `FieldDescriptions` drops the now-unrendered `leaseApp`/`applicant` entries.
+   Version bump (`package.go:85`, currently `0.31.2`).
+4. **FE wiring (`loftspace-app`):** Facts 3+4 — real-task lookup for the synthetic `SignRenewal` card
+   button, `context.row` resolution in `openCatalogComplete`. Then **delete** `COMPLETIONS` entirely
+   (it holds exactly these two entries — confirmed, `app.js:113-143`) along with `openLegacyComplete`,
+   `submitLegacyComplete`, `renewsLinkKey`, `applicationForLinkKey`, and the `COMPLETIONS[...]`
+   branches in `openComplete`/`submitComplete`/`descriptorFor` — dead code once both ops migrate, per
+   house rules (no half-finished/backwards-compat scaffolding for code proven unused).
+5. **Tests:** `internal/descriptorform/form.test.mjs` gains contextParams cases (required field
+   auto-filled + excluded from rendered fields; a template that fails to resolve on a required
+   contextParams field refuses) — `cmd/facet/web/descriptor_autofill.test.mjs` is a shape reference,
+   not something to copy verbatim (different module, different context shape).
+
+**Verify live (proves Fact 2's fix, not just the new code path):** reuse the running stack,
+`refresh-loftspace` after the package bump, exercise `SignRenewal` as a signed-in tenant with an open
+renewal cycle (both via the real Tasks-tab entry and the renewal-card button) and confirm it now
+**succeeds** where it previously `AuthDenied`; exercise `VerifyGuarantor` as the landlord hat.
+
+**Non-goals:** `CreateLocation`/`AttachObject`/`DetachObject` (named, unrelated blockers — untouched);
+`SetRenewalTerms`/`CancelRenewal` (already migrated — touched only incidentally if `context.row`
+wiring passes through their call site, behavior unchanged); the `?`-optional `contextParams` marker
+(build only if free, per increment 2).
+
+**Review depth:** posture-changing — new payload-population capability inside the shared,
+authContext-adjacent module (`internal/descriptorform` owns `authContext` assembly) **plus** a live
+authorization-bug fix. Full 3-layer adversarial pass mandatory before admit, cold reviewer, per the
+Inc 2/3a/3b/3c precedent (§14/§15/§16/§17 each found real regressions this way).
 
 census named. See `backlog/lattice.md`.
