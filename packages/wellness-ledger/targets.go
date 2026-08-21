@@ -42,7 +42,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: NoShowSettlementTarget,
-			LensRef:  NoShowSettlementTarget,
+			Description: "Every no-show booking carrying a fee is charged once to the member's wellness account. A " +
+				"member with no account open yet is skipped until one exists.",
+			LensRef: NoShowSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_charge": {
 					Action:    "directOp",
@@ -63,7 +65,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: ClassPriceSettlementTarget,
-			LensRef:  ClassPriceSettlementTarget,
+			Description: "Every booking on a paid class is charged its class price once to the member's account, " +
+				"whether or not the member ends up attending.",
+			LensRef: ClassPriceSettlementTarget,
 			// No missing_account gap here either — same rationale as
 			// NoShowSettlementTarget above: a member's billing already assumes
 			// a wellnessaccount exists via the standing CreateAccount flow, so
@@ -84,7 +88,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: RefundSettlementTarget,
-			LensRef:  RefundSettlementTarget,
+			Description: "A class price paid for a booking that was later cancelled is credited back to the member's " +
+				"account exactly once.",
+			LensRef: RefundSettlementTarget,
 			// No missing_account gap: a wellnessrefund only ever exists
 			// because CancelBooking already resolved a live accountKey
 			// off the original charge's postedTo link (wellness-domain/

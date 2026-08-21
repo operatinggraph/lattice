@@ -350,7 +350,7 @@ func TestBuildTargetDetailJoin(t *testing.T) {
 	summary := &weaverTargetSummary{TargetID: "leaseComplete", LensRef: "lensAAAAAAAAAAAAAAAA", State: "active",
 		Gaps: []string{"missing_bgcheck", "missing_notify", "missing_signature"}}
 
-	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations",
+	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations", "",
 		summary, scan, state, counts, map[string]string{"backgroundCheck": "vtx.meta.pAAA"}, nil, nil)
 
 	if !d.Registered || d.State != "active" || d.Mode != "planned" {
@@ -393,7 +393,7 @@ func TestBuildTargetDetailJoin(t *testing.T) {
 func TestBuildTargetDetailUnregisteredWithControlMarker(t *testing.T) {
 	scan := scanWeaverRows(nil, nil, false)
 	state := splitWeaverStateKeys("ghost", []string{"ghost.__control"})
-	d := buildTargetDetail("ghost", nil, "", "", nil, scan, state, nil, nil, nil, nil)
+	d := buildTargetDetail("ghost", nil, "", "", "", nil, scan, state, nil, nil, nil, nil)
 	if d.Registered {
 		t.Error("Registered must be false with no control-plane summary")
 	}
@@ -408,7 +408,7 @@ func TestBuildTargetDetailFallsBackToSummaryGaps(t *testing.T) {
 	docs := map[string]map[string]any{"aaaaaaaaaaaaaaaaaaaa": {"missing_x": true}}
 	scan := scanWeaverRows(docs, []string{"aaaaaaaaaaaaaaaaaaaa"}, false)
 	summary := &weaverTargetSummary{TargetID: "t", State: "active", Gaps: []string{"missing_x"}}
-	d := buildTargetDetail("t", nil, "", "", summary, scan, weaverStateKeys{}, nil, nil, nil, nil)
+	d := buildTargetDetail("t", nil, "", "", "", summary, scan, weaverStateKeys{}, nil, nil, nil, nil)
 	if len(d.Gaps) != 1 || d.Gaps[0].Column != "missing_x" || d.Gaps[0].Dispatch != "none" {
 		t.Errorf("gaps = %+v, want one structure-less node", d.Gaps)
 	}
@@ -585,5 +585,89 @@ func TestBuildWeaverMetaIndexKeysOffTheSpecBody(t *testing.T) {
 	}
 	if index.Patterns["pAAAAAAAAAAAAAAAAAAA"] != "vtx.meta.pAAAAAAAAAAAAAAAAAAA" {
 		t.Errorf("pattern index by vertex NanoID = %v", index.Patterns)
+	}
+}
+
+// TestWeaverTargetDescriptionsReadsOnlyDescribedTargets pins both the mapping
+// and the scan's cost bound. The roster is the Weaver landing page, so the scan
+// opens ONLY metas carrying both a `.spec` and a `.description` — a DDL's
+// description (there are hundreds) and an undescribed target must each cost
+// zero reads. The `targetId` check is what actually decides identity, so a
+// described lens or pattern is excluded on its body, not on its key shape.
+func TestWeaverTargetDescriptionsReadsOnlyDescribedTargets(t *testing.T) {
+	envelopes := map[string]string{
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.spec":        `{"data":` + leaseTargetSpec + `}`,
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.description": `{"data":{"text":"Every lease application reaches a signed lease."}}`,
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec":        `{"data":{"targetId":"quietTarget","gaps":{}}}`,
+		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.spec":        `{"data":{"patternId":"backgroundCheck","steps":[]}}`,
+		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.description": `{"data":{"text":"A pattern, not a target."}}`,
+		"vtx.meta.dAAAAAAAAAAAAAAAAAAA.description": `{"data":{"text":"A DDL, which carries no spec at all."}}`,
+	}
+	reads := map[string]int{}
+	get := func(k string) ([]byte, bool) {
+		reads[k]++
+		v, ok := envelopes[k]
+		return []byte(v), ok
+	}
+
+	got := weaverTargetDescriptions([]string{
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.description",
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.description",
+		"vtx.meta.dAAAAAAAAAAAAAAAAAAA.description",
+		// A non-meta key under the listing must be ignored outright.
+		"vtx.leaseApp.aaaaaaaaaaaaaaaaaaaa.description",
+	}, get)
+
+	if len(got) != 1 || got["leaseComplete"] != "Every lease application reaches a signed lease." {
+		t.Fatalf("descriptions = %v, want only the described target's prose", got)
+	}
+	if reads["vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec"] != 0 {
+		t.Errorf("an undescribed target's spec was read %d times, want 0", reads["vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec"])
+	}
+	if reads["vtx.meta.dAAAAAAAAAAAAAAAAAAA.description"] != 0 {
+		t.Errorf("a spec-less meta's description was read %d times, want 0", reads["vtx.meta.dAAAAAAAAAAAAAAAAAAA.description"])
+	}
+	if reads["vtx.meta.pAAAAAAAAAAAAAAAAAAA.description"] != 0 {
+		t.Errorf("a pattern's description was read %d times — the targetId check should stop before it", reads["vtx.meta.pAAAAAAAAAAAAAAAAAAA.description"])
+	}
+}
+
+// TestWeaverTargetDescriptionsSkipsTombstonedAndEmpty: a withdrawn description
+// must read as absent, not as the prose it used to carry (metaData's tombstone
+// rule, pinned here on the path the roster takes), and a blank body is the same
+// as none rather than an empty line on the card.
+func TestWeaverTargetDescriptionsSkipsTombstonedAndEmpty(t *testing.T) {
+	envelopes := map[string]string{
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.spec":        `{"data":` + leaseTargetSpec + `}`,
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.description": `{"isDeleted":true,"data":{"text":"withdrawn prose"}}`,
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec":        `{"data":{"targetId":"blankTarget","gaps":{}}}`,
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.description": `{"data":{"text":""}}`,
+	}
+	get := func(k string) ([]byte, bool) {
+		v, ok := envelopes[k]
+		return []byte(v), ok
+	}
+	got := weaverTargetDescriptions([]string{
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.description",
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.uAAAAAAAAAAAAAAAAAAA.description",
+	}, get)
+	if len(got) != 0 {
+		t.Errorf("descriptions = %v, want none (one tombstoned, one blank)", got)
+	}
+}
+
+// TestBuildTargetDetailCarriesDescription pins the prose onto the detail
+// payload — the same text the roster card shows, so the two surfaces never
+// disagree about what a target is for.
+func TestBuildTargetDetailCarriesDescription(t *testing.T) {
+	d := buildTargetDetail("t", nil, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "", "Every tab settles.",
+		nil, weaverRowScan{}, weaverStateKeys{}, nil, nil, nil, nil)
+	if d.Description != "Every tab settles." {
+		t.Errorf("detail description = %q", d.Description)
 	}
 }

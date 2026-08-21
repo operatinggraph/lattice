@@ -117,7 +117,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: ErasureCompleteTarget,
-			LensRef:  "identityErasureResidue",
+			Description: "An identity that asked to be erased ends with no credentials or duplicate-index links " +
+				"left, its key destroyed and its projections cleared, sealed by a completion attestation. " +
+				"Leftover traces are swept; a stalled step is raised for an operator.",
+			LensRef: "identityErasureResidue",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_credentialResidue": {
 					Action:    "directOp",

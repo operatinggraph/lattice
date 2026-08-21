@@ -35,7 +35,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: TabSettlementTarget,
-			LensRef:  TabSettlementTarget,
+			Description: "A settled tab that owes money is posted to the resident's house account. If their lease " +
+				"has no café account yet, one is opened, then the tab's total is charged to it.",
+			LensRef: TabSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
 					Action:    "directOp",
@@ -61,7 +63,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: StaleTabSettlementTarget,
-			LensRef:  StaleTabSettlementTarget,
+			Description: "No tab stays open past its settle-by deadline. A tab whose deadline passes without staff " +
+				"settling it is closed automatically, and a tab with no deadline recorded gets one filled " +
+				"in.",
+			LensRef: StaleTabSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_settle": {
 					Action:    "directOp",

@@ -14,7 +14,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{{
 		TargetID: "augurDispatch",
-		LensRef:  "augurDispatchPending",
+		Description: "An approved remediation proposal is actually carried out. Once a reviewer approves it, " +
+			"the operation it proposes is submitted, so approval never stops at the review queue.",
+		LensRef: "augurDispatchPending",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_dispatch": {Action: "proposedOp"},
 		},

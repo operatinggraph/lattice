@@ -23,7 +23,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{{
 		TargetID: "objectLiveness",
-		LensRef:  "objectLiveness",
+		Description: "Every stored object stays attached to at least one owner. An object left with no attachments " +
+			"is tombstoned so its stored bytes can be reclaimed.",
+		LensRef: "objectLiveness",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_owner": {
 				Action:    "directOp",

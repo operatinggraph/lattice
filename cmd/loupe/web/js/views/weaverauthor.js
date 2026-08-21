@@ -20,7 +20,7 @@
 import { $, el, api, demoHide, setStatus } from "../api.js";
 import {
   emptyDraft, emptyGap, parseParamsText, paramsToText, parseReadsText, readsToText,
-  buildTargetContent, buildLensContent, scaffoldLensSpec, validationBadge,
+  buildTargetContent, buildLensContent, proposeBlockers, scaffoldLensSpec, validationBadge,
   exportBundle, exportFilename,
 } from "../logic/weaverauthor.js";
 import { checksSummary, interferenceHeadline, opCoverageNote } from "../logic/weaver.js";
@@ -72,6 +72,13 @@ function targetFieldsBox() {
   row.appendChild(labeledInput("targetId", draft.targetId, (v) => { draft.targetId = v; }));
   row.appendChild(labeledInput("lensRef (the paired lens's canonicalName)", draft.lensRef, (v) => { draft.lensRef = v; }));
   box.appendChild(row);
+  // Prose, not a posture: it installs onto the target as its own aspect and is
+  // what the roster and the review queue label this target by, which is why
+  // Propose requires it while Check does not.
+  box.appendChild(labeledInput(
+    "description — what this target ensures, in plain language (persists onto the installed target)",
+    draft.description, (v) => { draft.description = v; },
+    { textarea: true, rows: 2, placeholder: "e.g. Every settled tab that owes money is posted to the resident's house account." }));
   return box;
 }
 
@@ -168,24 +175,24 @@ function actionsBox() {
   exportBtn.addEventListener("click", doExport);
   box.appendChild(exportBtn);
 
-  // Propose needs a passing Check on BOTH artifacts — an operator can still
-  // Export an invalid draft (a file has no review-queue consequence), but
-  // entering the queue on a verdict the operator hasn't seen would leave a
-  // predictably-invalid proposal in it. checkPassed mirrors the same
-  // {valid,errors} shape validationBadge already renders.
+  // Propose needs a passing Check on BOTH artifacts and a description — an
+  // operator can still Export an incomplete draft (a file has no review-queue
+  // consequence), but entering the queue on a verdict the operator hasn't seen,
+  // or under a row label nobody can read, leaves a proposal the reviewer cannot
+  // act on. proposeBlockers names every unmet reason so the disabled button is
+  // never a mystery.
+  const blockers = proposeBlockers(draft, lastCheck);
   const proposeBtn = demoHide(el("button", null, "Propose"));
-  proposeBtn.disabled = !checkPassed(lastCheck);
+  proposeBtn.disabled = blockers.length > 0;
+  if (blockers.length) proposeBtn.title = "propose needs: " + blockers.join("; ");
   proposeBtn.addEventListener("click", doPropose);
   box.appendChild(proposeBtn);
+  if (blockers.length) box.appendChild(el("span", "muted small", "propose needs: " + blockers.join("; ")));
 
   const status = el("span", "muted", "");
   status.id = "weaver-author-status";
   box.appendChild(status);
   return box;
-}
-
-function checkPassed(r) {
-  return !!(r && r.targetValidation && r.targetValidation.valid && r.lensValidation && r.lensValidation.valid);
 }
 
 async function runChecks() {

@@ -574,6 +574,64 @@ func TestValidateCapabilityArtifact_LoomPatternSmuggledStepFieldRejected(t *test
 	}
 }
 
+func TestValidateCapabilityArtifact_WeaverTargetDescriptionRoundTrips(t *testing.T) {
+	// `description` is prose, not authority — it is one of the fields the AI
+	// path may carry, so the unknown-field scan must ADMIT it (a rejection here
+	// would record every described proposal invalid) and materialization must
+	// carry it onto the WeaverTargetSpec the installer emits the sibling
+	// `.description` aspect from.
+	const prose = "Every dispatched proposal reaches a reviewed verdict."
+	content := weaverTargetContent(t, WeaverTargetArtifactContent{
+		TargetID:    "aiTargetDispatch",
+		LensRef:     "someExistingLens",
+		Description: prose,
+		Gaps: map[string]GapActionArtifact{
+			"missing_followUp": {Action: "directOp", Operation: "SendReminder"},
+		},
+	})
+	report, err := ValidateCapabilityArtifact("weaverTarget", content, fullCypherParser{}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !report.Valid {
+		t.Fatalf("a described target must validate; got errors: %v", report.Errors)
+	}
+
+	def, err := DefinitionForCapabilityArtifact("weaverTarget", content, "ai-target-pkg", "1.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(def.WeaverTargets) != 1 {
+		t.Fatalf("expected exactly one WeaverTarget, got %d", len(def.WeaverTargets))
+	}
+	if got := def.WeaverTargets[0].Description; got != prose {
+		t.Fatalf("materialized Description = %q, want %q", got, prose)
+	}
+}
+
+func TestValidateCapabilityArtifact_WeaverTargetDescriptionOmittedWhenBlank(t *testing.T) {
+	// A description-less artifact must stay byte-identical on the wire (the
+	// omitempty tag) and materialize with empty prose, so the installer emits
+	// no `.description` aspect for it.
+	content := weaverTargetContent(t, WeaverTargetArtifactContent{
+		TargetID: "aiTargetDispatch",
+		LensRef:  "someExistingLens",
+		Gaps: map[string]GapActionArtifact{
+			"missing_followUp": {Action: "directOp", Operation: "SendReminder"},
+		},
+	})
+	if strings.Contains(string(content), "description") {
+		t.Fatalf("a blank description must not appear on the wire; got %s", content)
+	}
+	def, err := DefinitionForCapabilityArtifact("weaverTarget", content, "ai-target-pkg", "1.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := def.WeaverTargets[0].Description; got != "" {
+		t.Fatalf("materialized Description = %q, want empty", got)
+	}
+}
+
 func TestDefinitionForCapabilityArtifact_WeaverTarget(t *testing.T) {
 	content := weaverTargetContent(t, WeaverTargetArtifactContent{
 		TargetID: "aiTargetDispatch",

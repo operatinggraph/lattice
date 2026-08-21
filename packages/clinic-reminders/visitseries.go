@@ -946,7 +946,10 @@ RETURN
 func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: VisitSeriesDueTarget,
-		LensRef:  "visitSeriesDue",
+		Description: "An active recurring visit series always has a future next-visit date. When a visit comes due " +
+			"the series records that occurrence and rolls forward to the next; paused or ended series stand " +
+			"still.",
+		LensRef: "visitSeriesDue",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_series_advance": {
 				Action:    "directOp",

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
@@ -143,7 +144,7 @@ func TestWeaverAuthorPropose_MintsOneProposalIdPerArtifact(t *testing.T) {
 	srv := newTestProposeServer(t, url)
 
 	body := `{"artifacts":[
-		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\"}","target":{"mode":"install"},"rationale":"r","validation":{"state":"valid"}},
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"description\":\"Every tab settles.\"}","target":{"mode":"install"},"rationale":"r","validation":{"state":"valid"}},
 		{"kind":"lens","content":"{\"canonicalName\":\"l1\"}","target":{"mode":"install"},"rationale":"r","validation":{"state":"valid"}}
 	]}`
 	rec, out := callPropose(t, srv, body)
@@ -222,6 +223,119 @@ func TestWeaverAuthorPropose_OneArtifactFailureDoesNotBlockTheOther(t *testing.T
 	}
 	if calls != 2 {
 		t.Fatalf("gateway calls = %d, want 2 (both artifacts submitted)", calls)
+	}
+}
+
+// TestWeaverAuthorPropose_UndescribedTargetRejected pins Loupe's own
+// queue-readability rule: pkgmgr keeps `description` optional, but a target
+// entering the human review queue must say what it ensures. The refusal is a
+// whole-request 400 (nothing is submitted) rather than a per-artifact result —
+// the bundle's two artifacts are one operator action, and half-submitting it
+// would leave an unlabelled lens in the queue with no target to explain it.
+func TestWeaverAuthorPropose_UndescribedTargetRejected(t *testing.T) {
+	calls := 0
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	}))
+	t.Cleanup(hs.Close)
+	srv := newTestProposeServer(t, hs.URL)
+
+	for _, content := range []string{
+		`{\"targetId\":\"t1\"}`,
+		`{\"targetId\":\"t1\",\"description\":\"\"}`,
+		`{\"targetId\":\"t1\",\"description\":\"   \\n \"}`,
+	} {
+		body := `{"artifacts":[
+			{"kind":"weaverTarget","content":"` + content + `","target":{"mode":"install"},"rationale":"r","validation":{"state":"valid"}},
+			{"kind":"lens","content":"{}","target":{"mode":"install"},"rationale":"r","validation":{"state":"valid"}}
+		]}`
+		rec, _ := callPropose(t, srv, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("content %s: status = %d, want 400", content, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "description") {
+			t.Errorf("content %s: refusal must name the missing field; got %s", content, rec.Body.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("gateway calls = %d, want 0 — a refused bundle submits nothing", calls)
+	}
+}
+
+// TestWeaverAuthorPropose_IntentLabelsBothArtifacts pins the queue row label:
+// SubmitCapabilityProposal defaults `intent` to the whole rationale text
+// (packages/capability-author/ddls.go), which reads as a wall of prose in the
+// list. The target's description is the label of record, and BOTH artifacts
+// carry the same one so the pair reads as one submission.
+func TestWeaverAuthorPropose_IntentLabelsBothArtifacts(t *testing.T) {
+	var intents []string
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req gatewayOperationRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var payload map[string]any
+		_ = json.Unmarshal(req.Payload, &payload)
+		s, _ := payload["intent"].(string)
+		intents = append(intents, s)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	}))
+	t.Cleanup(hs.Close)
+	srv := newTestProposeServer(t, hs.URL)
+
+	body := `{"artifacts":[
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"description\":\"Every settled tab is charged.\\nA second line the row label drops.\"}","target":{"mode":"install"},"rationale":"a much longer rationale nobody wants as a row label","validation":{"state":"valid"}},
+		{"kind":"lens","content":"{}","target":{"mode":"install"},"rationale":"a much longer rationale nobody wants as a row label","validation":{"state":"valid"}}
+	]}`
+	rec, _ := callPropose(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(intents) != 2 {
+		t.Fatalf("relayed intents = %v, want one per artifact", intents)
+	}
+	for i, got := range intents {
+		if got != "Every settled tab is charged." {
+			t.Errorf("intent[%d] = %q, want the description's first line", i, got)
+		}
+	}
+}
+
+// TestProposeIntentFallsBackToRationale: a bundle with no weaverTarget artifact
+// never reaches the description gate, so its label comes from the first
+// rationale present — still a first line, still capped.
+func TestProposeIntentFallsBackToRationale(t *testing.T) {
+	t.Parallel()
+	got := proposeIntent("", []weaverAuthorProposeArtifact{
+		{Kind: "lens", Rationale: "  \n"},
+		{Kind: "lens", Rationale: "Projects the open tabs.\nwith more detail below"},
+	})
+	if got != "Projects the open tabs." {
+		t.Errorf("proposeIntent = %q, want the first non-blank rationale's first line", got)
+	}
+	if got := proposeIntent("", nil); got != "" {
+		t.Errorf("proposeIntent(nothing) = %q, want empty so the op's own default stands", got)
+	}
+}
+
+// TestFirstLineCappedIsRuneSafe: the cap is in RUNES. A byte-slice cut through
+// a multi-byte rune would put invalid UTF-8 into the proposal vertex.
+func TestFirstLineCappedIsRuneSafe(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("é", 200)
+	got := firstLineCapped(long, proposeIntentCap)
+	if n := len([]rune(got)); n != proposeIntentCap {
+		t.Errorf("capped length = %d runes, want %d", n, proposeIntentCap)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("a truncated label must be marked elided; got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("capped label is not valid UTF-8: %q", got)
+	}
+	if got := firstLineCapped("short", proposeIntentCap); got != "short" {
+		t.Errorf("an under-cap line must be returned whole; got %q", got)
 	}
 }
 

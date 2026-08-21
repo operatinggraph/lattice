@@ -159,17 +159,23 @@ type GapActionArtifact struct {
 // WeaverTargetArtifactContent is the JSON shape of a "weaverTarget"-kind
 // proposal's artifact.content (design §3.2, Fire 3) — the constrained subset
 // of pkgmgr.WeaverTargetSpec an AI-authored target proposal may carry: the
-// base `{targetId, lensRef, gaps}` §10.8 shape. The `augur` escalation-policy
-// block is deliberately NOT exposed here — it configures AI-reasoning
-// escalation (and, via autoApply, the one standing autonomy boundary Andrew
-// has not ratified for even hand-authored packages, design §For-Andrew #1) —
-// so an AI proposing its OWN escalation policy is out of scope for this
-// increment, same posture as the lens kind's excluded protected/secure
-// postures (§3.2).
+// base `{targetId, lensRef, gaps}` §10.8 shape, plus the optional prose
+// `description` that installs as the target's sibling `.description` aspect.
+// The `augur` escalation-policy block is deliberately NOT exposed here — it
+// configures AI-reasoning escalation (and, via autoApply, the one standing
+// autonomy boundary Andrew has not ratified for even hand-authored packages,
+// design §For-Andrew #1) — so an AI proposing its OWN escalation policy is out
+// of scope for this increment, same posture as the lens kind's excluded
+// protected/secure postures (§3.2).
 type WeaverTargetArtifactContent struct {
 	TargetID string                       `json:"targetId"`
 	LensRef  string                       `json:"lensRef"`
 	Gaps     map[string]GapActionArtifact `json:"gaps"`
+	// Description carries no authority of its own — it is prose an operator
+	// reads on the roster — so it is exposed to the AI path unlike the
+	// posture-bearing fields above. Optional, hence omitempty: a
+	// description-less artifact stays byte-identical on the wire.
+	Description string `json:"description,omitempty"`
 }
 
 // StepArtifact is the JSON shape of one entry in a "loomPattern"-kind
@@ -447,9 +453,10 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 // exposes for the "weaverTarget" kind. Mirrors knownLensFields' explicit-
 // allow-list rationale.
 var knownWeaverTargetFields = map[string]bool{
-	"targetId": true,
-	"lensRef":  true,
-	"gaps":     true,
+	"targetId":    true,
+	"lensRef":     true,
+	"gaps":        true,
+	"description": true,
 }
 
 // knownGapActionFields are the JSON keys GapActionArtifact exposes for one
@@ -640,9 +647,10 @@ func weaverTargetArtifactDefinition(wc WeaverTargetArtifactContent, name, versio
 		Name:    name,
 		Version: version,
 		WeaverTargets: []WeaverTargetSpec{{
-			TargetID: wc.TargetID,
-			LensRef:  wc.LensRef,
-			Gaps:     gaps,
+			TargetID:    wc.TargetID,
+			LensRef:     wc.LensRef,
+			Gaps:        gaps,
+			Description: wc.Description,
 		}},
 	}
 }

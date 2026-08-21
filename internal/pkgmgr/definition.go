@@ -259,6 +259,14 @@ type WeaverTargetSpec struct {
 	// action the engine runs when that column is set.
 	Gaps map[string]GapActionSpec
 
+	// Description is the target's optional operator- and AI-facing prose: the
+	// invariant this target keeps true, in the domain's own nouns, and what it
+	// does when a candidate violates it. It is emitted as a SIBLING
+	// `vtx.meta.<id>.description` aspect (the §10.8 spec body carries no prose
+	// field), so the Weaver registry — which reads only `spec`/`effects` —
+	// never sees it. Empty emits no aspect at all.
+	Description string
+
 	// Augur is the optional, default-absent AI-reasoning escalation policy
 	// (Contract #10 §10.8 "Augur escalation"). When set, the installer emits it
 	// into the meta.weaverTarget body so the Weaver registry parses it into a

@@ -31,7 +31,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: OrphanedBookingSettlementTarget,
-			LensRef:  OrphanedBookingSettlementTarget,
+			Description: "No booking or waitlist spot outlives the class it was made for. When a class is called " +
+				"off, the seats and waitlist slots it still holds are released and those bookings closed " +
+				"out.",
+			LensRef: OrphanedBookingSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_release": {
 					Action:    "directOp",

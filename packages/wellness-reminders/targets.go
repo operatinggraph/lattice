@@ -27,7 +27,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: WellnessBookingRemindersTarget,
-			LensRef:  "wellnessBookingReminders",
+			Description: "Every confirmed booking on an upcoming class gets a reminder about a day before the class " +
+				"starts. Moving the class to a new time re-arms the reminder.",
+			LensRef: "wellnessBookingReminders",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_reminder": {
 					Action:    "directOp",

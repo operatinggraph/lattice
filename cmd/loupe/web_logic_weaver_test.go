@@ -99,6 +99,41 @@ func TestWeaverRosterHeadline(t *testing.T) {
 	if got := call(t, vm, "rosterHeadline", partial, []any{}).(string); !containsSub(got, "orphan scan unavailable") {
 		t.Errorf("headline with a failed state scan = %q", got)
 	}
+	// Prose is read separately from the control-plane summary: an unreadable
+	// core-kv must not look like a corpus of targets nobody has described.
+	noProse := map[string]any{"targets": []any{}, "descriptionError": "list core-kv metas: timeout"}
+	if got := call(t, vm, "rosterHeadline", noProse, []any{}).(string); !containsSub(got, "descriptions unavailable") {
+		t.Errorf("headline with a failed description scan = %q", got)
+	}
+}
+
+// TestWeaverTargetRowsCarryDescription: the roster card renders the target's
+// authored prose, so the normalizer must carry it — and an orphan __control
+// marker has no meta-vertex at all, so it can never claim one.
+func TestWeaverTargetRowsCarryDescription(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	body := map[string]any{
+		"targets": []any{
+			map[string]any{"targetId": "described", "state": "active", "gaps": 1, "description": "Every tab settles."},
+			map[string]any{"targetId": "bare", "state": "active", "gaps": 1},
+		},
+		"orphanControl": []any{"ghost"},
+	}
+	rows := call(t, vm, "targetRows", body).([]any)
+	byID := map[string]map[string]any{}
+	for _, r := range rows {
+		m := r.(map[string]any)
+		byID[m["targetId"].(string)] = m
+	}
+	if byID["described"]["description"] != "Every tab settles." {
+		t.Errorf("described row = %v", byID["described"])
+	}
+	if byID["bare"]["description"] != "" {
+		t.Errorf("an undescribed target must normalize to empty, not undefined: %v", byID["bare"])
+	}
+	if byID["ghost"]["description"] != "" {
+		t.Errorf("an orphan marker must carry no description: %v", byID["ghost"])
+	}
 }
 
 func TestWeaverGapBadges(t *testing.T) {

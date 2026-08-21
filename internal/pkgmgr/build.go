@@ -234,7 +234,12 @@ func (i *Installer) buildInstallBatch(
 
 	// WeaverTarget meta-vertices + spec aspect. The vertex carries empty data;
 	// the `.spec` aspect carries the target body the Weaver registry CDC source
-	// unwraps from `.data` and deserializes into a runtime Target.
+	// unwraps from `.data` and deserializes into a runtime Target. An authored
+	// Description rides alongside as a sibling `.description` aspect — the same
+	// class and `{"text": …}` body a role's description carries — kept OUT of
+	// the spec body so the §10.8 shape the engine deserializes stays frozen.
+	// Emitted only when non-empty, matching the spec body's own conditional
+	// posture for optional blocks.
 	for idx, t := range def.WeaverTargets {
 		targetKey := metaVertexPrefix + weaverTargetIDs[idx]
 		lensRef, err := resolveLensRef(t.LensRef, lensByCanonical)
@@ -244,6 +249,10 @@ func (i *Installer) buildInstallBatch(
 		addCreate(targetKey, docVertex(weaverTargetClass, nil))
 		addCreate(targetKey+".spec", docAspect(targetKey, "spec", weaverTargetSpecClass,
 			weaverTargetSpecBody(t, lensRef)))
+		if t.Description != "" {
+			addCreate(targetKey+".description", docAspect(targetKey, "description", "description",
+				map[string]any{"text": t.Description}))
+		}
 	}
 
 	// LoomPattern meta-vertices + spec aspect. Same envelope as the Lens spec;

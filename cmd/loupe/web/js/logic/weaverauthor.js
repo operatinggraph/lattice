@@ -3,16 +3,16 @@
 // imports (the goja logic-file convention) — views/weaverauthor.js binds this
 // to the form.
 //
-// A draft is a plain object the view owns: { targetId, lensRef, gaps: {
-// <col>: { action, pattern, subject, adapter, operation, assignee, target,
-// issueCode, issueSeverity, paramsText, readsText } }, lens: { canonicalName,
-// adapter, bucket, table, spec } }. paramsText/readsText are the textarea/
-// input strings the operator types; buildTargetContent parses them into the
-// artifact's params/reads shape at build time, so the draft's OWN shape can
-// stay simple strings throughout editing.
+// A draft is a plain object the view owns: { targetId, description, lensRef,
+// gaps: { <col>: { action, pattern, subject, adapter, operation, assignee,
+// target, issueCode, issueSeverity, paramsText, readsText } }, lens: {
+// canonicalName, adapter, bucket, table, spec } }. paramsText/readsText are the
+// textarea/ input strings the operator types; buildTargetContent parses them
+// into the artifact's params/reads shape at build time, so the draft's OWN
+// shape can stay simple strings throughout editing.
 
 function emptyDraft() {
-  return { targetId: "", lensRef: "", gaps: {}, lens: emptyLens(), rationale: "" };
+  return { targetId: "", description: "", lensRef: "", gaps: {}, lens: emptyLens(), rationale: "" };
 }
 
 function emptyGap() {
@@ -80,13 +80,36 @@ function gapActionArtifact(g) {
 // buildTargetContent builds the pkgmgr.WeaverTargetArtifactContent-shaped
 // object a draft's target fields describe — exactly what
 // POST /api/weaver/author/check's `target` field and the export bundle's
-// weaverTarget artifact both carry.
+// weaverTarget artifact both carry. `description` appears only when the
+// operator actually typed prose (trimmed), so a description-less draft keeps
+// the key-for-key shape the Go side's omitempty tag produces.
 function buildTargetContent(draft) {
   const gaps = {};
   Object.keys(draft.gaps || {}).sort().forEach((col) => {
     gaps[col] = gapActionArtifact(draft.gaps[col]);
   });
-  return { targetId: draft.targetId || "", lensRef: draft.lensRef || "", gaps };
+  const content = { targetId: draft.targetId || "", lensRef: draft.lensRef || "", gaps };
+  const description = (draft.description || "").trim();
+  if (description) content.description = description;
+  return content;
+}
+
+// proposeBlockers lists, in the order an operator should fix them, why Propose
+// is not available yet. Check verdicts are one reason; a missing description is
+// the other — the server refuses a described-less weaverTarget outright
+// (weaverauthor.go's proposedTargetDescription), so the button must not offer a
+// submission the server will reject. Check itself stays shape-only, so a draft
+// can be validated long before it has prose.
+function proposeBlockers(draft, checkResult) {
+  const out = [];
+  const r = checkResult;
+  if (!r) out.push("run checks first");
+  else {
+    if (!(r.targetValidation && r.targetValidation.valid)) out.push("target artifact is not valid");
+    if (!(r.lensValidation && r.lensValidation.valid)) out.push("lens artifact is not valid");
+  }
+  if (!((draft && draft.description) || "").trim()) out.push("describe what this target ensures");
+  return out;
 }
 
 // buildLensContent builds the pkgmgr.LensArtifactContent-shaped object.
@@ -180,4 +203,4 @@ function exportFilename(targetId) {
   return "weaver-target-" + safe + ".json";
 }
 
-export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, scaffoldLensSpec, validationBadge, exportBundle, exportFilename };
+export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, proposeBlockers, scaffoldLensSpec, validationBadge, exportBundle, exportFilename };

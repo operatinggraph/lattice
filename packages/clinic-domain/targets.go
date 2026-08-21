@@ -18,7 +18,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: ClinicSiteBackfillTarget,
-			LensRef:  ClinicSiteBackfillTarget,
+			Description: "Every appointment records the clinic site it takes place at. An appointment booked without " +
+				"one has its site filled in from the provider's practice location, when that provider works " +
+				"at exactly one site.",
+			LensRef: ClinicSiteBackfillTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_site": {
 					Action:    "directOp",

@@ -77,6 +77,71 @@ func TestWeaverAuthorBuildTargetContentOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestWeaverAuthorBuildTargetContentDescription pins both halves of the
+// optional prose field: typed prose lands trimmed on the artifact, and a blank
+// (or whitespace-only) one is OMITTED rather than carried as "" — the wire
+// shape pkgmgr's own `description,omitempty` produces, so a description-less
+// draft is byte-identical to one authored before the field existed.
+func TestWeaverAuthorBuildTargetContentDescription(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	base := func(desc any) map[string]any {
+		d := map[string]any{"targetId": "t1", "lensRef": "l1", "gaps": map[string]any{}}
+		if desc != nil {
+			d["description"] = desc
+		}
+		return d
+	}
+	got := call(t, vm, "buildTargetContent", base("  Every settled tab is posted to the house account.  ")).(map[string]any)
+	if got["description"] != "Every settled tab is posted to the house account." {
+		t.Errorf("description = %v, want the trimmed prose", got["description"])
+	}
+	for _, blank := range []any{nil, "", "   \n  "} {
+		got = call(t, vm, "buildTargetContent", base(blank)).(map[string]any)
+		if _, has := got["description"]; has {
+			t.Errorf("buildTargetContent(%q) = %v, a blank description must be omitted", blank, got)
+		}
+	}
+}
+
+// TestWeaverAuthorProposeBlockers pins the client half of the propose gate.
+// The server refuses a weaverTarget with no description outright, so the button
+// must not offer a submission the server will reject — and every unmet reason
+// is named, so a disabled Propose is never a mystery.
+func TestWeaverAuthorProposeBlockers(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	passing := map[string]any{
+		"targetValidation": map[string]any{"valid": true, "errors": []any{}},
+		"lensValidation":   map[string]any{"valid": true, "errors": []any{}},
+	}
+	described := map[string]any{"targetId": "t1", "description": "Every tab settles."}
+
+	if got := call(t, vm, "proposeBlockers", described, passing).([]any); len(got) != 0 {
+		t.Errorf("proposeBlockers(checked, described) = %v, want none", got)
+	}
+
+	blank := map[string]any{"targetId": "t1", "description": "   "}
+	got := call(t, vm, "proposeBlockers", blank, passing).([]any)
+	if len(got) != 1 || !containsSub(got[0].(string), "describe") {
+		t.Errorf("proposeBlockers(checked, blank description) = %v, want the description reason", got)
+	}
+
+	// Never checked: the check reason comes first, and the description reason
+	// still rides along so one pass fixes both.
+	got = call(t, vm, "proposeBlockers", blank, nil).([]any)
+	if len(got) != 2 || !containsSub(got[0].(string), "checks") {
+		t.Errorf("proposeBlockers(unchecked, blank) = %v, want checks-first plus the description reason", got)
+	}
+
+	failing := map[string]any{
+		"targetValidation": map[string]any{"valid": false, "errors": []any{"bad"}},
+		"lensValidation":   map[string]any{"valid": true, "errors": []any{}},
+	}
+	got = call(t, vm, "proposeBlockers", described, failing).([]any)
+	if len(got) != 1 || !containsSub(got[0].(string), "target artifact") {
+		t.Errorf("proposeBlockers(invalid target) = %v", got)
+	}
+}
+
 func TestWeaverAuthorBuildLensContentDefaultsAdapter(t *testing.T) {
 	vm := logicVM(t, "weaverauthor.js")
 	got := call(t, vm, "buildLensContent", map[string]any{

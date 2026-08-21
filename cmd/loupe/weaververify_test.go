@@ -55,7 +55,7 @@ func TestComputeTargetChecksSurfacesFindings(t *testing.T) {
 	summary := &weaverTargetSummary{TargetID: "leaseComplete", State: "active",
 		Gaps: []string{"missing_bgcheck", "missing_signature", "missing_notify"}}
 
-	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations",
+	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations", "",
 		summary, scan, state, nil, patterns, patternSubject, nil)
 
 	byCode := map[string]int{}
@@ -79,7 +79,7 @@ func TestComputeTargetChecksPatternNotInstalled(t *testing.T) {
 	summary := &weaverTargetSummary{TargetID: "leaseComplete", State: "active",
 		Gaps: []string{"missing_bgcheck", "missing_signature", "missing_notify"}}
 	// No patterns map entry at all — backgroundCheck resolves to nothing.
-	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations",
+	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations", "",
 		summary, scan, weaverStateKeys{}, nil, nil, nil, nil)
 	found := false
 	for _, c := range d.Checks {

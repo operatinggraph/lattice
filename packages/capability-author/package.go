@@ -118,7 +118,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.9.0",
+	Version:       "0.9.1",
 	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, and Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),

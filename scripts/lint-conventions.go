@@ -267,6 +267,11 @@ var (
 	// postures a lens entry may declare to opt out of the fail-closed default.
 	lensAdapterPostgres = regexp.MustCompile(`Adapter:\s*"postgres"`)
 	lensPostureFlag     = regexp.MustCompile(`\b(Protected|Public|GrantTable):`)
+	// weaverTargetIDField anchors a pkgmgr.WeaverTargetSpec composite literal by
+	// its one always-present field; weaverTargetDescField is the prose an
+	// operator-facing surface reads the target by.
+	weaverTargetIDField   = regexp.MustCompile(`(?m)^[ \t]*TargetID:[ \t]`)
+	weaverTargetDescField = regexp.MustCompile(`\bDescription:`)
 	// loadOrGenerateCall anchors a bootstrap.LoadOrGenerate call site (the
 	// per-test-populate hazard bootstrap-primordial-globals-race-design.md §4
 	// closes via testutil.EnsurePrimordials).
@@ -883,6 +888,12 @@ func scanSource(path string, data []byte) []finding {
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
+	// Weaver-target prose is a packages/ authoring rule: the literals live only
+	// there, and internal/pkgmgr's own fixtures deliberately exercise the
+	// description-less shape the installer still supports.
+	if !isTest && (strings.HasPrefix(slash, "packages/") || strings.Contains(slash, "/packages/")) {
+		out = append(out, checkWeaverTargetDescribed(path, string(data))...)
+	}
 	// max-reconnects scope: every non-test cmd/** binary. A test's
 	// substrate.Connect targets an ephemeral embedded fixture torn down at test
 	// end, where reconnect budgets are meaningless; a shipped binary's connection
@@ -1465,6 +1476,77 @@ func checkLensProtectedByDefault(path, src string) []finding {
 		if !lensPostureFlag.MatchString(src[entryStart : entryEnd+1]) {
 			line := strings.Count(src[:pos], "\n") + 1
 			out = append(out, finding{file: path, line: line, msg: "lens declares Adapter: \"postgres\" but neither Protected, Public, nor GrantTable — a postgres business read model is protected by default and undeclared posture fails closed at activation (Contract #6 §6.14)"})
+		}
+	}
+	return out
+}
+
+// weaverTargetScanWindow bounds how far checkWeaverTargetDescribed walks
+// backward/forward from a TargetID: field to find its literal's braces — a
+// safety cap, well beyond any real WeaverTargetSpec entry (the largest in the
+// corpus, lease-signing's leaseApplicationComplete, is under 6000 bytes).
+const weaverTargetScanWindow = 8000
+
+// checkWeaverTargetDescribed flags a pkgmgr.WeaverTargetSpec literal under
+// packages/ that declares no Description. The installer keeps the field
+// optional — an aspect is emitted only when it is set — so nothing else
+// refuses a nameless target; but a target with no prose reaches an operator as
+// a bare KV token on the Weaver roster and as an unlabelled row in the review
+// queue, with the invariant it keeps true recoverable only by reading its lens
+// cypher.
+//
+// The literal's span is found by balanced-brace walking out from the TargetID:
+// field — the same technique checkLensProtectedByDefault uses for a LensSpec
+// entry, and with the same residual risk: a stray brace inside a string or
+// comment within the entry throws the walk off. No target literal in this
+// codebase has one (gap bodies are field lists and named consts), so an
+// AST rewrite is not bought for it here.
+func checkWeaverTargetDescribed(path, src string) []finding {
+	var out []finding
+	for _, m := range weaverTargetIDField.FindAllStringIndex(src, -1) {
+		pos := m[0]
+		backLimit := pos - weaverTargetScanWindow
+		if backLimit < 0 {
+			backLimit = 0
+		}
+		entryStart, balance := -1, 0
+		for i := pos - 1; i >= backLimit && entryStart == -1; i-- {
+			switch src[i] {
+			case '}':
+				balance++
+			case '{':
+				if balance == 0 {
+					entryStart = i
+				} else {
+					balance--
+				}
+			}
+		}
+		if entryStart == -1 {
+			continue
+		}
+		fwdLimit := entryStart + weaverTargetScanWindow
+		if fwdLimit > len(src) {
+			fwdLimit = len(src)
+		}
+		entryEnd, balance := -1, 1
+		for i := entryStart + 1; i < fwdLimit && entryEnd == -1; i++ {
+			switch src[i] {
+			case '{':
+				balance++
+			case '}':
+				balance--
+				if balance == 0 {
+					entryEnd = i
+				}
+			}
+		}
+		if entryEnd == -1 {
+			continue
+		}
+		if !weaverTargetDescField.MatchString(src[entryStart : entryEnd+1]) {
+			line := strings.Count(src[:pos], "\n") + 1
+			out = append(out, finding{file: path, line: line, msg: "WeaverTargetSpec declares no Description — an installed target reaches operators as a bare targetId on the Weaver roster and an unlabelled row in the review queue; say in plain language what invariant this target keeps true"})
 		}
 	}
 	return out

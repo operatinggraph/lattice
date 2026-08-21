@@ -104,6 +104,11 @@ function targetCard(t) {
   }
   card.appendChild(head);
 
+  // The authored purpose line sits directly under the id: it is what the card
+  // is FOR, so it reads before the counts. Absent when the target's package
+  // declared none, rather than showing a placeholder.
+  if (t.description) card.appendChild(el("div", "weaver-target-desc muted small", t.description));
+
   const meta = el("div", "weaver-card-meta muted small");
   if (t.orphan) {
     meta.appendChild(el("span", null,
@@ -179,6 +184,8 @@ function targetHeader(d) {
     meta.appendChild(a);
   }
   head.appendChild(meta);
+
+  if (d.description) head.appendChild(el("div", "weaver-target-desc muted small", d.description));
 
   if (d.admission || d.augur) {
     const policy = el("div", "weaver-policy small");

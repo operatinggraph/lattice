@@ -48,6 +48,7 @@ function targetRows(body) {
     var t = list[i] || {};
     rows.push({
       targetId: String(t.targetId || ""),
+      description: String(t.description || ""),
       lensRef: String(t.lensRef || ""),
       gaps: typeof t.gaps === "number" ? t.gaps : 0,
       state: String(t.state || ""),
@@ -62,6 +63,7 @@ function targetRows(body) {
   for (var j = 0; j < orphans.length; j++) {
     rows.push({
       targetId: String(orphans[j]),
+      description: "",
       lensRef: "",
       gaps: 0,
       state: "disabled",
@@ -103,6 +105,10 @@ function rosterHeadline(body, rows) {
   if (disabled) parts.push(disabled + " disabled");
   if (orphan) parts.push(orphan + " orphan __control marker" + (orphan === 1 ? "" : "s"));
   if (body && body.stateError) parts.push("orphan scan unavailable: " + body.stateError);
+  // Prose is read separately from the control-plane summary, so its failure is
+  // its own fact: without this line an unreadable core-kv would look exactly
+  // like a corpus of targets nobody has described.
+  if (body && body.descriptionError) parts.push("descriptions unavailable: " + body.descriptionError);
   return parts.join(" · ");
 }
 

@@ -57,7 +57,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: ClauseSatisfactionTarget,
-			LensRef:  ClauseSatisfactionTarget,
+			Description: "Every contract clause is honored: a clause that charges an account is billed, monthly " +
+				"clauses each period, and a clause requiring an inspection has one assigned to its named " +
+				"inspector.",
+			LensRef: ClauseSatisfactionTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_charge": {
 					Action:    "directOp",
@@ -80,7 +83,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		},
 		{
 			TargetID: LeaseRentSettlementTarget,
-			LensRef:  LeaseRentSettlementTarget,
+			Description: "An approved lease with an agreed rent has a ledger account and a recurring monthly rent " +
+				"clause. Whichever is missing is created, so a signed lease actually bills its rent.",
+			LensRef: LeaseRentSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
 					Action:    "directOp",

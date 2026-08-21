@@ -22,7 +22,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: NoShowSettlementTarget,
-			LensRef:  NoShowSettlementTarget,
+			Description: "Every no-show appointment carrying a fee is charged once to the patient's clinic account. " +
+				"If the patient has no account yet, one is opened first and the fee is then posted against " +
+				"the visit.",
+			LensRef: NoShowSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
 					Action:    "directOp",

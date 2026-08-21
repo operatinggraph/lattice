@@ -12,7 +12,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{{
 		TargetID: "capabilityAuthorDispatch",
-		LensRef:  "capabilityAuthorPending",
+		Description: "Every capability request gets an authored proposal. A request with no artifact and no " +
+			"authoring run under way starts one, so it never sits unanswered.",
+		LensRef: "capabilityAuthorPending",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_authoring": {Action: "triggerLoom", Pattern: "capabilityAuthor", Subject: "row.entityKey"},
 		},

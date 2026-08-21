@@ -124,6 +124,80 @@ func TestEmit_WeaverTarget_RoundTripsThroughEngineParse(t *testing.T) {
 	}
 }
 
+// TestEmit_WeaverTarget_DescriptionEmitsSiblingAspect asserts an authored
+// Description installs as its own `.description` aspect — the role/DDL
+// description shape (class `description`, body `{"text": …}`) — and that the
+// §10.8 spec body the Weaver registry deserializes is untouched by it. The
+// sibling placement is the whole safety argument: the registry early-returns
+// on any localName other than spec/effects, so prose never reaches a runtime
+// Target.
+func TestEmit_WeaverTarget_DescriptionEmitsSiblingAspect(t *testing.T) {
+	def := orchestrationDef()
+	def.WeaverTargets[0].Description = "Every lease application reaches a fully signed, onboarded state."
+	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+
+	vtxKey := "vtx.meta." + pkgmgr.EntityNanoIDForTest(def.Name, "weaverTarget:leaseSigning")
+	descDoc := findDoc(ops, vtxKey+".description")
+	if descDoc == nil {
+		t.Fatalf("no description aspect emitted at %s.description", vtxKey)
+	}
+	if descDoc["class"] != "description" {
+		t.Errorf("description aspect class = %v, want description", descDoc["class"])
+	}
+	if descDoc["localName"] != "description" {
+		t.Errorf("description aspect localName = %v, want description", descDoc["localName"])
+	}
+	if descDoc["vertexKey"] != vtxKey {
+		t.Errorf("description aspect vertexKey = %v, want %s", descDoc["vertexKey"], vtxKey)
+	}
+	data, ok := descDoc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("description aspect data not a map: %T", descDoc["data"])
+	}
+	if data["text"] != def.WeaverTargets[0].Description {
+		t.Errorf("description text = %v, want %q", data["text"], def.WeaverTargets[0].Description)
+	}
+
+	body := findDoc(ops, vtxKey+".spec")["data"].(map[string]any)
+	if _, present := body["description"]; present {
+		t.Errorf("spec body must not carry description, got %v", body)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal target body: %v", err)
+	}
+	var target weaver.Target
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatalf("spec body no longer deserializes into weaver.Target: %v", err)
+	}
+	if target.TargetID != "leaseSigning" || len(target.Gaps) != 2 {
+		t.Errorf("spec body changed under a description: %+v", target)
+	}
+}
+
+// TestEmit_WeaverTarget_NoDescriptionEmitsNoAspect pins the emit-when-non-empty
+// posture: a target that declares no prose installs exactly the keys it did
+// before, and declares none in the manifest uninstall enumerates.
+func TestEmit_WeaverTarget_NoDescriptionEmitsNoAspect(t *testing.T) {
+	def := orchestrationDef()
+	ops, declared, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+	vtxKey := "vtx.meta." + pkgmgr.EntityNanoIDForTest(def.Name, "weaverTarget:leaseSigning")
+	if doc := findDoc(ops, vtxKey+".description"); doc != nil {
+		t.Errorf("description aspect emitted for a target with no Description: %v", doc)
+	}
+	for _, k := range declared {
+		if k == vtxKey+".description" {
+			t.Errorf("%s declared in the manifest with no Description authored", k)
+		}
+	}
+}
+
 // TestEmit_WeaverTarget_LensRefResolvesToDeclaredLensNanoID asserts a LensRef
 // authored as a lens canonicalName emits the lens's in-batch NanoID.
 func TestEmit_WeaverTarget_LensRefResolvesToDeclaredLensNanoID(t *testing.T) {

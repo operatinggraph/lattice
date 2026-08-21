@@ -69,7 +69,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	targets := []pkgmgr.WeaverTargetSpec{{
 		TargetID: "leaseApplicationComplete",
-		LensRef:  "leaseApplicationComplete",
+		Description: "A lease application reaches a signed, executed lease with its document attached, and an " +
+			"approved application's unit is marked leased. Outstanding steps are requested from the " +
+			"applicant or the vendor.",
+		LensRef: "leaseApplicationComplete",
 		// Admission (Contract #10 §10.8 "Admission control", Fire 8) paces this
 		// target's two vendor-backed gaps independently: a spike of applicants
 		// hitting missing_bgcheck/missing_payment together must not burst either

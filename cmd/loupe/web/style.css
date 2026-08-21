@@ -1321,6 +1321,7 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .weaver-sep { color: var(--text-dim); }
 .weaver-target-name, .weaver-entity-id, .weaver-gap-name { font-size: 13px; font-weight: 600; word-break: break-word; }
 .weaver-target-card.orphan { border-left-color: var(--yellow); opacity: 0.85; cursor: default; }
+.weaver-target-desc { line-height: 1.35; margin: 0 0 4px; }
 .weaver-link { color: var(--accent); }
 
 .weaver-detail-head { margin-bottom: 14px; }

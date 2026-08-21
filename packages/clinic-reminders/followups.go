@@ -307,7 +307,9 @@ RETURN
 func followUpRemindersTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: FollowUpRemindersTarget,
-		LensRef:  "followUpReminders",
+		Description: "Every documented visit that asked for a follow-up gets a reminder once its follow-up date " +
+			"arrives. Re-documenting the visit with a new date sends a fresh reminder for it.",
+		LensRef: "followUpReminders",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_followup_reminder": {
 				Action:    "directOp",

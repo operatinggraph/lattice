@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
@@ -229,16 +231,89 @@ type weaverAuthorProposeResponse struct {
 	Results []weaverAuthorProposeResult `json:"results"`
 }
 
+// proposeIntentCap bounds the queue row label. The label sits inline in the
+// review list, so a paragraph pasted into the description must not push the
+// row's own state chips off the line.
+const proposeIntentCap = 120
+
+// proposedTargetDescription returns the prose on the bundle's weaverTarget
+// artifact, refusing the submission when that artifact carries none.
+//
+// The requirement is Loupe's, not the platform's: pkgmgr keeps `description`
+// optional (a package author may install a target without one, and the
+// unknown-field scan admits it either way), while the studio holds a target
+// entering the human review queue to a higher bar — a reviewer reading a
+// proposal has nothing but a targetId and cypher otherwise. Check stays
+// shape-only, so a draft can be validated long before it has prose.
+func proposedTargetDescription(artifacts []weaverAuthorProposeArtifact) (string, error) {
+	for _, a := range artifacts {
+		if a.Kind != "weaverTarget" {
+			continue
+		}
+		var wc pkgmgr.WeaverTargetArtifactContent
+		if err := json.Unmarshal([]byte(a.Content), &wc); err != nil {
+			return "", errors.New("weaverTarget artifact content is not decodable: " + err.Error())
+		}
+		desc := strings.TrimSpace(wc.Description)
+		if desc == "" {
+			return "", errors.New("weaverTarget artifact requires a description — say in plain language what this target ensures, so a reviewer can judge the proposal without reading its cypher")
+		}
+		return desc, nil
+	}
+	return "", nil
+}
+
+// proposeIntent derives the SubmitCapabilityProposal `intent` — the review
+// queue's row label, which the op otherwise defaults to the whole rationale
+// text (packages/capability-author/ddls.go). One label is computed for the
+// bundle and stamped on every artifact in it, so the target and the lens it
+// pairs with read as one submission in the queue rather than two unrelated
+// rows. The target's own description is the label of record; a bundle with no
+// weaverTarget artifact falls back to the first rationale present.
+func proposeIntent(targetDescription string, artifacts []weaverAuthorProposeArtifact) string {
+	source := targetDescription
+	if source == "" {
+		for _, a := range artifacts {
+			if strings.TrimSpace(a.Rationale) != "" {
+				source = a.Rationale
+				break
+			}
+		}
+	}
+	return firstLineCapped(source, proposeIntentCap)
+}
+
+// firstLineCapped takes the first non-empty line of s and bounds it to limit
+// RUNES (never bytes — a mid-rune cut would emit invalid UTF-8 into the
+// proposal), marking an elision with an ellipsis that counts against the limit.
+func firstLineCapped(s string, limit int) string {
+	line := ""
+	for _, candidate := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(candidate); line != "" {
+			break
+		}
+	}
+	runes := []rune(line)
+	if len(runes) <= limit {
+		return line
+	}
+	return strings.TrimSpace(string(runes[:limit-1])) + "…"
+}
+
 // weaverAuthorPropose implements POST /api/weaver/author/propose (§6 step
 // 4). Each artifact becomes its own SubmitCapabilityProposal op — the DDL
 // mints the whole proposal vertex from one op, reads nothing, and rejects
-// synchronously on a malformed payload (submit_test.go), so this handler
-// does no pre-validation of its own beyond decoding the request; the studio
-// already ran Check before enabling the button, and the op records
-// whatever validation verdict this request carries. The requester is
-// stamped by the Gateway from the caller's own verified Bearer token (never
-// asserted by this handler), so the review queue's requestedBy always names
-// the real operator regardless of what a payload might claim.
+// synchronously on a malformed payload (submit_test.go), so the artifact's
+// SHAPE is not re-checked here; the studio already ran Check before enabling
+// the button, and the op records whatever validation verdict this request
+// carries. The one thing this handler does refuse is a weaverTarget with no
+// description (proposedTargetDescription) — a queue-readability rule of
+// Loupe's own, not a platform one.
+//
+// The requester is stamped by the Gateway from the caller's own verified
+// Bearer token (never asserted by this handler), so the review queue's
+// requestedBy always names the real operator regardless of what a payload
+// might claim.
 func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
@@ -254,6 +329,13 @@ func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	targetDescription, err := proposedTargetDescription(req.Artifacts)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	intent := proposeIntent(targetDescription, req.Artifacts)
+
 	ctx, cancel := s.gatewaySubmitContext(r)
 	defer cancel()
 
@@ -264,14 +346,18 @@ func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
 			results = append(results, weaverAuthorProposeResult{Kind: a.Kind, Error: "generate proposal id: " + err.Error()})
 			continue
 		}
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"proposalId": id,
 			"kind":       a.Kind,
 			"content":    a.Content,
 			"target":     a.Target,
 			"rationale":  a.Rationale,
 			"validation": a.Validation,
-		})
+		}
+		if intent != "" {
+			fields["intent"] = intent
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			results = append(results, weaverAuthorProposeResult{Kind: a.Kind, ProposalID: id, Error: "marshal payload: " + err.Error()})
 			continue

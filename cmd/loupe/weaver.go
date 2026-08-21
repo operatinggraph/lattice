@@ -57,7 +57,11 @@ const (
 // aggregate count to show here, and an all-targets row scan is exactly the
 // per-render cost the single-target map exists to confine.
 type weaverTargetRow struct {
-	TargetID    string `json:"targetId"`
+	TargetID string `json:"targetId"`
+	// Description is the target's authored prose, read from its meta-vertex's
+	// sibling `.description` aspect. Empty for a target whose package declared
+	// none, and for an orphan `__control` marker, which has no meta-vertex at all.
+	Description string `json:"description,omitempty"`
 	LensRef     string `json:"lensRef,omitempty"`
 	Gaps        int    `json:"gaps"`
 	State       string `json:"state"`
@@ -148,9 +152,12 @@ type weaverEntityRow struct {
 // weaverTargetDetail is the whole target map document.
 type weaverTargetDetail struct {
 	TargetID string `json:"targetId"`
-	MetaKey  string `json:"metaKey,omitempty"`
-	LensRef  string `json:"lensRef,omitempty"`
-	LensName string `json:"lensName,omitempty"`
+	// Description is the prose on the target meta-vertex's sibling
+	// `.description` aspect — the same text the roster card carries.
+	Description string `json:"description,omitempty"`
+	MetaKey     string `json:"metaKey,omitempty"`
+	LensRef     string `json:"lensRef,omitempty"`
+	LensName    string `json:"lensName,omitempty"`
 	// Registered reports whether the engine's control plane lists this target.
 	// An unregistered id with rows or a __control marker is a real state —
 	// a package uninstalled out from under its projections, or an orphan
@@ -712,7 +719,7 @@ func gapBudget(declared map[string]int, gapColumn, action string) (int, bool) {
 func buildTargetDetail(
 	targetID string,
 	body *weaverTargetBody,
-	metaKey, lensName string,
+	metaKey, lensName, description string,
 	summary *weaverTargetSummary,
 	scan weaverRowScan,
 	state weaverStateKeys,
@@ -723,6 +730,7 @@ func buildTargetDetail(
 ) weaverTargetDetail {
 	d := weaverTargetDetail{
 		TargetID:    targetID,
+		Description: description,
 		MetaKey:     metaKey,
 		LensName:    lensName,
 		Rows:        scan.Rows,
@@ -1214,11 +1222,23 @@ func (s *server) weaverTargets(w http.ResponseWriter, r *http.Request) {
 	// this bucket the same way at Start (seedDisabledTargets).
 	stateKeys, stateErr := conn.KVListKeys(ctx, bootstrap.WeaverStateBucket)
 
+	// Prose lives in Core KV, not on the control plane's summary, so it is read
+	// separately — and a failure to read it degrades the roster to a nameless
+	// list rather than 502ing a page whose substance came from the engine. The
+	// failure is reported instead of swallowed: a card silently missing an
+	// authored description would read as "this target has none".
+	var descriptions map[string]string
+	readers, descErr := s.weaverCoreReaders(ctx, conn)
+	if descErr == nil {
+		descriptions = weaverTargetDescriptions(readers.metaKeys, readers.coreGet)
+	}
+
 	rows := make([]weaverTargetRow, 0, len(summaries))
 	for _, t := range summaries {
 		issues := issuesNaming(hbs, t.TargetID)
 		rows = append(rows, weaverTargetRow{
 			TargetID:    t.TargetID,
+			Description: descriptions[t.TargetID],
 			LensRef:     t.LensRef,
 			Gaps:        len(t.Gaps),
 			State:       t.State,
@@ -1235,6 +1255,9 @@ func (s *server) weaverTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	if listErr != nil {
 		out["listError"] = listErr.Error()
+	}
+	if descErr != nil {
+		out["descriptionError"] = descErr.Error()
 	}
 	if stateErr != nil {
 		out["stateError"] = stateErr.Error()
@@ -1342,6 +1365,53 @@ func buildWeaverMetaIndex(metaKeys []string, get kvGetter) weaverMetaIndex {
 	return index
 }
 
+// weaverTargetDescriptions maps each described target's targetId to the prose
+// on its meta-vertex's sibling `.description` aspect (pkgmgr emits it from a
+// WeaverTargetSpec.Description; the body is the same `{"text": …}` a role's
+// description carries).
+//
+// It reads Core KV directly, which Loupe alone among applications may do — it
+// is the console inspector. The scan is deliberately narrower than
+// buildWeaverMetaIndex: only a meta carrying BOTH a `.spec` and a
+// `.description` key is opened, so the GET count is bounded by the number of
+// described targets rather than by the whole spec-carrying corpus. That
+// matters because the roster is the Weaver landing page. The two-suffix filter
+// is a cheap prefilter, not the identity test — a lens or pattern that ever
+// gains a description is still excluded by the `targetId` check below, exactly
+// as buildWeaverMetaIndex keys targets off the spec body's own id.
+func weaverTargetDescriptions(metaKeys []string, get kvGetter) map[string]string {
+	described := make(map[string]bool)
+	for _, k := range metaKeys {
+		if root, ok := strings.CutSuffix(k, ".description"); ok && classifyKey(root) == classMeta {
+			described[root] = true
+		}
+	}
+	out := map[string]string{}
+	if len(described) == 0 {
+		return out
+	}
+	for _, k := range metaKeys {
+		root, ok := strings.CutSuffix(k, ".spec")
+		if !ok || !described[root] {
+			continue
+		}
+		targetID, _ := metaData(get, k)["targetId"].(string)
+		if targetID == "" {
+			continue
+		}
+		text := dataString(metaData(get, root+".description"), "text", "value")
+		if text == "" {
+			continue
+		}
+		// First writer wins on a duplicate targetId, matching
+		// buildWeaverMetaIndex's handling of the same corpus anomaly.
+		if _, dup := out[targetID]; !dup {
+			out[targetID] = text
+		}
+	}
+	return out
+}
+
 func putIfAbsent(m map[string]string, k, v string) {
 	if k == "" {
 		return
@@ -1429,7 +1499,15 @@ func (s *server) weaverTargetMap(w http.ResponseWriter, r *http.Request, targetI
 	}
 	hbs := readWeaverHeartbeats(healthKeys, readEntry)
 
-	detail := buildTargetDetail(targetID, body, metaKey, lensName, summary, scan, state, counts, index.Patterns, index.PatternSubject, hbs)
+	// Guarded on metaKey: an unregistered id reaching this handler on rows or a
+	// stale __control marker alone resolves no meta-vertex, and there is no
+	// ".description" key to read.
+	description := ""
+	if metaKey != "" {
+		description = dataString(metaData(readers.coreGet, metaKey+".description"), "text", "value")
+	}
+
+	detail := buildTargetDetail(targetID, body, metaKey, lensName, description, summary, scan, state, counts, index.Patterns, index.PatternSubject, hbs)
 	if !detail.Registered && body == nil && detail.Rows == 0 && !state.Control {
 		s.writeError(w, http.StatusNotFound,
 			"target "+targetID+" not found (not registered, no meta-vertex, no rows, no control marker)")

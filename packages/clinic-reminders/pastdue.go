@@ -109,7 +109,9 @@ RETURN
 func pastDueAppointmentsTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: PastDueAppointmentsTarget,
-		LensRef:  "pastDueAppointments",
+		Description: "No appointment stays open once its scheduled end time has passed. A visit with no completed, " +
+			"cancelled, or no-show outcome recorded by then is marked a no-show.",
+		LensRef: "pastDueAppointments",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_noshow_transition": {
 				Action:    "directOp",

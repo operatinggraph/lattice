@@ -39,7 +39,9 @@ func RenewalTargets() []pkgmgr.WeaverTargetSpec {
 func leaseExpiryTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: "leaseExpiry",
-		LensRef:  "leaseExpiry",
+		Description: "Every signed, landlord-approved lease opens a renewal cycle once its renewal window arrives. " +
+			"If the window passes with no renewal for that term, one is opened automatically.",
+		LensRef: "leaseExpiry",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_renewalCycle": {
 				Action:    "directOp",
@@ -129,8 +131,11 @@ func renewalCompleteTarget() pkgmgr.WeaverTargetSpec {
 	}
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: "renewalComplete",
-		LensRef:  "renewalComplete",
-		Mode:     "planned",
+		Description: "An open renewal reaches a current background check, a verified guarantor where one is claimed, " +
+			"landlord-set terms, and the tenant's signature. The remaining steps are ordered and assigned " +
+			"automatically.",
+		LensRef: "renewalComplete",
+		Mode:    "planned",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_renewalComplete": {
 				Goal:        goal,

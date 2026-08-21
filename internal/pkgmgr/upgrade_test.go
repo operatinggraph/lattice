@@ -529,6 +529,68 @@ func TestUpgrade_DiffCreateUpdateTombstone(t *testing.T) {
 	}
 }
 
+// TestUpgrade_AddsNewAspectKeyOnSurvivingVertex proves an upgrade that adds a
+// brand-new ASPECT to an already-installed vertex creates that key while the
+// vertex and its sibling aspects survive untouched. Every other create case in
+// this file adds a whole new vertex; this is the shape a prose backfill takes
+// — a weaverTarget's root and `.spec` are byte-identical across the bump and
+// only `.description` is new — so nothing else pins it.
+func TestUpgrade_AddsNewAspectKeyOnSurvivingVertex(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	target := WeaverTargetSpec{
+		TargetID: "sampleConvergence",
+		LensRef:  "sampleLens",
+		Gaps:     map[string]GapActionSpec{"missing_thing": {Action: "directOp", Operation: "SampleOp"}},
+	}
+	v1 := sampleDef("0.1.0")
+	v1.WeaverTargets = []WeaverTargetSpec{target}
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	targetKey := metaVertexPrefix + entityNanoID(v1.Name, "weaverTarget:sampleConvergence")
+	descKey := targetKey + ".description"
+	specKey := targetKey + ".spec"
+	if _, err := conn.KVGet(ctx, CoreBucket, descKey); err == nil {
+		t.Fatalf("v1 declared no Description but %s exists", descKey)
+	}
+	origSpec := kvDoc(t, ctx, conn, specKey)
+	origSpecCreatedAt, _ := origSpec["createdAt"].(string)
+
+	const prose = "Every sample entity reaches its converged state."
+	v2 := sampleDef("0.2.0")
+	target.Description = prose
+	v2.WeaverTargets = []WeaverTargetSpec{target}
+
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade: %v", err)
+	}
+	if res.Skipped {
+		t.Fatalf("an upgrade adding a description should not be skipped: %+v", res)
+	}
+
+	desc := kvDoc(t, ctx, conn, descKey)
+	if del, _ := desc["isDeleted"].(bool); del {
+		t.Fatalf("backfilled %s should be live", descKey)
+	}
+	if got, _ := desc["data"].(map[string]any)["text"].(string); got != prose {
+		t.Fatalf("backfilled description text = %q, want %q", got, prose)
+	}
+
+	// The spec aspect is byte-equal across the bump, so the body-equality skip
+	// must leave its creation provenance alone — a description backfill is not
+	// a rewrite of the target the engine already runs.
+	newSpec := kvDoc(t, ctx, conn, specKey)
+	if del, _ := newSpec["isDeleted"].(bool); del {
+		t.Fatalf("%s should still be live after the backfill", specKey)
+	}
+	if gotCreatedAt, _ := newSpec["createdAt"].(string); gotCreatedAt != origSpecCreatedAt {
+		t.Fatalf("spec createdAt changed under a description backfill: was %q now %q", origSpecCreatedAt, gotCreatedAt)
+	}
+}
+
 // TestUpgrade_DeltaCarriesExpectedRevision proves diffManifest conditions
 // every update/tombstone mutation on the revision its own read observed
 // (F-011 per-key OCC, Contract #8 §8.6); a create mutation carries none (it

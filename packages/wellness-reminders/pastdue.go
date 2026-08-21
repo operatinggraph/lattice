@@ -108,7 +108,10 @@ RETURN
 func pastDueBookingsTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: PastDueBookingsTarget,
-		LensRef:  "pastDueBookings",
+		Description: "No confirmed booking stays unresolved once its class has ended. A seat still marked booked " +
+			"after the class finishes is recorded as a no-show, which in turn puts any no-show fee on the " +
+			"member's account.",
+		LensRef: "pastDueBookings",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_noshow_transition": {
 				Action:    "directOp",

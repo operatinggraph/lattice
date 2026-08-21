@@ -27,14 +27,19 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: "unroutedTasks",
-			LensRef:  "unroutedTasks",
+			Description: "Every task queued to a role is claimed before its grant expires. A task whose deadline " +
+				"passes unclaimed is flagged for an operator rather than quietly abandoned.",
+			LensRef: "unroutedTasks",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_claim": {Action: "surface", IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
 			},
 		},
 		{
 			TargetID: "orphanedTaskGrants",
-			LensRef:  "orphanedTaskGrants",
+			Description: "Every open task still points at an operation someone can actually run. A task whose " +
+				"granted operation no longer exists is cancelled instead of sitting permanently " +
+				"unactionable.",
+			LensRef: "orphanedTaskGrants",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_operation": {
 					Action:    "directOp",
