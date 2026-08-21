@@ -138,7 +138,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **`TestRefractor_E2E_P99` gates an absolute latency SLO on a shared runner** | NFR-P3's 500ms p99 is asserted by a unit test measuring wall-clock projection latency while three other jobs contend for the runner: CI run 31288862556 measured `10.03s`. A shared runner promises no latency floor, so the gate reads contention, not regression. | ★★ | S | 📋 ready · owner: Whetstone · reshape the measurement or move it off shared CI |
 | **[Weaver] `sweeper.pass`'s mark+row read pair needs a joint-snapshot judgment call before batching** | Sequential per-entity mark-then-row reads; whether the reconciliation invariant tolerates a joint `KVGetMulti` snapshot vs. today's two straight-line `KVGet`s is undecided. Runs every minute, highest-traffic site in the enumeration corpus. | ★ | S | 📋 ready · consumer: the enumeration-corpus sweep · [why](../../implementation-artifacts/adjacency-per-edge-index-design.md) §17.2 |
 | **[Refractor] Rule-engine anchor derivation's memoized reads make bulk `KVGetMulti` a possible net loss** | `executor.go:833-890` already memoizes fetched nodes (`ex.nodes`, `:994`) and exits early on many paths; batching every listed key up front could read more than the short-circuiting per-key path it would replace. Needs a read-count comparison, not a mirror. | ★ | S | 📋 ready · consumer: the enumeration-corpus sweep · [why](../../implementation-artifacts/adjacency-per-edge-index-design.md) §17.2 |
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Ten parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` carved out with its own `-parallel`. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · pole = `convergence` ~187s, of which `test-lease-convergence` is 159s · next: that one target — nothing else is within 45s of it |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Ten parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` carved out with its own `-parallel`; lease-convergence's async trio parallelized as its own group. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `convergence` (164s) and `unit-4` (162s) now within 2s — no single pole · next: re-measure, both are candidates |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -149,6 +149,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `a7c94ef` · [CI] lease-convergence's async trio parallelized as its own group — convergence job's pole; same 14 tests, no gate weakened
 - 2026-08-21 · `fc49b7c` · [CI] `internal/natsperm` given its own `-parallel` budget — the unit-4 pole; same 1501 vectors, no gate weakened
 - 2026-08-16 · (verification, no SHA) · [privacy-base] merge-concurrent-erasure-step-1 row REMOVED — already closed by `a0d762f3`'s dual-condition `write_path_closed` gate
 - 2026-08-16 · `71cb8136` · [Pkgmgr] secureColumns holderTypes narrowing CLOSED — union-at-write-site both diffManifest branches; review found+fixed an unsound revive-branch exclusion; 2 adjacent hazards filed
