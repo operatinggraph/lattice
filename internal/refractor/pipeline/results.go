@@ -12,6 +12,24 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// writeResults writes a slice of evaluation results through the active adapter,
+// applying the same failure-classification, terminal-DLQ, retry-enqueue, and
+// ack discipline as the inline vertex write loop. Returns the Decision the
+// supervisor applies (plus a non-nil error on an infra/structural write failure,
+// which leaves the message pending and pauses the pump).
+//
+// Retry enqueues and terminal DLQ publishes are buffered and flushed only when
+// the whole batch is known free of infra/structural failures. Any path that
+// leaves the message pending (Nak) makes redelivery re-run every result, so
+// flushing eagerly would enqueue/publish a duplicate for the already-disposed
+// results on every redelivery (e.g. each pause/resume cycle).
+//
+// enumeratedActors (personal-lens-retraction-design.md §3.2, R1) is nil for
+// a plain lens or a non-personal actor-aware pipeline; otherwise a keyset
+// frame is published per enumerated actor once every result has cleanly
+// applied (no retry-enqueue, no terminal DLQ) — a partially-disposed batch
+// emits no frame, so a would-be-retracting frame can never race ahead of
+// the write it is supposed to describe.
 func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
 	if p.supersededRule(rs) {
 		slog.Info("pipeline: rule swapped mid-event — naking so redelivery evaluates the new rule",
