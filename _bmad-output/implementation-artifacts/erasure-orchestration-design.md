@@ -3627,3 +3627,79 @@ entry in the LIVE owner's own `credentialBinding` array (the precedent for rewri
 hygiene in a live third party's sign-in-methods list, not a privacy leak of the erased person —
 tombstoning the index alone already fully closes the plaintext-correlation leak this fire exists to
 fix. Filed as its own row on `backlog/lattice.md` (Component maintenance, ★, XS–S).
+
+## Fire brief — privacy-base verification tooling (Steward, 2026-08-21)
+
+### Scope sentence
+
+Give **privacy-base** the post-install assertion tooling every other core package already has, and run
+the erasure spine end to end on a live stack for the first time: a `verify-package-privacy-base` Makefile
+target + `scripts/verify-package-privacy-base.go` asserting the installed spine (13 DDLs, 4 lenses, the
+`identityErasureComplete` weaver target, the `identityErasure` Loom pattern, 5 permissions + their grants,
+the package vertex + manifest), wired into CI's `stack-gates` job; and a
+`verify-claim-ceremony.go`-style one-shot that drives all four spine steps against a **disposable**
+subject minted for the run.
+
+Green bar: `make verify-package-privacy-base` passes against a live stack; the one-shot drives
+`ShredIdentityKey → SealIdentityForErasure → UnbindIdentityCredentials → PurgeIdentityDedupFootprint`
+on a throwaway identity and asserts each step's observable state; both are deterministic enough to gate CI.
+
+### Why the erasure spine is the one package with no verifier
+
+`make up` installs privacy-base as a dependency of the vertical packages, so it is present in every
+stack CI builds — but no step asserts anything about it afterwards. A diff-apply that dropped a lens,
+a permission, or the Loom pattern's step order would leave a stack that looks healthy and an erasure
+that silently no longer runs to completion. Every sibling package (`rbac`, `identity`, `objects-base`,
+`clinic-*`, `location-*`, `augur`, `lease-signing`) has a `verify-package-*` gate; the erasure plane,
+which is the one whose failure is legally load-bearing, has none.
+
+The second half exists because the spine has never actually been *run* on a live stack. Step 1 destroys
+a key irreversibly, so exercising it demands a subject minted to be destroyed — which is precisely why
+it had not been done, and why the one-shot mints its own rather than reusing a fixture identity.
+
+### Verified touch-list (`file:line`, re-checked live this fire)
+
+- `Makefile:443-450` (`verify-package-identity`) — the target shape to mirror: build `lattice-pkg`,
+  `./bin/lattice-pkg install packages/<p>` under `NKEY_LATTICE_PKG`, then
+  `go run ./scripts/verify-package-<p>.go` under `NKEY_LATTICE_CLI`. `Makefile:568-586`
+  (`verify-package-lease-signing`) is the multi-dependency co-install shape.
+- `scripts/verify-package-identity.go` + `scripts/pkgverify/verify.go` — the assertion harness
+  (Core KV reads, OK/FAIL counters, exit 0/1).
+- `scripts/verify-claim-ceremony.go` — the live-ceremony shape: mint a disposable subject, drive the
+  ops, poll to convergence. Note its own board row: its 5s `waitForRoleGrant` deadline reads real
+  unbounded latency as failure. **Poll to convergence here; do not copy the fixed deadline.**
+- `packages/privacy-base/package.go:44-55` (`Definition`) + `ddls.go:55-130` (13 DDLs),
+  `lenses.go` (4), `weavertargets.go` (1), `loompatterns.go` (1), `permissions.go` (5).
+- `packages/privacy-base/manifest.yaml` — the declared set the verifier asserts against.
+- `.github/workflows/ci.yml:213-277` (`stack-gates`) — where the new step lands.
+- Spine ops: `shred_identity_key.go`, `seal_identity_for_erasure.go`,
+  `purge_identity_dedup_footprint.go` (privacy-base); `UnbindIdentityCredentials` (identity-domain).
+
+### Increment order + green checks
+
+1. **Inc 1 (mechanical).** `scripts/verify-package-privacy-base.go` + the Makefile target.
+   Green: `make verify-package-privacy-base` against a live stack.
+2. **Inc 2 (mechanical).** CI `stack-gates` step, placed after `verify-package-identity`.
+   Green: the target is order-independent given its own co-install.
+3. **Inc 3 (posture-changing — first live destructive run).** The four-step one-shot on a disposable
+   subject. Green: all four steps assert; re-runnable without manual cleanup.
+
+### In-scope gotchas
+
+- **Poll to convergence, never a fixed deadline** — the `verify-claim-ceremony` 5s-SLA defect is an open
+  board row; do not reproduce it. No fixed `time.Sleep` for synchronization (CLAUDE.md).
+- **The one-shot must mint its own subject.** Step 1 is irreversible; a run that erases a shared fixture
+  identity poisons every later assertion on that stack.
+- **Step 3 (`UnbindIdentityCredentials`) is identity-domain's**, so the one-shot's stack needs
+  identity-domain installed — the target co-installs it, mirroring `verify-package-lease-signing`.
+- **Steps 3 and 4 are sweeps** bounded at `2·SWEEP_LIMIT`; a subject with no credentials and no dedup
+  footprint still commits them (idempotent, zero-row). Assert the commit, not a row count.
+- P5/P2 hold: the verifier READS Core KV as a platform script (sanctioned — it is tooling, not a
+  `cmd/<app>`), and every state change it makes goes through an op.
+
+### Non-goals (the drift fence)
+
+- **No change to the spine itself** — no op, DDL, lens, pattern, or permission edit. If the verifier
+  finds the installed shape wrong, that is a finding to fix as its own unit, not a spec to relax.
+- **No Vault backend change.** The one-shot destroys a disposable subject's key through the normal path.
+- **No new `make down`/teardown semantics** — the one-shot leaves the stack usable.
