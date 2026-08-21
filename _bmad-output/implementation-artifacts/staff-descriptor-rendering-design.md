@@ -448,3 +448,42 @@ admit, per §7.
 **Verify:** headless — `go test`, then `curl localhost:7788/api/op-catalog` against the running
 stack (reuse if up) asserting the JSON shape and that `SignLease`/`SetRenewalTerms`/etc. rows carry
 schema + dispatch; in-browser only if a writable stack is up, one tab, closed when done.
+
+## 12. Inc 1 outcome — shipped `c96b6ccb`
+
+Built per §11's touch-list, unchanged in shape. Two findings surfaced mid-build and folded before
+merge, both cheap because the pre-scout had already bounded the increment to one real net-new
+descriptor:
+
+- **`SignLease`/`RecordIdentityPII` move onto the task-grant `AuthContext` path** (catalog-driven
+  dispatch sends `{authContext:{task,target}}`, where the old hand-built `COMPLETIONS` entries sent
+  none). Adversarially verified as a FIX, not a regression: `SignLease` is granted to `operator`
+  only (`packages/lease-signing/permissions.go`) and `RecordIdentityPII`'s DDL refuses a claimed
+  identity without `authContextTarget == identity_key` — the old path was reachable only under an
+  operator session, never a real applicant. The task-grant mechanism is not spoofable: `target` is
+  pinned to the task's own `scopedTo` inside the actor's own ephemeral grant document, derived
+  server-side from the gateway-verified identity, never client input.
+- **Three defects the adversarial pass caught, all closed in the same fire** (no deferral row —
+  each was inside the touched files): the `plain_scanroot_corpus_census_test.go` structural/
+  per-event divergence exception was a bare lens-name allow-list — rewritten so the exception
+  re-asks `AnchorProjectionKey` against a realistic tombstoned body per lens, so an aspect-keyed
+  lens with genuinely-dead retraction can no longer reuse the same excuse; `SetRenewalTerms`'s
+  `rentAmount` lost its client-side positive bound in the migration — restored as an InputSchema
+  `minimum`; `dispatchVisibleWhen` was projected by the lens but silently dropped by the loftspace
+  proxy (fail-open) — threaded through and treated as not-offerable by the FE, matching the
+  descriptor's own unresolvable-condition contract.
+
+**Not run — no live stack in this build environment (only `lattice-nats`/`lattice-postgres`
+containers were up):** `make verify-kernel`, `make verify-package-{edge-manifest,lease-signing}`,
+the `/api/op-catalog` shape curl, and an in-browser exercise of the applicant `SignLease`/
+`RecordIdentityPII` task flow (the one behavioral change worth a human eyeball, since both move
+paths). CI's `stack-gates` job independently installs + verifies both packages against a real
+Docker stack and was green on `c96b6ccb` — owed anyway is the loftspace-app-specific in-browser
+pass once a writable stack is up.
+
+**Checkpoint for the next fire (Inc 2 — the shared module, §7):** no worktree held; Inc 1 landed
+whole. Inc 2 builds `internal/descriptorform` (`form.mjs` + `//go:embed`), mounts it at `/shared/`
+in all four apps, restructures `lint-facet-renderer-drift.go`'s hardcoded two-renderer table to
+N-way, and moves loftspace's pilot modal from Inc 1's inline consumer onto the shared module. No
+other Inc 1 residue: `SignRenewal`/`VerifyGuarantor` stay hand-built exactly as they were, per
+design.
