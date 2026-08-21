@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-04 · `02b812c4` · The renewal cycle finally opens in the live demo — seedResidentTenancies' move-in pushed back 11 months (was 2) so leaseEnd lands inside the 60-day renewal window on the seed's first tick.
+- 2026-08-04 · `ab971faa` · A screening budget that runs out no longer dead-ends in silence — leaseApplicationComplete escalates "exhausted" gaps to Augur reasoning instead of an unread GapBudgetExhausted warning. lease-signing 0.27.12
 - 2026-08-04 · `329dc7d2` · The clinic front desk can finally record a charge or payment — DebitAccount/CreditAccount renamed Clinic{Debit,Credit}Account + frontOfHouse granted; the patient hat no longer sees Record charge. clinic-ledger 0.2.7
 - 2026-08-04 · `5afb72f7` · Pre-pin clinic-provider + café-menu-item duplicates finally reaped — seed-classic-demo.go tombstones every stray "Dr. Classic Demo"/Latte/Croissant, name+location filtered.
 - 2026-08-04 · `38dd7d18` · An off-menu café charge can finally be named — POS charge form gains an optional description input, mirroring loftspace/clinic-app's memo `trim() || undefined` idiom.

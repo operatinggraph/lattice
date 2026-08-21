@@ -1039,3 +1039,45 @@ loftspace's `CreateLocation`/`AttachObject`/`DetachObject` — unaffected by thi
 posture-changing (new gate rule), full review depth.
 
 census named. See `backlog/lattice.md`.
+
+## 20. Inc 4 outcome — the ratchet, shipped `fc15558f`
+
+Built per §5/§7: `lint-app-op-descriptors` gains `appOpCeilings`, pinning each vertical app's
+distinct hardcoded-operationType-literal count exactly — above the pinned ceiling fails (a new
+hand-wired op appeared while the catalog-driven renderer, live since Inc 1-3, could have described
+it), below fails too (the `guardHelperFloors` discipline inverted from a `>=` floor to an `==` pin,
+so migration progress that isn't recorded here reads as an amnesty), a missing app entry fails
+(silent exemption), an orphaned entry fails (stale after a rename/removal).
+
+The cold 3-layer adversarial pass (Blind Hunter / Edge-Case Hunter / Acceptance Auditor, mandatory
+per §7's posture-changing call) found the definitive-context scan (`scanFile`) was line-local: a
+pure reformat — a wrapped `submitOp(...)` call or a ternary split across `?`/`:` — could silently
+drop an op from the count either direction, and Inc 4 turns that into a hard CI-red on an unrelated
+diff, with the emitted message prescribing a permanent, wrong ceiling lowering. Fixed before ship:
+`scanFile` now joins a still-open call/ternary across a bounded run of continuation lines (capped at
+6) before extracting, with a `consumedThrough` guard against double-crediting the joined lines. That
+fix is not cosmetic — it surfaced four `submitOp` calls in `clinic-app/web/app.js` (`CreatePatient`,
+`SetAppointmentStatus`, `RescheduleAppointment`, `CreateBooking`) already wrapped in exactly this
+shape and invisible to the pre-Inc-4 scanner; clinic's true baseline is **14** distinct ops, not the
+naively-measured 10, independently re-verified live against the source before pinning. Also fixed: a
+typo'd op literal no longer double-reports as both an R1 violation and a spurious ceiling delta (the
+accounting moved to after the R1 `continue`), and the `appOpCeilings` doc comment no longer overclaims
+"surface" when the pinned number is distinct op *literals* — a duplicate form referencing an
+already-counted op does not move it, and the comment now says so plus discloses the scan's one honest
+gap (a hoisted `const OP = "…"` is invisible to a line-local scan; the ceiling is a floor on hand-wiring
+this scan can see, not a census).
+
+Mutation-tested by hand, each verified to fire then reverted (no `scripts/*_test.go` exists for this
+`//go:build ignore` corpus — `guardHelperFloors` carries the same precedent, §recorded there): ceiling
+raised above true count, ceiling lowered below true count, entry deleted, orphaned entry added, a
+wrapped `submitOp` call, a wrapped ternary (both arms), and a typo'd op literal — all seven behaved
+exactly as designed. Baseline: `appOpCeilings = {cafe: 6, clinic: 14, loftspace: 20, wellness: 12}`,
+`STRICT=1 go run ./scripts/lint-app-op-descriptors.go` reports `0 issues` clean.
+
+CI step comments (`.github/workflows/ci.yml`) and the `Makefile` target doc both updated in the same
+commit to mention the ratchet — the reviewer flagged both as stale (described only R1/R2/appOpDebt).
+
+**Inc 4 closes staff-descriptor-rendering-design.md's §7 decomposition.** The design is DONE except
+for Inc 3's four named, unaffected per-app residuals: clinic's five §15 blockers, wellness's four
+§16, café's four §17, loftspace's `CreateLocation`/`AttachObject`/`DetachObject` (§7/§18) — each
+tracked in its own `verticals.md` row, not this design doc's open work.
