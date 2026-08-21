@@ -787,4 +787,100 @@ no future fire needs to re-derive it.
 guard test (the idiom already exists in `packages/orchestration-base`, extracting each op's script-read
 keys and asserting set-equality against its declared `Reads`/`OptionalReads`) would have caught the
 original `SetInstructorProfile` gap directly and should be rolled out to the other four packages the
+
+## 17. Inc 3c outcome — café (partial), shipped `3362aa8c`
+
+Migrated two café-app ops onto `internal/descriptorform`: **VoidCharge** (POS amount-based void;
+`AuthContext: "standing"`, `TargetField: tabKey`, a direct mirror of `SetInstructorProfile`'s
+standing/targetField shape) and **CreditCafeAccount** — both legs, going one further than Inc 3a/3b's
+own precedent. `CreditCafeAccount` is dual-grant (operator/frontOfHouse scope=any + resident scope=self,
+`packages/cafe-ledger/opmetas.go`), and a cold adversarial pass on the first cut caught the build's own
+code comment misreading that doc comment as ruling out driving the front-desk leg from the same
+descriptor — it does not. `ClinicCreditAccount` (Inc 3a) already proves the identical dual-grant shape
+drives both legs off one descriptor via `context.selfVoice` (true → self, false → the staff path's own
+existing hand-built envelope shape, since `buildAuthContext` returns no `authContext` at all when
+`selfVoice` is falsy). Both café legs now migrate: self-pay (`context.selfVoice: true`,
+`context.me: identityKey()`) and front-desk record-payment (`context.selfVoice: false`, no
+`context.me` — café has no cheap already-loaded lookup for "the lease's own resident identity" the way
+clinic's `patientIdentityKey()` was, and it costs nothing to omit: `buildAuthContext` ignores `me`
+whenever `selfVoice` is false, and its only other consumer, the module's targetField/`context.me` reads
+fallback (Inc 3b), is inert here since `CreditCafeAccount` declares no `OptionalReads` probe that would
+need it). cafe-app gained the same missing infra clinic-app/wellness-app already had:
+`op_catalog.go` (byte-identical to wellness-app's own — no vertical-specific change needed at all, the
+bucket is edge-manifest's shared `OpCatalogBucket`), `loadDescriptorform()` module caching, and
+`submitCatalogOp`.
+
+**Left hand-built — real blockers verified against the actual descriptors and `form.mjs`'s
+`substituteTemplate`, not scope-avoidance:**
+- **`OpenTab`** — declares no `dispatch.targetField` at all, only `ContextParams:
+  {"leaseAppKey": "{me.leaseapp}"}` (its subject is a freshly-minted tab vertex, so there is no
+  "vertex being viewed" to derive a target from). Neither `op_catalog.go`'s `opCatalogProjection` struct
+  nor `form.mjs` carries or consumes a `contextParams` column at all — confirmed by the adversarial
+  pass to render (not throw) a required raw-key text input asking a resident to type
+  `vtx.leaseapp.<NanoID>` by hand, which is a real, if softer, blocker than the report's first-cut
+  characterization.
+- **`Charge`** (self path) **and `Settle`** — a genuinely new `form.mjs` gap, first exercised by café:
+  both declare an `OptionalReads` self-ownership probe using the **typed** `{me.leaseapp:id}` template
+  (e.g. `lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}`).
+  `substituteTemplate` only resolves bare `{me}`/`{actor}`/`{payload.*}`/`{context.*}` and **throws**
+  `"descriptorform: unrecognized read template …"` on anything else — confirmed by an existing,
+  deliberately-failing-loud `form.test.mjs` case, not a bug to route around. Migrating either op today
+  would ship a form that always errors. `Charge`'s descriptor is independently self-voice-only and
+  omits `amountCents`/`description`, which the POS off-menu charge flow needs — a second, unrelated
+  reason its staff paths stay hand-built regardless.
+- **`CreateMenuItem`** — its required `locationKey` is silently derived from the staffer's own
+  `worksAt` anchor (`workplaceLocationKey()`) and never rendered as a field at all, the identical
+  new-semantics gap as Inc 3b's `CreateStudio` (§16).
+- **`RetireMenuItem`** and the per-line "Void" button on each charge line — one-click list-row actions,
+  parameter already known, no dedicated form; the `RemoveProviderSite`/`TombstoneStudio` category. The
+  per-line void's `{tabKey, lineId}` payload shape isn't in `VoidCharge`'s own `InputSchema` at all
+  (`tabKey`/`amountCents` only), so it couldn't ride the same migrated form even if it were otherwise
+  one-click-exempt.
+- **`CreateAccount`/`DebitAccount`** (`cafe-ledger`) — operator-only, auto-opened / Weaver-dispatched,
+  no `OpMetaSpec` exists or should (the package's own doc comment: "neither is something a person
+  decides to do"). Same category as Inc 3a's `ClinicCreateAccount` / Inc 3b's `WellnessCreateAccount`.
+
+**Real bugs a cold adversarial pass caught on the first cut, fixed in this fire, not filed:**
+- **A double-void money bug.** The migrated Void button re-enabled in a `finally`, but — unlike the
+  deleted hand-built `#void-amount` input's own `input.value = ""` on success — never cleared the
+  descriptor-owned amount field, so two clicks inside the `setTimeout(renderPos, 700)` re-render window
+  resubmitted the byte-identical envelope; `VoidCharge`'s amount branch has no dedup/idempotency key and
+  just subtracts again (clamped at zero). Fixed to match the adjacent per-line void button's own
+  pattern: re-enable only in `catch`, never in `finally` — a successful void now stays disabled until
+  the 700ms re-render mounts a fresh form.
+- **Lost Enter-to-submit.** The migrated markup dropped the surrounding `<form>` in favor of a bare
+  `<div>` + `type="button"`, silently breaking the ordinary POS "type amount, press Enter" gesture (and
+  making the double-void above easier to hit by accident). Restored: `renderOpForm` never emits its own
+  `<form>` wrapper, so wrapping the mount back in one and switching to a `submit` listener was safe.
+- **Settle Tab rendering inert.** `renderPos` awaited the void form's catalog/module load BEFORE wiring
+  `#settle-btn`'s own listener, leaving Settle visibly enabled but non-functional for the load's
+  duration (and, on an overlapping re-render, able to double-wire). Reordered after Settle's listener
+  and made fire-and-forget — `wireVoidChargeForm` captures its own DOM nodes before its first internal
+  `await`, so it was already safe to detach.
+- **A catalog-outage toast stomping a success toast.** Every `renderPos` — including the one after a
+  successful Charge/Settle — re-toasted "void form unavailable" on a catalog outage, silently
+  overwriting the just-shown green success toast 700ms later. Now rendered inline into the void mount
+  instead of via the shared global toast.
+- **A dropped confirmation amount.** The success toast lost `money(cents)` when the amount moved from a
+  hand-tracked local variable to the submitted envelope's own payload; restored by reading it back off
+  `envelope.payload.amountCents`.
+
+**A cross-increment gap the adversarial pass surfaced live, fixed in this fire because it blocked
+verifying this fire's own change:** none of `up-cafe`/`up-clinic`/`up-wellness`/`up-loftspace` provision
+`edge-manifest` — confirmed against the actual running dev stack (`nats kv ls` against `NATS_URL`:
+no `op-catalog` bucket exists). Every descriptor-driven form this whole design has shipped, including
+the Inc 1 loftspace pilot, has been unverifiable-live on a stack brought up via any of the four
+documented one-command targets since Inc 1 — a stack that happened to already carry `edge-manifest`
+installed from an earlier hand-run `make install-edge-manifest`/`make up-facet` masked it. All four
+targets now call `install-edge-manifest` (idempotent, same as every other `lattice-pkg install` call)
+after their vertical's own `install-<x>` and before `provision-readpath`.
+
+**Checkpoint for the next fire:** no worktree held once this lands. Inc 3 continues with **loftspace's
+remaining `SignRenewal`/`VerifyGuarantor`** next per §7's sequence (the `{context.<field>}` template
+Inc 2 shipped, per Inc 2's own checkpoint). Once loftspace's tail lands, Inc 3 is done except for the
+named blockers each increment left behind (clinic's five, wellness's four, café's four above,
+loftspace's `CreateLocation`/`AttachObject`/`DetachObject`) — each is its own future increment per §7,
+not "more Inc 3."
+
+
 census named. See `backlog/lattice.md`.
