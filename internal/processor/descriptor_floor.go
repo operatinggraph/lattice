@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // applyDescriptorFloor enforces Contract #2 §2.5's "the descriptor's
@@ -27,10 +28,31 @@ import (
 // request. This is the seam where the submitter's declaration stops being the
 // last word.
 //
+// # What a template names
+//
+// A descriptor's read templates are written in the vocabulary a CLIENT
+// resolves them with (cmd/facet/web/app.js's substituteTemplate). Half of it
+// is server-resolvable — `{actor}`, `{service}`, `{payload.<field>}`, and
+// `{scopedTo}` where step 3 proved the target — and substitutes to one
+// concrete key. The other half, `{me.<type>}`, names a vertex out of the
+// caller's own projected view, which the Processor does not have.
+//
+// A client-only placeholder compiles to a whole-segment WILDCARD constrained
+// to a NanoID (compileDescriptorTemplate), so the template still names a
+// determinate key SHAPE. Shape-matching is not an approximation of the
+// client's resolution — for this vocabulary it is the correct semantics. The
+// key whose absence is observable is the key the SCRIPT touches, and a script
+// commonly recovers its own anchor from state the caller never supplied (a
+// tab's `.status` naming the lease it was charged to), so the key it touches
+// need not be the one the caller's own `me.<type>` would name. A submitter
+// hardening a same-shaped probe for someone else's entity is exactly the
+// decoupled case the pattern covers and a client-faithful resolution would
+// miss.
+//
 // # Precedence
 //
 // The floor is applied to the ENVELOPE's declaration, at the head of step 4,
-// BEFORE `derive_reads` runs and therefore before mergeDerivedReads. Three
+// BEFORE `derive_reads` runs and therefore before mergeDerivedReads. Four
 // consequences, in the order they matter:
 //
 //  1. mergeDerivedReads' "envelope's disposition stands" rule then sees the
@@ -39,9 +61,10 @@ import (
 //     disposition — the same weakest-wins answer the derived-vs-envelope rule
 //     already gives, reached without a second rule.
 //
-//  2. The demotion MOVES the key rather than copying it. step4_hydrate's
-//     "a key in both lists keeps fail-closed reads semantics" would otherwise
-//     re-harden on the very next loop, silently undoing this.
+//  2. The demotion MOVES the key rather than copying it, and moves EVERY
+//     match rather than the first. step4_hydrate's "a key in both lists keeps
+//     fail-closed reads semantics" would otherwise re-harden on the very next
+//     loop, silently undoing this.
 //
 //  3. `egressReads` is floored too, but by a DIFFERENT action, because the
 //     obvious one is a plaintext leak. Moving an egress key into optionalReads
@@ -63,35 +86,64 @@ import (
 //     a collision nor mask one, and mergeDerivedReads' re-check over the
 //     merged set sees the egress set it would have seen.
 //
+//  4. REQUIRED WINS, over an exclusion set the SUBMITTER CANNOT STEER. Where
+//     one key is named by both of a descriptor's lists, the required reading
+//     stands: wrong-demotion is the dangerous direction, turning the
+//     HydrationMiss the script's author expected into a silent None.
+//
+//     The exclusion is therefore computed from the descriptor plus the
+//     authenticated identity ALONE — `{actor}`, `{service}`, a `{scopedTo}`
+//     step 3 validated, and literal text. A required template carrying
+//     `{payload.<field>}` contributes nothing (resolveDescriptorRequired).
+//     That restriction is the control's integrity, not tidiness: a
+//     payload-derived exclusion is written by the same hostile party the floor
+//     is defending against, so a submitter who put their probe key into that
+//     payload field would exclude it from the floor and hand themselves back
+//     the HydrationMiss oracle — with a demotion this file would otherwise
+//     perform. An exclusion set the attacker can address is not a precedence
+//     rule, it is a bypass.
+//
 // # Direction of failure
 //
 // An operation with NO descriptor demotes nothing. That is the ordinary case
 // — most of the corpus carries no Dispatch block — and it is not a silent
 // hardening: the rule has no subject, because there is no descriptor declaring
-// the key optional. The same holds for a descriptor whose optionalReads
-// templates the Processor cannot resolve (`{me.<type>}`, `{entity.<column>}`
-// name a key derived from the CLIENT's projected view, which the Processor
-// does not have). Those are logged, not guessed at.
+// the key optional. The same holds for a template this Processor cannot
+// compile at all: an unresolvable server-side placeholder (a payload field the
+// envelope omits), a `{scopedTo}` on a path step 3 did not validate, a
+// placeholder outside the vocabulary, or a client-only placeholder sharing a
+// segment with literal text. Those are logged, not guessed at.
 //
 // Demoting on doubt is deliberately NOT the fallback, and the asymmetry is
 // worth stating: demotion is the weaker disposition for the oracle but the
 // DANGEROUS one for correctness — softening a read the operation genuinely
 // depends on turns a HydrationMiss into a silent None, which is the failure
 // the §2.5 authoring rule exists to prevent. So the floor demotes exactly the
-// keys a resolvable descriptor names, and nothing else.
-func applyDescriptorFloor(base declaredReads, templates []string, env *OperationEnvelope, logger *slog.Logger) declaredReads {
-	if len(templates) == 0 || (len(base.Reads) == 0 && len(base.EgressReads) == 0) {
+// keys a compilable descriptor names, and nothing else.
+func applyDescriptorFloor(base declaredReads, templates DispatchTemplates, env *OperationEnvelope, logger *slog.Logger) declaredReads {
+	if len(templates.OptionalReads) == 0 || (len(base.Reads) == 0 && len(base.EgressReads) == 0) {
 		return base
 	}
-	floor := resolveDescriptorFloor(templates, env, logger)
-	if len(floor) == 0 {
+	var payload map[string]interface{}
+	if len(env.Payload) > 0 {
+		payload, _ = jsonToGenericMap(env.Payload)
+	}
+	floor := resolveDescriptorFloor(templates.OptionalReads, env, payload, logger)
+	if floor.empty() {
 		return base
+	}
+	required := resolveDescriptorRequired(templates.Reads, env, payload, logger)
+	floored := func(key string) bool {
+		if _, isRequired := required[key]; isRequired {
+			return false
+		}
+		return floor.covers(key)
 	}
 
 	// The egress arm: mark, never move. See the header's precedence note 3 —
 	// relocating an egress key would swap a bridge-opened ref for plaintext.
 	for _, k := range base.EgressReads {
-		if _, isFloor := floor[k]; !isFloor {
+		if !floored(k) {
 			continue
 		}
 		if base.EgressAbsenceTolerant == nil {
@@ -111,8 +163,9 @@ func applyDescriptorFloor(base declaredReads, templates []string, env *Operation
 	// storage the envelope owns.
 	kept := make([]string, 0, len(base.Reads))
 	demoted := make([]string, 0, len(base.Reads))
+	grown := append([]string{}, base.OptionalReads...)
 	for _, k := range base.Reads {
-		if _, isFloor := floor[k]; !isFloor {
+		if !floored(k) {
 			kept = append(kept, k)
 			continue
 		}
@@ -124,90 +177,310 @@ func applyDescriptorFloor(base declaredReads, templates []string, env *Operation
 			continue
 		}
 		optional[k] = struct{}{}
-		base.OptionalReads = append(append([]string{}, base.OptionalReads...), k)
+		grown = append(grown, k)
 	}
 	if len(demoted) == 0 {
 		return base
 	}
+	base.OptionalReads = grown
 	base.Reads = kept
 	logger.Info("step4: descriptor floor demoted declared reads to optional",
 		"operationType", env.OperationType, "requestId", env.RequestID, "keys", demoted)
 	return base
 }
 
-// resolveDescriptorFloor substitutes a descriptor's optionalReads templates
-// against this envelope and returns the concrete keys among them.
+// descriptorFloor is a descriptor's optionalReads list compiled against one
+// envelope: the concrete keys it names, plus the key SHAPES it names for the
+// placeholders only a client can resolve.
 //
-// A template that still carries an unresolved placeholder after substitution
-// yields NO key — the descriptor is not naming a determinate key for this
-// envelope, so there is nothing for the floor to be about. Same for a
-// substitution that leaves a hole (an empty segment): that is not a shorter
-// key, it is a different and invalid one, and the client-side resolver
-// (cmd/facet/web/app.js's wholeKey) drops it for the same reason.
-func resolveDescriptorFloor(templates []string, env *OperationEnvelope, logger *slog.Logger) map[string]struct{} {
-	var payload map[string]interface{}
-	if len(env.Payload) > 0 {
-		payload, _ = jsonToGenericMap(env.Payload)
+// Exact keys are held apart from patterns because they answer in one map
+// lookup, and because a template carrying no client-only vocabulary must reach
+// the same answer it reaches with no pattern machinery in the file at all.
+type descriptorFloor struct {
+	exact    map[string]struct{}
+	patterns []keyPattern
+}
+
+func (f descriptorFloor) empty() bool { return len(f.exact) == 0 && len(f.patterns) == 0 }
+
+// covers reports whether a declared key falls under the floor. Cost is
+// O(patterns × segments) per declared key, over at most MaxDeclaredReads keys
+// and a descriptor's own template count — no budget is spent on it.
+func (f descriptorFloor) covers(key string) bool {
+	if _, ok := f.exact[key]; ok {
+		return true
 	}
-	floor := make(map[string]struct{}, len(templates))
+	for _, p := range f.patterns {
+		if p.matches(key) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDescriptorFloor compiles a descriptor's optionalReads templates
+// against this envelope.
+//
+// A template this Processor cannot compile yields NO key and NO shape — the
+// descriptor is not naming a determinate key or shape for this envelope, so
+// there is nothing for the floor to be about.
+func resolveDescriptorFloor(templates []string, env *OperationEnvelope, payload map[string]interface{}, logger *slog.Logger) descriptorFloor {
+	floor := descriptorFloor{exact: make(map[string]struct{}, len(templates))}
 	for _, tpl := range templates {
-		key, ok := substituteDescriptorTemplate(tpl, env, payload)
+		pattern, ok := compileDescriptorTemplate(tpl, env, payload)
 		if !ok {
 			// WARN, not Debug, and the level is the point: "the control did
 			// not apply" has to be at least as visible as "the control fired",
 			// or the only thing production shows is the enforced case and the
 			// gap is invisible at exactly the levels operators run.
 			//
-			// Not a defect in the descriptor — the client-only vocabulary is
-			// legitimate — but it does mean this key has no floor, so the
-			// envelope's own disposition is the last word for it.
-			logger.Warn("step4: descriptor optionalRead template is not server-resolvable; NO floor applied for this key",
+			// Not necessarily a defect in the descriptor — an envelope that
+			// omits an optional payload field reaches here legitimately — but
+			// it does mean this key has no floor, so the envelope's own
+			// disposition is the last word for it.
+			logger.Warn("step4: descriptor optionalRead template does not compile against this envelope; NO floor applied for this key",
 				"operationType", env.OperationType, "requestId", env.RequestID, "template", tpl)
 			continue
 		}
-		floor[key] = struct{}{}
+		if key, isConcrete := pattern.concrete(); isConcrete {
+			floor.exact[key] = struct{}{}
+			continue
+		}
+		floor.patterns = append(floor.patterns, pattern)
 	}
 	return floor
 }
 
-// substituteDescriptorTemplate expands the server-resolvable half of the
-// descriptor key-template vocabulary (the whole vocabulary lives in
-// cmd/facet/web/app.js's substituteTemplate, which is the authority a client
-// resolves with).
+// resolveDescriptorRequired compiles a descriptor's `reads` templates and
+// returns the keys the floor must leave fail-closed however the optional side
+// matches them. Two rules narrow which templates contribute one, and both are
+// the same "no contribution + Warn" posture an uncompilable optional template
+// gets — failing toward the floor still applying rather than toward the
+// oracle.
 //
-// Resolvable here: `{actor}`, `{service}`, `{payload.<field>}`, each with the
-// optional `:id` suffix that asks for the Contract #1 bare id instead of the
-// whole vertex key. Not resolvable: `{me.<type>}` and `{entity.<column>}`,
-// which name a vertex out of the caller's own projected view — the edge
-// manifest's self-anchors and the row being displayed — neither of which the
-// Processor has or should reconstruct.
+// A template naming `{payload.<field>}` contributes NOTHING. Everything the
+// exclusion set is built from must come from the descriptor and the
+// authenticated identity: `{actor}` and `{service}` are step-3 facts,
+// `{scopedTo}` resolves only where step 3 proved the target, and literal text
+// is the descriptor's own. Payload is not — it is the hostile submitter's own
+// field, and an exclusion addressable from it lets that submitter name the key
+// they are probing and take it out of the floor's reach, converting the
+// precedence rule into a per-request bypass of the demotion this file would
+// otherwise perform.
 //
-// Returns ok=false when any placeholder is left unexpanded or the expansion
-// leaves an empty segment.
-func substituteDescriptorTemplate(tpl string, env *OperationEnvelope, payload map[string]interface{}) (string, bool) {
-	var b strings.Builder
+// A template that compiles to a PATTERN contributes nothing either. A loose
+// required shape would blanket every key of that shape out of demotion — one
+// `{me.<type>}` on the required side preserves the oracle for every declared
+// root of the type, which is the outcome this whole file exists to close. The
+// pkgmgr install gate refuses to author that shape, but
+// `InstallPackage`/`UpgradePackage` submitted directly reach the kernel install
+// script without that preflight, so the runtime carries its own rule rather
+// than inheriting one.
+//
+// What survives both rules is the exclusion a descriptor can state about ITS
+// OWN operation and this actor — the shape of a genuine self-contradiction
+// between the two lists — and nothing a request can address.
+func resolveDescriptorRequired(templates []string, env *OperationEnvelope, payload map[string]interface{}, logger *slog.Logger) map[string]struct{} {
+	if len(templates) == 0 {
+		return nil
+	}
+	required := make(map[string]struct{}, len(templates))
+	for _, tpl := range templates {
+		pattern, ok := compileDescriptorTemplate(tpl, env, payload)
+		if !ok {
+			logger.Warn("step4: descriptor read template does not compile against this envelope; it excludes no key from the floor",
+				"operationType", env.OperationType, "requestId", env.RequestID, "template", tpl)
+			continue
+		}
+		if pattern.submitterDerived {
+			logger.Warn("step4: descriptor read template resolves from submitter-supplied payload; it excludes no key from the floor",
+				"operationType", env.OperationType, "requestId", env.RequestID, "template", tpl)
+			continue
+		}
+		key, isConcrete := pattern.concrete()
+		if !isConcrete {
+			logger.Warn("step4: descriptor read template compiles to a key SHAPE, not a key; it excludes no key from the floor",
+				"operationType", env.OperationType, "requestId", env.RequestID, "template", tpl)
+			continue
+		}
+		required[key] = struct{}{}
+	}
+	return required
+}
+
+// patternSegment is one dot-delimited segment of a compiled template: either
+// literal text a matching key must carry byte for byte, or a wildcard standing
+// for exactly one NanoID.
+type patternSegment struct {
+	literal  string
+	wildcard bool
+}
+
+// keyPattern is one descriptor read template compiled against one envelope.
+// Its lifetime is that Hydrate call: it is derived from the envelope plus the
+// DDL cache's descriptor snapshot, dropped with declaredReads, and re-derived
+// on an OCC retry.
+//
+// A wildcard is always a WHOLE segment, never a fragment of one, which is what
+// keeps matching to segment equality with no prefix/suffix arithmetic. Segment
+// count is already the key-shape discriminator (Contract #1: 3 segments for a
+// vertex, 4 for an aspect, 6 for a link), so a pattern cannot match across
+// shapes.
+//
+// Two shapes this matcher does not express, each with zero live instances and
+// each failing toward NO floor, which is the safe direction:
+//
+//   - A wildcard segment is a NanoID at every position, including a localName
+//     position, where real local names are not NanoIDs
+//     (substrate.IsValidLocalName is a different alphabet and length). So a
+//     pattern like `vtx.<type>.{payload.x}.{me.y:id}` under-covers the real
+//     aspects of that vertex: they simply do not match, and their disposition
+//     stands as the envelope declared it.
+//   - The whole-key `{me.<type>}` form covers `vtx.<type>.<any NanoID>`, i.e.
+//     any declared root of that type. On an EGRESS key that reaches further
+//     than a silent None: step4_hydrate routes a floored absent key into
+//     KnownAbsent instead of RequiredAbsent, firstRequiredAbsentMutation
+//     (starlark_runner.go) guards only RequiredAbsent, and
+//     applyHydratedRevisions (commit_path.go) leaves an update or tombstone on
+//     a step-4-absent key unconditioned — so an over-wide floor of that form
+//     can drop a write-side guard, not merely soften a read. Every live
+//     client-only template is the `{me.<type>:id}` FRAGMENT form inside a link
+//     key, which fixes every other segment.
+type keyPattern struct {
+	segments []patternSegment
+	// submitterDerived records that at least one segment's text came from
+	// `{payload.<field>}` — a value the requester wrote. The floor arm ignores
+	// this (a floor over a key the submitter named is still a floor); the
+	// required arm refuses to build an exclusion from it, per
+	// resolveDescriptorRequired.
+	submitterDerived bool
+}
+
+// concrete returns the single key this pattern names, or ok=false when it
+// carries a wildcard and therefore names a shape instead.
+func (p keyPattern) concrete() (string, bool) {
+	out := make([]string, len(p.segments))
+	for i, seg := range p.segments {
+		if seg.wildcard {
+			return "", false
+		}
+		out[i] = seg.literal
+	}
+	return strings.Join(out, "."), true
+}
+
+// matches reports whether a concrete key falls under this pattern: same
+// segment count, every literal segment byte-equal, every wildcard segment a
+// canonical NanoID.
+func (p keyPattern) matches(key string) bool {
+	segments := strings.Split(key, ".")
+	if len(segments) != len(p.segments) {
+		return false
+	}
+	for i, want := range p.segments {
+		if want.wildcard {
+			if !substrate.IsValidNanoID(segments[i]) {
+				return false
+			}
+			continue
+		}
+		if segments[i] != want.literal {
+			return false
+		}
+	}
+	return true
+}
+
+// templatePart is one piece of an expanded template before it is cut into
+// segments: either text (literal, or a placeholder's substituted value) or an
+// atomic wildcard. Wildcards are carried as their own part rather than as a
+// marker inside the text, so that a payload value spelling the marker cannot
+// pass itself off as one.
+type templatePart struct {
+	text     string
+	wildcard bool
+	// submitterDerived marks text that came out of the request payload, so the
+	// provenance survives the cut into segments and reaches keyPattern.
+	submitterDerived bool
+}
+
+// compileDescriptorTemplate compiles one descriptor read template against this
+// envelope, into either a concrete key or a key pattern.
+//
+// The vocabulary, and what each element compiles to:
+//
+//   - literal text — itself.
+//   - `{actor}`, `{service}`, `{payload.<field>}`, each ±`:id` — the concrete
+//     value. `:id` asks for the Contract #1 bare id instead of the whole vertex
+//     key, and is refused rather than truncated over a value that is not a
+//     vertex key: a bare id taken off a malformed key addresses something else.
+//   - `{scopedTo}` ±`:id` — `authContext.target`, but ONLY where step 3 proved
+//     it (AuthTargetValidated: the platform scope=self path and the task path).
+//     An unvalidated target is a client-supplied hint, and resolving one would
+//     let a lying submitter steer the floor away from the key they are probing.
+//     It never becomes a wildcard either: the target's TYPE is unknown, so the
+//     shape would be `vtx.<any>.<nanoid>` and would demote every declared
+//     vertex root the envelope carries.
+//   - `{me.<type>:id}` — a one-segment NanoID wildcard.
+//   - `{me.<type>}` — the caller's own vertex of that type in whole-key form:
+//     the literal segments `vtx` and `<type>`, then a NanoID wildcard. `<type>`
+//     must be a bare Contract #1 type token; anything else in that position
+//     (an optional-marker `?`, a stray modifier, a dotted path) is a
+//     placeholder outside this vocabulary and is refused rather than folded
+//     into a literal segment, so an unrecognized spelling is always audible at
+//     Warn instead of compiling to a pattern that quietly matches nothing.
+//
+// Anything else is refused (ok=false): an unknown placeholder, an unclosed
+// `{`, a placeholder that resolves to nothing, an empty segment, or a client-
+// only placeholder sharing a segment with literal text. That last one is the
+// mid-segment fragment idiom — legal and live with a SERVER-resolvable
+// placeholder, where it substitutes concretely and needs no wildcard at all
+// (`vtx.session.{payload.session:id}.bkr{actor:id}`), and inexpressible in a
+// whole-segment matcher with a client-only one. Refusing it costs a floor;
+// widening the wildcard to swallow the literal text around it would demote
+// keys no template named.
+func compileDescriptorTemplate(tpl string, env *OperationEnvelope, payload map[string]interface{}) (keyPattern, bool) {
+	parts, ok := expandDescriptorTemplate(tpl, env, payload)
+	if !ok {
+		return keyPattern{}, false
+	}
+	return segmentTemplateParts(parts)
+}
+
+func expandDescriptorTemplate(tpl string, env *OperationEnvelope, payload map[string]interface{}) ([]templatePart, bool) {
+	var parts []templatePart
 	rest := tpl
 	for {
 		open := strings.Index(rest, "{")
 		if open < 0 {
-			b.WriteString(rest)
+			parts = append(parts, templatePart{text: rest})
 			break
 		}
-		close := strings.Index(rest[open:], "}")
-		if close < 0 {
-			return "", false
+		closed := strings.Index(rest[open:], "}")
+		if closed < 0 {
+			return nil, false
 		}
-		close += open
-		b.WriteString(rest[:open])
-		expr := rest[open+1 : close]
-		rest = rest[close+1:]
+		closed += open
+		parts = append(parts, templatePart{text: rest[:open]})
+		expr := rest[open+1 : closed]
+		rest = rest[closed+1:]
 
-		bareID := false
-		if strings.HasSuffix(expr, ":id") {
-			bareID = true
-			expr = strings.TrimSuffix(expr, ":id")
+		bareID := strings.HasSuffix(expr, ":id")
+		expr = strings.TrimSuffix(expr, ":id")
+
+		if vertexType, isSelf := strings.CutPrefix(expr, "me."); isSelf {
+			if !keys.IsValidTypeSegment(vertexType) {
+				return nil, false
+			}
+			if !bareID {
+				parts = append(parts, templatePart{text: "vtx." + vertexType + "."})
+			}
+			parts = append(parts, templatePart{wildcard: true})
+			continue
 		}
+
 		var val string
+		fromPayload := false
 		switch {
 		case expr == "actor":
 			val = env.Actor
@@ -215,35 +488,85 @@ func substituteDescriptorTemplate(tpl string, env *OperationEnvelope, payload ma
 			if env.AuthContext != nil {
 				val = env.AuthContext.Service
 			}
+		case expr == "scopedTo":
+			if !env.AuthTargetValidated {
+				return nil, false
+			}
+			if env.AuthContext != nil {
+				val = env.AuthContext.Target
+			}
 		case strings.HasPrefix(expr, "payload."):
 			s, isString := payload[strings.TrimPrefix(expr, "payload.")].(string)
 			if !isString {
-				return "", false
+				return nil, false
 			}
 			val = s
+			fromPayload = true
 		default:
-			return "", false
+			return nil, false
 		}
 		if val == "" {
-			return "", false
+			return nil, false
 		}
 		if bareID {
 			_, id, parsed := substrate.ParseVertexKey(val)
 			if !parsed {
-				return "", false
+				return nil, false
 			}
 			val = id
 		}
-		b.WriteString(val)
+		parts = append(parts, templatePart{text: val, submitterDerived: fromPayload})
 	}
-	out := b.String()
-	if out == "" || strings.Contains(out, "{") {
-		return "", false
-	}
-	for _, seg := range strings.Split(out, ".") {
-		if seg == "" {
-			return "", false
+	return parts, true
+}
+
+// segmentTemplateParts cuts the expanded parts into whole dot-delimited
+// segments. The cut runs over the SUBSTITUTED text, not the raw template,
+// because a substituted value carries its own dots — `{actor}` is a whole
+// three-segment vertex key.
+//
+// Refused: a segment holding both a wildcard and literal text (in either
+// order), two wildcards with no separator between them, an empty segment (a
+// hole is not a shorter key, it is a different and invalid one — the client-
+// side resolver, cmd/facet/web/app.js's wholeKey, drops it for the same
+// reason), and a substituted value carrying a `{` of its own.
+func segmentTemplateParts(parts []templatePart) (keyPattern, bool) {
+	var segments []patternSegment
+	submitterDerived := false
+	current := patternSegment{}
+	for _, part := range parts {
+		if part.submitterDerived {
+			submitterDerived = true
+		}
+		if part.wildcard {
+			if current.wildcard || current.literal != "" {
+				return keyPattern{}, false
+			}
+			current.wildcard = true
+			continue
+		}
+		if part.text == "" {
+			continue
+		}
+		for i, chunk := range strings.Split(part.text, ".") {
+			if i > 0 {
+				segments = append(segments, current)
+				current = patternSegment{}
+			}
+			if chunk == "" {
+				continue
+			}
+			if current.wildcard || strings.Contains(chunk, "{") {
+				return keyPattern{}, false
+			}
+			current.literal += chunk
 		}
 	}
-	return out, true
+	segments = append(segments, current)
+	for _, seg := range segments {
+		if !seg.wildcard && seg.literal == "" {
+			return keyPattern{}, false
+		}
+	}
+	return keyPattern{segments: segments, submitterDerived: submitterDerived}, true
 }

@@ -40,6 +40,7 @@ func (def Definition) validateAll() error {
 		def.validateWeaverTargets,
 		def.validateLoomPatterns,
 		def.validateOpMetas,
+		def.ValidateOpDispatchTemplates,
 		def.validateEffects,
 		def.validateSensitiveClassScope,
 		def.validateRetentionClasses,
@@ -644,24 +645,55 @@ type OpPresentationSpec struct {
 // which of the wire envelope's `self|service|task` fields the client
 // populates (`self` -> {target: actorId}; `service` -> {service: serviceKey};
 // `task` -> {task, target: scopedTo}) — NOT itself a processor.AuthContext
-// value. ContextParams/Reads/OptionalReads entries are templates substituted
-// from `{actor}`, `{scopedTo}`, `{service}`, `{payload.<field>}`, and
-// `{me.<type>}`, the submitting identity's own vertex of that Contract #1
+// value.
+//
+// ContextParams, Reads, and OptionalReads are all template strings, but they
+// draw from two different vocabularies, and ValidateOpDispatchTemplates is
+// the install-time gate that holds Reads/OptionalReads to the narrower one:
+//
+//   - ContextParams is the full vocabulary: `{actor}`, `{scopedTo}`,
+//     `{service}`, `{payload.<field>}`, `{me.<type>}`, and
+//     `{entity.<column>}` — the last naming a column off the row the client
+//     resolved TargetType from (e.g. `{entity.studioKey}`) — each optionally
+//     suffixed `:id`, and any of them may also close with the `?` OPTIONAL
+//     marker described below.
+//   - Reads and OptionalReads draw from a CLOSED subset of that vocabulary:
+//     `{actor}`, `{scopedTo}`, `{service}`, `{payload.<field>}`, and
+//     `{me.<type>}`, each optionally suffixed `:id` — nothing else.
+//     `{entity.<column>}` and the `?` marker are ContextParams-only: a read
+//     template is resolved server-side by the Processor's descriptor floor,
+//     whose client wholeKey silently drops either one, so an entry using
+//     them is dead weight the gate refuses rather than ships. `{me.<type>}`
+//     in a read template carries two further gated rules: it is
+//     OptionalReads-only (a required-side `{me.<type>}` cannot resolve
+//     server-side and would force a required PATTERN that blankets a whole
+//     key class out of demotion — descriptor-floor-template-coverage-design.md
+//     §3.2), and it must occupy a WHOLE dot-delimited segment of the
+//     template, because the Processor's matcher only wildcards whole
+//     segments: a mid-segment client-only fragment (`bkr{me.instructor:id}`)
+//     is refused at install rather than silently carrying no floor. An
+//     unrecognized placeholder in either read list is refused the same way —
+//     the read-template vocabulary is closed by default-deny, not
+//     open-ended.
+//
+// `{me.<type>}` is the submitting identity's own vertex of that Contract #1
 // type, taken from the `selfAnchors` set the client's identity projection
 // carries (edge-manifest's edgeIdentity lens projects each as {type, key}).
-// `{me.<type>}` is how a self-scope entity-key param is declared rather than
+// It is how a self-scope entity-key param is declared rather than
 // asked of the visitor as a raw vertex key: the client fills it and never
 // renders the field. It resolves only when the identity holds exactly one
 // vertex of that type — zero or several is not a value to guess at, and a
 // client that cannot resolve a declared `{me.<type>}` has no business
 // offering the op (the same rule TargetType states below).
 //
-// A placeholder may also close with a `?` OPTIONAL marker ({me.leaseapp?},
-// {me.leaseapp:id?}): the client fills the param silently when it resolves
-// and OMITS the param silently when it doesn't — the field is never
-// rendered and the op stays offered either way. It exists for
+// A ContextParams placeholder may also close with a `?` OPTIONAL marker
+// ({me.leaseapp?}, {me.leaseapp:id?}): the client fills the param silently
+// when it resolves and OMITS the param silently when it doesn't — the field
+// is never rendered and the op stays offered either way. It exists for
 // rate/eligibility params whose ABSENCE is a designed script branch; a
-// required key never carries it (the same split Reads/OptionalReads states).
+// required key never carries it. Reads/OptionalReads have no marker
+// equivalent — filing a key under OptionalReads is that vocabulary's own
+// way of saying its absence is expected.
 //
 // Any placeholder accepts a trailing `:id` modifier, which substitutes the
 // Contract #1 BARE id rather than the full `vtx.<type>.<id>` key. That is what
@@ -673,7 +705,11 @@ type OpPresentationSpec struct {
 // mid-entry (e.g.
 // `lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}`),
 // which is exactly why the AI-authored validator's stricter anchored
-// vocabulary rejects that shape — see sensitiveReadAspect.
+// vocabulary rejects that shape — see sensitiveReadAspect. In a read
+// template a mid-entry fragment is legal only when the embedded placeholder
+// is server-resolvable (`{payload.*}`, `{actor}`, `{service}`, or a
+// validated `{scopedTo}`); a client-only `{me.<type>}` fragment is exactly
+// the shape the whole-segment rule above refuses.
 type OpDispatchSpec struct {
 	Class string
 

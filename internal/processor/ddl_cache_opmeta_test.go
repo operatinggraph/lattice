@@ -36,12 +36,29 @@ func seedOpMeta(t *testing.T, ctx context.Context, conn *substrate.Conn, metaID,
 }
 
 func dispatchAspect(root string, optionalReads string, tombstoned bool) []byte {
+	return dispatchAspectLists(root, `[]`, optionalReads, tombstoned)
+}
+
+// dispatchAspectLists seeds a `.dispatch` carrying BOTH read-template lists,
+// the way pkgmgr emits it (internal/pkgmgr/build.go's OpMetas loop writes
+// `reads` and `optionalReads` side by side). reads and optionalReads are JSON
+// array literals.
+func dispatchAspectLists(root, reads, optionalReads string, tombstoned bool) []byte {
 	del := "false"
 	if tombstoned {
 		del = "true"
 	}
 	return []byte(`{"class":"dispatch","vertexKey":"` + root + `","localName":"dispatch","isDeleted":` + del +
-		`,"data":{"class":"identity","authContext":"self","optionalReads":` + optionalReads + `}}`)
+		`,"data":{"class":"identity","authContext":"self","reads":` + reads +
+		`,"optionalReads":` + optionalReads + `}}`)
+}
+
+// floorTemplates reads the descriptor index's floor half through the real
+// accessor, for the assertions whose subject is the floor alone. The pair the
+// accessor returns is asserted whole wherever the `reads` half is the point.
+func floorTemplates(c *DDLCache, operationType string) ([]string, bool) {
+	templates, ok := c.DispatchReadTemplates(operationType)
+	return templates.OptionalReads, ok
 }
 
 // TestDDLCache_LoadsOpMetaDispatch: the descriptor is readable SERVER-SIDE.
@@ -53,19 +70,26 @@ func TestDDLCache_LoadsOpMetaDispatch(t *testing.T) {
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	root := "vtx.meta." + tplID
 	seedOpMeta(t, ctx, conn, tplID, "ClaimIdentity",
-		dispatchAspect(root, `["{payload.targetIdentityKey}","{payload.targetIdentityKey}.claimKey"]`, false), false)
+		dispatchAspectLists(root, `["{payload.claimantKey}"]`,
+			`["{payload.targetIdentityKey}","{payload.targetIdentityKey}.claimKey"]`, false), false)
 
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	got, ok := cache.DispatchOptionalReads("ClaimIdentity")
+	got, ok := cache.DispatchReadTemplates("ClaimIdentity")
 	if !ok {
-		t.Fatalf("DispatchOptionalReads = (_, false); the descriptor must be reachable at merge time")
+		t.Fatalf("DispatchReadTemplates = (_, false); the descriptor must be reachable at merge time")
 	}
 	want := []string{"{payload.targetIdentityKey}", "{payload.targetIdentityKey}.claimKey"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("templates = %v, want %v", got, want)
+	if !slices.Equal(got.OptionalReads, want) {
+		t.Fatalf("optionalReads = %v, want %v", got.OptionalReads, want)
+	}
+	// The `reads` half rides the same aspect and the same accessor. Without it
+	// the required-wins precedence has no subject at all: every key would be
+	// demotable by whatever the optional side happens to match.
+	if !slices.Equal(got.Reads, []string{"{payload.claimantKey}"}) {
+		t.Fatalf("reads = %v, want the descriptor's required templates — they are on the wire and must reach step 4", got.Reads)
 	}
 }
 
@@ -87,7 +111,7 @@ func TestDDLCache_OpMetaIsNotIndexedAsADDL(t *testing.T) {
 	if ref, ok := cache.Lookup("identity"); ok && ref.MetaVertexKey == root {
 		t.Fatalf("the op-meta was indexed as the DDL for class %q", "identity")
 	}
-	if _, ok := cache.DispatchOptionalReads("identity"); !ok {
+	if _, ok := floorTemplates(cache, "identity"); !ok {
 		t.Fatalf("the op-meta should still be reachable as a DESCRIPTOR")
 	}
 }
@@ -107,7 +131,7 @@ func TestDDLCache_TombstonedDispatchWithdrawsTheFloor(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	templates, ok := cache.DispatchOptionalReads("ClaimIdentity")
+	templates, ok := floorTemplates(cache, "ClaimIdentity")
 	if !ok {
 		t.Fatalf("the descriptor itself is still there; only its dispatch was withdrawn")
 	}
@@ -128,7 +152,7 @@ func TestDDLCache_InvalidateMaintainsTheDescriptorIndex(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if _, ok := cache.DispatchOptionalReads("ClaimIdentity"); ok {
+	if _, ok := floorTemplates(cache, "ClaimIdentity"); ok {
 		t.Fatalf("no descriptor is seeded yet")
 	}
 
@@ -137,7 +161,7 @@ func TestDDLCache_InvalidateMaintainsTheDescriptorIndex(t *testing.T) {
 	if err := cache.Invalidate(ctx, root+".dispatch"); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
-	if got, ok := cache.DispatchOptionalReads("ClaimIdentity"); !ok || len(got) != 1 {
+	if got, ok := floorTemplates(cache, "ClaimIdentity"); !ok || len(got) != 1 {
 		t.Fatalf("after invalidate: got (%v, %v), want the freshly committed floor", got, ok)
 	}
 
@@ -148,16 +172,16 @@ func TestDDLCache_InvalidateMaintainsTheDescriptorIndex(t *testing.T) {
 	if err := cache.Invalidate(ctx, root); err != nil {
 		t.Fatalf("Invalidate (tombstoned): %v", err)
 	}
-	if got, ok := cache.DispatchOptionalReads("ClaimIdentity"); ok {
+	if got, ok := floorTemplates(cache, "ClaimIdentity"); ok {
 		t.Fatalf("after the op-meta was tombstoned the floor is still applied: %v", got)
 	}
 }
 
 // TestDDLCache_DispatchReadsAreNotAFloor is the negative control against the
-// wrong list being read. A descriptor carrying BOTH lists must surface only its
-// optionalReads: its `reads` entries are not a floor, so an envelope hardening
-// one of those keys is left alone (hardening is already that key's default,
-// and the contract says a reads-declaring descriptor is unaffected).
+// wrong list being read. A descriptor carrying BOTH lists floors only what its
+// optionalReads names: its `reads` entries are not a floor, so an envelope
+// hardening one of those keys is left alone (hardening is already that key's
+// default, and the contract says a reads-declaring descriptor is unaffected).
 func TestDDLCache_DispatchReadsAreNotAFloor(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -170,12 +194,15 @@ func TestDDLCache_DispatchReadsAreNotAFloor(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	templates, ok := cache.DispatchOptionalReads("MixedDispatchOp")
+	templates, ok := cache.DispatchReadTemplates("MixedDispatchOp")
 	if !ok {
 		t.Fatalf("descriptor not found")
 	}
-	if !slices.Equal(templates, []string{"{payload.softKey}"}) {
-		t.Fatalf("templates = %v, want the optionalReads half ALONE", templates)
+	if !slices.Equal(templates.OptionalReads, []string{"{payload.softKey}"}) {
+		t.Fatalf("optionalReads = %v, want the floor half ALONE", templates.OptionalReads)
+	}
+	if !slices.Equal(templates.Reads, []string{"{payload.hardKey}"}) {
+		t.Fatalf("reads = %v, want the required half kept apart from the floor", templates.Reads)
 	}
 
 	hard := "vtx.identity." + instID
@@ -243,8 +270,16 @@ type cacheIndexes struct {
 	byName       map[string]MetaVertexRef
 	byMetaPK     map[string]string
 	byCommand    map[string]string
-	byOpType     map[string][]string
+	byOpType     map[string]DispatchTemplates
 	byOpMetaRoot map[string]opMetaDescriptor
+}
+
+func cloneTemplates(t DispatchTemplates) DispatchTemplates {
+	return DispatchTemplates{Reads: slices.Clone(t.Reads), OptionalReads: slices.Clone(t.OptionalReads)}
+}
+
+func sameTemplates(a, b DispatchTemplates) bool {
+	return slices.Equal(a.Reads, b.Reads) && slices.Equal(a.OptionalReads, b.OptionalReads)
 }
 
 func snapshotIndexes(c *DDLCache) cacheIndexes {
@@ -255,14 +290,14 @@ func snapshotIndexes(c *DDLCache) cacheIndexes {
 		byName:       maps.Clone(c.byName),
 		byMetaPK:     maps.Clone(c.byMetaPK),
 		byCommand:    maps.Clone(c.byCommand),
-		byOpType:     make(map[string][]string, len(c.byOpType)),
+		byOpType:     make(map[string]DispatchTemplates, len(c.byOpType)),
 		byOpMetaRoot: make(map[string]opMetaDescriptor, len(c.byOpMetaRoot)),
 	}
 	for op, tpl := range c.byOpType {
-		out.byOpType[op] = slices.Clone(tpl)
+		out.byOpType[op] = cloneTemplates(tpl)
 	}
 	for k, d := range c.byOpMetaRoot {
-		out.byOpMetaRoot[k] = opMetaDescriptor{operationType: d.operationType, optionalReads: slices.Clone(d.optionalReads)}
+		out.byOpMetaRoot[k] = opMetaDescriptor{operationType: d.operationType, templates: cloneTemplates(d.templates)}
 	}
 	return out
 }
@@ -305,9 +340,9 @@ func assertMatchesFullRefresh(t *testing.T, ctx context.Context, conn *substrate
 	got := snapshotIndexes(invalidated)
 	want := snapshotIndexes(refreshedFromScratch(t, ctx, conn))
 	sameDescriptor := func(a, b opMetaDescriptor) bool {
-		return a.operationType == b.operationType && slices.Equal(a.optionalReads, b.optionalReads)
+		return a.operationType == b.operationType && sameTemplates(a.templates, b.templates)
 	}
-	if !maps.EqualFunc(got.byOpType, want.byOpType, slices.Equal) {
+	if !maps.EqualFunc(got.byOpType, want.byOpType, sameTemplates) {
 		t.Fatalf("%s: byOpType after Invalidate = %v, want %v — a single-root invalidate must land where a full Refresh over the same KV state lands",
 			stage, got.byOpType, want.byOpType)
 	}
@@ -357,7 +392,7 @@ func TestDDLCache_TwoClaimantsWithdrawOneFloor(t *testing.T) {
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if got, _ := cache.DispatchOptionalReads("ClaimIdentity"); !slices.Equal(got, []string{"{payload.aOnly}", "{payload.bOnly}", "{payload.shared}"}) {
+	if got, _ := floorTemplates(cache, "ClaimIdentity"); !slices.Equal(got, []string{"{payload.aOnly}", "{payload.bOnly}", "{payload.shared}"}) {
 		t.Fatalf("union floor = %v, want both claimants' templates in root-key order", got)
 	}
 
@@ -368,7 +403,7 @@ func TestDDLCache_TwoClaimantsWithdrawOneFloor(t *testing.T) {
 		t.Fatalf("Invalidate (tombstoned A): %v", err)
 	}
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after tombstoning one of two claimants")
-	got, ok := cache.DispatchOptionalReads("ClaimIdentity")
+	got, ok := floorTemplates(cache, "ClaimIdentity")
 	if !ok {
 		t.Fatalf("B still claims ClaimIdentity; its floor must not be dropped with A's")
 	}
@@ -386,7 +421,7 @@ func TestDDLCache_TwoClaimantsWithdrawOneFloor(t *testing.T) {
 	if err := cache.Invalidate(ctx, rootB+".dispatch"); err != nil {
 		t.Fatalf("Invalidate (edited B): %v", err)
 	}
-	if got, _ := cache.DispatchOptionalReads("ClaimIdentity"); !slices.Equal(got, []string{"{payload.bOnly}"}) {
+	if got, _ := floorTemplates(cache, "ClaimIdentity"); !slices.Equal(got, []string{"{payload.bOnly}"}) {
 		t.Fatalf("floor = %v, want the edited descriptor's own templates — a removed template must shrink the floor", got)
 	}
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after editing a descriptor to remove a template")
@@ -399,7 +434,7 @@ func TestDDLCache_TwoClaimantsWithdrawOneFloor(t *testing.T) {
 	if err := cache.Invalidate(ctx, rootB); err != nil {
 		t.Fatalf("Invalidate (tombstoned B): %v", err)
 	}
-	if got, ok := cache.DispatchOptionalReads("ClaimIdentity"); ok {
+	if got, ok := floorTemplates(cache, "ClaimIdentity"); ok {
 		t.Fatalf("floor = %v, want no descriptor at all once every claimant is withdrawn", got)
 	}
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after withdrawing the last claimant")
@@ -430,7 +465,7 @@ func TestDDLCache_TwoClaimantsEditWhilePeerPresent(t *testing.T) {
 	if err := cache.Invalidate(ctx, rootA+".dispatch"); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
-	got, _ := cache.DispatchOptionalReads("ClaimIdentity")
+	got, _ := floorTemplates(cache, "ClaimIdentity")
 	if slices.Contains(got, "{payload.doomed}") {
 		t.Fatalf("floor = %v, still carries the removed template — the rebuild unioned the stale aggregate rather than the peers' own declarations", got)
 	}
@@ -438,6 +473,75 @@ func TestDDLCache_TwoClaimantsEditWhilePeerPresent(t *testing.T) {
 		t.Fatalf("floor = %v, want the surviving declarations of both claimants", got)
 	}
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after editing one of two live claimants")
+}
+
+// TestDDLCache_TwoClaimantsUnionBothTemplateLists is the aggregate shape over
+// the list the floor does not demote from. `reads` decides which keys the floor
+// must LEAVE ALONE, so a rebuild that unioned only the optional half would let
+// one claimant's optional template demote a key the other claimant declares
+// required — the silent-None direction — and a withdrawal that subtracted from
+// the aggregate instead of re-deriving would keep excluding keys nobody
+// requires any more.
+func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+
+	rootA := "vtx.meta." + testNanoID3
+	rootB := "vtx.meta." + tplID
+	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
+		dispatchAspectLists(rootA, `["{payload.aRequired}"]`, `["{payload.aOptional}"]`, false), false)
+	seedOpMeta(t, ctx, conn, tplID, "ClaimIdentity",
+		dispatchAspectLists(rootB, `["{payload.bRequired}"]`, `["{payload.bOptional}"]`, false), false)
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	got, ok := cache.DispatchReadTemplates("ClaimIdentity")
+	if !ok {
+		t.Fatalf("descriptor not found")
+	}
+	if !slices.Equal(got.Reads, []string{"{payload.aRequired}", "{payload.bRequired}"}) {
+		t.Fatalf("reads = %v, want both claimants' required templates in root-key order", got.Reads)
+	}
+	if !slices.Equal(got.OptionalReads, []string{"{payload.aOptional}", "{payload.bOptional}"}) {
+		t.Fatalf("optionalReads = %v, want both claimants' floors in root-key order", got.OptionalReads)
+	}
+
+	// Edit A to drop its required template while B is still a claimant: the
+	// arm where a rebuild reading the stale aggregate re-adds exactly what the
+	// edit removed.
+	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
+		dispatchAspectLists(rootA, `[]`, `["{payload.aOptional}"]`, false), false)
+	if err := cache.Invalidate(ctx, rootA+".dispatch"); err != nil {
+		t.Fatalf("Invalidate (edited A): %v", err)
+	}
+	got, _ = cache.DispatchReadTemplates("ClaimIdentity")
+	if slices.Contains(got.Reads, "{payload.aRequired}") {
+		t.Fatalf("reads = %v, still carries the withdrawn required template — the rebuild unioned the stale aggregate rather than the claimants' own declarations", got.Reads)
+	}
+	if !slices.Equal(got.Reads, []string{"{payload.bRequired}"}) {
+		t.Fatalf("reads = %v, want the surviving claimant's required template", got.Reads)
+	}
+	if !slices.Equal(got.OptionalReads, []string{"{payload.aOptional}", "{payload.bOptional}"}) {
+		t.Fatalf("optionalReads = %v, want the floor untouched by an edit to the other list", got.OptionalReads)
+	}
+	assertMatchesFullRefresh(t, ctx, conn, cache, "after editing one of two claimants' required list")
+
+	// Withdraw A entirely: both of its lists leave, both of B's stay.
+	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
+		dispatchAspectLists(rootA, `[]`, `["{payload.aOptional}"]`, false), true)
+	if err := cache.Invalidate(ctx, rootA); err != nil {
+		t.Fatalf("Invalidate (tombstoned A): %v", err)
+	}
+	got, ok = cache.DispatchReadTemplates("ClaimIdentity")
+	if !ok {
+		t.Fatalf("B still claims ClaimIdentity; its descriptor must not be dropped with A's")
+	}
+	if !slices.Equal(got.Reads, []string{"{payload.bRequired}"}) || !slices.Equal(got.OptionalReads, []string{"{payload.bOptional}"}) {
+		t.Fatalf("templates = %+v, want exactly B's own two lists", got)
+	}
+	assertMatchesFullRefresh(t, ctx, conn, cache, "after withdrawing one of two claimants")
 }
 
 // TestDDLCache_DuplicateCanonicalNameSurvivesTheOtherClaimantsWithdrawal is the
@@ -541,7 +645,7 @@ func TestDDLCache_UnparseableMetaDocumentRefusesTheRefresh(t *testing.T) {
 	if !errors.Is(err, errMetaDocumentUntrusted) {
 		t.Fatalf("Refresh error = %v, want one that classifies as an untrusted document so callers can tell it from a read that did not answer", err)
 	}
-	if _, ok := cache.DispatchOptionalReads("ClaimIdentity"); ok {
+	if _, ok := floorTemplates(cache, "ClaimIdentity"); ok {
 		t.Fatalf("the refused refresh still published a partial index")
 	}
 }
@@ -564,7 +668,7 @@ func TestDDLCache_ReadThatNeverAnswersSpendsTheBudgetThenRefuses(t *testing.T) {
 	cache := NewDDLCache(conn, "core-kv-that-was-never-provisioned", testLogger())
 
 	started := time.Now()
-	_, _, _, err := cache.loadOpMetaDispatch(ctx, "vtx.meta."+tplID)
+	_, _, err := cache.loadOpMetaDispatch(ctx, "vtx.meta."+tplID)
 	elapsed := time.Since(started)
 
 	if err == nil {

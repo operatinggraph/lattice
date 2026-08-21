@@ -272,11 +272,12 @@ type DDLCache struct {
 	//     op is left OUT of the index (fall through to explicit class). Inferring
 	//     a class for an ambiguous op could run the wrong script — fail closed.
 	byCommand map[string]string
-	// byOpType maps an operationType to its op-meta descriptor's declared
-	// optionalReads TEMPLATES (Contract #2 §2.5, "the descriptor's disposition
-	// is a floor the envelope cannot raise"). Populated from the `.dispatch`
-	// aspect of an op-meta vertex — a `vtx.meta.<NanoID>` whose root document
-	// carries `data.operationType` (internal/pkgmgr/build.go's OpMetas loop).
+	// byOpType maps an operationType to its op-meta descriptor's declared read
+	// TEMPLATES — both lists (Contract #2 §2.5, "the descriptor's disposition
+	// is a floor the envelope cannot raise", and the required-wins precedence
+	// applyDescriptorFloor states). Populated from the `.dispatch` aspect of an
+	// op-meta vertex — a `vtx.meta.<NanoID>` whose root document carries
+	// `data.operationType` (internal/pkgmgr/build.go's OpMetas loop).
 	//
 	// Op-metas are indexed SEPARATELY from byName rather than folded into it,
 	// and that is a collision, not tidiness: an op-meta's root class is
@@ -294,9 +295,9 @@ type DDLCache struct {
 	// swapped under the write lock by Refresh and re-derived in full by
 	// Invalidate. Nothing else mutates it and nothing in it outlives a
 	// refresh.
-	byOpType map[string][]string
+	byOpType map[string]DispatchTemplates
 	// byOpMetaRoot holds ONE entry per op-meta root: the operationType that
-	// root claims and the optionalReads templates its own `.dispatch`
+	// root claims and the read templates its own `.dispatch`
 	// declares. byRoot's counterpart for the descriptor index, and byOpType is
 	// derived from it for the sharper of byRoot's two reasons — byOpType's
 	// value is a UNION over claimants, so an index holding only the union can
@@ -353,13 +354,26 @@ type DDLCache struct {
 	degradedStaleRoots map[string]string
 }
 
+// DispatchTemplates is a descriptor's two read-template lists as the
+// `.dispatch` aspect declares them (Contract #2 §2.5). Both are key TEMPLATES
+// in the client's substitution vocabulary, not keys.
+//
+// They travel together because step 4 decides one question with both:
+// OptionalReads is the floor an envelope cannot raise, and Reads names the keys
+// the floor leaves alone (applyDescriptorFloor's precedence). Held in one index
+// entry, they are always a matched pair from a single rebuild.
+type DispatchTemplates struct {
+	Reads         []string
+	OptionalReads []string
+}
+
 // opMetaDescriptor is one op-meta root's own contribution to an operation's
 // read-disposition floor (Contract #2 §2.5). Per-root and never merged in
 // place: the merge lives in floorsByOpType, over the whole set, so every
 // rebuild sees exactly the claimants that exist at that moment.
 type opMetaDescriptor struct {
 	operationType string
-	optionalReads []string
+	templates     DispatchTemplates
 }
 
 // NewDDLCache constructs the cache. Caller MUST invoke Refresh once
@@ -382,7 +396,7 @@ func NewDDLCache(conn *substrate.Conn, coreBucket string, logger *slog.Logger) *
 		byName:       map[string]MetaVertexRef{},
 		byMetaPK:     map[string]string{},
 		byCommand:    map[string]string{},
-		byOpType:     map[string][]string{},
+		byOpType:     map[string]DispatchTemplates{},
 		byOpMetaRoot: map[string]opMetaDescriptor{},
 	}
 }
@@ -421,7 +435,7 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 		// and each recognizes its own shape. An op-meta is never also a DDL:
 		// loadOpMetaDispatch requires `data.operationType`, which no DDL root
 		// carries.
-		opType, optional, isOpMeta, err := c.loadOpMetaDispatch(ctx, root)
+		descriptor, isOpMeta, err := c.loadOpMetaDispatch(ctx, root)
 		if err != nil {
 			// A root that did not load refuses the WHOLE refresh — a cache
 			// built from a partial scan must not become the quiet state.
@@ -462,7 +476,7 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 			return fmt.Errorf("ddl cache: refresh: read meta vertex %s: %w", root, err)
 		}
 		if isOpMeta {
-			byOpMetaRoot[root] = opMetaDescriptor{operationType: opType, optionalReads: optional}
+			byOpMetaRoot[root] = descriptor
 			continue
 		}
 		ref, ok, err := c.loadMetaVertex(ctx, root, members)
@@ -506,8 +520,8 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 }
 
 // loadOpMetaDispatch reads root as an OP-META and returns its operationType
-// plus the optionalReads TEMPLATES its `.dispatch` aspect declares. Reports
-// (_, _, false, nil) for any root that is not an op-meta, which is every DDL
+// plus both read-template lists its `.dispatch` aspect declares. Reports
+// (_, false, nil) for any root that is not an op-meta, which is every DDL
 // meta-vertex and every pane.
 //
 // The discriminator is `data.operationType` on the root document. It is the
@@ -523,21 +537,21 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 // TOMBSTONED rather than removed. Reading a tombstoned dispatch as live would
 // keep applying a withdrawn floor forever.
 //
-// An op-meta with no `.dispatch`, or a dispatch with no optionalReads, is
-// still reported found with an empty template list. That is a real answer —
+// An op-meta with no `.dispatch`, or a dispatch with no read templates, is
+// still reported found with empty template lists. That is a real answer —
 // "this descriptor declares no optional floor" — and it is not the same as
 // having no descriptor at all.
 //
 // Errors come in the two kinds errMetaDocumentUntrusted separates, and callers
 // are expected to test for it: an unparseable document is a durable fact about
 // the bucket, a failed KVGet is a fact about this attempt.
-func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (operationType string, optionalReads []string, ok bool, err error) {
+func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (descriptor opMetaDescriptor, ok bool, err error) {
 	rootEntry, err := c.readMetaKey(ctx, root)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return "", nil, false, nil
+			return opMetaDescriptor{}, false, nil
 		}
-		return "", nil, false, fmt.Errorf("read op-meta root %s: %w", root, err)
+		return opMetaDescriptor{}, false, fmt.Errorf("read op-meta root %s: %w", root, err)
 	}
 	var rootDoc struct {
 		IsDeleted bool `json:"isDeleted"`
@@ -546,41 +560,49 @@ func (c *DDLCache) loadOpMetaDispatch(ctx context.Context, root string) (operati
 		} `json:"data"`
 	}
 	if uerr := json.Unmarshal(rootEntry.Value, &rootDoc); uerr != nil {
-		return "", nil, false, fmt.Errorf("op-meta root %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
+		return opMetaDescriptor{}, false, fmt.Errorf("op-meta root %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
 	}
 	if rootDoc.IsDeleted || rootDoc.Data.OperationType == "" {
-		return "", nil, false, nil
+		return opMetaDescriptor{}, false, nil
 	}
+	found := opMetaDescriptor{operationType: rootDoc.Data.OperationType}
 
 	dispatchEntry, derr := c.readMetaKey(ctx, root+".dispatch")
 	if derr != nil {
 		if errors.Is(derr, substrate.ErrKeyNotFound) {
-			return rootDoc.Data.OperationType, nil, true, nil
+			return found, true, nil
 		}
-		return "", nil, false, fmt.Errorf("read dispatch %s: %w", root, derr)
+		return opMetaDescriptor{}, false, fmt.Errorf("read dispatch %s: %w", root, derr)
 	}
 	var asp struct {
 		IsDeleted bool `json:"isDeleted"`
 		Data      struct {
+			Reads         []string `json:"reads"`
 			OptionalReads []string `json:"optionalReads"`
 		} `json:"data"`
 	}
 	if uerr := json.Unmarshal(dispatchEntry.Value, &asp); uerr != nil {
-		return "", nil, false, fmt.Errorf("dispatch %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
+		return opMetaDescriptor{}, false, fmt.Errorf("dispatch %s: %w: %w", root, errMetaDocumentUntrusted, uerr)
 	}
 	if asp.IsDeleted {
-		return rootDoc.Data.OperationType, nil, true, nil
+		return found, true, nil
 	}
-	return rootDoc.Data.OperationType, asp.Data.OptionalReads, true, nil
+	found.templates = DispatchTemplates{Reads: asp.Data.Reads, OptionalReads: asp.Data.OptionalReads}
+	return found, true, nil
 }
 
-// DispatchOptionalReads returns the optionalReads templates the descriptor for
-// operationType declares, and whether a descriptor was found at all. The two
-// answers are distinct: (nil, true) is a descriptor declaring no optional
-// floor, (nil, false) is an operation with no descriptor — most of the corpus.
-func (c *DDLCache) DispatchOptionalReads(operationType string) ([]string, bool) {
+// DispatchReadTemplates returns the read templates the descriptor for
+// operationType declares — the optionalReads floor and the `reads` list that
+// wins over it — plus whether a descriptor was found at all. The two answers
+// are distinct: (empty, true) is a descriptor declaring no floor, (empty,
+// false) is an operation with no descriptor — most of the corpus.
+//
+// Both lists answer ONE question — which of an envelope's declared keys the
+// floor demotes — so they are read together under one RLock, from one index
+// entry, and are always a matched pair from a single rebuild.
+func (c *DDLCache) DispatchReadTemplates(operationType string) (DispatchTemplates, bool) {
 	if c == nil {
-		return nil, false
+		return DispatchTemplates{}, false
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -956,7 +978,7 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 	// re-loaded here for the reason the DDL entry is: a meta-commit that
 	// retires a `.dispatch` aspect must stop the floor being applied without
 	// waiting for the next full Refresh.
-	opType, optional, isOpMeta, oerr := c.loadOpMetaDispatch(ctx, metaRootKey)
+	descriptor, isOpMeta, oerr := c.loadOpMetaDispatch(ctx, metaRootKey)
 	if oerr != nil {
 		// Both error kinds are returned here, unlike Refresh: this is a
 		// single-root path with a caller (the committer, at step 8) that can
@@ -990,12 +1012,13 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 	// on a path that runs once per DDL commit.
 	if isOpMeta {
 		c.mu.Lock()
-		c.byOpMetaRoot[metaRootKey] = opMetaDescriptor{operationType: opType, optionalReads: optional}
+		c.byOpMetaRoot[metaRootKey] = descriptor
 		c.byOpType = floorsByOpType(c.byOpMetaRoot, c.logger)
-		templates := len(c.byOpType[opType])
+		merged := c.byOpType[descriptor.operationType]
 		c.mu.Unlock()
 		c.logger.Info("ddl cache: op-meta descriptor invalidated",
-			"key", metaRootKey, "operationType", opType, "optionalReads", templates)
+			"key", metaRootKey, "operationType", descriptor.operationType,
+			"reads", len(merged.Reads), "optionalReads", len(merged.OptionalReads))
 		return nil
 	}
 	if hadPriorOp {
@@ -1006,11 +1029,11 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		c.mu.Lock()
 		delete(c.byOpMetaRoot, metaRootKey)
 		c.byOpType = floorsByOpType(c.byOpMetaRoot, c.logger)
-		remaining := len(c.byOpType[priorOp.operationType])
+		remaining := c.byOpType[priorOp.operationType]
 		c.mu.Unlock()
 		c.logger.Info("ddl cache: op-meta descriptor withdrawn",
 			"key", metaRootKey, "operationType", priorOp.operationType,
-			"remainingTemplates", remaining)
+			"remainingTemplates", len(remaining.Reads)+len(remaining.OptionalReads))
 		return nil
 	}
 
@@ -1288,6 +1311,11 @@ func unionTemplates(a, b []string) []string {
 // Invalidate hand it the whole root set, so the two cannot disagree: a
 // withdrawal is a root leaving the input, and the answer follows.
 //
+// Both lists are unioned per contributor, never one of them: `reads` decides
+// which keys the floor must leave alone (applyDescriptorFloor's required-wins
+// precedence), so a claimant whose required list were dropped would have its
+// keys demoted by a peer's optional template.
+//
 // A duplicate operationType is UNIONED, never picked. Unlike buildByCommand's
 // ambiguity guard — which drops a candidate and thereby fails CLOSED, because
 // losing a class inference rejects the op — dropping a floor fails OPEN. The
@@ -1304,23 +1332,27 @@ func unionTemplates(a, b []string) []string {
 // collision check) and validateOpMetas refuses one within a single package, so
 // the union is a recovery from state that predates those gates or was written
 // around them, not a supported way to express two descriptors for one op.
-func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logger) map[string][]string {
-	out := make(map[string][]string, len(byOpMetaRoot))
+func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logger) map[string]DispatchTemplates {
+	out := make(map[string]DispatchTemplates, len(byOpMetaRoot))
 	claimedBy := make(map[string]string, len(byOpMetaRoot))
 	for _, rootKey := range slices.Sorted(maps.Keys(byOpMetaRoot)) {
 		d := byOpMetaRoot[rootKey]
 		prior, dup := out[d.operationType]
 		if !dup {
-			out[d.operationType] = d.optionalReads
+			out[d.operationType] = d.templates
 			claimedBy[d.operationType] = rootKey
 			continue
 		}
 		if logger != nil {
 			logger.Warn("ddl cache: duplicate op-meta descriptor; unioning the floors",
 				"operationType", d.operationType, "key", rootKey, "alsoClaimedBy", claimedBy[d.operationType],
-				"priorTemplates", len(prior), "addedTemplates", len(d.optionalReads))
+				"priorTemplates", len(prior.Reads)+len(prior.OptionalReads),
+				"addedTemplates", len(d.templates.Reads)+len(d.templates.OptionalReads))
 		}
-		out[d.operationType] = unionTemplates(prior, d.optionalReads)
+		out[d.operationType] = DispatchTemplates{
+			Reads:         unionTemplates(prior.Reads, d.templates.Reads),
+			OptionalReads: unionTemplates(prior.OptionalReads, d.templates.OptionalReads),
+		}
 	}
 	return out
 }

@@ -201,7 +201,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// `reads` entry cannot re-harden what the floor just softened. See
 	// applyDescriptorFloor for the full precedence, and for why an
 	// unresolvable descriptor demotes nothing rather than everything.
-	if templates, hasDescriptor := h.DDLs.DispatchOptionalReads(env.OperationType); hasDescriptor {
+	if templates, hasDescriptor := h.DDLs.DispatchReadTemplates(env.OperationType); hasDescriptor {
 		declared = applyDescriptorFloor(declared, templates, env, h.Logger)
 	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
