@@ -2797,5 +2797,40 @@ func trackedGoFiles() []string {
 			files = append(files, l)
 		}
 	}
+	reportUntrackedGoFiles()
 	return files
+}
+
+// reportUntrackedGoFiles names the .go files this run did NOT scan because git
+// does not track them yet.
+//
+// The scan set comes from `git ls-files`, so a file that has not been `git
+// add`ed is invisible to every check here — and CI, which lints a committed
+// tree, sees it. A local run therefore reports "0 issues" on exactly the new
+// file the author most wants checked, and the first real verdict arrives as a
+// red build on main. Saying which files were skipped costs one line and turns
+// that silence into something the author can act on before pushing.
+//
+// Informational on purpose: it is written to stderr and changes no exit code.
+// Untracked .go files are a normal mid-edit state, so failing on them would
+// make the gate unusable during ordinary work; the fix is to make the gap
+// visible, not to forbid it.
+func reportUntrackedGoFiles() {
+	out, err := exec.Command("git", "ls-files", "--others", "--exclude-standard", "*.go").Output()
+	if err != nil {
+		return
+	}
+	var skipped []string
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l != "" {
+			skipped = append(skipped, l)
+		}
+	}
+	if len(skipped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "lint-conventions: NOT SCANNED — %d untracked .go file(s); `git add` them for this gate to see what CI will:\n", len(skipped))
+	for _, f := range skipped {
+		fmt.Fprintf(os.Stderr, "  %s\n", f)
+	}
 }

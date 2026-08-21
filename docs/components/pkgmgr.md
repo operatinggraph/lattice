@@ -75,11 +75,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `packageName` follow-on. Check: normalize symmetrically where a match GRANTS nothing, and where a match
   selects something destructive keep the comparison exact and make the near-miss a loud refusal; every
   identity string resolving to a deterministic key carries a whitespace/case vector in its own test.
-- **A version bump can be silently unified away by a rebase** — two concurrent fires bumped the same
-  package to the same next version; the rebase merged the identical lines with no conflict, so against the
-  merged base the version read unchanged while `internal/pkgmgr/` still differed, and the gate that passed
-  locally failed in CI. Minted: §30's CI red. Check: re-run the gate with CI's own base —
-  `DIFF_BASE=<merge-base> go run ./scripts/lint-package-version.go` — after committing, never only locally.
+- **A local gate run and CI's gate run do not see the same tree** — every `scripts/lint-*.go` reads its
+  scan set from git, so what the author has not committed is not what the gate judged. Two sightings: a
+  version bump unified away by a rebase, where the merged base read unchanged while `internal/pkgmgr/`
+  still differed; and a brand-new **untracked** file, invisible to `git ls-files` and so reported "0
+  issues" locally while CI — linting a committed tree — failed on it. Minted: §30's CI red; second
+  sighting the privacy-base ceremony's CI red. Check (mechanized): `lint-conventions` now names the
+  untracked `.go` files it did not scan; for diff-based gates re-run against CI's base,
+  `DIFF_BASE=<merge-base> go run ./scripts/lint-package-version.go`. Run both **after committing**.
 - **A security-plane skip guard keyed on tombstone-state alone, with no anchor-type check, silently widens
   past its ratified scope** — a fix scoped to "respect a revoked grant" first-cut as "respect any
   surviving tombstoned key," quietly covering package definitions (`vtx.meta.*`) the design never
