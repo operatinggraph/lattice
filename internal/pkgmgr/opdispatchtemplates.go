@@ -57,10 +57,8 @@ var readTemplatePlaceholderRe = regexp.MustCompile(`\{([^{}]+)\}`)
 //     matched placeholders would let it sail through as though it were
 //     literal text.
 //   - an empty dot-delimited segment — a leading `.`, a trailing `.`, or a
-//     doubled `..` — once every `{...}` placeholder is masked out first
-//     (`{payload.<field>}` legitimately contains a dot INSIDE its braces, so
-//     the empty-segment check must not mistake that for a boundary). A hole
-//     is not a shorter key, it is a different and invalid one — the
+//     doubled `..`, INCLUDING inside a placeholder body (`{payload.a..b}`).
+//     A hole is not a shorter key, it is a different and invalid one — the
 //     client-side resolver (cmd/facet/web/app.js's wholeKey) drops such an
 //     entry for the same reason, so a descriptor declaring one never
 //     resolves as the author intended.
@@ -214,20 +212,24 @@ func validateBraceBalance(pkgName, opType, listName, entry string) error {
 	return nil
 }
 
-// validateNoEmptySegments refuses a template entry that contains an empty
-// dot-delimited segment — a leading `.`, a trailing `.`, or a doubled `..` —
-// once every `{...}` placeholder is masked out first. Masking matters
-// because `{payload.<field>}` legitimately contains a dot INSIDE its
-// braces; splitting the raw entry on `.` would misread that as a segment
-// boundary. A hole is not a shorter key, it is a different and invalid one
-// — the client-side resolver (cmd/facet/web/app.js's wholeKey) drops such
-// an entry for the same reason, so a descriptor declaring one never
-// resolves as the author intended. Callers only reach this once
-// validateBraceBalance has already confirmed every brace is matched, so the
-// mask below always operates on well-formed `{...}` groups.
+// validateNoEmptySegments refuses a template entry that splits into an
+// empty dot-delimited segment — a leading `.`, a trailing `.`, or a doubled
+// `..`, wherever it occurs, including inside a placeholder body
+// (`{payload.a..b}`). A hole is not a shorter key, it is a different and
+// invalid one — the client-side resolver (cmd/facet/web/app.js's wholeKey)
+// drops such an entry for the same reason, so a descriptor declaring one
+// never resolves as the author intended.
+//
+// The split runs over the RAW entry, unmasked: no legal placeholder body
+// puts a bare `.` where splitting it would produce a false empty segment —
+// `{payload.<field>}` splits to `{payload` and `<field>}`, both non-empty,
+// same as `{me.<type>}` splits to `{me` and `<type>}` — so masking buys
+// nothing a legal template needs, and splitting raw is strictly stronger:
+// it also catches a malformed placeholder body such as `{payload.a..b}`
+// that a masked split would hide entirely (the whole `{...}` collapses to
+// one opaque token before the split ever sees it).
 func validateNoEmptySegments(pkgName, opType, listName, entry string) error {
-	masked := readTemplatePlaceholderRe.ReplaceAllString(entry, "X")
-	for _, seg := range strings.Split(masked, ".") {
+	for _, seg := range strings.Split(entry, ".") {
 		if seg == "" {
 			return fmt.Errorf(
 				"pkgmgr: package %q op %q Dispatch.%s entry %q: contains an empty dot-delimited segment (a leading '.', a trailing '.', or '..') — a hole is not a shorter key, it is a different one, and the client wholeKey drops such an entry rather than resolving it",

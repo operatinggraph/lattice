@@ -121,6 +121,14 @@ func TestValidateOpDispatchTemplates_EntityPlaceholderRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "{entity.studioKey}") {
 		t.Errorf("error should name the offending entry/placeholder %q; got %q", "{entity.studioKey}", err)
 	}
+	// The default-deny "unknown placeholder" refusal also names the entry
+	// and placeholder, so without this the test cannot tell the tailored
+	// {entity.*} guidance apart from a generic unknown-vocabulary refusal —
+	// assert the ContextParams-specific wording only the tailored message
+	// carries.
+	if !strings.Contains(err.Error(), "ContextParams") {
+		t.Errorf("error should carry the {entity.<column>}-specific ContextParams guidance, not just a generic unknown-placeholder refusal; got %q", err)
+	}
 }
 
 func TestValidateOpDispatchTemplates_OptionalMarkerRefused(t *testing.T) {
@@ -294,5 +302,66 @@ func TestValidateOpDispatchTemplates_TrailingDotEmptySegmentRefused(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "{actor}.") {
 		t.Errorf("error should name the offending entry %q; got %q", "{actor}.", err)
+	}
+}
+
+// TestValidateOpDispatchTemplates_EmptySegmentInsidePlaceholderBodyRefused
+// is the vector that pins validateNoEmptySegments splitting the RAW entry
+// rather than a placeholder-masked one: a doubled '.' INSIDE a placeholder
+// body is only visible to a raw split — a masked split collapses the whole
+// `{...}` to one opaque token before the empty segment is ever seen.
+func TestValidateOpDispatchTemplates_EmptySegmentInsidePlaceholderBodyRefused(t *testing.T) {
+	// Positive vector: the same placeholder with a single '.' between "a"
+	// and "b" is a legal (if unusual) payload field reference.
+	ok := dispatchDef(nil, []string{"{payload.a.b}"})
+	if err := ok.ValidateOpDispatchTemplates(); err != nil {
+		t.Fatalf("positive vector: expected accept, got: %v", err)
+	}
+
+	bad := dispatchDef(nil, []string{"{payload.a..b}"})
+	err := bad.ValidateOpDispatchTemplates()
+	if err == nil {
+		t.Fatal("expected refusal for a doubled '.' inside a placeholder body, got nil")
+	}
+	if !strings.Contains(err.Error(), "{payload.a..b}") {
+		t.Errorf("error should name the offending entry %q; got %q", "{payload.a..b}", err)
+	}
+}
+
+// TestValidateOpDispatchTemplates_WiredIntoValidateAll pins that
+// ValidateOpDispatchTemplates is actually reached from Definition.validateAll
+// — the install path every one of pkgmgr's other checks is proven through
+// (packagename_test.go:168's TestValidatePackageName_RefusesUnnormalizedName
+// is the precedent this mirrors). Every other test in this file calls
+// ValidateOpDispatchTemplates directly, and the pkgregistry corpus census
+// walks Definition structurally — neither exercises the validateAll wiring
+// line in definition.go, so deleting that line breaks nothing without this
+// test.
+func TestValidateOpDispatchTemplates_WiredIntoValidateAll(t *testing.T) {
+	// Positive vector: a Definition that is otherwise the known-good
+	// installer fixture, plus one legal dispatch template, passes
+	// validateAll() outright — proves the negative below fails BECAUSE of
+	// the offending template, not because the fixture trips some other
+	// validator first (validateAll short-circuits on the first error).
+	ok := sampleDef("0.1.0")
+	ok.OpMetas = []OpMetaSpec{{
+		OperationType: "SampleOp",
+		Dispatch:      &OpDispatchSpec{OptionalReads: []string{"{payload.id}"}},
+	}}
+	if err := ok.validateAll(); err != nil {
+		t.Fatalf("positive vector: expected validateAll() to accept a legal dispatch template, got: %v", err)
+	}
+
+	bad := sampleDef("0.1.0")
+	bad.OpMetas = []OpMetaSpec{{
+		OperationType: "SampleOp",
+		Dispatch:      &OpDispatchSpec{OptionalReads: []string{"{entity.id}"}},
+	}}
+	err := bad.validateAll()
+	if err == nil {
+		t.Fatal("expected validateAll() to refuse a {entity.<column>} read template, got nil")
+	}
+	if !strings.Contains(err.Error(), "{entity.id}") || !strings.Contains(err.Error(), "ContextParams") {
+		t.Errorf("validateAll() error should be ValidateOpDispatchTemplates' own {entity.<column>} refusal, naming the entry and the ContextParams guidance; got %q", err)
 	}
 }

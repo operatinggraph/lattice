@@ -482,6 +482,15 @@ func TestDDLCache_TwoClaimantsEditWhilePeerPresent(t *testing.T) {
 // required — the silent-None direction — and a withdrawal that subtracted from
 // the aggregate instead of re-deriving would keep excluding keys nobody
 // requires any more.
+//
+// Both claimants declare one template the other also declares, in DIFFERENT
+// positions within their own lists, and every assertion below is over the whole
+// merged list. That is what pins the union's two halves together: membership
+// and order come from the claimant set alone, and a template two claimants
+// declare appears ONCE. A merge that concatenated instead would double it, and
+// the doubling is not cosmetic — the merged list is walked per declared key on
+// the step-4 hot path, and a duplicated template is a second full pass over
+// every declared key for an answer the first pass already gave.
 func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -489,30 +498,37 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	rootA := "vtx.meta." + testNanoID3
 	rootB := "vtx.meta." + tplID
 	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
-		dispatchAspectLists(rootA, `["{payload.aRequired}"]`, `["{payload.aOptional}"]`, false), false)
+		dispatchAspectLists(rootA,
+			`["{payload.aRequired}","{payload.sharedRequired}"]`,
+			`["{payload.aOptional}","{payload.sharedOptional}"]`, false), false)
 	seedOpMeta(t, ctx, conn, tplID, "ClaimIdentity",
-		dispatchAspectLists(rootB, `["{payload.bRequired}"]`, `["{payload.bOptional}"]`, false), false)
+		dispatchAspectLists(rootB,
+			`["{payload.sharedRequired}","{payload.bRequired}"]`,
+			`["{payload.sharedOptional}","{payload.bOptional}"]`, false), false)
 
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
+	// Root-key order, then each claimant's own order, each template once: the
+	// shared one lands where the lowest-keyed claimant declares it.
+	wantReads := []string{"{payload.aRequired}", "{payload.sharedRequired}", "{payload.bRequired}"}
+	wantOptional := []string{"{payload.aOptional}", "{payload.sharedOptional}", "{payload.bOptional}"}
+
 	got, ok := cache.DispatchReadTemplates("ClaimIdentity")
 	if !ok {
 		t.Fatalf("descriptor not found")
 	}
-	if !slices.Equal(got.Reads, []string{"{payload.aRequired}", "{payload.bRequired}"}) {
-		t.Fatalf("reads = %v, want both claimants' required templates in root-key order", got.Reads)
-	}
-	if !slices.Equal(got.OptionalReads, []string{"{payload.aOptional}", "{payload.bOptional}"}) {
-		t.Fatalf("optionalReads = %v, want both claimants' floors in root-key order", got.OptionalReads)
-	}
+	assertUnionedTemplates(t, got, wantReads, wantOptional, "two live claimants")
 
-	// Edit A to drop its required template while B is still a claimant: the
-	// arm where a rebuild reading the stale aggregate re-adds exactly what the
-	// edit removed.
+	// Edit A to drop its EXCLUSIVE required template while keeping the shared
+	// one: the arm where a rebuild reading the stale aggregate re-adds exactly
+	// what the edit removed, and where a merge that deduplicated by dropping
+	// the later claimant's copy would lose a template the survivor declares.
 	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
-		dispatchAspectLists(rootA, `[]`, `["{payload.aOptional}"]`, false), false)
+		dispatchAspectLists(rootA,
+			`["{payload.sharedRequired}"]`,
+			`["{payload.aOptional}","{payload.sharedOptional}"]`, false), false)
 	if err := cache.Invalidate(ctx, rootA+".dispatch"); err != nil {
 		t.Fatalf("Invalidate (edited A): %v", err)
 	}
@@ -520,17 +536,18 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	if slices.Contains(got.Reads, "{payload.aRequired}") {
 		t.Fatalf("reads = %v, still carries the withdrawn required template — the rebuild unioned the stale aggregate rather than the claimants' own declarations", got.Reads)
 	}
-	if !slices.Equal(got.Reads, []string{"{payload.bRequired}"}) {
-		t.Fatalf("reads = %v, want the surviving claimant's required template", got.Reads)
-	}
-	if !slices.Equal(got.OptionalReads, []string{"{payload.aOptional}", "{payload.bOptional}"}) {
-		t.Fatalf("optionalReads = %v, want the floor untouched by an edit to the other list", got.OptionalReads)
-	}
+	assertUnionedTemplates(t, got,
+		[]string{"{payload.sharedRequired}", "{payload.bRequired}"}, wantOptional,
+		"after editing one of two claimants' required list")
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after editing one of two claimants' required list")
 
-	// Withdraw A entirely: both of its lists leave, both of B's stay.
+	// Withdraw A entirely: A's exclusive templates leave, and the shared one
+	// stays — exactly once — because B still declares it. Dropping it with A
+	// would floor a key B's descriptor still names optional.
 	seedOpMeta(t, ctx, conn, testNanoID3, "ClaimIdentity",
-		dispatchAspectLists(rootA, `[]`, `["{payload.aOptional}"]`, false), true)
+		dispatchAspectLists(rootA,
+			`["{payload.sharedRequired}"]`,
+			`["{payload.aOptional}","{payload.sharedOptional}"]`, false), true)
 	if err := cache.Invalidate(ctx, rootA); err != nil {
 		t.Fatalf("Invalidate (tombstoned A): %v", err)
 	}
@@ -538,10 +555,53 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	if !ok {
 		t.Fatalf("B still claims ClaimIdentity; its descriptor must not be dropped with A's")
 	}
-	if !slices.Equal(got.Reads, []string{"{payload.bRequired}"}) || !slices.Equal(got.OptionalReads, []string{"{payload.bOptional}"}) {
-		t.Fatalf("templates = %+v, want exactly B's own two lists", got)
+	for _, gone := range []string{"{payload.aRequired}", "{payload.aOptional}"} {
+		if slices.Contains(got.Reads, gone) || slices.Contains(got.OptionalReads, gone) {
+			t.Fatalf("templates = %+v, still carry %q after its only claimant was withdrawn", got, gone)
+		}
 	}
+	assertUnionedTemplates(t, got,
+		[]string{"{payload.sharedRequired}", "{payload.bRequired}"},
+		[]string{"{payload.sharedOptional}", "{payload.bOptional}"},
+		"after withdrawing one of two claimants")
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after withdrawing one of two claimants")
+}
+
+// assertUnionedTemplates compares both merged lists against the exact sequence
+// the claimant set implies. Equality over the whole list is what states the
+// union's guarantee in one assertion — membership, order, and each template
+// appearing once — and the count check that follows names the duplicate case
+// directly, because "the list is longer than expected" is the report a reader
+// most needs spelled out.
+func assertUnionedTemplates(t *testing.T, got DispatchTemplates, wantReads, wantOptional []string, stage string) {
+	t.Helper()
+	for _, list := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"reads", got.Reads, wantReads},
+		{"optionalReads", got.OptionalReads, wantOptional},
+	} {
+		if !slices.Equal(list.got, list.want) {
+			t.Fatalf("%s: %s = %v, want %v", stage, list.name, list.got, list.want)
+		}
+		for _, tpl := range list.want {
+			if n := countTemplate(list.got, tpl); n != 1 {
+				t.Fatalf("%s: %s carries %q %d times, want once — a template two claimants declare is unioned, not concatenated", stage, list.name, tpl, n)
+			}
+		}
+	}
+}
+
+func countTemplate(list []string, want string) int {
+	n := 0
+	for _, tpl := range list {
+		if tpl == want {
+			n++
+		}
+	}
+	return n
 }
 
 // TestDDLCache_DuplicateCanonicalNameSurvivesTheOtherClaimantsWithdrawal is the

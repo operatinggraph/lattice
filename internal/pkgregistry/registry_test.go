@@ -92,6 +92,14 @@ func TestEveryPackageCompilesItsReadGrantWalks(t *testing.T) {
 // validateAll, so ValidateOpDispatchTemplates is exported specifically so
 // this test exercises the same code the install path runs, not a copy that
 // could silently diverge from it.
+//
+// This test alone is an acceptance assertion, not a coverage one: it passes
+// unconditionally if ValidateOpDispatchTemplates is disabled outright, and
+// it would pass just as emptily over a registry with nothing registered in
+// it. Its structural subject — that the corpus actually contains the shapes
+// this gate is supposed to police — comes entirely from
+// TestOpDispatchTemplateCensus below, which is the load-bearing half of the
+// "gate breaks nothing" proof.
 func TestEveryPackagePassesOpDispatchTemplateGate(t *testing.T) {
 	for _, name := range Names() {
 		def, _ := Lookup(name)
