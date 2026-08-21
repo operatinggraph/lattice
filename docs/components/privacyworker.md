@@ -142,6 +142,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   tombstones the permission vertex and its `grantedBy` link, and no reinstall path revives either while
   every install still reports success. Minted: the erasure ceremony's live run (the board row's fix).
   Check: none yet — assert the projected `cap.roles.*` entry, never the installer's exit code.
+- **A scan that branches on `class` alone certifies tombstoned entities** — a tombstone keeps the stored
+  body verbatim and only sets `isDeleted`, and the key stays listed because a KV tombstone is not a
+  delete, so a removed Loom pattern still read as `meta.loomPattern` with all four steps intact and the
+  gate exited 0 on a spine that was gone. Minted: the privacy-base spine gate's cold review (every other
+  section of the same file already checked the flag). Check: a meta scan tests `isDeleted` on the ROOT and
+  on the `.spec` independently, and resolves matches by collecting all live ones — never last-wins over a
+  randomized map.
+- **A post-state both branches of an op satisfy asserts nothing about which branch ran** — `ShredIdentityKey`
+  writes `shredded`/`shreddedAt` identically whether it flips a live envelope or replaces it with an
+  empty-`wrappedDEK` placeholder, so a run that destroyed real key material reported green. Minted: the
+  same review. Check: assert the field the two branches DISAGREE on — capture `wrappedDEK` in setup and
+  require it byte-identical after.
 - **A verifying environment's own provisioning gap reads as a product defect** — `provision-readpath`
   shells through `docker compose`, so a natively-built stack lacks `actor_read_grants` and every shred
   logs `grant-table revoke failed (privacy-critical, no retry)`. Minted: the same run. Check: establish
