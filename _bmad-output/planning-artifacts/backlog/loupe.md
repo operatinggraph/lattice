@@ -34,7 +34,6 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **`retentionKeyStatus` has no operator surface** | The Vault page's shred view reads `privacy-shreds` (identity holders only), so the new `privacy-retention-keys` bucket — every declared retention class, its policy/period, and its destruction progress — is unreadable in Loupe. `handleVaultShreds` is the shape to mirror. | ★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §4.4 |
 
 ## Parked
 
@@ -69,6 +68,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `3c185e9b` · [Loupe/maint] `retentionKeyStatus` operator surface — `/api/vault/retention-keys` + Vault page Retention classes panel. Tests, live-verified, CI green
 - 2026-08-21 · `6d34b1d3` · [Loupe/maint] `protectedFlag` — a malformed (non-bool) `targetConfig.protected` now reads as protected, not silently unprotected. Tests, CI green
 - 2026-08-21 · `fb6a637d` · [Loupe/maint] Shred button now starts the identityErasure pattern, not a bare key shred; panel gains a five-step erasure progress list. Tests, live-verified, CI green
 - 2026-08-02 · `28dd2c55` · [Loupe/F25.3b] Weaver Target Studio — Propose + Trial: `SubmitCapabilityProposal` submission, review-queue source badge, born-disabled Trial panel; F25 CLOSED. Lead self-review, live-verified end to end
