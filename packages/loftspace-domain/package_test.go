@@ -225,8 +225,8 @@ func TestPackage_Permissions(t *testing.T) {
 	// itself). It must stay a FULL descriptor — a bare meta would satisfy the
 	// count while leaving the op unrenderable, which is the S1 hole the
 	// Standard exists to close.
-	if got := len(Package.OpMetas); got != 1 {
-		t.Fatalf("expected 1 opMeta, got %d", got)
+	if got := len(Package.OpMetas); got != 4 {
+		t.Fatalf("expected 4 opMetas, got %d", got)
 	}
 	meta := Package.OpMetas[0]
 	if meta.OperationType != "SetListingStatus" {

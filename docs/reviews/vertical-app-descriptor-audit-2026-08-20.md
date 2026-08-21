@@ -109,3 +109,18 @@ alternative ships. When that design lands, its own fire carries the shrink-only 
 (per-app hardcoded-op counts are already printed by the gate on every run, so the trend is visible
 now). Field-level drift between a hand-built form and its descriptor's schema is likewise carried
 by the skill + review layer until the renderer makes it structural.
+
+## 6. Same-day outcome (adjudicated)
+
+The sweep (§3's work-list) shipped **12 of 15** descriptors across five packages (version-bumped
+in lockstep; all gates green, including the build-tagged lease-convergence suite run locally).
+Three stayed in the `appOpDebt` baseline with grounded reasons rather than exemption codes —
+`CreateLocation` (one op on three leaf DDLs; a static `Dispatch.Class` cannot express the class
+choice), `AttachObject`/`DetachObject` (inputs are the byte-plane upload response; the fix is an
+owner-anchored read surface + upload affordance, not a marker) — and the sweep exposed a gate
+blind spot: unquoted JS object keys (`SignLease:` in loftspace's `COMPLETIONS`) were invisible to
+the quoted-literal scan. The gate now carries a keyed-op detector; `SignLease` is the baseline's
+fourth entry. All four residuals are owed by named increments of the ratified
+[staff-descriptor-rendering-design.md](../../_bmad-output/implementation-artifacts/staff-descriptor-rendering-design.md)
+(Winston-adjudicated under Andrew's 2026-08-20 delegation: no-fork/no-contract designs need no
+Andrew approval), whose Inc 1 (op-catalog lens + loftspace pilot) is build-ready.

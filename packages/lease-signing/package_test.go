@@ -92,7 +92,7 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 	engineLegs := []string{
 		"SignLease", "CreateLeaseServiceInstance",
 		"RecordLeaseServiceOutcome", "RecordServiceDispatch",
-		"CreateLeaseDocInstance", "RecordLeaseDocOutcome", "SignRenewal",
+		"CreateLeaseDocInstance", "RecordLeaseDocOutcome",
 	}
 	byOp := map[string]pkgmgr.OpMetaSpec{}
 	for _, m := range Package.OpMetas {

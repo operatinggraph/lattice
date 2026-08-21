@@ -68,6 +68,30 @@ func DDLs() []pkgmgr.DDLSpec {
 // Loom step can bind them; TombstoneObject is GC-internal (the object-store-
 // manager's owner-tombstone cascade submits it directly) and is also resolvable
 // for that binding.
+//
+// AttachObject and DetachObject stay bare despite real staff forms
+// (cmd/loftspace-app, cmd/wellness-app browser-direct through the Gateway) —
+// the app-seam audit (docs/reviews/vertical-app-descriptor-audit-2026-08-20.md)
+// found no descriptor and no exemption for either, and neither closes cleanly:
+//   - AttachObject's digest/size/contentType/storeName carry no pre-existing
+//     entity for a lens to project at all — they are the RESPONSE of the
+//     app's own byte-plane upload endpoint (POST /api/objects, streaming to
+//     core-objects), computed only once the bytes are already sent. No
+//     exemption code names "value is the output of a client-side upload
+//     transport step no template can trigger" (closest, unprojected-input,
+//     is about an entity a lens fails to project — there is no entity here
+//     before the upload completes).
+//   - DetachObject's oid identifies an existing object, but no lens
+//     enumerates "objects attached to owner X" (objectAttachments.go's
+//     objectAttachments lens is anchored on the OBJECT, the wrong direction
+//     for this); the vertical apps bridge the gap with their own bespoke
+//     backend filtering (loftspace-app's GET /api/objects?owner=), not a
+//     descriptor-driven mechanism. The closest platform precedent —
+//     identity-domain's UnlinkCredential, permissions.go, once in the same
+//     spot — was resolved by shipping a signInMethods PANE
+//     (edge-manifest/panes.go, PaneSpec's dispatch-target column), not an
+//     exemption code; the same fix here would need an owner-anchored
+//     attachments read surface objects-base does not have.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "AttachObject"},

@@ -5,14 +5,6 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3) for the ledger ops a person triggers.
 //
-// DebitAccount carries none deliberately: it stays granted at scope=any to
-// `operator` alone — a billing act submitted by the trusted-tool app, not
-// something the descriptor vocabulary needs to render standalone. The S1 gate
-// does not ask it for one (it fires on ops granted beyond the trusted-tool
-// roles).
-//
-// LoftspaceCreateAccount and CreditAccount are the exceptions:
-//
 //   - LoftspaceCreateAccount — opening a lease's ledger account is what the
 //     browser needs to do before the billing view can show anything but "no
 //     account yet" — a front-desk act, so it grants frontOfHouse and needs a
@@ -27,6 +19,26 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     account's own heldFor topology), not via a templated OptionalReads
 //     anchor here — the account carries no denormalized lease anchor for a
 //     descriptor client to template ahead of submit.
+//   - DebitAccount — granted operator-only (permissions.go, no self-scope
+//     row: "a resident may pay down a balance, never charge one"), so its
+//     voice is STAFF-standing. loftspace-app's landlord billing view wires a
+//     real "record a charge" form to it (web/app.js renderLedgerRecordForm),
+//     which is the app-seam rule (vertical-package-standard.md §15) — a
+//     shipped screen is proof a person triggers the op, whatever its grant
+//     roles. The descriptor's InputSchema is narrower than the DDL's own
+//     merged schema (clinic CreateAppointment idiom): it omits the optional
+//     clauseRef/period pair (transactionDDL's "DebitAccount only" fields,
+//     scripts.go post_entry) — a hand-submitted DebitAccount that supplies
+//     clauseRef validates it via the PRE-HYDRATED state dict alone
+//     (vertex_alive(state, clause_key), then state[clause_key + ".terms"]),
+//     never a live kv.Read fallback, so honoring it would need declaring
+//     {payload.clauseRef}.terms — a suffix hung off an OPTIONAL field, which
+//     checkReadTemplates refuses on sight (Standard §readTemplateDebt: an
+//     omitted clauseRef substitutes empty and leaves the literal ".terms"
+//     behind, a malformed key NATS rejects rather than reporting absent).
+//     Describing the clause-authorized shape would be a promise this
+//     descriptor cannot honour; "a plain human-submitted DebitAccount omits
+//     it entirely" (scripts.go) is the shape described below.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -74,6 +86,36 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "transaction",
 				AuthContext: "self",
+				TargetField: "accountKey",
+				TargetType:  "account",
+				Reads:       []string{"{payload.accountKey}"},
+			},
+		},
+		{
+			OperationType: "DebitAccount",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record charge",
+				Description: "Charge a lease's ledger account (rent, a late fee, a deposit).",
+				Icon:        "wallet",
+				Tone:        "primary",
+				SubmitLabel: "Record charge",
+			},
+			// Excludes clauseRef/period — see the package doc comment above
+			// (checkReadTemplates forbids the suffix read a clause-authorized
+			// charge would need to declare).
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the charge posts to — auto-filled from the lease's own ledger account."},` +
+				`"amountCents":{"type":"integer","description":"Charge amount in integer cents; required, must be a positive number."},` +
+				`"memo":{"type":"string","description":"Optional note (e.g. \"June rent\", \"Late fee\")."}},` +
+				`"required":["accountKey","amountCents"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The lease's ledger account — auto-filled by the client from the lease being viewed (dispatch.targetField), not user-entered.",
+				"amountCents": "The charge amount in integer cents; required, must be a positive number.",
+				"memo":        "Optional note attached to the charge (e.g. \"June rent\", \"Late fee\").",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "transaction",
+				AuthContext: "standing",
 				TargetField: "accountKey",
 				TargetType:  "account",
 				Reads:       []string{"{payload.accountKey}"},

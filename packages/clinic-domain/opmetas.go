@@ -47,6 +47,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // for a client to derive the field from. Its optional identityKey is the one
 // read it declares — absence-tolerant on both counts, since the field itself is
 // optional and the patientClaim guard it probes is absent on every first bind.
+//
+// CreateProvider / SetProviderProfile / SetSiteProfile / AssignProviderSite /
+// RemoveProviderSite are all operator-only (permissions.go's mk() helper —
+// scope=any, GrantsTo: [operator], no consumer/provider/frontOfHouse row), so
+// each is AuthContext "standing" (the same posture as SetProviderHours/
+// SetProviderTimeOff above): the authority is the operator ROLE, not a
+// relationship to the target.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -260,6 +267,154 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// (cmd/clinic-app/web/app.js), which the vocabulary has no
 				// form for.
 				OptionalReads: []string{"{payload.identityKey}"},
+			},
+		},
+		{
+			OperationType: "CreateProvider",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Register provider",
+				Description: "Add a new provider to the practice roster.",
+				Icon:        "user-plus",
+				Tone:        "primary",
+				SubmitLabel: "Register",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"fullName":{"type":"string","title":"Full name","description":"The provider's full name."},` +
+				`"specialty":{"type":"string","title":"Specialty","description":"The provider's clinical specialty, e.g. Cardiology."},` +
+				`"credentials":{"type":"string","title":"Credentials","description":"Optional post-nominal credentials, e.g. MD."},` +
+				`"bio":{"type":"string","title":"Bio","description":"Optional short provider bio."}},` +
+				`"required":["fullName","specialty"]}`,
+			FieldDescriptions: map[string]string{
+				"fullName":    "The provider's full name, as it should appear on the roster.",
+				"specialty":   "The provider's clinical specialty (e.g. Cardiology).",
+				"credentials": "Optional post-nominal credentials (e.g. MD, RN).",
+				"bio":         "Optional short provider bio.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "provider",
+				AuthContext: "standing",
+				// Mints the provider — no pre-existing vertex for a client to
+				// derive a target from (the CreatePatient idiom above).
+			},
+		},
+		{
+			OperationType: "SetProviderProfile",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Edit provider profile",
+				Description: "Update a provider's name, specialty, credentials, and bio.",
+				Icon:        "user",
+				Tone:        "primary",
+				SubmitLabel: "Save profile",
+			},
+			// A full replace (ddls.go SetProviderProfile), so the schema names
+			// every .profile field, not just the ones being changed.
+			InputSchema: `{"type":"object","properties":` +
+				`{"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of the provider being edited — auto-filled from the provider being viewed."},` +
+				`"fullName":{"type":"string","title":"Full name","description":"The provider's full name."},` +
+				`"specialty":{"type":"string","title":"Specialty","description":"The provider's clinical specialty, e.g. Cardiology."},` +
+				`"credentials":{"type":"string","title":"Credentials","description":"Optional post-nominal credentials, e.g. MD."},` +
+				`"bio":{"type":"string","title":"Bio","description":"Optional short provider bio."}},` +
+				`"required":["providerKey","fullName","specialty"]}`,
+			FieldDescriptions: map[string]string{
+				"providerKey": "The provider being edited — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
+				"fullName":    "The provider's full name. REPLACES the stored value, so a re-submit must resupply it.",
+				"specialty":   "The provider's clinical specialty. REPLACES the stored value, so a re-submit must resupply it.",
+				"credentials": "Optional post-nominal credentials. Omitted clears any existing value (full replace).",
+				"bio":         "Optional short provider bio. Omitted clears any existing value (full replace).",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "provider",
+				AuthContext: "standing",
+				TargetField: "providerKey",
+				TargetType:  "provider",
+				Reads:       []string{"{payload.providerKey}"},
+			},
+		},
+		{
+			OperationType: "SetSiteProfile",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Name clinic site",
+				Description: "Set the display name for a clinic site.",
+				Icon:        "building",
+				Tone:        "primary",
+				SubmitLabel: "Save",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"buildingKey":{"type":"string","description":"vtx.building.<NanoID> of the site — auto-filled from the site being viewed."},` +
+				`"name":{"type":"string","title":"Site name","description":"The clinic site/branch display name."}},` +
+				`"required":["buildingKey","name"]}`,
+			FieldDescriptions: map[string]string{
+				"buildingKey": "The site being named — auto-filled by the client from the site being viewed (dispatch.targetField), not user-entered.",
+				"name":        "The clinic site/branch display name. REPLACES the stored value, so a re-submit must resupply it.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "clinicSite",
+				AuthContext: "standing",
+				TargetField: "buildingKey",
+				TargetType:  "building",
+				Reads:       []string{"{payload.buildingKey}"},
+			},
+		},
+		{
+			OperationType: "AssignProviderSite",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Assign provider to site",
+				Description: "Record that a provider practices at a site.",
+				Icon:        "building",
+				Tone:        "primary",
+				SubmitLabel: "Assign",
+			},
+			// Both endpoints pre-exist and neither is "the entity in view" —
+			// the shipped picker (cmd/clinic-app/web/app.js
+			// submitAssignProviderSite) offers free-choice provider AND site
+			// selects from a standalone assignment screen, so no TargetField
+			// is named below (the ClaimIdentity/CreatePatient precedent for
+			// "no natural target to derive").
+			InputSchema: `{"type":"object","properties":` +
+				`{"provider":{"type":"string","title":"Provider","description":"vtx.provider.<NanoID> of the provider."},` +
+				`"building":{"type":"string","title":"Site","description":"vtx.building.<NanoID> of the site."}},` +
+				`"required":["provider","building"]}`,
+			FieldDescriptions: map[string]string{
+				"provider": "The provider being assigned.",
+				"building": "The site the provider will practice at.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "clinicSiteAssignment",
+				AuthContext: "standing",
+				Reads:       []string{"{payload.provider}", "{payload.building}"},
+				// The per-pair practicesAt link is read on demand for the
+				// create/revive/no-op idempotency branch (site.go
+				// clinicSiteAssignmentDDLScript's own "read-posture: (d)"
+				// annotation) — absence is the normal first-assignment case,
+				// so it can never be a required read.
+				OptionalReads: []string{"lnk.provider.{payload.provider:id}.practicesAt.building.{payload.building:id}"},
+			},
+		},
+		{
+			OperationType: "RemoveProviderSite",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Remove site assignment",
+				Description: "Revoke a provider's assignment to a site.",
+				Icon:        "building",
+				Tone:        "destructive",
+				SubmitLabel: "Remove",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"provider":{"type":"string","title":"Provider","description":"vtx.provider.<NanoID> of the provider."},` +
+				`"building":{"type":"string","title":"Site","description":"vtx.building.<NanoID> of the site."}},` +
+				`"required":["provider","building"]}`,
+			FieldDescriptions: map[string]string{
+				"provider": "The provider whose assignment is being removed.",
+				"building": "The site the provider is being removed from.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "clinicSiteAssignment",
+				AuthContext: "standing",
+				// The script never validates provider/building aliveness on
+				// this branch (site.go clinicSiteAssignmentDDLScript) — both
+				// values only build the link key string, so no vertex read
+				// grounds this op.
+				OptionalReads: []string{"lnk.provider.{payload.provider:id}.practicesAt.building.{payload.building:id}"},
 			},
 		},
 	}

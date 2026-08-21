@@ -5,11 +5,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
 // three consumer (scope=self) ones, CreateBooking, JoinWaitlist and
-// CancelBooking; the staff standing ones, CreateStudio, CreateSession and
-// CreateSessionSeries; and the provider-hat standing ones, TombstoneSession,
-// SetBookingAttendance and SetInstructorProfile — mirroring clinic-domain's
-// adoption (Fire 5 Inc 1) and service-domain's original RequestService
-// op-meta.
+// CancelBooking; the staff standing ones, CreateStudio, CreateSession,
+// CreateSessionSeries, TombstoneStudio and CreateInstructor; and the
+// provider-hat standing ones, TombstoneSession, SetBookingAttendance and
+// SetInstructorProfile — mirroring clinic-domain's adoption (Fire 5 Inc 1)
+// and service-domain's original RequestService op-meta.
+//
+// TombstoneStudio and CreateInstructor are granted `operator` alone
+// (permissions.go's mk() helper — entity provisioning stays a trusted-tool
+// ceremony, mirroring clinic-domain's CreateProvider/TombstoneProvider), so
+// both are AuthContext "standing"; cmd/wellness-app wires real staff forms to
+// both (the app-seam rule, vertical-package-standard.md §15), which is what
+// makes them user-facing by demonstration despite the operator-only grant.
 //
 // Dispatch.Class on each entry is "booking" — the booking DDL's own
 // CanonicalName (bookingVertexDDL), the Contract #2 §2.1 envelope `class`
@@ -502,6 +509,57 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// render a control that fails closed.
 				ContextParams: map[string]string{"location": "{me.workplace}"},
 				Reads:         []string{"{payload.location}"},
+			},
+		},
+		{
+			OperationType: "TombstoneStudio",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Remove studio",
+				Description: "Remove a studio. Does not cascade onto its sessions or bookings.",
+				Icon:        "building",
+				Tone:        "destructive",
+				SubmitLabel: "Remove studio",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of the studio to remove — auto-filled from the studio being viewed."}},` +
+				`"required":["studioKey"]}`,
+			FieldDescriptions: map[string]string{
+				"studioKey": "The studio being removed — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       studioVertexDDL,
+				AuthContext: "standing",
+				TargetField: "studioKey",
+				TargetType:  studioVertexDDL,
+				Reads:       []string{"{payload.studioKey}"},
+			},
+		},
+		{
+			OperationType: "CreateInstructor",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Register instructor",
+				Description: "Add a new instructor.",
+				Icon:        "user-plus",
+				Tone:        "primary",
+				SubmitLabel: "Register",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"displayName":{"type":"string","title":"Name","description":"The instructor's display name."},` +
+				`"studio":{"type":"string","title":"Studio","description":"Optional vtx.studio.<NanoID> the instructor teaches at."}},` +
+				`"required":["displayName"]}`,
+			FieldDescriptions: map[string]string{
+				"displayName": "The instructor's display name, as members will see it on the class list.",
+				"studio":      "Optional. A studio this instructor teaches at — writes the teachesAt link. Leave blank to register the instructor unassigned.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       instructorVertexDDL,
+				AuthContext: "standing",
+				// Mints the instructor — no pre-existing vertex for a client to
+				// derive a target from (clinic-domain's CreateProvider idiom).
+				// studio is validated alive+typed (require_live_typed) only when
+				// supplied — a whole-entry optionalRead, never a required one,
+				// mirroring clinic-domain's CreatePatient identityKey.
+				OptionalReads: []string{"{payload.studio}"},
 			},
 		},
 		{

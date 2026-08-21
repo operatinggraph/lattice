@@ -156,27 +156,24 @@ func registeredOps() map[string]*opStatus {
 // shipped staff FORM is proof a person triggers the op, and the staff-worlds
 // catalog (edgeCatalog's held-role walk) cannot render what nothing describes.
 var appOpDebt = map[string]string{
-	"AssignProviderSite": "clinic-domain",
-	"AssignUnitOwner":    "loftspace-domain",
-	"AttachObject":       "objects-base",
-	"CreateInstructor":   "wellness-domain",
-	"CreateLocation":     "location-domain",
-	"CreateProvider":     "clinic-domain",
-	"DebitAccount":       "loftspace-ledger",
-	"DetachObject":       "objects-base",
-	"RemoveProviderSite": "clinic-domain",
-	"SetListing":         "loftspace-domain",
-	"SetProviderProfile": "clinic-domain",
-	"SetSiteProfile":     "clinic-domain",
-	"SetUnitAddress":     "loftspace-domain",
-	"SignRenewal":        "lease-signing",
-	"TombstoneStudio":    "wellness-domain",
+	"AttachObject":   "objects-base",     // inputs are the byte-plane upload response (digest/size/contentType), producible by no template
+	"CreateLocation": "location-domain",  // one op on THREE leaf DDLs — a single static Dispatch.Class cannot express the class choice
+	"DetachObject":   "objects-base",     // oid names an entity no owner-anchored lens projects; the fix is a read surface, not a marker
+	"SignLease":      "lease-signing",    // task-modal screen via an unquoted COMPLETIONS key; descriptor owed by staff-descriptor-rendering Inc 1
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every
 // Lattice operationType has. Lowercase strings (class names, field names)
 // never match, which is what keeps the whole-file scan quiet.
 var quotedOpLike = regexp.MustCompile(`["']([A-Z][A-Za-z]+)["']`)
+
+// keyedOpLike matches a bare PascalCase identifier in object-key position
+// (`SignLease: {…}`). A form registry keyed by op name (loftspace's
+// COMPLETIONS idiom) references ops through UNQUOTED JS object keys, which the
+// quoted scan cannot see — that is exactly how SignLease escaped the gate's
+// original census. Membership in the registered-op set is the filter, so a
+// Go struct field or a JS label that merely LOOKS PascalCase never reports.
+var keyedOpLike = regexp.MustCompile(`\b([A-Z][A-Za-z]+)\s*:`)
 
 // submissionContext marks a line as an op-submission site: an envelope's
 // operationType field being assigned (JS or Go spelling), or the apps' shared
@@ -217,6 +214,11 @@ func scanFile(path string, known map[string]*opStatus) []ref {
 			}
 		}
 		for _, m := range quotedOpLike.FindAllStringSubmatch(line, -1) {
+			if _, ok := known[m[1]]; ok {
+				out = append(out, ref{path, i + 1, m[1], false})
+			}
+		}
+		for _, m := range keyedOpLike.FindAllStringSubmatch(line, -1) {
 			if _, ok := known[m[1]]; ok {
 				out = append(out, ref{path, i + 1, m[1], false})
 			}

@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.21.4
+version: 0.22.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -218,4 +218,6 @@ declares:
     - operationType: CreateSession
     - operationType: CreateSessionSeries
     - operationType: CreateStudio
+    - operationType: TombstoneStudio
+    - operationType: CreateInstructor
     - operationType: SetInstructorProfile

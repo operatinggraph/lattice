@@ -1,14 +1,18 @@
 # Staff descriptor rendering — the op catalog read model + the shared form renderer
 
-**Status: 📐 awaiting-Andrew (ratification).** Designed 2026-08-20 (Winston, Andrew-directed
-session). **Board row:** verticals lane · *Staff FEs render op forms from descriptors, not
+**Status: ✅ RATIFIED 2026-08-20 (Winston-adjudicated).** Designed 2026-08-20 (Winston,
+Andrew-directed session); adjudicated under Andrew's same-day delegation — *"any designs without
+architectural fork or contract change do not need my approval; Winston can adjudicate"* — which
+this design satisfies: no architectural fork, no frozen-contract change (the For-Andrew block
+below is the check that says so). Adversarial pass run and folded (§9); Inc-0 sweep outcome
+folded (§10). Build-ready for the Steward. **Board row:** verticals lane · *Staff FEs render op forms from descriptors, not
 hand-built JS* (★★★ XL). **Demand:** the 2026-08-20 audit
 (`docs/reviews/vertical-app-descriptor-audit-2026-08-20.md`) — ~70 hardcoded submission sites /
 ~7,500 lines across the four vertical FEs re-implementing what `OpMetaSpec` already declares —
 plus the codebase's own ask at `cmd/loftspace-app/web/app.js:76`: *"the generic
 DDL-self-describing form needs an op-catalog read model — a Core-KV op-meta scan would violate P5
-in a vertical app."* **Precondition:** the 15-op descriptor sweep (appOpDebt → empty), running as
-its own fire.
+in a vertical app."* **Precondition:** the 15-op descriptor sweep — DONE (§10): 12 shipped, the
+baseline holds 4 named residuals, each owed by a named increment below.
 
 ## For Andrew
 
@@ -26,7 +30,8 @@ Two mechanisms, both extensions of shipped machinery, no frozen-contract change:
    gate (per-app op-literal ceilings, shrink-only) lands after the pilot proves the path.
 
 No Andrew-altitude fork: the two mechanism forks (embedded registry vs lens; shared module vs
-pinned copies) are resolved below with grounded reasoning. Ratifying this unblocks Inc 1.
+pinned copies) are resolved below with grounded reasoning. That check is what qualified this
+design for Winston adjudication under the 2026-08-20 delegation (see Status); Inc 1 is unblocked.
 
 ## 1. Problem + intent
 
@@ -237,7 +242,13 @@ per-app measure line is the visibility.
   bucket const + cypher test + loftspace `/api/op-catalog` proxy + the task-completion modal swaps
   its descriptor source from `COMPLETIONS` to catalog rows for the **five** expressible entries
   (`SignLease`, `RecordIdentityPII`, `SetRenewalTerms`, `CancelRenewal`, `ResolveWorkOrder`),
-  deleting their map entries and the `app.js:76` lament. `SignRenewal`/`VerifyGuarantor` remain a
+  deleting their map entries and the `app.js:76` lament. **This increment also ships
+  `SignLease`'s full descriptor in lease-signing** (task voice, empty-properties schema — the
+  form is a single confirm) — the pilot's own dependency: the sweep left it because its only app
+  references are unquoted `COMPLETIONS` keys, now visible to the gate's object-key detector and
+  baselined as `SignLease: lease-signing`; shipping it deletes that entry AND rewrites the
+  Standard §6 *"Bare metas stay bare — SignLease…"* clause in place (the banner-rewrites-body
+  rule), since §15 supersedes it for screen-wired ops. `SignRenewal`/`VerifyGuarantor` remain a
   two-entry residue map whose comment names the missing `{context.<field>}` template (§2.2) —
   deleted by Inc 3's loftspace fire, after Inc 2 ships the template. Green bar: the modal renders
   a renewal action from projected data on the running stack; a descriptor edit +
@@ -250,6 +261,15 @@ per-app measure line is the visibility.
   pilot modal moves onto the module (proving it against a surface that already works).
 - **Inc 3 — per-app migration (FE, one fire per app):** clinic (biggest surface) → wellness →
   café → loftspace remainder. Each fire's brief lists the surfaces swapped and the lines deleted.
+  Two surfaces are known non-migratable until their blockers clear, and stay hand-built with the
+  gate's baseline as the ledger: **`CreateLocation`** (one op declared on three leaf DDLs — a
+  single static `Dispatch.Class` cannot express the class choice, and an envelope without `class`
+  is unconditionally rejected, `ddl_cache.go` `ClassForCommand`; Inc 3's clinic/loftspace briefs
+  price the two honest fixes — a `Dispatch.ClassChoices` vocabulary field the renderer offers as
+  an enum, vs per-leaf operationTypes — and build one), and **`AttachObject`/`DetachObject`**
+  (inputs are the byte-plane upload response; the fix is an upload-ceremony affordance plus an
+  owner-anchored attachments read surface, the `signInMethods`-pane precedent — not an exemption
+  marker).
 - **Inc 4 — the ratchet (gate):** per-app ceilings, mutation-tested.
 
 Review depth: Inc 1 and Inc 4 are posture-changing (new read surface; new gate rule) — full pass.
@@ -290,3 +310,32 @@ the build starts from what was verified, not what was drafted:
   citations; the drift-gate extension is a bounded restructure, not a constant edit; and a
   permission/role event reaches this lens via the unseeded whole-corpus rescan — acceptable at
   install frequency, named escape if that changes.
+
+## 10. Inc 0 outcome — the descriptor sweep (adjudicated 2026-08-20)
+
+**12 of 15 shipped** as full descriptors (clinic-domain ×5, loftspace-domain ×3, loftspace-ledger,
+lease-signing `SignRenewal`, wellness-domain ×2), five packages version-bumped in lockstep, all
+gates green including the build-tagged lease-convergence suite run locally (lease-signing's
+op-meta list moved). Adjudication highlights, each verified against the diff:
+
+- **`SignRenewal` is `AuthContext: "task"`** — the tenant holds no standing grant and reaches the
+  op only via the §10.7 ephemeral task grant; the descriptor names the descriptor-driven client's
+  path (the RecordIdentityPII precedent). The §9 landlordLeg concern resolved cleanly: the
+  landlord ops (`SetRenewalTerms`/`CancelRenewal`) already carry self-voice descriptors from the
+  Standard's Inc 1, and loftspace's hand-built `landlordLeg` dispatch keeps working until Inc 3
+  migrates it. `SignRenewal`'s reads are transcribed verbatim from the shipped completion
+  dispatcher, and its formerly-bare `engineLegs` pin was updated, not loosened.
+- **Three left in the shrink-only baseline with grounded reasons, deliberately not exempted:**
+  `CreateLocation` (the three-leaf class-choice gap, §7 Inc 3), `AttachObject`/`DetachObject`
+  (upload-response inputs / missing owner-anchored read surface — the honest fix is a surface,
+  not a marker; the `UnlinkCredential`→`signInMethods`-pane precedent). Exemption codes are
+  permanent ratified postures; these are debt with named fixes, so the baseline is their ledger.
+- **`AssignUnitOwner` deliberately does NOT auto-fill `landlord` from the actor** — the op is
+  operator-granted with no self-path constraint, and auto-filling would silently remove the
+  operator's ability to assign a different manager (a script-permitted case).
+- **`DebitAccount`'s slice deliberately omits `clauseRef`/`period`** (Weaver-only fields whose
+  read template would hang an aspect suffix off an optional field — the checkReadTemplates
+  refusal class).
+- **The sweep exposed the gate's unquoted-object-key blind spot** (`SignLease:` as a JS map key
+  was invisible to the quoted-literal scan). The gate now carries a keyed-op detector; `SignLease`
+  is baselined and owed by Inc 1 (§7).

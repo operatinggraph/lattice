@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.29.0
+version: 0.30.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -177,10 +177,10 @@ declares:
     - operationType: SetRenewalTerms
     - operationType: VerifyGuarantor
     - operationType: CancelRenewal
+    - operationType: SignRenewal
     - operationType: SignLease
     - operationType: CreateLeaseServiceInstance
     - operationType: RecordLeaseServiceOutcome
     - operationType: RecordServiceDispatch
     - operationType: CreateLeaseDocInstance
     - operationType: RecordLeaseDocOutcome
-    - operationType: SignRenewal

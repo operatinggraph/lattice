@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.32.2
+version: 0.33.0
 depends:
   - location-domain
 description: |
@@ -262,3 +262,8 @@ declares:
     - operationType: SetProviderTimeOff
     - operationType: RecordEncounter
     - operationType: CreatePatient
+    - operationType: CreateProvider
+    - operationType: SetProviderProfile
+    - operationType: SetSiteProfile
+    - operationType: AssignProviderSite
+    - operationType: RemoveProviderSite

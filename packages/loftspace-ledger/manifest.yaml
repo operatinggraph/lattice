@@ -1,5 +1,5 @@
 name: loftspace-ledger
-version: 0.4.7
+version: 0.5.0
 description: |
   Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount,
   independently-minted id, one per lease via a .ledgerAccount guard aspect on
@@ -32,6 +32,7 @@ declares:
   opMetas:
     - operationType: LoftspaceCreateAccount
     - operationType: CreditAccount
+    - operationType: DebitAccount
   permissions:
     - operationType: LoftspaceCreateAccount
       scope: any

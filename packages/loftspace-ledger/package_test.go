@@ -47,7 +47,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 2; got != want {
+	if got, want := len(Package.OpMetas), 3; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 

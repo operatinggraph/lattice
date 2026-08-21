@@ -220,15 +220,25 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     (renewal_targets.go); the Weaver Actuator resolves forOperation to each
 //     op-meta when it creates the remediation task. CancelRenewal is task-less
 //     (a directOp/operator action, never an assignTask target), so its meta is
-//     owed to S1 rather than to forOperation resolution.
+//     owed to S1 rather than to forOperation resolution. All four carry full
+//     descriptors below: SignRenewal's tenant leg is a real loftspace-app
+//     screen (web/app.js COMPLETIONS.SignRenewal), which is the app-seam rule
+//     (vertical-package-standard.md §15) — a shipped screen is proof a person
+//     triggers the op, whatever its grant roles (permissions.go grants only
+//     `operator`; the tenant reaches it via the §10.7 ephemeral task grant
+//     alone, so its Dispatch.AuthContext is "task", not "standing" — the
+//     RecordIdentityPII precedent, identity-domain/opmetas.go).
 //
 // Every op a human triggers carries a FULL descriptor (S1) — Presentation +
 // InputSchema + FieldDescriptions + Dispatch. The audience slice is narrower
 // than the owning DDL's merged InputSchema: a descriptor describes ONE op's
 // fields, not the whole vertex type's. The remaining bare `{OperationType}`
-// entries are engine legs — externalTask instanceOp/replyOp/dispatchOp, the
-// assignTask targets a client never builds a form for — and exist only so
-// forOperation resolves.
+// entries are engine/adapter legs — externalTask instanceOp/replyOp/dispatchOp
+// — that exist only so forOperation resolves. SignLease is the one assignTask
+// target still undescribed: loftspace-app also completes it (COMPLETIONS.
+// SignLease), but every reference is an unquoted JS object key, so the
+// app-seam gate (lint-app-op-descriptors) cannot see it and it carries no
+// appOpDebt entry — out of this fire's scope, not a claim that no form exists.
 //
 // Dispatch.AuthContext names the SELF path wherever an op carries both a
 // standing staff grant and a consumer scope=self grant (clinic-domain's
@@ -567,15 +577,82 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{"{payload.renewalKey}.renewalSignature"},
 			},
 		},
-		// Engine legs — externalTask instanceOp/replyOp/dispatchOp and the
-		// assignTask targets a client never builds a form for. Bare on
-		// purpose: they exist so forOperation resolves, not to be rendered.
+		// SignRenewal is the tenant's completion leg — the write-path mirror of
+		// VerifyGuarantor/SetRenewalTerms above, but a DIFFERENT voice: the
+		// landlord ops are consumer scope=self (a landlord acting on a unit
+		// they manage), while SignRenewal carries no scope=self grant at all
+		// (permissions.go) — the tenant reaches it only via the §10.7 ephemeral
+		// task grant the renewalComplete goal's assignTask leg mints
+		// (renewal_targets.go), so Dispatch.AuthContext is "task", not "self"
+		// or "standing" (the RecordIdentityPII precedent,
+		// identity-domain/opmetas.go). leaseApp/applicant are neither typed nor
+		// template-resolved from the task itself (assignTask carries only
+		// assignee/scopedTo/forOperation, §10.5) — a descriptor-driven client
+		// sources them the same way it sources every other field of "the
+		// entity being viewed": from the renewalsRead lens row for the
+		// renewal the task's scopedTo names (mirrors loftspace-app's own
+		// completion dispatcher, web/app.js COMPLETIONS.SignRenewal.
+		// extraFromRenewal). Reads/OptionalReads below are copied verbatim
+		// from that same shipped dispatcher's extraReads — the two validation
+		// links (renews, applicationFor), the required .tenancy read
+		// (renewal_scripts.go SignRenewal reads it via state[], so it is
+		// class-(a) despite being conditionally reached), and three
+		// absence-tolerant class-(d) ordering probes (.terms,
+		// .applicationSignals, .guarantorVerification).
+		{
+			OperationType: "SignRenewal",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Sign your lease renewal",
+				ShortLabel:  "Sign renewal",
+				Description: "Sign your renewal, extending your lease on the agreed terms. Final once signed.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Sign renewal",
+				Group:       "Renewals",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle being signed — the task's own subject."},` +
+				`"leaseApp":{"type":"string","title":"Application","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
+				`"applicant":{"type":"string","title":"Tenant","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."}},` +
+				`"required":["renewalKey","leaseApp","applicant"]}`,
+			FieldDescriptions: map[string]string{
+				"renewalKey": "The renewal cycle being signed — filled from the task's own scopedTo subject, never typed.",
+				"leaseApp":   "The application this cycle renews — resolved from the renewal's own record, never typed. Verified against the renewal's own renews link (LeaseAppMismatch on mismatch).",
+				"applicant":  "You — resolved from the renewal's own record, never typed. Verified against the application's own applicationFor link (ApplicantMismatch on mismatch) before anything is extended.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "renewal",
+				AuthContext: "task",
+				TargetField: "renewalKey",
+				TargetType:  "renewal",
+				Reads: []string{
+					"{payload.renewalKey}",
+					"lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",
+					"lnk.leaseapp.{payload.leaseApp:id}.applicationFor.identity.{payload.applicant:id}",
+					"{payload.leaseApp}.tenancy",
+				},
+				// Each is genuinely absence-tolerant: .terms is absent until the
+				// landlord sets terms (NotReadyToSign), .applicationSignals is
+				// absent only when SetApplicantProfile was never (re)submitted
+				// since the three-way split shipped (ApplicationSignalsMissing —
+				// fail-closed, never "no guarantor"), and .guarantorVerification
+				// is absent until the landlord verifies one (GuarantorNotVerified,
+				// checked only when .applicationSignals says hasGuarantor).
+				OptionalReads: []string{
+					"{payload.renewalKey}.terms",
+					"{payload.leaseApp}.applicationSignals",
+					"{payload.renewalKey}.guarantorVerification",
+				},
+			},
+		},
+		// Engine legs — externalTask instanceOp/replyOp/dispatchOp — that
+		// exist only so forOperation resolves. SignLease is the one
+		// assignTask target left bare here (see doc comment above).
 		{OperationType: "SignLease"},
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},
 		{OperationType: "CreateLeaseDocInstance"},
 		{OperationType: "RecordLeaseDocOutcome"},
-		{OperationType: "SignRenewal"},
 	}
 }
