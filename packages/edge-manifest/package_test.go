@@ -65,9 +65,21 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_EighteenLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 18 {
-		t.Fatalf("expected 18 lenses (15 manifest + 3 read-grant producers), got %d", got)
+// plainLensNames is the package's third lens class: an ordinary nats-kv read
+// model, neither Personal nor a cap-read producer. opCatalog is the only one —
+// the op-descriptor catalog a STAFF application renders forms from
+// (staff-descriptor-rendering-design.md §2.1). It is excluded from the
+// Personal-transport and manifest-namespace pins below for the same reason the
+// read-grant producers are: it is a structurally different shape, and asserting
+// the Personal contract over it would be asserting the wrong contract.
+var plainLensNames = map[string]bool{"opCatalog": true}
+
+func TestPackage_NineteenLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 19 {
+		t.Fatalf("expected 19 lenses (15 manifest + opCatalog + 3 read-grant producers), got %d", got)
+	}
+	if !plainLensNames["opCatalog"] {
+		t.Fatal("opCatalog must be classified as a plain lens, not a manifest one")
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -163,6 +175,33 @@ func TestPackage_ReadGrantLensIsActorAggregateNatsKV(t *testing.T) {
 	}
 }
 
+// TestPackage_OpCatalogIsAPlainNatsKVLens pins the shape the staff read path
+// depends on: an ordinary open nats-kv bucket (not the SYNC transport — a
+// staff app server is not an edge node), keyed by operationType, and NOT
+// Personal (a Personal:true lens would be re-executed per recipient identity
+// and delivered nowhere a staff app can read).
+func TestPackage_OpCatalogIsAPlainNatsKVLens(t *testing.T) {
+	l := emComposedLens(t, "opCatalog")
+	if l.Adapter != "nats-kv" {
+		t.Errorf("adapter = %q, want nats-kv", l.Adapter)
+	}
+	if l.Bucket != OpCatalogBucket {
+		t.Errorf("bucket = %q, want %q", l.Bucket, OpCatalogBucket)
+	}
+	if l.Personal {
+		t.Error("Personal = true, want false")
+	}
+	if l.ProjectionKind != "" {
+		t.Errorf("ProjectionKind = %q, want \"\" (a plain projection, not an actor aggregate)", l.ProjectionKind)
+	}
+	if len(l.IntoKey) != 1 || l.IntoKey[0] != "operationType" {
+		t.Errorf("IntoKey = %v, want [operationType]", l.IntoKey)
+	}
+	if len(l.Walks) != 0 || len(l.SpecBranches) != 0 {
+		t.Error("opCatalog declares no reachability Walk — it is global data, not a per-actor view")
+	}
+}
+
 // TestPackage_LensRowKeysAreManifestNamespaced pins that every MANIFEST
 // lens's first non-actor RETURN column is a literal "manifest.<ns>" string
 // (the buildKey dot-join anchor) — the reserved namespace edge/store.go's
@@ -195,7 +234,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeProviderQueue":    `"manifest.ent" AS ns`,
 	}
 	for _, l := range emComposedLenses(t) {
-		if readGrantLensNames[l.CanonicalName] {
+		if readGrantLensNames[l.CanonicalName] || plainLensNames[l.CanonicalName] {
 			continue
 		}
 		lit, ok := want[l.CanonicalName]

@@ -140,24 +140,29 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"oneBillClinicEntries":           {hasNeighbour: true, reason: rootUngrounded},
 	"oneBillRentEntries":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"oneBillWellnessEntries":         {hasNeighbour: true, reason: rootUngrounded},
-	"patientIdentityReadGrants":      {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"piiKeyEnvelope":                 {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"providerAppointmentsRead":       {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"providerIdentityReadGrants":     {hasNeighbour: true, reason: rootUngrounded},
-	"providerSites":                  {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"renewalsRead":                   {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"retentionKeyStatus":             {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"shredStatus":                    {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"staffReadGrants":                {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"visitSeriesRead":                {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessBookings":               {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessIdentitiesRead":         {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessInstructors":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessLedgerHistory":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessMemberAccounts":         {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"wellnessMembers":                {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessSessions":               {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessStudios":                {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	// closureRefused is the PROBE's answer, not the lens's: its key column is
+	// the anchor's own root `data.operationType`, which the empty synthetic
+	// body cannot carry — see structuralClosureDivergence, and the live
+	// retraction proof it names.
+	"opCatalog":                  {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"patientIdentityReadGrants":  {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"piiKeyEnvelope":             {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	"providerAppointmentsRead":   {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"providerIdentityReadGrants": {hasNeighbour: true, reason: rootUngrounded},
+	"providerSites":              {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"renewalsRead":               {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"retentionKeyStatus":         {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	"shredStatus":                {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"visitSeriesRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessBookings":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessIdentitiesRead":     {hasNeighbour: true, reason: rootVarLengthHop},
+	"wellnessInstructors":        {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessLedgerHistory":      {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessMemberAccounts":     {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"wellnessMembers":            {hasNeighbour: true, reason: rootVarLengthHop},
+	"wellnessSessions":           {hasNeighbour: true, reason: rootVarLengthHop},
+	"wellnessStudios":            {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 }
 
 // threadsForClosure mirrors cmd/refractor/main.go's threadsKeyColumns /
@@ -272,15 +277,78 @@ func deriveScanRootVerdict(t *testing.T, eng *full.Engine, name, spec string, ru
 	// A divergence is a lens ARRIVING at (or leaving) the set a future
 	// increment acts on while this column still reads its old verdict — the
 	// direction §2's header says needs an argument, caught at the lens rather
-	// than left to be noticed later.
-	require.Equalf(t, closureOK, fullCR.HasAnchorOnlyKeyColumns(),
-		"%s: the structural closure predicate and this census's per-event closure verdict disagree — "+
-			"decide which one this column should pin before recording a verdict for it", name)
+	// than left to be noticed later. The one lens where the two predicates are
+	// KNOWN to differ is named below, so the equality still binds everywhere
+	// else.
+	if body, excepted := structuralClosureDivergence[name]; excepted {
+		require.Truef(t, fullCR.HasAnchorOnlyKeyColumns(),
+			"%s is pinned as a structural/per-event divergence, but the STRUCTURAL predicate now refuses it too — "+
+				"that is a real closure change rather than the probe's empty body; remove its row and re-read the lens", name)
+		require.Falsef(t, closureOK,
+			"%s is pinned as a structural/per-event divergence, but the per-event probe now resolves — "+
+				"the two agree again, so delete its row", name)
+		// The exception does not SKIP the question, it re-asks it against a
+		// realistic body: the same read-free resolution, over the root document
+		// a real tombstone actually delivers. An aspect-sourced key column —
+		// the shape whose retraction genuinely is dead — cannot pass this,
+		// because no root body carries an aspect at all.
+		keys, realOK := eng.AnchorProjectionKey(cr, syntheticEventKey(label), label, body)
+		require.Truef(t, realOK,
+			"%s is excepted from the structural/per-event equality on the claim that ONLY the probe's empty "+
+				"body refuses it — but its key does not resolve from a realistic tombstoned body either. The "+
+				"retraction is genuinely dead: the lens stops projecting the deleted anchor and never emits a "+
+				"Delete, so its row describes a retired vertex forever", name)
+		require.NotEmptyf(t, keys,
+			"%s resolved an EMPTY key map from its sample body — a Delete on no key columns is not a retraction", name)
+	} else {
+		require.Equalf(t, closureOK, fullCR.HasAnchorOnlyKeyColumns(),
+			"%s: the structural closure predicate and this census's per-event closure verdict disagree — "+
+				"decide which one this column should pin before recording a verdict for it", name)
+	}
 	require.Equalf(t, closureOK, fullCR.ProjectsOneRowPerAnchor(),
 		"%s: the write licence's closure conjunct (ProjectsOneRowPerAnchor) and this census's closure verdict "+
 			"disagree — the licensed set has moved away from what this column pins, so review the lens before "+
 			"recording a verdict for it", name)
 	return v
+}
+
+// structuralClosureDivergence carries the plain lenses where the STRUCTURAL
+// predicate (HasAnchorOnlyKeyColumns) admits the lens and this census's
+// per-event probe refuses it — the "strictly weaker" gap the comment above
+// describes and that no lens exercised until `opCatalog`.
+//
+// The probe binds an EMPTY root body, which cannot tell two very different
+// lenses apart. A key column reading the anchor's own ROOT DATA
+// (`op.data.operationType`) is unresolvable against an empty map but resolves
+// on the live path, where the tombstone carries the prior document WHOLE
+// (internal/processor/step8_commit.go's buildMutationValue tombstone arm). A
+// key column reading an ASPECT is unresolvable against BOTH — no root body ever
+// carries an aspect — and that lens's retraction really is dead.
+//
+// So the value here is not a permission, it is the DISCRIMINATOR: a sample root
+// body of the shape a real tombstone delivers for this lens's anchor, which the
+// divergence branch re-asks AnchorProjectionKey against and requires to resolve.
+// A name alone would excuse both shapes; this excuses only the first, and an
+// aspect-keyed lens added here fails on its own sample body.
+//
+// The event KEY is not part of the body: AnchorProjectionKey takes it
+// separately and resolves `<anchor>.key` from it, exactly as the live CDC path
+// does. Only the fields a key column reads off the stored document belong here.
+//
+// opCatalog's own end-to-end proof — a real tombstoned vertex, the row actually
+// leaving the projection, and mutations for the two ways this resolution dies
+// silently (a `WITH` clause; an aspect-sourced key column) — is
+// packages/edge-manifest/lens_cypher_test.go's
+// TestOpCatalog_TombstonedOpMetaRetractsItsRow.
+var structuralClosureDivergence = map[string]map[string]any{
+	// vtx.meta.<id> for an op meta: pkgmgr writes operationType onto the
+	// vertex's own `data` envelope (internal/pkgmgr/build.go's
+	// docVertex(opMetaClass, {"operationType": …})), and the tombstone keeps it.
+	"opCatalog": {
+		"class":     "meta",
+		"isDeleted": true,
+		"data":      map[string]any{"operationType": "ResolveWorkOrder"},
+	},
 }
 
 // syntheticEventKey is a well-formed, valid-alphabet Contract #1 vertex key

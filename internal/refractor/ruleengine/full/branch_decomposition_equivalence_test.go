@@ -220,6 +220,31 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	scope := name("scope")
 	putVertex(t, reg, coreKV, scope, "leaseapp", nil)
 
+	// A role that grants EVERY op meta the corpus seeds, through the pair of
+	// install-time edges pkgmgr mints together (internal/pkgmgr/build.go):
+	// `permission grantedBy role` and `permission forOperation meta`. Without
+	// the second one a permission dead-ends at its operationType STRING, which
+	// no cypher can join to a vertex, and opCatalog's role collect folds empty
+	// over the whole corpus.
+	//
+	// The actor deliberately does NOT hold this role, so nothing anchored on the
+	// actor can reach it: the role feeds the op-anchored catalog and moves no
+	// other lens's rows.
+	catalogRole := name("catalogrole")
+	putVertex(t, reg, coreKV, catalogRole, "role", nil)
+	putAspect(t, reg, coreKV, catalogRole, "canonicalName", map[string]any{"value": "catalog"})
+	grantOp := func(suffix, opLogical, operationType string) {
+		perm := name("catalogperm_%s", suffix)
+		putVertex(t, reg, coreKV, perm, "permission", map[string]any{
+			"data": map[string]any{"operationType": operationType, "scope": "any"},
+		})
+		putEdge(t, reg, adjKV, "grantedBy", perm, catalogRole)
+		putEdge(t, reg, adjKV, "forOperation", perm, opLogical)
+	}
+	grantOp("op", op, "ApproveLeaseApplication")
+	grantOp("signop", signOp, "SignLease")
+	grantOp("onbop", onbOp, "RecordIdentityPII")
+
 	task := func(logical string, extra map[string]any) {
 		props := map[string]any{"status": "open", "expiresAt": future}
 		for k, v := range extra {
@@ -333,6 +358,7 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 				"data": map[string]any{"operationType": fmt.Sprintf("Svc%d_%d", i, j)},
 			})
 			putEdge(t, reg, adjKV, "permitsOperation", tpl, op)
+			grantOp(fmt.Sprintf("tplop_%d_%d", i, j), op, fmt.Sprintf("Svc%d_%d", i, j))
 		}
 	}
 
@@ -758,6 +784,18 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				boolEvidence(t, row, "escalated_bgcheck", true, "augur proposal")
 			},
 			content: func(row map[string]any) int { return boolsTrue(row, "escalated_bgcheck") }},
+		// opCatalog is UNANCHORED and anchored on the OP META rather than on any
+		// actor — one row per op the corpus seeds. Every one of them is granted
+		// (seedBranchCorpus's catalogRole), so the role collect is non-empty on
+		// whichever row comes first, and an empty grantedToRoles anywhere means
+		// the permission→role subtree folded empty rather than that this corpus
+		// happened to seed an ungranted op.
+		{name: "opCatalog", spec: corpusSpec(t, "opCatalog"),
+			evidence: func(t *testing.T, row map[string]any) {
+				require.Positive(t, listLen(row, "grantedToRoles"),
+					"the permission→role branch folded empty")
+			},
+			content: func(row map[string]any) int { return listLen(row, "grantedToRoles") }},
 		{name: "landlordLeaseApplicationsRead", spec: corpusSpec(t, "landlordLeaseApplicationsRead"),
 			evidence: func(t *testing.T, row map[string]any) {
 				// This lens's only deferred subtree is the readiness instance walk,
@@ -877,7 +915,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 		"edgeManifestProviderReadGrants", "edgeManifestReadGrants", "edgeManifestStaffReadGrants",
 		"identityAnchors", "identityErasureResidue", "landlordLeaseApplicationsRead",
 		"leaseApplicationComplete", "leaseApplicationsRead", "leaseExpiry", "leaseRentSettlement",
-		"myTasks", "objectAttachments", "renewalComplete",
+		"myTasks", "objectAttachments", "opCatalog", "renewalComplete",
 	} {
 		require.Truef(t, covered[name],
 			"%s decomposes in the shipped corpus but no differential in this package executes it "+

@@ -85,12 +85,58 @@ func TestPackage_SelfServiceDescriptorsNameTheSelfPath(t *testing.T) {
 	}
 }
 
-// TestPackage_EngineLegsStayBare is the complement: the externalTask and
-// assignTask legs exist so forOperation resolves, not to be rendered. Giving
-// one a descriptor would offer a client a form for an op no human submits.
+// TestPackage_TaskLegDescriptorsNameTheTaskPath is the self-voice test's twin,
+// for the two legs a person reaches ONLY through a task.
+//
+// Neither SignLease nor SignRenewal carries a consumer grant at all — the grant
+// matrix gives both to `operator` alone — so the applicant/tenant who actually
+// performs them holds no standing grant and is authorized solely by the §10.7
+// ephemeral task grant, which step 3 matches on {task, target}. A descriptor
+// naming "standing" or "self" here is not a stylistic slip: it tells a
+// descriptor-driven client to send the wrong authContext (or none at all), and
+// every submission is refused. The client reading these two rows out of the
+// op-catalog read model is loftspace-app's task modal, which renders from the
+// descriptor rather than from a hardcoded map — so this value IS the behaviour,
+// not documentation of it.
+func TestPackage_TaskLegDescriptorsNameTheTaskPath(t *testing.T) {
+	taskLegs := map[string]string{
+		"SignLease":   "leaseapp",
+		"SignRenewal": "renewal",
+	}
+	byOp := map[string]pkgmgr.OpMetaSpec{}
+	for _, m := range Package.OpMetas {
+		byOp[m.OperationType] = m
+	}
+	for op, wantTarget := range taskLegs {
+		m, ok := byOp[op]
+		if !ok {
+			t.Fatalf("%s: no op-meta — a task leg a person completes must be self-describing (S1/§15)", op)
+		}
+		if m.Presentation == nil || m.Presentation.Title == "" || m.InputSchema == "" ||
+			len(m.FieldDescriptions) == 0 || m.Dispatch == nil {
+			t.Fatalf("%s: needs a FULL descriptor (presentation+schema+fields+dispatch), got %+v", op, m)
+		}
+		if m.Dispatch.AuthContext != "task" {
+			t.Fatalf("%s: authContext = %q, want task — the performer holds no standing grant, so any other value sends an authContext step 3 cannot match and the submission is refused", op, m.Dispatch.AuthContext)
+		}
+		if m.Dispatch.TargetType != wantTarget {
+			t.Fatalf("%s: targetType = %q, want %q", op, m.Dispatch.TargetType, wantTarget)
+		}
+		if m.Dispatch.TargetField == "" {
+			t.Fatalf("%s: a named targetType needs the field it resolves into", op)
+		}
+		if len(m.Dispatch.Reads) == 0 {
+			t.Fatalf("%s: declares no reads — the submitter lists exact keys (Contract #2 §2.5)", op)
+		}
+	}
+}
+
+// TestPackage_EngineLegsStayBare is the complement: the externalTask legs exist
+// so forOperation resolves, not to be rendered. Giving one a descriptor would
+// offer a client a form for an op no human submits.
 func TestPackage_EngineLegsStayBare(t *testing.T) {
 	engineLegs := []string{
-		"SignLease", "CreateLeaseServiceInstance",
+		"CreateLeaseServiceInstance",
 		"RecordLeaseServiceOutcome", "RecordServiceDispatch",
 		"CreateLeaseDocInstance", "RecordLeaseDocOutcome",
 	}

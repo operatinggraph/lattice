@@ -183,6 +183,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"oneBillClinicEntries":           {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
 	"oneBillRentEntries":             {narrow, "account leaseapp transaction", modeRelation},
 	"oneBillWellnessEntries":         {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
+	"opCatalog":                      {narrow, "meta permission role", modeRelation},
 	"pastDueAppointments":            {narrow, "appointment patient provider", modeRelation},
 	"pastDueBookings":                {narrow, "booking identity session", modeRelation},
 	"patientIdentityReadGrants":      {narrow, "identity patient", modeRelation},

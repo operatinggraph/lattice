@@ -149,7 +149,7 @@ func TestCorpusBranchDecomposition_DecomposingLensesAreTheKnownPopulation(t *tes
 		"the population of lenses whose sibling branches this engine evaluates apart has changed. "+
 			"A lens joining this list needs an equivalence proof before it ships; one leaving it means "+
 			"the decomposition stopped applying where the design says it does")
-	require.GreaterOrEqual(t, len(names), 17,
+	require.GreaterOrEqual(t, len(names), 18,
 		"the decomposing population collapsed — an empty enumeration would otherwise read as a table of unchanged rows")
 }
 

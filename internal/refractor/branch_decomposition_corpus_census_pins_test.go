@@ -1,7 +1,7 @@
 package refractor_test
 
 // corpusBranchVerdicts pins every executable cypher the installed corpus ships.
-// Seventeen lenses decompose; every other row records a cypher this mechanism
+// Eighteen lenses decompose; every other row records a cypher this mechanism
 // leaves on the product path, which is the half of the census an eye-reading
 // gets wrong.
 var corpusBranchVerdicts = map[string]branchVerdict{
@@ -90,6 +90,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"oneBillClinicEntries":              {"g0/o0!no-aggregating-item", 0, 0},
 	"oneBillRentEntries":                {"g0/o0!no-aggregating-item", 0, 0},
 	"oneBillWellnessEntries":            {"g0/o0!no-aggregating-item", 0, 0},
+	"opCatalog":                         {"g1/o1[perm,role]", 1, 1},
 	"orphanedTaskGrants":                {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"pastDueAppointments":               {"g2/o2!no-aggregating-item", 0, 2},
 	"pastDueBookings":                   {"g2/o2!no-aggregating-item", 0, 2},
@@ -125,7 +126,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 // now evaluates apart.
 //
 // Every name here is executed under BOTH configurations by a differential in
-// ruleengine/full — the fourteen hand-authored lenses by
+// ruleengine/full — the fifteen hand-authored lenses by
 // TestBranchDecomposition_ShippedLensesProjectIdenticalRows and its randomized
 // sibling, the three generated read-grant producers by
 // TestBranchDecomposition_GeneratedProducersProjectIdenticalRows. That coverage
@@ -149,6 +150,7 @@ var decomposingCorpusLenses = []string{
 	"leaseRentSettlement",
 	"myTasks",
 	"objectAttachments",
+	"opCatalog",
 	"renewalComplete",
 }
 

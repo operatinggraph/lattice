@@ -146,6 +146,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"oneBillClinicEntries":              {"p", 0},
 	"oneBillRentEntries":                {"p", 0},
 	"oneBillWellnessEntries":            {"p", 0},
+	"opCatalog":                         {"key(description dispatchAuthContext dispatchClass dispatchContextParams dispatchOptionalReads dispatchReads dispatchTargetField dispatchTargetType dispatchVisibleWhen fieldDescriptions group icon inputSchema opMetaKey operationType sensitive shortLabel submitLabel title tone)", 0},
 	"orphanedTaskGrants":                {"p p!opKey", 0},
 	"pastDueAppointments":               {"p", 0},
 	"pastDueBookings":                   {"p", 0},

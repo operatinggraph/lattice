@@ -22,6 +22,7 @@ package edgemanifest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -478,4 +479,353 @@ func TestEdgeEntityBookings_ProjectsItsSessionsInstructorKey(t *testing.T) {
 	row, ok := rows[f.ids["booking"]]
 	require.True(t, ok, "the booker's own booking must project")
 	require.Equal(t, f.key("instr"), row["instructorKey"])
+}
+
+// ---- opCatalog: the staff-plane op-descriptor read model ----
+//
+// opCatalog is this package's one PLAIN lens (staff-descriptor-rendering-
+// design.md §2.1): one open `op-catalog` row per op meta, keyed by
+// operationType, carrying the descriptor vocabulary a staff application
+// renders an operation's form from. Four of its properties are invisible from
+// reading the cypher, and each is pinned below with the MUTATION that breaks
+// it, executed rather than described:
+//
+//	the OPTIONAL role join    — required, a zero-permission op vanishes entirely
+//	the no-WITH rule          — with one, the tombstone Delete silently stops
+//	the operationType filter  — without it, every DDL/lens/pane meta leaks in
+//	the anchor-derived key    — an aspect-sourced key would never retract
+//
+// A mutation asserted only in prose is a mutation nobody ran; each test below
+// executes both the shipped spec and its mutant, and fails if the mutant
+// behaves the same.
+
+// The op metas below are seeded with `vtxData` (coverage_proof_test.go), which
+// carries their operationType on the vertex ROOT's `data` envelope — the shape
+// pkgmgr writes (internal/pkgmgr/build.go's
+// docVertex(opMetaClass, {"operationType": …})). That placement is what lets
+// opCatalog key on `op.data.operationType` and still resolve it read-free from
+// a tombstoned body.
+
+// emBody reads a seeded vertex's stored root body back — the same bytes a CDC
+// event carries as its Properties, and what the retraction path resolves the
+// row key from.
+func (f *emFixture) emBody(t *testing.T, name string) map[string]any {
+	t.Helper()
+	entry, err := f.coreKV.Get(context.Background(), f.key(name))
+	require.NoError(t, err)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &out))
+	return out
+}
+
+// tombstoneKeepingBody soft-deletes a vertex the way a real commit does: the
+// prior document is carried over WHOLE and only `isDeleted` flips
+// (internal/processor/step8_commit.go, buildMutationValue's tombstone arm).
+// The distinction IS the retraction mechanism — the delete key is resolved
+// read-free from the tombstoned body alone, so the sibling `tombstone` helper
+// above (which blanks `data`) would prove the opposite of what it looked like.
+// Returns the tombstoned body, which is what the CDC event delivers.
+func (f *emFixture) tombstoneKeepingBody(t *testing.T, name string) map[string]any {
+	t.Helper()
+	body := f.emBody(t, name)
+	body["isDeleted"] = true
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), f.key(name), raw)
+	require.NoError(t, err)
+	return body
+}
+
+// emOpCatalogWorld seeds the four descriptor shapes the catalog has to tell
+// apart, each with the exact aspect local names + field names pkgmgr's
+// build.go writes (presentation / inputSchema / fieldDescriptions / dispatch /
+// sensitive), plus the two install-time grant edges it joins over:
+//
+//	fullOp      "ResolveWorkOrder"  whole vocabulary, granted by TWO roles
+//	bareOp      "RecordLeaseDocOutcome"  operationType and nothing else (an engine leg)
+//	ungrantedOp "OpenRenewal"       described, but NO granting permission at all
+//	ddlMeta     —                   a :meta vertex that is not an op (a DDL meta)
+//
+// `permission forOperation meta` and `permission grantedBy role` are the two
+// links internal/pkgmgr/build.go mints at install; the role's name lives on a
+// `.canonicalName` aspect, never on the role root.
+func emOpCatalogWorld(t *testing.T) *emFixture {
+	f := newEmFixture(t)
+
+	f.vtxData(t, "fullOp", "meta", map[string]any{"operationType": "ResolveWorkOrder"})
+	f.aspect(t, "fullOp", "presentation", "presentation", map[string]any{
+		"title":       "Resolve a work order",
+		"shortLabel":  "Resolve",
+		"description": "Record what you did.",
+		"icon":        "wrench",
+		"tone":        "primary",
+		"submitLabel": "Mark resolved",
+		"group":       "Maintenance",
+	})
+	f.aspect(t, "fullOp", "inputSchema", "inputSchema", map[string]any{
+		"schema": `{"type":"object","properties":{"workOrderKey":{"type":"string"},"notes":{"type":"string"}},"required":["workOrderKey","notes"]}`,
+	})
+	f.aspect(t, "fullOp", "fieldDescriptions", "fieldDescriptions", map[string]any{
+		"fieldDescriptions": map[string]any{
+			"workOrderKey": "Filled by the client from the task, not typed.",
+			"notes":        "What you actually did.",
+		},
+	})
+	f.aspect(t, "fullOp", "dispatch", "dispatch", map[string]any{
+		"class":         "workOrder",
+		"authContext":   "task",
+		"targetField":   "workOrderKey",
+		"targetType":    "workorder",
+		"reads":         []any{"{payload.workOrderKey}"},
+		"optionalReads": []any{"{payload.workOrderKey}.resolution"},
+	})
+	f.aspect(t, "fullOp", "sensitive", "sensitive", map[string]any{"value": true})
+
+	f.vtxData(t, "bareOp", "meta", map[string]any{"operationType": "RecordLeaseDocOutcome"})
+
+	f.vtxData(t, "ungrantedOp", "meta", map[string]any{"operationType": "OpenRenewal"})
+	f.aspect(t, "ungrantedOp", "presentation", "presentation", map[string]any{"title": "Open a renewal"})
+
+	// A meta-vertex that is NOT an op: pkgmgr mints one of these for every DDL,
+	// lens, pane and package it installs, so they outnumber the op metas in a
+	// live corpus by a wide margin.
+	f.vtxData(t, "ddlMeta", "meta", map[string]any{"canonicalName": "workOrder"})
+
+	f.vtx(t, "backOfHouse", "role")
+	f.aspect(t, "backOfHouse", "canonicalName", "canonicalName", map[string]any{"value": "backOfHouse"})
+	f.vtx(t, "operator", "role")
+	f.aspect(t, "operator", "canonicalName", "canonicalName", map[string]any{"value": "operator"})
+
+	f.vtxData(t, "permResolveBoh", "permission", map[string]any{"operationType": "ResolveWorkOrder", "scope": "any"})
+	f.edge(t, "grantedBy", "permResolveBoh", "backOfHouse")
+	f.edge(t, "forOperation", "permResolveBoh", "fullOp")
+
+	f.vtxData(t, "permResolveOp", "permission", map[string]any{"operationType": "ResolveWorkOrder", "scope": "any"})
+	f.edge(t, "grantedBy", "permResolveOp", "operator")
+	f.edge(t, "forOperation", "permResolveOp", "fullOp")
+
+	f.vtxData(t, "permBare", "permission", map[string]any{"operationType": "RecordLeaseDocOutcome", "scope": "any"})
+	f.edge(t, "grantedBy", "permBare", "operator")
+	f.edge(t, "forOperation", "permBare", "bareOp")
+
+	return f
+}
+
+// emCatalogRows indexes an opCatalog projection by operationType, which is the
+// lens's own IntoKey — so a duplicate here is a real key collision, not a test
+// convenience, and is asserted as one.
+func emCatalogRows(t *testing.T, rows []ruleengine.ProjectionResult) map[string]map[string]any {
+	t.Helper()
+	out := map[string]map[string]any{}
+	for _, r := range rows {
+		op, _ := r.Values["operationType"].(string)
+		if op == "" {
+			continue
+		}
+		require.NotContainsf(t, out, op,
+			"two rows for operationType %q would race for one op-catalog key", op)
+		out[op] = r.Values
+	}
+	return out
+}
+
+// TestOpCatalog_FullVocabularyOpProjectsEveryColumn is the positive vector: a
+// staff renderer needs the WHOLE descriptor off one row — no column may be
+// quietly dropped in the copy from edgeCatalogTail, because a missing
+// dispatch column is a form that renders and then submits a malformed
+// envelope.
+func TestOpCatalog_FullVocabularyOpProjectsEveryColumn(t *testing.T) {
+	f := emOpCatalogWorld(t)
+	rows := emCatalogRows(t, f.project(t, opCatalogSpec, ""))
+
+	row, ok := rows["ResolveWorkOrder"]
+	require.True(t, ok, "the fully-described op must project; got %v", rows)
+
+	require.Equal(t, f.key("fullOp"), row["opMetaKey"])
+	require.Equal(t, "Resolve a work order", row["title"])
+	require.Equal(t, "Resolve", row["shortLabel"])
+	require.Equal(t, "Record what you did.", row["description"])
+	require.Equal(t, "wrench", row["icon"])
+	require.Equal(t, "primary", row["tone"])
+	require.Equal(t, "Mark resolved", row["submitLabel"])
+	require.Equal(t, "Maintenance", row["group"])
+
+	require.Contains(t, row["inputSchema"], `"workOrderKey"`,
+		"inputSchema rides as the declared JSON-schema STRING — the renderer parses it client-side")
+	fd, isMap := row["fieldDescriptions"].(map[string]any)
+	require.True(t, isMap, "fieldDescriptions must project as a map, got %T", row["fieldDescriptions"])
+	require.Equal(t, "What you actually did.", fd["notes"])
+
+	require.Equal(t, "workOrder", row["dispatchClass"],
+		"an envelope with no class is unconditionally rejected — this column is not decoration")
+	require.Equal(t, "task", row["dispatchAuthContext"])
+	require.Equal(t, "workOrderKey", row["dispatchTargetField"])
+	require.Equal(t, "workorder", row["dispatchTargetType"])
+	require.Equal(t, []any{"{payload.workOrderKey}"}, row["dispatchReads"])
+	require.Equal(t, []any{"{payload.workOrderKey}.resolution"}, row["dispatchOptionalReads"])
+	require.Equal(t, true, row["sensitive"],
+		"the masking rule the modal keys on — absent, a client renders an SSN in the clear")
+}
+
+// TestOpCatalog_BareOpMetaProjectsWithNullSchema pins the fail-closed
+// degradation: an op that adopted none of the vocabulary still gets a ROW,
+// with null descriptor columns. It must not be filtered out — a missing row is
+// indistinguishable from a lagging projection, whereas a row with no
+// inputSchema is a positive statement the renderer acts on by declining to
+// offer the op.
+func TestOpCatalog_BareOpMetaProjectsWithNullSchema(t *testing.T) {
+	f := emOpCatalogWorld(t)
+	rows := emCatalogRows(t, f.project(t, opCatalogSpec, ""))
+
+	row, ok := rows["RecordLeaseDocOutcome"]
+	require.True(t, ok, "a bare op meta must still project a row; got %v", rows)
+	require.Equal(t, f.key("bareOp"), row["opMetaKey"])
+	require.Nil(t, row["inputSchema"], "nothing to render from — the renderer's not-offerable signal")
+	require.Nil(t, row["title"])
+	require.Nil(t, row["dispatchClass"])
+	require.Nil(t, row["sensitive"])
+	require.Equal(t, []any{"operator"}, row["grantedToRoles"],
+		"a bare op still carries its grant topology — visibility is derivable even when the form is not")
+}
+
+// TestOpCatalog_RoleGrantedOpCarriesItsGrantingRoleNames pins the join a staff
+// client curates its offered set from: the ROLE NAMES, collapsed onto the op's
+// single row. Two granting roles must not fan the op into two rows — they
+// would race for one op-catalog key, and whichever landed last would erase the
+// other's roles.
+func TestOpCatalog_RoleGrantedOpCarriesItsGrantingRoleNames(t *testing.T) {
+	f := emOpCatalogWorld(t)
+	rows := emCatalogRows(t, f.project(t, opCatalogSpec, ""))
+
+	roles, isList := rows["ResolveWorkOrder"]["grantedToRoles"].([]any)
+	require.True(t, isList, "grantedToRoles must be a list, got %T", rows["ResolveWorkOrder"]["grantedToRoles"])
+	require.ElementsMatch(t, []any{"backOfHouse", "operator"}, roles,
+		"both granting roles collapse onto the one row")
+	for _, r := range roles {
+		require.NotContains(t, r, "vtx.role.",
+			"the names a client filters on — a vertex key here surfaces a NanoID where a role name belongs")
+	}
+}
+
+// TestOpCatalog_UngrantedOpStillProjects is the OPTIONAL MATCH's own vector,
+// with the mutation that motivates it. An op meta no permission grants — an
+// engine leg, or an op whose grant ships in a later package version — must
+// degrade to an empty grantedToRoles, never disappear: a catalog that silently
+// omits ops is worse than one that says "nobody holds this yet", because the
+// omission is unattributable at the client.
+func TestOpCatalog_UngrantedOpStillProjects(t *testing.T) {
+	f := emOpCatalogWorld(t)
+
+	rows := emCatalogRows(t, f.project(t, opCatalogSpec, ""))
+	row, ok := rows["OpenRenewal"]
+	require.True(t, ok, "an op with no granting permission must still project; got %v", rows)
+	require.Equal(t, "Open a renewal", row["title"])
+	require.Empty(t, row["grantedToRoles"],
+		"a bare-property collect over an unmatched OPTIONAL binding is empty, not [null]")
+
+	// MUTATION — make the role join required. The op vanishes outright.
+	required := strings.Replace(opCatalogSpec,
+		"OPTIONAL MATCH (op)<-[:forOperation]-", "MATCH (op)<-[:forOperation]-", 1)
+	require.NotEqual(t, opCatalogSpec, required, "the mutation must actually change the spec")
+	mutated := emCatalogRows(t, f.project(t, required, ""))
+	require.NotContains(t, mutated, "OpenRenewal",
+		"the mutant must LOSE the ungranted op — if it still projects, this test is not proving the OPTIONAL is load-bearing")
+	require.Contains(t, mutated, "ResolveWorkOrder",
+		"and must keep the granted one, so the mutation is narrowing the join rather than breaking the query")
+}
+
+// TestOpCatalog_NonOpMetasAreFilteredOut pins the `operationType <> null`
+// WHERE, with its mutation. `:meta` is also the label of every DDL, lens, pane
+// and package meta-vertex pkgmgr installs; without the filter they all land in
+// the catalog keyed on a NULL operationType, which is both a garbage row and a
+// key collision waiting to happen among themselves.
+func TestOpCatalog_NonOpMetasAreFilteredOut(t *testing.T) {
+	f := emOpCatalogWorld(t)
+
+	for _, r := range f.project(t, opCatalogSpec, "") {
+		require.NotEqual(t, f.key("ddlMeta"), r.Values["opMetaKey"],
+			"a DDL meta-vertex is not an operation and must not reach the catalog")
+	}
+
+	// MUTATION — drop the filter. The non-op meta leaks in.
+	unfiltered := strings.Replace(opCatalogSpec, "\nWHERE op.data.operationType <> null", "", 1)
+	require.NotEqual(t, opCatalogSpec, unfiltered, "the mutation must actually change the spec")
+	leaked := false
+	for _, r := range f.project(t, unfiltered, "") {
+		if r.Values["opMetaKey"] == f.key("ddlMeta") {
+			leaked = true
+			require.Nil(t, r.Values["operationType"],
+				"and it leaks keyed on a null operationType — the row the filter exists to prevent")
+		}
+	}
+	require.True(t, leaked,
+		"the mutant must LEAK the DDL meta — if it does not, the filter is not what is keeping the catalog clean")
+}
+
+// TestOpCatalog_TombstonedOpMetaRetractsItsRow is the retraction pin, and the
+// one the design's adversarial pass (B3) was filed against: the tempting
+// copy-paste source, edgeCatalogTail, OPENS with `WITH op, role`, and
+// anchorProjectionShape (internal/refractor/ruleengine/full/anchor_delete.go)
+// refuses any query carrying a WITH — wholesale, silently, before it ever
+// looks at the anchor. The lens would still parse, still project, still pass
+// every other test in this file, and simply never retract a retired op's row,
+// leaving the catalog describing an operation the Processor no longer accepts.
+//
+// Two halves, because the mechanism has two:
+//
+//   - the whole-corpus re-scan stops UPSERTING the tombstoned anchor (that
+//     alone leaves the prior row stale forever — it is why a Delete exists);
+//   - AnchorDeleteResult resolves the exact row key to DELETE, read-free from
+//     the tombstoned body, which is what the key being a ROOT field buys.
+func TestOpCatalog_TombstonedOpMetaRetractsItsRow(t *testing.T) {
+	f := emOpCatalogWorld(t)
+	require.Contains(t, emCatalogRows(t, f.project(t, opCatalogSpec, "")), "ResolveWorkOrder",
+		"precondition: the op is in the catalog before it is retired")
+
+	body := f.tombstoneKeepingBody(t, "fullOp")
+	require.NotContains(t, emCatalogRows(t, f.project(t, opCatalogSpec, "")), "ResolveWorkOrder",
+		"a tombstoned anchor must stop projecting — but that alone only makes the stale row invisible to the scan, never removed")
+
+	eng := full.New()
+	compiled, err := eng.Parse(opCatalogSpec)
+	require.NoError(t, err)
+	cr, isFull := compiled.(*full.CompiledRule)
+	require.True(t, isFull)
+	cr.KeyColumns = []string{"operationType"}
+	require.NoError(t, cr.ValidateKeyColumns(),
+		"the lens must activate against its declared IntoKey")
+
+	keys, ok := eng.AnchorDeleteResult(cr, f.key("fullOp"), "meta", body)
+	require.True(t, ok,
+		"the retired op's row key must resolve read-free from the tombstoned body — no WITH, a labeled :meta anchor, and a key column off the anchor's own ROOT data")
+	require.Equal(t, map[string]any{"operationType": "ResolveWorkOrder"}, keys,
+		"the Delete must name the row the upsert path wrote, or it retracts nothing (or worse, something else)")
+
+	// MUTATION 1 — the `WITH op, role` opener edgeCatalogTail carries. The
+	// query still parses and still projects; the retraction silently dies.
+	withOpener := strings.Replace(opCatalogSpec, "\nRETURN\n", "\nWITH op, role\nRETURN\n", 1)
+	require.NotEqual(t, opCatalogSpec, withOpener, "the mutation must actually change the spec")
+	withCompiled, err := eng.Parse(withOpener)
+	require.NoError(t, err, "the mutant must still PARSE — that is precisely what makes this trap silent")
+	withCR, isFull := withCompiled.(*full.CompiledRule)
+	require.True(t, isFull)
+	withCR.KeyColumns = []string{"operationType"}
+	_, withOK := eng.AnchorDeleteResult(withCR, f.key("fullOp"), "meta", body)
+	require.False(t, withOK,
+		"the mutant must LOSE the retraction — if a WITH-carrying spec still retracts, this test is not proving the no-WITH rule")
+
+	// MUTATION 2 — key the lens off an ASPECT field instead of the anchor's
+	// root data. It projects identically on a live vertex and resolves to
+	// nothing on a tombstoned one, because the aspect read is disabled on the
+	// read-free binding. Same silent outcome, a different way in.
+	aspectKeyed := strings.Replace(opCatalogSpec,
+		"op.data.operationType AS operationType", "op.dispatch.data.targetField AS operationType", 1)
+	require.NotEqual(t, opCatalogSpec, aspectKeyed, "the mutation must actually change the spec")
+	aspectCompiled, err := eng.Parse(aspectKeyed)
+	require.NoError(t, err)
+	aspectCR, isFull := aspectCompiled.(*full.CompiledRule)
+	require.True(t, isFull)
+	aspectCR.KeyColumns = []string{"operationType"}
+	_, aspectOK := eng.AnchorDeleteResult(aspectCR, f.key("fullOp"), "meta", body)
+	require.False(t, aspectOK,
+		"an aspect-sourced key column must LOSE the retraction — the anchor-derived key is a requirement, not an accident of which column read nicely")
 }

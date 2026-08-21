@@ -205,11 +205,13 @@ in the self voice. That settles the dual-grant question without inventing anythi
 the self path. Full-vocabulary idiom (Reads / OptionalReads / `:id` link fragments) is
 `lease-signing/permissions.go:209-252`; field semantics `internal/pkgmgr/definition.go:518-545`.
 
-**Bare metas stay bare.** `SignLease`, `RecordIdentityPII`, the service/doc instance+outcome ops and
-`SignRenewal` exist for orchestration `forOperation` resolution only (S1) — the doc block at
-`lease-signing/permissions.go:176-196` states why. Not upgraded. *(`RecordIdentityPII` left this list in
-Inc 5: identity-domain owns that op and now declares its descriptor, so lease-signing's bare shadow was
-deleted rather than kept bare — §8.)*
+**Bare metas stay bare.** The service/doc instance+outcome ops exist for orchestration `forOperation`
+resolution only (S1) — the doc block at `lease-signing/permissions.go` states why. Not upgraded.
+*(`RecordIdentityPII` left this list in Inc 5: identity-domain owns that op and now declares its
+descriptor, so lease-signing's bare shadow was deleted rather than kept bare — §8. `SignRenewal` left it
+in the staff-descriptor-rendering fire's Inc 0 descriptor sweep: its tenant leg is a real loftspace-app
+screen, which is §15's app-seam rule. `SignLease` left this list in Inc 1 of the staff-descriptor-rendering
+fire: lease-signing now declares its descriptor.)*
 
 **Increments.** Inc 1 — the eight descriptors above + delete the 7 closed `s1Debt` entries + manifest bumps.
 Inc 2 — S6 `lens_cypher_test.go` for `cafe-ledger` + `loftspace-ledger`. Inc 3 — S6 structure pins for all

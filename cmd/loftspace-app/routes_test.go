@@ -33,6 +33,7 @@ func TestRegisterRoutes_EveryAPIRouteIsSessionGated(t *testing.T) {
 	mux, _ := realMux(t)
 	gated := []string{
 		"/api/listings",
+		"/api/op-catalog",
 		"/api/staff/identities",
 		"/api/applications",
 		"/api/credentials",

@@ -21,8 +21,9 @@ orchestration-base's tasks, service-domain's templates/instances, service-locati
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
 archetypes — into the reserved `manifest.` key namespace, delivered per-actor over the shared
 `lattice.sync.user.<actor>` SYNC transport (the `nats-subject` Personal Lens adapter, `edge-manifest
-Fire 0`). It also declares **three generated read-grant producer lenses** (one per `ReadGrantDomain`) and
-one **server pane** (a Protected/RLS descriptor — a different mechanism, see "Server panes" below). It
+Fire 0`). It also declares **three generated read-grant producer lenses** (one per `ReadGrantDomain`), one
+**plain `nats-kv` lens** (`opCatalog`, the staff-plane op-descriptor read model — see below), and one
+**server pane** (a Protected/RLS descriptor — a different mechanism, see "Server panes" below). It
 declares no DDLs and no permissions: every row is a read-side re-projection of state another package's DDL
 already authored.
 
@@ -93,6 +94,35 @@ them Refractor's D1 `readableAnchors` gate silently drops every row the correspo
 | `edgeManifestStaffReadGrants` | `cap-read.edgeManifestStaff.<actor>` | every staff-lens anchor a role the actor holds reaches |
 | `edgeManifestProviderReadGrants` | `cap-read.edgeManifestProvider.<actor>` | every provider-hat-lens anchor the actor's own provider/instructor/serviceprovider binding reaches |
 
+**The staff-plane op catalog** (`opCatalog`, staff-descriptor-rendering-design.md §2.1) is this package's
+one PLAIN lens — an ordinary `nats-kv` read model rather than a Personal Lens, and the only member of the
+lens slice that is neither per-actor nor a cap-read producer:
+
+| Lens | Key | Bucket | Projects |
+|---|---|---|---|
+| `opCatalog` | the op's `operationType` (`IntoKey`) | `op-catalog` (`OpCatalogBucket`, auto-created on lens load) | one row per op meta: the whole descriptor vocabulary `edgeCatalog` reads (`presentation.*`, `inputSchema`, `fieldDescriptions`, `dispatch.*`, `sensitive`) plus `grantedToRoles`, the canonical names of every role whose permission `forOperation`s it |
+
+It exists because a **staff application is not an edge node**: it has no per-actor SYNC transport and
+cannot read Core KV (P5), so `manifest.op.*` is unreachable to it and the op descriptors its forms need
+had nowhere to come from. `cmd/loftspace-app` reads this bucket through a thin `/api/op-catalog` proxy and
+renders its task-completion modal from the row — a descriptor edit plus `refresh-loftspace` changes the
+form with no app rebuild. Rows carry no person data by construction (an op meta is a package-declared
+descriptor), so the bucket is open and the lens declares no read-path posture.
+
+Three properties of its cypher are load-bearing and each is mutation-tested in
+`packages/edge-manifest/lens_cypher_test.go`. It carries **no `WITH` clause** — `anchorProjectionShape`
+(`internal/refractor/ruleengine/full/anchor_delete.go`) refuses any query with one, which would silently
+disable the anchor-tombstone Delete and leave a retired op's row describing an operation the Processor no
+longer accepts (`edgeCatalogTail`, the natural copy-paste source, opens with `WITH op, role`). Its key
+column is `op.data.operationType`, a **ROOT vertex field**, so it resolves read-free from the tombstoned
+body — an aspect-sourced key would project fine and never retract. And the role join is an **`OPTIONAL
+MATCH`**: required, an op no permission grants yields zero rows and vanishes from the catalog instead of
+degrading to an empty `grantedToRoles`. A bare op meta still projects, with every descriptor column null —
+the consuming renderer reads "no `inputSchema`" as *not renderable* and declines to offer the op, which a
+missing row could not say. Because the lens references the `permission`/`role` labels, a permission or role
+event reaches it through the unseeded whole-corpus rescan rather than an anchored seed; that is
+install-frequency work, not steady-state.
+
 Three domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
 a reachability path not every actor has (staff role-standing grants, provider-hat bindings) lives in its own
 slice — the §6.14 blast-radius unit, so a path most actors never take neither grows nor invalidates the
@@ -151,7 +181,8 @@ is expected, not a bug — the renderer obligation is the same one `my-tasks.*` 
 
 **Fire 0 + Fire 1 + Fire 2 + the `facet-entity-browse-design.md` entity lenses + the
 `facet-staff-worlds-design.md` staff lenses + the `persona-worlds-design.md` Fire W0 provider-hat lenses +
-the `facet-discovery-restoration-design.md` `edgeStaffPanes`/`Panes()` descriptor lens shipped.** Structural
+the `facet-discovery-restoration-design.md` `edgeStaffPanes`/`Panes()` descriptor lens +
+`staff-descriptor-rendering-design.md` Inc 1's `opCatalog` shipped.** Structural
 install verified (`make verify-package-edge-manifest`) and every lens's cypher parses under the real
 `ruleengine/full` engine (`packages/edge-manifest/package_test.go`). The live projection e2e — a seeded
 tenant actually receiving every row kind over `lattice.sync.user.<actor>` and completing the full write

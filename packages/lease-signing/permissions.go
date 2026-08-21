@@ -234,11 +234,10 @@ func Permissions() []pkgmgr.PermissionSpec {
 // than the owning DDL's merged InputSchema: a descriptor describes ONE op's
 // fields, not the whole vertex type's. The remaining bare `{OperationType}`
 // entries are engine/adapter legs — externalTask instanceOp/replyOp/dispatchOp
-// — that exist only so forOperation resolves. SignLease is the one assignTask
-// target still undescribed: loftspace-app also completes it (COMPLETIONS.
-// SignLease), but every reference is an unquoted JS object key, so the
-// app-seam gate (lint-app-op-descriptors) cannot see it and it carries no
-// appOpDebt entry — out of this fire's scope, not a claim that no form exists.
+// — that exist only so forOperation resolves. SignLease is NOT among them: it
+// is an assignTask target a real person completes from loftspace-app's task
+// modal, so it carries a full (single-confirm) descriptor below, and the
+// modal renders from that descriptor rather than from a hand-built form.
 //
 // Dispatch.AuthContext names the SELF path wherever an op carries both a
 // standing staff grant and a consumer scope=self grant (clinic-domain's
@@ -483,9 +482,24 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				SubmitLabel: "Set terms",
 				Group:       "Renewals",
 			},
+			// rentAmount carries a machine-readable `minimum`, not just the prose
+			// "must be greater than zero": the script's own guard
+			// (renewal_scripts.go — `InvalidArgument: rentAmount: required
+			// positive number`) is the enforcer, and a descriptor-driven client
+			// can only pre-empt it inline if the bound is a field a renderer
+			// reads. Both shipped renderers do (cmd/facet/web/app.js emits
+			// min=/max= from minimum/maximum; so does loftspace's catalog form),
+			// so declaring it here is what keeps a landlord from learning that 0
+			// is invalid only from a server round-trip.
+			//
+			// termMonths deliberately declares NO minimum: its real floor is the
+			// package's renewal window, a policy value baked into the script at
+			// init, so any constant here would be a magic number that agrees
+			// with the guard only by luck — the class of drift this vocabulary
+			// exists to end.
 			InputSchema: `{"type":"object","properties":` +
 				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
-				`"rentAmount":{"type":"number","title":"Monthly rent","description":"Monthly rent for the renewed term. Must be greater than zero."},` +
+				`"rentAmount":{"type":"number","minimum":1,"title":"Monthly rent","description":"Monthly rent for the renewed term. Must be greater than zero."},` +
 				`"termMonths":{"type":"integer","title":"Term (months)","description":"Renewed lease term in whole months. Must be at least the package's renewal window."}},` +
 				`"required":["renewalKey","rentAmount","termMonths"]}`,
 			FieldDescriptions: map[string]string{
@@ -645,10 +659,53 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
+		// SignLease is the applicant's own leg of the convergence: the
+		// assignTask target that closes missing_signature (targets.go). It is a
+		// SINGLE CONFIRM — leaseAppKey is the task's own subject, so the form
+		// has no field to render at all and the whole descriptor exists to say
+		// "press this button, and here is the envelope it sends".
+		//
+		// AuthContext is "task", and that is the only value that WORKS for the
+		// person who actually signs: the grant matrix above gives SignLease to
+		// `operator` alone, so an applicant holds no standing grant and reaches
+		// the op solely through the §10.7 ephemeral task grant, which step 3
+		// matches on {task, target}. A "standing" descriptor would send no
+		// authContext and be refused every time — the RecordIdentityPII /
+		// SignRenewal precedent, for the same reason in all three cases.
+		//
+		// Reads is the single subject key the script hydrates to prove the
+		// application is alive. The `.signature` aspect is deliberately NOT
+		// declared: it is absent on every first sign (its absence IS the
+		// condition that permits the write), so it could only ever be an
+		// absence-tolerant read, and the CreateOnly guard on the aspect already
+		// rejects a second sign without it.
+		{
+			OperationType: "SignLease",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Sign your lease",
+				ShortLabel:  "Sign lease",
+				Description: "Sign the lease for the application you were approved on. Once only — a signed application cannot be re-signed.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Sign lease",
+				Group:       "My applications",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application being signed — the task's own subject."}},` +
+				`"required":["leaseAppKey"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application being signed — filled from the task's own scopedTo subject, never typed. There is nothing else to fill in: signing IS the whole operation.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "task",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads:       []string{"{payload.leaseAppKey}"},
+			},
+		},
 		// Engine legs — externalTask instanceOp/replyOp/dispatchOp — that
-		// exist only so forOperation resolves. SignLease is the one
-		// assignTask target left bare here (see doc comment above).
-		{OperationType: "SignLease"},
+		// exist only so forOperation resolves.
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},

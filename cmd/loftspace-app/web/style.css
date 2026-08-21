@@ -277,6 +277,10 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .field .opt { color: var(--text-dim); font-weight: 400; }
 .field .readonly { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
 .field input { width: 100%; }
+/* The owning package's own field help, projected onto the form (the op-catalog
+   row's fieldDescriptions). Muted, not warning-coloured — it explains; .hint
+   below is the yellow one, for something that needs noticing. */
+.field .field-help { font-size: 12px; color: var(--text-dim); }
 .hint { margin: 2px 0 0; font-size: 12px; color: var(--yellow); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 

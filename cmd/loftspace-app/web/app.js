@@ -16,6 +16,11 @@ const state = {
   applicant: null, identityId: null, anchors: [], canSignOut: false,
   current: null, currentTask: null, view: "browse", highlight: null,
   mode: "applicant",
+  // opCatalog maps operationType → the op's own descriptor, read from the
+  // edge-manifest `opCatalog` lens (GET /api/op-catalog). It is what the
+  // completion modal renders from; empty until loadOpCatalog resolves, and an
+  // op missing from it is simply not offered.
+  opCatalog: {},
   docScope: null,
   // sessionUploads maps an oid uploaded THIS session to the link it was created
   // with, so the doc can be detached. A doc listed from a prior session is not
@@ -75,45 +80,32 @@ function photoSrc(oid) {
   return "/api/objects/" + encodeURIComponent(oid);
 }
 
-// COMPLETIONS maps a userTask op to how the applicant completes it in-app. target
-// is the op's primary key field, filled from the task's scopedTo — for a userTask
-// the §10.5 invariant holds (assignee == scopedTo == the subject), so scopedTo is
-// the entity the op acts on. class is the op's DDL-inference class; reads carry the
-// scopedTo key. An op not listed here can't be completed in-app yet (the generic
-// DDL-self-describing form needs an op-catalog read model — a Core-KV op-meta scan
-// would violate P5 in a vertical app); its card links to Loupe instead.
+// COMPLETIONS is the RESIDUE map: the two renewal completions this app still
+// hand-builds. Both splice fields of the renewal ROW they were opened from
+// (leaseApp, tenant) into the payload AND into composite link-key reads — the
+// `{context.<field>}` template form the descriptor vocabulary does not carry
+// yet (staff-descriptor-rendering-design.md §2.2), so neither is expressible
+// from a descriptor alone. Every other completion is rendered from the op's own
+// descriptor, projected into the `op-catalog` read model and fetched at
+// /api/op-catalog; descriptorFor below is the single lookup, and it checks this
+// map first.
+//
+// target is the op's primary key field, filled from the task's scopedTo — for a
+// userTask the §10.5 invariant holds (assignee == scopedTo == the subject), so
+// scopedTo is the entity the op acts on. class is the op's DDL-inference class;
+// reads carry the scopedTo key.
+//
+// The two renewal ops here (design loftspace-lease-renewal-goal-authored-target-
+// design.md §4.4/§4.5, R3) need leaseApp + applicant, which assignTask never
+// populates on the task itself (it only ever carries assignee/scopedTo/
+// forOperation, §10.5) — extraFromRenewal sources them from the matching
+// renewalsRead row once submitComplete loads it (see below). extraReads(target,
+// row) returns the op's (a)/(d) read-posture declarations beyond [target]
+// (script-read-posture-design.md §13): the renews/applicationFor validation
+// links are (a) required reads (derived from target's + row.leaseApp's/
+// row.tenant's own NanoIDs, mirroring guardLinkKey-style key reconstruction);
+// .terms/.applicationSignals/.guarantorVerification/.tenancy per the table below.
 const COMPLETIONS = {
-  SignLease: {
-    title: "Sign your lease",
-    klass: "leaseapp",
-    targetField: "leaseAppKey",
-    fields: [],
-    submitLabel: "Sign lease",
-  },
-  RecordIdentityPII: {
-    title: "Provide your identity details",
-    klass: "identity",
-    targetField: "identityKey",
-    sensitive: true,
-    fields: [
-      { name: "ssn", label: "Social Security Number", placeholder: "123-45-6789", required: true },
-      { name: "dob", label: "Date of birth", type: "date", required: true },
-    ],
-    submitLabel: "Submit details",
-  },
-  // The four renewal ops (design loftspace-lease-renewal-goal-authored-target-
-  // design.md §4.4/§4.5, R3). SignRenewal/VerifyGuarantor also need leaseApp +
-  // applicant, which assignTask never populates on the task itself (it only
-  // ever carries assignee/scopedTo/forOperation, §10.5) — extraFromRenewal
-  // sources them from the matching renewalsRead row once submitComplete loads
-  // it (see below). SetRenewalTerms/CancelRenewal need only renewalKey
-  // (=target), which the generic targetField plumbing already supplies.
-  // extraReads(target, row) returns the op's (a)/(d) read-posture declarations
-  // beyond [target] (script-read-posture-design.md §13): the renews/
-  // applicationFor validation links are (a) required reads (derived from
-  // target's + row.leaseApp's/row.tenant's own NanoIDs, mirroring
-  // guardLinkKey-style key reconstruction); .terms/.applicationSignals/
-  // .guarantorVerification/.renewalSignature/.tenancy per the table below.
   SignRenewal: {
     title: "Sign your lease renewal",
     klass: "renewal",
@@ -143,44 +135,6 @@ const COMPLETIONS = {
       optionalReads: [row.leaseApp + ".applicationSignals"],
     }),
   },
-  SetRenewalTerms: {
-    landlordLeg: true,
-    title: "Set renewal terms",
-    klass: "renewal",
-    targetField: "renewalKey",
-    fields: [
-      { name: "rentAmount", label: "Monthly rent", type: "number", min: "1", step: "1", placeholder: "2500", required: true, positive: true },
-      { name: "termMonths", label: "Lease term, months", type: "number", min: "1", step: "1", placeholder: "12", required: true, positive: true },
-    ],
-    submitLabel: "Set terms",
-    extraReads: (target) => ({ optionalReads: [target + ".renewalSignature"] }),
-  },
-  CancelRenewal: {
-    landlordLeg: true,
-    title: "Decline this renewal",
-    klass: "renewal",
-    targetField: "renewalKey",
-    fields: [{ name: "reason", label: "Reason", placeholder: "Selling the property.", required: false }],
-    submitLabel: "Decline renewal",
-    extraReads: (target) => ({ optionalReads: [target + ".renewalSignature"] }),
-  },
-  // ResolveWorkOrder (maintenance-domain) is the op an FR28 role-queued task
-  // grants its claimant — the claimant holds no STANDING ResolveWorkOrder
-  // grant (permissions.go: "operator ONLY... the whole point rather than an
-  // oversight"), so taskLeg submits it under the task's own ephemeral grant
-  // (authContext.task) rather than the standing-grant path every other entry
-  // here uses. The Processor's §10.6 auto-complete then closes the task on
-  // the same commit — no separate CompleteTask call (the claimant holds no
-  // standing grant for that either).
-  ResolveWorkOrder: {
-    title: "Resolve work order",
-    klass: "workOrder",
-    targetField: "workOrderKey",
-    taskLeg: true,
-    fields: [{ name: "notes", label: "What did you do?", required: true }],
-    submitLabel: "Mark resolved",
-    extraReads: (target) => ({ optionalReads: [target + ".resolution"] }),
-  },
 };
 
 // renewsLinkKey / applicationForLinkKey reconstruct the renewal-cycle
@@ -191,6 +145,206 @@ function renewsLinkKey(renewalKey, leaseAppKey) {
 }
 function applicationForLinkKey(leaseAppKey, applicantKey) {
   return "lnk.leaseapp." + shortKey(leaseAppKey) + ".applicationFor.identity." + shortKey(applicantKey);
+}
+
+// ---- The op catalog: completions rendered from descriptors, not from code ----
+//
+// GET /api/op-catalog serves the edge-manifest `opCatalog` lens read model — one
+// row per op meta, carrying the presentation / inputSchema / fieldDescriptions /
+// dispatch / sensitive vocabulary the OWNING PACKAGE declared. Everything the
+// completion modal used to hardcode per op (the title, the field list, the
+// class, the target field, the declared reads, the auth path) is read off that
+// row instead, so a descriptor edit + refresh-loftspace changes the form with no
+// app rebuild.
+//
+// Cached for the page's lifetime: a descriptor changes only when a package is
+// installed. A FAILED load is not cached — opCatalogPromise is cleared — so a
+// transient outage retries on the next tasks/renewals refresh instead of
+// poisoning the page for its whole session.
+let opCatalogPromise = null;
+
+async function loadOpCatalog() {
+  if (!opCatalogPromise) {
+    opCatalogPromise = appGet("/api/op-catalog").then(
+      (data) => (data && data.catalog) || {},
+      (e) => {
+        opCatalogPromise = null;
+        throw e;
+      },
+    );
+  }
+  state.opCatalog = await opCatalogPromise;
+  return state.opCatalog;
+}
+
+// loadOpCatalogQuiet keeps a catalog outage from taking a whole panel down: the
+// tasks and renewals lists still render, and an op whose descriptor did not
+// arrive is simply NOT OFFERED — the same fail-closed answer as an op that
+// carries no descriptor at all. appGet has already handed a session lapse to
+// the login page by the time this sees the error.
+async function loadOpCatalogQuiet() {
+  try {
+    await loadOpCatalog();
+  } catch (_) {
+    /* not offered, rather than offered and broken */
+  }
+}
+
+// descriptorFor resolves HOW a completion is built: the residue map first (the
+// two ops whose reads need renewal-row context the vocabulary cannot express),
+// then the op's own catalog descriptor. Null means "not completable in this
+// app" — the card offers Loupe instead — and that is the right answer for an op
+// the catalog has not projected, projected bare, or projected without the
+// dispatch fields an envelope cannot be assembled without.
+function descriptorFor(operationName) {
+  if (COMPLETIONS[operationName]) return COMPLETIONS[operationName];
+  return catalogDescriptor((state.opCatalog || {})[operationName]);
+}
+
+// catalogDescriptor turns one catalog row into the same internal shape
+// COMPLETIONS entries carry, so openComplete/submitComplete stay one code path
+// over both sources.
+//
+// It refuses (returns null) rather than half-rendering: no inputSchema means
+// there is nothing to render, and no dispatch class / target field means the
+// envelope could not be assembled even if a form appeared. An envelope without
+// `class` is rejected outright by the Processor, so offering the form would
+// promise something that cannot be kept.
+//
+// AuthContext is read straight off the descriptor and decides which leg the
+// submit takes — the value is the package's own statement of which grant path
+// the performer walks, and getting it wrong is a refusal every time:
+//
+//	"task"     the performer holds no standing grant and is authorized by the
+//	           task's own §10.7 ephemeral grant, so the envelope carries
+//	           {task, target} and the Processor's §10.6 auto-complete closes
+//	           the task on the same commit (no separate CompleteTask).
+//	"self"     a scope=self grant checked as authContext.target == actor —
+//	           this app's landlord hat, so it rides landlordSubmit().
+//	"standing" a scope=any role grant with no relationship to any target: no
+//	           authContext object at all.
+//
+// A declared `visibleWhen` is refused outright — see below.
+function catalogDescriptor(row) {
+  if (!row || !row.inputSchema || !row.dispatch) return null;
+  const d = row.dispatch;
+  if (!d.class || !d.targetField) return null;
+  // visibleWhen gates whether the op is OFFERED at all, against a column of
+  // the resolved target row ("offer only when row[field] equals equals" —
+  // pkgmgr.OpDispatchSpec.VisibleWhen). This increment ships no evaluator for
+  // it, and the honest answer to a condition you cannot evaluate is the
+  // descriptor's own rule for a client that cannot decide it: treat the
+  // condition as UNMET. No state, no offer.
+  //
+  // Ignoring the field instead would fail OPEN, silently, on the day a package
+  // author first adds one — offering a state-machine pair's wrong half, which
+  // is the exact thing the field exists to prevent. The op stays reachable in
+  // Loupe meanwhile, which is what the card already says.
+  if (d.visibleWhen) return null;
+  let schema;
+  try {
+    schema = JSON.parse(row.inputSchema);
+  } catch (_) {
+    return null;
+  }
+  if (!schema || typeof schema !== "object") return null;
+  const presentation = row.presentation || {};
+  return {
+    fromCatalog: true,
+    title: presentation.title || row.operationType,
+    submitLabel: presentation.submitLabel || "Complete",
+    klass: d.class,
+    targetField: d.targetField,
+    targetType: d.targetType || "",
+    sensitive: !!row.sensitive,
+    taskLeg: d.authContext === "task",
+    landlordLeg: d.authContext === "self",
+    fields: schemaFields(schema, d.targetField, row.fieldDescriptions || {}),
+    // The declared read posture (Contract #2 §2.5), templated. Substituted at
+    // submit time, once the payload exists.
+    readTemplates: d.reads || [],
+    optionalReadTemplates: d.optionalReads || [],
+  };
+}
+
+// schemaFields turns an InputSchema's properties into the modal's field list,
+// in declaration order. The TARGET FIELD is dropped: it is filled from the
+// task's own scopedTo, never typed, and rendering it would invite someone to
+// hand-edit a vtx key that is already decided.
+//
+// Bounds come from the schema and ONLY from the schema (minimum / maximum /
+// integer step). The app does not invent them: a hardcoded floor here is a
+// magic number that can only agree with the script's real guard by luck, which
+// is the class of drift the descriptor exists to end. A field whose bound
+// matters and is unstated is a descriptor to fix, not a constant to add here.
+function schemaFields(schema, targetField, fieldHelp) {
+  const properties = schema.properties || {};
+  const required = new Set(schema.required || []);
+  const fields = [];
+  for (const name of Object.keys(properties)) {
+    if (name === targetField) continue;
+    const p = properties[name] || {};
+    const f = {
+      name,
+      label: p.title || prettyFieldName(name),
+      required: required.has(name),
+      help: fieldHelp[name] || p.description || "",
+      type: "text",
+    };
+    if (p.type === "number" || p.type === "integer") {
+      f.type = "number";
+      if (p.type === "integer") f.step = "1";
+      if (p.minimum !== undefined) f.min = String(p.minimum);
+      if (p.maximum !== undefined) f.max = String(p.maximum);
+    } else if (p.type === "string" && p.format === "date") {
+      f.type = "date";
+    } else if (p.type === "string" && p.format === "date-time") {
+      f.type = "datetime-local";
+    }
+    fields.push(f);
+  }
+  return fields;
+}
+
+// prettyFieldName is the label fallback for a schema property that declares no
+// title: "leaseTermMonths" → "Lease term months".
+function prettyFieldName(name) {
+  const spaced = String(name).replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+// substituteReads resolves a descriptor's declared read templates against the
+// assembled payload and the signed-in identity. Two forms carry the five ops
+// this app renders from the catalog: `{payload.<field>}` and `{me}` / `{actor}`,
+// each optionally suffixed `:id` for the bare NanoID a 6-segment link key needs.
+//
+// WHOLE-KEY RULE: a template with any segment that does not resolve is DROPPED,
+// never sent half-substituted — a malformed read key is a hard Processor
+// rejection (HydrationMiss) on a key that describes nothing, which reads to a
+// person as "the op is broken" rather than "that field was empty".
+function substituteReads(templates, payload) {
+  const out = [];
+  for (const template of templates || []) {
+    if (typeof template !== "string") continue;
+    let whole = true;
+    const key = template.replace(/\{([^}]+)\}/g, (_m, expr) => {
+      const bare = expr.endsWith(":id");
+      const path = bare ? expr.slice(0, -3) : expr;
+      let value = null;
+      if (path.startsWith("payload.")) {
+        value = payload[path.slice("payload.".length)];
+      } else if (path === "me" || path === "actor") {
+        value = state.applicant;
+      }
+      if (typeof value !== "string" || value === "") {
+        whole = false;
+        return "";
+      }
+      return bare ? shortKey(value) : value;
+    });
+    if (whole && key) out.push(key);
+  }
+  return out;
 }
 
 // manageLinkKey reconstructs the signed-in landlord's management link to a unit
@@ -1911,6 +2065,9 @@ async function loadTasks() {
     return;
   }
   $("#tasks-summary").textContent = "loading…";
+  // The catalog decides which tasks offer a Complete button at all, so it has
+  // to be in hand before the cards render — not fetched per card.
+  await loadOpCatalogQuiet();
   try {
     const data = await appGet("/api/tasks");
     state.tasks = data.tasks || [];
@@ -1967,14 +2124,14 @@ function renderTaskCard(t) {
   const btn = document.createElement("button");
   if (t.queuedRole) {
     // Role-queued, not yet assigned (lenses.go:242-267's qtask branch) — the
-    // FIRST step is ClaimTask, not completion; COMPLETIONS never applies
-    // until the claim lands and a later /api/tasks load shows it assigned.
+    // FIRST step is ClaimTask, not completion; no descriptor applies until the
+    // claim lands and a later /api/tasks load shows it assigned.
     badge.textContent = "queued";
     btn.textContent = "Claim";
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
     badge.textContent = "open";
-    const canComplete = !!COMPLETIONS[t.operationName];
+    const canComplete = !!descriptorFor(t.operationName);
     btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
     btn.disabled = !canComplete;
     btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
@@ -2071,13 +2228,27 @@ async function reportIssue(ev) {
 
 // ---- Complete task modal ----
 
+// openComplete renders the modal from a descriptor — the residue map's, or the
+// op's own catalog row (descriptorFor). One code path over both: everything the
+// form needs is normalized to the same shape before it gets here.
+//
+// TARGET RESOLUTION IS FAIL-CLOSED (staff-descriptor-rendering-design.md §2.2,
+// normative): the target is the TASK's own scopedTo and nothing else. It is
+// never substituted with the signed-in identity when it does not resolve — that
+// exact fallback is the filed defect (vertical-package-standard.md §8) that
+// wrote a walk-in's SSN onto the operator's own vertex, create-only. No target,
+// no form.
 function openComplete(task) {
-  const desc = COMPLETIONS[task.operationName];
+  const desc = descriptorFor(task.operationName);
   if (!desc) return;
+  if (!(task.scopedTo || "")) {
+    toast("This task has no target to act on.", "err");
+    return;
+  }
   state.currentTask = task;
   $("#complete-title").textContent = desc.title;
   $("#complete-desc").textContent = task.operationDescription || "";
-  $("#tc-target").textContent = task.scopedTo || task.taskKey;
+  $("#tc-target").textContent = task.scopedTo;
   $("#tc-sensitive").hidden = !desc.sensitive;
   $("#complete-submit").textContent = desc.submitLabel || "Complete";
 
@@ -2091,11 +2262,24 @@ function openComplete(task) {
     label.textContent = f.label + (f.required ? "" : " (optional)");
     const input = document.createElement("input");
     input.id = "tc-" + f.name;
-    input.type = f.type || "text";
+    // An op-level sensitive flag masks entry — but never a DATE, which is
+    // unenterable masked and is not a secret from the person typing their own
+    // birthday (the identity-domain descriptor's own note on `dob`).
+    input.type = desc.sensitive && f.type === "text" ? "password" : f.type || "text";
+    if (input.type === "password") input.autocomplete = "off";
     if (f.placeholder) input.placeholder = f.placeholder;
     if (f.min !== undefined) input.min = f.min;
+    if (f.max !== undefined) input.max = f.max;
     if (f.step !== undefined) input.step = f.step;
     wrap.append(label, input);
+    // The owning package's own field help, rendered rather than paraphrased —
+    // this is what a descriptor buys over a hardcoded label.
+    if (f.help) {
+      const help = document.createElement("div");
+      help.className = "field-help";
+      help.textContent = f.help;
+      wrap.append(help);
+    }
     host.append(wrap);
   }
   $("#complete-overlay").hidden = false;
@@ -2112,15 +2296,20 @@ async function submitComplete(ev) {
   ev.preventDefault();
   const task = state.currentTask;
   if (!task) return;
-  const desc = COMPLETIONS[task.operationName];
+  const desc = descriptorFor(task.operationName);
   if (!desc) return;
 
+  // The target is the task's OWN subject — never the signed-in identity, and
+  // never a guess (see openComplete's fail-closed note).
   const target = task.scopedTo || "";
   if (!target) {
     toast("This task has no target to act on.", "err");
     return;
   }
   const payload = {};
+  // Written FIRST, before any read template is substituted: a declared read of
+  // the form `{payload.<targetField>}.suffix` can only resolve once the target
+  // is in the payload it names.
   payload[desc.targetField] = target;
   for (const f of desc.fields) {
     const v = ($("#tc-" + f.name).value || "").trim();
@@ -2134,12 +2323,13 @@ async function submitComplete(ev) {
     if (f.type === "number") {
       const n = Number(v);
       // Number("") is 0, not NaN, but v is already non-empty here — a
-      // malformed numeric string (or a positive-required field like
-      // rentAmount typed as "0") must surface as a client-side error, not
-      // silently serialize as JSON null (JSON.stringify(NaN) === "null") or
-      // ride to the op only to bounce off its own InvalidArgument guard.
-      if (Number.isNaN(n) || (f.positive && n <= 0)) {
-        toast(f.label + " must be a valid" + (f.positive ? ", positive" : "") + " number.", "err");
+      // malformed numeric string must surface as a client-side error rather
+      // than silently serializing as JSON null (JSON.stringify(NaN) ===
+      // "null"). The BOUNDS are the schema's (min/max on the input), never an
+      // invented floor: a constant here could only agree with the script's
+      // real guard by luck.
+      if (Number.isNaN(n)) {
+        toast(f.label + " must be a valid number.", "err");
         return;
       }
       payload[f.name] = n;
@@ -2175,6 +2365,28 @@ async function submitComplete(ev) {
     const extra = desc.extraReads(target, renewalRow);
     if (extra.reads) reads.push(...extra.reads);
     optionalReads = extra.optionalReads;
+  } else if (desc.fromCatalog) {
+    // The descriptor's OWN declared read posture, substituted against the
+    // payload just assembled. `reads` already holds the target key; the
+    // descriptor's `{payload.<targetField>}` resolves to the same key, so the
+    // two are unioned rather than concatenated — a duplicate read key is a
+    // hydration request repeated, not a second fact.
+    for (const key of substituteReads(desc.readTemplates, payload)) {
+      if (!reads.includes(key)) reads.push(key);
+    }
+    const optional = substituteReads(desc.optionalReadTemplates, payload);
+    if (optional.length > 0) optionalReads = optional;
+  }
+
+  // The auth path the descriptor names (catalogDescriptor's own note): a
+  // task-voice op is authorized by the task's §10.7 ephemeral grant and needs
+  // the task key, a self-voice op rides this app's landlord hat, and a standing
+  // op sends no authContext at all. A task-voice op reached WITHOUT a real task
+  // (the synthetic renewal-card path) has no grant to submit under, so it is
+  // refused here rather than sent with a null task the Gateway cannot match.
+  if (desc.taskLeg && !task.taskKey) {
+    toast("This action can only be taken from its task.", "err");
+    return;
   }
 
   const submit = $("#complete-submit");
@@ -2289,6 +2501,9 @@ async function loadRenewals() {
     return;
   }
   if (summary) summary.textContent = "loading…";
+  // The landlord legs (SetRenewalTerms / CancelRenewal) render from their
+  // descriptors, so the catalog is loaded before the cards offer their buttons.
+  await loadOpCatalogQuiet();
   try {
     await loadRenewalsQuiet();
   } catch (e) {
@@ -2412,10 +2627,15 @@ function renderRenewalCard(row, landlord) {
 // four ops — the tenant's REAL SignRenewal task (Tasks tab) and this card's
 // button both submit the identical op and either can complete it first.
 function openRenewalAction(row, operationName) {
+  const desc = descriptorFor(operationName);
+  if (!desc) {
+    toast("That action isn't available right now — reload and try again.", "err");
+    return;
+  }
   openComplete({
     taskKey: null,
     operationName,
-    operationDescription: COMPLETIONS[operationName].title,
+    operationDescription: desc.title,
     scopedTo: row.entityKey,
   });
 }

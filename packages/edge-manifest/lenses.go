@@ -2,6 +2,22 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
+// OpCatalogBucket is the NATS-KV read model the `opCatalog` lens projects
+// into — the **P5 query surface** for "what does this operation look like":
+// one open row per op meta, keyed by its `operationType`, carrying the whole
+// descriptor vocabulary (presentation / inputSchema / fieldDescriptions /
+// dispatch / sensitive) plus the names of the roles that grant it. A staff
+// application reads THIS bucket to render an operation's form, never Core KV
+// (lattice-architecture.md P5 — lenses are the only application query
+// surface); the Refractor auto-creates the bucket on lens load.
+//
+// It is the STAFF-plane twin of the per-actor `manifest.op` rows edgeCatalog
+// delivers to a Facet edge node: same vocabulary, global rather than
+// per-actor, over an ordinary KV read model rather than the SYNC transport.
+// The rows carry no person data by construction — an op meta is a
+// package-declared descriptor — so an open bucket is the correct posture.
+const OpCatalogBucket = "op-catalog"
+
 // Lenses returns the package's fifteen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff sibling edgeStaffWorkOrders per
@@ -65,6 +81,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // open-task-forOperation catalog path — a task's own bound op already rides
 // inline on its edgeTasks row, so that gap is "browse all my ops," never
 // "complete my task."
+//
+// One lens in the slice is NOT a Personal Lens: `opCatalog`, the plain
+// (`nats-kv`) descriptor read model a staff application renders op forms from
+// (staff-descriptor-rendering-design.md §2.1). Everything above about the
+// per-actor transport, the Walks, and the D1 read-grant gate is about the
+// Personal ones and does not apply to it — it is anchored on the op meta
+// itself, keyed by `operationType`, and reaches every reader through an
+// ordinary open bucket.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -384,6 +408,15 @@ func Lenses() []pkgmgr.LensSpec {
 			}},
 			Spec: edgeProviderQueueTail,
 		},
+		{
+			CanonicalName: "opCatalog",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        OpCatalogBucket,
+			Engine:        "full",
+			Spec:          opCatalogSpec,
+			IntoKey:       []string{"operationType"},
+		},
 	}
 }
 
@@ -617,6 +650,76 @@ RETURN
   [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName
+`
+
+// opCatalogSpec projects one `op-catalog` row per op meta — the descriptor a
+// staff application renders an operation's form from. It carries the same
+// vocabulary columns edgeCatalogTail hands a Facet edge node, minus the
+// per-actor reachability ones (anchor / ns / entityId / viaRole) and plus
+// `grantedToRoles`, so a staff client can curate WHICH ops it offers a person
+// without asking the graph a second question.
+//
+// Three properties of this cypher are load-bearing, and each has a mutation
+// test in lens_cypher_test.go because none of them is visible from reading it:
+//
+//   - **No `WITH` clause.** The tempting copy-paste source, edgeCatalogTail,
+//     opens with `WITH op, role`; Refractor's anchorProjectionShape
+//     (ruleengine/full/anchor_delete.go) refuses any query carrying one, and
+//     that refusal silently disables BOTH the anchor-tombstone Delete and the
+//     filter-retraction presence check. A retired op meta's row would then
+//     linger in the bucket forever, describing an operation the Processor no
+//     longer accepts. Copy edgeCatalogTail's RETURN columns; never its opener.
+//
+//   - **`operationType` is the key, and it is anchor-derived.** It is a ROOT
+//     vertex field (pkgmgr/build.go writes `data.operationType` on the meta
+//     vertex itself), so it resolves read-free from the tombstoned anchor's
+//     preserved body — which is exactly the condition AnchorProjectionKey
+//     needs to derive the row to retract. A key column read off an ASPECT
+//     would parse, project and then fail to retract. It is also unique
+//     cross-package at install time (pkgmgr/installer.go), so the rows cannot
+//     collide.
+//
+//   - **The role join is `OPTIONAL MATCH`.** As a required continuation, an op
+//     meta that no permission grants yields ZERO rows and vanishes from the
+//     catalog outright, rather than degrading to a row with an empty
+//     grantedToRoles. Engine legs and not-yet-granted ops are exactly that
+//     case. Same shape as rbac-domain's capabilityRolesSpec.
+//
+// The `operationType <> null` filter keeps the catalog to op metas: `:meta` is
+// also the label of every DDL / lens / pane / package meta-vertex, and those
+// carry no operationType.
+//
+// A bare op meta (one that adopted none of the vocabulary) still projects, with
+// every descriptor column null. That is deliberate: the consuming renderer
+// treats "no inputSchema" as NOT RENDERABLE and declines to offer the op, which
+// is the fail-closed answer. A missing row would be indistinguishable from a
+// lagging projection.
+const opCatalogSpec = `
+MATCH (op:meta)
+WHERE op.data.operationType <> null
+OPTIONAL MATCH (op)<-[:forOperation]-(perm:permission)-[:grantedBy]->(role:role)
+RETURN
+  op.data.operationType AS operationType,
+  op.key AS opMetaKey,
+  op.presentation.data.title AS title,
+  op.presentation.data.shortLabel AS shortLabel,
+  op.presentation.data.description AS description,
+  op.presentation.data.icon AS icon,
+  op.presentation.data.tone AS tone,
+  op.presentation.data.submitLabel AS submitLabel,
+  op.presentation.data.group AS group,
+  op.inputSchema.data.schema AS inputSchema,
+  op.fieldDescriptions.data.fieldDescriptions AS fieldDescriptions,
+  op.dispatch.data.class AS dispatchClass,
+  op.dispatch.data.authContext AS dispatchAuthContext,
+  op.dispatch.data.targetField AS dispatchTargetField,
+  op.dispatch.data.targetType AS dispatchTargetType,
+  op.dispatch.data.contextParams AS dispatchContextParams,
+  op.dispatch.data.reads AS dispatchReads,
+  op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
+  op.sensitive.data.value AS sensitive,
+  collect(DISTINCT role.canonicalName.data.value) AS grantedToRoles
 `
 
 // edgeTasksTail presents one `manifest.task.<taskId>` row per OPEN task

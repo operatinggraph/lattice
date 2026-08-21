@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.15.31
+version: 0.16.0
 description: |
   The Facet edge app's world manifest: fifteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeTasks/
@@ -35,6 +35,10 @@ description: |
   internal/bootstrap/lenses.go's CapabilityReadLensDefinition uses at the kernel
   level) — not a Postgres GrantTable (that's Path A / RLS for Protected reads,
   irrelevant here).
+  Alongside them, one PLAIN (nats-kv) lens: opCatalog, the op-catalog read
+  model a staff application renders operation forms from — one open row per op
+  meta, keyed by operationType, carrying the whole descriptor vocabulary plus
+  the roles that grant it (staff-descriptor-rendering-design.md §2.1).
 depends:
   - identity-domain
   - orchestration-base
@@ -86,6 +90,9 @@ declares:
       engine: full
     - canonicalName: edgeProviderQueue
       adapter: nats-subject
+      engine: full
+    - canonicalName: opCatalog
+      adapter: nats-kv
       engine: full
     - canonicalName: edgeManifestStaffReadGrants
       adapter: nats-kv
