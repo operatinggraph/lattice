@@ -31,4 +31,43 @@ function shredFinalizationLine(row) {
     (r.projectionsNullified ? "projectionsNullified ✓" : "projectionsNullified …");
 }
 
-export { shredInFlight, shredFleetSummary, shredFinalizationLine };
+// --- identityErasure pattern progress (erasure-orchestration-design.md §12
+// Fire B increment 4) — sourced from the shred row above plus the
+// identityErasureComplete weaverTarget's residue row (GET
+// /api/weaver/target/identityErasureComplete/entity/<id>,
+// packages/privacy-base lenses.go's identityErasureResidue). Durable-state
+// derived, not the Loom instance's own in-memory cursor, so it reads the same
+// after a page reload as it does mid-run.
+
+// erasureResidueOpen reports whether the pattern's convergent tail still has
+// open work — a credential/dedup sweep gap or the final seal, each column
+// false once its sweep/seal op has nothing left to do.
+function erasureResidueOpen(residueRow) {
+  return !!(residueRow && (residueRow.missing_credentialResidue || residueRow.missing_dedupResidue || residueRow.missing_erasureSeal));
+}
+
+// erasureInFlight combines the key-shred finalization (shredInFlight, only
+// meaningful once shredRow.shredded) with the erasure pattern's convergent
+// tail — either being open keeps the panel polling.
+function erasureInFlight(shredRow, residueRow) {
+  if (shredRow && shredRow.shredded && shredInFlight(shredRow)) return true;
+  return erasureResidueOpen(residueRow);
+}
+
+// erasureSteps derives the identityErasure pattern's five-step progress list.
+// Step 1 reads the shred row (may be null — the key may not be shredded yet);
+// steps 2-5 read the residue row (may be null — the pattern may never have
+// been started), each undone by default so an absent row shows nothing done
+// past step 1 rather than false-completing a step no read model has recorded.
+function erasureSteps(shredRow, residueRow) {
+  var r = residueRow || {};
+  return [
+    { label: "Shred key", done: !!(shredRow && shredRow.shredded) },
+    { label: "Seal for erasure", done: !!r.requestedAt },
+    { label: "Unbind credentials", done: r.missing_credentialResidue === false },
+    { label: "Purge dedup footprint", done: r.missing_dedupResidue === false },
+    { label: "Erasure sealed", done: r.missing_erasureSeal === false },
+  ];
+}
+
+export { shredInFlight, shredFleetSummary, shredFinalizationLine, erasureResidueOpen, erasureInFlight, erasureSteps };

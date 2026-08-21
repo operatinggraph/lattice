@@ -12,7 +12,7 @@ import {
   groupLinkItems, evictForBudget, hoodSentence,
 } from "../logic/hood.js";
 import { isSealedAspect, sealedSummary } from "../logic/sensitive.js";
-import { shredFinalizationLine } from "../logic/shred.js";
+import { shredFinalizationLine, erasureInFlight, erasureSteps } from "../logic/shred.js";
 import { deleteConfirmReady } from "../logic/lens.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 import { navigate } from "../router.js";
@@ -796,12 +796,15 @@ function materialize(groupNode, link) {
 }
 
 // ---------------------------------------------------------------------------
-// Crypto-shred proof (F12 §3.3): before/after of an identity's sensitive
-// aspects across a ShredIdentityKey run, plus the cross-plane confirmation
-// (live Core KV, JetStream history, projections) and the async finalization
-// line. Reveal reuses renderSealedBody verbatim — the "after" state isn't a
-// separate rendering path, it's the operator re-clicking Reveal on the same
-// row and the Vault's own ErrKeyShredded answering honestly.
+// Crypto-shred / erasure proof (F12 §3.3, erasure-orchestration-design.md §12
+// Fire B inc. 4): before/after of an identity's sensitive aspects across a
+// key shred, the cross-plane confirmation (live Core KV, JetStream history,
+// projections) and its async finalization line, plus the identityErasure
+// Loom pattern's own progress once started (key shred → seal → credential
+// unbind → dedup purge → seal). Reveal reuses renderSealedBody verbatim —
+// the "after" state isn't a separate rendering path, it's the operator
+// re-clicking Reveal on the same row and the Vault's own ErrKeyShredded
+// answering honestly.
 
 const shredProof = { center: null, pollSeq: 0, pollTimer: null, modal: null };
 
@@ -854,13 +857,28 @@ async function showShredProof(identityKey) {
   if (shredProof.center !== identityKey) return;
   const row = !shredsBody.error && (shredsBody.shreds || []).find((r) => r.identityKey === identityKey);
 
-  renderShredProof(box, identityKey, sensitive, unchecked, row || null, shredsBody.error || null);
-  if (row && row.shredded && !(row.vaultKeyDestroyed && row.projectionsNullified)) {
+  const residueRow = await fetchErasureResidue(identityKey);
+  if (shredProof.center !== identityKey) return;
+
+  renderShredProof(box, identityKey, sensitive, unchecked, row || null, shredsBody.error || null, residueRow);
+  if (erasureInFlight(row, residueRow)) {
     scheduleShredPoll(identityKey);
   }
 }
 
-function renderShredProof(box, identityKey, sensitive, unchecked, row, shredStatusError) {
+// fetchErasureResidue reads the identityErasureComplete weaverTarget's row for
+// one identity — the SAME generic entity-drill-down endpoint the Weaver page's
+// #/weaver target/entity view uses (weaver.go's weaverEntity), keyed by the
+// identity's bare NanoID (the projection's KeyColumn: "entityId" convention,
+// packages/privacy-base/lenses.go). Returns null when the pattern was never
+// started for this identity (a 404 "no row" answer, not an error) or on a
+// transport failure — both read as "not yet".
+async function fetchErasureResidue(identityKey) {
+  const body = await api("/api/weaver/target/identityErasureComplete/entity/" + encodeURIComponent(shortId(identityKey)));
+  return !body.error && body.found ? body.row : null;
+}
+
+function renderShredProof(box, identityKey, sensitive, unchecked, row, shredStatusError, residueRow) {
   box.innerHTML = "";
   box.appendChild(el("div", "shred-head", "Identity " + shortId(identityKey) + " — crypto-shred proof"));
 
@@ -886,32 +904,54 @@ function renderShredProof(box, identityKey, sensitive, unchecked, row, shredStat
   const banner = el("div", "shred-status-banner" + (row && row.shredded ? " shredded" : ""));
   if (shredStatusError) {
     // A failed status read is an unknown, not a "not yet shredded" negative
-    // — say so rather than implying a false-clean state. ShredIdentityKey is
-    // an unconditioned update (privacy-base design), so offering the action
-    // regardless is safe: re-submitting an already-shredded identity is a
-    // no-op assertion, not a double-destroy.
+    // — say so rather than implying a false-clean state. StartLoomPattern is
+    // safe to re-submit regardless of where this identity's erasure already
+    // stands: every step of identityErasure is itself an idempotent guarded
+    // update, never a double-destroy.
     banner.appendChild(el("div", "error-text small",
       "could not determine this identity's shred status: " + shredStatusError));
   }
   if (row && row.shredded) {
     banner.appendChild(el("div", null, "🔒 this identity's key has been shredded."));
     banner.appendChild(shredChecklistEl(row));
+  }
+  if (residueRow) {
+    banner.appendChild(erasureStepsEl(row, residueRow));
   } else {
     banner.appendChild(el("p", "muted small",
-      "This permanently destroys the encryption key for this identity. Its PII becomes unrecoverable " +
-      "everywhere — live, history, and every projection. This cannot be undone."));
-    const shredBtn = demoHide(el("button", "danger-btn", "Shred this identity's key"));
-    shredBtn.addEventListener("click", () => openShredModal(identityKey));
-    banner.appendChild(shredBtn);
+      (row && row.shredded
+        ? "The key is shredded, but the decrypt-free footprint — contact-hash index vertices, " +
+          "duplicateOf pairs, credential bindings — is still live and keeps answering questions about " +
+          "this person without any key."
+        : "This permanently destroys the encryption key for this identity. Its PII becomes unrecoverable " +
+          "everywhere — live, history, and every projection.") +
+      " Starting the erasure pattern below shreds the key (if not already shredded), seals the identity " +
+      "for erasure, unbinds its credentials, and purges that footprint. This cannot be undone."));
+    const eraseBtn = demoHide(el("button", "danger-btn", "Start erasure"));
+    eraseBtn.addEventListener("click", () => openShredModal(identityKey));
+    banner.appendChild(eraseBtn);
   }
   box.appendChild(banner);
 
   box.appendChild(el("div", "muted small shred-bounds",
-    "This shreds sensitive aspects, and nothing else. The decrypt-free footprint — contact-hash index " +
-    "vertices, duplicateOf pairs, credential bindings — stays live and keeps answering questions about " +
-    "this person without any key. Erasing that is the identityErasure pattern's work: " +
-    "lattice loom start identityErasure --subject <identityKey>. PII in uploaded documents (object " +
-    "store) is a separate follow-on (crypto-shred for object-store blobs) — not erased by this action."));
+    "PII in uploaded documents (object store) is a separate follow-on (crypto-shred for object-store " +
+    "blobs) — not covered by this erasure."));
+}
+
+// erasureStepsEl renders the identityErasure pattern's step progress
+// (logic/shred.js's erasureSteps — durable read models, not the Loom
+// instance's own ephemeral cursor, so the panel reads the same after a page
+// reload as it does mid-run).
+function erasureStepsEl(row, residueRow) {
+  const box = el("div", "flow-steps");
+  box.appendChild(el("div", "comp-section-head", "Erasure progress"));
+  erasureSteps(row, residueRow).forEach((s) => {
+    const line = el("div", "flow-step " + (s.done ? "done" : "pending"));
+    line.appendChild(el("span", "flow-step-state", s.done ? "done" : "pending"));
+    line.appendChild(el("span", "flow-step-label", s.label));
+    box.appendChild(line);
+  });
+  return box;
 }
 
 // shredChecklistEl is the cross-plane confirmation — the teaching device
@@ -948,15 +988,19 @@ function scheduleShredPoll(identityKey, tick) {
     const body = await api("/api/vault/shreds");
     if (seq !== shredProof.pollSeq || shredProof.center !== identityKey) return;
     const row = !body.error && (body.shreds || []).find((r) => r.identityKey === identityKey);
+    const residueRow = await fetchErasureResidue(identityKey);
+    if (seq !== shredProof.pollSeq || shredProof.center !== identityKey) return;
     const banner = $("#graph-shred-body .shred-status-banner");
-    const finalized = row && row.shredded && row.vaultKeyDestroyed && row.projectionsNullified;
-    if (row && row.shredded && banner) {
-      banner.classList.add("shredded");
+    if (banner) {
       banner.innerHTML = "";
-      banner.appendChild(el("div", null, "🔒 this identity's key has been shredded."));
-      banner.appendChild(shredChecklistEl(row));
+      if (row && row.shredded) {
+        banner.classList.add("shredded");
+        banner.appendChild(el("div", null, "🔒 this identity's key has been shredded."));
+        banner.appendChild(shredChecklistEl(row));
+      }
+      if (residueRow) banner.appendChild(erasureStepsEl(row, residueRow));
     }
-    if (finalized) return;
+    if (!erasureInFlight(row, residueRow)) return;
     if (n + 1 >= SHRED_POLL_MAX_TICKS) {
       if (banner) {
         banner.appendChild(el("div", "muted small",
@@ -971,18 +1015,22 @@ function scheduleShredPoll(identityKey, tick) {
 
 // openShredModal is the typed-confirm destructive flow (mirrors lens.js's
 // openDeleteModal): the token is the identity's short id, exact match only.
-// ShredIdentityKey is an urgent-lane op (privacy-base design §2.2) submitted
-// via the existing /api/op surface — no new privileged endpoint.
+// Confirming starts the identityErasure Loom pattern via POST /api/vault/erase
+// (vault.go's handleVaultErase) rather than submitting a bare ShredIdentityKey
+// — the pattern's own first step performs the same shred, then advances
+// through sealing, credential unbinding and dedup-footprint purge.
 function openShredModal(identityKey) {
   closeShredModal();
   const token = shortId(identityKey);
   let inFlight = false;
   const overlay = el("div", "modal-overlay");
   const modal = el("div", "modal");
-  modal.appendChild(el("h3", null, "Shred identity key"));
+  modal.appendChild(el("h3", null, "Erase identity"));
   modal.appendChild(el("p", "muted",
-    "This permanently destroys the encryption key for " + identityKey + ". Its PII becomes unrecoverable " +
-    "everywhere — live, history, and every projection. This cannot be undone. Type the identity id to confirm:"));
+    "This starts the erasure pattern for " + identityKey + ": destroys its encryption key (if not already " +
+    "shredded), seals it for erasure, unbinds its credentials, and purges its decrypt-free footprint. Its PII " +
+    "becomes unrecoverable everywhere — live, history, and every projection. This cannot be undone. Type the " +
+    "identity id to confirm:"));
   modal.appendChild(el("div", "cid", token));
   const input = el("input");
   input.type = "text";
@@ -990,7 +1038,7 @@ function openShredModal(identityKey) {
   modal.appendChild(input);
   const actions = el("div", "modal-actions");
   const cancel = el("button", null, "Cancel");
-  const confirm = demoHide(el("button", "danger-btn", "Shred"));
+  const confirm = demoHide(el("button", "danger-btn", "Erase"));
   confirm.disabled = true;
   actions.appendChild(cancel);
   actions.appendChild(confirm);
@@ -1035,30 +1083,21 @@ function openShredModal(identityKey) {
     input.disabled = true;
     msg.className = "muted small";
     msg.textContent = "submitting…";
-    const body = await api("/api/op", {
+    const body = await api("/api/vault/erase", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "ShredIdentityKey",
-        lane: "urgent",
-        payload: { identityKey },
-        reads: [identityKey],
-        // read-posture class (d) — the identity may never have received a
-        // sensitive write, so its piiKey aspect may legitimately not exist
-        // yet (script-read-posture-design §13).
-        optionalReads: [identityKey + ".piiKey"],
-      }),
+      body: JSON.stringify({ identityKey }),
     });
     inFlight = false;
     if (body.error) {
       msg.className = "error-text small";
-      msg.textContent = "shred failed: " + body.error;
+      msg.textContent = "erasure failed: " + body.error;
       cancel.disabled = false;
       input.disabled = false;
       return;
     }
     close();
-    toast("shred submitted for " + token);
+    toast("erasure started for " + token);
     if (shredProof.center === identityKey) showShredProof(identityKey);
   });
 }
