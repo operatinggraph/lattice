@@ -44,14 +44,25 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   unresolvable expansion label contributed 0 to a total the refusal message then called "the worst case",
   sending an author to shrink the wrong budget. Minted: dynamic-type-taxonomy C3.7. Check: the un-priced
   labels are named in the message and the total is stated as a floor.
-- **A refusal's stated remedy must not be a move that defeats the gate** — the cap refusal advised dropping
-  the redundant concrete label, which clears exhaustiveness, takes the lens broad forever, and so trades the
-  refusal for the exact silent footprint regression the gate exists to detect. Minted: dynamic-type-taxonomy
-  C3.7. Check: name the safe moves explicitly and say which lookalike move is not one.
-- **RETIRED:** the installer parses but never reads a lens spec's labels, so any install-time authoring check
-  over them is uncomputable — mechanized: the `CypherParser` seam returns `SpecLabels`
-  (`internal/refractor/ruleengine/full/spec_labels.go`), with the corpus tripwire in
-  `lenslabelcap_corpus_test.go` sweeping all 31 packages.
+- **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
+  granted" is NOT evidence the remedy works.** Two sightings. The cap refusal advised dropping the redundant
+  concrete label, which clears exhaustiveness and trades the refusal for the exact silent regression the gate
+  detects (dynamic-type-taxonomy C3.7). Then the occupancy refusal told operators to restore a revoked grant
+  with `CreatePermission` — verified only as far as "rbac-domain grants it" — when authority travels the
+  `grantedBy` edge a SECOND verb writes, so the remedy returned a success reply and no grant
+  (reinstall-over-uninstall-occupancy §3, struck in the design body). Check: trace the remedy to the
+  OUTCOME it promises, through the projection or consumer that delivers it, not to the existence of its
+  first step; and a remedy printed for every caller must be qualified per caller — name the states it is
+  false in (a reserved operationType, a declared `Lanes`, the package that grants the remedy verbs itself).
+- **A new failure mode is not shipped until every surface that renders it says the right thing** — the
+  message, the error's own shape, and each status/UX mapping downstream. `ErrDeclaredKeysOccupied` fell
+  through `cmd/loupe`'s default arm to **502**, the code that UI's own front end treats as a transport blip
+  worth retrying, for a state that fails identically forever; and the two occupancy buckets were carried
+  only in prose, so a review got a real defect — every tombstoned key also reported live — past the FULL
+  suite by lowercasing one word. Minted: reinstall-over-uninstall-occupancy close review. Check: a new
+  sentinel is grepped across every `errors.Is` status/UX mapping in `cmd/` before it ships (and duplicated
+  mappings are folded into one helper so they cannot drift); a distinction the code MAKES is carried in
+  fields and asserted from fields, never scraped from the rendered message.
 - **A corpus-wide guard read must exclude the churn namespaces** — an install-time scan over every vertex
   root also walks `vtx.op.<requestId>` idempotency trackers, a 24h-horizon population that is millions of
   keys on a busy kernel, against a 45-60s install deadline (and the long-lived Loupe process). Minted:
@@ -63,8 +74,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   stops seeing the thing** — the retention-class destruction oracle drops a lens on THREE independent
   conditions (secure-column content, the vertex root's `class`, an `eventStream` source), and a guard built
   against one of them left the other two as silent erasures with a clean "0 retired" report. Minted:
-  retention-class-key-custody §30 (both found by cold review executing them, not by reading). Check: the
-  brief names the consumer's full exclusion set, and the guard carries one test vector per condition.
+  retention-class-key-custody §30 (both found by cold review executing them, not by reading). Second
+  sighting: the occupancy probe reads DOCUMENTS via `KVGetMulti`, which drops delete/purge markers, while
+  the commit's `CreateOnly` fails against a marker exactly as against a document — so the probe's "free" is
+  narrower than the commit's, in the one state an operator reaches by clearing a key by hand. Check: the
+  brief names the consumer's full exclusion set and the guard carries one test vector per condition; where
+  a condition is deliberately left uncovered, the code says so as a named narrowing with its direction
+  (under- vs over-reporting), and the operator-facing text closes the path that leads into it.
 - **A field validated after normalization must be MATCHED after the same normalization — but folding a
   DESTRUCTIVE resolver's match set is the wrong cure.** `Lens` was `TrimSpace`-checked for emptiness and
   resolved raw, so a declaration with a trailing space was refused with a remedy identical to the line

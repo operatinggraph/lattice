@@ -194,4 +194,31 @@ tombstoned manifest`). Sketched here so the decision is a one-look one:
 
 ## 6. Build note
 
-Filled at close.
+**Shipped** — `aca2120` (the gate) + `00a4a73` (the review fix round). Scope as §3/§4, plus the dry-run
+preview added mid-build (§4 touch-list).
+
+**What the three cold reviews changed.** The enforcement point was attacked on all three lenses and held:
+the false-positive census proved `declared` and `ops` share one append site so no key goes unprobed,
+`vtx.roleindex.<sha(canonicalName)>` is the only non-package-scoped declared key and the shipped corpus has
+no collision on it, and every Makefile/CI install path re-installs a LIVE package and short-circuits at
+step 2 ahead of the gate. What did not hold was the refusal TEXT — see the struck claim in §3 and the two
+dossier entries this item minted/extended.
+
+**Known narrowing, stated rather than implied.** `KVGetMulti` returns documents and drops NATS delete/purge
+markers, while the commit's `CreateOnly` (`Nats-Expected-Last-Subject-Sequence: 0`) fails against a marker
+as against a document. The gate therefore under-reports and never over-reports: a marker-only key reads as
+free here and is refused loudly one step later. It is deliberately not marker-aware — that needs a batched
+primitive the substrate does not offer — and no production path puts a marker on a declared key (the only
+Core-KV `KVDelete` is the outbox consumer's, on `vtx.op.<requestId>.events`, which no package declares; no
+production `KVPurge` on the bucket exists). The one route in is an operator clearing a key by hand, which
+the refusal text now names as a trap instead of inviting.
+
+**Found and NOT fixed — filed, with their out.** Two pre-existing full-bucket `KVListKeys` reads on the
+install path: `checkCoreBucketExists` lists the entire bucket to learn whether the stream exists, and
+`findInstalledPackage` lists it again and then issues one serial `KVGet` per `vtx.package.*.manifest`. Both
+are the dossier's churn-namespace hazard, both are paid by every Install/Upgrade/Apply/Uninstall, and
+neither is this item's mechanism. One row, naming the shared missing primitive.
+
+**Residual with no row, deliberately:** the probe→submit window is unguarded, so a concurrent
+install/uninstall landing inside it still yields a bare `RevisionConflict`. The gate narrows that window
+and never claimed to close it; the tracker op remains the only true mutual-exclusion point.
