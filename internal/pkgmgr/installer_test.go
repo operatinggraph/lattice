@@ -802,6 +802,204 @@ func TestInstaller_Uninstall_ReportsAlreadyStrandedHolderSeparately(t *testing.T
 	}
 }
 
+// TestInstaller_Uninstall_ReportsSecureColumnsErased is Uninstall's half of
+// §30.6's adjacent find: a lens's committed secureColumns describe key-custody
+// history the tombstone erases from the destruction-readiness oracle's view
+// (registry_probe.declaredLensIDs skips a tombstoned lens outright) without
+// touching the ciphertext still sitting in the target store. Uninstall takes a
+// package NAME, not a Definition, so there is no declaration point the way
+// Upgrade/Apply's RetiredSecureColumns is — this is report-only, never a
+// refusal, and the tombstone still commits.
+func TestInstaller_Uninstall_ReportsSecureColumnsErased(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if len(uninst.SecureColumnsErased) != 1 {
+		t.Fatalf("SecureColumnsErased = %+v, want exactly 1 entry", uninst.SecureColumnsErased)
+	}
+	got := uninst.SecureColumnsErased[0]
+	wantKey := secureLensSpecKey(def)
+	if got.Key != wantKey {
+		t.Fatalf("SecureColumnsErased[0].Key = %q, want %q", got.Key, wantKey)
+	}
+	if got.Lens != "sampleSecureLens" {
+		t.Fatalf("SecureColumnsErased[0].Lens = %q, want %q", got.Lens, "sampleSecureLens")
+	}
+	if !slices.Equal(got.Columns, []string{"applicant_name"}) {
+		t.Fatalf("SecureColumnsErased[0].Columns = %v, want [applicant_name]", got.Columns)
+	}
+	if !slices.Equal(got.Holders, []string{"identity"}) {
+		t.Fatalf("SecureColumnsErased[0].Holders = %v, want [identity]", got.Holders)
+	}
+	if !slices.Contains(uninst.Tombstoned, wantKey) {
+		t.Fatalf("secure lens spec key not tombstoned: %v", uninst.Tombstoned)
+	}
+}
+
+// TestInstaller_Uninstall_ReportsNoSecureColumnsErasedWithoutSecureLens is the
+// negative vector: a package declaring no Secure Lens reports an empty
+// SecureColumnsErased.
+func TestInstaller_Uninstall_ReportsNoSecureColumnsErasedWithoutSecureLens(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if len(uninst.SecureColumnsErased) != 0 {
+		t.Fatalf("SecureColumnsErased = %+v, want none", uninst.SecureColumnsErased)
+	}
+}
+
+// TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately is B4's
+// regression: a lens `.spec` tombstoned out-of-band before this uninstall ran
+// already dropped out of declaredLensIDs's view — re-tombstoning it here
+// erases nothing NEW, so it must land in SecureColumnsAlreadyErased (pre-
+// existing damage to escalate), never in SecureColumnsErased (blaming this
+// run for something it did not do), mirroring the retention-holder
+// preserved/already-stranded split for the identical reason.
+func TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	entry, err := conn.KVGet(ctx, CoreBucket, specKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", specKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", specKey, err)
+	}
+	doc["isDeleted"] = true
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal already-tombstoned spec: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, specKey, raw); err != nil {
+		t.Fatalf("KVPut already-tombstoned spec: %v", err)
+	}
+
+	uninst, err := inst.Uninstall(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if len(uninst.SecureColumnsErased) != 0 {
+		t.Fatalf("SecureColumnsErased = %+v, want none — the spec was already tombstoned before this run", uninst.SecureColumnsErased)
+	}
+	if len(uninst.SecureColumnsAlreadyErased) != 1 || uninst.SecureColumnsAlreadyErased[0].Key != specKey {
+		t.Fatalf("SecureColumnsAlreadyErased = %+v, want exactly one entry for %s", uninst.SecureColumnsAlreadyErased, specKey)
+	}
+}
+
+// TestInstaller_Uninstall_ReturnsErrorOnUnparseableSpec is B5's regression:
+// a `.spec` document that fails to json.Unmarshal must surface as an error,
+// not be silently swallowed into "no custody left the oracle's view" — the
+// one claim that cannot be substantiated when the document could not even be
+// read. Mirrors the retention-holder loop's identical parse-error handling.
+func TestInstaller_Uninstall_ReturnsErrorOnUnparseableSpec(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	specKey := secureLensSpecKey(def)
+	if _, err := conn.KVPut(ctx, CoreBucket, specKey, []byte("not json")); err != nil {
+		t.Fatalf("KVPut malformed spec: %v", err)
+	}
+
+	if _, err := inst.Uninstall(ctx, def.Name); err == nil {
+		t.Fatal("expected Uninstall to fail on an unparseable spec, got nil error")
+	}
+}
+
+// TestInstaller_Upgrade_RefusesClassFlip proves the retention-class-key-
+// custody-design.md §30 B1 bypass is closed end-to-end through the real
+// installer harness: an upgrade that flips a secure lens's Class away from
+// "meta.lens" while KEEPING its committed SecureColumns is now refused before
+// any KV write, not merely at the unit-validator level. Before this fix the
+// upgrade landed clean with UpgradeResult.SecureColumnsRetired == 0 — the
+// existing drop guard never fired because the columns were never dropped —
+// while both Refractor's destruction-readiness oracle (declaredLensIDs,
+// internal/refractor/health/registry_probe.go) and its own lens registry
+// silently stopped seeing the lens, whose ciphertext stayed live in Postgres.
+func TestInstaller_Upgrade_RefusesClassFlip(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity"}, "")
+	found := false
+	for i := range v2.Lenses {
+		if v2.Lenses[i].CanonicalName == "sampleSecureLens" {
+			v2.Lenses[i].Class = "meta.lens.archived"
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("test fixture drift: sampleSecureLens not found in defWithSecureLens output")
+	}
+
+	_, err := inst.Upgrade(ctx, v2)
+	if err == nil {
+		t.Fatal("expected the Class flip (with SecureColumns still declared) to be refused, got nil error")
+	}
+	if !strings.Contains(err.Error(), "meta.lens") {
+		t.Fatalf("refusal does not name the reserved Class literal, got: %v", err)
+	}
+}
+
+// TestInstaller_Upgrade_RefusesEventStreamSecureColumnCombination proves the
+// §30 B2 bypass is closed the same way: an upgrade that adds an eventStream
+// Source to a lens while KEEPING its committed SecureColumns is refused,
+// instead of landing clean with SecureColumnsRetired == 0 while both
+// Refractor's CoreKVSource discovery and declaredLensIDs skip the eventStream
+// spec outright, stranding the ciphertext with neither side raising a signal.
+func TestInstaller_Upgrade_RefusesEventStreamSecureColumnCombination(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	v2 := defWithSecureLens("0.2.0", []string{"identity"}, "")
+	found := false
+	for i := range v2.Lenses {
+		if v2.Lenses[i].CanonicalName == "sampleSecureLens" {
+			v2.Lenses[i].Source = &SourceConfig{Kind: "eventStream"}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("test fixture drift: sampleSecureLens not found in defWithSecureLens output")
+	}
+
+	_, err := inst.Upgrade(ctx, v2)
+	if err == nil {
+		t.Fatal("expected the eventStream+SecureColumns combination to be refused, got nil error")
+	}
+	if !strings.Contains(err.Error(), "eventStream") {
+		t.Fatalf("refusal does not name the eventStream combination, got: %v", err)
+	}
+}
+
 // TestInstaller_Uninstall_RaceOnDeclaredKeyRejected proves the F-011 per-key
 // OCC fix (Contract #8 §8.3): a concurrent write to a declared key between
 // the moment it is read and the moment the tombstone commits is rejected

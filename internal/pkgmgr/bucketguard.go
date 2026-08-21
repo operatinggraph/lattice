@@ -70,6 +70,22 @@ func (def Definition) validateLensBuckets() error {
 // operation.
 func (def Definition) validateLensAdapters() error {
 	for idx, l := range def.Lenses {
+		// build.go's addCreate writes the vertex-root envelope's class as
+		// l.Class, defaulting empty to "meta.lens" — and BOTH sides of the
+		// destruction-readiness oracle key discovery on that exact literal:
+		// Refractor's registry-probe declaredLensIDs (internal/refractor/health/
+		// registry_probe.go) skips any root whose class != "meta.lens", and the
+		// lens registry itself discovers lenses the identical way. A census of
+		// the whole packages/ corpus found all 105 LensSpec.Class values are
+		// exactly "meta.lens" or unset — nothing else is used — so any other
+		// value is refused outright: it would silently drop the lens (and any
+		// secure-column ciphertext it still projects) from the oracle's view
+		// while changing nothing Refractor's own activation checks.
+		if l.Class != "" && l.Class != "meta.lens" {
+			return fmt.Errorf(
+				"pkgmgr: Lens[%d] %q declares Class %q — the destruction-readiness oracle and the lens registry both key discovery on the exact literal \"meta.lens\" (empty defaults to it); any other value silently drops this lens from both while its projected data stays live",
+				idx, l.CanonicalName, l.Class)
+		}
 		switch l.Adapter {
 		case "", "nats-kv":
 			if l.Bucket == "" {
@@ -96,6 +112,28 @@ func (def Definition) validateLensAdapters() error {
 		}
 	}
 	return nil
+}
+
+// reservedRLSColumnNames are the platform's own RLS columns that
+// adapter.BuildProtectedTableDDL (internal/refractor/adapter/rls.go) always
+// appends to a Protected read-model table, alongside whatever a package
+// declares in Columns AND whatever it declares in IntoKey — BuildProtectedTableDDL
+// emits the lens's key columns as real columns first, then appends these four
+// with no dedup against either set: the authz set-membership column, the
+// incremental-rebuild watermark, and the two soft-tombstone columns. Only a
+// Protected lens's Columns/IntoKey ever reach that DDL — translatePostgresColumns
+// drops a non-Protected lens's Columns before they reach a ColumnDef, and a
+// GrantTable lens's fixed schema never reads either field — so a name collision
+// here is unreachable for any other posture. A package that declares one of
+// these as an ordinary business column or a key column installs cleanly
+// (bucketguard runs before any KV write) and fails only at Refractor activation
+// with Postgres 42701 duplicate column; this check moves that failure to
+// install time and names the reason.
+var reservedRLSColumnNames = map[string]struct{}{
+	"authz_anchors":  {},
+	"projection_seq": {},
+	"is_deleted":     {},
+	"deleted_at":     {},
 }
 
 // validateLensReadPath rejects an incoherent read-path-authorization posture on
@@ -138,6 +176,26 @@ func (def Definition) validateLensReadPath() error {
 		if l.GrantTable && l.DiffRetraction && l.GrantSource == "" {
 			return fmt.Errorf("pkgmgr: Lens[%d] %q: a GrantTable lens with DiffRetraction must declare GrantSource — actor_read_grants is shared across producers and retraction must be scoped to this lens's own rows (Contract #6 §6.14)", idx, l.CanonicalName)
 		}
+		if l.Protected {
+			// A plain business Columns entry reaches BuildProtectedTableDDL exactly
+			// like a SecureColumns column does — the reservation is on the CREATE
+			// TABLE's column NAME, not on whether that column happens to be
+			// encrypted. Checked for every Protected lens, independent of whether
+			// it also declares SecureColumns.
+			for _, c := range l.Columns {
+				if _, bad := reservedRLSColumnNames[c.Name]; bad {
+					return fmt.Errorf("pkgmgr: Lens[%d] %q: Columns declares %q, which is a platform RLS column — Refractor's BuildProtectedTableDDL always appends authz_anchors/projection_seq/is_deleted/deleted_at to a Protected table, so this collides at Postgres activation (42701 duplicate column); rename the column", idx, l.CanonicalName, c.Name)
+				}
+			}
+			// IntoKey collides the identical way: BuildProtectedTableDDL emits the
+			// lens's key columns as real columns before appending the four platform
+			// columns, with no dedup against either set.
+			for _, k := range l.IntoKey {
+				if _, bad := reservedRLSColumnNames[k]; bad {
+					return fmt.Errorf("pkgmgr: Lens[%d] %q: IntoKey declares %q, which is a platform RLS column — Refractor's BuildProtectedTableDDL emits key columns as real columns before appending authz_anchors/projection_seq/is_deleted/deleted_at to a Protected table, so this collides at Postgres activation (42701 duplicate column); rename the key column", idx, l.CanonicalName, k)
+				}
+			}
+		}
 		if len(l.SecureColumns) > 0 {
 			// Mirror Refractor's validateSecureColumns (Contract #3 §3.10) so a
 			// Secure Lens that could never activate is rejected at install time.
@@ -150,7 +208,18 @@ func (def Definition) validateLensReadPath() error {
 			if l.ProjectionKind != "" {
 				return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns are supported on plain projection lenses only, not ProjectionKind %q", idx, l.CanonicalName, l.ProjectionKind)
 			}
-			reserved := map[string]struct{}{"authz_anchors": {}, "projection_seq": {}, "is_deleted": {}, "deleted_at": {}}
+			// An eventStream Source has no Core-KV vertex to project from
+			// (Spec must be left empty — LensSpec.Source's own doc comment), so
+			// SecureColumns is incoherent on it regardless of any oracle. It is
+			// also independently invisible to key-custody tracking: Refractor's
+			// CoreKVSource discovery skips an eventStream spec exactly as the
+			// destruction-readiness oracle's declaredLensIDs does (both check
+			// isEventStream before anything else), so an upgrade that kept
+			// SecureColumns while adding this Source would strand its ciphertext
+			// with neither side ever raising a signal.
+			if l.Source != nil && l.Source.Kind == "eventStream" {
+				return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns cannot combine with an eventStream Source — an event lens has no Core-KV vertex to decrypt against, and both Refractor's discovery and the destruction-readiness oracle skip an eventStream spec outright, so any secure column here would be invisible to key-custody tracking", idx, l.CanonicalName)
+			}
 			declared := make(map[string]struct{}, len(l.Columns))
 			for _, c := range l.Columns {
 				declared[c.Name] = struct{}{}
@@ -168,7 +237,7 @@ func (def Definition) validateLensReadPath() error {
 					return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns declares column %q twice", idx, l.CanonicalName, sc.Column)
 				}
 				seen[sc.Column] = struct{}{}
-				if _, bad := reserved[sc.Column]; bad {
+				if _, bad := reservedRLSColumnNames[sc.Column]; bad {
 					return fmt.Errorf("pkgmgr: Lens[%d] %q: secure column %q is a platform RLS column — decrypted data must never drive read authorization or the write guard", idx, l.CanonicalName, sc.Column)
 				}
 				if _, isKey := keyCols[sc.Column]; isKey {

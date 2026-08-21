@@ -46,6 +46,7 @@ func (def Definition) validateAll() error {
 		def.validateAbstractDDLScope,
 		def.validateCanonicalNameUniqueness,
 		def.validatePermissionIdentityUniqueness,
+		def.validateRetiredSecureColumns,
 	} {
 		if err := check(); err != nil {
 			return err
@@ -228,6 +229,32 @@ type Definition struct {
 	// refuse a dropped operationType found here today ("work-preserving
 	// moves are not yet supported — cancel or wait"); see the design doc §3.
 	MovedOps map[string]string
+
+	// RetiredSecureColumns declares, per lens, that this package VERSION
+	// deliberately stops carrying a Secure-Lens column's key-custody history
+	// (retention-class-key-custody-design.md §30). Upgrade/Apply refuse any
+	// edit that erases a committed `targetConfig.secureColumns` entry — the
+	// column dropped from a lens the package still declares, or the lens
+	// itself removed (or renamed, which mints a new key and tombstones the old
+	// one) with its secure columns still standing — unless an entry here names
+	// it.
+	//
+	// The declaration is an author's ATTESTATION, exactly as
+	// RetireCancelsOpenTasks is: the platform does not verify that the
+	// ciphertext those holder types encrypted has been swept, re-keyed, or
+	// destroyed. What it does guarantee is that a package cannot silently
+	// blind the destruction-readiness oracle, which answers "which lenses hold
+	// ciphertext for this holder type?" from the CURRENT spec alone
+	// (internal/refractor/health/registry_probe.go): a spec that has forgotten
+	// a column attests coverage over rows it can no longer see.
+	//
+	// Every entry is checked whether or not it matches a real erasure: a
+	// missing Lens or Note fails the upgrade on its own, and a duplicate
+	// (Lens, Column) pair is refused. An entry that matches no erasure applies
+	// to nothing and is reported back as unused — a retirement that has
+	// outlived the edit it was written for is the shape that would otherwise
+	// sit in a package file looking load-bearing.
+	RetiredSecureColumns []RetiredSecureColumn
 
 	// readGrantWalksExpanded marks a Definition that already ran through
 	// ExpandReadGrantWalks and is what makes the pass idempotent. A composed
@@ -1133,6 +1160,37 @@ type SecureColumn struct {
 	Column      string
 	HolderTypes []string
 	Field       string
+}
+
+// RetiredSecureColumn is one entry of Definition.RetiredSecureColumns: the
+// author's attestation that a Secure-Lens column's key-custody history may
+// stop being carried by the persisted spec.
+//
+// Lens is the lens's canonicalName AS THE COMMITTED PACKAGE DECLARED IT. A
+// lens's key is a NanoID salted by that name (LensID), so a rename mints a
+// wholly new key and tombstones the old one — the retirement names the OLD
+// name, the one whose spec is losing its secure columns, never the new one.
+//
+// Column selects the erasure this entry attests to, and the two shapes do not
+// substitute for one another. A named column excuses that column being dropped
+// from a lens that survives. Column:"" excuses ONLY the whole spec going at
+// once — the removed or renamed lens — and never a single column dropped from
+// a surviving one.
+//
+// The asymmetry is what keeps a retirement from outliving its edit. A blanket
+// Column:"" entry left in a package file after the removal it described would
+// otherwise wave through every later erasure on that lens, under a Note
+// written about a different one; requiring each dropped column to be named
+// means a stale entry goes inert instead of silently excusing the next author.
+//
+// Note is required and free-form: why the history is safe to stop carrying
+// (the rows were swept, re-keyed, or never written). Nothing reads it — it is
+// the record the next operator asking "who decided this?" needs, and requiring
+// it is what keeps a retirement from being a reflex.
+type RetiredSecureColumn struct {
+	Lens   string
+	Column string
+	Note   string
 }
 
 // SourceConfig mirrors the on-wire lens-source descriptor (the Chronicler's

@@ -1355,6 +1355,8 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	// leaves the package fully installed — never a partial/mixed state.
 	declaredEntries := make([]map[string]any, 0, len(keys))
 	tombstoned := make([]string, 0, len(keys))
+	var secureColumnsErased []UninstallSecureColumnErasure
+	var secureColumnsAlreadyErased []UninstallSecureColumnErasure
 	for _, k := range keys {
 		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
 		if err != nil {
@@ -1362,6 +1364,41 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 				continue
 			}
 			return nil, fmt.Errorf("pkgmgr: uninstall read %s: %w", k, err)
+		}
+		// A lens `.spec` key's committed secureColumns names key-custody
+		// history this tombstone takes with it (retention-class-key-custody-
+		// design.md §30.6): the ciphertext those columns wrote is still
+		// sitting in the target store, untouched by the tombstone, but
+		// registry_probe.declaredLensIDs skips a tombstoned lens outright, so
+		// nothing else will ever attest this lens's coverage again. Uninstall
+		// takes a package NAME, not a Definition — there is no place for an
+		// author to declare the retirement the way RetiredSecureColumns does
+		// for Upgrade/Apply — so this is report-only, never a refusal.
+		if strings.HasSuffix(k, ".spec") {
+			var doc map[string]any
+			if err := json.Unmarshal(entry.Value, &doc); err != nil {
+				return nil, fmt.Errorf("pkgmgr: uninstall parse %s: %w", k, err)
+			}
+			if entries := secureColumnsOf(doc); len(entries) > 0 {
+				erasure := UninstallSecureColumnErasure{Key: k, Lens: i.lensCanonicalNameOf(ctx, k)}
+				for _, sc := range entries {
+					if column, _ := sc["column"].(string); column != "" {
+						erasure.Columns = append(erasure.Columns, column)
+					}
+					erasure.Holders = unionStrings(erasure.Holders, stringsOf(sc["holderTypes"]))
+				}
+				// A spec already isDeleted when THIS uninstall read it was already
+				// invisible to declaredLensIDs before this run touched anything —
+				// pre-existing damage this uninstall did not cause and cannot
+				// undo, exactly the split the retention-holder classification
+				// above makes for the identical reason (a tombstone re-applied to
+				// an already-tombstoned key is not a NEW erasure).
+				if alreadyDeleted, _ := doc["isDeleted"].(bool); alreadyDeleted {
+					secureColumnsAlreadyErased = append(secureColumnsAlreadyErased, erasure)
+				} else {
+					secureColumnsErased = append(secureColumnsErased, erasure)
+				}
+			}
 		}
 		declaredEntries = append(declaredEntries, map[string]any{"key": k, "expectedRevision": entry.Revision})
 		tombstoned = append(tombstoned, k)
@@ -1380,6 +1417,8 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 			Note:                            note,
 			RetentionHoldersPreserved:       retentionHoldersPreserved,
 			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
+			SecureColumnsErased:             secureColumnsErased,
+			SecureColumnsAlreadyErased:      secureColumnsAlreadyErased,
 		}, nil
 	}
 
@@ -1399,6 +1438,8 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 			Tombstoned:                      tombstoned,
 			RetentionHoldersPreserved:       retentionHoldersPreserved,
 			RetentionHoldersAlreadyStranded: retentionHoldersAlreadyStranded,
+			SecureColumnsErased:             secureColumnsErased,
+			SecureColumnsAlreadyErased:      secureColumnsAlreadyErased,
 		}, nil
 	default:
 		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
@@ -1448,4 +1489,48 @@ type UninstallResult struct {
 	// separately so the operator can escalate real stranded custody instead of
 	// reading it as a benign preservation.
 	RetentionHoldersAlreadyStranded []string
+
+	// SecureColumnsErased names every lens `.spec` key THIS uninstall newly
+	// tombstoned (it was live when read) whose committed
+	// targetConfig.secureColumns was non-empty (retention-class-key-custody-
+	// design.md §30.6) — the same key-custody history Upgrade/Apply refuse to
+	// erase without a declared RetiredSecureColumn, except Uninstall takes a
+	// package NAME, not a Definition, so there is no place for an author to
+	// declare the retirement. This is report-only, never a refusal: the
+	// tombstone commits regardless, and the ciphertext those columns
+	// encrypted stays untouched in the target store while
+	// registry_probe.declaredLensIDs stops seeing the tombstoned lens at all.
+	// Reported so an operator sees custody coverage leaving the destruction-
+	// readiness oracle, exactly as RetentionHoldersAlreadyStranded exists so
+	// real stranded custody is never read as benign.
+	SecureColumnsErased []UninstallSecureColumnErasure
+
+	// SecureColumnsAlreadyErased names the same shape of entry as
+	// SecureColumnsErased, for a `.spec` key that was ALREADY tombstoned when
+	// this uninstall read it — mirroring the RetentionHoldersPreserved /
+	// RetentionHoldersAlreadyStranded split above for the identical reason: a
+	// spec tombstoned out-of-band before this run already dropped out of
+	// declaredLensIDs's view, so re-tombstoning it here erases nothing NEW.
+	// Reported separately so this uninstall is never blamed for custody loss
+	// it did not cause and cannot undo — the operator still needs to see it,
+	// but as pre-existing damage to escalate, not as this run's own effect.
+	SecureColumnsAlreadyErased []UninstallSecureColumnErasure
+}
+
+// UninstallSecureColumnErasure names one lens whose committed secure-column
+// key-custody history an uninstall's tombstone erases from the destruction-
+// readiness oracle's view, without touching the ciphertext those columns
+// still hold in the target store.
+type UninstallSecureColumnErasure struct {
+	// Key is the lens `.spec` aspect key this uninstall tombstoned.
+	Key string `json:"key"`
+	// Lens is the lens's canonicalName, read off the sibling `.canonicalName`
+	// aspect (lensCanonicalNameOf) since a lens NanoID is a salted hash and
+	// does not invert. Empty when that aspect could not be read.
+	Lens string `json:"lens"`
+	// Columns names every committed secure column this lens's spec carried.
+	Columns []string `json:"columns"`
+	// Holders names every holder type those columns declared, deduplicated
+	// across all of them.
+	Holders []string `json:"holderTypes"`
 }

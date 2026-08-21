@@ -411,6 +411,36 @@ func TestLensSpecBody_Postgres_SecureColumns(t *testing.T) {
 	}
 }
 
+// TestValidateLensAdapters_ClassReserved proves the destruction-readiness
+// oracle's declaredLensIDs and Refractor's own lens registry both key
+// discovery on the exact literal "meta.lens" (retention-class-key-custody-
+// design.md §30 B1): a Class that flips away from it silently drops the
+// lens (with its projected ciphertext still live) from both, so
+// validateLensAdapters refuses any Class other than empty or "meta.lens".
+func TestValidateLensAdapters_ClassReserved(t *testing.T) {
+	cases := []struct {
+		name    string
+		lens    LensSpec
+		wantErr bool
+	}{
+		{"empty class ok (defaults to meta.lens)", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b"}, false},
+		{"explicit meta.lens ok", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b", Class: "meta.lens"}, false},
+		{"class flipped away from meta.lens rejected", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b", Class: "meta.lens.archived"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def := Definition{Name: "pkg", Version: "0.1.0", Lenses: []LensSpec{tc.lens}}
+			err := def.validateLensAdapters()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateLensReadPath(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -478,6 +508,32 @@ func TestValidateLensReadPath(t *testing.T) {
 		{"secure duplicate column rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
 			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}, {Column: "name", HolderTypes: []string{"identity"}}}}, true},
+		{"plain column named authz_anchors rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns: []PostgresColumn{{Name: "authz_anchors", Type: "text[]"}, {Name: "identity_key", Type: "text"}}}, true},
+		{"plain column named projection_seq rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns: []PostgresColumn{{Name: "projection_seq", Type: "bigint"}, {Name: "identity_key", Type: "text"}}}, true},
+		{"plain column named is_deleted rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns: []PostgresColumn{{Name: "is_deleted", Type: "boolean"}, {Name: "identity_key", Type: "text"}}}, true},
+		{"plain column named deleted_at rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns: []PostgresColumn{{Name: "deleted_at", Type: "timestamptz"}, {Name: "identity_key", Type: "text"}}}, true},
+		{"protected lens with ordinary columns ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns: []PostgresColumn{{Name: "name", Type: "text"}, {Name: "identity_key", Type: "text"}}}, false},
+		{"intoKey named is_deleted rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			IntoKey: []string{"is_deleted"},
+			Columns: []PostgresColumn{{Name: "name", Type: "text"}}}, true},
+		{"intoKey named authz_anchors rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			IntoKey: []string{"authz_anchors"},
+			Columns: []PostgresColumn{{Name: "name", Type: "text"}}}, true},
+		{"protected lens with ordinary intoKey ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			IntoKey: []string{"identity_key"},
+			Columns: []PostgresColumn{{Name: "name", Type: "text"}, {Name: "identity_key", Type: "text"}}}, false},
+		{"secure column on eventStream source rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Source:        &SourceConfig{Kind: "eventStream"},
+			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, true},
+		{"eventStream lens without secure columns ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Source:  &SourceConfig{Kind: "eventStream"},
+			Columns: []PostgresColumn{{Name: "name", Type: "text"}}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

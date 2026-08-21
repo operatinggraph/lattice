@@ -270,6 +270,40 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 		logger.Warn("secure column(s) kept their committed holderTypes — the narrowed declaration was NOT applied; ciphertext written under a dropped holder type would become invisible to key destruction",
 			"count", res.SecureColumnsWidened)
 	}
+	// The inverse of the line above, and the one that actually removes custody
+	// history: the package DECLARED these erasures, so they landed. The
+	// platform verified nothing about the ciphertext — the declaration is the
+	// author's attestation — which is why the operator gets a count rather than
+	// having to notice a spec that quietly stopped naming a column.
+	//
+	// This fires before the DryRun branch below (like every warning above it),
+	// so on a dry run it must say so itself: "retired" read next to the
+	// dry-run's own "no changes submitted" line would tell the operator the
+	// persisted spec already lost these columns, when nothing was submitted.
+	if res.SecureColumnsRetired > 0 {
+		if res.DryRun {
+			logger.Warn("dry run — secure-column key-custody record(s) WOULD be retired on the package's declared attestation if this ran for real; nothing has been submitted yet",
+				"count", res.SecureColumnsRetired)
+		} else {
+			logger.Warn("secure-column key-custody record(s) retired on the package's declared attestation — the persisted spec no longer names them, and the platform did not verify their ciphertext is gone",
+				"count", res.SecureColumnsRetired)
+		}
+	}
+	// A retirement that matched no actual erasure is not a failure of THIS
+	// run — the declaration's own match-or-refuse logic runs the same way on
+	// a dry run as for real, so "unused" is a fact about the package's
+	// current declarations, not an outcome this run only might produce. Not
+	// an error: the declaration is simply inert. But an inert entry sits in
+	// the package file looking load-bearing, and this is the only place an
+	// author (or a reviewer) learns to either delete it or notice a
+	// misspelled Lens/Column selector before it is mistaken for coverage of
+	// a LATER edit that happens to share its shape.
+	if len(res.SecureColumnRetirementsUnused) > 0 {
+		logger.Warn("declared secure-column retirement(s) matched no actual erasure — inert, not an error; delete the entry or check for a misspelled lens/column selector",
+			"count", len(res.SecureColumnRetirementsUnused),
+			"entries", res.SecureColumnRetirementsUnused,
+		)
+	}
 	if res.DryRun {
 		logger.Info("dry-run — no changes submitted",
 			"package", res.PackageName,
@@ -358,6 +392,33 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 		logger.Warn("retention-class holder key(s) are ALREADY tombstoned from a prior run — their class key can never be destroyed by ShredRetentionClassKey; pre-existing platform damage, not caused by this uninstall",
 			"count", len(res.RetentionHoldersAlreadyStranded),
 			"keys", res.RetentionHoldersAlreadyStranded,
+		)
+	}
+	// Report-only, never a refusal: Uninstall takes a package NAME, not a
+	// Definition, so there is no place for an author to declare the retirement
+	// Upgrade/Apply's RetiredSecureColumns guard would demand. The ciphertext
+	// these columns encrypted stays in the target store; the operator needs to
+	// know the destruction-readiness oracle just stopped seeing it.
+	for _, e := range res.SecureColumnsErased {
+		logger.Warn("uninstall tombstoned a lens whose committed secure columns still held key-custody history — the destruction-readiness oracle no longer sees this lens; ciphertext those columns encrypted stays in the target store",
+			"lens", e.Lens,
+			"key", e.Key,
+			"columns", e.Columns,
+			"holderTypes", e.Holders,
+		)
+	}
+	// The other bucket, same split as RetentionHoldersAlreadyStranded above:
+	// these specs were ALREADY tombstoned before this uninstall read them, so
+	// they were already invisible to the destruction-readiness oracle before
+	// this run touched anything. This uninstall did not cause it and cannot
+	// undo it; named so the operator can escalate pre-existing damage instead
+	// of reading it as something this run did.
+	for _, e := range res.SecureColumnsAlreadyErased {
+		logger.Warn("a lens whose committed secure columns still held key-custody history was ALREADY tombstoned from a prior run — the destruction-readiness oracle already could not see it; pre-existing platform damage, not caused by this uninstall",
+			"lens", e.Lens,
+			"key", e.Key,
+			"columns", e.Columns,
+			"holderTypes", e.Holders,
 		)
 	}
 	logger.Info("uninstall committed",

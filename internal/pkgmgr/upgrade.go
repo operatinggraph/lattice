@@ -75,6 +75,24 @@ type UpgradeResult struct {
 	// otherwise become invisible to every destruction-readiness reader.
 	SecureColumnsWidened int
 
+	// SecureColumnsRetired counts the secure COLUMNS whose committed
+	// targetConfig.secureColumns entry this upgrade erased because the package
+	// declared the retirement in Definition.RetiredSecureColumns — the same
+	// unit SecureColumnsWidened counts, so a removed lens that took twenty
+	// secure columns with it reports twenty, not one. Each is an author
+	// attestation that the ciphertext those holder types encrypted is safe to
+	// stop tracking; the platform verified nothing. Reported so an operator
+	// sees custody history leaving the system rather than only its arrival.
+	SecureColumnsRetired int
+
+	// SecureColumnRetirementsUnused labels every
+	// Definition.RetiredSecureColumns entry this upgrade matched to no actual
+	// erasure, as "<lens> / <column selector>". An unused entry excused
+	// nothing here, but it sits in the package file looking load-bearing, and
+	// a retirement that has outlived the edit it was written for is exactly
+	// what a later author would otherwise mistake for coverage of theirs.
+	SecureColumnRetirementsUnused []string
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
@@ -140,6 +158,22 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		SecureColumnsWidened:            sum.secureColumnsWidened,
 		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
+
+	// The Secure-Lens key-custody retirement guard: refuse an undeclared
+	// erasure of a committed targetConfig.secureColumns entry (retention-class-
+	// key-custody-design.md §30). It runs BEFORE the empty-delta return below,
+	// unlike the op-meta guard further down: no erasure can actually reach an
+	// empty delta (a dropped column changes the spec body, and a removed lens
+	// emits its own tombstone), but the check is pure and side-effect-free, so
+	// placing it first also validates the declarations themselves on every run
+	// rather than only on the runs that happen to carry a mutation.
+	retired, unusedRetirements, err := enforceSecureColumnRetirement(def, sum.droppedSecureColumns)
+	if err != nil {
+		return nil, err
+	}
+	res.SecureColumnsRetired = retired
+	res.SecureColumnRetirementsUnused = unusedRetirements
+
 	if len(mutations) == 0 {
 		res.Skipped = true
 		res.Reason = noChangesReason(def.Name, sum.revocationsRespected, sum.secureColumnsWidened)
@@ -321,6 +355,39 @@ type diffSummary struct {
 	// (opmeta-retirement-open-task-guard-design.md §2) checks against the
 	// Definition's declared disposition before the mutations are submitted.
 	tombstonedOpMetas []tombstonedOpMeta
+	// droppedSecureColumns names every committed targetConfig.secureColumns
+	// entry this delta erases — the column dropped from a lens the package
+	// still declares, or the whole spec of a lens it removed or renamed. This
+	// is the population the secure-column retirement guard
+	// (retention-class-key-custody-design.md §30) checks against the
+	// Definition's declared retirements before the mutations are submitted.
+	// The widen (secureColumnsWidened) protects a column the new spec still
+	// names; nothing protected one it stopped naming.
+	droppedSecureColumns []droppedSecureColumn
+}
+
+// droppedSecureColumn names one erasure of a lens's committed key-custody
+// history that an upgrade must not make silently.
+type droppedSecureColumn struct {
+	// Key is the lens `.spec` aspect key whose committed
+	// targetConfig.secureColumns this delta erases.
+	Key string
+	// Lens is the lens's canonicalName as the COMMITTED package declared it —
+	// the value a RetiredSecureColumn must name, read off the sibling
+	// `.canonicalName` aspect because a lens NanoID is a salted hash and does
+	// not invert. Empty when that aspect could not be read.
+	Lens string
+	// Column is the retirement SELECTOR this erasure needs: the dropped
+	// column's name, or "" when the whole spec goes (a removed or renamed
+	// lens), which only a Column:"" declaration excuses.
+	Column string
+	// Erased names every committed secure column this erasure takes with it —
+	// one entry for a dropped column, all of them for a dropped spec — and
+	// Holders the holder types they declared. Both exist so a refusal can tell
+	// an author what history is at stake rather than only that something was
+	// refused.
+	Erased  []string
+	Holders []string
 }
 
 // tombstonedOpMeta names one op-meta a diff drops: its vertex key (so the
@@ -409,6 +476,8 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			// triplet from the stored document for every update and tombstone,
 			// and drops whatever the mutation supplied — so this branch neither
 			// needs to graft it nor could override it.
+			sum.droppedSecureColumns = append(sum.droppedSecureColumns,
+				i.droppedSecureColumnsForUpdate(ctx, op.Key, committed, op.Document)...)
 			sum.secureColumnsWidened += widenSecureColumnsForUpdate(op.Key, committed, op.Document)
 			out = append(out, installMutation{Op: "update", Key: op.Key, Document: op.Document, ExpectedRevision: &rev})
 			sum.revived++
@@ -447,6 +516,8 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			sum.revocationsRespected++
 			continue
 		}
+		sum.droppedSecureColumns = append(sum.droppedSecureColumns,
+			i.droppedSecureColumnsForUpdate(ctx, op.Key, committed, op.Document)...)
 		sum.secureColumnsWidened += widenSecureColumnsForUpdate(op.Key, committed, op.Document)
 		if logicalDocEqual(op.Document, committed) {
 			continue // body-equality skip — no update needed
@@ -504,6 +575,8 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			}
 			continue
 		}
+		sum.droppedSecureColumns = append(sum.droppedSecureColumns,
+			i.droppedSecureColumnsForRemoval(ctx, k, committed)...)
 		out = append(out, installMutation{
 			Op:               "tombstone",
 			Key:              k,
@@ -690,6 +763,124 @@ func widenSecureColumnsForUpdate(key string, committed, newDoc map[string]any) i
 		}
 	}
 	return widened
+}
+
+// droppedSecureColumnsForUpdate names the committed secure columns an
+// update (or revive) of a lens `.spec` key erases: every entry the committed
+// spec declares whose column the new document no longer names at all.
+//
+// This is the gap the widen above cannot close. widenSecureColumnsForUpdate
+// unions holder types for a column BOTH specs declare; a column the new spec
+// stops declaring is skipped there, and the persisted spec simply loses it.
+// The destruction-readiness oracle reads a decoded targetConfig with no
+// matching secure column as a genuine "this lens holds no ciphertext for that
+// holder type" (internal/refractor/health/registry_probe.go), so the erasure
+// is indistinguishable from never having encrypted anything — while the
+// ciphertext is still physically in the target store, which no package diff
+// ever touches. The author has to say so out loud instead.
+//
+// A new document with no targetConfig at all (the adapter changed away from
+// postgres, say) drops every committed secure column, and is detected by the
+// same walk rather than by a separate adapter check.
+//
+// Detection keys on the committed entry's EXISTENCE, never on its holder
+// types being non-empty: the oracle reads an empty holderTypes list as
+// UNKNOWN and answers "may hold", so an entry with nothing in it is exactly
+// the entry whose disappearance loses the most coverage.
+func (i *Installer) droppedSecureColumnsForUpdate(ctx context.Context, key string, committed, newDoc map[string]any) []droppedSecureColumn {
+	if !strings.HasSuffix(key, ".spec") {
+		return nil
+	}
+	committedEntries := secureColumnsOf(committed)
+	if len(committedEntries) == 0 {
+		return nil
+	}
+	stillDeclared := make(map[string]struct{}, len(committedEntries))
+	for _, entry := range secureColumnsOf(newDoc) {
+		if column, _ := entry["column"].(string); column != "" {
+			stillDeclared[column] = struct{}{}
+		}
+	}
+	var out []droppedSecureColumn
+	lens := ""
+	for _, entry := range committedEntries {
+		column, _ := entry["column"].(string)
+		if column == "" {
+			// Unnamed and therefore unnameable by any retirement declaration.
+			// bucketguard refuses an empty column name at install, so a
+			// committed entry cannot carry one; the skip exists so a
+			// hand-written or hand-corrupted document cannot make the guard
+			// demand a declaration no author can write.
+			continue
+		}
+		if _, ok := stillDeclared[column]; ok {
+			continue
+		}
+		if lens == "" {
+			lens = i.lensCanonicalNameOf(ctx, key)
+		}
+		out = append(out, droppedSecureColumn{
+			Key:     key,
+			Lens:    lens,
+			Column:  column,
+			Erased:  []string{column},
+			Holders: stringsOf(entry["holderTypes"]),
+		})
+	}
+	return out
+}
+
+// droppedSecureColumnsForRemoval names the erasure a REMOVED lens `.spec` key
+// commits: the whole committed targetConfig.secureColumns goes with the
+// tombstone, because a lens NanoID is salted by the canonicalName, so a lens
+// the package renamed lands on a wholly new key and the old key is tombstoned
+// exactly as an outright removal would be. Either way the oracle skips a
+// tombstoned lens outright (registry_probe.go's IsDeleted check), while the
+// target store still holds every row the retired columns encrypted.
+//
+// One erasure covers the whole spec, selected by a Column:"" retirement: a
+// per-column declaration attests one column's history, never the lens's.
+//
+// A spec whose committed doc is ALREADY tombstoned is reported the same way.
+// The guard reasons about what the committed spec declares, not about which
+// upgrade first erased it — and a retirement declaration is available for that
+// state too, which is the honest way to record custody that is already gone.
+func (i *Installer) droppedSecureColumnsForRemoval(ctx context.Context, key string, committed map[string]any) []droppedSecureColumn {
+	if !strings.HasSuffix(key, ".spec") {
+		return nil
+	}
+	entries := secureColumnsOf(committed)
+	if len(entries) == 0 {
+		return nil
+	}
+	drop := droppedSecureColumn{Key: key, Lens: i.lensCanonicalNameOf(ctx, key)}
+	for _, entry := range entries {
+		if column, _ := entry["column"].(string); column != "" {
+			drop.Erased = append(drop.Erased, column)
+		}
+		drop.Holders = unionStrings(drop.Holders, stringsOf(entry["holderTypes"]))
+	}
+	return []droppedSecureColumn{drop}
+}
+
+// lensCanonicalNameOf reads the canonicalName a lens `.spec` key's vertex
+// carries, off the sibling `.canonicalName` aspect. A lens NanoID is a salted
+// hash of (package, canonicalName) and does not invert, so this read is the
+// only way a refusal can hand the author the exact Lens value their
+// RetiredSecureColumn entry needs — and a refusal whose remedy cannot be
+// written is a refusal that gets worked around by deleting the lens.
+//
+// Presentational only: a read failure yields the empty string and the refusal
+// falls back to naming the key, rather than replacing a precise fail-closed
+// message with a KV error about a different key.
+func (i *Installer) lensCanonicalNameOf(ctx context.Context, specKey string) string {
+	doc, _, err := i.getCommitted(ctx, strings.TrimSuffix(specKey, ".spec")+".canonicalName")
+	if err != nil || doc == nil {
+		return ""
+	}
+	data, _ := doc["data"].(map[string]any)
+	name, _ := data["value"].(string)
+	return name
 }
 
 // secureColumnsOf returns a spec document's secureColumns entries as mutable

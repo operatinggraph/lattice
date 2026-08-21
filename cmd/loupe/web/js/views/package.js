@@ -7,7 +7,7 @@
 
 import { $, el, demoHide, api, setStatus, toast } from "../api.js";
 import { navigate, replaceRoute } from "../router.js";
-import { manifestCandidate, applySummaryLine, uninstallSummary } from "../logic/pkg.js";
+import { manifestCandidate, applySummaryLine, uninstallSummary, uninstallResultLines } from "../logic/pkg.js";
 import { deleteConfirmReady } from "../logic/lens.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 
@@ -380,25 +380,18 @@ function openUninstallModal(pkg) {
       return;
     }
     // Render the full reply — the tombstoned key list, linkified (dimmed;
-    // they are soft-deleted now) — before the operator closes out.
+    // they are soft-deleted now) — before the operator closes out. The
+    // classification of every other line (which population is benign,
+    // which is escalate-this) lives in uninstallResultLines — pure, and
+    // goja-tested — so this view is just a thin DOM wrapper around it.
     const keys = body.tombstoned || [];
-    const preserved = body.retentionHoldersPreserved || [];
-    const stranded = body.retentionHoldersAlreadyStranded || [];
     msg.className = "small";
     msg.innerHTML = "";
     msg.appendChild(el("div", null, "uninstalled — " + keys.length + " key(s) tombstoned" +
       (body.note ? " (" + body.note + ")" : "")));
-    // The keys the uninstall deliberately held back. Naming them here is the
-    // only place an operator learns the package's retention custody outlived
-    // the package; the tombstone list below would otherwise read as complete.
-    if (preserved.length) {
-      msg.appendChild(el("div", null, preserved.length + " retention-class holder key(s) preserved (not tombstoned) — " +
-        "still destroyable via ShredRetentionClassKey: " + preserved.join(", ")));
-    }
-    if (stranded.length) {
-      msg.appendChild(el("div", "warn-text", stranded.length + " retention-class holder key(s) are ALREADY tombstoned from a prior run — " +
-        "their class key can never be destroyed by ShredRetentionClassKey. Pre-existing platform damage, not caused by this uninstall; escalate: " + stranded.join(", ")));
-    }
+    uninstallResultLines(body).forEach((line) => {
+      msg.appendChild(el("div", line.warn ? "warn-text" : null, line.text));
+    });
     const keyBox = el("div", "pkg-modal-out pkg-item-deleted");
     keys.forEach((k) => {
       const line = el("div", "pkg-delta small");

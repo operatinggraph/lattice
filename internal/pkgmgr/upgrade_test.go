@@ -1136,8 +1136,13 @@ func TestUpgrade_SecureColumnHolderTypesNeverNarrowOnRevive(t *testing.T) {
 	specKey := secureLensSpecKey(v1)
 
 	// v2 drops the Secure Lens entirely — the spec key falls into the diff's
-	// old \ new removal partition and is tombstoned.
+	// old \ new removal partition and is tombstoned. Dropping the lens erases
+	// its committed secure columns, so the removal itself has to be declared;
+	// the widen this test is about is what happens on the way BACK.
 	v2 := sampleDef("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens: "sampleSecureLens", Note: "test fixture: the lens is coming back in v3",
+	}}
 	if _, err := inst.Upgrade(ctx, v2); err != nil {
 		t.Fatalf("Upgrade (drop the secure lens): %v", err)
 	}
@@ -1241,5 +1246,575 @@ func TestUpgrade_SecureColumnHolderTypeReorderIsNotAChange(t *testing.T) {
 	after := kvDoc(t, ctx, conn, specKey)
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("re-ordering the same holder-type set must not rewrite the spec (it would force a needless lens re-activation):\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// defWithTwoSecureColumns extends defWithSecureLens with a second secure
+// column, so a test can drop ONE of them and observe an erasure that is not
+// also the disappearance of the whole spec.
+func defWithTwoSecureColumns(version string) Definition {
+	def := defWithSecureLens(version, []string{"identity", "retentionclass"}, "")
+	lens := &def.Lenses[len(def.Lenses)-1]
+	lens.Columns = append(lens.Columns, PostgresColumn{Name: "applicant_email", Type: "text"})
+	lens.SecureColumns = append(lens.SecureColumns, SecureColumn{
+		Column:      "applicant_email",
+		HolderTypes: []string{"identity"},
+		Field:       "value",
+	})
+	return def
+}
+
+// defWithOneSecureColumn is defWithTwoSecureColumns minus applicant_email —
+// the version whose upgrade erases that column's key-custody record.
+func defWithOneSecureColumn(version string) Definition {
+	def := defWithTwoSecureColumns(version)
+	lens := &def.Lenses[len(def.Lenses)-1]
+	lens.SecureColumns = lens.SecureColumns[:1]
+	return def
+}
+
+// committedSecureColumnNames lists the columns a committed lens spec still
+// declares as secure, without failing on absence — the assertion an erasure
+// test needs and committedHolderTypes cannot give (it fatals on a missing
+// column, which is exactly the state under test here).
+func committedSecureColumnNames(t *testing.T, doc map[string]any) []string {
+	t.Helper()
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec doc has no data envelope: %+v", doc)
+	}
+	cfg, ok := data["targetConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec data has no targetConfig: %+v", data)
+	}
+	entries, _ := cfg["secureColumns"].([]any)
+	var out []string
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := entry["column"].(string); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// TestUpgrade_UndeclaredSecureColumnDropRefused is R2: a lens the package still
+// declares, minus one of its secure columns. The widen cannot help — it unions
+// holder types only for columns BOTH specs name — so the persisted spec would
+// simply forget that applicant_email ever held ciphertext, while every row it
+// encrypted stays in the target store. Refractor's destruction-readiness oracle
+// reads the current spec and nothing else, so the erasure turns into an
+// attestation of coverage the platform does not have. The upgrade must refuse,
+// and refuse before anything commits.
+func TestUpgrade_UndeclaredSecureColumnDropRefused(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+
+	_, err := inst.Upgrade(ctx, defWithOneSecureColumn("0.2.0"))
+	if err == nil {
+		t.Fatalf("dropping a committed secure column with no declared retirement must fail the upgrade")
+	}
+	if !strings.Contains(err.Error(), "applicant_email") || !strings.Contains(err.Error(), "RetiredSecureColumn") {
+		t.Fatalf("the refusal must name the dropped column and the declaration to add, got: %v", err)
+	}
+	// The remedy an author is handed must never be the move the guard exists to
+	// catch.
+	if strings.Contains(err.Error(), "remove the column") || strings.Contains(err.Error(), "drop the column") {
+		t.Fatalf("the refusal must not suggest dropping the column as the fix: %v", err)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("a refused upgrade must commit nothing:\nbefore %+v\nafter  %+v", before, after)
+	}
+	if got := committedSecureColumnNames(t, after); !slices.Equal(got, []string{"applicant_name", "applicant_email"}) {
+		t.Fatalf("committed secure columns = %v, want both still declared", got)
+	}
+}
+
+// TestUpgrade_DeclaredSecureColumnRetirementProceeds is the positive vector for
+// the refusal above: the identical edit, declared. The erasure lands (the
+// platform verifies nothing about the ciphertext — the declaration is the
+// author's attestation) and is COUNTED, because custody history leaving the
+// system is not an outcome an operator should have to infer.
+func TestUpgrade_DeclaredSecureColumnRetirementProceeds(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "sampleSecureLens",
+		Column: "applicant_email",
+		Note:   "applicant_email rows were re-keyed under applicant_name's envelope in the 0.2.0 migration",
+	}}
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (declared retirement): %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 (%+v)", res.SecureColumnsRetired, res)
+	}
+
+	after := kvDoc(t, ctx, conn, specKey)
+	if got := committedSecureColumnNames(t, after); !slices.Equal(got, []string{"applicant_name"}) {
+		t.Fatalf("committed secure columns = %v, want the declared retirement to have landed", got)
+	}
+	if got := committedHolderTypes(t, after, "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("the surviving column must be untouched by the retirement, got %v", got)
+	}
+}
+
+// TestUpgrade_UndeclaredSecureLensRemovalRefused is R3: the lens leaves the
+// manifest entirely and its whole spec is tombstoned with its secure columns
+// still standing. The oracle skips a tombstoned lens outright, so this erases
+// even more custody record than dropping a single column does — and the removal
+// never went near the target store holding the ciphertext.
+func TestUpgrade_UndeclaredSecureLensRemovalRefused(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	_, err := inst.Upgrade(ctx, sampleDef("0.2.0"))
+	if err == nil {
+		t.Fatalf("removing a lens whose committed spec carries secure columns must fail the upgrade")
+	}
+	if !strings.Contains(err.Error(), "sampleSecureLens") || !strings.Contains(err.Error(), "retentionclass") {
+		t.Fatalf("the refusal must name the lens and the holder types at stake, got: %v", err)
+	}
+
+	doc := kvDoc(t, ctx, conn, specKey)
+	if del, _ := doc["isDeleted"].(bool); del {
+		t.Fatalf("a refused upgrade must not tombstone %s: %+v", specKey, doc)
+	}
+}
+
+// TestUpgrade_DeclaredSecureLensRetirementProceeds is the removal's positive
+// vector. Column:"" is the selector a whole-spec erasure needs, because the
+// lens takes every secure column it had with it.
+func TestUpgrade_DeclaredSecureLensRetirementProceeds(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	v2 := sampleDef("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens: "sampleSecureLens",
+		Note: "the read_sample_secure table was dropped after its rows were shredded",
+	}}
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (declared lens retirement): %v", err)
+	}
+	// The count is in COLUMNS, not erasure events: this lens took both of its
+	// secure columns with it, and a "1" here would be a number an operator
+	// cannot compare with the SecureColumnsWidened printed beside it.
+	if res.SecureColumnsRetired != 2 {
+		t.Fatalf("SecureColumnsRetired = %d, want 2 — the lens took both secure columns with it (%+v)", res.SecureColumnsRetired, res)
+	}
+	if del, _ := kvDoc(t, ctx, conn, specKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned once the retirement is declared", specKey)
+	}
+}
+
+// TestUpgrade_PerColumnRetirementDoesNotExcuseLensRemoval pins the asymmetry
+// between the two selectors. Attesting that ONE column's history is safe to
+// stop carrying says nothing about the rest of the lens's, so a per-column
+// declaration must not wave through the removal of the whole spec — the guard
+// would otherwise be defeated by declaring the cheapest column in the list.
+func TestUpgrade_PerColumnRetirementDoesNotExcuseLensRemoval(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	if _, err := inst.Install(ctx, defWithTwoSecureColumns("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	v2 := sampleDef("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "sampleSecureLens",
+		Column: "applicant_email",
+		Note:   "only this one column was swept",
+	}}
+	_, err := inst.Upgrade(ctx, v2)
+	if err == nil {
+		t.Fatalf("a per-column retirement must not excuse tombstoning the whole spec")
+	}
+	if !strings.Contains(err.Error(), `Column: ""`) {
+		t.Fatalf("the refusal must point at the Column:\"\" selector the whole-spec erasure needs, got: %v", err)
+	}
+}
+
+// TestUpgrade_RenamedSecureLensRetirementNamesTheOldLens covers the rename,
+// which is the shape most likely to be declared wrong. A lens NanoID is salted
+// by its canonicalName, so a rename mints a wholly new key and tombstones the
+// old one — and it is the OLD name whose spec loses its secure columns. A
+// declaration naming the new lens excuses nothing.
+func TestUpgrade_RenamedSecureLensRetirementNamesTheOldLens(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	oldSpecKey := secureLensSpecKey(v1)
+
+	renamed := func(version, declaredLens string) Definition {
+		def := defWithSecureLens(version, []string{"identity", "retentionclass"}, "")
+		def.Lenses[len(def.Lenses)-1].CanonicalName = "sampleSecureLensRenamed"
+		if declaredLens != "" {
+			def.RetiredSecureColumns = []RetiredSecureColumn{{
+				Lens: declaredLens,
+				Note: "the renamed lens projects the same rows from the same table",
+			}}
+		}
+		return def
+	}
+
+	if _, err := inst.Upgrade(ctx, renamed("0.2.0", "sampleSecureLensRenamed")); err == nil {
+		t.Fatalf("declaring the NEW lens name must not excuse the old lens's erasure")
+	}
+	if del, _ := kvDoc(t, ctx, conn, oldSpecKey)["isDeleted"].(bool); del {
+		t.Fatalf("a refused rename must not tombstone %s", oldSpecKey)
+	}
+
+	res, err := inst.Upgrade(ctx, renamed("0.2.0", "sampleSecureLens"))
+	if err != nil {
+		t.Fatalf("Upgrade (rename, old name declared): %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 (%+v)", res.SecureColumnsRetired, res)
+	}
+	if del, _ := kvDoc(t, ctx, conn, oldSpecKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned once the rename's retirement is declared", oldSpecKey)
+	}
+}
+
+// TestUpgrade_SecureColumnRetirementRequiresNote proves the Note is load-bearing
+// rather than decorative. Nothing reads it, but a retirement with no stated
+// reason is indistinguishable from a reflex, and the next operator asking who
+// decided the ciphertext was safe to stop tracking has nothing to read.
+func TestUpgrade_SecureColumnRetirementRequiresNote(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	if _, err := inst.Install(ctx, defWithTwoSecureColumns("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "sampleSecureLens",
+		Column: "applicant_email",
+	}}
+	_, err := inst.Upgrade(ctx, v2)
+	if err == nil {
+		t.Fatalf("a retirement with an empty Note must be refused")
+	}
+	if !strings.Contains(err.Error(), "empty Note") {
+		t.Fatalf("the refusal must say the Note is what is missing, got: %v", err)
+	}
+}
+
+// TestUpgrade_HolderTypeNarrowingIsNotASecureColumnRetirement is the regression
+// pin on the mechanism this guard sits beside. Narrowing a column's holderTypes
+// leaves the column declared, so it is the WIDEN's case, not an erasure: the
+// upgrade must still succeed, still widen, and never demand a retirement
+// declaration for an edit that loses no column.
+func TestUpgrade_HolderTypeNarrowingIsNotASecureColumnRetirement(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithSecureLens("0.1.0", []string{"identity", "retentionclass"}, "")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	res, err := inst.Upgrade(ctx, defWithSecureLens("0.2.0", []string{"identity"}, ""))
+	if err != nil {
+		t.Fatalf("a narrowing upgrade must still succeed (the widen handles it): %v", err)
+	}
+	if res.SecureColumnsWidened != 1 {
+		t.Fatalf("SecureColumnsWidened = %d, want 1 (%+v)", res.SecureColumnsWidened, res)
+	}
+	if res.SecureColumnsRetired != 0 {
+		t.Fatalf("SecureColumnsRetired = %d, want 0 — no column was erased (%+v)", res.SecureColumnsRetired, res)
+	}
+	if got := committedHolderTypes(t, kvDoc(t, ctx, conn, specKey), "applicant_name"); !slices.Equal(got, []string{"identity", "retentionclass"}) {
+		t.Fatalf("holderTypes = %v, want the union still written by the widen", got)
+	}
+}
+
+// TestUpgrade_NonLensSpecRemovalNeedsNoRetirement bounds the guard. `.spec` is
+// not lens-exclusive — weaver-target and loom-pattern bodies use the same
+// aspect name — but neither carries a targetConfig, so neither can hold key
+// custody and neither may be made to demand a retirement declaration.
+func TestUpgrade_NonLensSpecRemovalNeedsNoRetirement(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := sampleDef("0.1.0")
+	v1.WeaverTargets = []WeaverTargetSpec{{
+		TargetID: "sampleTarget",
+		LensRef:  "sampleLens",
+		Gaps:     map[string]GapActionSpec{"missing_x": {Action: "directOp", Operation: "SampleOp"}},
+	}}
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	targetSpecKey := metaVertexPrefix + entityNanoID(v1.Name, "weaverTarget:sampleTarget") + ".spec"
+	if del, _ := kvDoc(t, ctx, conn, targetSpecKey)["isDeleted"].(bool); del {
+		t.Fatalf("%s should be live right after install", targetSpecKey)
+	}
+
+	res, err := inst.Upgrade(ctx, sampleDef("0.2.0"))
+	if err != nil {
+		t.Fatalf("removing a weaver target must not need a secure-column retirement: %v", err)
+	}
+	if res.SecureColumnsRetired != 0 {
+		t.Fatalf("SecureColumnsRetired = %d, want 0 (%+v)", res.SecureColumnsRetired, res)
+	}
+	if del, _ := kvDoc(t, ctx, conn, targetSpecKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned after the target leaves the manifest", targetSpecKey)
+	}
+}
+
+// TestUpgrade_BlanketRetirementDoesNotExcuseColumnDrop is the mirror of
+// PerColumnRetirementDoesNotExcuseLensRemoval, and the direction that decides
+// whether a retirement can outlive its edit. A Column:"" entry attests that a
+// removed lens's whole spec was safe to let go. Left in the package file
+// afterwards it would, under a looser rule, wave through every later erasure on
+// that lens — including a column dropped from the lens once it is back — under
+// a Note written about something else entirely. The selector has to match
+// exactly, so a stale blanket entry goes inert instead.
+func TestUpgrade_BlanketRetirementDoesNotExcuseColumnDrop(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens: "sampleSecureLens",
+		Note: "0.0.9: the old read_sample_secure table was dropped outright",
+	}}
+	_, err := inst.Upgrade(ctx, v2)
+	if err == nil {
+		t.Fatalf("a whole-spec retirement must not excuse dropping one column from a lens that survives")
+	}
+	// The author has a Column:"" entry in front of them, so the refusal has to
+	// say why it did not apply — otherwise the guard reads as broken and the
+	// next move is to delete the lens.
+	if !strings.Contains(err.Error(), `Column:""`) {
+		t.Fatalf("the refusal must explain why the existing whole-spec entry does not apply, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `Column: "applicant_email"`) {
+		t.Fatalf("the refusal must name the per-column declaration to add, got: %v", err)
+	}
+	if after := kvDoc(t, ctx, conn, specKey); !reflect.DeepEqual(before, after) {
+		t.Fatalf("a refused upgrade must commit nothing:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// TestUpgrade_SecureColumnRetirementToleratesSurroundingSpace pins that the
+// validated and the MATCHED spellings of a declaration are the same one. A lens
+// NanoID is salted by the raw canonicalName, so an entry trimmed for validation
+// and used untrimmed for matching would validate, match nothing, and produce a
+// refusal instructing the author to add a declaration identical to the one
+// already in their file — a dead end with no exit that is not deleting the lens.
+func TestUpgrade_SecureColumnRetirementToleratesSurroundingSpace(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "  sampleSecureLens ",
+		Column: " applicant_email\t",
+		Note:   "the column's rows were shredded before this release",
+	}}
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("a declaration carrying surrounding whitespace must still match its lens and column: %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 (%+v)", res.SecureColumnsRetired, res)
+	}
+	if got := committedSecureColumnNames(t, kvDoc(t, ctx, conn, specKey)); !slices.Equal(got, []string{"applicant_name"}) {
+		t.Fatalf("committed secure columns = %v, want the declared retirement to have landed", got)
+	}
+}
+
+// TestUpgrade_UnusedSecureColumnRetirementReported covers the entry that
+// excused nothing. It cannot be refused — a package may legitimately carry a
+// retirement across versions after the erasure it described has landed — but
+// left unreported it is indistinguishable from one still doing work, which is
+// how a stale attestation ends up read as coverage for somebody else's edit.
+func TestUpgrade_UnusedSecureColumnRetirementReported(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	if _, err := inst.Install(ctx, defWithTwoSecureColumns("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{
+		{Lens: "sampleSecureLens", Column: "applicant_email", Note: "swept in 0.2.0"},
+		{Lens: "sampleSecureLens", Column: "applicant_name", Note: "0.0.9: never actually written"},
+		{Lens: "someOtherLens", Note: "0.0.4: that lens is long gone"},
+	}
+	res, err := inst.Upgrade(ctx, v2)
+	if err != nil {
+		t.Fatalf("Upgrade (one live retirement, two stale): %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 — only applicant_email was erased (%+v)", res.SecureColumnsRetired, res)
+	}
+	want := []string{
+		"sampleSecureLens / applicant_name",
+		`someOtherLens / "" (the whole spec — a removed or renamed lens)`,
+	}
+	if !slices.Equal(res.SecureColumnRetirementsUnused, want) {
+		t.Fatalf("SecureColumnRetirementsUnused = %v, want %v (declaration order, the live one absent)",
+			res.SecureColumnRetirementsUnused, want)
+	}
+}
+
+// TestUpgrade_SecureColumnDropOnReviveRefused covers the revive branch, which
+// reaches the erasure through a different path than an ordinary body edit and
+// is the branch §29 got wrong once already. A package entity key is
+// deterministic in (package, kind, canonicalName), so a lens removed in one
+// version and re-added in the next lands on the exact key its removal
+// tombstoned — and the tombstone touched a Core KV definition, not the target
+// store holding the ciphertext. A lens that comes BACK with a secure column
+// missing erases that column's custody record just as surely as dropping it in
+// place would, so remove-then-readd must not be a way around the guard.
+func TestUpgrade_SecureColumnDropOnReviveRefused(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+
+	// v2 removes the lens outright — declared, so the removal itself proceeds
+	// and the spec is tombstoned with both secure columns still in its body.
+	v2 := sampleDef("0.2.0")
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens: "sampleSecureLens", Note: "test fixture: the lens returns in v3",
+	}}
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("Upgrade (remove the lens): %v", err)
+	}
+	tombstoned := kvDoc(t, ctx, conn, specKey)
+	if del, _ := tombstoned["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned after v2", specKey)
+	}
+	if got := committedSecureColumnNames(t, tombstoned); !slices.Equal(got, []string{"applicant_name", "applicant_email"}) {
+		t.Fatalf("the tombstoned spec must still carry its secure columns (they are what the revive reads): %v", got)
+	}
+
+	// v3 re-adds the lens with applicant_email gone. The revive branch reads
+	// the tombstoned spec as committed history, so this is an erasure.
+	v3 := defWithOneSecureColumn("0.3.0")
+	if _, err := inst.Upgrade(ctx, v3); err == nil {
+		t.Fatalf("re-adding a lens without one of its committed secure columns must be refused, same as dropping it in place")
+	}
+	if got := committedSecureColumnNames(t, kvDoc(t, ctx, conn, specKey)); !slices.Equal(got, []string{"applicant_name", "applicant_email"}) {
+		t.Fatalf("a refused revive must commit nothing, got %v", got)
+	}
+
+	// The positive vector: the same re-add, declared.
+	v3.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "sampleSecureLens",
+		Column: "applicant_email",
+		Note:   "the column was shredded while the lens was out of the manifest",
+	}}
+	res, err := inst.Upgrade(ctx, v3)
+	if err != nil {
+		t.Fatalf("Upgrade (declared revive retirement): %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 on the revive path (%+v)", res.SecureColumnsRetired, res)
+	}
+	revived := kvDoc(t, ctx, conn, specKey)
+	if del, _ := revived["isDeleted"].(bool); del {
+		t.Fatalf("%s should be live again after the re-add", specKey)
+	}
+	if got := committedSecureColumnNames(t, revived); !slices.Equal(got, []string{"applicant_name"}) {
+		t.Fatalf("committed secure columns after the declared revive = %v, want just applicant_name", got)
+	}
+}
+
+// TestDefinition_ValidateRetiredSecureColumns proves the declaration is checked
+// at INSTALL, not only when some later version's erasure happens to reach it. A
+// package that could ship a noteless retirement and surface it three versions
+// on would be handing the diagnosis to whoever runs that upgrade rather than to
+// the author who wrote it.
+func TestDefinition_ValidateRetiredSecureColumns(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	for _, tc := range []struct {
+		name    string
+		decls   []RetiredSecureColumn
+		wantErr string
+	}{
+		{
+			name:    "no lens",
+			decls:   []RetiredSecureColumn{{Column: "applicant_name", Note: "swept"}},
+			wantErr: "names no Lens",
+		},
+		{
+			name:    "no note",
+			decls:   []RetiredSecureColumn{{Lens: "sampleSecureLens", Column: "applicant_name"}},
+			wantErr: "empty Note",
+		},
+		{
+			name: "duplicate pair",
+			decls: []RetiredSecureColumn{
+				{Lens: "sampleSecureLens", Column: "applicant_name", Note: "swept"},
+				{Lens: " sampleSecureLens", Column: "applicant_name ", Note: "swept again?"},
+			},
+			wantErr: "twice",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := defWithSecureLens("0.1.0", []string{"identity"}, "")
+			def.RetiredSecureColumns = tc.decls
+			_, err := inst.Install(ctx, def)
+			if err == nil {
+				t.Fatalf("Install must refuse a malformed retirement declaration")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.wantErr)
+			}
+		})
 	}
 }

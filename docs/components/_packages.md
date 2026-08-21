@@ -156,6 +156,10 @@ declares:
       subjectType: lease
   opMetas:
     - operationType: SignLease
+  retentionClasses:
+    - canonicalName: clinicalRecord
+      policy: eraseOnExpiry
+      retentionPeriod: P7Y
 ```
 
 Field semantics:
@@ -225,6 +229,22 @@ Field semantics:
   `operationType` on its `data`, making that op discoverable by `forOperation`
   resolution. A package declaring an op as the target of a Weaver `assignTask`
   or a Loom `userTask` step must declare a matching `opMetas` entry.
+- **declares.retentionClasses[]**: each entry maps to one retention-class key
+  holder the package's own Go `Definition.RetentionClasses` declares
+  (retention-class-key-custody-design.md §3.1) — a `vtx.retentionclass.<NanoID>`
+  root + `.retentionPolicy` aspect a DDL's aspect types name via
+  `Custody.RetentionClass`. **Mandatory** whenever the package declares any
+  `RetentionClasses`: `VerifyAgainstDefinition` fails the count when the
+  manifest's list and the Definition's disagree in length, so an author who
+  adds a Go-side retention class without adding the matching manifest entry
+  fails verification, not silently ships undocumented. `canonicalName` is the
+  entry's identity; `policy` and `retentionPeriod` are the actual data-
+  controller obligation (currently `eraseOnExpiry` is the only implemented
+  `policy`, and `retentionPeriod` is an ISO-8601 duration) and are compared
+  too — a manifest that agrees on `canonicalName` alone but not on what the
+  class's obligation actually is would let that obligation drift with a
+  zero-line manifest diff, defeating the one construct whose whole purpose is
+  being the reviewable statement of it.
 
 ## Installation semantics
 

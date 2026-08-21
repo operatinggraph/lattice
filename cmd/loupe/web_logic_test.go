@@ -798,6 +798,27 @@ func TestPkgLogicJS(t *testing.T) {
 		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
 			"secureColumnsWidened": 1},
 			"upgrade 1.0.0 → 1.1.0 — no changes · 1 secure column(s) kept their committed holderTypes"},
+		// The inverse of the narrowing-refused line above: the package
+		// DECLARED these erasures and they landed. Rides under the same
+		// "preview —" dry-run prefix as every other count on this line.
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"secureColumnsRetired": 3},
+			"upgrade 1.0.0 → 1.1.0 — no changes · 3 secure-column key-custody record(s) retired"},
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0", "dryRun": true,
+			"secureColumnsRetired": 3},
+			"preview — upgrade 1.0.0 → 1.1.0 — no changes · 3 secure-column key-custody record(s) retired"},
+		// A declared retirement that matched no actual erasure — advisory
+		// hygiene, deliberately worded lighter than "retired"/"widened": it is
+		// not custody loss, just a stale attestation to clean up.
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"secureColumnRetirementsUnused": []any{"leaseApplicationsRead / applicant_name"}},
+			"upgrade 1.0.0 → 1.1.0 — no changes · 1 declared retirement(s) unused"},
+		// Both together, in the order the function appends them: widened,
+		// retired, then unused — none of the three counters swallows another.
+		{map[string]any{"action": "upgrade", "fromVersion": "1.0.0", "toVersion": "1.1.0",
+			"secureColumnsWidened": 1, "secureColumnsRetired": 2,
+			"secureColumnRetirementsUnused": []any{"a / b"}},
+			"upgrade 1.0.0 → 1.1.0 — no changes · 1 secure column(s) kept their committed holderTypes · 2 secure-column key-custody record(s) retired · 1 declared retirement(s) unused"},
 	} {
 		if got := call(t, vm, "applySummaryLine", tc.res); got != tc.want {
 			t.Errorf("applySummaryLine(%v) = %q, want %q", tc.res, got, tc.want)
@@ -861,6 +882,68 @@ func TestPkgLogicJS(t *testing.T) {
 	}
 	if got := call(t, vm, "uninstallSummary", unresolvedHolder); got != "tombstones up to 4 key(s) incl. the manifest + package vertex; 1 unresolved skipped; 1 retention-class holder key(s) left untouched (only ShredRetentionClassKey may destroy them)" {
 		t.Errorf("uninstallSummary with an unresolved holder = %q", got)
+	}
+
+	// uninstallResultLines is the post-uninstall-reply classifier the confirm
+	// modal renders through: which population is a deliberate, benign
+	// hold-back (warn: false) and which is escalate-this (warn: true).
+	if got, ok := call(t, vm, "uninstallResultLines", map[string]any{}).([]any); !ok || len(got) != 0 {
+		t.Fatalf("uninstallResultLines(empty) = %v, want zero lines", got)
+	}
+
+	preservedOnly, ok := call(t, vm, "uninstallResultLines", map[string]any{
+		"retentionHoldersPreserved": []any{"vtx.retentionclass.aaaaaaaaaaaaaaaaaaaa"},
+	}).([]any)
+	if !ok || len(preservedOnly) != 1 {
+		t.Fatalf("uninstallResultLines(preserved) = %v, want 1 line", preservedOnly)
+	}
+	if line := preservedOnly[0].(map[string]any); line["warn"] != false || !strings.Contains(line["text"].(string), "preserved") {
+		t.Errorf(`uninstallResultLines(preserved)[0] = %v, want warn=false, text mentioning "preserved"`, line)
+	}
+
+	strandedOnly, ok := call(t, vm, "uninstallResultLines", map[string]any{
+		"retentionHoldersAlreadyStranded": []any{"vtx.retentionclass.bbbbbbbbbbbbbbbbbbbb"},
+	}).([]any)
+	if !ok || len(strandedOnly) != 1 {
+		t.Fatalf("uninstallResultLines(stranded) = %v, want 1 line", strandedOnly)
+	}
+	if line := strandedOnly[0].(map[string]any); line["warn"] != true || !strings.Contains(line["text"].(string), "ALREADY tombstoned") {
+		t.Errorf(`uninstallResultLines(stranded)[0] = %v, want warn=true, text mentioning "ALREADY tombstoned"`, line)
+	}
+
+	// The B4 regression: secureColumnsErased (THIS run) and
+	// secureColumnsAlreadyErased (a PRIOR run) must render as two DISTINCT
+	// lines, each naming its own lens — not merged into one count, and not
+	// cross-attributed. An assertion that only checked "some warning
+	// appeared" would still pass with the misattribution bug restored; this
+	// one fails unless both lenses are named in their OWN line.
+	both, ok := call(t, vm, "uninstallResultLines", map[string]any{
+		"secureColumnsErased": []any{
+			map[string]any{"key": "vtx.meta.aaaaaaaaaaaaaaaaaaaa.spec", "lens": "clinicEncountersRead", "columns": []any{"summary"}, "holderTypes": []any{"retentionclass"}},
+		},
+		"secureColumnsAlreadyErased": []any{
+			map[string]any{"key": "vtx.meta.bbbbbbbbbbbbbbbbbbbb.spec", "lens": "leaseApplicationsRead", "columns": []any{"applicant_name"}, "holderTypes": []any{"identity"}},
+		},
+	}).([]any)
+	if !ok || len(both) != 2 {
+		t.Fatalf("uninstallResultLines(erased+alreadyErased) = %v, want exactly 2 lines", both)
+	}
+	erasedLine := both[0].(map[string]any)
+	alreadyErasedLine := both[1].(map[string]any)
+	if erasedLine["warn"] != true || !strings.Contains(erasedLine["text"].(string), "clinicEncountersRead") {
+		t.Errorf("uninstallResultLines erased line = %v, want warn=true naming clinicEncountersRead", erasedLine)
+	}
+	if strings.Contains(erasedLine["text"].(string), "leaseApplicationsRead") {
+		t.Errorf("uninstallResultLines erased line = %v, must NOT name the already-erased lens", erasedLine)
+	}
+	if alreadyErasedLine["warn"] != true || !strings.Contains(alreadyErasedLine["text"].(string), "leaseApplicationsRead") {
+		t.Errorf("uninstallResultLines alreadyErased line = %v, want warn=true naming leaseApplicationsRead", alreadyErasedLine)
+	}
+	if !strings.Contains(alreadyErasedLine["text"].(string), "prior run") {
+		t.Errorf("uninstallResultLines alreadyErased line = %v, want text naming it as a PRIOR run, not this uninstall", alreadyErasedLine)
+	}
+	if strings.Contains(alreadyErasedLine["text"].(string), "clinicEncountersRead") {
+		t.Errorf("uninstallResultLines alreadyErased line = %v, must NOT name the this-run-erased lens", alreadyErasedLine)
 	}
 }
 

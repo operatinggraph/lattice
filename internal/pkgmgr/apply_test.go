@@ -2,6 +2,8 @@ package pkgmgr
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -296,5 +298,51 @@ func TestApply_ForceNoBodyChangeSkips(t *testing.T) {
 	}
 	if !res.Skipped || res.Action != "skip" {
 		t.Fatalf("force with no body change: want skip via body-equality, got %+v", res)
+	}
+}
+
+// TestApply_UndeclaredSecureColumnDropRefused pins the SECOND enforcement
+// point. Apply and Upgrade share computeDeltaAgainst, so a guard wired only
+// into Upgrade would be bypassable through everything that reaches the
+// in-place path here — `lattice-pkg install`/`upgrade` and Loupe's
+// POST /api/packages/apply among them.
+//
+// The dry run is refused too: the guard is pure, so a preview can say the real
+// apply would refuse instead of previewing a delta that cannot commit.
+func TestApply_UndeclaredSecureColumnDropRefused(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	specKey := secureLensSpecKey(v1)
+	before := kvDoc(t, ctx, conn, specKey)
+
+	v2 := defWithOneSecureColumn("0.2.0")
+	if _, err := inst.Apply(ctx, v2, ApplyOptions{DryRun: true}); err == nil {
+		t.Fatalf("a dry-run apply must report the refusal, not preview a delta that cannot commit")
+	}
+	if _, err := inst.Apply(ctx, v2, ApplyOptions{}); err == nil {
+		t.Fatalf("Apply must refuse an undeclared secure-column erasure, same as Upgrade")
+	}
+	if after := kvDoc(t, ctx, conn, specKey); !reflect.DeepEqual(before, after) {
+		t.Fatalf("a refused apply must commit nothing:\nbefore %+v\nafter  %+v", before, after)
+	}
+
+	v2.RetiredSecureColumns = []RetiredSecureColumn{{
+		Lens:   "sampleSecureLens",
+		Column: "applicant_email",
+		Note:   "the column's rows were shredded before this release",
+	}}
+	res, err := inst.Apply(ctx, v2, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("Apply (declared retirement): %v", err)
+	}
+	if res.SecureColumnsRetired != 1 {
+		t.Fatalf("SecureColumnsRetired = %d, want 1 (%+v)", res.SecureColumnsRetired, res)
+	}
+	if got := committedSecureColumnNames(t, kvDoc(t, ctx, conn, specKey)); !slices.Equal(got, []string{"applicant_name"}) {
+		t.Fatalf("committed secure columns = %v, want the declared retirement to have landed", got)
 	}
 }

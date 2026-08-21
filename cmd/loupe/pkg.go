@@ -341,6 +341,8 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 		"retentionHoldersPreservedCount":       res.RetentionHoldersPreserved,
 		"retentionHoldersAlreadyStrandedCount": res.RetentionHoldersAlreadyStranded,
 		"secureColumnsWidened":                 res.SecureColumnsWidened,
+		"secureColumnsRetired":                 res.SecureColumnsRetired,
+		"secureColumnRetirementsUnused":        res.SecureColumnRetirementsUnused,
 		"skipped":                              res.Skipped,
 		"dryRun":                               res.DryRun,
 		"reason":                               res.Reason,
@@ -505,6 +507,8 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 		"tombstoned":                      res.Tombstoned,
 		"retentionHoldersPreserved":       res.RetentionHoldersPreserved,
 		"retentionHoldersAlreadyStranded": res.RetentionHoldersAlreadyStranded,
+		"secureColumnsErased":             res.SecureColumnsErased,
+		"secureColumnsAlreadyErased":      res.SecureColumnsAlreadyErased,
 		"note":                            res.Note,
 	})
 }

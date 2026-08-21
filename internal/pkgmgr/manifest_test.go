@@ -174,3 +174,106 @@ func TestVerifyAgainstDefinition_OpMetaIdentityMismatch(t *testing.T) {
 		t.Fatalf("expected operationType-mismatch error, got %v", err)
 	}
 }
+
+// TestVerifyAgainstDefinition_RetentionClassCountMismatch surfaces a package
+// that mints a retention-class key holder in its Go Definition without
+// declaring it in the reviewable manifest.
+func TestVerifyAgainstDefinition_RetentionClassCountMismatch(t *testing.T) {
+	m := &Manifest{Name: "x", Version: "1.0"}
+	def := Definition{
+		Name:             "x",
+		Version:          "1.0",
+		RetentionClasses: []RetentionClassSpec{{CanonicalName: "clinicalRecord"}},
+	}
+	err := m.VerifyAgainstDefinition(def)
+	if err == nil || !strings.Contains(err.Error(), "retentionClasses") {
+		t.Fatalf("expected retentionClasses count-mismatch error, got %v", err)
+	}
+}
+
+func TestVerifyAgainstDefinition_RetentionClassIdentityMismatch(t *testing.T) {
+	m := &Manifest{
+		Name:     "x",
+		Version:  "1.0",
+		Declares: ManifestBlock{RetentionClasses: []ManifestRetentionClass{{CanonicalName: "clinicalRecord"}}},
+	}
+	def := Definition{
+		Name:             "x",
+		Version:          "1.0",
+		RetentionClasses: []RetentionClassSpec{{CanonicalName: "underwritingRecord"}},
+	}
+	err := m.VerifyAgainstDefinition(def)
+	if err == nil || !strings.Contains(err.Error(), "RetentionClass[0] canonicalName mismatch") {
+		t.Fatalf("expected RetentionClass canonicalName-mismatch error, got %v", err)
+	}
+}
+
+// TestVerifyAgainstDefinition_RetentionClassHappyPath asserts a manifest
+// that declares the same retention classes as the Definition, in the same
+// order — including the Policy/RetentionPeriod obligation fields, not just
+// canonicalName — cross-checks cleanly.
+func TestVerifyAgainstDefinition_RetentionClassHappyPath(t *testing.T) {
+	m := &Manifest{
+		Name:    "x",
+		Version: "1.0",
+		Declares: ManifestBlock{
+			RetentionClasses: []ManifestRetentionClass{{CanonicalName: "clinicalRecord", Policy: "eraseOnExpiry", RetentionPeriod: "P7Y"}},
+		},
+	}
+	def := Definition{
+		Name:             "x",
+		Version:          "1.0",
+		RetentionClasses: []RetentionClassSpec{{CanonicalName: "clinicalRecord", Policy: "eraseOnExpiry", RetentionPeriod: "P7Y"}},
+	}
+	if err := m.VerifyAgainstDefinition(def); err != nil {
+		t.Fatalf("VerifyAgainstDefinition: %v", err)
+	}
+}
+
+// TestVerifyAgainstDefinition_RetentionClassPolicyMismatch is B8's
+// regression: the manifest is the reviewable statement of a retention
+// class's actual obligation, not just which class exists, so a Policy that
+// drifted between the manifest and the Definition must fail verification —
+// canonicalName alone identifying the class is not enough.
+func TestVerifyAgainstDefinition_RetentionClassPolicyMismatch(t *testing.T) {
+	m := &Manifest{
+		Name:    "x",
+		Version: "1.0",
+		Declares: ManifestBlock{
+			RetentionClasses: []ManifestRetentionClass{{CanonicalName: "clinicalRecord", Policy: "eraseOnExpiry", RetentionPeriod: "P7Y"}},
+		},
+	}
+	def := Definition{
+		Name:             "x",
+		Version:          "1.0",
+		RetentionClasses: []RetentionClassSpec{{CanonicalName: "clinicalRecord", Policy: "somethingElse", RetentionPeriod: "P7Y"}},
+	}
+	err := m.VerifyAgainstDefinition(def)
+	if err == nil || !strings.Contains(err.Error(), "policy mismatch") {
+		t.Fatalf("expected RetentionClass policy-mismatch error, got %v", err)
+	}
+}
+
+// TestVerifyAgainstDefinition_RetentionClassRetentionPeriodMismatch is B8's
+// central claim, proven directly: a manifest whose declared RetentionPeriod
+// silently drifted from the Definition's — e.g. an author shortening a
+// retention period from years to days without touching the manifest — must
+// fail verification, not pass with a zero-line diff.
+func TestVerifyAgainstDefinition_RetentionClassRetentionPeriodMismatch(t *testing.T) {
+	m := &Manifest{
+		Name:    "x",
+		Version: "1.0",
+		Declares: ManifestBlock{
+			RetentionClasses: []ManifestRetentionClass{{CanonicalName: "clinicalRecord", Policy: "eraseOnExpiry", RetentionPeriod: "P7Y"}},
+		},
+	}
+	def := Definition{
+		Name:             "x",
+		Version:          "1.0",
+		RetentionClasses: []RetentionClassSpec{{CanonicalName: "clinicalRecord", Policy: "eraseOnExpiry", RetentionPeriod: "P3D"}},
+	}
+	err := m.VerifyAgainstDefinition(def)
+	if err == nil || !strings.Contains(err.Error(), "retentionPeriod mismatch") {
+		t.Fatalf("expected RetentionClass retentionPeriod-mismatch error, got %v", err)
+	}
+}

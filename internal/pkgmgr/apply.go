@@ -82,6 +82,24 @@ type ApplyResult struct {
 	// otherwise become invisible to every destruction-readiness reader.
 	SecureColumnsWidened int
 
+	// SecureColumnsRetired counts the secure COLUMNS whose committed
+	// targetConfig.secureColumns entry this apply erased because the package
+	// declared the retirement in Definition.RetiredSecureColumns — the same
+	// unit SecureColumnsWidened counts, so a removed lens that took twenty
+	// secure columns with it reports twenty, not one. Each is an author's
+	// attestation that the ciphertext those holder types encrypted is safe to
+	// stop tracking; the platform verified nothing. Reported so an operator
+	// sees custody history leaving the system rather than only its arrival.
+	SecureColumnsRetired int
+
+	// SecureColumnRetirementsUnused labels every
+	// Definition.RetiredSecureColumns entry this apply matched to no actual
+	// erasure, as "<lens> / <column selector>". An unused entry excused
+	// nothing here, but it sits in the package file looking load-bearing, and
+	// a retirement that has outlived the edit it was written for is exactly
+	// what a later author would otherwise mistake for coverage of theirs.
+	SecureColumnRetirementsUnused []string
+
 	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
 	// design.md §10.2) whose resolved leaf count this apply pushed past its
 	// declared LeafBudget. Advisory only — the apply still succeeded. This is
@@ -160,6 +178,24 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		SecureColumnsWidened:            sum.secureColumnsWidened,
 		LeafBudgetWarnings:              leafBudgetWarnings,
 	}
+
+	// The Secure-Lens key-custody retirement guard (retention-class-key-
+	// custody-design.md §30). computeDeltaAgainst is shared with Upgrade, so
+	// wiring the guard only there would leave it bypassable through this path
+	// — `lattice-pkg install`/`upgrade` and Loupe's POST /api/packages/apply
+	// both land here.
+	//
+	// Unlike the op-meta guard below it runs before the empty-delta AND the
+	// dry-run returns: it is pure, so a preview can honestly report that the
+	// real apply would refuse, instead of previewing a delta that cannot
+	// commit.
+	retired, unusedRetirements, err := enforceSecureColumnRetirement(def, sum.droppedSecureColumns)
+	if err != nil {
+		return nil, err
+	}
+	res.SecureColumnsRetired = retired
+	res.SecureColumnRetirementsUnused = unusedRetirements
+
 	if len(mutations) == 0 {
 		res.Action = "skip"
 		res.Skipped = true

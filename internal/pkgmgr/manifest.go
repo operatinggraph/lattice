@@ -23,13 +23,14 @@ type Manifest struct {
 
 // ManifestBlock is the `declares:` sub-tree.
 type ManifestBlock struct {
-	DDLs          []ManifestDDL          `yaml:"ddls,omitempty"`
-	Lenses        []ManifestLens         `yaml:"lenses,omitempty"`
-	Permissions   []ManifestPermission   `yaml:"permissions,omitempty"`
-	WeaverTargets []ManifestWeaverTarget `yaml:"weaverTargets,omitempty"`
-	LoomPatterns  []ManifestLoomPattern  `yaml:"loomPatterns,omitempty"`
-	OpMetas       []ManifestOpMeta       `yaml:"opMetas,omitempty"`
-	Panes         []ManifestPane         `yaml:"panes,omitempty"`
+	DDLs             []ManifestDDL            `yaml:"ddls,omitempty"`
+	Lenses           []ManifestLens           `yaml:"lenses,omitempty"`
+	Permissions      []ManifestPermission     `yaml:"permissions,omitempty"`
+	WeaverTargets    []ManifestWeaverTarget   `yaml:"weaverTargets,omitempty"`
+	LoomPatterns     []ManifestLoomPattern    `yaml:"loomPatterns,omitempty"`
+	OpMetas          []ManifestOpMeta         `yaml:"opMetas,omitempty"`
+	Panes            []ManifestPane           `yaml:"panes,omitempty"`
+	RetentionClasses []ManifestRetentionClass `yaml:"retentionClasses,omitempty"`
 }
 
 // ManifestDDL is one DDL declaration entry. Class defaults to
@@ -91,6 +92,23 @@ type ManifestOpMeta struct {
 // VerifyAgainstDefinition cross-checks is `paneId`.
 type ManifestPane struct {
 	PaneID string `yaml:"paneId"`
+}
+
+// ManifestRetentionClass is one retention-class declaration entry. The
+// identity field VerifyAgainstDefinition cross-checks is `canonicalName`.
+//
+// Policy and RetentionPeriod carry the data controller's actual obligation
+// (retention-class-key-custody-design.md §3.1), not just which class exists:
+// without them an author can change a retention period from years to days,
+// or flip the policy, with a manifest diff that shows nothing — mirroring
+// why ManifestDDL's Abstract/SubtypeOf are compared alongside CanonicalName
+// rather than treated as decoration. A retention class's whole purpose is
+// being the reviewable statement of that obligation; identity alone is not
+// enough to review a change to it.
+type ManifestRetentionClass struct {
+	CanonicalName   string `yaml:"canonicalName"`
+	Policy          string `yaml:"policy,omitempty"`
+	RetentionPeriod string `yaml:"retentionPeriod,omitempty"`
 }
 
 // ParseManifest reads and validates a manifest.yaml file. Required
@@ -164,6 +182,9 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 	if got, want := len(m.Declares.Panes), len(d.Panes); got != want {
 		return fmt.Errorf("pkgmgr: manifest declares %d panes but Definition has %d", got, want)
 	}
+	if got, want := len(m.Declares.RetentionClasses), len(d.RetentionClasses); got != want {
+		return fmt.Errorf("pkgmgr: manifest declares %d retentionClasses but Definition has %d", got, want)
+	}
 	for i, dm := range m.Declares.DDLs {
 		if dm.CanonicalName != d.DDLs[i].CanonicalName {
 			return fmt.Errorf("pkgmgr: DDL[%d] canonicalName mismatch: manifest=%q definition=%q",
@@ -232,6 +253,23 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 		if pm.PaneID != d.Panes[i].CanonicalName {
 			return fmt.Errorf("pkgmgr: Pane[%d] paneId mismatch: manifest=%q definition=%q",
 				i, pm.PaneID, d.Panes[i].CanonicalName)
+		}
+	}
+	for i, rm := range m.Declares.RetentionClasses {
+		if rm.CanonicalName != d.RetentionClasses[i].CanonicalName {
+			return fmt.Errorf("pkgmgr: RetentionClass[%d] canonicalName mismatch: manifest=%q definition=%q",
+				i, rm.CanonicalName, d.RetentionClasses[i].CanonicalName)
+		}
+		// Policy/RetentionPeriod are the actual data-controller obligation, not
+		// decoration on the class's identity — a change to either must show up
+		// as a manifest diff (see ManifestRetentionClass's doc comment).
+		if rm.Policy != d.RetentionClasses[i].Policy {
+			return fmt.Errorf("pkgmgr: RetentionClass[%d] (%s) policy mismatch: manifest=%q definition=%q",
+				i, rm.CanonicalName, rm.Policy, d.RetentionClasses[i].Policy)
+		}
+		if rm.RetentionPeriod != d.RetentionClasses[i].RetentionPeriod {
+			return fmt.Errorf("pkgmgr: RetentionClass[%d] (%s) retentionPeriod mismatch: manifest=%q definition=%q",
+				i, rm.CanonicalName, rm.RetentionPeriod, d.RetentionClasses[i].RetentionPeriod)
 		}
 	}
 	return nil
