@@ -604,7 +604,16 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   population the walk was widened for. **The check:** for every skip/guard/emit predicate, write the state
   table BEFORE the predicate (never-X, X, X-then-not-X, X-then-Y, both-directions, re-run) and evaluate the
   predicate on each row — a design that ships a §"plane states" table cannot ship a one-clause rule over a
-  multi-shape set. Two corollaries from the same fire: **a fact you cite in one section binds every other
+  multi-shape set. **A third column belongs on that table: the OUTCOME, decided per row — and "refuse the
+  whole operation" versus "skip this row and report it" is a separate decision from the predicate, with
+  availability on one side of it.** Then re-evaluate every row whenever you sharpen the predicate, because
+  sharpening moves rows: a discriminator that gets *more* precise converts permits into refusals, and if the
+  outcome is batch-wide the improvement is an outage. (Trialed 2026-08-21, package restore: the state table
+  had a `lastModifiedByOp` discriminator whose row 3 was "refuse, named" — and the increment written to make
+  the discriminator *exact* was precisely what would move every package an operator had ever revoked a grant
+  on from row 2 into row 3, i.e. permanently unrestorable. The predicate was right; the outcome column had
+  never been thought about, so the fix that improved precision was an availability regression. Per-key skip
+  with a named report was both semantically correct and safe.) Two corollaries from the same fire: **a fact you cite in one section binds every other
   section** (G2 justified the write and was not applied to the tombstones the same loop walked past); and
   **a lazily-read key you then write is a read-then-write with no serialization point**
   (`starlark_kv.go:146-147`) — carry `expectedRevision` or the race's loser is a *third party's* live state,
@@ -718,6 +727,39 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   argued at length against a position §8.1 never held (it had already singled out the variant I was
   rejecting, and deferred it with a named trigger my own design would produce). The ledger rule — cite the
   code that *does* the thing, never the comment — extends to citing a *decision*: open it, don't recall it.
+
+- **"Mirrors X" / "same shape as X" / "copies the sibling" — go read X's own DOC COMMENT, not just its
+  code. In this codebase that comment is where the last person's bug is recorded, and a mirror re-imports
+  it.** The precedent-transfer reflexes above ask whether the precedent's *job* is yours (the RLS anchor, the
+  borrowed predicate's tolerance). This one is cheaper and catches a different thing: the sibling you are
+  copying often carries, in prose directly above it, the reason it is shaped the way it is — usually because
+  something went wrong once. Copy the shape without reading the prose and you re-ship the original defect,
+  with a citation that makes it look verified. (Trialed 2026-08-21, package restore; **four** findings from
+  one adversarial pass, all this: (1) I mirrored the sibling uninstall's
+  `deterministicNanoID(name, version, tag)` requestId — and `contentRequestID`'s doc comment eleven lines away
+  *narrates the exact bug that derivation caused*, silently-dropped work reported as `committed`, which my
+  design reintroduced verbatim. (2) I keyed a security guard on "the resolved operation type" while
+  `packageLifecycleType`'s comment **in the file I was editing** says a guard keyed on operationType "would
+  stand down for exactly the envelope that most needs it", because the script is selected by *class*. (3) I
+  wrote "mirrors `Uninstall`" for a dry-run mode `Uninstall` does not have. (4) I reused a partition helper
+  whose parameter type the mirror cannot supply.) **The check is mechanical: for every "mirrors X" sentence,
+  open X and read the twenty lines above it before the sentence stays in the draft.** And note the tell that
+  makes this class invisible — naming a precedent *reads as* having verified one, so these sentences get less
+  scrutiny than an unsourced claim would.
+
+- **Enumerate the REGISTRATION sites of the thing you are adding a fourth of, by grepping the existing three
+  — a kernel primitive is seeded in a different file from the one that defines it.** When a design adds
+  another member to an existing family (a fourth lifecycle op, a second adapter, a third lens kind), the
+  file that *declares* it is the one you are already reading and the file that *wires* it is the one you
+  will forget. Grep an existing member's name across the repo and treat every hit as a scope line item.
+  (Same fire: the design named the script constant and the key enumeration and never named `primordial.go`,
+  whose `add(...)` calls actually seed a kernel DDL and permission — so the op would have been defined,
+  contract-documented, and never created on any bootstrap. Nine further sites came with it: a key-count
+  constant, a bootstrap-file version gate, a test's magic number, `verify-kernel`'s drift gate. The version
+  history comment in `nanoid.go` had recorded the identical checklist from the last time someone walked it.)
+  Corollary worth stating in the design rather than discovering at build: ask what **adopting** the change
+  costs an existing deployment — here every stack must `make down && make up`, which is a striking thing to
+  find in a design whose purpose is sparing an operator a wipe.
 
 - **A REMOVAL design's census must be per-entity and must NOT exclude tests, docs, or examples — the
   platform's own reference implementation is a caller, and it lives in `_test.go`.** The glob reflex
