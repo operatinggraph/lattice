@@ -52,7 +52,7 @@ var readTemplatePlaceholderRe = regexp.MustCompile(`\{([^{}]+)\}`)
 // check alone would miss:
 //
 //   - an unbalanced brace — a `{` with no matching `}` (or vice versa), or a
-//     `}` with no opener. An unterminated `{payload.leaseAppKey` contains no
+//     `}` with no opener. An unterminated `{payload.entityKey` contains no
 //     `{...}` match at all, so a vocabulary check that only classifies
 //     matched placeholders would let it sail through as though it were
 //     literal text.
@@ -68,9 +68,9 @@ var readTemplatePlaceholderRe = regexp.MustCompile(`\{([^{}]+)\}`)
 // What it does NOT guarantee: it is a placeholder-vocabulary and
 // template-well-formedness gate, not a full Contract #1 key-grammar
 // validator. It does not refuse a syntactically well-formed template that
-// would still compile to an invalid or too-short key (`vtx.leaseapp` alone),
+// would still compile to an invalid or too-short key (`vtx.<type>` alone),
 // and it does not refuse a wildcard placeholder occupying a localName
-// position (`vtx.leaseapp.{payload.x}.{me.y:id}`) — that shape's coverage is
+// position (`vtx.<type>.{payload.x}.{me.y:id}`) — that shape's coverage is
 // a named residual on the Processor side, not an authoring rule this gate
 // enforces.
 //
@@ -184,7 +184,7 @@ func validateReadTemplateList(pkgName, opType, listName string, entries []string
 // unbalanced brace is never a legal literal — it means an author dropped a
 // character mid-placeholder — and it is invisible to a vocabulary check
 // that only classifies matched `{...}` groups: an unterminated
-// `{payload.leaseAppKey` contains no match, so it would otherwise sail
+// `{payload.entityKey` contains no match, so it would otherwise sail
 // through as though it were literal text.
 func validateBraceBalance(pkgName, opType, listName, entry string) error {
 	open := false
