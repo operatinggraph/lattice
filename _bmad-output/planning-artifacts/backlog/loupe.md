@@ -28,13 +28,13 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine (L2-full + L3)** | L1 is satisfied by the shipped Flows tab and L2 v1 by the flow-liveness scrubber; scrubbing past the live window and browsing the ledger both need history Loupe cannot read yet. | ★★★ | L | 🚧 blocked-on: Chronicler archive mode (lattice, Andrew-deferred) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
+| **Weaver Studio NL assist — Describe + Load-into-Author (NL-2)** | The Author stage gains a Describe panel (plain-language intent → `RequestCapabilityAuthoring` relay under the operator's token) and the review console a "Load into Author" hydration for weaverTarget proposals — the AI-draft→human-edit loop the Studio lacks. | ★★★ | M | 🚧 blocked-on: NL-1 real capability-author adapter (lattice, 📐 awaiting-Andrew) · [design](../../implementation-artifacts/natural-language-weaver-targets-design.md) §3.4 |
 
 ## Component maintenance
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **`retentionKeyStatus` has no operator surface** | The Vault page's shred view reads `privacy-shreds` (identity holders only), so the new `privacy-retention-keys` bucket — every declared retention class, its policy/period, and its destruction progress — is unreadable in Loupe. `handleVaultShreds` is the shape to mirror. | ★★ | S–M | 📋 ready · consumer: an operator asking which classes have expired · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §4.4 |
-| **A `weaverTarget`/lens config's `protected` field reads a malformed value as "not protected"** | `cmd/loupe/lens.go:83`/`lenses.go:45` read `cfg["protected"].(bool)` ok-discarded — same fail-open shape, but a display-only badge not a gate; today's writers always emit Go `true`. | ★ | XS | 📋 ready · origin: [backlog audit](../../implementation-artifacts/lattice-backlog-audit-2026-08-20.md) — moved from lattice (`cmd/loupe` scope) |
+| **`retentionKeyStatus` has no operator surface** | The Vault page's shred view reads `privacy-shreds` (identity holders only), so the new `privacy-retention-keys` bucket — every declared retention class, its policy/period, and its destruction progress — is unreadable in Loupe. `handleVaultShreds` is the shape to mirror. | ★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §4.4 |
 
 ## Parked
 
@@ -69,6 +69,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `6d34b1d3` · [Loupe/maint] `protectedFlag` — a malformed (non-bool) `targetConfig.protected` now reads as protected, not silently unprotected. Tests, CI green
 - 2026-08-21 · `fb6a637d` · [Loupe/maint] Shred button now starts the identityErasure pattern, not a bare key shred; panel gains a five-step erasure progress list. Tests, live-verified, CI green
 - 2026-08-02 · `28dd2c55` · [Loupe/F25.3b] Weaver Target Studio — Propose + Trial: `SubmitCapabilityProposal` submission, review-queue source badge, born-disabled Trial panel; F25 CLOSED. Lead self-review, live-verified end to end
 - 2026-08-02 · `c1bdcfae` · [Loupe/F25.3a] Weaver Target Studio — Author: draft+check+export at `#/weaver/author`. Lead self-review, live-verified, fixed forward two defects found live
