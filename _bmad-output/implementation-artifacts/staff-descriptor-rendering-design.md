@@ -487,3 +487,132 @@ in all four apps, restructures `lint-facet-renderer-drift.go`'s hardcoded two-re
 N-way, and moves loftspace's pilot modal from Inc 1's inline consumer onto the shared module. No
 other Inc 1 residue: `SignRenewal`/`VerifyGuarantor` stay hand-built exactly as they were, per
 design.
+
+## 13. Inc 2 fire brief (Vertical Steward, committed before code)
+
+**Scope sentence (verbatim from §7):** *`internal/descriptorform` + `/shared/` mounts in all four
+apps + node tests (incl. the anti-fallback pin and `{context.<field>}` resolution) + the drift gate
+restructured to N-way … Loftspace's pilot modal moves onto the module (proving it against a surface
+that already works).*
+
+**Resolved API (the design's §2.2 contract left the exact shapes open; pinned here so the build has
+one unambiguous spec, not a re-derivation per file):**
+
+```js
+// internal/descriptorform/form.mjs
+export function renderOpForm(catalogRow, context, mount) -> {
+  descriptor: { title, submitLabel, sensitive, targetField, targetType },
+  submit(): envelope   // throws on validation/anti-fallback failure; no network call
+}
+```
+
+- `catalogRow` is the **raw `/api/op-catalog` row shape** (`operationType`, `presentation`,
+  `inputSchema` as a JSON *string*, `fieldDescriptions`, `dispatch.{class,authContext,targetField,
+  targetType,reads,optionalReads,visibleWhen}`, `sensitive`) — the module does its OWN
+  `catalogDescriptor`-equivalent normalization internally (schema parse, `visibleWhen` fail-closed
+  per loftspace `app.js:227-243`'s rule, no-inputSchema/no-class/no-targetField refusal). This
+  removes the per-app normalization step Inc 1 left in `cmd/loftspace-app/web/app.js`
+  (`catalogDescriptor`/`schemaFields`) — Inc 2 deletes it there, not duplicates it elsewhere.
+- `context = { target, me, taskKey, workplace, row, prefill }` — `target` is the resolved subject
+  key (the app already knows it: a task's `scopedTo`, or an explicit entity key for a non-task
+  surface); `taskKey` is present only for a task-voice submission (Facet's `ctx.taskKey`,
+  `app.js:2604-2615` `buildAuthContext` "task" case — needed to build `authContext:{task,target}`);
+  `row`/`prefill` back `{context.<field>}` and pre-filled values. `me` is the signed-in identity key,
+  used only if a future descriptor needs `{me.*}` — **not** as a target fallback (the anti-fallback
+  rule, next).
+- `mount` is the **fields container only** (Facet/loftspace's `#tc-fields` role) — the module never
+  touches title/description/submit-button chrome; callers keep rendering those from the returned
+  `descriptor` exactly as `openComplete` does today.
+- `submit()` performs: required-field validation, numeric coercion (`Number.isNaN` guard, never
+  invented bounds — schema's `min`/`max`/`step` only), **write-target-into-payload-before-
+  substitution** (`payload[targetField] = target` first, mirroring `app.js:2748-2754` /
+  loftspace `:2313`), template substitution over `{payload.X}` / `{me.*}` / `{taskKey}` (new: bare,
+  for the `{task,target}` authContext shape — NOT a dotted `{context.<field>}` case) /
+  `{context.<field>}` (new — reads `context.row[field]`, the loftspace `SignRenewal`/
+  `VerifyGuarantor` companion-row need this migration does NOT touch, since those stay COMPLETIONS
+  in Inc 2; the template form ships so Inc 3 can adopt it without a module change), **wholeKey drop**
+  (Facet `:2582-2584` / loftspace `:329-345` — any read template with an unresolved segment is
+  dropped, never sent malformed), and **authContext assembly** per `dispatch.authContext` — `"task"`
+  → `{task:context.taskKey, target}` (throws if `context.taskKey` is falsy: the loftspace
+  `desc.taskLeg && !task.taskKey` refusal, `app.js:2387-2390`, now enforced INSIDE the module since
+  it owns authContext assembly), `"self"` → `{target: context.me}`, `"standing"`/anything else →
+  `undefined`. Returns `{operationType, class, payload, reads, optionalReads, authContext}` —
+  callers pass this straight to their existing `submitOp()`.
+- **Anti-fallback rule (normative, tested):** `submit()` NEVER substitutes `context.me` (or any
+  other context key) for an unresolved `targetField`/`targetType` — target resolution is `context.
+  target` alone (already provided, already app-resolved) or the call throws. This is narrower than
+  Facet's `resolveTargetKey` (which searches several context candidates) because descriptorform's
+  callers resolve target themselves before calling `renderOpForm` — the module's OWN fallback
+  surface is just "did the caller give me a target", so the rule collapses to: no `context.target`
+  ⇒ `renderOpForm` itself returns `null` (mirroring loftspace's `openComplete` early-return,
+  `app.js:2244-2247`) rather than rendering a form that can't submit.
+
+**Verified touch-list (file:line, live, from the Phase-0 scout):**
+
+1. **NEW `internal/descriptorform/form.mjs`** — the module above. Field-kind detection markers
+   (boolean/enum/money/date/date-time/entity-ref) mirror Facet `app.js:2484-2507` line-for-line in
+   *logic* (not copy-paste — a fresh implementation per design §2.2) so the drift gate's markers
+   (below) can find matching literals. `entity-ref` renders as a plain text input in this module
+   (staff apps have no entity-ref *picker* yet — out of scope; the marker only needs to exist for
+   drift-gate parity, per design §2.2 "the marker pins detection, not the resolution source").
+2. **NEW `internal/descriptorform/form.test.mjs`** — Facet's `.test.mjs` idiom
+   (`cmd/facet/web/dispatch_target.test.mjs:1-333`: `node:test` + `vm.createContext`/
+   `vm.runInContext`, sandbox `{console, document:{...}}`). Pins: schema→field-kind table (6 kinds),
+   envelope assembly per each `authContext` kind, wholeKey drop (a template with one unresolved
+   segment is dropped), unresolvable-target refusal (no `context.target` ⇒ `renderOpForm` returns
+   `null`), task-voice submit throws when `context.taskKey` is missing, write-before-substitute
+   order (a `{payload.<targetField>}.suffix` read resolves).
+3. **NEW `internal/descriptorform/embed.go`** — `//go:embed form.mjs` + `var formFS embed.FS` +
+   `func FS() http.FileSystem { return http.FS(formFS) }` (first internal package doing this — no
+   in-repo precedent; mirror the four apps' `//go:embed web` + `embed.FS` shape at e.g.
+   `cmd/loftspace-app/server.go:20-21`, just relocated + exported).
+4. **`cmd/{loftspace,clinic,cafe,wellness}-app/server.go`** — each adds one
+   `inner.Handle("/shared/", http.FileServer(descriptorform.FS()))` line beside its existing `/`
+   FileServer mount in `registerRoutes()` (loftspace `:65-73`, clinic `:58-66`, cafe `:59-71`,
+   wellness `:67-81`) + the new import.
+5. **`cmd/loftspace-app/web/app.js`** — DELETE `catalogDescriptor` (`:228-268`), `schemaFields`
+   (`:280-303`), `substituteReads` (`:325-348`) — all subsumed into `form.mjs`. Rewrite
+   `openComplete`/`submitComplete` (`:2241-2441`) to: resolve `target` (unchanged,
+   `task.scopedTo`), call the shared module (loaded from `/shared/form.mjs` via a dynamic `import()`
+   or a `<script type="module">` — builder's call, mirror whichever pattern is less invasive against
+   this file's existing non-module script tag) with `{target, taskKey: task.taskKey, row: null,
+   prefill: null}`, render its returned `descriptor` into the existing title/desc/target/sensitive/
+   submit-label DOM spans (unchanged from today), mount fields into `#tc-fields`, and on submit call
+   `handle.submit()` → `submitOp()` with the returned envelope, keeping the existing
+   `taskLeg`/non-taskLeg completion-and-reload logic (`:2412-2435`) — that part is app policy, not
+   module concern, and stays in `app.js`. `descriptorFor` (`:199-202`) keeps its COMPLETIONS branch
+   (SignRenewal/VerifyGuarantor, untouched) but its catalog branch now calls the module instead of
+   `catalogDescriptor`.
+6. **`scripts/lint-facet-renderer-drift.go`** — restructure `vocabMember` (`:41-45`) from
+   `{name, jsMarkers, swiftMarker}` to `{name, markers map[string][]string}` (renderer-name →
+   marker list), add a third renderer entry `formJS = "internal/descriptorform/form.mjs"` alongside
+   `appJS`/`descriptorSwift` (`:30-33`), and replace the pairwise loop (`:69-89`) with: for each
+   vocab member, compute the set of renderers missing at least one of their markers; if that set is
+   neither empty nor all-renderers, report which renderer(s) lag. Existing two-way behavior must be
+   unchanged for the boolean/enum/money/date/date-time/entity-ref markers already declared for
+   `appJS`/`descriptorSwift` — this is additive (new renderer, new markers), not a rewrite of what
+   already passes.
+7. **Docs:** `docs/components/edge-manifest.md` — add the `internal/descriptorform` module + its
+   `/shared/` mount convention next to Inc 1's `opCatalog` lens entry (§8 reconciliation, same file
+   Inc 1 already touched).
+
+**Non-goals (explicit, do not build):** `SignRenewal`/`VerifyGuarantor` migration (still Inc 3, still
+COMPLETIONS, still untouched); clinic/wellness/café migration onto the module (Inc 3 — Inc 2 only
+*mounts* `/shared/` in all four so Inc 3 has nothing platform-side left to add, but does not migrate
+their existing hand-built forms); the per-app op-literal ceiling ratchet (Inc 4); an entity-ref
+picker widget (still a plain text input everywhere).
+
+**Review depth: FULL 3-layer adversarial before admit** — this is capability-plane-adjacent (the
+anti-fallback / authContext-assembly rule is the exact defect class `vertical-package-standard.md`
+§8 already filed once — a fresh implementation of that rule needs independent verification, not
+size-based sizing) and it is the first internal package embedding a browser asset (`embed.go`
+precedent other Lattice work will copy).
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `node --check internal/descriptorform/form.mjs`,
+`node --test internal/descriptorform/form.test.mjs`, `STRICT=1 go run ./scripts/lint-facet-renderer-drift.go`,
+`go test ./cmd/loftspace-app/... ./cmd/clinic-app/... ./cmd/cafe-app/... ./cmd/wellness-app/...`.
+
+**Verify:** headless — node tests, `go build`, then (if a writable stack is up) `curl` each app's
+`/shared/form.mjs` for a 200 + the loftspace pilot's `SignLease`/`SetRenewalTerms` flow in one
+reused browser tab, closed when done; otherwise note pending.
