@@ -6,10 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
@@ -307,26 +305,8 @@ func TestExecuteFullForActor_OneRowPerAnchor_NoGuard(t *testing.T) {
 // Health KV buckets for the output-key-collision tests.
 func newCollisionKVs(t *testing.T) (coreKV, adjKV, healthKV *substrate.KV) {
 	t.Helper()
-	_, nc := natsfixture.Server(t)
-
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "CORE"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "ADJ"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "HEALTH"})
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "CORE")
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "ADJ")
-	require.NoError(t, err)
-	healthKV, err = conn.OpenKV(ctx, "HEALTH")
-	require.NoError(t, err)
-	return coreKV, adjKV, healthKV
+	kvs := newTestKVs(t, "CORE", "ADJ", "HEALTH")
+	return kvs[0], kvs[1], kvs[2]
 }
 
 // writeCollisionVertex stores a Contract #1 vertex body in Core KV with the

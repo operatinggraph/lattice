@@ -4,10 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -17,20 +15,7 @@ import (
 // adjacency bucket for ActorEnumerator tests.
 func newActorEnumeratorAdjKV(t *testing.T) *substrate.KV {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping NATS-backed test in short mode")
-	}
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "ADJ"})
-	require.NoError(t, err)
-	adjKV, err := conn.OpenKV(ctx, "ADJ")
-	require.NoError(t, err)
-	return adjKV
+	return newTestKVs(t, "ADJ")[0]
 }
 
 // enumFixture is a small named-vertex registry so tests can wire edges by

@@ -4,10 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -29,25 +27,8 @@ func ephemeralDeleteKey(actorKey string) string {
 // ErrKeyNotFound.
 func newDeleteKeyKV(t *testing.T) (coreKV, adjKV *substrate.KV) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping NATS-backed test in short mode")
-	}
-	_, nc := natsfixture.Server(t)
-
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "CORE"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "ADJ"})
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "CORE")
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "ADJ")
-	require.NoError(t, err)
-	return coreKV, adjKV
+	kvs := newTestKVs(t, "CORE", "ADJ")
+	return kvs[0], kvs[1]
 }
 
 func newDeleteKeyPipeline(t *testing.T, deleteKey func(string) string) *Pipeline {

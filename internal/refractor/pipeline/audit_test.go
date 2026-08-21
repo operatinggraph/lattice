@@ -14,10 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -34,29 +32,8 @@ const (
 // entry the cursor persists onto.
 func newAuditKVs(t *testing.T) (coreKV, adjKV, targetKV, healthKV *substrate.KV) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping NATS-backed test in short mode")
-	}
-	_, nc := natsfixture.Server(t)
-
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	for _, bucket := range []string{"CORE", "ADJ", "TARGET", "HEALTH"} {
-		_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
-		require.NoError(t, err)
-	}
-	coreKV, err = conn.OpenKV(ctx, "CORE")
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "ADJ")
-	require.NoError(t, err)
-	targetKV, err = conn.OpenKV(ctx, "TARGET")
-	require.NoError(t, err)
-	healthKV, err = conn.OpenKV(ctx, "HEALTH")
-	require.NoError(t, err)
-	return coreKV, adjKV, targetKV, healthKV
+	kvs := newTestKVs(t, "CORE", "ADJ", "TARGET", "HEALTH")
+	return kvs[0], kvs[1], kvs[2], kvs[3]
 }
 
 // auditFixture is one audited plain lens plus the handles a test needs to reach
