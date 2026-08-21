@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -1108,6 +1109,165 @@ func TestInstaller_SubmitOp_UsesSubmitFieldWhenSet(t *testing.T) {
 	}
 	if gotPayload["x"] != float64(1) {
 		t.Errorf("Submit received payload %+v", gotPayload)
+	}
+}
+
+// bucketRevisions snapshots every key in core-kv with the revision it currently
+// holds. Two snapshots that compare equal prove no commit landed between them:
+// a write to a new key adds an entry, and a write to an existing one advances
+// its revision, so neither can hide inside an equal map.
+func bucketRevisions(t *testing.T, ctx context.Context, conn *substrate.Conn) map[string]uint64 {
+	t.Helper()
+	keys, err := conn.KVListKeys(ctx, CoreBucket)
+	if err != nil {
+		t.Fatalf("KVListKeys: %v", err)
+	}
+	out := make(map[string]uint64, len(keys))
+	for _, k := range keys {
+		entry, err := conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			t.Fatalf("KVGet %s: %v", k, err)
+		}
+		out[k] = entry.Revision
+	}
+	return out
+}
+
+// TestInstaller_RefusesReinstallOverUninstall pins the occupancy gate on the
+// case it was built for: an uninstall tombstones every declared key without
+// freeing it, and the version-independent keys a reinstall mints are the exact
+// same ones. Before the gate this reported `install committed` while committing
+// nothing (the first install's idempotency tracker is still live, so the
+// Processor replies Duplicate and Install reads Duplicate as success) — a false
+// statement about a security grant, with no signal that the verb is still gone.
+func TestInstaller_RefusesReinstallOverUninstall(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	before := bucketRevisions(t, ctx, conn)
+
+	_, err = inst.Install(ctx, def)
+	if err == nil {
+		t.Fatal("reinstall over an uninstall must be refused; a nil error here is the false green the gate exists to kill")
+	}
+	if !errors.Is(err, ErrDeclaredKeysOccupied) {
+		t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, def.Name) {
+		t.Errorf("refusal must name the package; got %v", msg)
+	}
+	// The sample is the sorted head of the tombstoned bucket, which here is
+	// every declared key — so the lowest-sorting declared key must appear.
+	sorted := append([]string{}, res.DeclaredKeys...)
+	slices.Sort(sorted)
+	if !strings.Contains(msg, sorted[0]) {
+		t.Errorf("refusal must name a sample of the tombstoned keys (expected %q); got %v", sorted[0], msg)
+	}
+	if !strings.Contains(msg, "tombstoned by an uninstall") {
+		t.Errorf("refusal must say the keys were tombstoned by an uninstall; got %v", msg)
+	}
+	if !strings.Contains(msg, "CreatePermission") {
+		t.Errorf("refusal must name the operator's remedy for restoring a grant; got %v", msg)
+	}
+	// Nothing this package declared is live, so conflating the buckets would
+	// show up here as a LIVE sentence with no live occupant behind it.
+	if strings.Contains(msg, "LIVE") {
+		t.Errorf("no declared key is live after the uninstall; the live bucket must stay empty: %v", msg)
+	}
+
+	if after := bucketRevisions(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatalf("a refused install committed something: %d keys before, %d after", len(before), len(after))
+	}
+}
+
+// TestInstaller_RefusesLiveDeclaredKeyOccupant is the other bucket: a declared
+// key that is occupied and NOT tombstoned, with no live package manifest
+// anywhere. The occupant here is seeded directly (the shape a retention-class
+// holder an uninstall preserved, or a foreign writer's key, presents), so the
+// refusal must report it as live — the operator's next move is to read the
+// occupant, not to mint a grant back.
+func TestInstaller_RefusesLiveDeclaredKeyOccupant(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	perm := def.Permissions[0]
+	occupied := "vtx.permission." + entityNanoID(def.Name, permTag(perm.OperationType, perm.Scope))
+	doc := map[string]any{
+		"class":     "permission",
+		"isDeleted": false,
+		"data": map[string]any{
+			"operationType": perm.OperationType,
+			"scope":         perm.Scope,
+			"origin":        "runtime",
+		},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal live occupant: %v", err)
+	}
+	if _, err := conn.KVCreate(ctx, CoreBucket, occupied, raw); err != nil {
+		t.Fatalf("seed live occupant %s: %v", occupied, err)
+	}
+
+	_, err = inst.Install(ctx, def)
+	if err == nil {
+		t.Fatal("install over a live occupant of a declared key must be refused; the create-only batch cannot write it")
+	}
+	if !errors.Is(err, ErrDeclaredKeysOccupied) {
+		t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "LIVE") || !strings.Contains(msg, occupied) {
+		t.Errorf("refusal must report %s in the live bucket; got %v", occupied, msg)
+	}
+	if strings.Contains(msg, "tombstoned by an uninstall") {
+		t.Errorf("a live occupant must not be reported as tombstoned by an uninstall; got %v", msg)
+	}
+	if !strings.Contains(msg, "1 already-committed key(s)") {
+		t.Errorf("exactly one key is occupied; got %v", msg)
+	}
+
+	// Nothing installed: the refusal precedes the submit.
+	pkg, err := inst.findInstalledPackage(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("findInstalledPackage: %v", err)
+	}
+	if pkg != nil {
+		t.Fatalf("a refused install left a package vertex behind: %+v", pkg)
+	}
+}
+
+// TestInstaller_OccupancyGateLeavesCleanInstallsAlone is the negative vector on
+// both sides of the gate: a greenfield install still installs, and a
+// same-version re-run of a LIVE install still short-circuits to Skipped at the
+// idempotency check — the gate runs after that arm, never in front of it.
+func TestInstaller_OccupancyGateLeavesCleanInstallsAlone(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("clean fresh install must not be refused: %v", err)
+	}
+	if res.Skipped || len(res.DeclaredKeys) == 0 {
+		t.Fatalf("clean fresh install: want a committed create batch, got %+v", res)
+	}
+
+	again, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("same-version re-install of a LIVE package must still skip, got error: %v", err)
+	}
+	if !again.Skipped {
+		t.Fatalf("same-version re-install: want Skipped=true, got %+v", again)
 	}
 }
 

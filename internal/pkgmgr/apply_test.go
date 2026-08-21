@@ -274,6 +274,52 @@ func TestApply_DryRunFreshInstall(t *testing.T) {
 	}
 }
 
+// TestApply_OverUninstalledPackageRefuses covers both fresh-install branches
+// Apply reaches when no LIVE manifest carries the name but the package's own
+// keys are still occupied by its uninstall's tombstones.
+//
+// The dry-run branch never calls Install, so it needs the gate of its own: left
+// ungated it previews "install, N keys created" for a batch that cannot create
+// one of them. The real branch (including `--force`, which routes here too
+// because the dispatch is on `existing == nil`, not on Force) inherits the gate
+// through Install.
+func TestApply_OverUninstalledPackageRefuses(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	t.Run("DryRun", func(t *testing.T) {
+		res, err := inst.Apply(ctx, def, ApplyOptions{DryRun: true})
+		if err == nil {
+			t.Fatalf("dry-run over an uninstalled package must refuse, got a preview: %+v", res)
+		}
+		if !errors.Is(err, ErrDeclaredKeysOccupied) {
+			t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+		}
+		// No ApplyResult at all: a caller reading Created / CreatedKeys must have
+		// nothing there to read as a clean preview.
+		if res != nil {
+			t.Fatalf("a refused preview must return no ApplyResult, got %+v", res)
+		}
+	})
+
+	t.Run("Force", func(t *testing.T) {
+		res, err := inst.Apply(ctx, def, ApplyOptions{Force: true})
+		if err == nil {
+			t.Fatalf("a forced apply over an uninstalled package must refuse, got: %+v", res)
+		}
+		if !errors.Is(err, ErrDeclaredKeysOccupied) {
+			t.Fatalf("want ErrDeclaredKeysOccupied, got %v", err)
+		}
+	})
+}
+
 // TestApply_RequireInstalledOnAbsent: the explicit `upgrade` command semantics
 // (RequireInstalled) error on an absent base rather than creating it.
 func TestApply_RequireInstalledOnAbsent(t *testing.T) {

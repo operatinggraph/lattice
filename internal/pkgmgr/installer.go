@@ -174,6 +174,25 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	res.PackageKey = pkgKey
 	res.LeafBudgetWarnings = leafBudgetWarnings
 
+	// Step 3.5 — occupancy gate. The batch built above is create-only, and its
+	// keys are version-independent (Contract #8 §8.1), so a key that is already
+	// committed defeats the CreateOnly assertion the commit will make on it.
+	// Reaching step 2 with `existing == nil` says only that no LIVE manifest
+	// carries this name — it says nothing about the keys, which an uninstall
+	// leaves occupied by tombstones. Asking the kernel what actually sits on
+	// this package's own keys is the only thing that does.
+	//
+	// It runs HERE and nowhere earlier: the declared set is buildManifestBatch's
+	// output, and step 2's Skipped arm is the legitimate same-version re-run of a
+	// live install, which must keep short-circuiting before any of this.
+	tombstoned, liveOccupants, err := i.declaredKeyOccupants(ctx, declared)
+	if err != nil {
+		return nil, err
+	}
+	if len(tombstoned) > 0 || len(liveOccupants) > 0 {
+		return nil, occupiedDeclaredKeysError(def.Name, tombstoned, liveOccupants)
+	}
+
 	// Step 4 — submit the InstallPackage op to the Processor. The op
 	// carries the pre-built manifest; the kernel script enforces
 	// guardrails and emits the mutations; the Processor commits them in
@@ -688,6 +707,18 @@ var ErrOpMetaOperationTypeCollision = errors.New("pkgmgr: operationType already 
 // uninstall to retry against the current state.
 var ErrUninstallConflict = errors.New("pkgmgr: uninstall conflict — a declared key changed concurrently")
 
+// ErrDeclaredKeysOccupied is returned by Install when a key of the package's
+// freshly-built declared set is already committed in Core KV.
+//
+// An InstallPackage batch is create-only (Contract #8 §8.2), so an occupied key
+// is not something the install can write over: every occupied key is a
+// CreateOnly assertion the commit will fail. Refusing before the op is
+// submitted is what makes that fact visible — submitted, the same install
+// either replays the original install's still-live idempotency tracker and
+// reports success having committed nothing, or fails with a bare
+// RevisionConflict that names neither the cause nor a remedy.
+var ErrDeclaredKeysOccupied = errors.New("pkgmgr: install refused — declared keys are already committed in the kernel")
+
 // ErrBootstrapRequired is returned when the core-kv bucket is absent,
 // indicating bootstrap has not been run.
 var ErrBootstrapRequired = errors.New("pkgmgr: core-kv bucket not found — run bootstrap (or make up) before installing packages")
@@ -878,6 +909,106 @@ func (i *Installer) readMetaDocs(ctx context.Context, keys []string) (map[string
 		return nil, fmt.Errorf("pkgmgr: read %d meta keys: %w", len(keys), err)
 	}
 	return entries, nil
+}
+
+// occupancySampleCap bounds how many keys of each occupancy bucket the refusal
+// names. A package's declared set runs to hundreds of keys and an uninstall
+// tombstones nearly all of them, so naming every one buries the two sentences
+// that tell the operator what to do. The sample is sorted, so the same
+// occupied kernel always names the same keys — a refusal an operator can
+// compare across two runs.
+const occupancySampleCap = 5
+
+// declaredKeyOccupants reports which of a freshly-built declared key set are
+// already committed in Core KV, split into the tombstoned and the live.
+//
+// The two are never one bucket. A tombstoned key is this package's own
+// uninstall: the key is occupied by a `isDeleted=true` document (Contract #1 —
+// an uninstall soft-deletes, it does not free the key), and no install can
+// re-create it. A live key is something else entirely — a retention-class
+// holder an uninstall deliberately left live and undeclared, or a foreign
+// writer's key — and what the operator does next differs per bucket.
+//
+// The read is exactly this package's own declared keys, never a bucket listing:
+// the set is bounded by the package, chunked at abstractGuardReadChunk so even
+// a corpus-sized package stays on KVGetMulti's fast path.
+//
+// A key absent from the returned map is absent from the bucket (KVGetMulti
+// drops hard-delete/purge markers), the batched equivalent of ErrKeyNotFound.
+// A FAILED batch is never that: it returns an error and Install refuses on it,
+// because a probe that cannot read the kernel has not found the kernel empty.
+//
+// A document that will not decode is reported as LIVE, never dropped. Dropping
+// it would read an occupied key as a free one and hand the install straight
+// back to the create-only conflict this probe exists to pre-empt. Live rather
+// than tombstoned because the tombstoned bucket's message makes a positive
+// claim — this package's own uninstall put the key here — that an unreadable
+// document does not support; the live bucket's "inspect this occupant" is the
+// right instruction for a key whose content nothing can characterize.
+func (i *Installer) declaredKeyOccupants(ctx context.Context, declared []string) (tombstoned, live []string, err error) {
+	for start := 0; start < len(declared); start += abstractGuardReadChunk {
+		end := start + abstractGuardReadChunk
+		if end > len(declared) {
+			end = len(declared)
+		}
+		chunk := declared[start:end]
+		entries, err := i.Conn.KVGetMulti(ctx, CoreBucket, chunk)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pkgmgr: read %d declared keys: %w", len(chunk), err)
+		}
+		for _, k := range chunk {
+			entry, ok := entries[k]
+			if !ok || entry == nil {
+				continue
+			}
+			var env struct {
+				IsDeleted bool `json:"isDeleted"`
+			}
+			if uerr := json.Unmarshal(entry.Value, &env); uerr != nil {
+				live = append(live, k)
+				continue
+			}
+			if env.IsDeleted {
+				tombstoned = append(tombstoned, k)
+				continue
+			}
+			live = append(live, k)
+		}
+	}
+	sort.Strings(tombstoned)
+	sort.Strings(live)
+	return tombstoned, live, nil
+}
+
+// occupiedDeclaredKeysError renders the refusal for a declared set whose keys
+// are already committed. Each bucket contributes its own sentence, with its own
+// count, its own bounded sample, and its own next move — the two occupancies
+// have nothing in common but the wall they hit.
+func occupiedDeclaredKeysError(packageName string, tombstoned, live []string) error {
+	var parts []string
+	if len(tombstoned) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d key(s) were tombstoned by an uninstall of this package and cannot be re-created (sample: %s) — an InstallPackage batch is create-only, so re-running this install will fail identically forever; to restore a grant this package's uninstall revoked, mint it as a runtime-origin permission with CreatePermission (rbac-domain grants CreatePermission to the operator role) instead of reinstalling",
+			len(tombstoned), strings.Join(sampleKeys(tombstoned), ", ")))
+	}
+	if len(live) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d key(s) are LIVE (sample: %s) — a live occupant is either a retention-class holder an uninstall preserved on purpose (only ShredRetentionClassKey may ever destroy one; tombstoning it strands the key it custodies) or a key another writer owns, so read each one before anything else and give this package keys it does not share rather than removing the occupant",
+			len(live), strings.Join(sampleKeys(live), ", ")))
+	}
+	return fmt.Errorf("%w: package %q declares %d already-committed key(s): %s",
+		ErrDeclaredKeysOccupied, packageName, len(tombstoned)+len(live), strings.Join(parts, "; "))
+}
+
+// sampleKeys returns the first occupancySampleCap keys of an already-sorted
+// bucket, noting how many it left unnamed so the sample never reads as the
+// whole set.
+func sampleKeys(keys []string) []string {
+	if len(keys) <= occupancySampleCap {
+		return keys
+	}
+	out := append([]string{}, keys[:occupancySampleCap]...)
+	return append(out, fmt.Sprintf("and %d more", len(keys)-occupancySampleCap))
 }
 
 // metaScanResult carries the single Core KV key list + its derived
