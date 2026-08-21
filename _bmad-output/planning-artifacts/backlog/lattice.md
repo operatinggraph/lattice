@@ -144,7 +144,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-21 · `PLACEHOLDER` · [privacy-base] verification tooling CLOSED — package gate (140 assertions, in CI) + live 4-step erasure ceremony (35); reinstall-grant gap filed
+- 2026-08-21 · `934352d9` · [privacy-base] verification tooling CLOSED — package gate (140 assertions, in CI) + live 4-step erasure ceremony (35); reinstall-grant gap filed
 - 2026-08-21 · `ceb47fb` · [CI] whole-tree gofmt gate — every `scripts/*.go` is `//go:build ignore`, so golangci-lint's gofmt linter never loaded that tree; the step also fails on an unparseable file
 - 2026-08-21 · `833a7427` · [Pkgmgr] byte-exact packageName CLOSED — near-miss refuses loudly; review refuted folding the resolver (deny-list vs destructive-resolver polarity) and the shared proposal_string strip
 
