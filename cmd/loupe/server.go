@@ -134,6 +134,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/weaver/", s.handleWeaver)
 	mux.HandleFunc("/api/weaver/author/check", s.weaverAuthorCheck)
 	mux.HandleFunc("/api/weaver/author/propose", s.weaverAuthorPropose)
+	mux.HandleFunc("/api/weaver/author/request", s.weaverAuthorRequest)
 	mux.HandleFunc("/api/flows", s.handleFlows)
 	mux.HandleFunc("/api/flows/", s.handleFlowDetail)
 	mux.HandleFunc("/api/history/timeline", s.handleHistoryTimeline)

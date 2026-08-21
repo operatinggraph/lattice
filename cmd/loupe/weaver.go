@@ -1365,6 +1365,48 @@ func buildWeaverMetaIndex(metaKeys []string, get kvGetter) weaverMetaIndex {
 	return index
 }
 
+// buildLensCanonicalIndex maps every installed lens's canonicalName to its
+// bare NanoID meta id — the resolution a Studio-authored (or hydrated-then-
+// re-proposed) weaverTarget's LensRef needs before SubmitCapabilityProposal
+// (cmd/loupe/weaverauthor.go's resolveWeaverTargetLensRefs), mirroring
+// internal/pkgmgr/build.go's own resolveLensRef precondition: an installed
+// target's LensRef is always a bare NanoID, never a canonicalName, because a
+// Studio proposal applies as its own single-artifact Definition (no Lenses
+// list of its own for resolveLensRef to match against in-Definition).
+//
+// Walks the SAME spec-carrying metas buildWeaverMetaIndex does (one GET per
+// meta, no second read), filtered to the ones carrying NEITHER targetId NOR
+// patternId — buildWeaverMetaIndex's own discriminator, applied here so a
+// weaverTarget or loomPattern spec (which may incidentally share its name
+// with a lens on the dev stack, per that function's own doc comment) can
+// never resolve into this index. First writer wins on a canonicalName
+// collision, matching buildWeaverMetaIndex's targetId-collision policy.
+func buildLensCanonicalIndex(metaKeys []string, get kvGetter) map[string]string {
+	index := map[string]string{}
+	for _, k := range metaKeys {
+		root, ok := strings.CutSuffix(k, ".spec")
+		if !ok || classifyKey(root) != classMeta {
+			continue
+		}
+		d := metaData(get, k)
+		if d == nil {
+			continue
+		}
+		if patternID, _ := d["patternId"].(string); patternID != "" {
+			continue
+		}
+		if targetID, _ := d["targetId"].(string); targetID != "" {
+			continue
+		}
+		name, _ := d["canonicalName"].(string)
+		if name == "" {
+			continue
+		}
+		putIfAbsent(index, name, strings.TrimPrefix(root, "vtx.meta."))
+	}
+	return index
+}
+
 // weaverTargetDescriptions maps each described target's targetId to the prose
 // on its meta-vertex's sibling `.description` aspect (pkgmgr emits it from a
 // WeaverTargetSpec.Description; the body is the same `{"text": …}` a role's

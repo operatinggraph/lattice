@@ -44,7 +44,7 @@ function enter(route) {
   }
   if (parts.length === 1 && parts[0] === "author") {
     showOnly("weaver-author");
-    enterAuthor();
+    enterAuthor(route);
     return;
   }
   if (parts.length >= 2) { showOnly("weaver-entity"); loadEntity(parts[0], parts[1]); return; }

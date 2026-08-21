@@ -94,19 +94,78 @@ function buildTargetContent(draft) {
   return content;
 }
 
+// hydrateFromProposal inverts buildTargetContent's shape — a capability
+// proposal's own JSON-string artifact.content — back into a draft the Author
+// form can render and re-edit ("Load into Author", design §3.4). Only a
+// weaverTarget-kind proposal whose content decodes to a plausible object
+// hydrates; any other kind, or content that fails to parse, returns null so
+// the caller can show its own error rather than render a bogus draft. The
+// lens panel is deliberately left untouched (emptyLens()) — the proposal
+// bundle's separate "lens" artifact is not this function's input.
+function hydrateFromProposal(row) {
+  if (!row || row.kind !== "weaverTarget") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(row.content);
+  } catch (e) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const gaps = {};
+  const srcGaps = (parsed.gaps && typeof parsed.gaps === "object") ? parsed.gaps : {};
+  Object.keys(srcGaps).forEach((col) => {
+    const g = srcGaps[col] || {};
+    gaps[col] = {
+      action: g.action || "", pattern: g.pattern || "", subject: g.subject || "",
+      adapter: g.adapter || "", operation: g.operation || "", assignee: g.assignee || "",
+      target: g.target || "", issueCode: g.issueCode || "", issueSeverity: g.issueSeverity || "",
+      paramsText: paramsToText(g.params || {}), readsText: readsToText(g.reads || []),
+    };
+  });
+
+  const draft = emptyDraft();
+  draft.targetId = parsed.targetId || "";
+  draft.description = parsed.description || "";
+  draft.lensRef = parsed.lensRef || "";
+  draft.gaps = gaps;
+  draft.lens = emptyLens();
+  draft.rationale = row.rationale || "";
+  return draft;
+}
+
+// draftHasLens reports whether the operator is authoring a NEW paired lens
+// (a non-blank cypher spec) as opposed to binding the target to an
+// already-installed lens by reference only (Studio apply-path fix — cold
+// review of the "Load into Author" round trip: a hydrated AI draft binds an
+// existing lens and has no lens artifact of its own, weaver-target-
+// studio-design.md §6.4). Gates both the Check request's lens field and the
+// propose/export bundle's artifact count — a blank spec can never produce a
+// valid lens artifact, so treating it as "no lens intended" rather than
+// "invalid lens forever" is the only reading that lets a target-only draft
+// ever propose.
+function draftHasLens(draft) {
+  return !!((draft && draft.lens && draft.lens.spec) || "").trim();
+}
+
 // proposeBlockers lists, in the order an operator should fix them, why Propose
 // is not available yet. Check verdicts are one reason; a missing description is
 // the other — the server refuses a described-less weaverTarget outright
 // (weaverauthor.go's proposedTargetDescription), so the button must not offer a
 // submission the server will reject. Check itself stays shape-only, so a draft
-// can be validated long before it has prose.
+// can be validated long before it has prose. A target-only draft (no lens
+// being authored) is never blocked on a lens verdict it never asked for —
+// buildLensContent's empty spec would otherwise read "lens is not valid"
+// forever, permanently disabling Propose for exactly the draft this fire
+// exists to unblock.
 function proposeBlockers(draft, checkResult) {
   const out = [];
   const r = checkResult;
+  const hasLens = draftHasLens(draft);
   if (!r) out.push("run checks first");
   else {
     if (!(r.targetValidation && r.targetValidation.valid)) out.push("target artifact is not valid");
-    if (!(r.lensValidation && r.lensValidation.valid)) out.push("lens artifact is not valid");
+    if (hasLens && !(r.lensValidation && r.lensValidation.valid)) out.push("lens artifact is not valid");
   }
   if (!((draft && draft.description) || "").trim()) out.push("describe what this target ensures");
   return out;
@@ -166,35 +225,80 @@ function validationBadge(report) {
   return { text: n + " error" + (n === 1 ? "" : "s"), cls: "bad" };
 }
 
-// exportBundle builds the two-artifact JSON document Export downloads — the
-// shape a future F25.3b SubmitCapabilityProposal call needs per artifact
-// (minus proposalId, minted at propose time): {kind, content, target,
-// rationale, validation}. content is a JSON STRING (the wire shape
+// applyPackagePrefix namespaces a Studio-proposed artifact's derived
+// packageName by kind, so a co-authored {target+lens} bundle's two
+// artifacts — each its own independent apply, SubmitCapabilityProposal
+// mints one proposal per artifact (cmd/loupe/weaverauthor.go) — never derive
+// the SAME packageName and collide with each other at apply time
+// (internal/pkgmgr/capabilityapply.go's newPackage mode refuses an
+// already-installed name, and the first of the pair to apply would install
+// exactly that name out from under the second).
+const applyPackagePrefix = { weaverTarget: "weaver-target", lens: "weaver-lens" };
+
+// buildApplyTarget builds the {mode, packageName, newVersion} a Studio
+// artifact proposes for internal/pkgmgr/capabilityapply.go's apply step
+// (Studio apply-path fix — cold review of NL-2's "Load into Author" feature,
+// which depends on apply actually working): always mode "newPackage" (the
+// Studio never targets an existing package for upgrade — that is a
+// different, not-yet-built operator workflow), with a packageName derived
+// from the draft's targetId plus a caller-supplied freshness token, so
+// re-proposing the SAME targetId (e.g. an edited re-propose after "Load into
+// Author") never collides with a package name a PRIOR apply already
+// installed — newPackage fails closed against an already-installed name
+// (capabilityapply.go:186-189), and packageName is never shown to the
+// operator, so there is no readability cost to making it fresh every time.
+//
+// fresh is never generated in here — the view supplies a real unique token
+// per propose/export click — so this stays pure and deterministic for goja.
+// The "weaver-target-"/"weaver-lens-" prefix can never collide with a
+// PlatformProtectedPackage name (none of the twelve share it,
+// capabilityapply.go's platformProtectedPackages), so that refusal can never
+// fire here by construction — not merely by convention.
+function buildApplyTarget(kind, targetId, fresh) {
+  const prefix = applyPackagePrefix[kind] || "weaver-artifact";
+  const slug = (targetId || "draft").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "draft";
+  const token = (fresh || "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 12) || "0";
+  return { mode: "newPackage", packageName: prefix + "-" + slug + "-" + token, newVersion: "0.1.0" };
+}
+
+// exportBundle builds the artifact bundle Export downloads / Propose submits
+// — the shape SubmitCapabilityProposal needs per artifact (minus
+// proposalId, minted at propose time): {kind, content, target, rationale,
+// validation}. content is a JSON STRING (the wire shape
 // SubmitCapabilityProposal's own `content` field carries, design §6.4 point
 // 1), not a nested object.
-function exportBundle(draft, checkResult, rationale, targetMode) {
+//
+// TARGET-ONLY (one artifact) when the draft binds an existing installed lens
+// rather than authoring a new one (draftHasLens false — Studio apply-path
+// fix, §L2): proposing an empty/placeholder lens artifact alongside it would
+// just be a second doomed-to-be-invalid proposal nobody asked for. The
+// existing two-artifact {target+lens} shape is preserved unchanged for the
+// co-authoring case. fresh is threaded into buildApplyTarget for both
+// artifacts so a single call derives a consistent, collision-avoiding pair.
+function exportBundle(draft, checkResult, rationale, fresh) {
   const targetContent = buildTargetContent(draft);
-  const lensContent = buildLensContent(draft);
   const tv = (checkResult && checkResult.targetValidation) || { valid: false, errors: [] };
-  const lv = (checkResult && checkResult.lensValidation) || { valid: false, errors: [] };
-  return {
-    artifacts: [
-      {
-        kind: "weaverTarget",
-        content: JSON.stringify(targetContent),
-        target: { mode: targetMode || "install" },
-        rationale: rationale || "",
-        validation: { state: tv.valid ? "valid" : "invalid", report: (tv.errors || []).join("; ") },
-      },
-      {
-        kind: "lens",
-        content: JSON.stringify(lensContent),
-        target: { mode: targetMode || "install" },
-        rationale: rationale || "",
-        validation: { state: lv.valid ? "valid" : "invalid", report: (lv.errors || []).join("; ") },
-      },
-    ],
-  };
+  const artifacts = [
+    {
+      kind: "weaverTarget",
+      content: JSON.stringify(targetContent),
+      target: buildApplyTarget("weaverTarget", draft.targetId, fresh),
+      rationale: rationale || "",
+      validation: { state: tv.valid ? "valid" : "invalid", report: (tv.errors || []).join("; ") },
+    },
+  ];
+  if (draftHasLens(draft)) {
+    const lensContent = buildLensContent(draft);
+    const lv = (checkResult && checkResult.lensValidation) || { valid: false, errors: [] };
+    artifacts.push({
+      kind: "lens",
+      content: JSON.stringify(lensContent),
+      target: buildApplyTarget("lens", draft.targetId, fresh),
+      rationale: rationale || "",
+      validation: { state: lv.valid ? "valid" : "invalid", report: (lv.errors || []).join("; ") },
+    });
+  }
+  return { artifacts: artifacts };
 }
 
 // exportFilename derives a stable download name from the draft's targetId.
@@ -203,4 +307,18 @@ function exportFilename(targetId) {
   return "weaver-target-" + safe + ".json";
 }
 
-export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, proposeBlockers, scaffoldLensSpec, validationBadge, exportBundle, exportFilename };
+// buildAuthoringRequest builds POST /api/weaver/author/request's body from
+// the Describe panel's own two fields — trims the intent and omits a blank
+// contextRef — returning null when there is nothing to submit (a blank or
+// whitespace-only intent), so the view can gate Submit on the exact same
+// rule the server enforces.
+function buildAuthoringRequest(text, contextRef) {
+  const intent = (text || "").trim();
+  if (!intent) return null;
+  const payload = { intent: intent };
+  const ref = (contextRef || "").trim();
+  if (ref) payload.contextRef = ref;
+  return payload;
+}
+
+export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, hydrateFromProposal, draftHasLens, proposeBlockers, scaffoldLensSpec, validationBadge, buildApplyTarget, exportBundle, exportFilename, buildAuthoringRequest };

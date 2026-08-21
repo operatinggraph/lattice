@@ -219,9 +219,12 @@ func TestWeaverAuthorValidationBadge(t *testing.T) {
 	}
 }
 
-// TestWeaverAuthorExportBundleShape pins the wire shape a future F25.3b
-// SubmitCapabilityProposal call needs per artifact (design §6.4): content is
-// a JSON STRING, not a nested object.
+// TestWeaverAuthorExportBundleShape pins the wire shape SubmitCapabilityProposal
+// needs per artifact (design §6.4): content is a JSON STRING, not a nested
+// object, and — the Studio apply-path fix — target is {mode:"newPackage",
+// packageName, newVersion:"0.1.0"}, never the old placeholder {mode:"install"}
+// that internal/pkgmgr/capabilityapply.go refuses outright (unrecognized
+// target.mode) at the final apply click.
 func TestWeaverAuthorExportBundleShape(t *testing.T) {
 	vm := logicVM(t, "weaverauthor.js")
 	draft := map[string]any{
@@ -233,10 +236,10 @@ func TestWeaverAuthorExportBundleShape(t *testing.T) {
 		"targetValidation": map[string]any{"valid": true, "errors": []any{}},
 		"lensValidation":   map[string]any{"valid": false, "errors": []any{"bad spec"}},
 	}
-	got := call(t, vm, "exportBundle", draft, check, "because", "install").(map[string]any)
+	got := call(t, vm, "exportBundle", draft, check, "because", "freshTok1").(map[string]any)
 	artifacts := got["artifacts"].([]any)
 	if len(artifacts) != 2 {
-		t.Fatalf("exportBundle artifacts = %v, want 2", artifacts)
+		t.Fatalf("exportBundle artifacts = %v, want 2 (draft has a lens spec)", artifacts)
 	}
 	target := artifacts[0].(map[string]any)
 	if target["kind"] != "weaverTarget" {
@@ -249,8 +252,15 @@ func TestWeaverAuthorExportBundleShape(t *testing.T) {
 		t.Errorf("rationale = %v", target["rationale"])
 	}
 	tm := target["target"].(map[string]any)
-	if tm["mode"] != "install" {
-		t.Errorf("target.mode = %v", tm["mode"])
+	if tm["mode"] != "newPackage" {
+		t.Errorf("target.mode = %v, want newPackage", tm["mode"])
+	}
+	tPkg, _ := tm["packageName"].(string)
+	if tPkg == "" {
+		t.Error("target.packageName is empty, want a derived non-empty name")
+	}
+	if tm["newVersion"] != "0.1.0" {
+		t.Errorf("target.newVersion = %v, want 0.1.0", tm["newVersion"])
 	}
 	tv := target["validation"].(map[string]any)
 	if tv["state"] != "valid" {
@@ -261,6 +271,166 @@ func TestWeaverAuthorExportBundleShape(t *testing.T) {
 	if lv["state"] != "invalid" || lv["report"] != "bad spec" {
 		t.Errorf("lens validation = %v, want invalid/bad spec", lv)
 	}
+	// The two artifacts apply as two INDEPENDENT packages (propose mints one
+	// proposal per artifact) — reusing the same packageName would make the
+	// second apply refuse itself against the first's already-installed name.
+	lPkg, _ := lens["target"].(map[string]any)["packageName"].(string)
+	if lPkg == "" || lPkg == tPkg {
+		t.Errorf("lens packageName = %q, target packageName = %q — want distinct, both non-empty", lPkg, tPkg)
+	}
+}
+
+// TestWeaverAuthorExportBundleTargetOnly pins L2: a draft with no lens spec
+// (binding an existing installed lens rather than authoring a new one)
+// exports/proposes as a SINGLE weaverTarget artifact — no placeholder lens
+// artifact that could only ever compute as invalid.
+func TestWeaverAuthorExportBundleTargetOnly(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	draft := map[string]any{
+		"targetId": "t1", "lensRef": "aNanoIdOrCanonicalName",
+		"gaps": map[string]any{},
+		"lens": map[string]any{"canonicalName": "", "adapter": "nats-kv", "bucket": "weaver-targets", "spec": "   "},
+	}
+	check := map[string]any{"targetValidation": map[string]any{"valid": true, "errors": []any{}}}
+	got := call(t, vm, "exportBundle", draft, check, "because", "freshTok2").(map[string]any)
+	artifacts := got["artifacts"].([]any)
+	if len(artifacts) != 1 {
+		t.Fatalf("exportBundle artifacts = %v, want exactly 1 (target-only, blank/whitespace-only lens spec)", artifacts)
+	}
+	if artifacts[0].(map[string]any)["kind"] != "weaverTarget" {
+		t.Errorf("artifacts[0].kind = %v", artifacts[0].(map[string]any)["kind"])
+	}
+}
+
+// TestWeaverAuthorDraftHasLens pins the has-lens discriminator: only a
+// non-blank cypher spec counts as "authoring a new lens".
+func TestWeaverAuthorDraftHasLens(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	cases := []struct {
+		name string
+		lens any
+		want bool
+	}{
+		{"no lens field at all", nil, false},
+		{"blank spec", map[string]any{"spec": ""}, false},
+		{"whitespace-only spec", map[string]any{"spec": "   \n  "}, false},
+		{"real spec", map[string]any{"spec": "MATCH (e) RETURN e"}, true},
+	}
+	for _, tc := range cases {
+		draft := map[string]any{"targetId": "t1"}
+		if tc.lens != nil {
+			draft["lens"] = tc.lens
+		}
+		if got := call(t, vm, "draftHasLens", draft); got != tc.want {
+			t.Errorf("%s: draftHasLens = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got := call(t, vm, "draftHasLens", nil); got != false {
+		t.Errorf("draftHasLens(nil) = %v, want false", got)
+	}
+}
+
+// TestWeaverAuthorBuildApplyTarget pins L1: always newPackage, a non-empty
+// packageName derived from targetId+fresh, newVersion 0.1.0, and — the
+// PlatformProtectedPackage safety net — a packageName that can never equal a
+// protected name BY CONSTRUCTION (internal/pkgmgr/capabilityapply.go's
+// twelve-name deny-list, none of which share the weaver-target-/weaver-lens-
+// prefix).
+func TestWeaverAuthorBuildApplyTarget(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	got := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "abc123").(map[string]any)
+	if got["mode"] != "newPackage" {
+		t.Errorf("mode = %v, want newPackage", got["mode"])
+	}
+	if got["newVersion"] != "0.1.0" {
+		t.Errorf("newVersion = %v, want 0.1.0", got["newVersion"])
+	}
+	pkg, _ := got["packageName"].(string)
+	if !containsSub(pkg, "leasecomplete") || !containsSub(pkg, "abc123") {
+		t.Errorf("packageName = %q, want it traceable to both targetId and fresh", pkg)
+	}
+	for _, protected := range []string{
+		"rbac-domain", "control-authz", "privacy-base", "privacy-operator-grant",
+		"identity-domain", "identity-hygiene", "objects-base", "console-operator",
+		"demo-operator", "capability-author", "augur", "orchestration-base", "semantic-contracts",
+	} {
+		if pkg == protected {
+			t.Fatalf("packageName = %q collides with a PlatformProtectedPackage name", pkg)
+		}
+	}
+
+	// A different fresh token (a second propose/export click on the SAME
+	// targetId, e.g. re-proposing an edited "Load into Author" draft) must
+	// derive a DIFFERENT packageName — newPackage fails closed against a name
+	// a PRIOR apply already installed.
+	got2 := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "xyz789").(map[string]any)
+	if got["packageName"] == got2["packageName"] {
+		t.Errorf("two different fresh tokens derived the SAME packageName %q — re-proposing the same targetId would collide with a prior apply", got["packageName"])
+	}
+
+	// The lens artifact's kind must derive a DIFFERENT prefix than the
+	// target's, even given the identical targetId+fresh, so a co-authored
+	// pair's two independent applies never collide with each other.
+	lensTarget := call(t, vm, "buildApplyTarget", "lens", "leaseComplete", "abc123").(map[string]any)
+	if lensTarget["packageName"] == got["packageName"] {
+		t.Errorf("lens and weaverTarget derived the SAME packageName %q for the same targetId+fresh", got["packageName"])
+	}
+}
+
+// TestWeaverAuthorHydratedDraftReproposesTargetOnly is the coordinator's
+// round-trip proof: hydrateFromProposal loads content.lensRef verbatim, and
+// after the bridge adapter fix that value is already a bare NanoID — so a
+// re-proposed unedited "Load into Author" draft (a) is target-only (one
+// artifact, its lens field never touched — emptyLens()'s blank spec), (b) is
+// never blocked by proposeBlockers on a lens verdict it never asked for, and
+// (c) carries the SAME NanoID lensRef through untouched in the exported
+// content — exactly what weaverauthor.go's resolveWeaverTargetLensRefs then
+// passes through with no Core KV lookup at all
+// (TestWeaverAuthorPropose_TargetOnlyAlreadyNanoIDLensRefNeedsNoConn).
+func TestWeaverAuthorHydratedDraftReproposesTargetOnly(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	const lensID = "aaaaaaaaaaaaaaaaaaaa"
+	row := map[string]any{
+		"kind":      "weaverTarget",
+		"content":   `{"targetId":"leaseComplete","lensRef":"` + lensID + `","description":"Every tab settles.","gaps":{}}`,
+		"rationale": "because",
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+	if draft == nil {
+		t.Fatal("hydrateFromProposal returned nil")
+	}
+	if draft["lensRef"] != lensID {
+		t.Fatalf("draft lensRef = %v, want %v", draft["lensRef"], lensID)
+	}
+	if got := call(t, vm, "draftHasLens", draft); got != false {
+		t.Fatalf("draftHasLens(hydrated) = %v, want false — hydrateFromProposal leaves the lens panel at emptyLens()", got)
+	}
+
+	passing := map[string]any{"targetValidation": map[string]any{"valid": true, "errors": []any{}}}
+	if got := call(t, vm, "proposeBlockers", draft, passing).([]any); len(got) != 0 {
+		t.Errorf("proposeBlockers(hydrated, passing) = %v, want none — must never be blocked on a lens verdict it never requested", got)
+	}
+
+	bundle := call(t, vm, "exportBundle", draft, passing, "because", "freshtoken1").(map[string]any)
+	artifacts := bundle["artifacts"].([]any)
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %v, want exactly 1 (target-only)", artifacts)
+	}
+	a0 := artifacts[0].(map[string]any)
+	if a0["kind"] != "weaverTarget" {
+		t.Errorf("artifacts[0].kind = %v", a0["kind"])
+	}
+	content, _ := a0["content"].(string)
+	if !containsSub(content, lensID) {
+		t.Errorf("exported content = %s, want the untouched NanoID lensRef %q", content, lensID)
+	}
+	tgt := a0["target"].(map[string]any)
+	if tgt["mode"] != "newPackage" {
+		t.Errorf("target.mode = %v, want newPackage", tgt["mode"])
+	}
+	if pkg, _ := tgt["packageName"].(string); pkg == "" {
+		t.Error("target.packageName is empty")
+	}
 }
 
 func TestWeaverAuthorExportFilename(t *testing.T) {
@@ -270,5 +440,105 @@ func TestWeaverAuthorExportFilename(t *testing.T) {
 	}
 	if got := call(t, vm, "exportFilename", ""); got != "weaver-target-draft.json" {
 		t.Errorf("exportFilename(empty) = %v, want the draft fallback", got)
+	}
+}
+
+// --- NL-2 — Load into Author (hydrateFromProposal) + Describe (buildAuthoringRequest) --------
+
+// TestWeaverAuthorHydrateFromProposalHappyPath pins the inverse of
+// buildTargetContent: every field lands, and a gap's params/reads round-trip
+// through paramsToText/readsToText exactly the way the form edits them.
+func TestWeaverAuthorHydrateFromProposalHappyPath(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	row := map[string]any{
+		"kind": "weaverTarget",
+		"content": `{"targetId":"leaseComplete","lensRef":"leaseViolations","description":"Every tab settles.",` +
+			`"gaps":{"missing_x":{"action":"directOp","operation":"Foo","params":{"k":"v"},"reads":["row.a"]}}}`,
+		"intent":    "a target for lease completion",
+		"rationale": "because the lease needs it",
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+	if draft == nil {
+		t.Fatal("hydrateFromProposal returned nil on a well-formed weaverTarget row")
+	}
+	if draft["targetId"] != "leaseComplete" || draft["lensRef"] != "leaseViolations" {
+		t.Errorf("draft = %v", draft)
+	}
+	if draft["description"] != "Every tab settles." {
+		t.Errorf("description = %v", draft["description"])
+	}
+	if draft["rationale"] != "because the lease needs it" {
+		t.Errorf("rationale = %v, want the row's rationale", draft["rationale"])
+	}
+	lens := draft["lens"].(map[string]any)
+	if lens["canonicalName"] != "" || lens["adapter"] != "nats-kv" || lens["bucket"] != "weaver-targets" {
+		t.Errorf("lens = %v, want emptyLens() untouched", lens)
+	}
+	gaps := draft["gaps"].(map[string]any)
+	gx, ok := gaps["missing_x"].(map[string]any)
+	if !ok {
+		t.Fatalf("gaps = %v, missing missing_x", gaps)
+	}
+	if gx["action"] != "directOp" || gx["operation"] != "Foo" {
+		t.Errorf("gap = %v", gx)
+	}
+	if gx["paramsText"] != "k=v" {
+		t.Errorf("paramsText = %v, want k=v", gx["paramsText"])
+	}
+	if gx["readsText"] != "row.a" {
+		t.Errorf("readsText = %v, want row.a", gx["readsText"])
+	}
+	// Fields the artifact omitted (pattern etc.) must land as "", the form's
+	// own empty-field convention — never undefined.
+	if gx["pattern"] != "" {
+		t.Errorf("pattern = %v, want empty string for an omitted field", gx["pattern"])
+	}
+}
+
+// TestWeaverAuthorHydrateFromProposalWrongKind pins the kind guard: only a
+// weaverTarget-kind proposal ever hydrates.
+func TestWeaverAuthorHydrateFromProposalWrongKind(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	row := map[string]any{"kind": "lens", "content": `{"canonicalName":"l1"}`}
+	if got := call(t, vm, "hydrateFromProposal", row); got != nil {
+		t.Errorf("hydrateFromProposal(kind=lens) = %v, want nil", got)
+	}
+	if got := call(t, vm, "hydrateFromProposal", nil); got != nil {
+		t.Errorf("hydrateFromProposal(nil) = %v, want nil", got)
+	}
+}
+
+// TestWeaverAuthorHydrateFromProposalGarbageContent pins the parse guard:
+// unparseable JSON, and JSON that parses to something other than an object,
+// both return nil rather than a half-built draft.
+func TestWeaverAuthorHydrateFromProposalGarbageContent(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	for _, content := range []string{"{not json", "", `"just a string"`, "42", "null"} {
+		row := map[string]any{"kind": "weaverTarget", "content": content}
+		if got := call(t, vm, "hydrateFromProposal", row); got != nil {
+			t.Errorf("hydrateFromProposal(content=%q) = %v, want nil", content, got)
+		}
+	}
+}
+
+func TestWeaverAuthorBuildAuthoringRequest(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	got := call(t, vm, "buildAuthoringRequest", "  a lens listing active providers  ", "  vtx.meta.abc  ").(map[string]any)
+	if got["intent"] != "a lens listing active providers" {
+		t.Errorf("intent = %v, want trimmed", got["intent"])
+	}
+	if got["contextRef"] != "vtx.meta.abc" {
+		t.Errorf("contextRef = %v, want trimmed", got["contextRef"])
+	}
+
+	got = call(t, vm, "buildAuthoringRequest", "an intent", "").(map[string]any)
+	if _, has := got["contextRef"]; has {
+		t.Errorf("payload = %v, a blank contextRef must be omitted", got)
+	}
+
+	for _, blank := range []string{"", "   \n  "} {
+		if got := call(t, vm, "buildAuthoringRequest", blank, ""); got != nil {
+			t.Errorf("buildAuthoringRequest(%q) = %v, want nil for a blank intent", blank, got)
+		}
 	}
 }

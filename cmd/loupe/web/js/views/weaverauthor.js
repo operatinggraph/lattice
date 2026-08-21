@@ -20,25 +20,61 @@
 import { $, el, api, demoHide, setStatus } from "../api.js";
 import {
   emptyDraft, emptyGap, parseParamsText, paramsToText, parseReadsText, readsToText,
-  buildTargetContent, buildLensContent, proposeBlockers, scaffoldLensSpec, validationBadge,
-  exportBundle, exportFilename,
+  buildTargetContent, buildLensContent, hydrateFromProposal, draftHasLens, proposeBlockers,
+  scaffoldLensSpec, validationBadge, exportBundle, exportFilename, buildAuthoringRequest,
 } from "../logic/weaverauthor.js";
 import { checksSummary, interferenceHeadline, opCoverageNote } from "../logic/weaver.js";
 
 let draft = emptyDraft();
 let lastCheck = null;
 let proposeResults = null;
+let describeText = "";
+let describeResult = null;
+let authorError = null;
 
-function enterAuthor() {
+// enterAuthor resets the local draft and, when the route carries
+// ?proposal=<id> ("Load into Author", design §3.4), fetches that capability
+// proposal and hydrates the draft from its artifact — the inverse of Propose.
+// A proposal that fails to load, or does not hydrate (wrong kind, unparseable
+// content), leaves an empty draft plus an error line rather than a half-drawn
+// form.
+async function enterAuthor(route) {
   draft = emptyDraft();
   lastCheck = null;
   proposeResults = null;
+  describeText = "";
+  describeResult = null;
+  authorError = null;
+
+  const proposalId = route && route.params && route.params.proposal;
+  if (!proposalId) { render(); return; }
+
+  const box = $("#weaver-author");
+  box.innerHTML = "";
+  box.appendChild(el("div", "muted", "loading proposal " + proposalId + "…"));
+
+  const row = await api("/api/review/capability/" + encodeURIComponent(proposalId));
+  if (row.error) {
+    authorError = "could not load proposal " + proposalId + ": " + row.error;
+    render();
+    return;
+  }
+  const hydrated = hydrateFromProposal(row);
+  if (!hydrated) {
+    authorError = "proposal " + proposalId + " did not load into the Author form — " +
+      "it is not a weaverTarget draft, or its artifact content is unparseable";
+    render();
+    return;
+  }
+  draft = hydrated;
   render();
 }
 
 function render() {
   const box = $("#weaver-author");
   box.innerHTML = "";
+  box.appendChild(describeBox());
+  if (authorError) box.appendChild(el("div", "error", authorError));
   box.appendChild(el("p", "muted small",
     "Compose a target + its paired violation lens as a capability artifact — the same shape the AI-authored " +
     "lane validates and the Review console applies. Browser-local until exported or proposed; nothing here " +
@@ -50,6 +86,71 @@ function render() {
   if (lastCheck) box.appendChild(checkResultBox(lastCheck));
   if (proposeResults) box.appendChild(proposeResultBox(proposeResults));
   if (draft.targetId) box.appendChild(trialBox());
+}
+
+// describeBox is the Describe panel (design §3.4), the FIRST panel on the
+// Author page: a plain-language request that relays RequestCapabilityAuthoring
+// through POST /api/weaver/author/request — an AI draft lands on the review
+// queue asynchronously, distinct from this page's own hand-authored Propose
+// flow below.
+function describeBox() {
+  const box = el("div", "weaver-panel author-describe");
+  box.appendChild(el("h3", null, "Describe"));
+  box.appendChild(el("p", "muted small",
+    "Describe what the Weaver should keep true — an AI draft will land in the review queue"));
+
+  const textarea = document.createElement("textarea");
+  textarea.rows = 3;
+  textarea.value = describeText;
+  box.appendChild(textarea);
+
+  const submitBtn = demoHide(el("button", null, "Submit"));
+  submitBtn.disabled = !buildAuthoringRequest(textarea.value, "");
+  textarea.addEventListener("input", () => {
+    describeText = textarea.value;
+    submitBtn.disabled = !buildAuthoringRequest(describeText, "");
+  });
+  submitBtn.addEventListener("click", doDescribeSubmit);
+  box.appendChild(submitBtn);
+
+  const status = el("span", "muted small", "");
+  status.id = "weaver-describe-status";
+  box.appendChild(status);
+
+  if (describeResult) box.appendChild(describeResultBox(describeResult));
+  return box;
+}
+
+async function doDescribeSubmit() {
+  const payload = buildAuthoringRequest(describeText, "");
+  if (!payload) return;
+  setStatus("weaver-describe-status", "submitting…");
+  const body = await api("/api/weaver/author/request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (body.error) { setStatus("weaver-describe-status", body.error, true); return; }
+  if (body.reply && body.reply.status === "rejected") {
+    const reason = (body.reply.error && (body.reply.error.message || body.reply.error.code)) || "rejected";
+    setStatus("weaver-describe-status", "request rejected: " + reason, true);
+    return;
+  }
+  describeResult = body;
+  render();
+  setStatus("weaver-describe-status", "submitted");
+}
+
+// describeResultBox shows the minted proposalId plus a link out to the
+// review queue — the draft itself lands there once the AI reasoning
+// completes, asynchronously, so there is nothing more to show inline here.
+function describeResultBox(result) {
+  const box = el("div", "muted small author-describe-result");
+  box.appendChild(document.createTextNode("proposal " + result.proposalId + " — "));
+  const link = el("a", "key-link", "draft will appear in the review queue");
+  link.href = "#/review";
+  box.appendChild(link);
+  return box;
 }
 
 function labeledInput(labelText, value, onInput, opts) {
@@ -149,6 +250,9 @@ function lensBox() {
   });
   head.appendChild(scaffoldBtn);
   box.appendChild(head);
+  box.appendChild(el("p", "muted small",
+    "Leave spec blank to bind the target to an already-installed lens by lensRef instead of authoring a new " +
+    "one — Check/Propose then skip this panel entirely rather than holding it to a verdict it never asked for."));
 
   const row = el("div", "op-fields author-row");
   // Defaults to lensRef until the operator types their own — matched by
@@ -195,12 +299,19 @@ function actionsBox() {
   return box;
 }
 
+// runChecks posts the lens artifact ONLY when the operator is authoring one
+// (draftHasLens) — a target-only draft (binding an existing installed lens)
+// has nothing lens-shaped to check, and submitting buildLensContent's blank
+// placeholder would just compute a permanent, misleading "invalid" verdict
+// for a lens nobody is proposing (Studio apply-path fix, §L2).
 async function runChecks() {
   setStatus("weaver-author-status", "checking…");
+  const reqBody = { target: buildTargetContent(draft) };
+  if (draftHasLens(draft)) reqBody.lens = buildLensContent(draft);
   const body = await api("/api/weaver/author/check", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target: buildTargetContent(draft), lens: buildLensContent(draft) }),
+    body: JSON.stringify(reqBody),
   });
   if (body.error) { setStatus("weaver-author-status", body.error, true); return; }
   lastCheck = body;
@@ -213,10 +324,14 @@ function checkResultBox(r) {
   box.appendChild(el("h3", null, "Check result"));
 
   const tv = validationBadge(r.targetValidation);
-  const lv = validationBadge(r.lensValidation);
   const vRow = el("div", "author-validation-row");
   vRow.appendChild(chip("target artifact: " + tv.text, tv.cls));
-  vRow.appendChild(chip("lens artifact: " + lv.text, lv.cls));
+  // Absent (not merely empty) when no lens was submitted — a target-only
+  // draft shows no lens chip at all rather than a confusing "not checked".
+  if (r.lensValidation) {
+    const lv = validationBadge(r.lensValidation);
+    vRow.appendChild(chip("lens artifact: " + lv.text, lv.cls));
+  }
   box.appendChild(vRow);
   (r.targetValidation && r.targetValidation.errors || []).forEach((e) => box.appendChild(el("div", "weaver-issue bad", "target: " + e)));
   (r.lensValidation && r.lensValidation.errors || []).forEach((e) => box.appendChild(el("div", "weaver-issue bad", "lens: " + e)));
@@ -239,8 +354,17 @@ function checkResultBox(r) {
   return box;
 }
 
+// freshToken returns a short, call-unique string for buildApplyTarget's
+// packageName derivation (Studio apply-path fix, §L1) — impure (Date.now +
+// Math.random), so it lives here rather than among logic/weaverauthor.js's
+// dependency-free pure functions; exportBundle only ever receives it as a
+// plain string argument.
+function freshToken() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 function doExport() {
-  const bundle = exportBundle(draft, lastCheck, draft.rationale, "install");
+  const bundle = exportBundle(draft, lastCheck, draft.rationale, freshToken());
   const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = el("a", null, "");
@@ -253,15 +377,17 @@ function doExport() {
   setStatus("weaver-author-status", "exported " + exportFilename(draft.targetId));
 }
 
-// doPropose submits the same two-artifact bundle Export downloads (§6.4:
-// exportBundle's shape IS the wire shape SubmitCapabilityProposal needs per
-// artifact, minus proposalId, which the server mints). Both artifacts are
-// submitted regardless of whether one fails — they are independent
-// proposals in the queue, and an operator who fixed only the lens shouldn't
-// have the target's already-good submission withheld from them too.
+// doPropose submits the same bundle Export downloads (§6.4: exportBundle's
+// shape IS the wire shape SubmitCapabilityProposal needs per artifact, minus
+// proposalId, which the server mints) — one artifact for a target-only
+// draft, two for a co-authored {target+lens} draft (draftHasLens). Every
+// artifact in the bundle is submitted regardless of whether another fails —
+// they are independent proposals in the queue, and an operator who fixed
+// only the lens shouldn't have the target's already-good submission
+// withheld from them too.
 async function doPropose() {
   setStatus("weaver-author-status", "proposing…");
-  const bundle = exportBundle(draft, lastCheck, draft.rationale, "install");
+  const bundle = exportBundle(draft, lastCheck, draft.rationale, freshToken());
   const body = await api("/api/weaver/author/propose", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
@@ -362,5 +363,358 @@ func TestWeaverAuthorPropose_GetMethodRejected(t *testing.T) {
 	srv.weaverAuthorPropose(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (GET not allowed)", rec.Code)
+	}
+}
+
+// --- NL-2 — Describe (weaverAuthorRequest) --------------------------------
+
+// callAuthorRequest drives the handler directly with an operator token in the
+// request context, mirroring callPropose above.
+func callAuthorRequest(t *testing.T, srv *server, body string) (*httptest.ResponseRecorder, weaverAuthorRequestResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/weaver/author/request", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), operatorTokenContextKey{}, "test-operator-token"))
+	rec := httptest.NewRecorder()
+	srv.weaverAuthorRequest(rec, req)
+	var out weaverAuthorRequestResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+// TestWeaverAuthorRequest_BlankIntentRejected pins the same-shape refusal as
+// propose's undescribed-target gate: a blank (or whitespace-only) intent is a
+// 400 naming the missing field, and nothing is relayed to the Gateway.
+func TestWeaverAuthorRequest_BlankIntentRejected(t *testing.T) {
+	calls := 0
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	t.Cleanup(hs.Close)
+	srv := newTestProposeServer(t, hs.URL)
+
+	for _, body := range []string{`{"intent":""}`, `{"intent":"   \n "}`, `{}`} {
+		rec, _ := callAuthorRequest(t, srv, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400", body, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "intent") {
+			t.Errorf("body %s: refusal must name the missing field; got %s", body, rec.Body.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("gateway calls = %d, want 0 — a blank intent submits nothing", calls)
+	}
+}
+
+// TestWeaverAuthorRequest_HappyPath pins the relay shape: a minted bare
+// NanoID, RequestCapabilityAuthoring as the operation type, no Reads (the
+// DDL declares its own posture), and the relayed reply carried through.
+func TestWeaverAuthorRequest_HappyPath(t *testing.T) {
+	url, captured := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv := newTestProposeServer(t, url)
+
+	rec, out := callAuthorRequest(t, srv, `{"intent":"a lens listing active providers by specialty"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(out.ProposalID) != 20 {
+		t.Errorf("proposalId %q is not a 20-char NanoID", out.ProposalID)
+	}
+	if out.Reply == nil || out.Reply.Status != processor.ReplyStatusAccepted {
+		t.Errorf("reply = %+v, want the relayed accepted reply carried through", out.Reply)
+	}
+
+	if captured.OperationType != "RequestCapabilityAuthoring" {
+		t.Errorf("operationType = %q, want RequestCapabilityAuthoring", captured.OperationType)
+	}
+	if len(captured.Reads) != 0 {
+		t.Errorf("reads = %v, want none — the DDL declares its own posture", captured.Reads)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	if payload["intent"] != "a lens listing active providers by specialty" {
+		t.Errorf("relayed intent = %+v", payload["intent"])
+	}
+	if pid, _ := payload["proposalId"].(string); pid != out.ProposalID {
+		t.Errorf("relayed proposalId = %q, want the minted id %q", pid, out.ProposalID)
+	}
+	if _, has := payload["contextRef"]; has {
+		t.Errorf("payload = %+v, an omitted contextRef must not appear at all", payload)
+	}
+}
+
+// TestWeaverAuthorRequest_ContextRefPassthroughAndOmission pins both halves:
+// a typed contextRef rides the relayed payload trimmed, and an absent one is
+// omitted from the payload entirely rather than carried as "".
+func TestWeaverAuthorRequest_ContextRefPassthroughAndOmission(t *testing.T) {
+	url, captured := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv := newTestProposeServer(t, url)
+
+	if _, out := callAuthorRequest(t, srv, `{"intent":"x","contextRef":"  vtx.meta.abc  "}`); out.ProposalID == "" {
+		t.Fatal("expected a minted proposalId")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	if payload["contextRef"] != "vtx.meta.abc" {
+		t.Errorf("contextRef = %+v, want the trimmed value carried through", payload["contextRef"])
+	}
+
+	callAuthorRequest(t, srv, `{"intent":"x"}`)
+	payload = nil
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	if _, has := payload["contextRef"]; has {
+		t.Errorf("payload = %+v, a request with no contextRef must omit the key entirely", payload)
+	}
+}
+
+func TestWeaverAuthorRequest_GetMethodRejected(t *testing.T) {
+	srv := newTestProposeServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/weaver/author/request", nil)
+	rec := httptest.NewRecorder()
+	srv.weaverAuthorRequest(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (GET not allowed)", rec.Code)
+	}
+}
+
+func TestWeaverAuthorRequest_MalformedBodyRejected(t *testing.T) {
+	srv := newTestProposeServer(t, "")
+	rec, _ := callAuthorRequest(t, srv, `not json`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// --- Cold-review fix: Studio apply path -----------------------------------
+//
+// L2 (target-only check) + L3 (lensRef canonicalName resolution). Verified
+// live against internal/pkgmgr: capabilityapply.go:156-197 (packageName/mode
+// requirements), build.go:566-590 (resolveLensRef — an installed target's
+// LensRef is always a bare NanoID; a canonicalName only resolves within the
+// SAME Definition's own declared Lenses, which a Studio proposal — always a
+// single-artifact Definition — never carries), capabilitymaterializer.go:601
+// (validateWeaverTargetArtifact requires lensRef non-empty but never resolves
+// it — resolution is apply-time only, so Check-time validity is unaffected by
+// whether a lensRef is a canonicalName or a NanoID).
+
+// lensMetaSpecValue is the Core KV value classifyKey+metaData expect at
+// vtx.meta.<id>.spec for an installed lens — the {"data":{...}} envelope
+// metaData's own decode struct requires (cmd/loupe/ops.go).
+func lensMetaSpecValue(canonicalName string) string {
+	return `{"data":{"canonicalName":"` + canonicalName + `","targetType":"nats-kv","targetConfig":{},"cypherRule":"MATCH (e) RETURN e","engine":"full"}}`
+}
+
+func TestWeaverAuthorCheck_TargetOnlyOmitsLensValidation(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/weaver/author/check", strings.NewReader(
+		`{"target":{"targetId":"t1","lensRef":"aaaaaaaaaaaaaaaaaaaa","gaps":{}}}`))
+	rec := httptest.NewRecorder()
+	srv.weaverAuthorCheck(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "lensValidation") {
+		t.Errorf("response body carries a lensValidation key at all when no lens was submitted: %s", rec.Body.String())
+	}
+	var resp weaverAuthorCheckResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.LensValidation != nil {
+		t.Errorf("lensValidation = %+v, want nil", resp.LensValidation)
+	}
+	if !resp.TargetValidation.Valid {
+		t.Errorf("targetValidation = %+v, want valid — Check-time validation never resolves lensRef (apply-time only)", resp.TargetValidation)
+	}
+}
+
+func TestWeaverAuthorCheck_WithLensComputesLensValidation(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/weaver/author/check", strings.NewReader(
+		`{"target":{"targetId":"t1","lensRef":"l1","gaps":{}},`+
+			`"lens":{"canonicalName":"l1","adapter":"nats-kv","bucket":"weaver-targets","spec":"MATCH (e) RETURN e"}}`))
+	rec := httptest.NewRecorder()
+	srv.weaverAuthorCheck(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp weaverAuthorCheckResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.LensValidation == nil {
+		t.Fatal("lensValidation = nil, want a computed verdict — a lens WAS submitted")
+	}
+	if !resp.LensValidation.Valid {
+		t.Errorf("lensValidation = %+v, want valid", resp.LensValidation)
+	}
+}
+
+func TestWeaverTargetNeedsLensResolution(t *testing.T) {
+	cases := []struct {
+		name      string
+		artifacts []weaverAuthorProposeArtifact
+		want      bool
+	}{
+		{"co-authored bundle never needs resolution, even with a canonicalName lensRef",
+			[]weaverAuthorProposeArtifact{
+				{Kind: "weaverTarget", Content: `{"targetId":"t1","lensRef":"leaseViolations"}`},
+				{Kind: "lens", Content: `{"canonicalName":"leaseViolations"}`},
+			}, false},
+		{"target-only, empty lensRef",
+			[]weaverAuthorProposeArtifact{{Kind: "weaverTarget", Content: `{"targetId":"t1","lensRef":""}`}}, false},
+		{"target-only, already a bare NanoID",
+			[]weaverAuthorProposeArtifact{{Kind: "weaverTarget", Content: `{"targetId":"t1","lensRef":"aaaaaaaaaaaaaaaaaaaa"}`}}, false},
+		{"target-only, canonicalName lensRef",
+			[]weaverAuthorProposeArtifact{{Kind: "weaverTarget", Content: `{"targetId":"t1","lensRef":"leaseViolations"}`}}, true},
+		{"malformed content never blocks — resolveWeaverTargetLensRefs reports it properly",
+			[]weaverAuthorProposeArtifact{{Kind: "weaverTarget", Content: `not json`}}, false},
+		{"no weaverTarget artifact at all",
+			[]weaverAuthorProposeArtifact{{Kind: "lens", Content: `{"canonicalName":"l1"}`}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := weaverTargetNeedsLensResolution(tc.artifacts); got != tc.want {
+				t.Errorf("weaverTargetNeedsLensResolution = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWeaverAuthorPropose_TargetOnlyResolvesLensRefCanonicalName is L3's
+// core proof: an installed lens's canonicalName, authored into a
+// target-only bundle's lensRef, is rewritten to that lens's bare NanoID
+// before the op relays — the exact resolution internal/pkgmgr/build.go's
+// resolveLensRef needs at apply time and can never perform itself (a Studio
+// proposal's Definition never carries a Lenses list of its own).
+func TestWeaverAuthorPropose_TargetOnlyResolvesLensRefCanonicalName(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	const lensID = "aaaaaaaaaaaaaaaaaaaa"
+	put(bootstrap.CoreKVBucket, "vtx.meta."+lensID+".spec", lensMetaSpecValue("leaseViolations"))
+
+	url, captured := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv.gatewayURL = url
+
+	body := `{"artifacts":[
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"lensRef\":\"leaseViolations\",\"description\":\"Every tab settles.\"}","target":{"mode":"newPackage","packageName":"weaver-target-t1-abc","newVersion":"0.1.0"},"rationale":"r","validation":{"state":"valid"}}
+	]}`
+	rec, out := callPropose(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(out.Results) != 1 {
+		t.Fatalf("results = %+v, want 1 (target-only)", out.Results)
+	}
+	if out.Results[0].Error != "" {
+		t.Fatalf("result = %+v, want no error", out.Results[0])
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	content, _ := payload["content"].(string)
+	var wc pkgmgr.WeaverTargetArtifactContent
+	if err := json.Unmarshal([]byte(content), &wc); err != nil {
+		t.Fatalf("decode relayed weaverTarget content: %v", err)
+	}
+	if wc.LensRef != lensID {
+		t.Errorf("relayed lensRef = %q, want the resolved NanoID %q", wc.LensRef, lensID)
+	}
+}
+
+// TestWeaverAuthorPropose_TargetOnlyUnresolvableLensRefRejected pins the
+// fail-closed side: a canonicalName that matches no installed lens is
+// refused synchronously (400, naming the lensRef) rather than minting a
+// proposal that can only fail later, at the final apply click.
+func TestWeaverAuthorPropose_TargetOnlyUnresolvableLensRefRejected(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	calls := 0
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	t.Cleanup(hs.Close)
+	srv.gatewayURL = hs.URL
+
+	body := `{"artifacts":[
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"lensRef\":\"noSuchLens\",\"description\":\"Every tab settles.\"}","target":{"mode":"newPackage","packageName":"weaver-target-t1-abc","newVersion":"0.1.0"},"rationale":"r","validation":{"state":"valid"}}
+	]}`
+	rec, _ := callPropose(t, srv, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "noSuchLens") {
+		t.Errorf("refusal must name the unresolvable lensRef; got %s", rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("gateway calls = %d, want 0 — an unresolvable bundle submits nothing", calls)
+	}
+}
+
+// TestWeaverAuthorPropose_TargetOnlyAlreadyNanoIDLensRefNeedsNoConn is the
+// coordinator's round-trip proof: hydrateFromProposal loads content.lensRef
+// verbatim, and after the bridge adapter fix that value is already a bare
+// NanoID — so a re-proposed unedited "Load into Author" draft needs NO Core
+// KV lookup at all. Driven against the conn-FREE fixture (newTestProposeServer,
+// s.conn is nil) specifically to prove that: had resolution been attempted
+// here, s.requireConn would have failed the whole request closed.
+func TestWeaverAuthorPropose_TargetOnlyAlreadyNanoIDLensRefNeedsNoConn(t *testing.T) {
+	url, captured := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv := newTestProposeServer(t, url)
+	const lensID = "aaaaaaaaaaaaaaaaaaaa"
+
+	body := `{"artifacts":[
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"lensRef\":\"` + lensID + `\",\"description\":\"Every tab settles.\"}","target":{"mode":"newPackage","packageName":"weaver-target-t1-abc","newVersion":"0.1.0"},"rationale":"r","validation":{"state":"valid"}}
+	]}`
+	rec, out := callPropose(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (an already-NanoID lensRef needs no Core KV read, so a nil conn must not block it)", rec.Code, rec.Body.String())
+	}
+	if len(out.Results) != 1 || out.Results[0].Error != "" {
+		t.Fatalf("results = %+v, want 1 clean result", out.Results)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	content, _ := payload["content"].(string)
+	var wc pkgmgr.WeaverTargetArtifactContent
+	if err := json.Unmarshal([]byte(content), &wc); err != nil {
+		t.Fatalf("decode relayed weaverTarget content: %v", err)
+	}
+	if wc.LensRef != lensID {
+		t.Errorf("lensRef = %q, want unchanged %q (already resolved)", wc.LensRef, lensID)
+	}
+}
+
+// TestWeaverAuthorPropose_CoAuthoredBundleNeedsNoConn pins that the existing
+// {target+lens} co-authoring path is left completely alone: a canonicalName
+// lensRef is never rewritten (there is nothing installed yet to resolve it
+// against — the paired lens gets its NanoID only when ITS OWN proposal is
+// applied), and this path needs no Core KV connection at all — proven the
+// same way, against the conn-free fixture.
+func TestWeaverAuthorPropose_CoAuthoredBundleNeedsNoConn(t *testing.T) {
+	url, _ := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv := newTestProposeServer(t, url)
+
+	body := `{"artifacts":[
+		{"kind":"weaverTarget","content":"{\"targetId\":\"t1\",\"lensRef\":\"leaseViolations\",\"description\":\"Every tab settles.\"}","target":{"mode":"newPackage","packageName":"weaver-target-t1-abc","newVersion":"0.1.0"},"rationale":"r","validation":{"state":"valid"}},
+		{"kind":"lens","content":"{\"canonicalName\":\"leaseViolations\"}","target":{"mode":"newPackage","packageName":"weaver-lens-t1-abc","newVersion":"0.1.0"},"rationale":"r","validation":{"state":"valid"}}
+	]}`
+	rec, out := callPropose(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (co-authored path needs no Core KV read, so a nil conn must not block it)", rec.Code, rec.Body.String())
+	}
+	if len(out.Results) != 2 {
+		t.Fatalf("results = %+v, want 2", out.Results)
+	}
+	for _, r := range out.Results {
+		if r.Error != "" {
+			t.Errorf("result %+v carries an unexpected error", r)
+		}
 	}
 }

@@ -310,6 +310,7 @@ function provenanceSection(p) {
 
 function actionSection(p, raw) {
   const box = panel("Verdict");
+  if (p.kind === "weaverTarget") box.appendChild(loadIntoAuthorRow(p));
   const displayState = proposalDisplayState(p);
   // Approved-but-not-applied: the human verdict landed; the artifact still
   // has to be installed. F16.2's apply endpoint drives the two-commit F-004
@@ -390,6 +391,22 @@ function actionSection(p, raw) {
   row.appendChild(reject);
   box.appendChild(row);
   return box;
+}
+
+// loadIntoAuthorRow links a weaverTarget-kind proposal into the Author form
+// (design §3.4's "Load into Author"): logic/weaverauthor.js's
+// hydrateFromProposal inverts the artifact back into a draft the operator can
+// edit, re-check, and re-propose as their own operator-source submission —
+// the same screen they can also reject the AI draft from. Read-only
+// navigation (it writes nothing), so unlike the verdict buttons below it is
+// never demo-hidden — a visitor can look even though Propose itself still
+// 403s once they get there.
+function loadIntoAuthorRow(p) {
+  const row = el("div", "lens-ctlrow");
+  const link = el("a", "key-link", "Load into Author");
+  link.href = "#/weaver/author?proposal=" + encodeURIComponent(p.proposalId);
+  row.appendChild(link);
+  return row;
 }
 
 // applyRow renders the controls for an approved-but-not-applied proposal
