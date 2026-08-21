@@ -713,11 +713,14 @@ func (i *Installer) checkCoreBucketExists(ctx context.Context) error {
 }
 
 // IsPackageInstalled reports whether a non-tombstoned package vertex with the
-// given canonical name is present in core-kv. It is the install-state probe the
-// processor wiring uses to gate rbac-domain-dependent dispatch (the
-// cap.roles.<actor> platform routing). A bootstrap-not-run / bucket-absent
-// condition is surfaced as an error so the caller can fail loudly rather than
-// silently degrading auth.
+// given canonical name is present in core-kv. Its one production caller is
+// CapabilityApplyPlanForProposal (capabilityapply.go), which binds an
+// AI-authored proposal's declared newPackage/upgradeExisting intent to the
+// LIVE install catalog before ever building a Definition. Neither
+// internal/processor nor internal/gateway calls it — rbac-domain-dependent
+// dispatch is gated elsewhere. A bootstrap-not-run / bucket-absent condition
+// is surfaced as an error so the caller can fail loudly rather than silently
+// treating "bucket missing" as "package absent".
 func IsPackageInstalled(ctx context.Context, conn *substrate.Conn, name string) (bool, error) {
 	i := NewInstaller(conn, "")
 	pkg, err := i.findInstalledPackage(ctx, name)
@@ -727,13 +730,27 @@ func IsPackageInstalled(ctx context.Context, conn *substrate.Conn, name string) 
 	return pkg != nil, nil
 }
 
-// findInstalledPackage scans `vtx.package.>` and returns the first
-// package vertex whose manifest aspect's `name` matches.
+// findInstalledPackage scans `vtx.package.>` and returns the first package
+// vertex whose manifest aspect's `name` byte-exactly matches. Matching is
+// deliberately NOT folded through normalizePackageName: a hit here is a
+// destructive resolution target (Install/Upgrade/Apply diff-apply into it,
+// Uninstall tombstones its declaredKeys), so widening the match set would
+// widen what gets mutated — the opposite of what a near-miss spelling should
+// ever cause. Instead, a scan that finds no exact hit but does find a manifest
+// whose name is fold-equal (differs only by case/surrounding whitespace)
+// returns a loud error instead of silent absence: an exact miss with a
+// fold-equal near-miss present is not the same fact as a real absence, and
+// every caller (Install's idempotency probe, Upgrade/Apply's existing-base
+// lookup, Uninstall, IsPackageInstalled) already propagates a non-nil error
+// from this call rather than swallowing it into "not installed" — so the
+// near-miss refuses the operation instead of resolving it.
 func (i *Installer) findInstalledPackage(ctx context.Context, name string) (*installedPackage, error) {
 	keys, err := i.Conn.KVListKeys(ctx, CoreBucket)
 	if err != nil {
 		return nil, fmt.Errorf("pkgmgr: list keys: %w", err)
 	}
+	normalizedName := normalizePackageName(name)
+	var nearMiss string
 	for _, k := range keys {
 		// Match `vtx.package.<NanoID>.manifest`.
 		if len(k) < len(PackageVertexPrefix)+len(".manifest") {
@@ -764,11 +781,19 @@ func (i *Installer) findInstalledPackage(ctx context.Context, name string) (*ins
 		}
 		gotName, _ := env.Data["name"].(string)
 		if gotName != name {
+			if nearMiss == "" && gotName != "" && normalizePackageName(gotName) == normalizedName {
+				nearMiss = gotName
+			}
 			continue
 		}
 		gotVersion, _ := env.Data["version"].(string)
 		pkgVertexKey := k[:len(k)-len(".manifest")]
 		return &installedPackage{Name: gotName, Version: gotVersion, Key: pkgVertexKey}, nil
+	}
+	if nearMiss != "" {
+		return nil, fmt.Errorf(
+			"pkgmgr: no package %q is installed; %q is (names differ only by case/whitespace)",
+			name, nearMiss)
 	}
 	return nil, nil
 }

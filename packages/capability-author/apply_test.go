@@ -47,6 +47,8 @@ const (
 	capHandleApplyProtUp = "CAHNDApProtUpgHJKMNP"
 	capIDApplyProtNew    = "CAApprvProtNewHJKMNP"
 	capHandleApplyProtNw = "CAHNDApProtNewHJKMNP"
+	capIDApplyModeWS     = "CAApprvModeWsHJKMNPQ"
+	capHandleApplyModeWS = "CAHNDApModeWsHJKMNPQ"
 )
 
 // applyEnv builds the MarkCapabilityProposalApplied op the operator submits
@@ -444,6 +446,31 @@ func TestCapAuthor_Apply_PlatformProtectedNew_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "platform-protected") || !strings.Contains(err.Error(), "objects-base") {
 		t.Fatalf("error = %v, want one naming objects-base as platform-protected", err)
+	}
+}
+
+// TestCapAuthor_Apply_ModeWithStrayWhitespace_Rejected pins the regression a
+// global proposal_string strip would reopen: target.mode is a literal-
+// equality switch in CapabilityApplyPlanForProposal ("newPackage" |
+// "upgradeExisting"), read back exactly as SubmitCapabilityProposal stored
+// it. A mode padded with stray whitespace must still be unrecognized — never
+// folded into a recognized mode the plan builder would act on.
+func TestCapAuthor_Apply_ModeWithStrayWhitespace_Rejected(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-modews")
+
+	pk := drivePendingProposalForApplyMode(t, ctx, conn, cp, cons, "modews", capIDApplyModeWS, capHandleApplyModeWS, "ai-lens-modews", " newPackage ")
+	driveReview(t, ctx, conn, cp, cons, "modews", capIDApplyModeWS, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("precondition: review.state = %q, want approved", got)
+	}
+
+	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, pk)
+	if err == nil {
+		t.Fatalf("CapabilityApplyPlanForProposal returned plan %+v, want an unrecognized-mode refusal", plan)
+	}
+	if !strings.Contains(err.Error(), "unrecognized target.mode") {
+		t.Fatalf("error = %v, want it to name the mode as unrecognized (not folded into \"newPackage\")", err)
 	}
 }
 

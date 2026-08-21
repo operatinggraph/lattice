@@ -416,6 +416,17 @@ def proposal_string(d, name):
         return ""
     return v
 
+# proposal_package_name reads target.packageName with the same trim
+# required_string applies to an authored identifier, so a proposal's declared
+# install target folds to the exact spelling Installer.findInstalledPackage
+# and IsPackageInstalled compare against. Every OTHER proposal_string field —
+# target.mode, validation.state chief among them — is a fail-closed gate
+# tested against a literal expected value (e.g. "valid", "newPackage") and
+# must keep rejecting a value that carries stray whitespace; only the
+# packageName identifier gets this treatment.
+def proposal_package_name(d):
+    return proposal_string(d, "packageName").strip()
+
 def proposal_dict(d, name):
     if name not in d:
         return {}
@@ -536,7 +547,7 @@ def execute(state, op):
                         {"kind": kind, "content": content}),
             make_aspect(proposal_key, "target", "capabilityAuthor.target",
                         {"mode": target_mode,
-                         "packageName": proposal_string(target, "packageName"),
+                         "packageName": proposal_package_name(target),
                          "baseVersion": proposal_string(target, "baseVersion"),
                          "newVersion": proposal_string(target, "newVersion")}),
             make_aspect(proposal_key, "rationale", "capabilityAuthor.rationale", {"text": rationale}),
@@ -634,7 +645,7 @@ def execute(state, op):
                 content = proposal_string(proposal, "content")
                 target = proposal_dict(proposal, "target")
                 target_mode = proposal_string(target, "mode")
-                target_package_name = proposal_string(target, "packageName")
+                target_package_name = proposal_package_name(target)
                 target_base_version = proposal_string(target, "baseVersion")
                 target_new_version = proposal_string(target, "newVersion")
                 rationale = proposal_string(proposal, "rationale")

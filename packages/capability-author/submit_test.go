@@ -45,6 +45,8 @@ const (
 	capIDSubmitGated     = "CAsubGateHJKMNPQRSTU"
 	capIDSubmitNoTarget  = "CAsubNtgtHJKMNPQRSTU"
 	capIDSubmitGrant     = "CAsubGrntHJKMNPQRSTU"
+	capIDSubmitPkgName   = "CAsubPnrmHJKMNPQRSTU"
+	capIDSubmitValWS     = "CAsubVstateHJKMNPQRS"
 )
 
 // submitEnv builds a SubmitCapabilityProposal envelope. Unlike recordEnv's
@@ -445,5 +447,71 @@ func TestCapAuthor_Submit_EntersTheSameHumanGate(t *testing.T) {
 	lnk := readDoc(t, ctx, conn, "lnk.capabilityproposal."+capIDSubmitGated+".reviewedBy.identity."+capStaffActorID)
 	if got, _ := lnk["sourceVertex"].(string); got != proposalKey {
 		t.Fatalf("reviewedBy link sourceVertex = %q, want %q", got, proposalKey)
+	}
+}
+
+// TestCapAuthor_Submit_TargetPackageNameTrimmed: proposal_package_name strips
+// surrounding whitespace exactly as required_string does, so a
+// target.packageName carrying it (a studio form field, a copy-paste) is
+// stored trimmed. Installer.findInstalledPackage's manifest scan matches
+// byte-exactly against a live manifest's stored name — a stray leading/
+// trailing space here would otherwise never resolve, is not tolerated as a
+// near-miss recovery either (a near-miss refuses loudly, it does not
+// resolve), and would leave every apply against this target permanently
+// unable to find the package it names.
+func TestCapAuthor_Submit_TargetPackageNameTrimmed(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-submit-pkgname")
+
+	proposalKey := "vtx.capabilityproposal." + capIDSubmitPkgName
+	sub := submitEnvRaw(testutil.GenReqID("CASubmit"), map[string]any{
+		"proposalId": capIDSubmitPkgName,
+		"kind":       "lens",
+		"content":    string(validLensContent(t, "pkgNameTrimmedLens")),
+		"target": map[string]any{
+			"mode":        "upgradeExisting",
+			"packageName": "  loftspace-domain  ",
+		},
+		"rationale":  "target.packageName carries stray whitespace",
+		"validation": map[string]any{"state": "valid"},
+	})
+	testutil.PublishOp(t, conn, sub)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	td := aspectData(t, ctx, conn, proposalKey+".target")
+	if got, _ := td["packageName"].(string); got != "loftspace-domain" {
+		t.Fatalf(".target.packageName = %q, want the trimmed form %q", got, "loftspace-domain")
+	}
+}
+
+// TestCapAuthor_Submit_ValidationStateTrailingWhitespace_StaysInvalid pins the
+// regression a global proposal_string strip would reopen: validation.state is
+// a literal-equality fail-closed gate against "valid" (the §5 verdict this op
+// trusts, never re-derives), not an identifier proposal_package_name's own
+// trim may touch. A trailing newline — the shape a copy-pasted JSON blob or a
+// bridge reply's own encoding could carry — must still read as an
+// unrecognized state and record the proposal invalid, never pending.
+func TestCapAuthor_Submit_ValidationStateTrailingWhitespace_StaysInvalid(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-submit-valws")
+
+	proposalKey := "vtx.capabilityproposal." + capIDSubmitValWS
+	sub := submitEnvRaw(testutil.GenReqID("CASubmit"), map[string]any{
+		"proposalId": capIDSubmitValWS,
+		"kind":       "lens",
+		"content":    string(validLensContent(t, "valStateWhitespaceLens")),
+		"target":     map[string]any{"mode": "newPackage"},
+		"rationale":  "validation.state carries a trailing newline",
+		"validation": map[string]any{"state": "valid\n"},
+	})
+	testutil.PublishOp(t, conn, sub)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (\"valid\\n\" must not be folded into \"valid\")", got)
+	}
+	rv := aspectData(t, ctx, conn, proposalKey+".review")
+	if got, _ := rv["invalidReason"].(string); got == "" {
+		t.Fatalf(".review.invalidReason is empty; want the no-valid-verdict reason")
 	}
 }

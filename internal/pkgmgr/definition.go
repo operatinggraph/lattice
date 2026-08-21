@@ -33,6 +33,7 @@ func (def Definition) validateAll() error {
 		return err
 	}
 	for _, check := range []func() error{
+		def.validatePackageName,
 		def.validateLensBuckets,
 		def.validateLensAdapters,
 		def.validateLensReadPath,
@@ -51,6 +52,30 @@ func (def Definition) validateAll() error {
 		if err := check(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validatePackageName refuses a Definition.Name that is not already equal to
+// its own normalizePackageName fold (trimmed, then lowercased).
+// Installer.findInstalledPackage matches byte-exactly (a package name is a
+// destructive resolution target, never folded to decide a match — see
+// normalizePackageName's doc comment), so a Name installed with stray
+// whitespace or uppercase would be findable ONLY by that exact spelling
+// forever after: every later probe using the obviously-correct normalized
+// form (Install's idempotency check, Upgrade's/Apply's existing-base lookup,
+// Uninstall, IsPackageInstalled) would hit the fold-equal near-miss refusal
+// instead of ever resolving it — an unbreakable loop whose only exit is
+// deleting the record the guard protects. Refusing the denormalized Name at
+// declaration time is what keeps that landmine from ever being installed;
+// this is a fail-closed authoring guard, not a migration, since every
+// package's declared Name is already its own normalized form.
+func (def Definition) validatePackageName() error {
+	normalized := normalizePackageName(def.Name)
+	if def.Name != normalized {
+		return fmt.Errorf(
+			"pkgmgr: Definition.Name %q is not normalized (package names are matched trimmed + lowercased) — use %q",
+			def.Name, normalized)
 	}
 	return nil
 }

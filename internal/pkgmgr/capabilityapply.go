@@ -87,11 +87,24 @@ func PlatformProtectedPackage(name string) bool {
 	return platformProtectedPackages[normalizePackageName(name)]
 }
 
-// normalizePackageName folds a proposal-declared package name to the
-// canonical-lowercase form platformProtectedPackages is keyed by, so a
-// near-miss spelling ("Rbac-Domain", " rbac-domain ") cannot walk past an
-// exact-byte map lookup. It is scoped to this guard and deliberately changes
-// no other package-name comparison in the installer.
+// normalizePackageName folds a package name to its canonical matching form:
+// surrounding whitespace trimmed, then lowercased.
+//
+// Its only RESOLVING use is PlatformProtectedPackage's deny-list lookup, and
+// that is deliberate: widening a deny-list's match set can only deny more
+// names, never select one for a destructive operation, so folding a near-miss
+// spelling ("Rbac-Domain", " rbac-domain ") into a hit there is strictly
+// safer than missing it.
+//
+// Installer.findInstalledPackage also calls this, but NEVER to decide a
+// match — only to detect that an exact miss has a fold-equal near-miss on
+// record, so it can refuse loudly instead of returning silent absence. A
+// find is a destructive resolution target (diff-apply, tombstone): folding a
+// near-miss into a hit there would let a `mode: upgradeExisting` proposal
+// targeting a fold-equal-but-not-exact packageName resolve to, and diff-apply
+// into, an unrelated manifest — the widened match set widens what gets
+// mutated. Do not add a resolving (match-deciding) call site for this
+// function without re-deriving that argument for it.
 func normalizePackageName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
