@@ -747,6 +747,34 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   read** — `DeleteWithOutcome` shipped and compiled, and the one loop that mattered called the plain
   `Delete` and discarded it, so the revocation half of my mechanism had no channel at all.
 
+- **A HAND-ENUMERATED set of "the things that matter" is an assertion of completeness — derive the set
+  from the consumer that reads it, and check whether a rejected alternative's flaw is one your own
+  design reproduces by another route.** Two failures from one adversarial pass (2026-08-21, package
+  authority-minting), both structural rather than local. (1) I listed by hand the three mutation shapes
+  a security guard would govern — permission create, `grantedBy` create, `grantedBy` revival — and the
+  reviewer broke it in one move: a forged `lnk.identity.<self>.holdsRole.role.<operatorRoleId>` edge is
+  a *cheaper total* escalation, ungoverned because the platform's only `holdsRole` refusal sits inside a
+  lifecycle-scoped guard, after its `if lifecycle == "" { return nil }` bail. Worse, that one edge
+  **manufactured two of my own admission branches** — it grants the ops one branch tests for, and
+  `SystemActorKeys` is *graph-discovered from exactly that link*, so the "root plane" branch admits the
+  attacker after the next restart. The repair that generalizes is not "add holdsRole to the list": it is
+  to **derive the governed set from the projection inputs of the consumers that decide the outcome** (here,
+  the two capability lenses' `MATCH` patterns and the properties they read), so a future shape reaching
+  those consumers is in the set by construction rather than by someone remembering it. **The tell:** a
+  design section that enumerates shapes with "exactly three" / "the following mutations" and no statement
+  of what *generates* the list. Ask *what reads this, and what are ALL of its inputs?* — then write the
+  set as that answer. (2) In the same draft I rejected an alternative because it "would break every
+  approved AI capability apply", and then shipped a rule that broke the same consumer by a different
+  route (the artifact materializes a `Definition` with one `PermissionSpec` and **no DDLs**, so my
+  "the package must implement what it confers" test could never admit it). **Every flaw you name in
+  §alternatives is a test case for your own recommendation — run each rejected alternative's objection
+  back against the shape you chose**, because you have already proven you consider that outcome
+  disqualifying. Corollary from the same pass: **a census you write to size the work must measure the
+  predicate the GUARD evaluates, not a convenient proxy** — mine counted `permissions \ (ddls ∪ opmetas)`
+  per package while the guard asked "is at least one claimant of this op owned here", and the two diverge
+  the moment two packages implement the same op (three did), so the census would have gone green while
+  the guard refused a shipped install.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
