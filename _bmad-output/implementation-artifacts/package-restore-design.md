@@ -36,6 +36,13 @@ uninstalled package a silent resurrection. A distinct verb leaves `InstallPackag
 | #3 Mutations | **3.2 / 3.3** | a fourth verb, `revive` — admitted **only** for `RestorePackage` | every verb switch in `internal/processor` (§11 C1) |
 | #3 | **3.3** (two corrections) | *"There is no separate `restore` op"* and *"Tombstones are permanent; keys are not reused"* both **already contradict shipped, ratified behaviour** — `UpgradePackage`'s revive arm and §8.4 rule (3). Corrected in the same diff | anyone grounding a design in §3.3, which is how this was found |
 
+**The adversarial gate this design set for itself has been run** (§16): two cold reviewers, disjoint lenses,
+**4 BLOCKING and 6 SERIOUS findings, all folded**. Two of them would have shipped a verb that cannot work
+(the restore could never own its own manifest aspect, so the batch refused itself) and a containment claim
+that was bypassable (keyed on `operationType`, which the executing script is not bound to). The design you are
+reading is the corrected one; §16 records what changed and why, because the *pattern* in those findings —
+precedent cited but not re-read — is worth more than the individual fixes.
+
 > **The `docs/contracts/08-package-install.md` diff currently carries TWO independent proposals.** The
 > *Authority-minting admission* subsection is
 > [package-authority-minting-provenance-design.md](package-authority-minting-provenance-design.md)'s, staged
@@ -105,8 +112,11 @@ still sitting on the key.**
   batch. No package `Definition` field produces a `holdsRole` link, so a restore never emits one and the
   refusal stays untouched and unweakened.
 - `rejectProtectedMutations` KVGets each update/tombstone's 3-segment root and refuses on
-  `data.protected == true`. Package-declared roots are not protected; the guard stays in force for a restore
-  and is what keeps a hand-rolled `RestorePackage` payload off kernel keys.
+  `data.protected == true`. Package-declared roots are not protected, so a restore passes it — **but that it
+  runs at all is an increment obligation, not an inherited property, and the first draft stated it as the
+  latter** (§16, S3). Its test is `if m.Op != "update" && m.Op != "tombstone" { continue }`
+  (`step8_commit.go:730`) — an `!=` predicate that silently skips an unlisted verb. §14 carries the structural
+  answer: one shared predicate, not four hand-edited conjuncts.
 
 **1.5 Every entity key is package-namespaced by construction — with exactly one exception.**
 `entityNanoID(def.Name, tag)` folds the package name into the NanoID
@@ -216,13 +226,39 @@ wrote (§5.3).
   integer check on `expectedRevision` — emitting `{"op": "revive", "key": …}` instead of `tombstone`, and a
   `package.restored` event carrying `{name, keyCount}`. Self-description constants mirror the uninstall
   trio's (`:275-290`).
-- **Primordial permission** `PermRestorePackageKey` + its `grantedBy` link to `RoleOperatorID`, beside the
-  existing three (`internal/bootstrap/nanoid.go:682-691`). Kernel-seeded, so it survives the uninstall of
-  *any* package — including rbac-domain, whose uninstall is precisely the case the occupancy gate's current
-  remedy cannot help with (§1.6).
+- **Primordial permission** `PermRestorePackageKey` + its `grantedBy` link to `RoleOperatorID`. Kernel-seeded,
+  so it survives the uninstall of *any* package — including rbac-domain, whose uninstall is precisely the case
+  the occupancy gate's current remedy cannot help with (§1.6).
 - **`isPackageLifecycleOp`** (`step8_commit.go:932-938`) gains the fourth name, so every path-independent
   package guard — `holdsRole` refusal, forged-manifest-create refusal, scope resolution — covers it from the
   first commit.
+
+**The kernel-seeding checklist — every site the existing three touch (§16, F2).** The first draft named only
+the script file and the key-constant enumeration and would have shipped an op that is never seeded and never
+dispatchable. `internal/bootstrap/nanoid.go:259-310`'s own version history records this exact list from the
+last time it was walked — entry "12", *"UpgradePackage primordial DDL + its operator permission added"*:
+
+| site | what a fourth op needs |
+|---|---|
+| `bootstrap/primordial.go:614-628` | a fourth `seedPackageInstallDDL(add, RestorePackageDDLKey, …)` — the call that actually writes the meta-vertex + its 9 aspects (`:875-915`). **This is the file the first draft never named.** |
+| `bootstrap/primordial.go:742-746` | a fourth `installPerms` entry — feeds two loops, one seeding the permission vertex (`:762-773`), one the `grantedBy` link to operator (`:786-796`) |
+| `bootstrap/install_ddl.go` | the script + `restorePackageInputSchema` / `outputSchema` / `fieldDescription` / `examples` constants (the uninstall trio's live at `:275-290`) |
+| `bootstrap/nanoid.go` | `RestorePackageDDLID/Key`, `PermRestorePackageID/Key`; **two new `PrimordialIDsRaw` JSON fields**, the `targets` pointers (`:495-498`), the required-field check (`:540-543`), the `PrimordialVertexKeys()` entries (`:673`, `:684`, `:691`) |
+| `bootstrap/nanoid.go:718` | `PrimordialVertexKeyCount` **37 → 40** (DDL meta-vertex + permission + grant link) |
+| `bootstrap/nanoid.go:461-470` | `checkVersion` **"16" → "17"** — see the operational consequence below |
+| `bootstrap/service_actor_test.go:238` | the magic number in `TestPrimordialVertexKeyCount_AgreesWithEnumeration` |
+| `scripts/verify-kernel.go:105-111` | the KERNEL KEY COUNT DRIFT gate — red until the constant and the enumeration move together |
+| `bootstrap/primordial.go:618` | **`UninstallPackage`'s compensation-inverse hint currently names itself**, which is false for a destructive op. With a restore verb it becomes truthful; fix it in the same increment. |
+
+**A `make down && make up` is required to adopt this, on every existing deployment — and that irony belongs
+in the open.** `PermUpgradePackage` and `UpgradePackageDDL` are **randomly generated NanoIDs persisted in the
+bootstrap file** (`PrimordialIDsRaw`, `nanoid.go:220-223`, `:495-498`), not derived values, so a fourth op
+adds two new fields; `checkVersion` refuses any file whose version string is not the current one and sends the
+operator to `make down && make up` (`nanoid.go:461-470`), which force-wipes the stack. **A design whose whole
+purpose is sparing an operator a `make down` cannot be installed without one.** That is a pre-existing
+platform property — twelve prior primordial additions paid it — and this design pays it rather than papering
+over it. §17 records the cheaper shape it suggests, as an observation for Andrew rather than scope this fire
+absorbs.
 
 `InstallPackage`, `UpgradePackage` and `UninstallPackage` are **unchanged in behaviour**. No existing script
 gains a verb; no existing scope branch changes.
@@ -246,7 +282,15 @@ case "update", "tombstone", "revive":
 (`internal/bootstrap/install_ddl.go:160` emits key-only; `step8_commit.go:510-511` states the property). That
 single restriction is what carries the design's central safety claim:
 
-> A `RestorePackage` batch cannot write any byte a prior commit did not already write to that key.
+> A `RestorePackage` batch cannot write any **body** byte a prior commit did not already write to that key.
+
+The qualifier is load-bearing and the first draft omitted it (§16, S8). The committer always writes
+`doc["key"]` and the `lastModified*` triplet, and `preserveImmutableFields` (`step8_commit.go:566-586`)
+*stamps* the creation triplet from the current operation when the stored document lacks one — so restoring a
+document that predates provenance preservation attributes its creation to the restoring operator. That is the
+same carve-out §12's own test vector already states, extended to the creation triplet. The claim is about
+`class`, `data`, `vertexKey`, `localName`, `sourceVertex`, `targetVertex` — everything a script could
+otherwise choose.
 
 **The vocabulary this completes was already half-symmetric.** Contract #3 §3.3 describes `tombstone` as the
 document-less liveness verb — "a tombstone mutation carries no `document`; one supplied is not honored" — and
@@ -263,11 +307,43 @@ arbitrary-write backdoor `InstallPackageDDLScript`'s own doc block (`install_ddl
 package op must not be. Carrying no document removes the channel rather than guarding it.
 
 The verb is **admitted for `RestorePackage` and nothing else** — default-deny at `step6_validate`'s verb
-switch (`:186`) and `starlark_runner`'s (`:338`), keyed on the resolved operation type. A package-authored
-DDL emitting `revive` fails validation. Without that conjunct, every package author would gain "un-tombstone
-any key I can address", and because a revive carries no document it would slip
-`rejectPermissionRoleRewrites`' `m.Document == nil` skip — resurrecting a revoked grant with no guard in the
-path. **The restriction is not hygiene; it is the whole containment.**
+switch (`:186`) and `starlark_runner`'s (`:338`). A package-authored DDL emitting `revive` fails validation.
+Without it every package author would gain "un-tombstone any key I can address", and because a revive carries
+no document it would slip `rejectPermissionRoleRewrites`' `m.Document == nil` skip (`:828-830`), resurrecting
+a revoked grant with no guard in the path.
+
+**But it must be keyed the way `packageLifecycleType` is keyed, and the first draft got this wrong (§16, S2).**
+The draft said "keyed on the resolved operation type". The repo's own comment refutes that, in the very file
+this design edits — `step8_commit.go:950-956`:
+
+> *"The executing script is selected by CLASS, not by operationType: `resolveClass` prefers `env.Class`, then
+> `payload.class`, and only then falls back to the operationType's registered class. Nothing binds the three
+> together … a guard keyed on operationType alone would stand down for exactly the envelope that most needs
+> it."*
+
+Verified independently at `step4_hydrate.go:474-495` (that precedence) and `step3_auth_capability.go:343`
+(authorization matches `env.OperationType`, never the class). Both naive keyings fail: keyed on
+`operationType`, an envelope declaring `RestorePackage` runs whatever script its `class` names; keyed on the
+resolved class, an envelope declaring a cheap operationType runs the restore script while step 3 never sees
+`RestorePackage`. The admission conjunct is therefore
+**`packageLifecycleType(env, payloadClass) == "RestorePackage"`** — the same three-arm read every other
+path-independent package guard already uses (`:966-973`) — plumbed into the mutation parser from
+`sc.Operation` (`starlark_runner.go:78`), which `parseMutations` (`:316`) does not carry today. That plumbing
+is an Increment 2 line item, not an assumption.
+
+**With that correction, the honest statement of where containment lives changes, and it is worth stating
+plainly.** `PermRestorePackageKey` gates a *string in the envelope*, not the script — a **pre-existing**
+property of every package primitive, `InstallPackage` included, which this verb inherits rather than
+introduces. The authoritative containment is `resolvePackageScope` (§5.3), which bounds what the batch may
+touch **regardless of who submitted it or which permission they held**; the verb restriction is a second,
+independent layer. This is also the sharpest reason for §9's sequencing recommendation: the in-flight
+authority-minting guard is the design that closes the class/operationType decoupling itself, and says so —
+*"this one runs for every operationType, not only the three package-lifecycle primitives."*
+
+**One half of the claim came back stronger than written.** The "no client document" property does not rest on
+the parser being careful: `parseMutations` **hard-fails** a document supplied on any non-create/update verb
+(`starlark_runner.go:358-363`, `"tombstone must not carry a document"`), so a `revive` added to the whitelist
+at `:338` inherits that refusal automatically rather than needing a new rule.
 
 Every other verb switch treats `revive` as **update-class** — prior-document read (`readPriorDocuments:653-659`,
 which is what makes §5.3 cost zero extra reads), `conditionRevision`, `rejectProtectedMutations`,
@@ -284,16 +360,33 @@ if docIsTombstoned(manifest.Doc) {
     if lifecycle != "RestorePackage" { return scope, nil }   // Upgrade/Uninstall unchanged
     scope.resolved = true
     uninstallOp := manifest.Doc["lastModifiedByOp"]
-    for k := range declaredKeySet(manifest.Doc) {
-        if !isReviveTarget(k, mutations)     { continue }   // this batch is reviving it
+    claimable := func(k string) bool {
+        if !isReviveTarget(k, mutations)          { return false } // this batch is reviving it
         p := prior.doc(k)
-        if !docIsTombstoned(p)               { continue }   // live → never owned
-        if p["lastModifiedByOp"] != uninstallOp { continue } // not killed by THIS uninstall
-        scope.owned[k] = struct{}{}
+        if !docIsTombstoned(p)                    { return false } // live → never owned
+        return p["lastModifiedByOp"] == uninstallOp                // killed by THIS uninstall
     }
+    for k := range declaredKeySet(manifest.Doc) {
+        if claimable(k) { scope.owned[k] = struct{}{} }
+    }
+    // The manifest aspect is NOT in its own declaredKeys — the snapshot is taken
+    // before its addCreate (installer.go:1702-1704) — so the loop above can never
+    // reach it, and a restore MUST revive it or the package stays uninstalled.
+    // The live-manifest path adds both explicitly (step8_commit.go:1198-1199);
+    // the restore path does the same, held to the same four conditions.
+    if claimable(scope.manifestKey) { scope.owned[scope.manifestKey] = struct{}{} }
+    if claimable(scope.pkgKey)      { scope.owned[scope.pkgKey] = struct{}{} }
     return scope, nil
 }
 ```
+
+> **This block is the corrected form.** The first draft populated `owned` from `declaredKeySet` alone and
+> was **broken on the mainline path**: `rejectPackageScopeViolations` refuses every non-`create` mutation
+> whose key is not in `owned` (`step8_commit.go:1082-1088`), so the manifest's own revive would have failed
+> `unscoped` and taken the whole atomic batch with it — every round-trip in §12 would have died on that line.
+> Found by the adversarial pass (§16, F1). Note also that the manifest is its **own** provenance reference,
+> so condition (4) holds for it by construction; it is written through `claimable` anyway rather than
+> special-cased, so a future edit to the conditions cannot leave the manifest behind.
 
 Three conjuncts, and each answers a specific objection:
 
@@ -309,24 +402,51 @@ Three conjuncts, and each answers a specific objection:
   own `lastModifiedByOp` was killed by that uninstall; one carrying anything else was killed by something
   else, and a restore must not undo it. This is dossier entry #12's requirement met — the guard is **not**
   keyed on tombstone-state alone.
-- **Cost: zero extra reads.** `readPriorDocuments` already loads a prior for every update/tombstone key
-  (`:653-659`), and every key a restore revives is a revive target. The liveness and provenance tests read
-  the map the commit has already built.
+- **Cost: zero extra reads, and — because of the manifest fix above — the source document is the
+  *conditioned* one.** `readPriorDocuments` loads a prior for every update/tombstone key (`:653-659`), and a
+  restore revives every key it inspects, the manifest included. That matters beyond cost:
+  `resolvePackageScope` prefers the batch's own prior read precisely because it is the revision the batch
+  conditions on, and warns that a batch not mutating its manifest "falls back to an out-of-band read, which no
+  batch condition covers" (`:1170-1186`). A restore that omitted the manifest from its batch would compute its
+  entire ownership set from an unconditioned read — a race the design would not have seen (§16, S7). Reviving
+  the manifest closes it: `uninstallOp` is read from a document the atomic batch asserts a revision on.
 
 **The state table, written before the predicate.**
 
 | # | declared key's state at restore | tombstone's `lastModifiedByOp` | outcome | why |
 |---|---|---|---|---|
 | 1 | tombstoned | == the manifest's | **revive** | the uninstall killed it |
-| 2 | tombstoned by a revoke **before** the uninstall, then re-tombstoned by it | == the manifest's | **revive** | indistinguishable pre-Inc 1; see the narrowing below |
-| 3 | tombstoned by something **after** the uninstall | ≠ the manifest's | **refuse**, named | a deliberate act this restore must not undo |
+| 2 | tombstoned by a revoke **before** the uninstall on a **pre-Inc-1** stack, then re-tombstoned by it | == the manifest's | **revive**, named in the preflight | the uninstall overwrote the revoke's stamp; unrecoverable from state (see below) |
+| 3 | tombstoned by anything other than that uninstall — a revoke **before** it (post-Inc-1), a meta-vertex tombstone **after** it, or a retention holder already stranded | ≠ the manifest's | **left dead, named in the result — the rest of the batch proceeds** | a deliberate act this restore must not undo; see the paragraph below on why this is a per-key skip and not a batch refusal |
 | 4 | live — a retention-class holder the uninstall preserved | n/a | **no mutation**; not owned | already correct; body is unchanged, so no mutation is emitted at all |
 | 5 | live — a foreign or unexplained occupant | n/a | **refuse**, named | never owned; the preflight names it before the op is submitted |
 | 6 | absent | n/a | **refuse**, named | a revive has no body to write; the operator reinstalls from the manifest instead |
 | 7 | the package's manifest is **live** | n/a | **refuse** — "not uninstalled; use `install`/`upgrade`" | |
 | 8 | the package's manifest is **absent** | n/a | **refuse** — nothing to restore | |
 
-**Row 2 is the honest narrowing, and it needs Increment 1 to close.** `Uninstall` today re-tombstones a key
+**Row 3 is a per-key skip, and the first draft made it a whole-batch refusal — which would have made an
+ordinary class of packages permanently unrestorable (§16, S4).** The draft argued row 3 was barely reachable
+because `RevokePermission`/`RevokeRole` fail on an already-tombstoned link
+(`packages/rbac-domain/ddls.go:391-392`, `:428-429`). True, and aimed at the wrong window: the reachable one
+is **before** the uninstall. `RevokePermission` tombstones
+`lnk.permission.<pid>.grantedBy.role.<rid>` (`ddls.go:427-429`), a key that **is** in the declaring package's
+`declaredKeys` (`build.go:396`). Today the uninstall overwrites that stamp, making it row 2; **after Increment
+1 skips it, it keeps the revoke's stamp and becomes row 3** — so a whole-batch refusal would mean *every
+package an operator has ever revoked a grant on becomes permanently unrestorable*, and Increment 1 would have
+converted an over-grant into a total availability loss. A second class is live today with no Increment 1 at
+all: a retention-class holder tombstoned before the uninstall is prefix-excluded from the tombstone set
+(`installer.go:1680-1690`) and reported `RetentionHoldersAlreadyStranded` (`:1735`), so it keeps a foreign
+stamp and is row 3 on the very next restore.
+
+Skipping per key is also the **semantically correct** answer, not merely the available one: a restore undoes
+an uninstall and nothing else, so a grant revoked before the uninstall stays revoked. It is not a partial
+restore with a success signal, because the result names every skipped key, its stamp's operation, and the
+verb that would re-grant it — the operator is told exactly what did not come back and how to bring it back
+deliberately. Row 5 and row 6 stay **batch** refusals: a live foreign occupant or an absent declared key mean
+the restore cannot produce a coherent package at all, which is a different fact from "one grant stays
+revoked".
+
+**Row 2 is the residue, and it needs Increment 1 to close.** `Uninstall` today re-tombstones a key
 that is already tombstoned — its loop includes every declared key that resolves, regardless of `isDeleted`
 (`installer.go:1755-1799`) — which overwrites the revoking op's stamp with the uninstall's. Increment 1
 makes `Uninstall` **skip** an already-tombstoned key and report it in an `AlreadyTombstoned` bucket, mirroring
@@ -359,10 +479,20 @@ provenance and one keyed on tombstone-state alone, and has at least one reachabl
 3. Read every `declaredKeys` entry plus the manifest aspect and the package root — one `KVGetMulti`, chunked
    at `abstractGuardReadChunk`, mirroring `declaredKeyOccupants` (`installer.go:998-1006`). A failed batch
    refuses; a probe that cannot read the kernel has not found it restorable.
-4. Classify each key by the state table. Rows 3, 5, 6 → refuse with `ErrRestoreBlocked`, naming every
-   blocking key in its own bucket. Row 4 → no mutation. Row 1/2 → `{key, expectedRevision}`.
-5. Submit `RestorePackage` with `requestID = deterministicNanoID(name, manifestVersion, "restore-op")`,
-   mirroring the uninstall's version-scoped derivation (`installer.go:1823`).
+4. Classify each key by the state table. Rows **5 and 6** → refuse the whole restore with
+   `ErrRestoreBlocked`, naming every blocking key in its own bucket. Row **3** → omit the key from the batch
+   and report it under `LeftRevoked`, with the stamp's operation and the verb that would re-grant it. Row 4 →
+   no mutation. Rows 1/2 → `{key, expectedRevision}`.
+5. Submit `RestorePackage` with `requestID = contentRequestID(name, manifestVersion, "restore-op", revives)`
+   — **not** the uninstall's `deterministicNanoID(name, version, …)` shape, which the first draft mirrored
+   (§16, S5). Restore never advances the version, so a name+version derivation is constant across every
+   restore of a package: `restore → uninstall → restore` inside the 24h `TrackerTTL`
+   (`internal/processor/tracker.go:19`) reuses the first restore's requestId, the Processor replies
+   `Duplicate`, and the mirrored reply handling treats `Duplicate` as success (`installer.go:1829`) — **the
+   second restore reports success, commits nothing, and the package stays dead.** That is precisely the bug
+   `contentRequestID` exists to fix, in its own words (`installer.go:396-409`), reproduced by copying the
+   wrong sibling. Folding the revive set's digest in restores uniqueness, because each cycle's
+   `expectedRevision`s differ.
 
 **No `Definition` is read, parsed, or diffed.** Restore is `undo uninstall`, not `install at a new version` —
 it restores the package at the version the manifest records, and a subsequent `upgrade` moves it forward
@@ -389,14 +519,40 @@ not this design's to fix.)*
 
 ### 5.5 The preflight is the operator-facing safety mechanism
 
+**The shape, which the first draft asserted rather than designed (§16, F3).** `Uninstall` has no options
+struct and no preview mode — `runUninstall` (`cmd/lattice-pkg/main.go:352-424`) submits immediately — so
+"mirrors `Uninstall`" does not supply one. The only working precedent is `ApplyOptions.DryRun`
+(`internal/pkgmgr/apply.go:11-22`), and its real content is not the boolean but an explicit **guard-ordering
+rule**: a guard whose refusal the real run would raise must run **before** the dry-run return
+(`apply.go:189-196`, the Secure-Lens custody guard, "so a preview can honestly report that the real apply
+would refuse"), while a guard with a **side effect** must run after (`apply.go:211-217`, the op-meta
+retirement guard, "a preview must never cancel a live task as a side effect").
+
+So: `Installer.Restore(ctx, packageName string, opts RestoreOptions)` with `RestoreOptions{DryRun bool}`,
+and the same rule applied per guard:
+
+| runs **before** the dry-run return (a preview must predict the refusal) | runs **after** (real runs only) |
+|---|---|
+| the state-table classification of every declared key (rows 3/5/6/7/8) | the op submission itself |
+| the live-canonicalName re-collision check (§5.4) — a restore that would be refused for a name someone else took while it was dead must say so in the preview | — |
+| the batched read failing (a probe that cannot read the kernel has not found the package restorable) | — |
+
+Nothing on the restore path has a side effect to defer, which is why the right-hand column is empty and worth
+saying so: the preflight is a pure read, so `DryRun` costs only the submit.
+
 `Restore` in dry-run form (and the CLI's default before a confirmation) prints, before anything is submitted:
 
 - the package name, the version the manifest records, and the date of the uninstall (`lastModifiedAt` on the
   manifest tombstone);
 - **every authority the restore will revive**, per permission: the operationType, the scope, the role the
-  `grantedBy` link binds it to, and whether the operationType is core-reserved — the same partition
-  `restoreAdvice` already computes for the occupancy gate's refusal text (`installer.go:1090-1138`), reused
-  rather than rebuilt;
+  `grantedBy` link binds it to, and whether the operationType is core-reserved. The first draft called this
+  `restoreAdvice` "reused rather than rebuilt" — it cannot be (§16, S9): `classifyRestorePermissions`
+  (`installer.go:1087`) takes `[]PermissionSpec`, a `Definition` field, and a name-only restore has no
+  `Definition`. The **partition logic** is reusable; its **input** must be re-derived from the stored
+  `vtx.permission.*` bodies the restore already reads (`data.operationType`, `data.scope`, `data.lanes`), with
+  the role taken from the `grantedBy` link key's own last two segments. Refactoring
+  `classifyRestorePermissions` onto that projection so both callers share one partition is an Increment 2 line
+  item — and it matters, because §2's safety argument rests on this output;
 - **that identities still holding the package's roles regain those capabilities on commit.** A `holdsRole`
   link is not package-declared, so an uninstall never tombstoned it: it has been pointing at a dead role all
   along and becomes live again the moment the role does. This is correct — the assignment was never revoked —
@@ -489,7 +645,7 @@ and what does not?
 | `holdsRole` assignments to the package's roles | **never removed** by the uninstall; become effective again the moment the role does — the preflight says so out loud (§5.5) |
 | retention-class holders | **never removed**; still live, and re-declared by the restored manifest (state-table row 4) |
 | business data the package's DDLs wrote | never touched by uninstall; untouched by restore |
-| lens read-model rows in the target bucket/Postgres | not restored by the commit; **re-projected** by Refractor once the lens re-activates (§7.1, item 2) |
+| lens read-model rows in the target bucket/Postgres | not restored by the commit; **backfilled** by Refractor once the lens re-activates — its durable consumer is created `DeliverPolicy: DeliverLastPerSubject` (`cmd/refractor/main.go:2226-2236`), so a freshly re-registered lens replays the latest revision of every matching subject rather than only projecting from now on. This was the claim most likely to be an empty-read-model trap; it is not one |
 | ciphertext in a secure-lens target store | never destroyed by uninstall; the restored lens resumes attesting its coverage — which is the damage the filed row *"[Pkgmgr] Uninstall erases the same secure-lens history with no attestation"* describes, recovered. This design does **not** close that row: that row is about the missing attestation *at uninstall time*. |
 | the version the package was at | the manifest's recorded version — restore never advances it (§5.4) |
 | a grant revoked **before** an uninstall that pre-dates Increment 1 | comes back (state-table row 2); the preflight enumerates it |
@@ -506,10 +662,18 @@ tombstone. Traced, per consumer:
    from the full root set (`:1017-1048`). Op-metas take the identical path (`:534-575`, `:991-1000`), so the
    read-disposition floor restores itself.
 2. **Refractor lens registry** — `dispatchSpec` looks up `s.known[lensID]`, and because the tombstone deleted
-   the entry the revive takes the `!exists` arm and calls `loadCB` — a **fresh load**, not an update
-   (`corekv_source.go:1364-1373`), wired to `activateIfNotRegistered` → `startPipeline`
-   (`cmd/refractor/main.go:1926-1933`). No restart. `reloadpin.RefusedChange` is not on this path at all —
-   its only caller is `upgrade.go:644`, an advisory log-only diff.
+   the entry (`:912` root, `:1001` spec) the revive takes the `!exists` arm and calls `loadCB` — a **fresh
+   load**, not an update (`internal/refractor/lens/corekv_source.go:1364-1373`; the first draft cited this
+   file at the wrong path), wired to `activateIfNotRegistered` → `startPipeline`
+   (`cmd/refractor/main.go:1926-1932`). The watch filter is the static
+   `[]string{"vtx.meta.", "lnk.meta.*.subtypeOf.>"}` (`:725`) — no per-lens narrowing, no revision high-water,
+   no negative cache — and both root-first and spec-first orderings drain (`:975-982`, `:1013-1025`), so the
+   atomic batch's ordering is safe either way. `reloadpin.RefusedChange` is not on this path at all; its only
+   caller is `upgrade.go:644`, an advisory log-only diff.
+   **The one exception, which §12's e2e must pin rather than assume:** `startPipeline` re-runs every
+   precondition on a revive, and a lens carrying `*` labels under a taxonomy that has not resolved is recorded
+   refused and returns (`cmd/refractor/main.go:1449-1451`) — dark until the next taxonomy event. A "no restart"
+   assertion written without accounting for it is flaky, not false.
 3. **Weaver targets and Loom patterns** — one shared CDC source; `removeVertex`/`removeSpec` drop the target
    on tombstone and `dispatchTarget` finds no owner and calls `loadCB` on revive
    (`internal/weaver/registry.go:552-595`, `:987-1041`); `indexPattern` repopulates unconditionally
@@ -581,11 +745,20 @@ of them is optional:
    one opens.
 3. **R1's DDL-ownership test reads "already in its `.manifest.declaredKeys`".** For a restore that manifest
    is tombstoned, so R1 must read the same tombstoned manifest §5.3 resolves, or it will refuse every
-   restore. The cleanest resolution is the one this design's key set already proves: a revive whose key is in
-   the restoring package's own tombstoned-manifest `declaredKeys` and whose prior document is tombstoned
-   **confers nothing the package did not already legitimately hold** — the link key encodes both endpoints, so
-   the (permission, role) pair is exactly the pair that package declared and the uninstall revoked. That is a
-   strictly stronger statement than R1 or R3 and should be written as such rather than shoehorned.
+   restore. The natural resolution is that a revive whose key is in the restoring package's own tombstoned-manifest
+   `declaredKeys`, whose prior document is tombstoned, and whose tombstone that package's own uninstall wrote
+   confers nothing **that package's manifest did not already record** — the link key encodes both endpoints,
+   so the (permission, role) pair is fixed by the key.
+
+   **It is *not* the "strictly stronger than R1/R3" statement the first draft claimed (§16, S6.)** Manifest
+   membership records *adoption*, not original declaration: `validatedManifestClaims` admits any **tombstoned**
+   key a batch updates into that batch's own `declaredKeys` (`step8_commit.go:1244-1249`), because
+   "a dead key has no live owner to displace" is a claim about displacement, not provenance. So a package's
+   manifest can name a `grantedBy` link it never declared — one minted at runtime by `GrantPermission` and
+   later revoked — and that key then passes all three restore conjuncts. The rule is therefore **weaker** than
+   R1 and R3 and must be written into §8.4 as an additional admission with its own bound, not as a
+   strengthening. §17 records the underlying adoption path, which is pre-existing and belongs to the
+   authority-minting design rather than to this one.
 
 **Ordering — grounded, not a guess.** Either order *works*; the asymmetry is what each order costs. If
 authority-minting ships first, restore is built against a live governed set and obligation 3 is a paragraph
@@ -626,15 +799,27 @@ mechanically instead of trusting this prose.
 grep -rn '"tombstone"' --include="*.go" internal cmd | grep -v "_test.go" | grep -v "^internal/spike/"
 ```
 
-Expected at time of writing: **26 lines**, of which the *decision* sites are `step6_resolve_ddl.go:484,554`,
+Expected at time of writing: **28 lines** (the first draft said 26 and did not reproduce — §16, F4; a census
+whose whole claim is that it is command-derived has to reproduce, so the number is corrected rather than the
+command). Of those, the *decision* sites are `step6_resolve_ddl.go:484,554`,
 `step6_validate.go:186,221,241,273`, `starlark_runner.go:338`, `commit_path.go:630`,
 `step8_commit.go:296,523,544,545,655,730,828,1229`, `step65_encrypt.go:56`, `script_context.go:197` (doc),
 plus `internal/bootstrap/install_ddl.go:221,233,322` (the upgrade script's own vocabulary + input schema) and
 `internal/pkgmgr/apply.go:301` / `cmd/lattice-pkg/main.go:319` (reporting). **Unit: matching lines, not
 distinct switches** — several lines belong to one `switch`. `internal/spike/` is excluded deliberately: it is
 a spike, not a commit path; if the build finds it wired in anywhere, that is a finding, not a chore.
-The ~88 `"op": "tombstone"` emissions under `packages/` are **producers** and are untouched — they keep
-emitting `tombstone`.
+The remaining lines are **producers or prose**, and each is named rather than left to be rediscovered:
+`internal/bootstrap/meta_ddl.go:70` and `install_ddl.go:160` (Starlark emissions — the second is the sibling
+being cloned, not modified), `install_ddl.go:352` (an examples literal), `upgrade.go:581` (`diffManifest`'s
+tombstone arm — out of scope because Upgrade's behaviour is unchanged), `step6_validate.go:552` (a comment).
+The ~88 `"op": "tombstone"` emissions under `packages/` are producers too and keep emitting `tombstone`.
+
+**The method has a blind spot, and it is the reason §13 mandates the verb×site table rather than this grep.**
+A decision site need not contain the string `"tombstone"`: `step8_commit.go:1083` (`if m.Op == "create" {
+continue }`) and `:1092` (`if m.Op != "create" { continue }`) decide `revive`'s fate through a binary
+create/not-create test that this census cannot see. Both happen to be **correct** for `revive` by
+construction — it lands in the same bucket as `update`/`tombstone`, which is what the design wants — but that
+is luck, not coverage. A literal-string census sizes the work; only the exhaustive table proves it.
 
 **C2 — the authoritative declared-key count per package** (sizes the restore batch, the prior-read fan-out,
 and the op payload). Source literals are a *poor* proxy — several packages build specs in loops — so the
@@ -681,7 +866,13 @@ Every test below is owned by a named increment (§13); none is left unowned.
 - `Uninstall` over a package with one already-tombstoned declared key: the key is **not** re-tombstoned, its
   `lastModifiedByOp` is unchanged, and it is reported in `AlreadyTombstoned`. (`internal/pkgmgr`)
 - The existing uninstall tests keep passing unchanged — the skip must not alter the count of keys the batch
-  tombstones in the ordinary case.
+  tombstones in the ordinary case. **The closest existing test is
+  `installer_test.go:872-907`** (`TestInstaller_Uninstall_ReportsAlreadyErasedSecureColumnsSeparately`), which
+  already uninstalls over a pre-tombstoned declared key and survives Inc 1 because it never asserts on
+  `res.Tombstoned`. It is **not** a substitute for the new vector: its fixture tombstones by a raw `KVPut`
+  (`:888`) rather than through an op, so it stamps no distinct `lastModifiedByOp` and cannot exercise §5.3's
+  row-2-vs-row-3 distinction at all. The new fixture must tombstone **through a real op** or the discriminator
+  test passes vacuously.
 
 **Increment 2**
 - **Verb containment (the design's central claim).** A package-authored DDL emitting `{"op": "revive"}` is
@@ -709,6 +900,24 @@ Every test below is owned by a named increment (§13); none is left unowned.
   re-projects a row and the actor's `cap.roles.<actor>` regains the entry.
 - **Restoring `rbac-domain` itself** — the case §1.6 says the shipped remedy cannot help with. Proves the
   primordial permission's independence from any package.
+- **The verb-fallthrough vector (§14).** Assert the batch-op switch's `default` errors, and mutation-test the
+  four shared-predicate sites: with `mutationNeedsPrior` returning false for `revive`, the round-trip e2e must
+  go **red** — if it still passes, the test is not observing the body the revive is supposed to preserve.
+- **Double restore inside the tracker TTL** (§5.4 step 5): `restore → uninstall → restore` in one test with no
+  version change; the second restore must actually commit. With `deterministicNanoID` substituted for
+  `contentRequestID` the test must go red, or it does not cover S5 at all.
+- **Row 3 is a skip, not a refusal**: revoke one declared grant, uninstall, restore — the package comes back,
+  the revoked grant does **not**, and the result names it with the verb that would re-grant it.
+- **The taxonomy-refused lens** (§7.1 item 2): the e2e's no-restart assertion must wait on the lens actually
+  registering rather than on the commit, or it races `startPipeline`'s precondition re-run.
+
+**Increment 2 — the gate that binds the NEXT author.** §14's first risk is that a future verb, or a future
+guard, silently mis-handles `revive` by falling through a switch. A lint rule cannot classify that, but it
+does not need to: the mechanized form is a **table-driven test enumerating every mutation verb × every
+commit-path decision site**, asserting each pair has an explicit decision. Adding a fifth verb (the `delete`
+verb Contract #3 §3.3 already names as separately-designed) then fails the table until every site decides it,
+instead of compiling quietly. This ships **in Increment 2**, not as defense-in-depth afterwards — per the
+standing lint doctrine, the convention and the thing that enforces it land together.
 
 **Increment 3** — the Loupe endpoint returns 409 (not 502) for every `ErrRestoreBlocked` bucket; the detail
 page renders the preflight's authority list before the confirmation.
@@ -729,10 +938,16 @@ rather than re-tombstoning it; report it in a new `AlreadyTombstoned` bucket, mi
 valuable (`UninstallResult.Tombstoned` becomes honest, and the batch shrinks), and it is what makes §5.3's
 discriminator exact rather than vacuous. **Not posture-changing.**
 
-**Increment 2 — `RestorePackage`, end to end.** The `revive` verb + its containment; the kernel DDL script +
-self-description; the primordial permission; `isPackageLifecycleOp`; the `resolvePackageScope` restore
-branch + the discriminator; `pkgmgr.Restore` + the preflight + `ErrRestoreBlocked`; `lattice-pkg restore
-<name>`. **This is deliberately one fire and not three.** The verb, the guard branch and the op are each
+**Increment 2 — `RestorePackage`, end to end.** The `revive` verb + its containment + the verb×site table;
+**the whole kernel-seeding checklist in §5.1** (the `primordial.go` seed calls, the two new bootstrap NanoID
+fields, `PrimordialVertexKeyCount` 37 → 40, the `checkVersion` bump, the test magic number, `verify-kernel`,
+and the untruthful uninstall compensation hint) — that table is the increment's scope list, not a footnote,
+because the first draft omitted it entirely and would have handed the Steward an op that never seeds;
+`isPackageLifecycleOp`; the `packageLifecycleType`-keyed verb admission **plus the `sc.Operation` plumbing
+into `parseMutations`** (§5.2); the shared `mutationNeedsPrior`/`mutationIsConditioned` predicates + the
+batch-op `default` (§14); the `resolvePackageScope` restore branch + the discriminator; `pkgmgr.Restore` +
+`RestoreOptions{DryRun}` + the preflight + `classifyRestorePermissions` refactored onto a stored-body
+projection (§5.5) + `ErrRestoreBlocked`/`LeftRevoked`; `contentRequestID`; `lattice-pkg restore <name>`. **This is deliberately one fire and not three.** The verb, the guard branch and the op are each
 dead scaffolding without the other two — a `revive` verb with no `RestorePackage` realizes no value and can
 only be exercised by a test, which is the shape this repo's dead-scaffolding test exists to refuse.
 **Posture-changing.**
@@ -750,11 +965,20 @@ the row is filed. **Not posture-changing.**
 
 ## 14. Risks
 
-- **The `revive` verb's blast radius is the vocabulary, not the logic.** ~20 switch sites (§11 C1) must each
-  decide `revive`, and the failure mode of missing one is a *silent* mis-handling (e.g. a missing prior read
-  yields an empty body). Mitigation: make every verb switch in the commit path **exhaustive with an explicit
-  default-deny**, so an unhandled verb is a refusal rather than a fall-through, and let the compiler and the
-  gate find the rest.
+- **The `revive` verb's blast radius is the vocabulary, and the first draft's mitigation was wrong** (§16,
+  S3). "Let the compiler find the rest" does not work: the load-bearing sites are **not switches**. Four are
+  `!=` predicates — `readPriorDocuments` (`step8_commit.go:655`), `rejectProtectedMutations` (`:730`),
+  `applyHydratedRevisions` (`commit_path.go:630`), and `buildMutationValue`'s prior seed (`:523`) — and the
+  batch-op switch (`:293-296`) has **no `default`**. An unhandled `revive` therefore commits as a plain PUT
+  with neither `CreateOnly` nor `HasRevision`, and with `prior == nil` from the skipped read
+  `buildMutationValue` writes only the provenance fields — **erasing `class`, `data`, `sourceVertex` and
+  `targetVertex` on every declared key, unconditioned.** The verb whose purpose is to restore a body would
+  destroy it, silently, on the mainline path.
+  **Mitigation, structural rather than a checklist:** introduce one shared predicate pair
+  (`mutationNeedsPrior(op)` / `mutationIsConditioned(op)`) and rewrite all four `!=` sites onto it, so a new
+  verb is decided in **one** place; give the batch-op switch an explicit erroring `default`; and ship the
+  verb×site table test (§13) that fails when a fifth verb — the `delete` verb Contract #3 §3.3 already names
+  as separately-designed — arrives without a decision at every site.
 - **Restore is bounded by the manifest it revives.** If a manifest's `declaredKeys` were ever incomplete, the
   restore is incomplete in the same way and reports success. This is not a new exposure — `Uninstall` has the
   identical dependency and has shipped on it — but it is the one place where "restore committed" could be
@@ -763,6 +987,9 @@ the row is filed. **Not posture-changing.**
   and covered operationally by the preflight rather than by a mechanism.
 - **§9's ordering.** If the two designs are built in the other order, obligation 1 becomes a live gap rather
   than a paragraph.
+- **Adoption costs a full stack wipe** (§5.1). Every existing deployment must `make down && make up` to take
+  the new primordial keys. Sequence Increment 2 accordingly — it is not a hot-deployable change, and the
+  demo box's own state is lost adopting the feature that exists to stop state being lost.
 
 ---
 
@@ -777,3 +1004,96 @@ the row is filed. **Not posture-changing.**
 | Does a restore need to re-run the install-time collision gates? | **The canonicalName/opMeta/weaverTarget-id checks, yes** — a name it once held may have been claimed while it was dead (§5.4). The permission-identity and key-shape gates, no — it emits no new keys. |
 | Contract #3 §3.3 says "there is no separate `restore` op" and "keys are not reused" — does that block this? | **No — those sentences are already wrong.** Both are contradicted by shipped, ratified revive paths (§8). They are corrected in the same contract diff, and the correction stands on its own merits. |
 | Is `RestorePackage` an architectural fork? | **No.** It is a mechanism-level decision resolved in §6 on grounded mechanics. The frozen-contract change is what routes this to Andrew. |
+
+---
+
+## 16. Adversarial pass — run, and what it changed
+
+Run as a deferred gate on this design before it was flagged, per the Designer lane's obligation to discharge
+its own gates. Two cold reviewers with disjoint lenses, both read-only against the working tree.
+
+**Completeness / mechanism-reality lens — 2 BLOCKING, 2 SERIOUS, 1 MINOR, all folded above.**
+
+| # | finding | where it landed |
+|---|---|---|
+| F1 | **BLOCKING.** §5.3's owned-set loop populated `owned` from `declaredKeySet` alone — but the manifest aspect is never in its own `declaredKeys` (`installer.go:1702-1704`), so the manifest's own revive would have been refused `unscoped` (`step8_commit.go:1082-1088`) and taken the whole atomic batch with it. The mainline path, not an edge case. | §5.3 pseudocode rewritten; both explicit keys added, routed through the same four conditions |
+| F2 | **BLOCKING.** The design named `install_ddl.go` and `nanoid.go`'s key *enumeration* but never `primordial.go`, the file whose `add(...)` calls actually seed a kernel DDL and permission — so the op would never have been created on any bootstrap. Nine further sites (key count, version gate, the test's magic number, `verify-kernel`) went with it. | §5.1 gains the full checklist as a table; §13 makes it Increment 2's scope list |
+| F3 | **SERIOUS.** §5.5's "dry-run form" was asserted; `Uninstall` has no options struct, and `Apply`'s `DryRun` is a guard-**ordering** rule, not a boolean. | §5.5 gains `RestoreOptions{DryRun}` and the per-guard before/after table |
+| F4 | **SERIOUS.** C1's stated result (26) did not reproduce — the command returns 28. A census whose claim is that it is command-derived must reproduce. | §11 C1 corrected; the five non-decision lines named; the literal-string method's blind spot documented |
+| F5 | **MINOR.** `installer_test.go:872-907` already covers the Inc 1 scenario, but tombstones via raw `KVPut`, so it stamps no distinct `lastModifiedByOp` and cannot exercise the discriminator. | §12 Increment 1 requires the new fixture to tombstone through a real op |
+
+Claims the pass **verified rather than broke**: the single Core-KV `KVDelete` (§1.1); censuses C3 and C4
+exactly as stated; the package-namespacing of every key class including the `pane offeredTo role`,
+`permission forOperation meta` and `subtypeOf` link classes; and §7's read-model claim, which turned out to be
+stronger than written — a re-registered lens **backfills** (`DeliverLastPerSubject`), it does not merely
+project forward.
+
+**Security / soundness lens — 2 BLOCKING, 4 SERIOUS, 3 MINOR, all folded above.** It found F1 independently,
+by a different route (`build.go:430`'s snapshot comment rather than `installer.go`'s), which is the strongest
+evidence the finding is real and not a reviewer's misreading.
+
+| # | finding | where it landed |
+|---|---|---|
+| S1 | **BLOCKING.** Same defect as F1, found independently. | §5.3 |
+| S2 | **BLOCKING.** "Keyed on the resolved operation type" is unsound — the executing script is selected by **class**, not operationType, and `step8_commit.go:950-956` says so in the file this design edits. Both naive keyings are bypassable. It also forced an honest restatement: `PermRestorePackageKey` gates a string in the envelope, not the script, so the authoritative containment is the scope guard, not the permission. | §5.2 rewritten onto `packageLifecycleType`'s three-arm read; §9's sequencing argument sharpened |
+| S3 | **SERIOUS.** The guards §1.4 called "still in force" are `!=` predicates, and the batch-op switch has no `default` — an unhandled `revive` commits **unconditioned** with `prior == nil` and erases the body it exists to restore. §14's "let the compiler find it" was wrong. | §1.4 restated as an obligation; §14 replaced with a shared-predicate fix + a mutation test |
+| S4 | **SERIOUS.** Row 3's reachable window is **before** the uninstall, not after — so a whole-batch refusal would make every package an operator has revoked a grant on permanently unrestorable, and Increment 1 would have *caused* it. | Row 3 is now a per-key skip with a named report; §5.4 step 4 and §12 updated |
+| S5 | **SERIOUS.** `deterministicNanoID(name, version, …)` reproduces the exact dedup bug `contentRequestID` was written to fix — a second restore in 24h reports success and commits nothing. | §5.4 step 5; a red-on-substitution test in §12 |
+| S6 | **SERIOUS.** §9's "strictly stronger than R1/R3" is unsound: `validatedManifestClaims` admits any tombstoned key into a batch's own `declaredKeys`, so manifest membership records adoption, not declaration. | §9 obligation 3 corrected to "weaker, needs its own bound"; the adoption path recorded in §17 |
+| S7 | **SERIOUS→resolved by F1's fix.** With the manifest omitted from the batch, `uninstallOp` came from an *unconditioned* out-of-band read (`:1170-1186`), so §10's "cannot race" was false. Reviving the manifest closes it. | §5.3's cost bullet |
+| S8 | **MINOR.** "Cannot write any byte" is literally false — the committer stamps `key`, `lastModified*`, and heals an absent creation triplet. | §5.2 qualified to *body* bytes |
+| S9 | **MINOR.** §5.5 said `restoreAdvice` is "reused rather than rebuilt" while §5.4 said no `Definition` is read; `classifyRestorePermissions` takes `[]PermissionSpec`. | §5.5: partition logic reused, input re-derived from stored bodies |
+| S10 | **MINOR.** A cited path did not exist, and `startPipeline` re-runs preconditions on a revive — a taxonomy-refused lens stays dark. | §7.1 item 2 corrected and extended; §12 pins it |
+
+Claims this pass **verified rather than broke**: §7.1's DDL-cache, auth-plane and reconcile items (with a
+stronger citation than the design had — the auth-plane target write is guarded only by a monotonic watermark
+with no resurrection refusal, `adapter/natskv.go:378-384`, so the revive's higher sequence overwrites the
+retraction); §1.1; §1.5's roleindex exception being unreachable as a cross-package surface; §5.3's fail-closed
+posture on an undecodable prior (`docIsTombstoned(nil) == false` ⇒ not owned ⇒ refused); and — checked
+specifically because the design might have understated it — §5.5's `holdsRole` blast radius, which is
+**exactly right**: the authority genuinely was withdrawn while the role was dead (vertex liveness is enforced
+in the walk, `ruleengine/full/executor.go:811-813`) and genuinely returns.
+
+**What these passes say about the draft's habits, beyond the fixes.** F1 and F2 are the same failure in two
+places: *"mirrors X"* stated about a mechanism not opened. §5.3 mirrored the live-manifest branch without
+reading its last two lines; §5.1 mirrored "the existing three" without opening the file that seeds them. Both
+were sentences of the form the grounding reflexes name explicitly as unopened mechanisms, and both were in the
+draft anyway — which is the argument for running the checklist as a checklist rather than recalling it.
+
+S2, S5 and S9 are one further habit and a sharper one: **precedent-transfer without re-reading the
+precedent.** "Mirrors `Uninstall`" carried across a requestId derivation whose own doc comment documents the
+bug it causes (S5), an options struct that does not exist (F3), and a permissions partition whose input type
+the mirror cannot supply (S9); "keyed on the operation type" carried across a keying the target file's own
+comment refutes (S2). Every one was cheap to check and none was checked, because the sentence that named the
+precedent read as a citation.
+
+---
+
+## 17. One observation for Andrew, deliberately not scoped into this fire
+
+**Every new primordial op forces a full stack wipe on every deployment, and it need not.** The bootstrap
+file's `checkVersion` (`internal/bootstrap/nanoid.go:461-470`) refuses any version string but the current one
+and sends the operator to `make down && make up`. That is right for a **breaking** change to the kernel
+topology. It is heavier than necessary for a purely **additive** one: this design's delta is two new generated
+NanoID fields, and `planReconcile` already creates absent primordial keys on boot without rewriting anything
+tombstoned (`reconcile.go:118-121`). A version gate that accepted an older file when the only delta is
+additive — generating the missing IDs and rewriting the file — would let a primordial addition land without
+destroying deployment state.
+
+I am flagging rather than designing it: it is a different subsystem, it affects every future primordial
+addition equally rather than this one specially, and folding it in would be scope creep on a fire that is
+already L. It is worth your view because the cost compounds — thirteen primordial additions so far, each
+having wiped every stack that adopted it, on a platform now running demo boxes with state worth keeping.
+
+**A second observation, from the adversarial pass (§16, S6), which I am deliberately NOT filing as its own
+board row.** `validatedManifestClaims` admits any **tombstoned** key a batch updates into that batch's own
+`.manifest.declaredKeys` (`step8_commit.go:1244-1249`) on the ground that "a dead key has no live owner to
+displace" — which is true about *displacement* and says nothing about *provenance*. So a package can adopt
+into its manifest a key it never declared, provided that key is dead: a `grantedBy` link minted at runtime by
+`GrantPermission` and later revoked is the concrete shape, and `rejectPermissionRoleRewrites` does not cover
+link keys at all (`:850-905`). This is exactly the residual Contract #8 §8.4 already records in its own words
+— *"per-key ownership provenance … does not exist today, so a dual-declaration of an orphaned dead key remains
+possible"* — so it is **known, contract-recorded, and pre-existing**, not a new exposure this design opens.
+It belongs inside `package-authority-minting-provenance-design.md`'s scope, which is already rewriting exactly
+these admission rules; filing a separate row would violate the board's own consolidate-at-filing gate. What
+this design owes it is honesty about the bound (§9 obligation 3), which is now stated.
