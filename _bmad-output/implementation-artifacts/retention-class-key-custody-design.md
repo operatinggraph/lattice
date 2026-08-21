@@ -3287,11 +3287,13 @@ see §29.6 for what was deliberately left undecided):
   a genuine design question, not an execution detail). File a follow-up row naming this fix's own
   `holderTypesUnion` behavior as the mechanism a future "confirmed swept, now safe to shrink" verb would
   need to override.
-- **A whole secure column dropped from the manifest (not just a holder type narrowed within it) is
-  unhandled**, same as §24.6 scoped it: "a lens that stopped declaring it" is the holder-type case; a
-  column disappearing entirely causes the identical oracle blindness — `mayHoldHolderType` reads a decoded
-  `targetConfig` with no secure columns as a genuine no, same as it would for any holder type the surviving
-  columns no longer name — this fire deliberately does not close it too.
+- **A whole secure column dropped from the manifest is handled — by §30, not by this fire.** Struck
+  2026-08-21: this bullet scoped it out ("this fire deliberately does not close it too"), and §30 closed it,
+  together with the removed/renamed-lens case and two further oracle-blinding edits cold review found (a
+  vertex-root `class` flip, and an `eventStream` source added alongside secure columns). A drop is now
+  refused unless the author declares it in `Definition.RetiredSecureColumns`; the two class/source edits are
+  refused at install-time validation. Read §30 for the mechanism — the paragraph below still describes this
+  fire's widen correctly.
 - **The live decryptor's accepted holder types do change** — `col.HolderTypes` is a render gate
   (`internal/refractor/pipeline/secure.go`: a ciphertext whose `keyId` names an undeclared holder type is
   refused and the column is redacted), not bookkeeping, so widening it does change what a lens projects.
@@ -3420,3 +3422,46 @@ and is counted; `go test ./internal/pkgmgr/... ./internal/refractor/health/...` 
   "confirmed swept, now safe to shrink" verb stays future work; this fire gives it the declaration point
   it would hang off.
 - **`Install` (first install) is unreachable** — no committed history exists, so the guard cannot fire.
+
+### 30.8 Built shape (2026-08-21, `f793bc55`)
+
+Landed as briefed, plus two evasions the brief did not know about. Deviations from §30.1–30.7:
+
+- **Scope grew by two paths, both found by cold review executing against the real installer harness.**
+  `declaredLensIDs` drops a lens on three independent conditions, and §30 only covered secureColumns
+  content. **B1:** the vertex root's `class` flipped away from `meta.lens` (the skip is keyed on the ROOT,
+  and `LensSpec.Class` was validated by nothing). **B2:** `source.kind: eventStream` added alongside
+  `SecureColumns` — that skip runs *before* the holder-type filter, and Refractor's own discovery skips the
+  spec too, so neither side raises a missing-lens signal. Both close at **install-time validation**
+  (`bucketguard.go`) rather than in the diff, which covers Install/Upgrade/Apply in one place. The corpus
+  permits it: all 105 `LensSpec.Class` values are exactly `"meta.lens"`, and the sole `eventStream` lens
+  (`packages/orchestration-base/lenses.go:135`) declares no secure columns.
+- **`Column: ""` was narrowed after review.** As first built it excused every drop on the lens forever,
+  so one stale entry waved through a later author's erasure under a `Note` written about something else.
+  It now excuses only a whole-spec drop; a per-column drop must name its column.
+- **Unused declarations report rather than refuse** (`SecureColumnRetirementsUnused`). A Definition is
+  code and authors carry entries forward; refusing would fail every later upgrade.
+- **Declarations resolve under both the raw and the trimmed spelling.** `canonicalName` is not
+  charset-validated, so a name carrying whitespace is representable and a trim-only match would have
+  introduced a fresh miss where the guard refuses and prints a remedy identical to what is already in the file.
+- **`Uninstall` reports two populations, not one** — `SecureColumnsErased` and
+  `SecureColumnsAlreadyErased`, split on the committed tombstone exactly as the retention-holder pair is,
+  so a pre-existing tombstone is not attributed to this uninstall. Its unparseable-`.spec` path now errors
+  instead of silently reporting "nothing erased".
+- **§30.4 Inc 2 under-specified the manifest block.** It compares `canonicalName`, `policy` and
+  `retentionPeriod`: identity alone would let a controller's retention period go from years to days with a
+  zero-line manifest diff, in the one construct whose purpose is a reviewable declaration.
+- **Inc 3 grew to `IntoKey`.** Key columns are emitted as real columns with no dedup against the four
+  platform columns, so `IntoKey: ["is_deleted"]` reached the same 42701 the `Columns` check moved to
+  install time.
+- **`docs/components/_packages.md`** gained the `retentionClasses:` schema block and its field bullet:
+  the block is mandatory once a Definition declares retention classes, and an author following the doc
+  would otherwise write a manifest that fails verification.
+- **§30.6's adjacent find (Uninstall) was absorbed into this fire**, not filed.
+
+Every guard is mutation-tested — each reverted individually, its test observed failing — including a
+mutation that restores the `Uninstall` misattribution and fails the distinctness case.
+
+**Unclosed, and why:** an operator who has genuinely swept and re-keyed a target store still cannot shrink
+a declaration except by attesting it. §29.6's "confirmed swept, now safe to shrink" verb stays future
+work; `RetiredSecureColumns` is the declaration point it would hang off.
