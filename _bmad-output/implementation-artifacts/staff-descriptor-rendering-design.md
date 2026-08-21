@@ -721,3 +721,70 @@ new offer from this change today; re-check both invariants if a future package a
 next per §7's sequence (clinic's remaining ops are blocked on the five increments named above, not on
 more clinic-specific migration work — pick them up as their own future increments once each
 blocker's fix is designed, not folded silently into "more clinic").
+
+## 16. Inc 3b outcome — wellness (partial), shipped `24c9e484`
+
+Migrated four wellness-app ops onto `internal/descriptorform`: **CreateInstructor** (no
+`dispatch.targetField`, mirrors clinic's `CreateProvider`), **SetInstructorProfile** (task-voice,
+`targetField: instructorKey`, mirrors `SetProviderProfile`), **WellnessDebitAccount** +
+**WellnessCreditAccount** (the standing-authContext ledger pair, `targetField: accountKey`,
+mirroring clinic's `submitLedgerEntry` detached-mount pattern — a headless `renderOpForm` call whose
+mount is never shown, since the visible amount/memo inputs stay put across both buttons and only the
+envelope assembly changes). wellness-app gained the infra clinic already had: `op_catalog.go`
+(verbatim port), `loadDescriptorform()` module caching, and `submitCatalogOp`.
+
+**A cold adversarial pass, run against the first cut, found the build's own "fixed a pre-existing
+bug" claim was itself a misdiagnosis one layer too shallow** — a genuinely useful catch, not a false
+positive. The builder had found `SetInstructorProfile`'s `OpDispatchSpec` declared no `Reads` at all
+and would fail every submission (`vertex_alive` on an absent `state` key), and patched it by adding
+`Reads: []string{"{payload.instructorKey}"}` to the wellness-domain descriptor. Correct as far as it
+went, but the review traced the actual server-side read-hydration path
+(`internal/processor/step4_hydrate.go`) and `cmd/facet/web/app.js:2790-2804` and found: (a) Facet's
+renderer has *always* auto-pushed a resolved `targetField` value, and the caller's own identity, onto
+`reads` as a fallback — so this op was never actually broken for Facet, only for `form.mjs`, which
+never grew the equivalent fallback design §2.2 says it "mirrors"; (b) a census of every `packages/`
+`OpDispatchSpec` found **17 other ops across five packages** (clinic-domain, wellness-domain,
+service-domain, clinic-reminders, orchestration-base) rely on the identical Facet-side fallback and
+are silently broken the same way under `form.mjs` today — none of them touched by this fire. Fixed at
+the right layer: `form.mjs`'s `submit()` gained the two-line fallback (targetField + `context.me`,
+idempotent against an already-declared read), closing all 18 ops' gap at once with no per-package
+edits; `SetInstructorProfile` keeps its own explicit `Reads` declaration too (the correct §2.5 posture
+independent of the client-side safety net), with the descriptor's comment rewritten to drop the two
+false claims the first cut's comment made. Five new `form.test.mjs` cases pin the fallback; four
+existing tests updated to include the now-correctly-appended reads entries. The review also caught and
+the same fire fixed: an unhandled `identityKey()` throw in the instructor-edit-open path (now
+caught + toasted, matching the adjacent `loadDescriptorform()` failure handling), and the missing
+`isTransientAuthLag` bounded retry on the billing path's open-account-then-post race (Inc 3a added the
+identical retry for clinic's self-scoped pair; wellness's staff-standing pair had the same race,
+unnoticed until this pass).
+
+**Left hand-built — real blockers, each closing a distinct future increment, not slices to avoid
+work:**
+- **`CreateSession`/`CreateSessionSeries`/`ReassignSession`** — compute bespoke `optionalReads` via
+  `slotCellKeys()`/`occurrenceCellKeys()`, enumerating every 15-minute cell a studio/instructor span
+  covers for conflict-claim declaration. The module's read templates (`{payload.X}`/`{me.*}`/
+  `{context.<field>}`) only substitute single keys; expressing a range-computed, variable-length read
+  set is new module semantics with no shipped precedent, not a mirror of anything.
+- **`TombstoneStudio`/`TombstoneSession`/`SetBookingAttendance`/`CreateBooking`/`JoinWaitlist`/
+  `CancelBooking`** — one-click list-row or session/roster-card actions where every parameter is
+  already known from the row (no dedicated form to migrate), the same category as Inc 3a's
+  `RemoveProviderSite`; the booking trio additionally needs the same computed-reads machinery named
+  above (seat/waitlist/slot claim keys, the double-book guard).
+- **`CreateStudio`** — its `location` payload field is silently auto-derived from the caller's own
+  `worksAt` anchor (`anchorKey("worksAt")`) and never rendered as a form field at all, even though the
+  schema marks it required. The module's `context` map does carry a `workplace` key (§2.2) but no
+  shipped precedent auto-fills a required schema field from it without ever offering an input — a
+  genuinely new semantics question, flagged rather than guessed.
+- **`WellnessCreateAccount`** — auto-opened programmatically inside `ensureLedgerAccount()`, no
+  user-facing form, same reasoning as Inc 3a's `ClinicCreateAccount`.
+
+**Checkpoint for the next fire:** no worktree held once this lands. Inc 3 continues with **café** next
+per §7's sequence. The `form.mjs` targetField/`context.me` fallback fixed here benefits every future
+increment (café, the rest of loftspace, and clinic's five remaining blockers once each is unblocked) —
+no future fire needs to re-derive it.
+
+**Filed, not built here (continuous-improvement, not this item's scope):** a `dispatch_reads_guard_test.go`-style
+guard test (the idiom already exists in `packages/orchestration-base`, extracting each op's script-read
+keys and asserting set-equality against its declared `Reads`/`OptionalReads`) would have caught the
+original `SetInstructorProfile` gap directly and should be rolled out to the other four packages the
+census named. See `backlog/lattice.md`.
