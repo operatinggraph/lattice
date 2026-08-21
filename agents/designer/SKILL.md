@@ -223,6 +223,26 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   the causes instead of arbitrating the symptoms and the design got simpler: no store schema
   change, no notification redefinition, a guard with zero sanctioned exceptions.)
 
+- **A row's `no-pattern:` prescription (or an amendment's "a correct X needs Y") names the primitive a
+  PARTICULAR solution shape would need — re-derive the need before designing the primitive, and check
+  whether a LEVEL-triggered shape dissolves it.** When handed-down demand names a mechanism ("needs a
+  per-cycle correlation id", "needs a membership set", "needs an enumerator"), ask *which solution shape
+  forced that need*. A gate/latch built from **events** (edge-triggered: markers, notifications,
+  completions) inherently needs identity, scoping and membership machinery — events are consumed once and
+  race their own arming. The same guarantee built from **monotone state that already exists** (a delivery
+  floor, a cursor, a sequence, a count) is level-triggered: queryable at any time, race-free at arming by
+  construction, foreign-cycle-proof by contiguity — and the identity plane the row prescribed simply
+  dissolves. (Trialed 2026-08-21, the Edge first-paint gate: the amendment prescribed a per-hydrate
+  correlation id after the marker-membership shape was built and refuted on four defects; gating on the
+  delivery floor reaching a post-burst `SyncEndSeq` satisfied every requirement with one response field
+  and a timer, riding the plane the parent design had already named "the single resume authority". Three
+  of the four refuted defects were artifacts of edge-triggering itself.) The check: for any design that
+  correlates, scopes, or sets-membership over events, write down the monotone quantity the events drive
+  and ask whether comparing against a captured level of it gives the same guarantee. Corollary: a
+  level-comparison imports the precondition that both sides share a numbering space — name the reset path
+  that breaks it (stream recreation, restore, wipe) and refuse the comparison there rather than trusting
+  monotonicity across it.
+
 - **Check your design against the OTHER in-flight designs, not just shipped patterns — a parallel fire may be
   solving the same gap, and the SIMPLER of the two should win.** The "reconcile with the existing mental model /
   does this duplicate an established pattern?" check (§3) looks backward at *shipped* code; it misses a *parallel*
