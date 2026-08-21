@@ -184,6 +184,125 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
   return "lnk.tab." + idOf(tabKey) + ".chargedTo.leaseapp." + idOf(leaseAppKey);
 }
 
+// ---- op catalog + shared op-form renderer (staff-descriptor-rendering-design.md §15) ----
+//
+// loadOpCatalog fetches the op-catalog descriptors (GET /api/op-catalog,
+// proxying the edge-manifest opCatalog lens) once and caches them in
+// opCatalogCache. A migrated form's dispatch shape (class, targetField,
+// reads, authContext) is read off the matching row instead of hardcoded
+// here, so a descriptor edit changes the form with no app rebuild. A FAILED
+// load is not cached — opCatalogPromise is cleared — so a transient outage
+// retries on the next call instead of poisoning the page for its whole
+// session. Mirrors clinic-app/web/app.js's and wellness-app/web/app.js's own
+// loadOpCatalog.
+let opCatalogPromise = null;
+let opCatalogCache = null;
+async function loadOpCatalog() {
+  if (!opCatalogPromise) {
+    opCatalogPromise = appGet("/api/op-catalog").then(
+      (data) => (data && data.catalog) || {},
+      (e) => {
+        opCatalogPromise = null;
+        throw e;
+      },
+    );
+  }
+  opCatalogCache = await opCatalogPromise;
+  return opCatalogCache;
+}
+
+// loadOpCatalogQuiet keeps a catalog outage from taking a whole panel down: an
+// op whose descriptor did not arrive is simply NOT OFFERED — the same
+// fail-closed answer as an op that carries no descriptor at all.
+async function loadOpCatalogQuiet() {
+  try {
+    await loadOpCatalog();
+  } catch (_) {
+    /* not offered, rather than offered and broken */
+  }
+}
+
+// loadDescriptorform imports the shared op-form renderer exactly once —
+// served at /shared/form.mjs by this app's server.go, beside its own
+// embedded web/ FileServer. A dynamic import() keeps app.js a plain
+// (non-module) script, unchanged for every other caller.
+// descriptorformModule caches the resolved module itself (not just the
+// promise); a rejected import clears BOTH so a transient load failure is
+// retried on the next call rather than poisoning the session. Mirrors
+// clinic-app/web/app.js's and wellness-app/web/app.js's own
+// loadDescriptorform.
+let descriptorformPromise = null;
+let descriptorformModule = null;
+function loadDescriptorform() {
+  if (!descriptorformPromise) {
+    descriptorformPromise = import("/shared/form.mjs").then(
+      (mod) => {
+        descriptorformModule = mod;
+        return mod;
+      },
+      (e) => {
+        descriptorformPromise = null;
+        descriptorformModule = null;
+        throw e;
+      },
+    );
+  }
+  return descriptorformPromise;
+}
+
+// isTransientAuthLag reports whether a rejected reply is the known,
+// architecturally-expected async-projection race — the Capability Lens or
+// the credential-bindings materializer (both eventually-consistent CDC
+// projections, lattice-architecture.md's documented <500ms p99 lag) still
+// catching up on an actor's first touch, not yet visible to THIS
+// immediately-following request. Distinguishes it from a genuine, persistent
+// authorization denial, which should surface immediately rather than retry.
+// Mirrors clinic-app/web/app.js's and wellness-app/web/app.js's own
+// isTransientAuthLag verbatim.
+function isTransientAuthLag(reply) {
+  if (!reply || reply.status !== "rejected" || !reply.error) return false;
+  if (reply.error.code !== "AuthDenied") return false;
+  const reason = reply.error.details && reply.error.details.reason;
+  return reason === "NoCapabilityEntry" || reason === "OperationNotPermitted";
+}
+
+// retryBackoffsMs is the bounded backoff schedule the isTransientAuthLag
+// retry loop uses — ~3s total, mirrors clinic-app/web/app.js's and
+// wellness-app/web/app.js's own.
+const retryBackoffsMs = [200, 400, 800, 1600];
+
+// submitCatalogOp posts the envelope a descriptorform handle's submit()
+// returns — {operationType, class, payload, reads, optionalReads,
+// authContext} — to the same endpoint every hand-built write already uses
+// (submitOp), applying the bounded isTransientAuthLag retry before throwing a
+// friendly "Could not <what> — <reason>" Error on a still-rejected reply.
+// Needed specifically for CreditCafeAccount's self-pay path: a resident
+// identity signing in for the first time can outrun its own capability
+// projection, the same race Inc 3a/3b's adversarial passes fixed for
+// clinic's/wellness's self-scoped and staff-standing pairs. Applied to every
+// migrated op rather than only the self-scoped ones — harmless for a
+// staff-standing submission, which never races a just-opened grant, since
+// the retry only ever fires on the specific AuthDenied/reason signature
+// above, never on an ordinary validation rejection. Mirrors
+// wellness-app/web/app.js's own submitCatalogOp(envelope, what) shape
+// (clinic-app's own submitCatalogOp(envelope) takes no "what" and lets the
+// caller format the rejection; this app's own opOrThrow already formats
+// "Could not <what> — <reason>", so this mirrors wellness's shape to keep
+// that idiom for every migrated call site too).
+async function submitCatalogOp(envelope, what) {
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await submitOp(envelope, false);
+    if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  if (reply && reply.status === "rejected") {
+    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+    throw new Error(`Could not ${what} — ${msg}`);
+  }
+  return reply || {};
+}
+
 // ---- formatting --------------------------------------------------------
 
 function money(cents) {
@@ -575,31 +694,6 @@ async function renderPos() {
       btn.disabled = false;
     }
   });
-  document.getElementById("void-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const input = document.getElementById("void-amount");
-    const cents = parseDollars(input.value);
-    if (cents === null) { toast("Enter a void amount greater than $0.", false); return; }
-    const btn = document.getElementById("void-submit");
-    btn.disabled = true;
-    try {
-      await opOrThrow(
-        {
-          operationType: "VoidCharge", class: "tab",
-          reads: [open.tabKey, open.tabKey + ".status"],
-          payload: { tabKey: open.tabKey, amountCents: cents },
-        },
-        "void the charge"
-      );
-      toast("Voided " + money(cents) + ".", true);
-      input.value = "";
-      setTimeout(renderPos, 700);
-    } catch (e) {
-      toast(e.message, false);
-    } finally {
-      btn.disabled = false;
-    }
-  });
   document.getElementById("settle-btn").addEventListener("click", async () => {
     const btn = document.getElementById("settle-btn");
     btn.disabled = true;
@@ -620,6 +714,16 @@ async function renderPos() {
       btn.disabled = false;
     }
   });
+  // Wired AFTER settle-btn's own listener, and not awaited: this function's
+  // own catalog/module load is the slow part, and Settle Tab must not sit
+  // inert (rendered enabled, non-functional) while it's in flight. Safe to
+  // fire-and-forget — wireVoidChargeForm resolves its own #void-form/
+  // #void-fields/#void-submit elements before its first await, so a second
+  // concurrent renderPos (e.g. the #pos-lease change handler firing while a
+  // pending setTimeout(renderPos, 700) is still in flight) leaves it
+  // operating on its own already-captured, still-live DOM nodes rather than
+  // a stale reference.
+  wireVoidChargeForm(open.tabKey);
 }
 
 function renderOpenTabForm() {
@@ -656,12 +760,95 @@ function renderOpenTabCard(tab, items) {
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
     '<form id="void-form" class="field-row" style="margin-bottom:14px;">' +
-    '<input id="void-amount" type="number" step="0.01" min="0.01" placeholder="Free-amount correction ($)" required />' +
-    '<button id="void-submit" type="submit" class="ghost">Void by Amount</button>' +
+    '<div id="void-fields" style="flex:1"></div>' +
+    '<button type="submit" id="void-submit" class="ghost" disabled>Void</button>' +
     "</form>" +
     '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
     "</div>"
   );
+}
+
+// wireVoidChargeForm mounts VoidCharge's descriptor form into the POS tab
+// panel's #void-form and wires its submit (the surrounding <form> + a
+// type="submit" button, not a bare click handler, so the ordinary
+// type-amount-then-Enter POS gesture keeps working — renderOpForm itself
+// only ever appends field <div>s into the mount it's given, never its own
+// <form> wrapper, so wrapping #void-fields in one here is safe). VoidCharge
+// is staff-standing (AuthContext "standing" — packages/cafe-domain/
+// opmetas.go — no self-scope grant at all, no ownership probe declared), so
+// this needs no context.me/selfVoice wiring: a POS correction is always a
+// staff decision, the same straightforward standing-authContext shape
+// SetInstructorProfile's own edit form uses in wellness-app.
+//
+// Only the amount-based void (payload {tabKey, amountCents}, the old
+// #void-form) migrates. The per-line "Void" button rendered on each charge
+// line (chargeLinesBlock's data-void-line buttons, wired separately above)
+// submits {tabKey, lineId} — a shape VoidCharge's own InputSchema does not
+// declare at all (it names tabKey/amountCents only) — the same "one-click
+// list-row action, parameter already known, no dedicated form to migrate"
+// category as RetireMenuItem/RemoveProviderSite/TombstoneStudio, so it stays
+// hand-built (and, not coincidentally, already follows the
+// success-leaves-it-disabled pattern below).
+//
+// A load/render failure renders its message INLINE into #void-fields rather
+// than toasting: this function reruns on every renderPos (POS tab render),
+// including the setTimeout(renderPos, 700) re-render after a successful
+// Charge/Settle, so a toast here would silently stomp the just-shown green
+// success toast 700ms later on a catalog outage.
+async function wireVoidChargeForm(tabKey) {
+  const form = document.getElementById("void-form");
+  const mount = document.getElementById("void-fields");
+  const btn = document.getElementById("void-submit");
+  if (!form || !mount || !btn) return;
+  btn.disabled = true;
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = '<p class="meta">Void form unavailable — ' + escapeHtml(e.message) + "</p>";
+    return;
+  }
+  const row = opCatalogCache && opCatalogCache.VoidCharge;
+  const handle = row && renderOpForm(row, { target: tabKey }, mount);
+  if (!handle) {
+    mount.innerHTML = '<p class="meta">The void form is unavailable.</p>';
+    return;
+  }
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    btn.disabled = true;
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), false);
+      btn.disabled = false;
+      return;
+    }
+    // Left disabled on success rather than re-enabled in a `finally`: the
+    // amount field lives inside the descriptor-owned mount, which this
+    // function does not clear on success (unlike the old hand-built
+    // #void-amount input's own input.value = ""), so a re-enabled button
+    // would let a staffer double-click inside the 700ms setTimeout(renderPos,
+    // 700) window and resubmit the SAME {tabKey, amountCents} envelope —
+    // VoidCharge's amount branch has no dedup/idempotency key, so it just
+    // subtracts again. renderPos's own re-render 700ms later mounts a fresh
+    // form with a fresh (disabled-until-loaded) button, the same pattern the
+    // adjacent per-line void button and every other POS submit above already
+    // use.
+    try {
+      const amountCents = envelope.payload && envelope.payload.amountCents;
+      await submitCatalogOp(envelope, "void the charge");
+      toast("Voided" + (amountCents ? " " + money(amountCents) : "") + ".", true);
+      setTimeout(renderPos, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
+  });
 }
 
 // ---- Front Desk view (staff only) --------------------------------------
@@ -987,6 +1174,26 @@ async function renderResident() {
     "</div>"
   );
   body.innerHTML = parts.join("");
+  // CreditCafeAccount is dual-grant (operator/frontOfHouse scope=any PLUS
+  // resident scope=self — packages/cafe-ledger's own doc comment) and
+  // carries ONE descriptor written in the SELF voice — but that does NOT
+  // mean the descriptor can only ever drive the self leg: clinic-app's own
+  // ClinicCreditAccount migration (Inc 3a, submitLedgerEntry) drives BOTH
+  // legs off the SAME descriptor, toggling context.selfVoice per caller
+  // (true -> {target: context.me}, false -> no authContext at all — exactly
+  // what a staff submission already sends, buildAuthContext in
+  // internal/descriptorform/form.mjs). This front-desk leg mirrors that
+  // shape: selfVoice is always false here (this form only renders when
+  // !selfMode, i.e., definitively staff — café has no shared self/staff
+  // panel the way clinic's single patient-context view does, so there is no
+  // per-click actingAsSelf() to compute the way clinic's does). context.me
+  // is left unset: buildAuthContext ignores it whenever selfVoice is false,
+  // and the only other thing it feeds is form.mjs's own targetField/me
+  // read-fallback — harmless to skip since CreditCafeAccount declares no
+  // OptionalReads probe that would need it
+  // (packages/cafe-ledger/opmetas.go: Reads is {payload.accountKey} alone),
+  // unlike clinic's patientIdentityKey(), café has no already-loaded,
+  // cheap way to resolve "the lease's own resident identity" from this view.
   const paymentForm = document.getElementById("record-payment-form");
   if (paymentForm) {
     paymentForm.addEventListener("submit", async (ev) => {
@@ -995,21 +1202,23 @@ async function renderResident() {
       const memoInput = document.getElementById("record-payment-memo");
       const cents = parseDollars(amountInput.value);
       if (cents === null) { toast("Enter a payment amount greater than $0.", false); return; }
+      const memo = memoInput.value.trim();
       const btn = document.getElementById("record-payment-submit");
       btn.disabled = true;
       try {
-        const payload = { accountKey: ledger.accountKey, amountCents: cents };
-        const memo = memoInput.value.trim();
-        if (memo) payload.memo = memo;
-        await opOrThrow(
-          {
-            operationType: "CreditCafeAccount",
-            class: "cafetransaction",
-            reads: [ledger.accountKey],
-            payload,
-          },
-          "record the payment"
-        );
+        await loadOpCatalogQuiet();
+        const { renderOpForm } = await loadDescriptorform();
+        const row = opCatalogCache && opCatalogCache.CreditCafeAccount;
+        if (!row) throw new Error("this action is unavailable");
+        const context = {
+          target: ledger.accountKey,
+          selfVoice: false,
+          prefill: { amountCents: cents, memo: memo || undefined },
+        };
+        const handle = renderOpForm(row, context, document.createElement("div"));
+        if (!handle) throw new Error("this action is unavailable");
+        const envelope = handle.submit();
+        await submitCatalogOp(envelope, "record the payment");
         toast("Recorded " + money(cents) + ".", true);
         setTimeout(renderResident, 700);
       } catch (e) {
@@ -1018,6 +1227,16 @@ async function renderResident() {
       }
     });
   }
+  // The self-pay path below (self-pay-form) uses the SAME descriptor with
+  // selfVoice: true and context.me set — see the front-desk leg's own
+  // comment above for how the two legs share it. The visible
+  // #self-pay-amount input (its balance-capped `max` and prefilled value)
+  // stays exactly as built above — unlike a plain migrated form, this
+  // renders the descriptor into a detached mount that is never shown,
+  // purely to assemble the envelope (payload, reads, authContext per
+  // dispatch) from what was already typed into the visible field, mirroring
+  // clinic-app's own submitLedgerEntry / wellness-app's own
+  // submitBillingEntry.
   const selfPayForm = document.getElementById("self-pay-form");
   if (selfPayForm) {
     selfPayForm.addEventListener("submit", async (ev) => {
@@ -1028,16 +1247,20 @@ async function renderResident() {
       const btn = document.getElementById("self-pay-submit");
       btn.disabled = true;
       try {
-        await opOrThrow(
-          {
-            operationType: "CreditCafeAccount",
-            class: "cafetransaction",
-            reads: [ledger.accountKey],
-            payload: { accountKey: ledger.accountKey, amountCents: cents },
-          },
-          "pay your balance",
-          true
-        );
+        await loadOpCatalogQuiet();
+        const { renderOpForm } = await loadDescriptorform();
+        const row = opCatalogCache && opCatalogCache.CreditCafeAccount;
+        if (!row) throw new Error("this action is unavailable");
+        const context = {
+          target: ledger.accountKey,
+          me: identityKey(),
+          selfVoice: true,
+          prefill: { amountCents: cents },
+        };
+        const handle = renderOpForm(row, context, document.createElement("div"));
+        if (!handle) throw new Error("this action is unavailable");
+        const envelope = handle.submit();
+        await submitCatalogOp(envelope, "pay your balance");
         toast("Paid " + money(cents) + ".", true);
         setTimeout(renderResident, 700);
       } catch (e) {
@@ -1183,6 +1406,12 @@ function init() {
     applyHatGating();
     showView(isFrontDesk() ? "pos" : "resident");
     if (state.identityId) loadIdentities();
+    // Prefetched in parallel so the first descriptor-form render (void
+    // charge / pay balance) does not itself pay for the catalog + module
+    // round trips — both cache themselves for the page's lifetime. Mirrors
+    // clinic-app/web/app.js's and wellness-app/web/app.js's own prefetch.
+    loadOpCatalogQuiet();
+    loadDescriptorform().catch(() => {});
   });
 }
 

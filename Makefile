@@ -905,7 +905,8 @@ test-edge-revocation-e2e:
 	@echo "==> Running the edge-revocation e2e proof..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-edge-revocation-e2e.go
 
-## up-loftspace — Full stack + the LoftSpace vertical + the applicant app on :7788.
+## up-loftspace — Full stack + the LoftSpace vertical + edge-manifest (op-catalog
+## descriptor forms) + the applicant app on :7788.
 ## Runs up-full, installs the LoftSpace vertical (orchestration-base → location-domain
 ## → loftspace-domain → service-domain → lease-signing), and starts loftspace-app in
 ## the background alongside Loupe (:7777). The applicant app is the demand-side view;
@@ -914,6 +915,7 @@ up-loftspace:
 	@$(MAKE) up-full
 	@$(MAKE) provision-loftspace-role
 	@$(MAKE) install-loftspace
+	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-readpath
 	@echo "==> Building loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
@@ -965,7 +967,8 @@ provision-readpath:
 		docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -f -
 	@echo "==> Read-path tables provisioned (or none installed)."
 
-## up-clinic — One-command Clinic vertical: up-full → install-clinic → build +
+## up-clinic — One-command Clinic vertical: up-full → install-clinic →
+## install-edge-manifest (op-catalog descriptor forms) → build +
 ## start clinic-app (:7799) in the background alongside Loupe (:7777). The clinic
 ## app is the demand-side patient/booking view; Loupe is the operator/inspector.
 ## Provisions the clinic-app D1.5 read-boundary role (mirrors up-loftspace's D1.3
@@ -976,6 +979,7 @@ up-clinic:
 	@$(MAKE) up-full
 	@$(MAKE) provision-clinic-role
 	@$(MAKE) install-clinic
+	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-readpath
 	@echo "==> Building clinic-app binary..."
 	go build -o bin/clinic-app ./cmd/clinic-app
@@ -988,7 +992,8 @@ up-clinic:
 	@sleep 1
 	@echo "==> Clinic ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · patient app: http://127.0.0.1:7799"
 
-## up-cafe — One-command Café vertical: up-full → install-cafe → build + start
+## up-cafe — One-command Café vertical: up-full → install-cafe →
+## install-edge-manifest (op-catalog descriptor forms) → build + start
 ## cafe-app (:7801) in the background alongside Loupe (:7777). Provisions the
 ## cafe-app read-boundary role (mirrors up-loftspace/up-clinic's wiring) so
 ## the shipped protected read (cafeIdentitiesRead) serves instead of 500ing
@@ -997,6 +1002,7 @@ up-cafe:
 	@$(MAKE) up-full
 	@$(MAKE) provision-cafe-role
 	@$(MAKE) install-cafe
+	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-readpath
 	@echo "==> Building cafe-app binary..."
 	go build -o bin/cafe-app ./cmd/cafe-app
@@ -1334,6 +1340,7 @@ install-one-bill:
 	@echo "==> one-bill installed."
 
 ## up-wellness — One-command Wellness vertical: up-full → install-wellness →
+## install-edge-manifest (op-catalog descriptor forms) →
 ## build + start wellness-app (:7802) in the background alongside Loupe
 ## (:7777). Sign in at /login. Provisions the wellness-app read-boundary role
 ## (mirrors up-loftspace/up-clinic's wiring) so the shipped protected read
@@ -1343,6 +1350,7 @@ up-wellness:
 	@$(MAKE) up-full
 	@$(MAKE) provision-wellness-role
 	@$(MAKE) install-wellness
+	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-readpath
 	@echo "==> Building wellness-app binary..."
 	go build -o bin/wellness-app ./cmd/wellness-app
