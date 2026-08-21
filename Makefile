@@ -141,7 +141,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -474,6 +474,28 @@ verify-package-privacy-base:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/privacy-base
 	@echo "==> Running privacy-base package assertions..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-privacy-base.go
+
+## verify-erasure-ceremony — Drive the identityErasure spine's four steps
+## (ShredIdentityKey → SealIdentityForErasure → UnbindIdentityCredentials →
+## PurgeIdentityDedupFootprint) against a live stack, on a disposable subject the
+## run mints for itself and gives a real credential, a real identityindex edge and
+## a real duplicateOf edge, asserting each step's Core KV post-state and its domain
+## event. The behavioural half of verify-package-privacy-base, which asserts only
+## the installed shape. Co-installs privacy-operator-grant: ShredIdentityKey ships
+## NO grant from privacy-base (erasure is a deployment's consent decision), and
+## that package is the sanctioned way to reach it — without it step 1 is denied.
+verify-erasure-ceremony:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing dependency chain (rbac-domain, identity-domain)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/rbac-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/identity-domain
+	@echo "==> Installing privacy-base..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/privacy-base
+	@echo "==> Installing privacy-operator-grant (the ShredIdentityKey consent decision)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/privacy-operator-grant
+	@echo "==> Running the erasure-ceremony e2e proof..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-erasure-ceremony.go
 
 ## verify-package-objects-base — Install objects-base and assert its KV state.
 verify-package-objects-base:
