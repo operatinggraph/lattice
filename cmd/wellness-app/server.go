@@ -92,6 +92,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/members", s.handleMembers)
 	inner.HandleFunc("/api/identities", s.handleIdentities)
 	inner.HandleFunc("/api/config", s.handleConfig)
+	inner.HandleFunc("/api/op-catalog", s.handleOpCatalog)
 
 	s.session.RegisterRoutes(inner)
 	mux.Handle("/", s.session.RequireSession(inner))

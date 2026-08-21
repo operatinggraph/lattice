@@ -112,15 +112,8 @@
         <span class="summary" id="instructors-summary"></span>
       </div>
       <div id="instructor-new-form" class="session-form" hidden>
-        <div class="field">
-          <label for="instructor-new-name">Instructor name</label>
-          <input type="text" id="instructor-new-name" placeholder="e.g. Kai Nakamura" maxlength="120" />
-        </div>
-        <div class="field">
-          <label for="instructor-new-studio">Studio (optional)</label>
-          <select id="instructor-new-studio"></select>
-        </div>
-        <button id="instructor-new-create">Add instructor</button>
+        <div id="instructor-new-fields"></div>
+        <button type="button" id="instructor-new-create" disabled>Add instructor</button>
       </div>
       <div id="instructors-grid" class="grid" aria-live="polite"></div>
     </div>

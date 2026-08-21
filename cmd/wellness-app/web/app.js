@@ -510,6 +510,124 @@ async function loadMembers() {
   return membersCache;
 }
 
+// ---- op catalog + shared op-form renderer (staff-descriptor-rendering-design.md §15) ----
+//
+// loadOpCatalog fetches the op-catalog descriptors (GET /api/op-catalog,
+// proxying the edge-manifest opCatalog lens) once and caches them in
+// opCatalogCache. A migrated form's dispatch shape (class, targetField,
+// reads, authContext) is read off the matching row instead of hardcoded
+// here, so a descriptor edit changes the form with no app rebuild. A FAILED
+// load is not cached — opCatalogPromise is cleared — so a transient outage
+// retries on the next call instead of poisoning the page for its whole
+// session. Mirrors clinic-app/web/app.js's own loadOpCatalog.
+let opCatalogPromise = null;
+let opCatalogCache = null;
+async function loadOpCatalog() {
+  if (!opCatalogPromise) {
+    opCatalogPromise = appGet("/api/op-catalog").then(
+      (data) => (data && data.catalog) || {},
+      (e) => {
+        opCatalogPromise = null;
+        throw e;
+      },
+    );
+  }
+  opCatalogCache = await opCatalogPromise;
+  return opCatalogCache;
+}
+
+// loadOpCatalogQuiet keeps a catalog outage from taking a whole panel down: an
+// op whose descriptor did not arrive is simply NOT OFFERED — the same
+// fail-closed answer as an op that carries no descriptor at all.
+async function loadOpCatalogQuiet() {
+  try {
+    await loadOpCatalog();
+  } catch (_) {
+    /* not offered, rather than offered and broken */
+  }
+}
+
+// loadDescriptorform imports the shared op-form renderer exactly once —
+// served at /shared/form.mjs by this app's server.go, beside its own
+// embedded web/ FileServer. A dynamic import() keeps app.js a plain
+// (non-module) script, unchanged for every other caller.
+// descriptorformModule caches the resolved module itself (not just the
+// promise); a rejected import clears BOTH so a transient load failure is
+// retried on the next call rather than poisoning the session. Mirrors
+// clinic-app/web/app.js's own loadDescriptorform.
+let descriptorformPromise = null;
+let descriptorformModule = null;
+function loadDescriptorform() {
+  if (!descriptorformPromise) {
+    descriptorformPromise = import("/shared/form.mjs").then(
+      (mod) => {
+        descriptorformModule = mod;
+        return mod;
+      },
+      (e) => {
+        descriptorformPromise = null;
+        descriptorformModule = null;
+        throw e;
+      },
+    );
+  }
+  return descriptorformPromise;
+}
+
+// isTransientAuthLag reports whether a rejected reply is the known,
+// architecturally-expected async-projection race — the Capability Lens or
+// the credential-bindings materializer (both eventually-consistent CDC
+// projections, lattice-architecture.md's documented <500ms p99 lag) still
+// catching up on an actor's first touch, not yet visible to THIS
+// immediately-following request. Distinguishes it from a genuine, persistent
+// authorization denial, which should surface immediately rather than retry.
+// Mirrors clinic-app/web/app.js's own isTransientAuthLag verbatim.
+function isTransientAuthLag(reply) {
+  if (!reply || reply.status !== "rejected" || !reply.error) return false;
+  if (reply.error.code !== "AuthDenied") return false;
+  const reason = reply.error.details && reply.error.details.reason;
+  return reason === "NoCapabilityEntry" || reason === "OperationNotPermitted";
+}
+
+// retryBackoffsMs is the bounded backoff schedule the isTransientAuthLag
+// retry loop uses — ~3s total, mirrors clinic-app/web/app.js's own.
+const retryBackoffsMs = [200, 400, 800, 1600];
+
+// submitCatalogOp posts the envelope a descriptorform handle's submit()
+// returns — {operationType, class, payload, reads, optionalReads,
+// authContext} — to the same endpoint every hand-built write already uses
+// (submitOp), applying the bounded isTransientAuthLag retry (unconditional,
+// mirrors clinic-app's own submitCatalogOp) before throwing a friendly
+// "Could not <what> — <reason>" Error on a still-rejected reply. Needed
+// specifically for submitBillingEntry's ensureLedgerAccount-then-post
+// sequence: a ledger account opened moments earlier can still have its
+// grant projecting when the very next charge/payment submits — the same
+// race Inc 3a's adversarial pass fixed for clinic's
+// ClinicDebitAccount/ClinicCreditAccount. Applied to every migrated op
+// rather than only the billing path (like clinic's own submitCatalogOp) —
+// harmless for CreateInstructor/SetInstructorProfile, which never race a
+// just-opened grant, since the retry only ever fires on the specific
+// AuthDenied/reason signature above, never on an ordinary validation
+// rejection. selfScoped=false is correct for every op migrated so far (all
+// AuthContext "standing"); a genuinely self-scoped catalog op would need its
+// own context.me/selfVoice wiring at the call site, same as clinic's
+// ClinicCreditAccount migration — wellness has no such descriptor-driven op
+// yet (see wellness-ledger's OpMetas doc comment on WellnessCreateAccount's
+// unused self-scope grant).
+async function submitCatalogOp(envelope, what) {
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await submitOp(envelope, false);
+    if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  if (reply && reply.status === "rejected") {
+    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+    throw new Error(`Could not ${what} — ${msg}`);
+  }
+  return reply || {};
+}
+
 // ownLeaseAppKey is the signed-in member's own lease, CreateBooking's
 // optional resident-rate hint. The server answers only for the caller
 // (GET /api/my-residency), so there is nobody else's to pick. An approved
@@ -1703,8 +1821,17 @@ function renderBillingBody(data) {
 
 // submitBillingEntry posts WellnessDebitAccount/WellnessCreditAccount
 // against the selected member's ledger account, opening the account first
-// (ensureLedgerAccount, best-effort, mirrors the post-booking call site) if
-// this is its first-ever charge or payment.
+// (ensureLedgerAccount, best-effort, mirrors the post-booking call site,
+// left exactly as-is) if this is its first-ever charge or payment.
+//
+// The two ops share ONE visible amount/memo field pair behind two buttons
+// (charge vs payment), and the target account may not exist until this
+// call opens it — so, unlike the other migrated forms, this renders the
+// descriptor form into a detached mount that is never shown, purely to
+// assemble the envelope (payload, reads, authContext per dispatch — both
+// ops are AuthContext "standing", so no context.me/selfVoice is needed)
+// from what was already typed into the visible fields. Mirrors
+// clinic-app/web/app.js's own submitLedgerEntry.
 async function submitBillingEntry(opType, what) {
   const memberKey = document.getElementById("billing-member").value;
   if (!memberKey) {
@@ -1719,6 +1846,7 @@ async function submitBillingEntry(opType, what) {
     return;
   }
   const cents = Math.round(dollars * 100);
+  const memo = memoInput.value.trim();
   const chargeBtn = document.getElementById("billing-charge");
   const paymentBtn = document.getElementById("billing-payment");
   chargeBtn.disabled = paymentBtn.disabled = true;
@@ -1730,16 +1858,16 @@ async function submitBillingEntry(opType, what) {
       accountKey = data.accountKey;
     }
     if (!accountKey) throw new Error("could not open the ledger account");
-    await opOrThrow(
-      {
-        operationType: opType,
-        class: "wellnesstransaction",
-        reads: [accountKey],
-        payload: { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined },
-      },
-      what,
-      false,
-    );
+
+    await loadOpCatalogQuiet();
+    const { renderOpForm } = await loadDescriptorform();
+    const row = opCatalogCache && opCatalogCache[opType];
+    if (!row) throw new Error("this action is unavailable");
+    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined } };
+    const handle = renderOpForm(row, context, document.createElement("div"));
+    if (!handle) throw new Error("this action is unavailable");
+    const envelope = handle.submit();
+    await submitCatalogOp(envelope, what);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", true);
     amountInput.value = "";
     memoInput.value = "";
@@ -1978,55 +2106,65 @@ function wireStudioCard(s) {
 // isStaff() decides whether this TAB is reachable, not whether the op
 // succeeds.
 
-// renderNewInstructorForm populates the optional studio picker with the
-// studios already loaded for this view, so opening the form never issues its
-// own fetch.
+// renderNewInstructorForm mounts CreateInstructor's descriptor form. The op
+// mints a brand-new instructor — no pre-existing vertex to derive a target
+// from (packages/wellness-domain/opmetas.go's own dispatch note, mirroring
+// clinic-domain's CreateProvider) — so this renders once, with no
+// context.target, and re-renders itself after a successful add for the next
+// one (fresh empty fields — the module owns the controls, so there is
+// nothing for this app to clear directly). The optional "studio" field
+// renders as a free-text vtx.studio.<NanoID> input rather than the picker
+// the hand-built form offered: the schema declares it a plain string (no
+// x-entityRef), the same usability-only regression Inc 3a accepted for
+// clinic's AssignProviderSite provider/site fields — no wrong-target hazard,
+// since the DDL itself validates shape, type, and aliveness server-side.
+let addInstructorHandle = null;
 async function renderNewInstructorForm() {
-  const select = document.getElementById("instructor-new-studio");
-  let studios = [];
+  const mount = document.getElementById("instructor-new-fields");
+  const btn = document.getElementById("instructor-new-create");
+  addInstructorHandle = null;
+  btn.disabled = true;
+  await loadOpCatalogQuiet();
+  let renderOpForm;
   try {
-    studios = await loadStudios();
+    ({ renderOpForm } = await loadDescriptorform());
   } catch (e) {
-    // renderStudiosAdmin already surfaced the read failure; leave the picker
-    // showing only "— none —" rather than duplicating the toast.
+    mount.innerHTML = "";
+    toast("Could not load the add-instructor form: " + e.message, false);
+    return;
   }
-  select.innerHTML = '<option value="">— none —</option>';
-  for (const s of studios) {
-    const opt = document.createElement("option");
-    opt.value = s.studioKey;
-    opt.textContent = s.name || shortKey(s.studioKey);
-    select.appendChild(opt);
+  const row = opCatalogCache && opCatalogCache.CreateInstructor;
+  const handle = row && renderOpForm(row, {}, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The add-instructor form is unavailable.", false);
+    return;
   }
+  addInstructorHandle = handle;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
 }
 
+// createInstructor submits the mounted CreateInstructor form.
 async function createInstructor() {
-  const nameEl = document.getElementById("instructor-new-name");
-  const studioEl = document.getElementById("instructor-new-studio");
+  const handle = addInstructorHandle;
+  if (!handle) return;
   const submit = document.getElementById("instructor-new-create");
-  const name = nameEl.value.trim();
-  const studio = studioEl.value;
-  if (!name) { toast("Enter an instructor name.", false); return; }
   submit.disabled = true;
   try {
-    const payload = { displayName: name };
-    const reads = [];
-    // studio is a class-(a) required read (require_live_typed) only when
-    // supplied — the DDL's own contract (ddls.go instructorVertexTypeDDL).
-    if (studio) {
-      payload.studio = studio;
-      reads.push(studio);
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), false);
+      return;
     }
-    await opOrThrow(
-      { operationType: "CreateInstructor", class: "instructor", reads, payload },
-      "add the instructor",
-      false,
-    );
+    await submitCatalogOp(envelope, "add the instructor");
     toast("Instructor added.", true);
-    nameEl.value = "";
-    studioEl.value = "";
     document.getElementById("instructor-new-form").hidden = true;
     instructorsCache = null;
     setTimeout(renderInstructorsAdmin, 700);
+    renderNewInstructorForm();
   } catch (e) {
     toast(e.message, false);
   } finally {
@@ -2074,40 +2212,78 @@ function instructorCard(i) {
     (i.studioKey ? " · " + esc(instructorStudioName(i.studioKey)) : "") + "</div>" +
     '<div class="card-actions"><button id="instr-edit-toggle-' + id + '" class="ghost">Edit</button></div>' +
     '<div id="instr-edit-form-' + id + '" class="session-form" hidden>' +
-    '<div class="field"><label>Display name</label><input type="text" id="instr-edit-name-' + id + '" value="' + esc(i.displayName || "") + '" maxlength="120" /></div>' +
-    '<button id="instr-edit-save-' + id + '">Save</button>' +
+    '<div id="instr-edit-fields-' + id + '"></div>' +
+    '<button type="button" id="instr-edit-save-' + id + '" disabled>Save</button>' +
     "</div>" +
     "</div>"
   );
 }
 
-function wireInstructorCard(i) {
+// wireInstructorCard mounts SetInstructorProfile's descriptor form into the
+// card's own fields div, prefilled from the row already on hand (no extra
+// fetch), and wires the toggle + save buttons. context.target is the
+// instructor's own key (dispatch.targetField, task-voice-free "standing"
+// authContext — the instructor edits their own record, front desk or
+// operator can too). context.me is the signed-in identity: the op's own
+// OptionalReads carries a `{actor:id}` own-binding probe
+// (packages/wellness-domain/opmetas.go) that only resolves with it set — a
+// read-template need, not an authContext one; buildAuthContext for
+// "standing" ignores context.me entirely.
+async function wireInstructorCard(i) {
   const id = domId(i.instructorKey);
   const form = document.getElementById("instr-edit-form-" + id);
+  const mount = document.getElementById("instr-edit-fields-" + id);
+  const saveBtn = document.getElementById("instr-edit-save-" + id);
   document.getElementById("instr-edit-toggle-" + id).addEventListener("click", () => {
     form.hidden = !form.hidden;
   });
-  document.getElementById("instr-edit-save-" + id).addEventListener("click", async () => {
-    const nameEl = document.getElementById("instr-edit-name-" + id);
-    const submit = document.getElementById("instr-edit-save-" + id);
-    const name = nameEl.value.trim();
-    if (!name) { toast("Enter an instructor name.", false); return; }
-    submit.disabled = true;
+
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the instructor-edit form: " + e.message, false);
+    return;
+  }
+  // identityKey() throws when whoami never resolved (app.js's own doc
+  // comment on it) — reachable here the same way any other read can race a
+  // slow/failed whoami, so it gets the same catch-and-toast treatment as
+  // loadDescriptorform above rather than an unhandled throw that leaves the
+  // toggle open on a card with no fields and a permanently-disabled Save.
+  let me;
+  try {
+    me = identityKey();
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the instructor-edit form: " + e.message, false);
+    return;
+  }
+  const row = opCatalogCache && opCatalogCache.SetInstructorProfile;
+  const handle = row && renderOpForm(row, {
+    target: i.instructorKey,
+    me,
+    prefill: { displayName: i.displayName },
+  }, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The instructor-edit form is unavailable.", false);
+    return;
+  }
+  saveBtn.textContent = handle.descriptor.submitLabel;
+  saveBtn.disabled = false;
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
     try {
-      // instructorKey is auto-filled from the instructor being edited, never
-      // user-entered (ddls.go FieldDescription: "auto-filled by the client
-      // from the instructor being viewed"). reads = [i.instructorKey]: the
-      // script's vertex_alive/class_of pair is a class-(a) required read.
-      await opOrThrow(
-        {
-          operationType: "SetInstructorProfile",
-          class: "instructor",
-          reads: [i.instructorKey],
-          payload: { instructorKey: i.instructorKey, displayName: name },
-        },
-        "update the instructor",
-        false,
-      );
+      let envelope;
+      try {
+        envelope = handle.submit();
+      } catch (e) {
+        toast(e.message || String(e), false);
+        return;
+      }
+      await submitCatalogOp(envelope, "update the instructor");
       toast("Instructor updated.", true);
       form.hidden = true;
       instructorsCache = null;
@@ -2115,7 +2291,7 @@ function wireInstructorCard(i) {
     } catch (e) {
       toast(e.message, false);
     } finally {
-      submit.disabled = false;
+      saveBtn.disabled = false;
     }
   });
 }

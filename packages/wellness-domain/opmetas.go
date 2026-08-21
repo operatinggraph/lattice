@@ -595,6 +595,21 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "instructorKey",
 				TargetType:  instructorVertexDDL,
+				// The instructor being edited itself: the script's
+				// vertex_alive/class_of pair (ddls.go's SetInstructorProfile
+				// branch) reads it out of `state`. Declared explicitly here
+				// per Contract #2 section 2.5's read posture ("declared, not
+				// lazy") rather than left to a client's own fallback --
+				// internal/descriptorform/form.mjs independently auto-pushes
+				// a resolved targetField value onto `reads` (mirroring
+				// cmd/facet/web/app.js's identical fallback), so a
+				// descriptor-driven client was never actually broken by this
+				// being undeclared; the explicit declaration here is the
+				// correct posture regardless of any client-side safety net,
+				// and is what a NON-descriptor-driven submitter (one that
+				// resolves reads straight off this Dispatch block with no
+				// fallback of its own) needs to see.
+				Reads: []string{"{payload.instructorKey}"},
 				// The standing guard's own-binding probe, declared rather than
 				// left live (Contract #2 §2.5): absence is a meaningful
 				// rejection the script renders as AuthDenied, not a correctness
