@@ -308,3 +308,4 @@ Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detai
 - 2026-06-27 · `db4073a` · LoftSpace landlord surface Inc 3: the landlord FE
 - 2026-06-26 · `777d180` · LoftSpace signed-lease Inc A: project lease terms + terms-review panel
 - 2026-06-26 · `6c30a10` · LoftSpace landlord surface Inc 2: `DecideLeaseApplication` + lens gating
+- 2026-08-04 · `f836a533` · A booked visit finally says where to go — submitBook falls back to the provider's own sole practicesAt site when the site filter is left on "Any site".
