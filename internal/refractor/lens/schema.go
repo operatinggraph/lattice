@@ -122,7 +122,7 @@ type RetryConfig struct {
 	Backoff     string `yaml:"backoff"`      // ISO 8601 duration, e.g. "PT5S"
 }
 
-// Rule is the parsed, validated representation of a Lens (formerly Materializer-domain "Rule").
+// Rule is the parsed, validated representation of a Lens.
 type Rule struct {
 	ID    string      `yaml:"id"`
 	Match string      `yaml:"match"`

@@ -101,7 +101,7 @@ type Pauser interface {
 }
 
 // RuleGetter is a read-only interface for looking up loaded rules by ID.
-// *lens.CoreKVSource satisfies this via its Get method (formerly *lens.Loader).
+// *lens.CoreKVSource satisfies this via its Get method.
 type RuleGetter interface {
 	Get(ruleID string) (*lens.Rule, bool)
 }

@@ -932,12 +932,12 @@ func TestInstaller_Uninstall_ReturnsErrorOnUnparseableSpec(t *testing.T) {
 // custody-design.md §30 B1 bypass is closed end-to-end through the real
 // installer harness: an upgrade that flips a secure lens's Class away from
 // "meta.lens" while KEEPING its committed SecureColumns is now refused before
-// any KV write, not merely at the unit-validator level. Before this fix the
-// upgrade landed clean with UpgradeResult.SecureColumnsRetired == 0 — the
-// existing drop guard never fired because the columns were never dropped —
-// while both Refractor's destruction-readiness oracle (declaredLensIDs,
+// any KV write, not merely at the unit-validator level. Without this refusal
+// the upgrade would land clean with UpgradeResult.SecureColumnsRetired == 0
+// — the drop guard never fires because the columns are never dropped — while
+// both Refractor's destruction-readiness oracle (declaredLensIDs,
 // internal/refractor/health/registry_probe.go) and its own lens registry
-// silently stopped seeing the lens, whose ciphertext stayed live in Postgres.
+// silently stop seeing the lens, whose ciphertext stays live in Postgres.
 func TestInstaller_Upgrade_RefusesClassFlip(t *testing.T) {
 	ctx, _, inst := newInstallerHarness(t)
 	def := defWithSecureLens("0.1.0", []string{"identity"}, "")

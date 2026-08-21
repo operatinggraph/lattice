@@ -66,10 +66,11 @@ func TestPipeline_Progress_TracksAppliedSeqAndProjectedAt(t *testing.T) {
 // §3.4) is fixed: a fresh Pipeline instance bound to a durable that already
 // has ack history (simulating a process restart against the same durable
 // name) holds a NONZERO lastAppliedSeq immediately on Run — before it has
-// applied any event itself. Before this fix, lastAppliedSeq was purely
-// in-process state that always restarted at zero, so a reconciliation write
-// over an existing row kept hitting ErrNoOrderingToken until new CDC traffic
-// happened to arrive on that lens.
+// applied any event itself. lastAppliedSeq is seeded from the durable's own
+// ack floor rather than left as purely in-process state that always restarts
+// at zero: without that seed, a reconciliation write over an existing row
+// keeps hitting ErrNoOrderingToken until new CDC traffic happens to arrive
+// on that lens.
 func TestPipeline_Progress_SeedsFromDurableAckFloorOnRestart(t *testing.T) {
 	env := startPipelineEnv(t)
 	const ruleID = "rule-restart-seed"
