@@ -3403,3 +3403,179 @@ than surfacing a new one.
 
 **Review depth:** full 3-layer adversarial (security/PII-plane, identity dedup path), per steward
 SKILL.md §4, regardless of S–M size.
+
+## Fire brief — TombstoneOrphanedCredentialIndex, pre-narrowing shred residue cleanup (Steward, 2026-08-21)
+
+**Scope sentence.** A new narrow, fail-closed identity-domain operation plus a CLI driver that
+together tombstone a `credentialindex` vertex left standing by the pre-narrowing (pre-`54b3c8c7`)
+`ShredIdentityKey`, which tombstoned `boundTo` both directions but deliberately left each credential's
+index vertex live — the board row *[privacy-base] A pre-narrowing shredded subject earns a clean
+attestation over live `credentialindex` rows* (`backlog/lattice.md`, ★★, S).
+
+**The bug, precisely.** `SealIdentityForErasureCompleteDDL()`'s comment
+(`packages/privacy-base/seal_identity_for_erasure_complete.go:131-135`) already names this residue
+class as "NOT walkable ... invisible to the sweep and to this walk alike" but frames it as
+hypothetical. It is not: any identity shredded via a bare `ShredIdentityKey` submit **before**
+`54b3c8c7` landed (2026-08-07) has its `boundTo` links already tombstoned, so
+`UnbindIdentityCredentials`'s `collect_live_sweep` (`packages/identity-domain/unbind_identity_credentials.go:192-234`)
+finds zero live links in both directions and emits **no mutations at all** (`sweep_inbound`/
+`sweep_outbound` are both hit-gated), and the five-arm residue lens + `SealIdentityForErasureComplete`'s
+own re-walk read zero on every arm. The result: a `.erasure` attestation reading `violating=false` while
+N `vtx.credentialindex.<hash>` vertices — plaintext `{actorKey, identityKey, boundAt}`, i.e.
+`sha256(raw sign-in id) → the erased person` — are still live and readable. **Population is capped**:
+the producer (the pre-narrowing cascade) was deleted by `54b3c8c7`; every post-narrowing erasure runs
+`UnbindIdentityCredentials`, which tombstones the index and the link together, so no new instance of
+this shape can be created going forward. This is a cleanup of existing residue, not a recurring gap.
+
+**Verified touch-list (live at fire start, from the Phase-0 scout + Winston's own reads).**
+- `packages/identity-domain/ddls.go:686-720` — `write_path_closed(identity_key)`, the existing dual
+  discriminator (live `erasureRequested` marker OR `piiKey.shredded`) already used by
+  `ReconcileCredentialBinding` to refuse touching an erased identity's binding plane. The new op's
+  own "is this genuinely erased" guard must read the SAME two keys the SAME way (live `kv.Read`, not
+  `state[...]` — the guard's whole point is that an undeclared read still refuses).
+- `packages/identity-domain/ddls.go:921-922` — `credential_index_key(actor_key)` =
+  `"vtx.credentialindex." + crypto.sha256NanoID(actor_key)`.
+- `packages/identity-domain/ddls.go:941-949` — `credential_bound_to_key(credential_actor_key,
+  owner_identity_key)` = `"lnk.identity." + credential_id + ".boundTo.identity." + owner_id`
+  (Contract #1 §1.1: credential is source, owner is target).
+- `packages/identity-domain/ddls.go:1952-2075` — `ReconcileCredentialBinding`'s handler is the closest
+  sibling and the precedent for "author-declares-intent": the payload names both `credentialActorKey`
+  and `identityKey`, the op reads the index vertex the payload names and refuses `owner-mismatch` if
+  its stored `identityKey` disagrees, and it already refuses outright (`fail_reconcile("erased")`) on
+  either endpoint's `write_path_closed` — so `ReconcileCredentialBinding` never touches an erased
+  identity's index, and the new op below is its non-overlapping opposite number (only ever touches an
+  erased identity's index). No collision risk between the two ops on the same key.
+- `packages/identity-domain/unbind_identity_credentials.go` (whole file) — the file-shape precedent to
+  mirror exactly: standalone file, own DDL func + own script constant carrying its own copies of
+  `required_string`/`parts_of`/`vertex_alive` (Starlark has no `load()`), `operator`-only
+  `scope:any` grant, `[no-op-meta: engine-op]` (machinery, no client-facing descriptor), registered by
+  appending its DDL func's return value inside `DDLs()` (`ddls.go:564`).
+- `packages/identity-domain/permissions.go:100-106` — `UnbindIdentityCredentials`'s permission-vertex
+  entry, the shape to mirror for the new op's grant (same file, same `Permissions()` function, append
+  before `RevocationPermissions()...`).
+- `packages/identity-domain/manifest.yaml` — hand-maintained (confirmed: no `make regenerate-manifest`
+  target touches it), needs a new `ddls:` entry (`class: meta.ddl.vertexType`, no `opMetas:` entry —
+  matches `UnbindIdentityCredentials`/`ReconcileCredentialBinding`, both absent from `opMetas:` as
+  engine-ops), a new `permissions:` entry, and the description's op list extended. `package.go:33`
+  `Version: "0.20.5"` → `"0.20.6"` (same-version edits no-op per package-authoring convention).
+- `cmd/lattice/identity/reconcile.go` (whole file) — the CLI driver precedent: `credentialIndexPrefix`
+  scan via `conn.KVListKeysPrefix`, per-key `KVGet` + classify (self-loop / already-OK / retracted /
+  submit), `submitReconcile`'s `processor.OperationEnvelope` + `output.SubmitOp` shape (`RequestID` via
+  `substrate.NewNanoID()`, `Lane: processor.LaneDefault`, `Class: "identity"`,
+  `AuthContext: &processor.AuthContext{Target: owner}`), `--actor`/`--dry-run` flags, dual JSON/human
+  output, non-zero exit on any `Rejected`.
+- `cmd/lattice/identity/identity.go:38-48` — `NewCommand`'s `cmd.AddCommand(...)` registration list;
+  append the new subcommand's constructor call.
+
+**Precedent to mirror — the exact division of labor.** `ReconcileCredentialBinding` already proves the
+inverse shape works: it is the "the link is missing, the owner is alive" repair verb and explicitly
+refuses an erased owner. This fire's op is "the link is missing or retracted, the owner is erased"
+repair verb, and must explicitly refuse a LIVE link (defer to the ordinary `UnbindIdentityCredentials`
+sweep for that case) exactly as `ReconcileCredentialBinding` refuses an erased owner — two narrow,
+non-overlapping carve-outs, same shape as the `0bb6daea`/Fire-28 "diffManifest gains a narrow,
+well-commented carve-out right where a mutation is about to be emitted" precedent family, applied here
+to an operation handler instead of a package installer.
+
+**Increment order + runnable green check after each.**
+1. `packages/identity-domain/tombstone_orphaned_credential_index.go` (new file) —
+   `TombstoneOrphanedCredentialIndexDDL()` + `tombstoneOrphanedCredentialIndexDDLScript`, mirroring
+   `unbind_identity_credentials.go`'s file shape. Payload `{credentialActorKey, identityKey}` (both
+   required, `vtx.identity.<NanoID>`-shaped, self-loop refused). Script:
+   - Derive `index_key = credential_index_key(credential_actor_key)`; refuse
+     `CredentialIndexAlreadyClear` if absent or already tombstoned (idempotent-friendly for a
+     re-driven CLI sweep).
+   - Refuse `OwnerMismatch` unless the index vertex's own `data.identityKey == identityKey` **and**
+     `data.actorKey == credentialActorKey` (author-declares-intent: the caller must already know the
+     content it is asking to remove, never a blind key-only delete).
+   - Refuse `NotErased` unless `identityKey`'s write path is closed — same two-key check as
+     `write_path_closed` (live `erasureRequested` marker OR `piiKey.data.shredded == true`), read via
+     `kv.Read`, never `state[...]`.
+   - Refuse `StillBound` if `credential_bound_to_key(credentialActorKey, identityKey)` reads a LIVE
+     (non-tombstoned) link — this is the guard that keeps the op narrow to the orphaned-residue shape;
+     a live link means the ordinary sweep is the correct path, not this one.
+   - On success: `mutations = [{"op": "tombstone", "key": index_key}]`; `events =
+     [{"class": "identity.unbound", "data": {"identityKey": identityKey, "actorKey":
+     credentialActorKey}}]` — reuse `identity.unbound` verbatim rather than minting a new event type:
+     the outcome is semantically identical to what `UnbindIdentityCredentials`'s inbound sweep would
+     have emitted for this exact pair had the link still existed to enumerate, and the Gateway's
+     credential-bindings-bucket consumer already handles a redundant/idempotent `unbound` for a row
+     that was never materialized there. `response = {"primaryKey": index_key}` (a vertex-root mutation
+     key inside the op's own write footprint — mirrors `ReconcileCredentialBinding`'s
+     `primaryKey: link_key`).
+   Read-posture comments: `credentialActorKey`/`identityKey` derived keys are read via `state[...]`
+   (declare `index_key` in ContextHint.Reads — deterministic, payload-derived, class (c)); the
+   erasure-discriminator + boundTo-link reads are class (d) optionalReads, live, exactly as
+   `write_path_closed`'s own comment explains (an undeclared read must still refuse, not silently
+   pass).
+   Register in `packages/identity-domain/ddls.go`'s `DDLs()` (append
+   `TombstoneOrphanedCredentialIndexDDL()` beside `UnbindIdentityCredentialsDDL()`).
+   Green check: `go build ./packages/identity-domain/...`.
+2. `packages/identity-domain/permissions.go` — append the `TombstoneOrphanedCredentialIndex` grant
+   (`scope: any`, `GrantsTo: []string{"operator"}`, `[no-op-meta: engine-op]`, note naming the narrow
+   refusal conditions so the grant's own doc states what it cannot reach). `manifest.yaml` — add the
+   `ddls:`/`permissions:` entries + version bump; `package.go:33` version bump to match.
+   Green check: `go build ./... && STRICT=1 go run ./scripts/lint-package-version.go`.
+3. Tests, `packages/identity-domain/tombstone_orphaned_credential_index_test.go`, mirroring
+   `unbind_identity_credentials_test.go`'s harness (`CapabilityDoc` with/without the grant, real
+   Processor commit path, not a script-only test): a live-orphan-tombstoned success case (link
+   tombstoned, owner erased via bare `piiKey.shredded` — the actual historical shape); a second success
+   case with owner erased via `erasureRequested` instead (full-pattern shape, for completeness even
+   though `UnbindIdentityCredentials` would normally have already swept it); `NotErased` refusal on a
+   live, unerased owner (the safety property that matters most — prove the op cannot touch a live
+   person's index); `StillBound` refusal when the link is live; `OwnerMismatch` refusal;
+   `CredentialIndexAlreadyClear` refusal (already-tombstoned); the ungranted-actor denial (mirror
+   `unbindCapDocMissingGrant`'s pattern, granting some OTHER identity-domain op instead so the denial
+   test cannot pass on the lane check alone).
+   Green check: `go test ./packages/identity-domain/... -count=1`.
+4. `cmd/lattice/identity/credential_residue.go` (new file) — `newSweepCredentialResidueCommand`,
+   mirroring `reconcile.go`'s `newReconcileBindingsCommand` shape exactly (flags, output modes, exit
+   code). Driver (`sweepCredentialResidue`, testable without cobra, mirrors `reconcileBindings`):
+   scan `credentialIndexPrefix`; for each **live** entry, skip self-loop (`cred == owner`); read
+   `boundToKey(cred, owner)` (reuse the existing unexported helper from `reconcile.go` — same package,
+   same binary); if the link is **live** → `AlreadyOK`, skip (in scope for
+   `UnbindIdentityCredentials`'s ordinary sweep, not this tool); if the link is **absent or
+   tombstoned**, read the owner identity's erasure state (new small helper mirroring
+   `write_path_closed`'s two-key check, issued as two extra `KVGet`s — this CLI has no live-read
+   budget to respect, unlike the Starlark op) — if **not erased** → `NotErased`, skip (an absent link
+   with a live owner is `ReconcileCredentialBinding`'s repair job, not this tool's; a tombstoned link
+   with a live owner is the pre-existing "Retracted" shape `reconcile-bindings` already declines to
+   touch — leave it exactly as untouched as that tool leaves it); else submit
+   `TombstoneOrphanedCredentialIndex{credentialActorKey: cred, identityKey: owner}` (dry-run counts
+   `Submitted` without submitting, mirrors `reconcileBindings`). Register in `identity.go`'s
+   `NewCommand`.
+   Green check: `go build ./cmd/lattice/... && go test ./cmd/lattice/identity/... -count=1`.
+5. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, every `scripts/lint-*.go`,
+   `go test ./... -p 4`, `make verify-kernel`.
+
+**In-scope gotchas.**
+- `write_path_closed`'s comment (`ddls.go:686-720`) is explicit that the LIVE `kv.Read` (not
+  `state[...]`) IS the guard, not an optimization — an undeclared key reads ABSENT from `state[...]`,
+  which would silently open a fail-closed gate. Copy the read shape, not just the boolean logic.
+- `credential_index_key`/`credential_bound_to_key` must be copied into the new script verbatim
+  (Starlark has no `load()` — every sibling script carries its own copies; this is normal here, not
+  duplication to clean up).
+- The op's `OutputSchema`/response must name `index_key` as `primaryKey`, not `identityKey` or
+  `credentialActorKey` — the reply-constraint (`internal/processor/commit_path.go`) requires a
+  script-named `primaryKey` to lie inside the operation's own write footprint, and `index_key` is the
+  only key this op writes.
+- Do not let the CLI driver's "erased" check reimplement `write_path_closed` loosely — it must check
+  the exact same two keys (`erasureRequested` class-gated marker OR `piiKey.data.shredded == true`) so
+  a candidate the driver selects is never rejected `NotErased` by the op itself.
+- `packages/identity-domain` is a known ROTATING-membership package-level flake under parallel load
+  (this doc's increment-9 build note, above) — one re-run of a single reddened test before concluding
+  it's a real regression; never loosen an assertion to route around it.
+
+**Non-goals.** Re-sealing or rewriting any existing `.erasure` attestation once the residue is cleared
+— the attestation's `violating=false` claim becomes retroactively accurate the moment the live rows are
+gone; no consumer needs `coverage.credentials` to reflect this historical adjustment. Discovering the
+exact live count of affected subjects on any particular deployment — that is what `--dry-run` is for,
+run by an operator, not something this fire computes or bounds further. Extending
+`SealIdentityForErasureComplete`'s own walk to cover this class going forward — the class is provably
+unwalkable in-Starlark (no link exists to enumerate from) and the population is capped by `54b3c8c7`,
+so there is no recurring gap to close in the op itself, only historical residue to clean up once.
+
+**Adjacent finds filed to the board now:** none expected — this fire closes the already-filed row
+directly.
+
+**Review depth:** full 3-layer adversarial (security/PII-plane: this mints a new tombstone-authority
+operation over identity-adjacent data) — per steward SKILL.md §4, regardless of S size.
