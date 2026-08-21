@@ -321,8 +321,14 @@ redelivery). The call is **synchronous** (seconds) → the bridge's `Adapter.Exe
 
 An approved proposal is applied by the **capability materializer**: it reads the proposal's declarative
 `artifact.content`, assembles the *same* write-set shape `Installer.buildManifestBatch` produces (for a
-`newPackage`) or the diff `Installer.Upgrade` produces (for `upgradeExisting`), and the **approving
-operator** submits the existing **F-004 `InstallPackage`/`UpgradePackage` op**. Three properties make this
+`newPackage`) or — **only where the proposal's Definition covers everything the package declares** — the
+diff `Installer.Upgrade` produces (for `upgradeExisting`), and the **approving operator** submits the
+existing **F-004 `InstallPackage`/`UpgradePackage` op**. *(The unqualified `upgradeExisting` clause this
+sentence used to carry was superseded 2026-08-21 by
+[capability-apply-removal-refusal-design.md](capability-apply-removal-refusal-design.md): a one-artifact
+Definition is a PARTIAL description, and `Apply`'s in-place branch is a convergence operator, so an
+upgrade that does not cover the package tombstones every key it omits. That apply is now refused;
+`ApplyCapabilityPlan` is the only sanctioned entry point.)* Three properties make this
 safe and Weaver-consistent:
 
 1. **The AI never holds the authoring authority** — the op runs under the *operator's* identity (Item 4).
@@ -470,8 +476,11 @@ submits a `RequestCapabilityAuthoring`.
   a `pending`/`valid` proposal with a dry-run delta lands in the `capability-proposals` lens →
   `ReviewCapabilityProposal{approve}` → operator applies via `InstallPackage` → the lens is live + queryable
   → the proposal flips `applied`. A second e2e applies a `grant` and confirms the new permission is
-  enforced. A third applies an `upgradeExisting` and confirms the F-004 diff lands + the proposal is
-  F-004-revertible (`uninstall`/`upgrade` back).
+  enforced. A third drives an `upgradeExisting` at a real multi-entity package and confirms the apply is
+  **refused**, naming the keys it would have tombstoned, with Core KV unchanged
+  ([capability-apply-removal-refusal-design.md](capability-apply-removal-refusal-design.md) §10; that
+  design supersedes this line's original "confirms the F-004 diff lands", which was never built — and its
+  absence is why the defect shipped).
 - **Adversarial — the Gate-3-style "DEFENDED" assertion for the authoring surface.** A faked adapter that
   returns a malicious artifact — a lens targeting **Core KV** (P5 escape); a grant exceeding the operator's
   scope; an artifact whose materialized write-set touches a **protected/primordial** key; a Starlark
@@ -550,7 +559,12 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   reasoning alone, no Makefile parity) + the capability-authoring machinery itself (`capability-author`,
   `augur`) + `orchestration-base` (named in the board row; shared cross-vertical primitive, blast radius
   spans every vertical) + `semantic-contracts`. A vertical business-domain package (`cafe-domain`,
-  `clinic-domain`, …) is unaffected — `upgradeExisting` there is exactly what Fire 2 shipped to allow.
+  `clinic-domain`, …) is unaffected — the deny-list is about the target's **trust**, not about the diff's
+  blast radius. *(This clause used to read "`upgradeExisting` there is exactly what Fire 2 shipped to
+  allow". The deny-list decision stands; the capability it described does not exist —
+  [capability-apply-removal-refusal-design.md](capability-apply-removal-refusal-design.md), ratified
+  2026-08-21, refuses any capability apply that would remove a declared key the proposal does not
+  describe, which is every `upgradeExisting` at a multi-entity package.)*
   **Touch-list:** `internal/pkgmgr/capabilityapply.go` (the guard, both modes) + a new
   `internal/pkgmgr/capabilityapply_test.go` + `packages/capability-author/apply_test.go` (one e2e proving the
   plan-build itself refuses, mirroring `TestCapAuthor_Apply_UnknownPackage_Rejected`'s pattern). **Non-goal:**

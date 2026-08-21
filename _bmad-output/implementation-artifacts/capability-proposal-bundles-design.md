@@ -537,7 +537,11 @@ file in the build is a signal the scope drifted.
   argument **for** this shape. One request → one id → one queue row → N artifacts. An
   N-proposals-plus-bundle-link design would break that property.
 - ***Is `upgradeExisting` in scope?*** No. The Studio has always emitted `newPackage`, and §13.1's
-  defect makes `upgradeExisting` unsafe for the *existing* single-artifact path too.
+  defect made `upgradeExisting` unsafe for the *existing* single-artifact path too. §13.1 is now closed by
+  [capability-apply-removal-refusal-design.md](capability-apply-removal-refusal-design.md) (ratified
+  2026-08-21), which refuses any capability apply that would remove a declared key the proposal does not
+  describe. That composes with this design unchanged — a bundle merges N artifacts into one Definition,
+  which is still partial — and it does not put `upgradeExisting` back in scope here.
 - ***Does this widen what an AI may author?*** Not in Fires A/B — the Studio can already propose a lens.
   Fire C is where a **model** first authors one, which is why it is blocked on §4.2.
 
@@ -595,7 +599,8 @@ appliable, so rejecting the lens and approving the target installs a target boun
 resolving to nothing — a silently non-converging target with a success signal on its apply. It also
 requires both artifacts to target the **same** `packageName`, at which point the second `newPackage`
 apply refuses (`capabilityapply.go:198-201`), so it additionally needs `upgradeExisting`, which §13.1
-shows is destructive today. It solves the id and leaves the unit broken.
+showed was destructive and which the removal-refusal design now refuses outright for any non-covering
+proposal. It solves the id and leaves the unit broken.
 
 **Alt 2 — N proposal vertices plus a `bundledWith` link.** Keeps `.artifact` untouched. **Rejected:**
 review, apply and mark-applied are all proposal-keyed, so all three ops would need bundle-awareness
@@ -663,7 +668,7 @@ one deterministic key"*; *"a local gate run and CI's gate run do not see the sam
 
 ## 13. Discovered while grounding — filed separately, not fixed here
 
-### 13.1 `upgradeExisting` capability apply tombstones the rest of the package (★★★, filed)
+### 13.1 `upgradeExisting` capability apply tombstones the rest of the package (★★★, filed → **designed + ratified 2026-08-21**)
 
 `CapabilityApplyPlanForProposal` materializes a Definition from the proposal's artifacts **alone** and
 hands it to `Installer.Apply`, whose installed-package branch is a **diff** against the package's whole
@@ -673,9 +678,18 @@ proposal; destructive on a human-authored multi-entity package — which the den
 says is the intended target (`capabilityapply.go:55-64`). An independent census briefed to falsify it
 returned **STANDS**: no merge step, no subset guard, Processor step-8's package-scope guard passes (the
 keys are inside `priorDeclared`), and no test installs a real multi-entity package and then applies an
-`upgradeExisting` proposal at it. Not this design's root cause and not its scope; it gates any future
-`upgradeExisting` work, and its fix is non-obvious (the installed package's *source* Definition is not
-recoverable from KV, only its key set, so "merge the old manifest in" is unavailable).
+`upgradeExisting` proposal at it. Not this design's root cause and not its scope.
+
+**Outcome.** Designed and ratified as
+[capability-apply-removal-refusal-design.md](capability-apply-removal-refusal-design.md) (2026-08-21). Two
+clauses above were corrected by its grounding: the defect also breaks the *accumulation* case on an
+AI-authored package (keys are deterministic in `(package, kind, canonicalName)`, so proposal 2 tombstones
+proposal 1's artifact), so "correct for a package whose entire lineage is that proposal" is one proposal
+too generous; and "the source Definition is not recoverable, so merging is unavailable" is only half true —
+the diff operates on `(key → document)` pairs and `diffManifest` already reads every committed body
+(`upgrade.go:459`), so an additive mode is *expressible*, just not sound. The ratified answer refuses any
+capability apply that would remove a key its Definition does not describe, and shelves additive apply
+behind a named trigger.
 
 ### 13.2 Prose that will be stale the moment Fire A lands
 

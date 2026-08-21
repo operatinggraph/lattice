@@ -1,11 +1,16 @@
 # A capability apply may not remove what its Definition does not describe — design
 
-**Status: 📐 awaiting-Andrew (ratification).** No frozen-contract change. It goes to Andrew rather than
-Winston-adjudication for one reason, stated plainly in "For Andrew" below: it **narrows a capability an
-earlier design already ratified** — `ai-authored-capabilities-design.md` §3.5 and its §8 Fire-2 brief both
-state that `upgradeExisting` into a vertical business package is what that fire shipped to allow — and it
-**defers** the primitive that would make that promise safe. Narrowing ratified scope is a scope call, not a
-mechanism call.
+**Status: ✅ Andrew-ratified (2026-08-21).** No frozen-contract change. It went to Andrew rather than
+Winston-adjudication because it **narrows a capability an earlier design already ratified** —
+`ai-authored-capabilities-design.md` §3.5 and its §8 Fire-2 brief both stated that `upgradeExisting` into a
+vertical business package is what that fire shipped to allow — and it **defers** the primitive that would
+make that promise safe. Narrowing ratified scope is a scope call, not a mechanism call.
+
+**Ratified as branch (a) — refuse now, defer additive** (the fork below, as recommended). The §9 prose
+corrections have been executed: `ai-authored-capabilities-design.md` §3.5 / §8 Fire-2 / test plan and
+`capability-proposal-bundles-design.md` §12 / §13.1 are rewritten in place. The one remaining §9 item is
+`internal/pkgmgr/capabilityapply.go:55-64`'s doc comment, which is **code** and therefore a build scope
+line (§12, step 2). **Build-ready for the Lattice Steward.**
 **Component:** `internal/pkgmgr` (the apply seam) · `cmd/loupe` (review apply endpoint) ·
 `cmd/lattice-pkg` (`apply-proposal`) · `scripts/lint-conventions.go`.
 **Backlog row:** Lattice lane → *Component maintenance* → *[Pkgmgr] An `upgradeExisting` capability apply
@@ -28,8 +33,9 @@ not mention. This design refuses that at the seam: a capability apply **may not 
 computed atomically with the delta and names the keys, and the only way to reach `Apply` with a capability
 plan becomes one function that cannot forget to set it.
 
-**The one fork, and my recommendation.** The row's `no-pattern:` line asked for *additive-only
-(partial-Definition) package apply*. I recommend **refuse now, defer additive** — branch (a):
+**The one fork — resolved: Andrew ratified branch (a), 2026-08-21.** The row's `no-pattern:` line asked
+for *additive-only (partial-Definition) package apply*. The recommendation was **refuse now, defer
+additive** — branch (a), and that is what was ratified:
 
 - **(a) Refuse and defer (recommended).** A capability apply refuses any removal. The genuinely-correct
   case still works and self-opens: a package whose *entire* content is this proposal's artifacts (an
@@ -47,11 +53,11 @@ plan becomes one function that cannot forget to set it.
 - **(c) Remove `upgradeExisting` from the capability path entirely.** Simpler than (a) by a few lines, and
   it throws away the one case that is already correct. Rejected in §11.
 
-**What ratification costs you.** Branch (a) means `ai-authored-capabilities-design.md` §3.5's *"or the diff
+**What ratification cost.** Branch (a) superseded `ai-authored-capabilities-design.md` §3.5's *"or the diff
 `Installer.Upgrade` produces (for `upgradeExisting`)"*, its §8 Fire-2 sentence *"`upgradeExisting` there is
 exactly what Fire 2 shipped to allow"*, and its test-plan line *"a third applies an `upgradeExisting` and
-confirms the F-004 diff lands"* are **superseded** and get rewritten in place when this ratifies (§9). That
-third test was never built — which is precisely why the defect shipped.
+confirms the F-004 diff lands"*. All three are rewritten in place (§9). That third test was never built —
+which is precisely why the defect shipped.
 
 **No frozen-contract edit is staged.** `UpgradePackage`'s payload, semantics and step-8 guards are
 untouched (§7); this is a restriction on *which Definitions the capability path may hand to `Apply`*, which
@@ -471,7 +477,8 @@ A hand-authored `upgradeExisting` proposal that would previously have applied de
 race window §3.2 describes, where it now refuses instead of tombstoning.
 
 **Prose the ratification must rewrite in place** (banner-only folds leave the superseded shape fully
-specified for the next reader to build from):
+specified for the next reader to build from). Items 1, 2, 3 and 5 are **done** — executed at ratification,
+2026-08-21. Item 4 is code and is a build scope line (§12, step 2):
 
 1. `ai-authored-capabilities-design.md` §3.5 — *"or the diff `Installer.Upgrade` produces (for
    `upgradeExisting`)"* → the diff is produced only where the proposal covers the package.
