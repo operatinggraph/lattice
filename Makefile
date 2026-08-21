@@ -2157,7 +2157,10 @@ lint-facet-renderer-drift:
 ## [no-op-meta:] exemption; a machinery exemption (engine-op/reply-op/
 ## lifecycle-op) is CONTRADICTED by app UI and fails. Undescribed ops the apps
 ## already reach are the gate's shrink-only appOpDebt baseline — the
-## descriptor sweep's work-list.
+## descriptor sweep's work-list. appOpCeilings ratchets each app's distinct
+## hardcoded-op-literal count to an exact pin: growth above it or an
+## unrecorded shrink below it both fail (staff-descriptor-rendering-design.md
+## §5).
 lint-app-op-descriptors:
 	@echo "==> Linting vertical-app op literals against package descriptors..."
 	go run ./scripts/lint-app-op-descriptors.go

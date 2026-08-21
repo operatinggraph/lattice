@@ -204,7 +204,9 @@ jobs:
         # lifecycle-op) falsifies that exemption's "no person dispatches
         # this" and fails. The shrink-only appOpDebt baseline holds the ops
         # the apps already reach undescribed — the descriptor sweep's
-        # work-list; an entry that stops violating fails too.
+        # work-list; an entry that stops violating fails too. appOpCeilings
+        # ratchets each app's distinct hardcoded-op-literal count to an exact
+        # pin: growth above it or an unrecorded shrink below it both fail.
         run: STRICT=1 go run ./scripts/lint-app-op-descriptors.go
 
       - name: Manifest entityKey/entityType pairing lint (edge-manifest)
