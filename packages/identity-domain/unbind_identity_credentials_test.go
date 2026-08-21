@@ -178,9 +178,11 @@ func liveBoundToCount(t *testing.T, ctx context.Context, conn *substrate.Conn, s
 	return 0
 }
 
-// assertBoundToLive is assertTombstoned's opposite, for a link the sweep must
-// leave alone.
-func assertBoundToLive(t *testing.T, ctx context.Context, conn *substrate.Conn, key, why string) {
+// assertDocLive is assertTombstoned's opposite, for a document a sweep or a
+// refusal must leave alone. Present is not enough: a tombstone is a soft delete
+// and leaves the key readable, so an existence check would pass over exactly the
+// outcome being ruled out.
+func assertDocLive(t *testing.T, ctx context.Context, conn *substrate.Conn, key, why string) {
 	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
 	if err != nil {
@@ -260,7 +262,7 @@ func TestUnbindIdentityCredentials_InboundSweep_LeavesSubjectAspectUntouched(t *
 	if got := liveBoundToCount(t, ctx, conn, uKey, "in"); got != 0 {
 		t.Fatalf("live inbound boundTo links = %d, want 0", got)
 	}
-	assertBoundToLive(t, ctx, conn, bystanderLink,
+	assertDocLive(t, ctx, conn, bystanderLink,
 		"a boundTo between two other people was tombstoned; this sweep is confined to the subject by its key filter alone")
 	assertTrackerEvent(t, ctx, conn, reqID, "identity.unbound")
 

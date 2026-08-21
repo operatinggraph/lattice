@@ -562,6 +562,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		ActorRevokedEventDDL(),
 		ActorUnrevokedEventDDL(),
 		UnbindIdentityCredentialsDDL(),
+		TombstoneOrphanedCredentialIndexDDL(),
 	}
 }
 

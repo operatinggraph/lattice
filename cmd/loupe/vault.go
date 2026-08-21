@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
@@ -223,4 +225,79 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"plaintext": json.RawMessage(resp.Plaintext)})
+}
+
+// vaultEraseRequest is the POST /api/vault/erase body.
+type vaultEraseRequest struct {
+	IdentityKey string `json:"identityKey"`
+}
+
+// handleVaultErase implements POST /api/vault/erase — starts the
+// identityErasure Loom pattern for an identity (erasure-orchestration-design.md
+// §12 Fire B increment 4) instead of submitting a bare ShredIdentityKey. The
+// pattern's own first step shreds the key exactly as the old button did, then
+// advances through sealing, credential unbinding and dedup-footprint purge
+// (packages/privacy-base/patterns.go's identityErasure). patternRef must carry
+// the resolved vtx.meta.<id> key, not the bare canonical name — StartLoomPattern
+// looks up its `.spec` aspect by that key directly (mirroring
+// `lattice loom start`'s own resolvePatternKey resolution). operator
+// holds StartLoomPattern at scope:any (packages/orchestration-base/
+// loom_lifecycle.go), so no authContext.target is required for the grant to
+// apply.
+func (s *server) handleVaultErase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusBadRequest, "POST required")
+		return
+	}
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req vaultEraseRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "parse body: "+err.Error())
+		return
+	}
+	if classifyKey(req.IdentityKey) != classVertex || !strings.HasPrefix(req.IdentityKey, "vtx.identity.") {
+		s.writeError(w, http.StatusBadRequest, "identityKey must be a vtx.identity.<id> vertex key")
+		return
+	}
+	ctx, cancel := s.gatewaySubmitContext(r)
+	defer cancel()
+
+	readers, err := s.weaverCoreReaders(ctx, conn)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "list core-kv metas: "+err.Error())
+		return
+	}
+	index := buildWeaverMetaIndex(readers.metaKeys, readers.coreGet)
+	patternKey := index.Patterns["identityErasure"]
+	if patternKey == "" {
+		s.writeError(w, http.StatusBadGateway, "identityErasure Loom pattern is not installed")
+		return
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"patternRef": patternKey,
+		"subjectKey": req.IdentityKey,
+	})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "marshal payload: "+err.Error())
+		return
+	}
+	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		OperationType: "StartLoomPattern",
+		Lane:          string(processor.LaneDefault),
+		Payload:       payload,
+	})
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "submit op: "+err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, reply)
 }

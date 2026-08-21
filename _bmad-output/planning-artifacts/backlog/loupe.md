@@ -34,7 +34,6 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **`retentionKeyStatus` has no operator surface** | The Vault page's shred view reads `privacy-shreds` (identity holders only), so the new `privacy-retention-keys` bucket — every declared retention class, its policy/period, and its destruction progress — is unreadable in Loupe. `handleVaultShreds` is the shape to mirror. | ★★ | S–M | 📋 ready · consumer: an operator asking which classes have expired · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §4.4 |
-| **The Shred button submits a bare key shred, not an erasure** | `ShredIdentityKey` now destroys the key only; the decrypt-free footprint survives until the `identityErasure` pattern runs. The button should start the pattern (`StartLoomPattern`, already granted to `operator`), which turns `showShredProof`'s one-commit panel into a four-step progress surface over the instance and the residue row. | ★★ | M | 📋 ready · UX-then-FE · [design](../../implementation-artifacts/erasure-orchestration-design.md) §12 step 4 |
 | **A `weaverTarget`/lens config's `protected` field reads a malformed value as "not protected"** | `cmd/loupe/lens.go:83`/`lenses.go:45` read `cfg["protected"].(bool)` ok-discarded — same fail-open shape, but a display-only badge not a gate; today's writers always emit Go `true`. | ★ | XS | 📋 ready · origin: [backlog audit](../../implementation-artifacts/lattice-backlog-audit-2026-08-20.md) — moved from lattice (`cmd/loupe` scope) |
 
 ## Parked
@@ -70,6 +69,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-21 · `fb6a637d` · [Loupe/maint] Shred button now starts the identityErasure pattern, not a bare key shred; panel gains a five-step erasure progress list. Tests, live-verified, CI green
 - 2026-08-02 · `28dd2c55` · [Loupe/F25.3b] Weaver Target Studio — Propose + Trial: `SubmitCapabilityProposal` submission, review-queue source badge, born-disabled Trial panel; F25 CLOSED. Lead self-review, live-verified end to end
 - 2026-08-02 · `c1bdcfae` · [Loupe/F25.3a] Weaver Target Studio — Author: draft+check+export at `#/weaver/author`. Lead self-review, live-verified, fixed forward two defects found live
 - 2026-08-02 · `e9408470` · [Loupe/F25.2] Weaver Target Studio — Verify: Checks panel + `#/weaver/verify` (V1/V2/V3). Lead self-review, live-verified on the real dev stack
@@ -97,15 +97,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-18 · `0f292d43` · [Loupe/F16.2] Capability approve+apply — server-side re-validation (Option A) + two-commit F-004 install, closing F16. Embedded-NATS tests; headless-verified. Lead self-review, CI green
 - 2026-07-18 · `d010fe60` · [Loupe/F16.3] AI review console — Augur escalation tab, queue + detail + approve + reject (`#/review/augur`), shares F16.1's card renderer. Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
 - 2026-07-18 · `d37e86b` · [Loupe/F16.1] AI review console — capability queue + detail + reject (`#/review`). Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
-- 2026-07-18 · `3470f7d` · [Loupe/maint] System Map cleanup — Café + Wellness curated onto the door-band Apps group (all four verticals together; client-shelf empty). Verified live (all four green), lead self-review, CI green
-- 2026-07-07 · `6b1ab6e` · [Loupe/F15] Actually re-scoped the standing operator to consoleOperator (56911ac only proved the mechanism); console-operator's own read-grant lens + persisted identity. Verified live vs. real data, CI green
-- 2026-07-07 · `56911ac` · [Loupe/F15 inc.3] Items 5-6 CLOSED — pkg-lifecycle root-admin gate + live e2e (consoleOperator allow/deny); Postgres F9 seam wired to M5's wildcard-grant posture. Verified live + unit test, CI green
-- 2026-07-07 · `635db70` · [Loupe/F15 inc.2] Op-submissions relay through the Gateway, replacing `adminActor` direct-stamp. 3-layer reviewed, fixed forward; verified live + CI green
-- 2026-07-06 · `af43dab` · [Loupe/F15 inc.1] Browser-usable login session — cookie + `/login` page + unauth-nav redirect; pins gate to the configured operator. 3-layer reviewed, fixed forward; verified live + CI green
-- 2026-07-06 · `19c1dd0` · [Loupe/F15 inc.1] Operator login gate — requireOperator wraps the whole mux; 3-layer reviewed, fixed forward; verified live + CI green
-
-- 2026-07-06 · `c5e1c80` · [Loupe/F13] L1 reconciled + L2 v1 map scrubber (flow-liveness replay); 3-layer review fixed forward; verified live + CI green
-- 2026-07-06 · `f7c7e36` · [Loupe/maint] Ad-hoc (Andrew) — human-scale `freshness` "ago" past a minute (`32914s ago` → `9h ago`); single-point fix; verified live + CI green
-- 2026-07-06 · `78ca047` · [Loupe/F12 inc.3] Crypto-shred proof view — `#/graph/<identity>?view=shred`, typed-confirm `ShredIdentityKey` via `/api/op`; F12 CLOSED; 3-layer review fixed forward; verified live + CI green
-
-Older entries (F1–F11, deploy) rolled to [`archive/loupe-done.md`](archive/loupe-done.md).
+Older entries (F1–F15, F13, F12 inc.3, deploy) rolled to [`archive/loupe-done.md`](archive/loupe-done.md).

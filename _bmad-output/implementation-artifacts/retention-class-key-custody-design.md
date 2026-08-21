@@ -3304,3 +3304,119 @@ see §29.6 for what was deliberately left undecided):
   never *selects* by holder type — widening the allow-list cannot let a key of one holder type open data
   custodied under another. The write-path custody decision (`step6.5`, DDL `Custody.Kind`) is untouched and
   out of scope — don't let this paragraph become a pretext for touching `step65_encrypt.go`.
+
+## 30. Fire brief — §29.6's two named non-goals, closed (build note, 2026-08-21)
+
+### 30.1 Scope sentence
+
+Make `internal/pkgmgr`'s upgrade/apply diff **refuse a manifest edit that erases a lens's committed
+Secure-Lens history unless the package author declares the retirement** — the two evasions §29.6 left
+open: a whole `SecureColumns` entry dropped from a still-declared lens (R2), and a lens removed or renamed
+so its `.spec` is tombstoned with its `secureColumns` still standing (R3). Both leave
+`registry_probe.mayHoldHolderType` reading a spec that no longer names a holder type whose ciphertext is
+still sitting in the target store, so the destruction oracle attests coverage it does not have.
+
+Green bar: an undeclared drop/rename fails the upgrade with an actionable error; a declared one proceeds
+and is counted; `go test ./internal/pkgmgr/... ./internal/refractor/health/...` green.
+
+### 30.2 Verified touch-list (`file:line`, re-checked live this fire)
+
+- `internal/pkgmgr/upgrade.go:378-519` (`diffManifest`) — the two detection sites.
+  **R2** at the update/revive paths (`:412`, `:450`, where `widenSecureColumnsForUpdate` already runs): a
+  committed `targetConfig.secureColumns` entry whose `column` the new doc no longer declares is skipped by
+  the widen's `if !ok { continue }` (`upgrade.go:676`) — it widens only columns the new spec re-declares.
+  **R3** at the removal loop (`:461-516`): a removed `…​.spec` key whose committed doc carries a non-empty
+  `secureColumns` is tombstoned at `:507-511` with no consultation of what it held.
+- `internal/pkgmgr/upgrade.go:653-693` (`widenSecureColumnsForUpdate`) + its helpers `secureColumnsOf` /
+  `stringsOf` / `unionStrings` — reused verbatim by the new predicate; no shape work to redo.
+- `internal/pkgmgr/upgrade.go:154` + `internal/pkgmgr/apply.go:178` — the **two** enforcement call sites.
+  `computeDeltaAgainst` (`upgrade.go:197-215`) is shared by `Upgrade` and `Apply`'s in-place path, so a
+  guard wired only into `Upgrade` is bypassable through Loupe's `POST /api/packages/apply`
+  (`cmd/loupe/pkg.go:369`, `packagesApply`). Census: `diffManifest` has exactly **one** caller
+  (`computeDeltaAgainst`); `installMutation{}` is constructed in exactly one other place
+  (`build.go:70`, the fresh-build path, no committed history). No sibling bypass exists.
+- `internal/pkgmgr/opmetaretirement.go:14-54` (`enforceOpMetaDisposition`) — **the precedent this mirrors
+  1:1**: `diffManifest` accumulates the dropped set on `diffSummary`, `Upgrade`/`Apply` call an enforcer
+  before `submitUpgradeOp`, and an undeclared drop returns an error naming the `Definition` field to add.
+- `internal/pkgmgr/definition.go:125-200` (`Definition`) — where the declaration field lands, beside
+  `RetireCancelsOpenTasks`/`MovedOps`. `SecureColumn` is `definition.go:1124-1128`.
+- `internal/pkgmgr/installer.go:437-445` (`LensID`) — `entityNanoID(pkg, "lens:"+canonicalName)`. Confirmed
+  version-independent and **rename-sensitive**: a renamed lens is a wholly new key, which is why R3 exists.
+  This is also how a declared retirement resolves to the key it excuses.
+- `internal/refractor/health/registry_probe.go:98-117` (`mayHoldHolderType`) + `:332` — the oracle. A
+  decoded `targetConfig` with **no** secure columns is a genuine "no" (`:116`), and `vp.IsDeleted` skips a
+  tombstoned lens outright (`:332`) — the two reads that make R2/R3 silent. Not touched by this fire.
+- `cmd/refractor/main.go:2141-2153` — the live consumer: `classKeyShredded.SetRegistryReady` gates the
+  destruction attestation on `ReconcileNowForHolderType`. `holderTypeRebuildTargets`
+  (`cmd/refractor/main.go:2333-2345`) is the second reader, over the running pipeline's activated
+  `secureColumns` — populated from the same persisted spec, so both inherit the fix at its source.
+- `internal/pkgmgr/manifest.go:24-33` (`ManifestBlock`), `:161-163` (opMetas count check), `:225-230`
+  (opMetas identity loop) — Inc 2's mirror sites. `Definition.RetentionClasses` is `definition.go:164-171`;
+  live declarers are `packages/clinic-domain` and `packages/lease-signing` (their `manifest.yaml` carries no
+  `retentionClasses:` block today, so both need one or the new count check fails them).
+- `internal/pkgmgr/bucketguard.go:141-173` — Inc 3's site: the four reserved RLS names are checked **inside**
+  the `if len(l.SecureColumns) > 0` gate, so a plain `Columns` entry named `authz_anchors` /
+  `projection_seq` / `is_deleted` / `deleted_at` installs and fails only at Postgres activation (42701).
+- Tests: `internal/pkgmgr/upgrade_test.go` — `newInstallerHarness` + `kvDoc` + `sampleDef`;
+  `TestUpgrade_PreservesRetentionClassHolderOnRemoval` / `…OnRename` are the closest shape (assert live KV
+  after `Upgrade`, not mutation-list internals). `internal/pkgmgr/build_test.go:442-450` is Inc 3's shape.
+
+### 30.3 Precedents to mirror
+
+- Inc 1 → `enforceOpMetaDisposition` (author-declares-intent, fail-closed, enforced from both `Upgrade` and
+  `Apply` before the op is submitted). The *counting* half mirrors Fire 28's
+  `retentionHoldersPreserved` / `secureColumnsWidened` summary counters surfaced on `UpgradeResult`.
+- Inc 2 → the `OpMetas` block, verbatim shape (struct field + count check + identity loop).
+- Inc 3 → the `reserved` map already at `bucketguard.go:153`; hoisted so both column sets are checked.
+
+### 30.4 Increment order + green checks
+
+1. **Inc 1 (posture-changing — new fail-closed enforcement point).** `Definition.RetiredSecureColumns
+   []RetiredSecureColumn{Lens, Column, Note}` (`Column: ""` = every secure column on that lens, the
+   remove/rename case; `Note` required). `diffManifest` accumulates `sum.droppedSecureColumns`; a new
+   `enforceSecureColumnRetirement(def, dropped)` refuses an undeclared drop; wired into **both**
+   `Upgrade` and `Apply`. `UpgradeResult.SecureColumnsRetired` counts the declared ones.
+   Green: `go test ./internal/pkgmgr/...`.
+2. **Inc 2 (mechanical).** `ManifestBlock.RetentionClasses []ManifestRetentionClass{CanonicalName}` +
+   count check + identity loop; `packages/{clinic-domain,lease-signing}/manifest.yaml` gain the block.
+   Green: `go test ./internal/pkgmgr/...` + `go run ./scripts/lint-package-standard.go`.
+3. **Inc 3 (mechanical).** Reserved-RLS-name refusal for plain `Columns`. Green: `go test ./internal/pkgmgr/...`.
+4. Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   all `scripts/lint-*.go`, `go test ./internal/pkgmgr/... ./internal/refractor/... ./internal/bootstrap/...`.
+
+### 30.5 In-scope gotchas
+
+- **The committed shape is the round-tripped one** (§29.5's swallowed-bug warning still binds): `committed`
+  comes back from `getCommitted` as `[]any` of `map[string]any`; only the freshly-built doc is
+  `[]map[string]any`. Reuse `secureColumnsOf`/`stringsOf`, never a fresh type assertion.
+- **Match by `column` name, never slice index** (§29.5) — and resolve a declared retirement by
+  `LensID(def.Name, decl.Lens)`, never by the canonicalName string against a key.
+- **A committed secure column always has non-empty `HolderTypes`** (`bucketguard.go:161` refuses an empty
+  one at install), but the guard must still fire on an empty list: `mayHoldHolderType` reads empty as
+  UNKNOWN⇒yes, so dropping such an entry loses coverage too. Fail-closed on the entry's existence.
+- **Uninstall is a separate verb, deliberately out of scope** — see 30.7.
+- Dossier (pkgmgr): *two writers of one deterministic key*; *an injected dependency in a nil-able field
+  silently disables the gate it feeds* (the enforcer must be called from the real entry points, and a
+  fixture that builds mutations by hand must not be the only coverage); *a refusal's stated remedy must not
+  be a move that defeats the gate* (the error names the declaration, not "drop the column from the
+  manifest"); *a security-plane skip guard keyed on tombstone-state alone silently widens past its scope*.
+- Standing checklist: #3 (each refusal proven by a positive vector — a declared retirement that proceeds),
+  #4 (removal needs a transport AND an observer — the counter on `UpgradeResult` is the observer),
+  #6 (precedent may carry debt — `widenSecureColumnsForUpdate`'s `!ok` skip *is* the debt being closed).
+
+### 30.6 Adjacent finds
+
+- **`Uninstall` erases the same history** (`installer.go:1286-1300` excludes only the retention-class
+  holder from the tombstone set; a lens `.spec` is tombstoned, so the oracle loses it while the target
+  store's ciphertext stands). Absorbed into this run's batch as its own unit, not filed.
+
+### 30.7 Non-goals (the drift fence)
+
+- **No read-side change.** `mayHoldHolderType`, `declaredLensIDs` and `holderTypeRebuildTargets` are
+  untouched: a write path that cannot erase history makes all three correct by construction (§29.1's
+  argument, re-applied).
+- **No sweep/re-key verb.** A declared retirement is an author's attestation, exactly as
+  `RetireCancelsOpenTasks` is — the platform does not verify that the ciphertext is gone. §29.6's
+  "confirmed swept, now safe to shrink" verb stays future work; this fire gives it the declaration point
+  it would hang off.
+- **`Install` (first install) is unreachable** — no committed history exists, so the guard cannot fire.

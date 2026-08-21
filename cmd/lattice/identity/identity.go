@@ -44,6 +44,7 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd.AddCommand(newProvisionCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newClaimCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newReconcileBindingsCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newSweepCredentialResidueCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 

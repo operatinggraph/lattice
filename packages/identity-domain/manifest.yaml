@@ -1,12 +1,17 @@
 name: identity-domain
-version: 0.20.5
+version: 0.20.6
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
   RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
-  CompleteCredentialLink, UnlinkCredential, ReconcileCredentialBinding, and
+  CompleteCredentialLink, UnlinkCredential, ReconcileCredentialBinding,
   UnbindIdentityCredentials — the erasure plane's credential sweep, submitted
-  only by the orchestration service actors. Depends on rbac-domain. The
+  only by the orchestration service actors — and
+  TombstoneOrphanedCredentialIndex, the operator-run cleanup for a
+  credentialindex vertex whose boundTo link is gone and one of whose two
+  endpoints has been erased, where no boundTo walk can reach it — covering
+  both directions of that residue (the erased subject as the row's owner, and
+  the erased subject as the row's credential). Depends on rbac-domain. The
   consumer, frontOfHouse, backOfHouse, provider, and identityProvisioner
   roles are declared in the package definition and created in the single
   install batch routed through the Processor (Story 1.5.5).
@@ -47,6 +52,8 @@ declares:
     - canonicalName: gateway.actorUnrevoked
       class: meta.ddl.eventType
     - canonicalName: unbindIdentityCredentials
+      class: meta.ddl.vertexType
+    - canonicalName: tombstoneOrphanedCredentialIndex
       class: meta.ddl.vertexType
   lenses:
     - canonicalName: identityIndexHint
@@ -99,6 +106,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: ReconcileCredentialBinding
+      scope: any
+      grantsTo: [operator]
+    - operationType: TombstoneOrphanedCredentialIndex
       scope: any
       grantsTo: [operator]
     - operationType: RevokeActor
