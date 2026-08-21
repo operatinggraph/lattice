@@ -339,3 +339,112 @@ op-meta list moved). Adjudication highlights, each verified against the diff:
 - **The sweep exposed the gate's unquoted-object-key blind spot** (`SignLease:` as a JS map key
   was invisible to the quoted-literal scan). The gate now carries a keyed-op detector; `SignLease`
   is baselined and owed by Inc 1 (§7).
+
+## 11. Inc 1 fire brief (Vertical Steward, committed before code)
+
+**Scope sentence (verbatim from §7):** *opCatalog lens + bucket const + cypher test + loftspace
+`/api/op-catalog` proxy + the task-completion modal swaps its descriptor source from `COMPLETIONS`
+to catalog rows for the five expressible entries (`SignLease`, `RecordIdentityPII`,
+`SetRenewalTerms`, `CancelRenewal`, `ResolveWorkOrder`), deleting their map entries and the
+`app.js:76` lament. This increment also ships `SignLease`'s full descriptor in lease-signing …
+rewrites the Standard §6 "Bare metas stay bare — SignLease…" clause in place. `SignRenewal`/
+`VerifyGuarantor` remain a two-entry residue map … deleted by Inc 3's loftspace fire.*
+
+**Pre-scout finding that bounds the fire (verified live, changes the increment's actual size):**
+four of the five migrating entries **already carry a full `OpMetaSpec` descriptor**, independently
+of this fire — `RecordIdentityPII` (`packages/identity-domain/opmetas.go:291-…`, task="task" voice
+mislabel — actually AuthContext "task" per its own §10.7 task grant), `SetRenewalTerms` and
+`CancelRenewal` (`packages/lease-signing/permissions.go:476-506`, `:550-576`, both
+`AuthContext:"self"`, `TargetField/TargetType:"renewalKey"/"renewal"`), and `ResolveWorkOrder`
+(`packages/maintenance-domain/permissions.go:64-93`, `AuthContext:"task"`,
+`TargetField/TargetType:"workOrderKey"/"workorder"`) — all shipped by the Inc-0 sweep or an earlier
+fire, not by this one. **The only net-new descriptor this fire ships is `SignLease`'s** (currently
+bare — `packages/lease-signing/permissions.go:651`, just `{OperationType: "SignLease"}`, no
+Presentation/InputSchema/Dispatch). `ResolveWorkOrder`'s shape above (task-voice, `AuthContext:
+"task"`, single required target field, no other properties) is the precedent to mirror for
+`SignLease`'s "single confirm" descriptor — `Dispatch.Class` must be `"leaseapp"` (COMPLETIONS'
+own `klass`, `cmd/loftspace-app/web/app.js` COMPLETIONS.SignLease), `TargetField:"leaseAppKey"`,
+`TargetType:"leaseapp"`, `Reads:["{payload.leaseAppKey}"]`, no optional reads, `InputSchema`
+carrying only `leaseAppKey` (required), empty `FieldDescriptions` beyond it.
+
+**Verified touch-list (file:line, live):**
+
+1. `packages/edge-manifest/lenses.go` — append `opCatalog` as a NEW plain (`Adapter:"nats-kv"`)
+   `LensSpec` entry in the `Lenses()` slice (currently 15 Personal/`nats-subject` entries, lines
+   68-388; `LensSpec` supports both shapes in one struct per `internal/pkgmgr/definition.go:1030+`).
+   Mirror `packages/rbac-domain/lenses.go:65-72` (`capabilityRoleIndex`) for the plain-lens
+   shape/`IntoKey:["operationType"]`, but do **NOT** copy `edgeCatalogTail`'s `WITH op, role` opener
+   (`packages/edge-manifest/lenses.go:588`) — `internal/refractor/ruleengine/full/anchor_delete.go:179-182`
+   (`anchorProjectionShape`) type-asserts every clause and refuses wholesale on any `*With` node,
+   which silently disables both the tombstone-delete AND the retraction pin. Copy
+   `edgeCatalogTail`'s RETURN columns only (`lenses.go:596-613`, incl. `op.sensitive.data.value` at
+   `:613`), plus the two it omits per §2.1: `grantedToRoles` via `OPTIONAL MATCH
+   (op)<-[:forOperation]-(perm:permission)-[:grantedBy]->(role:role)` +
+   `collect(DISTINCT role.canonicalName...)` — mirror `packages/rbac-domain/lenses.go:109-115`'s
+   `collect(DISTINCT …)` shape, OPTIONAL is load-bearing (§2.1 B2: a required MATCH silently
+   vanishes zero-permission ops). Add `OpCatalogBucket = "op-catalog"` following the
+   `<Domain><Concept>Bucket` / kebab-case convention (`packages/clinic-domain/lenses.go:5-18`).
+2. `packages/edge-manifest/lens_cypher_test.go` (new file, or append if one exists) — mirror
+   `packages/rbac-domain/lens_cypher_test.go`'s harness shape for the seeded-topology proof, and
+   `internal/refractor/ruleengine/full/anchor_delete_test.go` for the tombstone/`WITH`-rejection
+   mechanics. Pins (§6): full-vocabulary row; bare-meta row (null schema); role-granted op carries
+   role names; a zero-permission op still projects (the OPTIONAL, mutate to required MATCH and
+   assert the row vanishes); **a tombstoned op-meta's row is DELETED** (mutate by inserting a
+   `WITH` clause and assert the retraction assertion REDS — the `anchorProjectionShape` trap);
+   second mutation: drop the `operationType <> null` filter and assert non-op metas leak. Every
+   mutation must be shown to fail before being reverted. Plus the pilot end-to-end: loftspace task
+   modal renders `SetRenewalTerms` from catalog data.
+3. `packages/lease-signing/permissions.go:651` — replace the bare `{OperationType: "SignLease"}`
+   with a full `OpMetaSpec` per the precedent above; bump `packages/lease-signing/package.go:85`
+   (`Version: "0.31.0"` → next patch) per the standing package-edit-needs-version-bump rule.
+4. `_bmad-output/implementation-artifacts/vertical-package-standard.md` §6 (lines ~208-212, "Bare
+   metas stay bare") — remove `SignLease` from the bare-list prose and add a parenthetical exactly
+   mirroring the existing `RecordIdentityPII` one two sentences later ("`SignLease` left this list
+   in Inc 1 of the staff-descriptor-rendering fire: lease-signing now declares its descriptor").
+5. `scripts/lint-app-op-descriptors.go:158-163` (`appOpDebt`) — **delete the `"SignLease": …`
+   entry**: the gate fails an op that stops violating while still baselined (`:146-157` doc
+   comment), so this line MUST come out in the same commit as #3, or CI reds.
+6. `cmd/loftspace-app/listings.go` (mirror its `handleListings`, lines ~135-163: `KVListKeys` →
+   per-key `KVGet` → JSON) — add `handleOpCatalog` reading `OpCatalogBucket`, keyed by
+   `operationType`; register `inner.HandleFunc("/api/op-catalog", s.handleOpCatalog)` in
+   `cmd/loftspace-app/server.go`'s `registerRoutes` (~line 75, alongside the other `/api/*` lines).
+   No `/shared/` mount yet — that is Inc 2.
+7. `cmd/loftspace-app/web/app.js` — delete the lament comment (~line 78-84) and the FIVE migrating
+   `COMPLETIONS` entries (`SignLease`, `RecordIdentityPII`, `SetRenewalTerms`, `CancelRenewal`,
+   `ResolveWorkOrder` — full current map at lines ~85-184, already captured verbatim by the scout
+   report above), replacing the completion-modal code path (`openComplete` ~2074-2104,
+   `submitComplete` ~2111-2150, `resolveTargetKey`/`selfAnchorKey` ~2261-2264/2642-2669) for those
+   five operationTypes with rendering driven by the fetched `/api/op-catalog` row: schema-driven
+   fields from `InputSchema`/`FieldDescriptions`/`Presentation`, envelope assembly from
+   `Dispatch.{Class,AuthContext,TargetField,TargetType,Reads,OptionalReads}` with `{payload.X}` /
+   `{me.*}` template substitution — reuse the SHIPPED `payload[desc.targetField] = target` write-
+   before-substitution order (line 2124) and the wholeKey-drop rule already present in
+   `submitComplete`. `SignRenewal`/`VerifyGuarantor` (`landlordLeg`/`extraFromRenewal` dispatch,
+   lines ~2153-2184) are explicitly OUT of scope — they need the `{context.<field>}` template
+   (§2.2), not built until Inc 2/3; leave their two `COMPLETIONS` entries + dispatch code
+   untouched. **No shared `internal/descriptorform` module yet** (Inc 2) — this is a
+   loftspace-local, inline consumer of the catalog rows; do not build the cross-app module early.
+   **Anti-fallback rule is normative even at this small scale** (§2.2): if `Dispatch.TargetType`
+   cannot be resolved from context, the op must not be offered — never substitute the actor's own
+   key.
+8. Docs build-to spec: `docs/components/edge-manifest.md` gains the `opCatalog` lens (§8
+   reconciliation) — add it to the lens roster next to the existing 15 Personal lenses, one
+   paragraph, per this file's own descriptive style.
+
+**Non-goals (explicit, do not build):** the shared `internal/descriptorform` module (Inc 2); the
+`{context.<field>}` template (Inc 2); `SignRenewal`/`VerifyGuarantor` migration (Inc 3); the N-way
+`lint-facet-renderer-drift` restructure (Inc 2); the per-app ceiling ratchet gate (Inc 4); any other
+vertical app's migration (Inc 3, clinic/wellness/café).
+
+**Review depth:** Inc 1 is posture-changing (new read surface off Core-KV `vtx.meta.>`, first plain
+lens in edge-manifest, new anchor-tombstone retraction pin) — full 3-layer adversarial pass before
+admit, per §7.
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-app-op-descriptors.go`,
+`STRICT=1 go run ./scripts/lint-package-standard.go` (if it exists as a gate script — verify),
+`go test ./packages/edge-manifest/... ./packages/lease-signing/... ./cmd/loftspace-app/...`.
+
+**Verify:** headless — `go test`, then `curl localhost:7788/api/op-catalog` against the running
+stack (reuse if up) asserting the JSON shape and that `SignLease`/`SetRenewalTerms`/etc. rows carry
+schema + dispatch; in-browser only if a writable stack is up, one tab, closed when done.
