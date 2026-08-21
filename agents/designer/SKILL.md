@@ -837,6 +837,35 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   the moment two packages implement the same op (three did), so the census would have gone green while
   the guard refused a shipped install.
 
+- **This codebase's own comments are sometimes AFFIRMATIVELY WRONG about a security property — and quoting
+  one launders the error into your design with a citation that reads as verified.** The ledger rule ("cite the
+  code that does the thing, never the comment") and the mirrors-X reflex both treat an in-repo comment as
+  *under*-consulted. This is the opposite failure and it is worse, because the comment is institutional
+  knowledge: it was written by someone who thought hard, it is phrased as settled, and a design that repeats
+  it inherits its blast radius. (Trialed 2026-08-21, app-tier read scope: `internal/natsperm/matrix.go:180-192`
+  states `$JS.ACK.>` is "consumer protocol plumbing … not a data-plane privilege". I made it a grounding-ledger
+  row. It is false — an ack payload prefixed `+NXT` dispatches a next-message request delivering to the
+  caller's reply subject, publisher unchecked (`server/consumer.go:2736-2738`), so the grant READS any pull
+  consumer on any stream. A whole matrix row shipped on that sentence, an existing board row was mis-scoped by
+  it as mere ack-forge, and my design would have preserved the primitive in the tier it was confining. The
+  same fire's other instance: "clinical PHI lives in Protected/Postgres, not NATS-KV" — a true-sounding mental
+  model that a `nats-kv` lens projecting a DDL-declared-non-sensitive "chief complaint" falsifies.) **The
+  check:** any comment you are about to quote *as a security guarantee* gets the same treatment as a vendor
+  claim — open the code that decides, enumerate the branches, and if the comment is wrong say so in the design
+  and fix it in the same fire. A citation to a comment is an unopened mechanism wearing a source.
+
+- **When you add a field beside existing ones, read the ADJACENT fields' comments for the fail-open lesson
+  someone already paid for — it is usually within twenty lines.** The mirrors-X reflex sends you to the
+  precedent you *named*; this one is about the code you are physically editing and did not think of as a
+  precedent at all. (Same fire: I added a `SubscribeAllow`-style declaration and specified an "empty list =
+  scope nothing" semantics. An empty subscribe allow-list renders `allow: []`, which the server parses to a
+  nil sublist and `canSubscribe` short-circuits to *allowed* — subscribe-everything. `matrix.go:541-545`,
+  **twelve lines below the field I was extending**, documents that exact fail-open for
+  `WebsocketAllowedOrigins`: "NATS treats an empty allowed_origins as allow-any-origin, so an empty list is
+  fail-open." The lesson was in the file, in the same struct's neighbourhood, and the draft shipped without
+  it.) The tell: you are introducing a list/set/map whose *empty* value has to mean something. Write down what
+  empty renders to, and go read what the consumer does with it.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
