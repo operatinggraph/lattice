@@ -123,3 +123,26 @@ finalization record → `shredStatus` projection) is proven by the Vault Fire 5b
 **No independent heartbeat.** Privacy-worker's activity is folded into the `health.vault` heartbeat's
 `keyshredded_handled_total` counter (Contract #5 §5.4) rather than a distinct `health.privacy-worker.*`
 group — it has no standalone Contract #5 baseline of its own.
+
+---
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A spine asserted only by its declared shape is not asserted at all** — every core package carried a
+  `verify-package-*` gate except the erasure plane, because exercising step 1 destroys a key and so needs
+  a subject minted to be destroyed; the cost of not doing it was that no one knew whether the four steps
+  ran. Minted: privacy-base verification tooling. Check: `verify-erasure-ceremony` drives the spine on a
+  disposable subject, and `verify-package-privacy-base` pins the Loom pattern's step ORDER, not just its
+  presence.
+- **A destructive verb's grant is revocable but not restorable** — uninstalling the consent package
+  tombstones the permission vertex and its `grantedBy` link, and no reinstall path revives either while
+  every install still reports success. Minted: the erasure ceremony's live run (the board row's fix).
+  Check: none yet — assert the projected `cap.roles.*` entry, never the installer's exit code.
+- **A verifying environment's own provisioning gap reads as a product defect** — `provision-readpath`
+  shells through `docker compose`, so a natively-built stack lacks `actor_read_grants` and every shred
+  logs `grant-table revoke failed (privacy-critical, no retry)`. Minted: the same run. Check: establish
+  which target creates a missing relation before filing the error that names it.

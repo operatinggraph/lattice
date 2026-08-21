@@ -3703,3 +3703,43 @@ it had not been done, and why the one-shot mints its own rather than reusing a f
   finds the installed shape wrong, that is a finding to fix as its own unit, not a spec to relax.
 - **No Vault backend change.** The one-shot destroys a disposable subject's key through the normal path.
 - **No new `make down`/teardown semantics** — the one-shot leaves the stack usable.
+
+### Built shape — closed (build note, 2026-08-21, one fire)
+
+All three increments shipped. `verify-package-privacy-base` (140 assertions) asserts the installed
+shape and runs in CI's `stack-gates` job; `verify-erasure-ceremony` (35 assertions) drives the spine
+live and is **deliberately not wired into CI** — a green run is ~1s, but each stuck wait costs its full
+convergence ceiling, so a red run is slow by construction, and the ceremony is destructive by nature.
+Both were proven on a stack rebuilt from scratch, including the first-ever install of
+`privacy-operator-grant`.
+
+**Two forks resolved here, not deferred.**
+
+*The ceremony drives the four ops directly rather than through Loom.* The pattern's declared shape —
+four `systemOp` steps in order over `subjectType: identity` — is asserted statically by
+`verify-package-privacy-base`, and proven to bite by inverting the expected order before landing. The
+`stack-gates` job runs no orchestration tier, so routing the ceremony through Loom would mean running
+`loom` + `weaver` and absorbing async step-advance convergence without covering any more of the ops
+themselves. The split is therefore: the package gate owns the spine's *shape*, the ceremony owns its
+*behaviour*. **What this leaves genuinely uncovered** is the pattern's own machinery — its guards, its
+step-advance-on-domain-event correlation, and §5.2/§5.3's `StepSpec.Reads` question. Nothing runs
+`identityErasure` as a pattern yet; that is a real gap, named here so a later fire does not mistake
+"the four steps pass" for "the pattern works".
+
+*Step 1 is reached through `privacy-operator-grant`, never a self-minted grant.* `ShredIdentityKey`
+ships no grant from privacy-base because erasure is a deployment's consent decision, and the sanctioned
+way to confer it is that separate package. A harness minting itself the permission would have defeated
+the boundary rather than tested it; on a stack without the consent package, step 1 is correctly denied.
+
+**What the first live run established.** The four steps work end to end, in order, first attempt — no
+op rejected, no payload or `contextHint` surprise. The async half's first leg genuinely ran: the
+privacy-worker consumed `privacy.keyShredded`, called `Vault.ShredKey`, and committed
+`RecordShredFinalization{vaultKeyDestroyed}`. The key destruction is irreversible on a real stack, so
+the disposable-subject rule is load-bearing rather than ceremonial. Step 4's one-class-per-commit design
+is observable exactly as §5.4 derives it: pass 1 `indexes`, pass 2 `duplicateOf`, pass 3 `purged=0`.
+
+**Observed but NOT a spine defect:** `refractor keyshredded: grant-table revoke failed
+(privacy-critical, no retry) — relation "actor_read_grants" does not exist` fires once per shred on a
+stack that never ran `provision-readpath` (which creates that table, and which shells through
+`docker compose` and so could not run in this container). It is a provisioning gap in the verifying
+environment, not a finding, and is recorded here so the next reader of these logs does not re-diagnose it.
