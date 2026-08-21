@@ -18,7 +18,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, vet, golangci, conventions-lint     (no Docker)
-#   stack-gates        — make up → verify-kernel → 10× verify-package →
+#   stack-gates        — make up → verify-kernel → 12× verify-package →
 #                         hello-lattice → health-completeness        (Docker)
 #   convergence        — lease-convergence, object-gc, augur-convergence,
 #                         unrouted-convergence, crypto-shred,
@@ -235,6 +235,9 @@ jobs:
 
       - name: Install + verify identity-hygiene package
         run: make verify-package-identity-hygiene
+
+      - name: Install + verify privacy-base package (co-installs rbac/identity)
+        run: make verify-package-privacy-base
 
       - name: Install + verify objects-base package
         run: make verify-package-objects-base
