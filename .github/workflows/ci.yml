@@ -460,7 +460,8 @@ jobs:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m
-          ./cmd/loftspace-app/... ./internal/bridge/... ./internal/controlauth/...
+          ./cmd/loftspace-app/... ./cmd/model-runner/... ./internal/bridge/...
+          ./internal/controlauth/... ./internal/modelrunner/...
           ./internal/objectcrypto/... ./internal/privacyworker/...
           ./internal/processor/... ./packages/cafe-ledger/...
           ./packages/capability-author/... ./packages/demo-operator/...
@@ -634,7 +635,8 @@ jobs:
             ./packages/orchestration-base/... ./packages/privacy-operator-grant/... \
             ./packages/rbac-domain/... ./packages/semantic-contracts/... \
             ./packages/wellness-reminders/... \
-            ./cmd/loftspace-app/... ./internal/bridge/... ./internal/controlauth/... \
+            ./cmd/loftspace-app/... ./cmd/model-runner/... ./internal/bridge/... \
+            ./internal/controlauth/... ./internal/modelrunner/... \
             ./internal/objectcrypto/... ./internal/privacyworker/... \
             ./internal/processor/... ./packages/cafe-ledger/... \
             ./packages/capability-author/... ./packages/demo-operator/... \
