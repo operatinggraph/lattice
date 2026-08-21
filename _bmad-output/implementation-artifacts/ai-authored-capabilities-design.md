@@ -570,11 +570,13 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   package's vertex (no install runs, but the graph records an AI-authored artifact as applied into
   platform-trust machinery). Fixed by exporting `pkgmgr.PlatformProtectedPackage` and gating both handlers on
   it independently, mutation-tested. Also closed: the deny-list lookup normalizes case/whitespace now (was
-  exact-byte-match, so `"Rbac-Domain"` / `" rbac-domain "` slipped it). **Deliberately not fixed here** (filed
-  to `lattice.md` as its own row — pre-existing, spans every human package install too, not specific to
-  AI-authored capabilities): `packageName` is still compared byte-exact in `IsPackageInstalled`, and the
-  Starlark `proposal_string` helper (`packages/capability-author/ddls.go`) doesn't `.strip()` the way its
-  `required_string` sibling does.
+  exact-byte-match, so `"Rbac-Domain"` / `" rbac-domain "` slipped it). Filed separately and **since closed** (`833a7427`): the byte-exact `packageName`
+  comparison in `IsPackageInstalled` stays byte-exact on purpose — a hit there is a destructive resolution
+  target, so folding it would let an `upgradeExisting` proposal diff-apply into a differently-spelled
+  manifest — and a fold-equal near-miss is now a loud refusal instead of silent absence. Only
+  `target.packageName` is trimmed, via its own `proposal_package_name` helper: trimming the shared
+  `proposal_string` would have flipped the approve-time `validation.state == "valid"` re-validation and
+  `target.mode` open to a stray newline.
 - **Fire 3 — Declarative orchestration kinds.** The **weaverTarget** + **loomPattern** kinds in
   the materializer (`validateWeaverTargets`/`validateGapAction`/`validateLoomPatterns`, reused verbatim — plus
   one check *stronger* than the hand-authored path: a loomPattern step's `Guard` is run through the shared
