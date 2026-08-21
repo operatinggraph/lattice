@@ -49,6 +49,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -341,10 +342,32 @@ func main() {
 	//    (internal/pkgmgr/build.go writes only a `.spec` aspect for each), so
 	//    resolve by scanning root vtx.meta.<NanoID> vertices by class, then
 	//    reading the identifier out of the aspect that class actually writes.
+	//
+	//    A tombstone is a KV entry with isDeleted=true, not a removed key
+	//    (internal/processor/step8_commit.go seeds a tombstone's body from the
+	//    stored document, so class and data survive verbatim on a deleted
+	//    root or spec); both the root and its .spec aspect are checked and
+	//    skipped independently. Keys are visited in SORTED order and every
+	//    live match is collected before any assertion runs, so the result
+	//    does not depend on Go's randomized map iteration order, and a
+	//    package rename or reinstall that leaves more than one live match
+	//    for the same targetId/patternId is reported as an explicit
+	//    ambiguity rather than silently resolved by whichever match the
+	//    scan happened to see last.
 	// -------------------------------------------------------------------------
-	foundTarget, foundPattern := false, false
-	var patternSteps []any
+	type erasureMetaMatch struct {
+		key  string
+		data map[string]any
+	}
+	var targetMatches, patternMatches []erasureMetaMatch
+
+	sortedKeys := make([]string, 0, len(allKeys))
 	for key := range allKeys {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.Strings(sortedKeys)
+
+	for _, key := range sortedKeys {
 		if !strings.HasPrefix(key, "vtx.meta.") || strings.Count(key, ".") != 2 {
 			continue
 		}
@@ -352,85 +375,106 @@ func main() {
 		if err != nil {
 			continue
 		}
-		switch cls, _ := env["class"].(string); cls {
+		if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+			continue
+		}
+		cls, _ := env["class"].(string)
+		if cls != "meta.weaverTarget" && cls != "meta.loomPattern" {
+			continue
+		}
+		specEnv, err := pkgverify.GetEnvelope(ctx, coreKV, key+".spec")
+		if err != nil {
+			continue
+		}
+		if isDeleted, _ := specEnv["isDeleted"].(bool); isDeleted {
+			continue
+		}
+		sd, _ := specEnv["data"].(map[string]any)
+		switch cls {
 		case "meta.weaverTarget":
-			specEnv, err := pkgverify.GetEnvelope(ctx, coreKV, key+".spec")
-			if err != nil {
-				continue
-			}
-			sd, _ := specEnv["data"].(map[string]any)
-			if tid, _ := sd["targetId"].(string); tid != erasureTargetID {
-				continue
-			}
-			foundTarget = true
-			ok(fmt.Sprintf("%s meta.weaverTarget exists (targetId in .spec): %s", erasureTargetID, key))
-
-			// LensRef installs resolved to the lens's own NanoID
-			// (internal/pkgmgr/build.go's resolveLensRef), not the
-			// canonicalName it was authored as.
-			wantLensID := lensIDByCanonical[erasureLensRef]
-			if lensRef, _ := sd["lensRef"].(string); lensRef != wantLensID {
-				fail(key+".spec lensRef", fmt.Sprintf("got %q want %q (%s's NanoID)", lensRef, wantLensID, erasureLensRef))
-			} else {
-				ok(key + ".spec lensRef=" + wantLensID + " (" + erasureLensRef + ")")
-			}
-
-			gaps, _ := sd["gaps"].(map[string]any)
-			for _, gc := range privacyErasureGaps {
-				gap, gapFound := gaps[gc.column].(map[string]any)
-				if !gapFound {
-					fail(key+".spec.gaps."+gc.column, "gap not declared")
-					continue
-				}
-				if action, _ := gap["action"].(string); action != gc.action {
-					fail(key+".spec.gaps."+gc.column+".action", fmt.Sprintf("got %q want %q", action, gc.action))
-					continue
-				}
-				if gc.operation == "" {
-					ok(key + ".spec.gaps." + gc.column + ".action=" + gc.action)
-					continue
-				}
-				if opType, _ := gap["operation"].(string); opType != gc.operation {
-					fail(key+".spec.gaps."+gc.column+".operation", fmt.Sprintf("got %q want %q", opType, gc.operation))
-				} else {
-					ok(fmt.Sprintf("%s.spec.gaps.%s = directOp %s", key, gc.column, gc.operation))
-				}
+			if tid, _ := sd["targetId"].(string); tid == erasureTargetID {
+				targetMatches = append(targetMatches, erasureMetaMatch{key: key, data: sd})
 			}
 		case "meta.loomPattern":
-			specEnv, err := pkgverify.GetEnvelope(ctx, coreKV, key+".spec")
-			if err != nil {
-				continue
+			if pid, _ := sd["patternId"].(string); pid == erasurePatternID {
+				patternMatches = append(patternMatches, erasureMetaMatch{key: key, data: sd})
 			}
-			sd, _ := specEnv["data"].(map[string]any)
-			if pid, _ := sd["patternId"].(string); pid != erasurePatternID {
-				continue
-			}
-			foundPattern = true
-			ok(fmt.Sprintf("%s meta.loomPattern exists (patternId in .spec): %s", erasurePatternID, key))
-
-			if subjType, _ := sd["subjectType"].(string); subjType != "identity" {
-				fail(key+".spec subjectType", fmt.Sprintf("got %q want %q", subjType, "identity"))
-			} else {
-				ok(key + ".spec subjectType=identity")
-			}
-
-			steps, _ := sd["steps"].([]any)
-			patternSteps = steps
 		}
 	}
-	if !foundTarget {
-		fail(erasureTargetID+" meta.weaverTarget", "no meta.weaverTarget with targetId="+erasureTargetID+" found")
+
+	switch len(targetMatches) {
+	case 0:
+		fail(erasureTargetID+" meta.weaverTarget", "no live meta.weaverTarget with targetId="+erasureTargetID+" found")
+	case 1:
+		key, sd := targetMatches[0].key, targetMatches[0].data
+		ok(fmt.Sprintf("%s meta.weaverTarget exists (targetId in .spec): %s", erasureTargetID, key))
+
+		// LensRef installs resolved to the lens's own NanoID
+		// (internal/pkgmgr/build.go's resolveLensRef), not the
+		// canonicalName it was authored as. An empty wantLensID means the
+		// lens itself was not found above (section 2 already failed that);
+		// treat it as a hard failure here too rather than letting two
+		// independently-missing reads compare equal.
+		wantLensID := lensIDByCanonical[erasureLensRef]
+		lensRef, _ := sd["lensRef"].(string)
+		if wantLensID == "" {
+			fail(key+".spec lensRef", fmt.Sprintf("cannot verify — %s lens NanoID unknown (see section 2 failure above); got lensRef=%q", erasureLensRef, lensRef))
+		} else if lensRef != wantLensID {
+			fail(key+".spec lensRef", fmt.Sprintf("got %q want %q (%s's NanoID)", lensRef, wantLensID, erasureLensRef))
+		} else {
+			ok(key + ".spec lensRef=" + wantLensID + " (" + erasureLensRef + ")")
+		}
+
+		gaps, _ := sd["gaps"].(map[string]any)
+		for _, gc := range privacyErasureGaps {
+			gap, gapFound := gaps[gc.column].(map[string]any)
+			if !gapFound {
+				fail(key+".spec.gaps."+gc.column, "gap not declared")
+				continue
+			}
+			if action, _ := gap["action"].(string); action != gc.action {
+				fail(key+".spec.gaps."+gc.column+".action", fmt.Sprintf("got %q want %q", action, gc.action))
+				continue
+			}
+			if gc.operation == "" {
+				ok(key + ".spec.gaps." + gc.column + ".action=" + gc.action)
+				continue
+			}
+			if opType, _ := gap["operation"].(string); opType != gc.operation {
+				fail(key+".spec.gaps."+gc.column+".operation", fmt.Sprintf("got %q want %q", opType, gc.operation))
+			} else {
+				ok(fmt.Sprintf("%s.spec.gaps.%s = directOp %s", key, gc.column, gc.operation))
+			}
+		}
+	default:
+		keys := make([]string, len(targetMatches))
+		for i, m := range targetMatches {
+			keys[i] = m.key
+		}
+		fail(erasureTargetID+" meta.weaverTarget", fmt.Sprintf("%d live matches found (ambiguous, want exactly 1): %v", len(targetMatches), keys))
 	}
-	if !foundPattern {
-		fail(erasurePatternID+" meta.loomPattern", "no meta.loomPattern with patternId="+erasurePatternID+" found")
-	} else {
+
+	switch len(patternMatches) {
+	case 0:
+		fail(erasurePatternID+" meta.loomPattern", "no live meta.loomPattern with patternId="+erasurePatternID+" found")
+	case 1:
+		key, sd := patternMatches[0].key, patternMatches[0].data
+		ok(fmt.Sprintf("%s meta.loomPattern exists (patternId in .spec): %s", erasurePatternID, key))
+
+		if subjType, _ := sd["subjectType"].(string); subjType != "identity" {
+			fail(key+".spec subjectType", fmt.Sprintf("got %q want %q", subjType, "identity"))
+		} else {
+			ok(key + ".spec subjectType=identity")
+		}
+
 		// THE LOAD-BEARING ASSERTION: the pattern's steps, in order, must be
 		// exactly the four-op erasure spine. A silently reordered or
 		// truncated spine leaves an installed stack that looks healthy while
 		// an erasure no longer runs to completion.
-		gotOps := make([]string, 0, len(patternSteps))
-		gotKinds := make([]string, 0, len(patternSteps))
-		for _, s := range patternSteps {
+		steps, _ := sd["steps"].([]any)
+		gotOps := make([]string, 0, len(steps))
+		gotKinds := make([]string, 0, len(steps))
+		for _, s := range steps {
 			step, _ := s.(map[string]any)
 			op, _ := step["operation"].(string)
 			kind, _ := step["kind"].(string)
@@ -455,13 +499,31 @@ func main() {
 				ok(fmt.Sprintf("identityErasure pattern steps IN ORDER: %v", erasurePatternStepOrder))
 			}
 		}
+	default:
+		keys := make([]string, len(patternMatches))
+		for i, m := range patternMatches {
+			keys[i] = m.key
+		}
+		fail(erasurePatternID+" meta.loomPattern", fmt.Sprintf("%d live matches found (ambiguous, want exactly 1): %v", len(patternMatches), keys))
 	}
 
 	// -------------------------------------------------------------------------
 	// 4. 5 permission vertices + grantedBy link to operator.
+	//
+	//    Matched on operationType AND declaredBy==privacy-base
+	//    (internal/pkgmgr/build.go writes declaredBy: def.Name into every
+	//    permission vertex's envelope). Permissions carry no cross-package
+	//    uniqueness gate — a sibling package or a runtime CreatePermission
+	//    can grant the same operationType to operator — so matching on
+	//    operationType alone would let this package's OWN grant go missing
+	//    while a look-alike from elsewhere keeps the gate green. Candidates
+	//    are collected (not last-wins over map order) so more than one live
+	//    privacy-base-declared vertex for the same op — which should never
+	//    happen, since install ids are deterministic per (package,
+	//    operationType) — is reported as an explicit ambiguity.
 	// -------------------------------------------------------------------------
-	permIDByOp := map[string]string{}
-	for key := range allKeys {
+	permMatchesByOp := map[string][]string{}
+	for _, key := range sortedKeys {
 		if !strings.HasPrefix(key, "vtx.permission.") {
 			continue
 		}
@@ -477,31 +539,40 @@ func main() {
 			continue
 		}
 		data, _ := env["data"].(map[string]any)
+		if declaredBy, _ := data["declaredBy"].(string); declaredBy != privacyPackageName {
+			continue
+		}
 		opType, _ := data["operationType"].(string)
 		for _, expected := range privacyExpectedOps {
 			if opType == expected {
-				permIDByOp[opType] = parts[2]
+				permMatchesByOp[opType] = append(permMatchesByOp[opType], parts[2])
 				break
 			}
 		}
 	}
 
 	for _, op := range privacyExpectedOps {
-		permID, found := permIDByOp[op]
-		if !found {
-			fail("vtx.permission.*[operationType="+op+"]", "not found in Core KV")
+		matches := permMatchesByOp[op]
+		if len(matches) == 0 {
+			fail("vtx.permission.*[operationType="+op+" declaredBy="+privacyPackageName+"]", "not found in Core KV")
 			continue
 		}
+		if len(matches) > 1 {
+			fail("vtx.permission.*[operationType="+op+" declaredBy="+privacyPackageName+"]", fmt.Sprintf("%d live matches found (ambiguous, want exactly 1): %v", len(matches), matches))
+			continue
+		}
+		permID := matches[0]
 		permKey := "vtx.permission." + permID
-		ok(fmt.Sprintf("%s operationType=%s", permKey, op))
 
 		env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey)
-		if err == nil {
+		if err != nil {
+			fail(permKey+" scope", fmt.Sprintf("cannot read: %v", err))
+		} else {
 			data, _ := env["data"].(map[string]any)
 			if scope, _ := data["scope"].(string); scope != "any" {
 				fail(permKey+" scope", fmt.Sprintf("got %q want %q", scope, "any"))
 			} else {
-				ok(permKey + " scope=any")
+				ok(permKey + " operationType=" + op + " declaredBy=" + privacyPackageName + " scope=any")
 			}
 		}
 
@@ -528,8 +599,7 @@ func main() {
 	if err != nil || pkgKey == "" {
 		fail("privacy-base package manifest", fmt.Sprintf("vtx.package.*.manifest[name=%q] not found: %v", privacyPackageName, err))
 	} else {
-		ok(fmt.Sprintf("package vertex exists: %s", pkgKey))
-		ok(fmt.Sprintf("package manifest exists: %s", pkgManifestKey))
+		ok(fmt.Sprintf("package vertex + manifest exist: %s / %s", pkgKey, pkgManifestKey))
 	}
 	if pkgManifestKey != "" {
 		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pkgManifestKey); err != nil {

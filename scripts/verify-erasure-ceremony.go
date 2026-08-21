@@ -7,8 +7,10 @@
 // verify-package-privacy-base` asserts the INSTALLED SHAPE of the spine (13
 // DDLs, 4 lenses, the weaverTarget, the identityErasure pattern's four ordered
 // steps, the grants) against Core KV, but nothing ever RAN the spine. Step 1
-// destroys a key irreversibly, so exercising it demands a subject minted to be
-// destroyed — which is exactly why it had not been done.
+// ARMS an irreversible destruction — it writes a revocation flag on the
+// envelope, and the privacy-worker's listener then calls Vault.ShredKey off the
+// event that commit emits — so exercising it demands a subject minted to be
+// destroyed, which is exactly why it had not been done.
 //
 // This harness mints that subject, gives it something real to erase, drives
 // all four steps of the identityErasure spine against it in order as ordinary
@@ -41,7 +43,8 @@
 // # What it proves, step by step
 //
 //	step 1 — ShredIdentityKey: subject.piiKey.data.shredded == true with a
-//	  shreddedAt stamp; privacy.keyShredded emitted.
+//	  shreddedAt stamp, and wrappedDEK byte-identical to what the setup
+//	  captured; privacy.keyShredded emitted.
 //	step 2 — SealIdentityForErasure: subject.erasureRequested written, class
 //	  `erasureRequested`, requestedAt set, and shreddedAt equal to the
 //	  envelope's stamp (the cycle discriminator §6 rests on);
@@ -65,6 +68,18 @@
 //
 // And it never writes Core KV. Every state change goes through an operation
 // (P2); Core KV is read-only here, which is sanctioned for platform tooling.
+//
+// # Where the ceremony stops
+//
+// The four synchronous commits are the whole scope. The erasure's ASYNC half —
+// the privacy-worker's Vault.ShredKey and the Refractor's projection nullify,
+// each landing a RecordShredFinalization progress record, and the completion
+// attestation the identityErasureComplete target writes once both have — runs
+// off the events this harness observes but is not asserted here: those are
+// separate components on their own cadence, and a harness that waited on them
+// would be measuring their liveness rather than the spine's four steps. The
+// steps are also submitted directly rather than through the identityErasure
+// Loom pattern, so the pattern's guards and step advance are equally untouched.
 //
 // # Polling
 //
@@ -266,7 +281,7 @@ func main() {
 	boundToLinkKey := "lnk.identity." + deviceID + ".boundTo.identity." + subjectID
 	assertLive(ctx, conn, credentialIndexKey, "credential's credentialindex vertex")
 	assertLive(ctx, conn, boundToLinkKey, "credential's boundTo link to the subject")
-	assertUnshreddedEnvelope(ctx, conn, subjectKey)
+	wrappedDEK := captureLiveEnvelope(ctx, conn, subjectKey)
 
 	// --- Step 1: ShredIdentityKey -------------------------------------------
 
@@ -280,7 +295,7 @@ func main() {
 	assertAccepted(shred.reply, "step 1 ShredIdentityKey")
 
 	shreddedAt := ""
-	waitFor(ctx, "step 1: "+piiKeyKey+" marked shredded", func() (bool, string) {
+	waitFor(ctx, "step 1: "+piiKeyKey+" marked shredded over its intact key material", func() (bool, string) {
 		doc, err := readDoc(ctx, conn, piiKeyKey)
 		if err != nil {
 			return false, err.Error()
@@ -291,6 +306,13 @@ func main() {
 		if shredded, _ := doc.Data["shredded"].(bool); !shredded {
 			return false, fmt.Sprintf("data.shredded = %v", doc.Data["shredded"])
 		}
+		// The shred flips a flag over the existing envelope; it never rewrites
+		// the wrapped key. A changed value means the placeholder branch ran and
+		// destroyed live key material that the erasure plane still needs to
+		// name what was protected.
+		if got, _ := doc.Data["wrappedDEK"].(string); got != wrappedDEK {
+			return false, fmt.Sprintf("data.wrappedDEK changed from %d bytes of key material to %q — the shred must flip shredded=true over the existing envelope, never replace it with an empty-wrappedDEK placeholder", len(wrappedDEK), got)
+		}
 		stamp, _ := doc.Data["shreddedAt"].(string)
 		if stamp == "" {
 			return false, "data.shreddedAt is empty — the seal would have no cycle discriminator"
@@ -298,7 +320,16 @@ func main() {
 		shreddedAt = stamp
 		return true, ""
 	})
-	events.assertEmitted(shred.requestID, "privacy.keyShredded", map[string]string{"identityKey": subjectKey})
+	events.assertEmitted(ctx, shred.requestID, "privacy.keyShredded", map[string]string{"identityKey": subjectKey})
+
+	// Every assertion from here on is stated against the shred's own cycle
+	// discriminator, so without one they would compare "" to "" and report
+	// green inside a red run. There is nothing to seal either: the seal
+	// refuses an identity whose envelope carries no stamp.
+	if shreddedAt == "" {
+		fail("step 1 recorded no shreddedAt stamp — steps 2 through 4 are not attempted, because every assertion they make is anchored on it")
+		report()
+	}
 
 	// --- Step 2: SealIdentityForErasure -------------------------------------
 
@@ -330,7 +361,7 @@ func main() {
 		}
 		return true, ""
 	})
-	events.assertEmitted(seal.requestID, "privacy.erasureRequested", map[string]string{
+	events.assertEmitted(ctx, seal.requestID, "privacy.erasureRequested", map[string]string{
 		"identityKey": subjectKey, "shreddedAt": shreddedAt,
 	})
 
@@ -350,7 +381,7 @@ func main() {
 
 	waitForTombstoned(ctx, conn, credentialIndexKey, "step 3: credentialindex vertex")
 	waitForTombstoned(ctx, conn, boundToLinkKey, "step 3: boundTo link")
-	events.assertEmitted(unbind.requestID, "identity.unbound", map[string]string{
+	events.assertEmitted(ctx, unbind.requestID, "identity.unbound", map[string]string{
 		"identityKey": subjectKey, "actorKey": deviceKey,
 	})
 
@@ -364,10 +395,18 @@ func main() {
 	waitForTombstoned(ctx, conn, nameIndexKey, "step 4: name identityindex vertex")
 	waitForTombstoned(ctx, conn, duplicateOfLinkKey, "step 4: duplicateOf link")
 
+	report()
+}
+
+// report prints the assertion tally and exits with the status it implies. It
+// is the only exit from a run that got as far as making assertions, so a
+// ceremony that stops early still tells the reader how far it got.
+func report() {
 	fmt.Printf("\n%d OK, %d FAIL\n", okCount, failCount)
 	if failCount > 0 {
 		os.Exit(1)
 	}
+	os.Exit(0)
 }
 
 // drivePurgeToConvergence re-submits PurgeIdentityDedupFootprint until a pass
@@ -398,11 +437,23 @@ func drivePurgeToConvergence(ctx context.Context, conn *substrate.Conn, events *
 			fail("step 4 pass %d: no privacy.dedupFootprintSwept event for requestId %s", pass, purge.requestID)
 			return
 		}
-		purged := intField(ev.Payload, "purged")
+		purged, present := intField(ev.Payload, "purged")
+		if !present {
+			fail("step 4 pass %d: privacy.dedupFootprintSwept carries no numeric purged field, so the sweep reports no convergence signal to read", pass)
+			return
+		}
 		relation, _ := ev.Payload["relation"].(string)
 		if purged == 0 {
 			if relation != "" {
 				fail("step 4: converged with purged=0 but relation=%q — a zero-row pass names no relation", relation)
+				return
+			}
+			// The subject was minted with residue on TWO relation classes and
+			// the op sweeps one per commit, so reaching zero without ever
+			// purging anything means the sweep never saw that residue — the
+			// zero-row path wearing the convergence answer.
+			if totalPurged == 0 {
+				fail("step 4: reported purged=0 on pass %d having swept nothing, but the subject carries an indexes edge and a duplicateOf edge — the sweep did not reach the residue it was pointed at", pass)
 				return
 			}
 			ok("step 4: converged after %d passes, %d links purged in total, final pass reports purged=0", pass, totalPurged)
@@ -558,13 +609,27 @@ func waitForTombstoned(ctx context.Context, conn *substrate.Conn, key, label str
 	})
 }
 
-// assertUnshreddedEnvelope checks the claim minted the subject a REAL piiKey
-// envelope, which is what makes step 1 a live-DEK shred rather than the
-// placeholder path ShredIdentityKey takes for an identity that never received
-// a sensitive write. A non-empty wrappedDEK is the difference.
-func assertUnshreddedEnvelope(ctx context.Context, conn *substrate.Conn, subjectKey string) {
+// captureLiveEnvelope waits for the subject's piiKey envelope to be live,
+// unshredded and carrying real key material, and returns its wrappedDEK — the
+// value step 1 must leave byte-identical.
+//
+// A non-empty wrappedDEK is what separates the two branches ShredIdentityKey
+// can take. On an already-minted envelope it copies the existing body and only
+// flips shredded=true, keeping the real bytes (privacy-base/lenses.go states
+// that invariant outright, because the envelope lens depends on it); on an
+// identity that never received a sensitive write it REPLACES the body with an
+// empty-wrappedDEK placeholder. Both write shredded=true and shreddedAt, so
+// those two fields alone cannot tell a correct shred from a placeholder that
+// has just overwritten live key material — the worst outcome in this domain.
+// Carrying the pre-shred value forward is what makes the post-state able to.
+//
+// A failure here is fatal rather than a recorded assertion: this is setup, and
+// with no captured key material the post-state comparison would degenerate
+// into checking "" against "" and pass on exactly the case it exists to catch.
+func captureLiveEnvelope(ctx context.Context, conn *substrate.Conn, subjectKey string) string {
 	key := subjectKey + ".piiKey"
-	waitFor(ctx, "setup: "+key+" is a live, unshredded envelope", func() (bool, string) {
+	wrappedDEK := ""
+	satisfied := waitFor(ctx, "setup: "+key+" is a live, unshredded envelope holding real key material", func() (bool, string) {
 		doc, err := readDoc(ctx, conn, key)
 		if err != nil {
 			return false, err.Error()
@@ -575,11 +640,18 @@ func assertUnshreddedEnvelope(ctx context.Context, conn *substrate.Conn, subject
 		if shredded, _ := doc.Data["shredded"].(bool); shredded {
 			return false, "already shredded before the ceremony began"
 		}
-		if wrapped, _ := doc.Data["wrappedDEK"].(string); wrapped == "" {
+		wrapped, _ := doc.Data["wrappedDEK"].(string)
+		if wrapped == "" {
 			return false, "wrappedDEK is empty — no real key was minted, so step 1 would only exercise the placeholder path"
 		}
+		wrappedDEK = wrapped
 		return true, ""
 	})
+	if !satisfied {
+		fmt.Fprintf(os.Stderr, "FATAL setup: %s never became a live envelope with real key material, so the ceremony has no live DEK to erase\n", key)
+		os.Exit(1)
+	}
+	return wrappedDEK
 }
 
 // waitForRoleGrant polls actorKey's cap.roles projection until it carries
@@ -662,8 +734,8 @@ func (l *eventLog) await(ctx context.Context, requestID, class string) (domainEv
 
 // assertEmitted waits for the event and then checks the payload fields the
 // spine's downstream consumers bind to.
-func (l *eventLog) assertEmitted(requestID, class string, wantFields map[string]string) {
-	ev, found := l.await(context.Background(), requestID, class)
+func (l *eventLog) assertEmitted(ctx context.Context, requestID, class string, wantFields map[string]string) {
+	ev, found := l.await(ctx, requestID, class)
 	if !found {
 		return
 	}
@@ -678,10 +750,13 @@ func (l *eventLog) assertEmitted(requestID, class string, wantFields map[string]
 }
 
 // intField reads a JSON number field, which decodes as float64 through
-// map[string]any.
-func intField(payload map[string]any, field string) int {
-	v, _ := payload[field].(float64)
-	return int(v)
+// map[string]any, and reports whether it was there to read. Presence is
+// returned separately because a missing field and a genuine zero decode
+// identically, and here zero is the convergence answer — an absent field
+// wearing it would read as a converged sweep.
+func intField(payload map[string]any, field string) (int, bool) {
+	v, present := payload[field].(float64)
+	return int(v), present
 }
 
 // identityIndexKey rebuilds identity-domain's contact index key for an
