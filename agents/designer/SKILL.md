@@ -866,6 +866,42 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   it.) The tell: you are introducing a list/set/map whose *empty* value has to mean something. Write down what
   empty renders to, and go read what the consumer does with it.
 
+- **Generalizing a mechanism from ONE to N activates conjunctive branches the singular case could never
+  reach — and empties the field every consumer used as a PRESENCE test. Enumerate both, and expect the
+  RESTRICTED generalization to win.** Two mechanical checks whenever a design makes a container hold N of
+  something it held one of (N artifacts per proposal, N targets per request, N rows per key). (1) **Open the
+  code that CONSUMES the container and grep every branch conditioned on "both A and B are present."** Those
+  branches are, by definition, unreachable today and reachable after — they are new behaviour the design
+  did not choose and review has never seen. (2) **The singular field you are emptying is almost certainly
+  somebody's "has this happened yet?" test**, because a scalar that is set exactly once is the cheapest
+  available presence flag; grep it as a *boolean*, not as a value. (Trialed 2026-08-21, capability-proposal
+  bundles. (1) A general N-kind bundle merged into one `pkgmgr.Definition` reached two cross-references a
+  one-artifact Definition provably cannot: `{vertexTypeDDL, grant}` satisfies the *unratified* sibling
+  minting design's R1 — "this batch creates a DDL declaring T" — so R3, "the applier already holds T", never
+  runs; and `build.go:412-416` mints a `forOperation` link only when the same Definition declares the
+  op-meta. Restricting the bundle to the two kinds the filed demand actually needed delivered 100% of the
+  payoff and made both compositions inexpressible — the general case was simultaneously the larger build and
+  the less safe one. (2) Emptying `.artifact.data.kind` broke `cmd/loupe/review.go:611`'s
+  `if cols.Kind == "" { 409 }` approve gate and `review.js:24`'s `if (!r.kind) return "authoring"`, so the
+  console would have refused every new proposal forever — neither is a "kind" consumer in any meaningful
+  sense, which is why a value-shaped census misses them.) The corollary for scope: a presence-test consumer
+  turns "this fire realizes no value yet" into "this fire ships a regression", which is a different
+  sequencing answer — re-derive the fire split after running check (2), not before. This is the
+  cardinality-change reflex above (reverse indexes) pointed at the two other things cardinality silently
+  carries: conjunctive reachability, and presence.
+
+- **In this codebase a "deterministic validator" verdict is CALLER-SUPPLIED — a check that must actually
+  bind belongs in the op script, not in the Go validator.** `ValidateCapabilityArtifact` and its siblings
+  run in the submitter (Loupe, the CLI, the bridge) and the DDL copies `payload.validation.state` straight
+  through (`packages/capability-author/ddls.go:549-568`, `:810-820`), so anything enforced only in the Go
+  helper is advisory against the actor who supplies the verdict. Ask, per check: *is this legibility, or is
+  it a bound?* A bound that is pure arithmetic or pure shape over the payload — a count cap, a byte budget,
+  an allow-list of shapes — costs a few Starlark lines and is the difference between a refusal and a
+  proposal that records fine, gets approved, and then fails terminally at apply with no way back (a
+  single-transition `review` state has no route from `approved` to anything). (Trialed in the same fire: a
+  bundle cap specified only in `ValidateCapabilityBundle`.) Same family as *enforcement point follows the
+  threat*, with the repo-specific fact that makes it concrete.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
