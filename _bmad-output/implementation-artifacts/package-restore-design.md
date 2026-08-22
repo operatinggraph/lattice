@@ -1,9 +1,37 @@
 # `RestorePackage` — undoing an uninstall
 
-**Status: 📐 awaiting-Andrew (ratification).** Carries a **frozen-contract change** — Contract #8 (a new
-**§8.5**, plus one pointer in §8.2 and one scope paragraph in §8.4) and Contract #3 §3.2/§3.3 (a fourth
-mutation verb, **and two corrections to text that already contradicts shipped behaviour**) — staged
-**uncommitted** in `main`. No architectural fork.
+**Status: 🗄️ SHELVED (Andrew, 2026-08-22).** The `RestorePackage` op and its new `revive` mutation verb
+are **not built**. Andrew's call in the ratify session, refuse/simplify posture: the demand is entirely
+designer-inferred (the steward filed the row closing its own occupancy fire; no surveyor/PO/operator
+request, no recorded incident, zero code references to `RestorePackage`), and the two load-bearing
+arguments for the feature do not survive grounding — see the two findings below. The Contract #8 §8.5 /
+§8.4 / §8.2 edits and the Contract #3 `revive` verb are **reverted** from the working tree.
+
+> **Revive trigger:** a first *real* operator need to undo an uninstall — a recorded incident, or a
+> surveyor/PO/operator request naming the loss. Absent that, an uninstall stays a one-way door whose
+> false-green was already closed (`00a4a73`, the loud occupancy refusal), and the realistic dev-time
+> remedy is `make down`.
+
+**Two findings that sank the feature (grounded this session):**
+1. The design's own "cheap alternative" — a typed-confirmation on Loupe's uninstall button (§6.3) — is
+   **already shipped** (`cmd/loupe/web/js/views/package.js:411-413`, exact-string-match gate). The design
+   did not know it. The only real gap was CLI confirmation, and Andrew declined even that.
+2. The `revive` verb's whole justification is "provably cannot write a body a prior commit didn't." But
+   `RestorePackage`'s only grantee is the `operator` role, which **already holds `UpdateMetaVertex` at
+   `scope: any`** (`internal/bootstrap/primordial.go:736-738`) — it can already write arbitrary Starlark
+   into any `vtx.meta.*.script`. The verb closes **no** privilege boundary for its only grantee. Its cost
+   was a 4th mutation verb across ~28 sites with a documented silent-body-erasure failure mode, +3
+   primordial keys, and a forced `make down` to adopt.
+
+**What was KEPT and committed (Andrew-ratified this session):** the two Contract #3 §3.3 text corrections
+— the `update` verb now says an update writes the whole value (a body without `isDeleted:true` restores,
+the mechanism `UpgradePackage`'s re-add path uses), and the `tombstone` verb now says a tombstoned key is
+not *freed* (`create` still conflicts) but the **same** key may be revived for the **same** entity by
+`update`. Both describe **shipped** behaviour (`upgrade.go:458`, §8.4 rule (3), §8.6) and replace text
+that contradicted it. **No new verb** — the corrections are `update`-based. The committed HEAD's *"There is
+no separate `restore` op"* stands, because there is none.
+
+*Original design retained below for the record — do not build it.*
 
 Owns board row *[Pkgmgr] An uninstalled package cannot be reinstalled — only refused*
 (`backlog/lattice.md`), filed by [reinstall-over-uninstall-occupancy-design.md](reinstall-over-uninstall-occupancy-design.md)
