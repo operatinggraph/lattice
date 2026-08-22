@@ -537,7 +537,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `AckNonePolicy` through the **legacy** push path (`jetstream/kv.go:1304-1305` → `js.go:1780-1781`) — same
   conclusion, wrong evidence, and it hid that the listing genuinely depends on `$JS.FC.>`. Minted:
   adjacency Shape B (`valueSizeLimit`'s memo justification); sharpened by the ack-plane fire's cold review.
-  Check: trace the call graph to the line you cite, and cite the one on the path you are describing.
+  Its third sighting is the hardest form: a citation that is real, on-path, and still carries a **false**
+  conclusion, because the window cited stops short of a guard that changes the answer. The ack fire's
+  KNOWN LIMIT read `client.go:4280-4287` — a publisher's reply subject is not permission-checked — and
+  concluded every deny is self-service defeasible; `:4305-4307` rejects a `$JS.ACK.` reply outright, so the
+  ack denies the comment was written to caveat are the one family that route cannot reach. Check: trace the
+  call graph to the line you cite and cite the one on the path you describe — and for a claim that
+  something is *not* checked, run the probe, because reading forward far enough is precisely what fails.
 - **A reopen/retry loop needs a connection-closed exit of its own** — an "is it really gone" probe is a
   round trip, so it cannot answer over a closed connection, and its unanswerable case resolves to keep
   trying: right for a stall, unbounded for a close. The loop then spins at its backoff for as long as the
