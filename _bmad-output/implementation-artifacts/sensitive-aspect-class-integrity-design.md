@@ -1,12 +1,34 @@
 # A sensitive aspect's key must decide its class — not the mutation's own word for it
 
-**Status: 📐 awaiting-Andrew (ratification).** Carries a **frozen-contract change** (Contract #1 §1.5 +
-§1.6, staged UNCOMMITTED in `main`), so it is not Winston-adjudicable under the 2026-08-20 delegation.
-**No architectural fork** — see §11.
-**Components:** Processor (`internal/processor/{step6_validate,step65_encrypt,ddl_cache,health}.go`),
+**Status: ❌ REJECTED (Andrew, 2026-08-22) — on a foundational architecture invariant, not a detail.**
+The mechanism this design is built on — making a **key segment** (`localName` + `anchorType`) *decide or
+constrain* a document's `class` and therefore its sensitivity — **inverts the platform's source-of-truth
+posture: the document is authoritative for an entity's type and sensitivity, via its `class` field.
+Period.** That posture was established very early and is not up for relitigation; a design may not move type
+or sensitivity authority off the document and onto the key. The whole shape (Inc 1's reverse guard, Inc 2's
+`(anchorType, localName)→class` binding) is refused on that ground. Not "shelved pending a consumer" —
+rejected on invariant.
+
+**What is *not* a defect, restated correctly under the posture.** The runtime behavior the row called a
+"fail-open" — an omitted or unresolvable `class` → no DDL → no encryption — is **correct**. A document that
+does not declare a sensitive `class` *is not sensitive*; the platform faithfully stored what the document
+declared. A writer who wants encryption declares the sensitive class; one who omits it has a **script bug**
+in their own package, caught by that package's tests — not a platform hole the Processor should close by
+second-guessing the document from its key. There is no arm where a document declares a resolvable sensitive
+class and is nonetheless stored plaintext (DD confirmed: all three "arms" are the document declaring itself
+non-sensitive). So there is no posture-independent fail-open, and **no code change is warranted.**
+
+**The one real residual — filed separately, and it *reinforces* the posture.** The *committed* Contract #1
+§1.5 "Default class" clause promises the Processor defaults an omitted `class` **from the key's local name**.
+That clause is (a) unimplemented (census §3.4: the only occurrence is the sentence itself) and (b) itself a
+statement of *key-decides-class* — it contradicts document-is-source-of-truth. It should be **deleted** (a
+frozen-contract doc fix, Andrew's commit), not replaced with a new key-binding rule. Board row for that is
+`🔭 flag-for-Andrew`. The contract edit this design staged is **reverted** in full.
+
+*Original framing below, retained for the record — do not build it.*
+
+**Components (as originally scoped):** Processor (`internal/processor/{step6_validate,step65_encrypt,ddl_cache,health}.go`),
 pkgmgr (`internal/pkgmgr/{definition,build,manifest}.go` + a new validator), `cmd/lattice/identity`.
-**Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Component maintenance →
-*[Processor] Sensitive resolution trusts a mutation's self-reported `class`, never the key's localName*.
 **Filed by:** [ddl-cache-invalidation-fault-signal-design.md](ddl-cache-invalidation-fault-signal-design.md) §1,
 whose security review found this arm and correctly refused to close it in-line.
 
@@ -173,7 +195,7 @@ canonicalName; two of the three retention-class ones do not. §5.2 is built on t
 ### 3.2 The writer sites — key and class are two independent literals
 
 ```bash
-grep -rn 'make_aspect_upsert[a-z_]*([a-zA-Z_0-9]*, *"profile",' packages/ | grep -v _test
+grep -rn 'make_aspect[a-z_]*([a-zA-Z_0-9]*, *"profile",' packages/ | grep -v _test
 ```
 
 `packages/lease-signing/scripts.go:1102-1103` is the clearest specimen — the two shapes side by side in
@@ -224,7 +246,7 @@ designer) is entitled to rely on it.
 ### 3.5 localName collisions — a localName alone cannot name a class
 
 ```bash
-for n in profile status schedule; do grep -rn "make_aspect_upsert[a-z_]*([a-zA-Z_0-9]*, *\"$n\", *\"[A-Za-z]*\"" packages/ | grep -v _test; done
+for n in profile status schedule; do grep -rn "make_aspect[a-z_]*([a-zA-Z_0-9]*, *\"$n\", *\"[A-Za-z]*\"" packages/ | grep -v _test; done
 ```
 
 | localName | distinct classes | citations |
@@ -291,7 +313,7 @@ new declaration on `DDLSpec`, emitted as one more meta-vertex aspect beside `.se
 (`build.go:174-191`) — the shape shipped end-to-end four days ago for `weaverTarget.description`
 (`8f49c13b`).
 
-**"Is a parallel design touching this seam?"** Yes, and it is building now — see §12.
+**"Is a parallel design touching this seam?"** It was — it landed while this design was being written; see §12.
 
 ---
 
@@ -364,7 +386,7 @@ the *declaration* half is placed at authorship time exactly as the rule prescrib
 
 ### 5.4 What is deliberately NOT governed
 
-- **A non-sensitive aspect DDL may declare a binding, but need not.** Requiring all ~76 would be a
+- **A non-sensitive aspect DDL may declare a binding, but need not.** Requiring all 77 would be a
   76-line migration for a hygiene check on a population where a mismatch costs nothing. If one declares,
   the forward rule applies to it — opt-in strictness.
 - **An undeclared aspect** (no DDL at all) is untouched — Contract #1 §1.6 unchanged.
@@ -622,7 +644,7 @@ behaviour".
 
 **A5 — implement Contract #1 §1.5's "Default class" clause.** It would close arm A for free. **Rejected**:
 defaulting an omitted class to the localName newly binds DDLs — and their `permittedCommands` — to writes
-that pass today, retroactively, across all ~76 aspect DDLs and every undeclared aspect in the platform. It
+that pass today, retroactively, across all 77 aspect DDLs and every undeclared aspect in the platform. It
 is a corpus-wide behaviour change with no demand, in service of a clause whose premise (localName ≈ class)
 the corpus explicitly rejects. Correcting the clause is the honest move.
 
@@ -636,17 +658,16 @@ entirely from the corpus, which §3.5 proves impossible for retention-class cust
 
 ---
 
-## 12. Collision with in-flight work — sequence behind `retention-class-key-custody` §30
+## 12. Collision with in-flight work — discharged: `retention-class-key-custody` §30 landed
 
-`retention-class-key-custody-design.md` §30 is **building now** (three board rows 🏗️). Its Increment 2 adds
-`ManifestBlock.RetentionClasses` at `internal/pkgmgr/manifest.go:24-33` plus a count check and identity
-loop, and adds a `retentionClasses:` block to `packages/{clinic-domain,lease-signing}/manifest.yaml` —
-**the same struct, the same two manifest files** this design's Increment 2 touches, for the same two
-packages.
+`retention-class-key-custody-design.md` §30 **landed** (`f793bc55`, ~15 minutes after this design's first
+commit): `ManifestBlock.RetentionClasses` is live at `internal/pkgmgr/manifest.go:33` with the count check
+at `:185` and the identity loop at `:258`, and both `packages/clinic-domain/manifest.yaml` and
+`packages/lease-signing/manifest.yaml` carry `retentionClasses:` blocks — the same struct and the same two
+manifest files this design's Increment 2 touches.
 
-**Recommendation: this design's Increment 2 sequences behind §30's Increment 2**, and reuses its landed
-shape rather than racing it. Increment 1 has **no** pkgmgr surface and can run in parallel with §30
-immediately. The board row should carry `seq: retention-class §30 Inc 2` on the Increment-2 half.
+**Consequence: no sequencing stamp is needed.** This design's Increment 2 builds on §30's landed shape;
+Increment 1 has **no** pkgmgr surface and was never coupled to it.
 
 No other in-flight design touches this seam: `package-authority-minting-provenance-design.md` reads step 6
 only to observe that `class:"permission"` resolves no DDL (`:93-95`), which this design does not change

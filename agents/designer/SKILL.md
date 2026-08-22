@@ -114,6 +114,18 @@ vertices/aspects/links in Core KV; operational state lives outside (Health KV, W
 `lnk.<tA>.<idA>.<rel>.<tB>.<idB>`, link names read "source relation target" (later-arriving vertex = source);
 meta-vertices `vtx.meta.<NanoID>`. Relationships are **links**, not `data` refs; every reader filters
 tombstones. **Capability KV is a lens projection** (projection correctness = auth correctness).
+**The DOCUMENT is the source of truth for an entity's type and sensitivity — the `class` field, period**
+(Andrew, 2026-08-22, foundational and not up for relitigation). **Never design a mechanism where a key
+segment (localName, anchorType, any address bit) *decides or constrains* a document's `class` or its
+sensitivity.** The key *addresses*; the document *declares what it is*. Corollary: an omitted or
+unresolvable `class` means the document declares itself untyped / non-sensitive — storing it unencrypted is
+**correct, not a fail-open**; do not add platform machinery to second-guess the document from its key. A
+writer who wants encryption declares the sensitive class; a missing declaration is that package's own
+script bug, caught by its tests — not a Processor concern. (Trialed and rejected:
+`sensitive-aspect-class-integrity-design.md` proposed a `(anchorType, localName)→class` reverse binding to
+"close a plaintext-PHI fail-open"; the fail-open framing dissolves under the posture, and the binding
+inverted it. If you find a committed clause that *defaults class from the key* — e.g. Contract #1 §1.5's old
+"default class from localName" — that clause is the bug; delete it, don't build to it.)
 
 **Four design reflexes Andrew enforced (2026-06-28/29) — apply them before proposing a shape:**
 
