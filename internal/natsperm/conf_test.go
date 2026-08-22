@@ -896,22 +896,42 @@ func TestCoreEventsSideChannel(t *testing.T) {
 	}
 }
 
-// jsAckNoWaitPull is the body every ack-plane vector below publishes. "+NXT"
-// makes the server ack the message the subject names and then run a
+// jsAckNoWaitPull is the body every ack-plane DENIAL vector below publishes;
+// there is no MSG.NEXT twin because every front-way pull in this file is a
+// positive control and takes the waiting form below.
+// "+NXT" makes the server ack the message the subject names and then run a
 // next-message request on that consumer, delivering the result to the
 // PUBLISHER's own reply subject with no check on who published (nats-server
 // v2.14.0 server/consumer.go:2716, :2736-2738) — the ack subject is a read
 // path, which is what these vectors exist to police. The JSON tail is
 // TrimSpace'd and parsed as an ordinary pull request (:3861-3862), and
-// no_wait is load-bearing: with it the server ALWAYS answers a permitted
-// request — a message when one is available, a 404 status reply when the
-// pending set is empty (:4494-4497) — so "no reply at all" can only mean the
-// publish was denied at the transport, never "the consumer had nothing".
+// no_wait is load-bearing for a denial: with it the server ALWAYS answers a
+// permitted request — a message when one is available, a 404 status reply
+// when the pending set is empty (:4494-4497) — so "no reply at all" can only
+// mean the publish was denied at the transport, never "the consumer had
+// nothing".
 var jsAckNoWaitPull = []byte(`+NXT {"batch":1,"no_wait":true}`)
 
-// msgNextNoWaitPull is the same no-wait pull sent the front way, through
-// $JS.API.CONSUMER.MSG.NEXT.
-var msgNextNoWaitPull = []byte(`{"batch":1,"no_wait":true}`)
+// The waiting forms are what a POSITIVE control sends, and the difference is
+// not cosmetic. A PubAck means the stream stored the message; it does not mean
+// the consumer's pending count has caught up, because the stream signals its
+// consumers asynchronously. A no_wait pull issued in that window is answered
+// 404 by a consumer that does in fact have the message a moment later — which
+// on a loaded runner turns "prove this subject delivers" into a coin flip
+// (CI run 32574181868, unit-4 at -parallel 24: the v1 control took a 404 for
+// a message its own publish had already been acked for).
+//
+// An expiry instead of no_wait makes the server hold the request until the
+// message arrives, which is the protocol's own synchronisation rather than a
+// sleep. It costs the control nothing: a dead subject still draws no reply at
+// all and fails on the client timeout, and a live subject that stays empty
+// draws a 408 that assertDeliveredMessage rejects. The expiry is under the
+// callers' 3s Request deadline so the 408 arrives first and names the real
+// problem.
+var (
+	jsAckWaitingPull   = []byte(`+NXT {"batch":1,"expires":2000000000}`)
+	msgNextWaitingPull = []byte(`{"batch":1,"expires":2000000000}`)
+)
 
 // assertDeliveredMessage fails unless msg is a real stream delivery rather
 // than one of JetStream's status replies (404 no-messages, 408 request
@@ -1015,7 +1035,7 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 			// template: pull the front way and keep the ack subject the
 			// server stamped on the delivery.
 			publishEvent(t)
-			delivered, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextNoWaitPull, 3*time.Second)
+			delivered, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextWaitingPull, 3*time.Second)
 			if err != nil {
 				t.Fatalf("%s MSG.NEXT %s: want a delivered message, got %v", pc.owner, pc.name, err)
 			}
@@ -1028,7 +1048,7 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 
 			// the premise: that real ack subject is a live inbound READ path.
 			publishEvent(t)
-			pulled, err := owner.NATS().Request(v1Ack, jsAckNoWaitPull, 3*time.Second)
+			pulled, err := owner.NATS().Request(v1Ack, jsAckWaitingPull, 3*time.Second)
 			if err != nil {
 				t.Fatalf("%s +NXT on its own v1 ack subject %q: want a delivered message, got %v", pc.owner, v1Ack, err)
 			}
@@ -1040,7 +1060,7 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 			// make every v2 denial below meaningless.
 			v2Ack := v2AckSubject("core-events", pc.name)
 			publishEvent(t)
-			pulledV2, err := owner.NATS().Request(v2Ack, jsAckNoWaitPull, 3*time.Second)
+			pulledV2, err := owner.NATS().Request(v2Ack, jsAckWaitingPull, 3*time.Second)
 			if err != nil {
 				t.Fatalf("%s +NXT on the v2 ack subject %q: want a delivered message, got %v — the server subscribes the v2 form unconditionally (server/consumer.go:1699-1707), so this failing means the domain/account-hash derivation is wrong", pc.owner, v2Ack, err)
 			}
@@ -1081,7 +1101,7 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 			// the pending message is still there: no denied component pulled
 			// it, and the vectors above were not shadow-boxing an empty
 			// consumer.
-			survivor, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextNoWaitPull, 3*time.Second)
+			survivor, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextWaitingPull, 3*time.Second)
 			if err != nil {
 				t.Fatalf("%s MSG.NEXT %s after the denial vectors: want the pending message, got %v", pc.owner, pc.name, err)
 			}
@@ -1129,7 +1149,7 @@ func TestVerticalAppHoldsNoAckGrant(t *testing.T) {
 
 	// take the real ack subject off a real delivery (bootstrap is denied
 	// nothing), so the vectors below use the wire form the server stamped.
-	delivered, err := boot.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+probe, msgNextNoWaitPull, 3*time.Second)
+	delivered, err := boot.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+probe, msgNextWaitingPull, 3*time.Second)
 	if err != nil {
 		t.Fatalf("bootstrap MSG.NEXT %s: want a delivered message, got %v", probe, err)
 	}
@@ -1139,7 +1159,7 @@ func TestVerticalAppHoldsNoAckGrant(t *testing.T) {
 
 	t.Run("positive-control/processor", func(t *testing.T) {
 		for _, subject := range []string{v1Ack, v2Ack} {
-			pulled, err := proc.NATS().Request(subject, jsAckNoWaitPull, 3*time.Second)
+			pulled, err := proc.NATS().Request(subject, jsAckWaitingPull, 3*time.Second)
 			if err != nil {
 				t.Fatalf("processor +NXT %s: want a delivered message (it holds $JS.ACK.>), got %v", subject, err)
 			}
