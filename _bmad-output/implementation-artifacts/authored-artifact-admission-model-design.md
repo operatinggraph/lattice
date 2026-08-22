@@ -1,6 +1,24 @@
 # Three admission holes let an authored artifact reach the auth plane — a consumer-derived admission model
 
-**Status: 📐 awaiting-Andrew (ratification).** · Designer fire 2026-08-22 (Winston, unattended).
+**Status: 🗄️ SHELVED (Andrew, 2026-08-22) — no revive trigger.** Not built. The staged Contract #6 §6.1
+edit is **reverted** from the working tree. Andrew's call in the ratify session: the AI-authoring feature
+that makes these holes reachable is **dormant by default** — the model-backed capabilityAuthor adapter is
+registered only when an operator sets `BRIDGE_CAPABILITY_AUTHOR=real` and deploys a model-runner
+(`cmd/bridge/main.go:163-176`) — so in the default build every hole here is behind a feature nobody has
+turned on, nothing is blocked on the row, and it was filed by the design process, not by demand.
+Deliberately **no revive trigger**: this is not queued to auto-return when the feature is enabled; if
+AI-authoring is ever promoted toward on-by-default, the admission surface is re-evaluated fresh at that
+point (the design below is the record to start from, not a ratified plan to resume).
+
+> **Note on Increment 2.** Its namespace-ownership machinery is the only part needing the Contract #6 edit,
+> and DD found it primarily governs the **package** plane (a package-authored lens overwriting the kernel
+> anchor) — the same non-root-installer threat as the **parked** `package-authority-minting-provenance`
+> design (Inc 2 of which this folded in). Both share the "no distinct victim until `consoleOperator` is
+> delegated below root" gating; neither is live today.
+
+*Original design retained below for the record — do not build it.*
+
+**Status (original): 📐 awaiting-Andrew (ratification).** · Designer fire 2026-08-22 (Winston, unattended).
 **Adversarial pass: RUN (2026-08-22), two independent lenses — security-soundness and citation/census audit.
 They returned 3 blockers, 7 majors and a page of citation corrections, and they RESHAPED this design**: one of
 the four increments below did not exist in the draft, one was closing the wrong set, one had its disposition
