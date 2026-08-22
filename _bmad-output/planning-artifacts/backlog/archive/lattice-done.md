@@ -1,5 +1,15 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-15 · `b4eb8fb2` · [Tooling] gofmt CI gate CLOSED — 37 files formatted; dangling ratified §19 contract edit also committed this fire (`0e84769e`)
+- 2026-08-15 · `70bec5e6` · [bootstrap] package-manifest ownership scoping CLOSED — review found+fixed a self-forged-manifest bypass; §8(a)/§15 stay open, narrowed not closed
+- 2026-08-15 · `6ecf3d77` · [Facet] queued ceremony reveal durability CLOSED — reload recovery + a pinned loss signal; review found+fixed 2 real gaps in the sign-out/auth-death purge paths
+- 2026-08-15 · `8ca834a1` · [Processor] undeclared-key RevisionConflict attribution CLOSED — kv.Links-discovered keys now retry-eligible + correctly named; review found+fixed a false-pass test and an unbounded probe
+- 2026-08-15 · `07b1615b` · [location-domain] `LEGACY_LOCATION_CLASS` widening CLOSED — 7 packages; census found the Contract #1 tombstone exemption is a permanent invariant, not the removable marker the row assumed
+- 2026-08-15 · `ada53b37` · [Edge] `SYNC` stream MaxBytes CLOSED — 512 MiB cap mirrors `EnsureAuditStream`; 2 dangling ratified contract edits also committed this fire (`004e079c`)
+- 2026-08-15 · `aa41f292` · [rbac] `vtx.roleindex.<id>` provenance write-once CLOSED — mirrors the role-root guard; 3 cold reviews + 1 fix round, 0 blocking; create-forgery and no-repoint-heal limitations filed, not built
+- 2026-08-15 · (verification, no SHA) · [Edge] cross-lens delete-drop row REMOVED — already closed, proven by the pinned `TestPersonalTarget_ProducesNoDeleteShapedResult`
+- 2026-08-15 · `30d87457` · [identity-domain] erased-incumbent identityindex repoint CLOSED — review found+fixed a cross-op steal/revive race, closed with content+revision gates in privacy-base and identity-hygiene too; pin-coverage gap filed
+- 2026-08-15 · `db65e4da` · [Facet] concurrent first-`Acquire` mirror race CLOSED — per-identity singleflight, not a widened mutex; adversarial review found+fixed a Purge-race corpse-supersedes-live-build bug; both regressions mutation-verified
 - 2026-08-15 · `79b090cc` · [Processor] mutation `isDeleted` type gate CLOSED — batch-wide pre-pass fails a malformed value closed; review found no bypass, caught a comment overclaim; 2 adjacent fail-opens filed
 - 2026-08-15 · `034ab1f1` · [bootstrap] permission/role provenance write-once CLOSED — review closed a role-root shadow bypass beyond the design's sketch; contract §8.4 staged uncommitted for Andrew; 2 adjacent gaps filed
 - 2026-08-14 · `8796e6e9` · [Pkgmgr] renamed/uninstalled retention class no longer strands its DEK CLOSED — diffManifest + Uninstall exclude the holder; contract §8.3/§8.6 staged uncommitted for Andrew
