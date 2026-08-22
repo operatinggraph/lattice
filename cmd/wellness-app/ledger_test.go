@@ -79,6 +79,58 @@ func TestHandleLedger_MemberSeesOnlyOwnHistory(t *testing.T) {
 	}
 }
 
+// A no-show fee's className/classStartsAt (wellnessLedgerHistory's settles
+// hop, packages/wellness-ledger/lenses.go) carry through to the FE row, so a
+// member's billing history can tell two otherwise-identical "No-show fee"
+// lines apart by which class each one billed.
+func TestHandleLedger_NoShowFeeNamesItsClass(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	seedLedgerAccount(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa")
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa",
+		"accountKey":     "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey":    identityA,
+		"type":           "debit",
+		"amountCents":    2500,
+		"memo":           "No-show fee",
+		"postedAt":       "2026-08-21T00:00:00Z",
+		"bookingKey":     "vtx.booking.cccccccccccccccccccc",
+		"className":      "Vinyasa Flow",
+		"classStartsAt":  "2026-08-19T09:00:00Z",
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if len(body.Transactions) != 1 {
+		t.Fatalf("transactions = %+v, want exactly one", body.Transactions)
+	}
+	tx := body.Transactions[0]
+	if tx.ClassName != "Vinyasa Flow" || tx.ClassStartsAt != "2026-08-19T09:00:00Z" {
+		t.Errorf("got className=%q classStartsAt=%q, want the settled booking's class", tx.ClassName, tx.ClassStartsAt)
+	}
+}
+
+// A plain payment (no settled booking) carries no class name, not an error.
+func TestHandleLedger_PaymentCarriesNoClassName(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	seedLedgerAccount(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa")
+	seedLedgerTransaction(t, s, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa", identityA, "credit", 5000)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if len(body.Transactions) != 1 || body.Transactions[0].ClassName != "" {
+		t.Fatalf("transactions = %+v, want one row with no className", body.Transactions)
+	}
+}
+
 // A member who has never had a ledger account opened for them (the standing
 // gap — CreateAccount is grantsTo-operator-only, the browser has no grant to
 // open one itself) gets a clean empty answer, not an error.

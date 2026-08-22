@@ -16,6 +16,10 @@ import (
 
 // ledgerEntryProjection is one row of the wellness-ledger `wellnessLedgerHistory`
 // lens, read from its NATS-KV read-model bucket (P5 — never Core KV).
+// BookingKey/ClassName/ClassStartsAt are empty for the common transaction (a
+// payment or a class-price charge settles no booking) — only a no-show
+// debit's settles hop populates them, which is what lets the FE tell two
+// otherwise-identical "No-show fee" lines apart by the class each one billed.
 type ledgerEntryProjection struct {
 	TransactionKey string   `json:"transactionKey"`
 	AccountKey     string   `json:"accountKey"`
@@ -24,6 +28,9 @@ type ledgerEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
+	BookingKey     string   `json:"bookingKey"`
+	ClassName      string   `json:"className"`
+	ClassStartsAt  string   `json:"classStartsAt"`
 }
 
 // ledgerEntryRow is the billing-history row the FE renders.
@@ -33,6 +40,8 @@ type ledgerEntryRow struct {
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	ClassName      string `json:"className,omitempty"`
+	ClassStartsAt  string `json:"classStartsAt,omitempty"`
 }
 
 // memberAccountProjection is one row of the wellness-ledger `wellnessMemberAccounts`
@@ -74,6 +83,8 @@ func computeLedgerHistory(keys []string, get kvGetter, identityKey string) ([]le
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			ClassName:      p.ClassName,
+			ClassStartsAt:  p.ClassStartsAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

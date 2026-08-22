@@ -886,7 +886,7 @@ async function renderMyBalance() {
       const sign = t.type === "debit" ? "+" : "−";
       const d = new Date(t.postedAt);
       const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "");
+      li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
       list.append(li);
     }
   } catch (_) {
@@ -1815,7 +1815,7 @@ function renderBillingBody(data) {
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
     list.append(li);
   }
 }

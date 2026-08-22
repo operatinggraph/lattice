@@ -302,15 +302,33 @@ RETURN
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the
 // account and heldFor to the identity so the FE can filter/group by
-// identityKey with no extra hop. Every MATCH is REQUIRED (not OPTIONAL): a
-// transaction projects a row only when it is genuinely posted to a live
-// account held for a live identity (the normal shape every WellnessDebitAccount/
-// WellnessCreditAccount commit produces). The per-row key is the transaction key (the
-// IntoKey default), so the read model is keyed by vtx.wellnesstransaction.<id>;
-// transactionKey repeats it in the body for the reader.
+// identityKey with no extra hop. Every MATCH through identity is REQUIRED
+// (not OPTIONAL): a transaction projects a row only when it is genuinely
+// posted to a live account held for a live identity (the normal shape every
+// WellnessDebitAccount/WellnessCreditAccount commit produces). The per-row
+// key is the transaction key (the IntoKey default), so the read model is
+// keyed by vtx.wellnesstransaction.<id>; transactionKey repeats it in the
+// body for the reader.
+//
+// The trailing settles/forSession pair is OPTIONAL — mirrors clinic-ledger's
+// clinicLedgerHistory (15f628f4): most transactions (a payment, a class-price
+// charge) settle no booking, so bk/sess simply stay unmatched; only a
+// WellnessDebitAccount{bookingRef} no-show charge writes the settles link
+// this OPTIONAL MATCH walks (targets.go, noShowSettlementSpec above — the
+// SAME link that lens's own missing_charge count() reads). Chaining a second
+// OPTIONAL MATCH off the first's optionally-bound `bk` is the established
+// idiom already used package-locally (wellness-domain's bookingsSpec,
+// forSession then atStudio) and cross-package (front-desk, wellness-reminders,
+// edge-manifest) — a null `bk` just leaves `sess` null too, not an error.
+// Projecting the session's own .schedule.data.name — not just a date, since
+// wellness has a real class name to give a reader (clinic's appointment has
+// none) — is what lets a member's billing history tell two otherwise
+// identical "No-show fee" lines apart by which class each one billed.
 const ledgerHistorySpec = `MATCH (t:wellnesstransaction)
 MATCH (t)-[:postedTo]->(a:wellnessaccount)
 MATCH (a)-[:heldFor]->(id:identity)
+OPTIONAL MATCH (t)-[:settles]->(bk:booking)
+OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -319,7 +337,10 @@ RETURN
   t.entry.data.type AS type,
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
-  t.entry.data.postedAt AS postedAt`
+  t.entry.data.postedAt AS postedAt,
+  bk.key AS bookingKey,
+  sess.schedule.data.name AS className,
+  sess.schedule.data.startsAt AS classStartsAt`
 
 // memberAccountsSpec projects one row per identity that has ever BOOKED
 // (walked via booking's bookedBy link, DISTINCT'd — a member with many

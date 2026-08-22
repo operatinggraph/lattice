@@ -438,3 +438,76 @@ func TestWellnessRefundSettlement_ClassPriceLinkDoesNotConverge(t *testing.T) {
 	require.Equal(t, true, v["missing_refund"], "a settlesClassPrice link must not satisfy the settlesRefund gap")
 	require.Equal(t, true, v["violating"])
 }
+
+// project runs the unanchored wellnessLedgerHistory spec — the engine
+// enumerates its own roots and no actorKey is supplied, mirroring
+// clinic-ledger/lens_cypher_test.go's `project` helper.
+func (f *wlFixture) project(t *testing.T, specName, spec string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "%s cypher must parse on the full engine", specName)
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkPostedTransaction seeds the shape a committed WellnessDebitAccount/
+// WellnessCreditAccount produces: a wellnesstransaction posted to a
+// wellnessaccount held for an identity.
+func (f *wlFixture) mkPostedTransaction(t *testing.T, prefix string, amountCents float64, memo string) {
+	t.Helper()
+	f.vtx(t, prefix+"_identity", "identity")
+	f.vtx(t, prefix+"_acct", "wellnessaccount")
+	f.vtx(t, prefix+"_tx", "wellnesstransaction")
+	f.edge(t, "heldFor", prefix+"_acct", prefix+"_identity")
+	f.edge(t, "postedTo", prefix+"_tx", prefix+"_acct")
+	f.aspect(t, prefix+"_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "debit",
+		"amountCents": amountCents,
+		"memo":        memo,
+		"postedAt":    "2026-08-21T00:00:00Z",
+	})
+}
+
+func TestWellnessLedgerHistory_SettlesBooking_ProjectsClassName(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "noshow", 2500, "No-show fee")
+	f.vtx(t, "noshow_booking", "booking")
+	f.vtx(t, "noshow_session", "session")
+	f.aspect(t, "noshow_session", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-08-19T09:00:00Z", "endsAt": "2026-08-19T10:00:00Z", "capacity": 20,
+	})
+	f.edge(t, "forSession", "noshow_booking", "noshow_session")
+	f.edge(t, "settles", "noshow_tx", "noshow_booking")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.booking."+f.ids["noshow_booking"], v["bookingKey"],
+		"the settles link ties this charge to the booking that caused it")
+	require.Equal(t, "Vinyasa Flow", v["className"])
+	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
+}
+
+func TestWellnessLedgerHistory_NoSettlesLink_ProjectsNullClassName(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "payment", 5000, "Front-desk payment")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["bookingKey"], "a payment settles no booking — OPTIONAL MATCH leaves it null")
+	require.Nil(t, v["className"])
+	require.Nil(t, v["classStartsAt"])
+}
