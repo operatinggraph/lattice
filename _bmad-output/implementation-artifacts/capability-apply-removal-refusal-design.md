@@ -170,43 +170,89 @@ Two mechanisms, one fire. Neither introduces state, a lens, an op, or a contract
 RefuseRemovals bool
 ```
 
-Enforcement sits in `Apply` immediately after `enforceSecureColumnRetirement` — **before** the empty-delta
-return and **before** the `DryRun` return, for the reason that call site already states in prose: a preview
-whose real run would be refused must say so rather than describe a batch that cannot commit. It is pure
-(it reads `sum.tombstoned` and the mutation list, nothing else), so it costs a preview nothing.
+Enforcement sits in `Apply` **before `enforceSecureColumnRetirement`** and **before the `DryRun` return**.
+It is pure — it reads the diff summary and nothing else — so it costs a preview nothing.
+
+*(Amended 2026-08-22, during the build.)* Two things this paragraph originally said were wrong.
+
+**Order.** The removal guard runs *first*, not after the secure-column retirement guard. Both are fed by
+the same dropped-key set, so a partial Definition that drops a Secure Lens trips the retirement guard on
+every run — and that guard answers with a remedy the caller cannot perform (declare a
+`RetiredSecureColumn`, an attestation about ciphertext a proposal describing one artifact of somebody
+else's package has no standing to make) at a **502**, because `undeclaredSecureColumnDropError` returned a
+bare error. `clinic-domain` is off the deny-list and declares Secure Lenses, so the population is real.
+The removal refusal is the harder boundary — it says the apply must not happen at all, by any attestation —
+so it owns the answer. Source-authored callers leave `RefuseRemovals` false, so for them the block is a
+no-op and the retirement guard sees exactly what it saw before. (`undeclaredSecureColumnDropError` also
+gains a sentinel, `ErrUndeclaredSecureColumnDrop`, and a 409 arm, since its 502 is a live defect on a path
+this fire now shares.)
+
+**"Before the empty-delta return" is not load-bearing for this guard.** It was stated as holding "for the
+same reason" as the retirement guard's placement, and that reason is vacuous here: a Definition that stops
+describing a declared key necessarily rewrites the manifest aspect's `declaredKeys`, so its delta is never
+empty. The retirement guard genuinely can face dropped columns with zero mutations; this one cannot. The
+`DryRun` half of the claim stands.
 
 The refusal is typed, mirroring `DeclaredKeysOccupiedError` field-for-field in shape and reasoning — a
 distinction the code *makes* is carried in fields, never scraped from rendered prose:
 
 ```go
-var ErrApplyWouldRemove = errors.New("pkgmgr: apply refused — it would remove keys its Definition does not describe")
+var ErrApplyWouldRemove = errors.New("pkgmgr: apply refused — it would drop keys its Definition does not describe")
 
 type ApplyWouldRemoveError struct {
-    PackageName  string   // the package whose apply was refused
-    DeclaredKeys int      // how many keys the installed package declares
-    DescribedKeys int     // how many the submitted Definition describes
-    RemovedKeys  []string // sorted; every key the diff would have tombstoned
-    message      string
+    PackageName     string   // the package whose apply was refused
+    DeclaredKeys    int      // how many keys the installed package declares (deduplicated)
+    DescribedKeys   int      // how many the submitted Definition describes (deduplicated)
+    UndescribedKeys []string // sorted; old \ new, NOT the subset that would be tombstoned
+    Remedy          string   // supplied by the caller that knows which next move is true
+    message         string
 }
 func (e *ApplyWouldRemoveError) Error() string { return e.message }
 func (e *ApplyWouldRemoveError) Unwrap() error { return ErrApplyWouldRemove }
+
+// The same rule, read the other way.
+var ErrApplyWouldRevive = errors.New("pkgmgr: apply refused — it would revive keys an operator tombstoned")
 ```
+
+*(Amended 2026-08-22.)* `Remedy` is a field rather than fixed prose because the original message's
+"propose it as `newPackage`" is false for the caller that already IS a `newPackage` proposal and lost a
+race for its name — for that one the remedy is "choose a name that is free" — and because §11's rename
+residual lands here too and needs naming. `Apply` states the facts; `ApplyCapabilityPlan` supplies the
+remedy it owns.
 
 `cmd/loupe/pkg.go:375`'s `packageApplyStatus` gains `ErrApplyWouldRemove` in its 409 arm: like every other
 entry there, it is a deterministic package-state refusal that fails identically on every retry.
 
-**The predicate is one clause, so here is the state table it is evaluated against** — every shape the
-removal arm can produce, with the outcome decided per row rather than inferred from the clause:
+**The predicate is COVERAGE, not emission** *(amended 2026-08-22 — see the note under the table)*. It
+refuses iff `old \ new` is non-empty: any key the installed manifest declares that the submitted
+Definition does not describe. The state table it is evaluated against:
 
-| Delta the in-place branch produces | `sum.tombstoned` | Outcome |
+| Delta the in-place branch produces | `old \ new` | Outcome |
 |---|---|---|
 | `newPackage`, fresh install — create-only batch, no diff arm runs | n/a | admit (the flag is unreachable here by construction) |
-| Covering Definition, body edits only | 0 | admit — updates, `Tombstoned == 0` |
-| Covering Definition, byte-identical bodies | 0 | admit — empty delta, `Action: "skip"`, `Reason: "no changes"` |
+| Covering Definition, body edits only | ∅ | admit — updates, `Tombstoned == 0` |
+| Covering Definition, byte-identical bodies | ∅ | admit — empty delta, `Action: "skip"`, `Reason: "no changes"` |
 | Non-covering: a declared key is dropped and live in KV | ≥1 | **refuse**, naming every key |
-| Non-covering: a dropped key is a `vtx.retentionclass.*` holder | 0 (preserved, `upgrade.go:558-575`) | admit — nothing is removed; the holder stays live-but-undeclared as designed |
-| Non-covering: a dropped key is absent from KV entirely | 0 (skipped, `upgrade.go:551-556`) | admit — there is nothing to remove |
-| Non-covering: a dropped key is **already tombstoned** out-of-band | ≥1 (the removal arm re-emits it; only retention holders branch on `isDeleted`) | **refuse** — the removal is a no-op, but the Definition still fails to describe a key the package declares, and admitting it would make the guard's meaning depend on KV liveness rather than on what the submitter described |
+| Non-covering: a dropped key is a `vtx.retentionclass.*` holder | ≥1 (preserved, so no tombstone is emitted) | **refuse** — the holder is left LIVE AND UNDECLARED, a class key with nothing recording that this package custodies it |
+| Non-covering: a dropped key is absent from KV entirely | ≥1 (skipped, so no tombstone is emitted) | **refuse** — nothing is removed, but the key stops being declared, and the declaration is what a repair reads |
+| Non-covering: a dropped key is **already tombstoned** out-of-band | ≥1 | **refuse** — the removal is a no-op, but the Definition still fails to describe a key the package declares |
+| Covering, but a DESCRIBED key is already tombstoned out-of-band | ∅ | **refuse** (`ErrApplyWouldRevive`) — the body-diff path would un-tombstone a key an operator deliberately killed, and this Definition said nothing about that decision |
+
+**Why the predicate is coverage and not the emitted tombstone list** *(amended 2026-08-22, during the
+build; the original text had the last three rows wrong and reasoned from "there is nothing to remove")*.
+That reasoning covers the entity keys only. The admitted apply still runs the in-place branch, and
+`build.go:425-433` takes `declaredKeys`, `depends`, `description` and `version` **from the submitted
+Definition** — so a partial Definition emitting zero tombstones still replaces the manifest's
+`declaredKeys` with just its own, blanks `depends` and `description`, rewrites `version`, and leaves a
+dropped retention-class holder live but no longer declared, severing the package's key-custody
+declaration. A cold review demonstrated both no-tombstone shapes admitted at `action="upgrade"
+tombstoned=0` with `declaredKeys` narrowed to the proposal's own lens. Emission is only the loudest
+symptom of the misdescription; coverage is the property.
+
+The last row is the same rule read in the other direction, and was added for the same reason: refusing a
+no-op re-tombstone of an *undescribed* key while silently resurrecting a *described* one is the rule
+applied inconsistently. Source-authored convergence keeps today's revival behaviour untouched — only a
+caller that has declared its Definition partial is refused.
 
 The outcome column is deliberately uniform: **refuse the whole apply, never skip the offending keys.** A
 per-key skip would commit a package into a state that matches *neither* the old Definition nor the new one,
@@ -235,9 +281,22 @@ structural rather than a flag default (§11 prices inverting the default and rej
   | Field | Value | Why |
   |---|---|---|
   | `RefuseRemovals` | **always `true`**, both modes | A capability Definition is never authorized to remove. On the `newPackage` arm it is inert *by construction* — `applyFreshInstall` runs a create-only batch with no diff — and that inertness is the point: it closes the narrow race in which the name is installed between the plan build's `IsPackageInstalled` check (`capabilityapply.go:195`) and `Apply`'s own `findInstalledPackage`, which would otherwise silently take the in-place branch. |
-  | `RequireInstalled` | `true` for `upgradeExisting` | Two effects, both wanted. (i) If the package is uninstalled between the plan build and the apply, the honest outcome is `ErrNotInstalled`, not a fresh install landing on tombstoned keys and failing later as an occupancy refusal. (ii) It is a conjunct of `Apply`'s same-version skip branch (`apply.go:150`: `existing.Version == def.Version && !opts.Force && !opts.RequireInstalled`), so setting it **defeats the skip** — which closes a live defect today: a same-version `upgradeExisting` currently returns `Action: "skip"`, and `cmd/lattice-pkg`'s `runApplyProposal` then stamps `MarkCapabilityProposalApplied` over an artifact that never landed. |
+  | `RequireInstalled` | `true` for `upgradeExisting` | (i) If the package is uninstalled between the plan build and the apply, the honest outcome is `ErrNotInstalled`, not a fresh install landing on tombstoned keys and failing later as an occupancy refusal. **This is the option's only observable effect through this entry point, and the only thing that can pin it.** *(Amended 2026-08-22.)* The originally-stated second effect — that it is a conjunct of `Apply`'s same-version skip branch and so defeats that skip — is **unreachable here**: §3.3's `newVersion != installed` precondition refuses such a plan before one can exist, so no `ApplyCapabilityPlan` call can reach the skip it was said to defeat. An unfalsifiable justification is the inert-guard shape with the sign flipped, which §13.1 already caught once in this document; it is struck rather than left standing. The silent-`applied` harm it named is real and is closed — on the `newPackage` arm by the post-condition below, and on this arm by §3.3. |
   | `Force` | **never** | Redundant once `RequireInstalled` is set (both defeat the same skip conjunct), and it would additionally re-open the same-version diff path that §3.3 refuses for an independent reason. |
+- **`ApplyCapabilityPlan` also refuses a `newPackage` plan that comes back `Skipped`** *(added 2026-08-22,
+  during the build)*. `RequireInstalled` cannot be set on that arm — the package is absent by definition
+  there, so it would return `ErrNotInstalled` for every legitimate `newPackage` apply — and a skip on that
+  arm can only mean the name was claimed before the apply ran, by either of two branches (`Apply`'s
+  same-version skip, or `Install`'s own idempotency skip mirrored through `applyFreshInstall`). Both
+  installed nothing, and both return a nil error the caller stamps `MarkCapabilityProposalApplied` over.
+  The refusal is typed (`ErrPackageNameClaimed`, 409) and the post-condition tests the RESULT rather than a
+  branch, because two branches produce it.
 - After migration, `cmd/loupe/review.go` and `cmd/lattice-pkg/main.go` call `inst.ApplyCapabilityPlan(ctx, plan)`.
+- **`MaterializedDefinition()` returns a deep copy** *(added 2026-08-22)*. `Definition` is a struct of
+  slices and maps, so returning it by value handed out the plan's own backing arrays: a caller could edit
+  the lens body through the accessor and have `ApplyCapabilityPlan` submit the edited one, defeating the
+  whole point of unexporting the field. §3.5's lint regex cannot see that shape — it involves no `Apply`
+  call at all — so the accessor copies.
 
 ### 3.3 `upgradeExisting`'s preconditions become explicit, from data already stored
 
@@ -245,11 +304,18 @@ structural rather than a flag default (§11 prices inverting the default and rej
 proposal already carries (`.target {mode, packageName, baseVersion, newVersion}`,
 `packages/capability-author/ddls.go:129`), so none needs a package version bump or a new op field.
 
+All three comparisons fold surrounding whitespace *(amended 2026-08-22)*, following this file's own rule
+in `normalizePackageName`: widening a match set is safe for a **deny** check and unsafe for a destructive
+resolver, and these are deny checks. Byte-exact, `newVersion: "1.2.0 "` passed "an upgrade must move the
+version" while moving nothing an operator can see. The `baseVersion` mismatch check folds too even though
+widening makes it fire *less* often, because trimming cannot bridge two genuinely different versions — it
+can only stop refusing a value that already names the installed one.
+
 | Refusal | Why |
 |---|---|
 | `newVersion` **absent** | The shared `if version == "" { version = "0.1.0" }` default (`capabilityapply.go:185-187`) is meaningful for `newPackage` and meaningless for an upgrade: it would record `cafe-domain@1.3.0` as `0.1.0`. Absence must be declared, not defaulted. |
 | `newVersion` **equals the installed version** | Loupe's two-commit recovery branch answers "did the install half commit?" by asking whether the package is live **at the target version** (`review.go:711-721`, `:862-872`). If an upgrade's target version equals the version already installed, that question is unanswerable — `installed at newVersion` means both "applied" and "never applied" — and the console 409s every such proposal as recoverable, closing it over an artifact that never landed. Refusing here makes the discriminator sound **by construction** rather than by convention (§3.4). *(The silent-`skip`-then-`applied` harm this rule would also have prevented is already closed by `RequireInstalled`, §3.2 — this rule is not carrying that load.)* |
-| `baseVersion` **absent, or ≠ the installed version** | A proposal authored against `1.0.0` applied over `1.1.0` is a stale apply: the artifacts it *does* describe overwrite whatever `1.1.0` changed. This is the mode's optimistic-concurrency check, and the proposal already records the version it was authored against. Absence is refused rather than tolerated — there is no live producer to break (census A). |
+| `baseVersion` **absent, or ≠ the installed version** | A proposal authored against `1.0.0` applied over `1.1.0` is a stale apply: the artifacts it *does* describe overwrite whatever `1.1.0` changed. The proposal already records the version it was authored against. Absence is refused rather than tolerated — there is no live producer to break (census A). *(Amended 2026-08-22: this was described as "the mode's optimistic-concurrency check" and it is not one.* The comparison runs at plan-build time against its own `findInstalledPackage`; `Apply` then repeats that lookup independently and never re-checks `baseVersion`, so there is a window between them — the same TOCTOU-inside-a-safety-guard shape §11 rejects when it dismisses dry-run-then-apply. It is a **precondition**, not a concurrency check. What actually holds the line if the version moves inside the window is the coverage refusal, which is evaluated inside the call that computes the delta and so is atomic with it. Making `baseVersion` a real OCC conjunct means carrying an expected-base-version into `ApplyOptions` and comparing it against the `existing` that the diff itself is computed from — genuinely small, and deliberately **not** taken here: it changes the shared install/upgrade options contract for one capability-path guarantee, which is the blast-radius argument §11 already used to reject inverting `RefuseRemovals`' default. Flagged for a future fire rather than assumed.) |
 
 ### 3.4 What this *does not* change, and why that is load-bearing
 
@@ -257,10 +323,35 @@ Loupe's two-commit recovery branch (`review.go:711-721`) 409s a proposal whose t
 installed **at the target version**, and its own doc comment (`:862-872`) explains that name alone cannot
 separate "the install committed" from "a package of that name was already there". §3.3's `newVersion ≠
 installed version` rule is what makes that version comparison a *sound* discriminator for `upgradeExisting`
-rather than an accident: post-rule, `installed at newVersion` can only mean the apply committed. No change
-to Loupe's branch is needed — but the property it rests on is now enforced instead of assumed, and that is
-worth stating because the obvious alternative (letting a same-version re-propose diff-apply, which
-`RequireInstalled: true` alone would permit) would have quietly destroyed it.
+rather than an accident: post-rule, `installed at newVersion` can only mean the apply committed.
+
+***Amended 2026-08-22, during the build: as originally written this section claimed the property held with
+no change to Loupe, and that was false.*** The rule lives in `CapabilityApplyPlanForProposal`, and
+`reviewCapabilityApply` reaches the plan builder **only after** the recovery branch has already answered —
+so in exactly the state the rule refuses, the branch short-circuits and the rule never runs. A security
+review demonstrated it end to end: package live at `1.2.0`, an approved proposal at `newVersion: 1.2.0`
+never applied, `POST …/apply` → `409 {"resumable": true, …}`, `POST …/mark-applied` → accepted. The precise
+harm §3.3 cites as its own justification was still fully open, and the op's guards do not close it: the DDL
+checks that `packageKey` is live and name-matches, never the version.
+
+**What now enforces it:** `reviewCapabilityApply` calls `pkgmgr.ValidateCapabilityApplyTarget` **before**
+the recovery classification. That function shares `checkUpgradeExistingVersions` with the plan builder
+rather than restating the rules, so the two cannot drift, and it is scoped to `upgradeExisting`: the
+`newPackage` arm's bypass of the catalog binding is the *point* of the recovery branch (a `newPackage`
+proposal whose install committed IS a package of that name), so re-running it there would remove the only
+route out of a half-commit. An unreadable `.target` returns nil and lets the plan builder — which re-reads
+the same aspect and remains the authority — refuse; this call may only move a determination earlier, never
+be the only one that makes it.
+
+**A cleaner discriminator was looked for and does not exist durably.** The one artifact that records
+"this exact apply committed" is the Processor's idempotency tracker for the deterministic
+`UpgradePackage` requestId, and `TrackerTTL` is 24h — so it answers correctly for a day and then answers
+"never applied" forever. The proposal's own `appliedAs` link and `review.state` record that the *close*
+happened, which is the question already known. The ordering fix is therefore the answer, not a stopgap.
+
+The residual §3.4 originally noted still stands for `newPackage`, unchanged and out of this fire's scope:
+for that mode, name + version cannot separate "my install committed" from "someone else's package was
+already there", which is what `:862-878` says.
 
 ### 3.5 The gate that binds the next author
 
@@ -338,7 +429,15 @@ wondering which boundary was not thought about.
 The one durable value this design *reads* is the installed package's `.manifest.declaredKeys`, whose
 lifetime is unchanged: created by `InstallPackage`, rewritten by every `UpgradePackage`, tombstoned by
 uninstall, and — this is the property the whole design leans on — **never narrowed by a capability apply
-again**, because an apply that would narrow it is now refused before it is submitted.
+again**.
+
+*(Amended 2026-08-22, during the build.)* That invariant is true only under the **coverage** predicate
+§3.1 now specifies. Under the predicate as originally written — refuse iff the delta emits a tombstone —
+it was false: a partial Definition dropping only keys the removal arm preserves (a retention-class holder)
+or skips (a key already absent from KV) emitted nothing, was admitted, and rewrote `declaredKeys` to its
+own keys alone. What enforces the invariant is the guard reading `old \ new` rather than the emitted
+mutation list, plus `readDeclaredKeys` reporting a declaration it could not read whole so that the same
+guard fails closed instead of mistaking a short `old` set for full coverage.
 
 ---
 
