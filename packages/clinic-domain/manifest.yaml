@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.34.0
+version: 0.34.1
 depends:
   - location-domain
 description: |
@@ -36,6 +36,11 @@ description: |
   (follow-ups worklist, "All providers" aggregate, the patient-context switcher
   roster) all read them as an authenticated actor instead of the unprotected
   NATS-KV buckets; the staff audiences use the reserved WildcardAnchor grant.
+  clinicIdentitiesRead is a PROTECTED, self-anchored Postgres SECURE LENS
+  (Contract #3 §3.10) resolving a signed-in identity's own name — cmd/clinic-app
+  reads it to render "Signed in as <name>" for a front-desk staffer, who is
+  neither a patient nor a bound provider and so has no row in either roster,
+  mirroring cafe-domain's cafeIdentitiesRead.
   clinicPatientReadGrants / clinicProviderReadGrants are the package's own
   cap-read.clinic.patient / cap-read.clinic.provider GrantTable producers
   (self-anchoring class=patient / class=provider onto their own bare NanoID,
@@ -173,6 +178,9 @@ declares:
       adapter: postgres
       engine: full
     - canonicalName: clinicEncountersRead
+      adapter: postgres
+      engine: full
+    - canonicalName: clinicIdentitiesRead
       adapter: postgres
       engine: full
     - canonicalName: clinicPatientReadGrants

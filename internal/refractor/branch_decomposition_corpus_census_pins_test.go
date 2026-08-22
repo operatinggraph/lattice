@@ -31,6 +31,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"clinicAppointments":                {"g3/o3!no-aggregating-item", 0, 3},
 	"clinicAppointmentsRead":            {"g3/o3!no-aggregating-item", 0, 3},
 	"clinicEncountersRead":              {"g1/o1!no-aggregating-item", 0, 1},
+	"clinicIdentitiesRead":              {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicLedgerHistory":               {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicNoShowSettlement":            {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
 	"clinicPatientAccounts":             {"g1/o1!no-aggregating-item", 0, 1},

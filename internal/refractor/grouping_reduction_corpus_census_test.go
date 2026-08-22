@@ -87,6 +87,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"clinicAppointments":                {"p", 0},
 	"clinicAppointmentsRead":            {"p", 0},
 	"clinicEncountersRead":              {"p", 0},
+	"clinicIdentitiesRead":              {"p", 0},
 	"clinicLedgerHistory":               {"p", 0},
 	"clinicNoShowSettlement":            {"key(accountKey entityKey feeCents patientKey status) p", 0},
 	"clinicPatientAccounts":             {"p", 0},

@@ -15,8 +15,11 @@
 // signed-in actor's own token (real-actor-write-auth-e2e-design.md §3.1) — the
 // app never proxies a write. READS are served here from protected Postgres
 // models under RLS, scoped by that same session identity: /api/my-appointments,
-// /api/my-schedule and /api/my-visit-series answer for the caller alone
-// (patient-self and provider-self anchors), while /api/staff/appointments,
+// /api/my-schedule, /api/my-visit-series and /api/identities answer for the
+// caller alone (patient-self, provider-self, and identity-self anchors —
+// /api/identities is the name behind the "Signed in as" header, and is the one
+// of these a front-desk staffer, who is neither a patient nor a bound
+// provider, gets an answer from), while /api/staff/appointments,
 // /api/staff/visit-series, /api/staff/patients and /api/ledger answer only for an
 // identity holding the reserved WildcardAnchor grant (D1 design §3.4 M5) and
 // return nothing to anyone else. What a session may see is therefore decided by
@@ -31,9 +34,10 @@
 //	CLINIC_APP_ADDR      HTTP listen address (default: 127.0.0.1:7799)
 //	NATS_URL             NATS server URL (default: nats://localhost:4222)
 //	BOOTSTRAP_JSON_PATH  path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
-//	CLINIC_APP_PG_DSN    Postgres DSN for the protected clinicAppointmentsRead read
-//	                     model (D1.5); falls back to REFRACTOR_PG_DSN. Unset ⇒
-//	                     /api/my-appointments reports the model unconfigured.
+//	CLINIC_APP_PG_DSN    Postgres DSN for the protected clinicAppointmentsRead /
+//	                     clinicIdentitiesRead read models (D1.5); falls back to
+//	                     REFRACTOR_PG_DSN. Unset ⇒ /api/my-appointments and
+//	                     /api/identities report the model unconfigured.
 //	CLINIC_APP_DEV_AUTH  "1" enables the demo in-process minter behind /api/dev-login
 //	                     (loopback bind only).
 //	CLINIC_APP_JWT_PUBLIC_KEY / _JWT_ISSUER  the production verify-only posture: an
@@ -154,7 +158,7 @@ func run(logger *slog.Logger) error {
 		// the pool reconnects lazily if Postgres comes up later.
 		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := pool.Ping(pingCtx); err != nil {
-			logger.Warn("protected read model pool configured but unreachable at startup; every protected endpoint (/api/my-appointments, /api/my-schedule, /api/staff/appointments, /api/my-visit-series, /api/staff/visit-series) will 502 until Postgres is reachable",
+			logger.Warn("protected read model pool configured but unreachable at startup; every protected endpoint (/api/my-appointments, /api/my-schedule, /api/staff/appointments, /api/my-visit-series, /api/staff/visit-series, /api/identities) will 502 until Postgres is reachable",
 				"error", err)
 		} else {
 			logger.Info("protected read model pool configured")

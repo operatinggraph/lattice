@@ -144,6 +144,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"capabilityRoles":                {narrow, "identity permission role", modeRelation},
 	"clinicAppointments":             {narrow, "appointment building patient provider", modeLabel},
 	"clinicAppointmentsRead":         {narrow, "appointment building identity patient provider", modeLabel},
+	"clinicIdentitiesRead":           {narrow, "identity", modeRelation},
 	"clinicLedgerHistory":            {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
 	"clinicNoShowSettlement":         {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
 	"clinicPatientAccounts":          {narrow, "clinicaccount patient", modeRelation},

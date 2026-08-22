@@ -816,3 +816,82 @@ func TestClinicEncountersRead_CarriesNoPatientIdentifier(t *testing.T) {
 			"the clinical record's table must carry no patient identifier — a reader joins read_provider_appointments for one")
 	}
 }
+
+// seedNamedIdentity mints a bare identity carrying the sensitive .name aspect
+// in the at-rest shape step 6.5 commits — a ciphertext envelope, no plaintext
+// field — and returns the envelope for assertion.
+func (f *lensFixture) seedNamedIdentity(t *testing.T, name string) map[string]any {
+	t.Helper()
+	f.vtx(t, name, "identity")
+	envelope := map[string]any{
+		"ct":    "3q2+7w==",
+		"nonce": "3q2+7w==",
+		"keyId": "vtx.identity." + f.ids[name],
+	}
+	f.aspect(t, name, "name", "name", envelope)
+	return envelope
+}
+
+// TestClinicIdentitiesRead_ProjectsEnvelopeWholeAndSelfAnchors — one row per
+// named identity: the `name` column carries the ciphertext envelope MAP whole
+// (what the Secure-Lens decryptor consumes; the engine never sees a name), and
+// authz_anchors carries exactly the identity's OWN bare NanoID. That
+// self-anchor is what the platform's base cap-read self-grant matches, which
+// is what lets a front-desk staffer — in no patient or provider roster — read
+// their own name with no clinic-specific grant producer at all.
+func TestClinicIdentitiesRead_ProjectsEnvelopeWholeAndSelfAnchors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	envelope := f.seedNamedIdentity(t, "frontDesk")
+
+	rows := f.project(t, clinicIdentitiesReadSpec)
+	require.Len(t, rows, 1, "exactly one roster row for the one named identity")
+	v := rows[0].Values
+	require.Equal(t, f.ids["frontDesk"], v["identity_id"], "identity_id is the bare NanoID (the IntoKey)")
+	require.Equal(t, "vtx.identity."+f.ids["frontDesk"], v["identity_key"])
+	require.Equal(t, envelope, v["name"], "the envelope must reach the decryptor whole, never a field of it")
+	require.Equal(t, []string{f.ids["frontDesk"]}, anchorStrings(t, v["authz_anchors"]),
+		"self-anchored on the identity's own NanoID alone — no workplace fan-out")
+}
+
+// TestClinicIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities — the
+// ciphertext-presence WHERE: an identity with no .name aspect and one whose
+// .name data is plaintext-shaped ({value}, a shape step 6.5 can never commit)
+// both project NO row, so the lens can neither roster unnamed service actors
+// nor carry a plaintext name by itself.
+func TestClinicIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "svc", "identity") // no .name at all
+	f.vtx(t, "legacy", "identity")
+	f.aspect(t, "legacy", "name", "name", map[string]any{"value": "Plain Text"})
+	f.seedNamedIdentity(t, "frontDesk")
+
+	rows := f.project(t, clinicIdentitiesReadSpec)
+	require.Len(t, rows, 1, "only the ciphertext-named identity projects")
+	require.Equal(t, "vtx.identity."+f.ids["frontDesk"], rows[0].Values["identity_key"])
+}
+
+// TestClinicIdentitiesRead_OneRowPerIdentityRegardlessOfClinicLinks — an
+// identity bound to a patient AND a provider still projects exactly one row.
+// The spec anchors on the identity alone and walks nothing, so no clinic-side
+// link can fan a row out and collide on the single-valued identity_id IntoKey.
+func TestClinicIdentitiesRead_OneRowPerIdentityRegardlessOfClinicLinks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedNamedIdentity(t, "sam")
+	f.vtx(t, "samPatient", "patient")
+	f.vtx(t, "samProvider", "provider")
+	f.edge(t, "identifiedBy", "samPatient", "sam")
+	f.edge(t, "identifiedBy", "samProvider", "sam")
+
+	rows := f.project(t, clinicIdentitiesReadSpec)
+	require.Len(t, rows, 1, "one row per identity — the lens walks no clinic link")
+	require.Equal(t, []string{f.ids["sam"]}, anchorStrings(t, rows[0].Values["authz_anchors"]))
+}

@@ -19,6 +19,7 @@ const state = {
   patientOptions: [], // the roster currently rendered in the #patient select — the full cache, or a
   // narrower ?q= match while a front-desk search is active
   providers: [],
+  identities: [], // the protected clinicIdentitiesRead roster (loadIdentities) — at minimum the signed-in actor's own row, resolved by name. The only roster a front-desk staffer, who is neither a patient nor a bound provider, appears in.
   providerSearch: "", // #provider-search term, filters the booking picker's roster client-side (name/specialty substring)
   sites: [], // clinic-domain clinicSites lens rows: {siteKey, name}
   providerSites: [], // clinic-domain providerSites lens rows: {providerKey, siteKey, providerName, siteName}
@@ -213,26 +214,49 @@ function startSessionKeepalive() {
 const whoamiRetryBackoffsMs = [200, 500, 1200];
 
 // nameForIdentity resolves the signed-in identity's bare NanoID to its human
-// name, checking the already-loaded patient roster first (state.patients
-// carries identityKey per row as a FULL vtx.identity.<NanoID> key — the same
-// PROTECTED, RLS-scoped clinicPatientsRead projection nameForPatient reads),
-// then the provider roster (state.providers carries identityKey the same way,
-// from the OPEN clinicProviders lens — a provider directory entry is already
-// public, so no RLS is needed there), each matched through bareId() — falling
-// back to the short key when neither roster has loaded yet or the signed-in
-// identity is neither a patient nor a bound provider (front-desk staff, whose
-// own name has no row in either) — mirrors loftspace-app's
+// name over three rosters in turn, then the short key:
+//
+//   1. the patient roster (state.patients carries identityKey per row as a
+//      FULL vtx.identity.<NanoID> key — the same PROTECTED, RLS-scoped
+//      clinicPatientsRead projection nameForPatient reads),
+//   2. the provider roster (state.providers carries identityKey the same way,
+//      from the OPEN clinicProviders lens — a provider directory entry is
+//      already public, so no RLS is needed there),
+//   3. the identity roster (state.identities, the PROTECTED, self-anchored
+//      clinicIdentitiesRead model — the only one a front-desk staffer, who is
+//      neither a patient nor a bound provider, has a row in),
+//
+// each matched through bareId(), falling back to the short key while no roster
+// has loaded yet or the identity is named in none — mirrors loftspace-app's
 // nameFor/renderSignedInAs (cmd/loftspace-app/web/app.js).
 function nameForIdentity(key) {
   const patient = state.patients.find((p) => bareId(p.identityKey) === key);
   if (patient && patient.name) return patient.name;
   const provider = state.providers.find((p) => bareId(p.identityKey) === key);
   if (provider && provider.name) return provider.name;
+  const identity = state.identities.find((i) => bareId(i.identityKey) === key);
+  if (identity && identity.name) return identity.name;
   return shortKey(key);
 }
 
-// renderSignedInAs shows who the session belongs to, resolved to a name once
-// the patient roster lands (loadPatients calls this again after it loads).
+// loadIdentities reads the protected, RLS-scoped identity-name roster
+// (clinicIdentitiesRead) as the signed-in session — at minimum the caller's
+// own self-anchored row, plus every named identity for a WildcardAnchor
+// holder. A failure leaves the roster empty, which nameForIdentity renders as
+// the short key, exactly as it does before the fetch returns.
+async function loadIdentities() {
+  try {
+    const data = await appGet("/api/identities");
+    state.identities = (data && data.identities) || [];
+  } catch (_) {
+    state.identities = [];
+  }
+  renderSignedInAs();
+}
+
+// renderSignedInAs shows who the session belongs to, resolved to a name once a
+// roster naming the signed-in identity lands (loadPatients and loadIdentities
+// each call this again after they load).
 function renderSignedInAs() {
   const who = $("#signed-in-as");
   if (who) who.textContent = state.identityId ? nameForIdentity(state.identityId) : "";
@@ -321,17 +345,11 @@ function isTransientAuthLag(reply) {
 // (scripts/verify-real-actor-write-auth.go) uses for the same class of race.
 const retryBackoffsMs = [200, 400, 800, 1600];
 
-function toast(msg, kind, extra) {
+function toast(msg, kind) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
   t.innerHTML = "";
   t.append(document.createTextNode(msg));
-  if (extra) {
-    const span = document.createElement("span");
-    span.className = "mono";
-    span.textContent = " " + extra;
-    t.append(span);
-  }
   t.hidden = false;
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => (t.hidden = true), 6000);
@@ -819,7 +837,7 @@ async function submitNewPatient(ev) {
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     closeNewPatient();
-    toast("Patient created.", "ok", key);
+    toast("Patient created.", "ok");
     // Make the new patient the active context (the lens may take a moment to
     // project; select it now and reload so the switcher shows it once projected).
     if (key) {
@@ -1352,7 +1370,7 @@ async function submitAddProvider() {
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     $("#add-provider").open = false;
-    toast("Provider added.", "ok", key);
+    toast("Provider added.", "ok");
     renderAddProviderForm();
     setTimeout(async () => {
       await loadProviders();
@@ -2329,7 +2347,7 @@ async function submitBook(ev) {
     delete state.slotPatientApptCache[state.patient];
     $("#book-form").reset();
     refreshSlots();
-    toast("Appointment booked.", "ok", key);
+    toast("Appointment booked.", "ok");
     // Route to My Appointments with the new appointment highlighted (the lens may
     // take a moment to project; a Refresh shows it once projected).
     state.highlight = key || null;
@@ -4486,6 +4504,7 @@ function init() {
     if (state.canSignOut) startSessionKeepalive();
     loadPatients();
     loadProviders();
+    loadIdentities();
     loadSites();
     // Prefetched in parallel so the first descriptor-form render (provider
     // edit / add provider / assign site / ...) does not itself pay for the

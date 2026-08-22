@@ -386,6 +386,56 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// clinicIdentitiesRead — the protected Postgres identity-name lens
+			// that resolves a signed-in actor's OWN name. cmd/clinic-app renders
+			// "Signed in as <name>" off the patient roster (clinicPatientsRead)
+			// and the provider directory (clinicProviders); an identity that is
+			// neither — every front-desk staffer — has no row in either, so the
+			// header falls back to the raw key. NAME ONLY, mirroring
+			// cafe-domain's cafeIdentitiesRead and wellness-domain's
+			// wellnessIdentitiesRead SECURE LENS (Contract #3 §3.10) — the
+			// identity `name` is a sensitive aspect, so Core KV holds only its
+			// ciphertext envelope, and the cypher RETURNs the envelope whole for
+			// Refractor to decrypt at projection time.
+			//
+			// SELF-ANCHORED: each row's authz_anchors carries the identity's OWN
+			// bare NanoID, so the platform's base cap-read self-grant
+			// (internal/bootstrap.CapabilityReadGrantsLensDefinition — every
+			// actor's actor_id == anchor_id == its own key, and it matches
+			// class=identity, which IS this lens's anchor type) lets a signed-in
+			// staffer, patient, or provider read their own row with no extra
+			// grant declaration. That is the landlordUnitsRead idiom, not this
+			// package's indirect patientIdentityReadGrants /
+			// providerIdentityReadGrants producers: those exist because a
+			// patient/provider ENTITY is a different vertex class from the login
+			// that reads its rows, whereas here the anchor IS the identity.
+			//
+			// Self-anchor ONLY, unlike the café/wellness siblings, which fan a
+			// lease's covering buildings into the same set so a front-desk actor
+			// resolves OTHER people's names too. The names a clinic front desk
+			// needs about other people already have their own protected paths —
+			// clinicPatientsRead carries the patient roster with its own
+			// workplace fan-out, and clinicProviders is a public directory — and
+			// there is no lease-shaped walk from a bare identity to a clinic
+			// building to fan out over. A WildcardAnchor holder still reads
+			// every row.
+			CanonicalName: "clinicIdentitiesRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_clinic_identities",
+			Engine:        "full",
+			Spec:          clinicIdentitiesReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"identity_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "identity_key", Type: "text"},
+				{Name: "name", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
+			},
+		},
+		{
 			// clinicPatientReadGrants — the cap-read.clinic.patient GrantTable
 			// producer that closes the gap flagged live (0-of-1 read):
 			// clinicAppointmentsRead's authz_anchors anchors on the PATIENT
@@ -860,6 +910,25 @@ RETURN
   a.encounter.data                  AS assessment,
   a.encounter.data                  AS plan,
   [nanoIdFromKey(pr.key)]           AS authz_anchors
+`
+
+// clinicIdentitiesReadSpec projects one row per NAMED identity — the roster
+// clinic-app resolves the signed-in actor's own name against. The WHERE keeps
+// only identities carrying a `.name` aspect via ciphertext presence
+// (`i.name.data.ct <> null` — there is no plaintext `value` field at rest, so
+// testing the envelope's own field is the presence test), mirroring
+// cafe-domain's cafeIdentitiesReadSpec. The `name` column RETURNs the whole
+// envelope for the Secure-Lens decryptor, exactly as clinicPatientsReadSpec's
+// own `id.name.data` column does. authz_anchors carries the identity's OWN
+// bare NanoID and nothing else — see the Lenses() declaration above for why
+// that self-anchor, with no workplace fan-out, is the right shape here.
+const clinicIdentitiesReadSpec = `MATCH (i:identity)
+WHERE i.name.data.ct <> null
+RETURN
+  nanoIdFromKey(i.key)   AS identity_id,
+  i.key                  AS identity_key,
+  i.name.data            AS name,
+  [nanoIdFromKey(i.key)] AS authz_anchors
 `
 
 // clinicPatientReadGrantsSpec is the cap-read.clinic.patient GrantTable
