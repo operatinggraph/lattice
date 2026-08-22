@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -944,13 +945,13 @@ func v2AckSubject(stream, consumer string) string {
 	return "$JS.ACK._." + globalAccountHash() + "." + stream + "." + consumer + ".1.1.1.0.0"
 }
 
-// TestCoreEventsAckPlaneSideChannel: the protected-consumer registry names a
-// consumer's create and pull verbs but, before coreEventsAckDenies, not its
-// ack subject — and publishing "+NXT" there IS a pull, served to whatever
-// reply subject the caller chose. Any of the sixteen components holding the
-// matrix-wide $JS.ACK.> grant could therefore read (and drain) a shred,
-// revocation or credential-binding backlog the MSG.NEXT deny closes the front
-// door on.
+// TestCoreEventsAckPlaneSideChannel: a protected consumer's ack subject is a
+// pull door, not just an acknowledgement lane — publishing "+NXT" there reads
+// the next message into whatever reply subject the caller chose. Without
+// coreEventsAckDenies, every component holding the matrix-wide $JS.ACK.>
+// grant reads (and drains) a shred, revocation or credential-binding backlog
+// that the MSG.NEXT deny closes the front door on. These vectors pin that the
+// back door is closed too.
 //
 // Both wire forms are exercised because the server subscribes both regardless
 // of the js_ack_fc_v2 feature flag (server/consumer.go:1699-1707): the v1 form
@@ -1072,15 +1073,15 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 // does NOT cover — so what fails is the missing grant, not a per-consumer
 // deny. The four apps run no JetStream consumer at all (their listing path is
 // nats.go's ordered consumer, built AckNonePolicy, for which the server
-// subscribes no ack subject), so the grant only ever bought them an unscoped
-// "+NXT" read on every other component's consumers.
+// subscribes no ack subject), so an ack grant would buy them nothing but an
+// unscoped "+NXT" read on every other component's consumers.
 //
-// The positive control is a component that still holds the grant: the
-// Processor gets a reply on the very same subject, which is what makes the
-// apps' silence a permission result rather than a property of the subject.
-// The second half is the regression the narrowing has to survive: the apps'
-// real read path — a KV handle on token-revocation, a get and a key listing —
-// still works without it.
+// The positive control is a component that does hold the grant: the Processor
+// gets a reply on the very same subject, which is what makes the apps'
+// silence a permission result rather than a property of the subject. The
+// second half is the read path the apps actually depend on — a KV handle on
+// token-revocation, a get and a key listing — which needs no ack grant to
+// work.
 func TestVerticalAppHoldsNoAckGrant(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
@@ -1177,6 +1178,76 @@ func TestVerticalAppHoldsNoAckGrant(t *testing.T) {
 			})
 		}
 	})
+}
+
+// ackGrantRoster is every matrix component's ack-plane posture, and the reason
+// for it. $JS.ACK.> is a data-plane privilege (see coreEventsAckDenies), so
+// holding it is a decision, and so is not holding it — a component that runs a
+// durable consumer and loses the grant stalls silently, since a denied publish
+// draws no error anyone reads. Both directions are pinned by
+// TestAckGrantRoster.
+//
+// The three plain vertical-app rows and chronicler declare byte-identical
+// ExtraPubAllow literals, so nothing but this roster distinguishes an
+// intentional removal from one that swept up a neighbour.
+var ackGrantRoster = map[string]struct {
+	granted bool
+	because string
+}{
+	"processor":            {true, "runs privacy-worker and privacy-worker-retention"},
+	"refractor":            {true, "runs refractor-keyshredded and refractor-classkeyshredded"},
+	"gateway":              {true, "runs gateway-revocation and gateway-credential-bindings"},
+	"loom":                 {true, "runs the loom-trigger and loom-deadline durables"},
+	"weaver":               {true, "runs the weaver-temporal and weaver-sweep durables"},
+	"bridge":               {true, "runs the bridge-external and schedule durables"},
+	"object-store-manager": {true, "runs the object tombstone and cascade durables"},
+	"chronicler":           {true, "runs the eventStream materializer's durable"},
+	"bootstrap":            {true, "the provisioner, exempt from the registry deny loop entirely"},
+	"lattice-pkg":          {true, "consumes op-completion events during an install"},
+	"loupe":                {true, "the inspector consumes streams on demand"},
+	"lattice":              {true, "the operator CLI consumes streams on demand"},
+
+	"model-runner":  {false, "serves micro request/reply and runs no consumer"},
+	"facet":         {false, "health-plane only; per-identity traffic is on the callout connections"},
+	"clinic-app":    {false, "runs no consumer; listings use an AckNone ordered consumer"},
+	"cafe-app":      {false, "runs no consumer; listings use an AckNone ordered consumer"},
+	"wellness-app":  {false, "runs no consumer; listings use an AckNone ordered consumer"},
+	"loftspace-app": {false, "runs no consumer; listings use an AckNone ordered consumer"},
+}
+
+// TestAckGrantRoster pins each component's ack-plane posture against
+// ackGrantRoster, in both directions and with no component unaccounted for.
+//
+// The behavioural vectors elsewhere in this file prove the tier that must NOT
+// reach the ack plane cannot. They cannot prove the converse: a component that
+// wrongly LOSES the grant fails only at runtime, on a redelivery loop nobody
+// is watching, because substrate registers no nats.ErrorHandler and a denied
+// publish surfaces as silence. This is the check that catches that edit, and
+// the roster's exhaustiveness clause is what forces a newly added component to
+// state which side it is on rather than inheriting a neighbour's literal.
+func TestAckGrantRoster(t *testing.T) {
+	t.Parallel()
+	buckets := bootstrap.PlatformBuckets()
+
+	seen := make(map[string]bool, len(Matrix))
+	for _, c := range Matrix {
+		c := c
+		seen[c.Name] = true
+		want, listed := ackGrantRoster[c.Name]
+		if !listed {
+			t.Errorf("component %q is not in ackGrantRoster — decide whether it runs a JetStream consumer and needs $JS.ACK.>, and record the reason there", c.Name)
+			continue
+		}
+		got := slices.Contains(c.Allow(buckets), "$JS.ACK.>")
+		if got != want.granted {
+			t.Errorf("%s holds $JS.ACK.> = %v, want %v (%s)", c.Name, got, want.granted, want.because)
+		}
+	}
+	for name := range ackGrantRoster {
+		if !seen[name] {
+			t.Errorf("ackGrantRoster names %q, which is not a Matrix component", name)
+		}
+	}
 }
 
 // TestChroniclerBackingStreamSideChannel: chronicler-host-reconciliation's new
