@@ -787,6 +787,23 @@ no future fire needs to re-derive it.
 guard test (the idiom already exists in `packages/orchestration-base`, extracting each op's script-read
 keys and asserting set-equality against its declared `Reads`/`OptionalReads`) would have caught the
 original `SetInstructorProfile` gap directly and should be rolled out to the other four packages the
+census found rely on the same client-side fallback.
+
+**2026-08-22 grounding (Vertical Steward, before build):** picked up this row and scoped it before
+touching code. `orchestration-base`'s guard works because each op's `if ot == "<Op>":` branch inlines its
+own `required_string(p, "<field>")` → `vertex_alive(state, <var>)` pair, so a bounded-to-the-branch regex
+sees every check. wellness-domain's `CreateBooking`/`JoinWaitlist` branches (ddls.go:3250, :3287) instead
+delegate their whole read/validate sequence to a shared `prepare_booking_common(state, op, p)` helper
+defined elsewhere in the script — the branch text itself contains no `vertex_alive` call to find. A
+same-idiom port would silently pass (finding zero checks to compare) for exactly the ops that share
+validation logic across a helper, which is the worst place for a claimed drift-guard to have a blind spot
+(false confidence, not just incomplete coverage). wellness-domain's `Reads`/`OptionalReads` declarations
+(opmetas.go) also mix three read *kinds* — vertex existence, aspect presence (`.status`, `.schedule`), and
+link-based ownership probes (`lnk.*`, correctness-tolerant of absence by design) — where orchestration-base's
+guard only ever checked the first kind. Re-filed `📐 needs designer pass` on the board:
+the missing primitive is a script-flow-aware (not per-branch-regex) reads extractor that can follow a call
+into a shared helper and classify vertex/aspect/link reads distinctly. Not built this fire; picked a
+different ready row instead.
 
 ## 17. Inc 3c outcome — café (partial), shipped `3362aa8c`
 
