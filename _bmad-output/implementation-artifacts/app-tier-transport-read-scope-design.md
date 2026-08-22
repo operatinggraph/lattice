@@ -1,6 +1,26 @@
 # The app tier's transport read side is unrestricted — a declared read scope for the NATS permission matrix
 
-**Status: 📐 awaiting-Andrew (ratification).** · Designer fire 2026-08-21 (Winston, unattended).
+**Status: 🗄️ SHELVED (Andrew, 2026-08-22).** Not built. The exposure is real and vendor-verified, but it
+requires a **compromised app-tier binary** to read beyond its need, and Andrew's posture is that the
+vertical-app binaries are **trusted infra** — a breached app process is out of the current threat model, so
+a read-side narrowing is defense-in-depth against a game-over breach rather than a boundary the platform
+enforces today. Refuse/simplify call in the 2026-08-22 ratify session. No contract edit was staged, so
+nothing reverts.
+
+> **Revive trigger:** the app-tier NATS account stops being trusted infra — e.g. third-party / tenant /
+> untrusted app code sharing an app-tier NKey, or a compliance requirement that PHI/PII on the `ops.>`
+> lane not be readable by an app process. At that point this finishes the read side of the same boundary
+> `#75 Fire 2b` started on the publish side.
+
+**Related rows.** F1 (`$JS.ACK.>` cross-stream read) shipped independently as a parallel steward fire
+(`9c24c918`, ack-plane read primitive CLOSED). F2 (`DeliverSubject` unchecked) stays a standalone `📋` —
+it tests the **publish**-side Fire-2b integrity boundary the platform *does* enforce, gated on the cheap
+Processor-arm verification (if the Processor rejects the forged envelope at step-1/step-3, F2 is moot;
+else it is a real hole in a ratified boundary and returns to Andrew) — independent of this read-side shelve.
+
+*Original design retained below for the record — do not build it.*
+
+**Status (original): 📐 awaiting-Andrew (ratification).** · Designer fire 2026-08-21 (Winston, unattended).
 **Adversarial pass: RUN (2026-08-21), two independent lenses — security-soundness and citation/census audit.
 They returned 5 blockers, 4 majors and several minors, and they RESHAPED this design**: the headline exposure
 moved from the at-rest plane to the in-flight one (§For-Andrew ¶2), the mechanism gained a per-bucket mode and
