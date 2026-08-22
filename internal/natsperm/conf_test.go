@@ -3,6 +3,7 @@ package natsperm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -485,8 +486,14 @@ func TestOpsSystemPublishAccess(t *testing.T) {
 func TestVerticalAppOpsPublishDenied(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
-	assertDeniedPublish(t, url, "ops.default", []string{"clinic-app", "cafe-app", "loftspace-app", "wellness-app"})
+	assertDeniedPublish(t, url, "ops.default", verticalAppNames)
 }
+
+// verticalAppNames is the cmd/<x>-app tier — the P5 readers the platform does
+// not trust with a write door. Spelled out rather than derived: the Matrix
+// carries no "is a vertical app" field, and deriving the roster from the
+// grants under test would make the vectors circular.
+var verticalAppNames = []string{"clinic-app", "cafe-app", "loftspace-app", "wellness-app"}
 
 // TestPersonalSyncPublishAccess: refractor's nats_subject Personal Lens
 // adapter (internal/refractor/adapter/natssubject.go) publishes delta
@@ -872,6 +879,304 @@ func TestCoreEventsSideChannel(t *testing.T) {
 			}
 		}
 	}
+}
+
+// jsAckNoWaitPull is the body every ack-plane vector below publishes. "+NXT"
+// makes the server ack the message the subject names and then run a
+// next-message request on that consumer, delivering the result to the
+// PUBLISHER's own reply subject with no check on who published (nats-server
+// v2.14.0 server/consumer.go:2716, :2736-2738) — the ack subject is a read
+// path, which is what these vectors exist to police. The JSON tail is
+// TrimSpace'd and parsed as an ordinary pull request (:3861-3862), and
+// no_wait is load-bearing: with it the server ALWAYS answers a permitted
+// request — a message when one is available, a 404 status reply when the
+// pending set is empty (:4494-4497) — so "no reply at all" can only mean the
+// publish was denied at the transport, never "the consumer had nothing".
+var jsAckNoWaitPull = []byte(`+NXT {"batch":1,"no_wait":true}`)
+
+// msgNextNoWaitPull is the same no-wait pull sent the front way, through
+// $JS.API.CONSUMER.MSG.NEXT.
+var msgNextNoWaitPull = []byte(`{"batch":1,"no_wait":true}`)
+
+// assertDeliveredMessage fails unless msg is a real stream delivery rather
+// than one of JetStream's status replies (404 no-messages, 408 request
+// timeout, 409 limit exceeded). A status reply means the request was
+// PERMITTED but found nothing — a positive control that accepted one would
+// claim the wrong thing.
+func assertDeliveredMessage(t *testing.T, what string, msg *nats.Msg) {
+	t.Helper()
+	if status := msg.Header.Get("Status"); status != "" {
+		t.Fatalf("%s: want a delivered message, got JetStream status %q %q", what, status, msg.Header.Get("Description"))
+	}
+	if len(msg.Data) == 0 {
+		t.Fatalf("%s: want a delivered message with a body, got an empty payload", what)
+	}
+}
+
+// globalAccountHash reproduces the second token of a v2 ack subject the way
+// nats-server derives it: the first 8 bytes of sha256(<account name>), each
+// byte folded into a 62-character alphabet (v2.14.0 server/events.go:1151-1163,
+// with digits/base at server/accounts.go:2363-2364), over the account the
+// connection lands in. deploy/nats-server.conf declares no accounts block, so
+// every component user is in the global account "$G" (server/const.go:247).
+//
+// Derived, never a hardcoded literal: a stale constant would name a subject
+// nothing is subscribed to, so every v2 denial vector would pass vacuously.
+// Getting it wrong instead fails the v2 positive control loudly.
+func globalAccountHash() string {
+	const digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	sum := sha256.Sum256([]byte("$G"))
+	h := make([]byte, 8)
+	for i := range h {
+		h[i] = digits[int(sum[i])%len(digits)]
+	}
+	return string(h)
+}
+
+// v2AckSubject builds the v2 wire form of a consumer's ack subject —
+// $JS.ACK.<domain>.<accHash>.<stream>.<consumer>.<5 counters> (v2.14.0
+// server/consumer.go:1395-1398). The domain is the literal "_" because the
+// committed conf's jetstream block configures none (:1377-1379). The trailing
+// counters need not correspond to a real delivery: processAck's "+NXT" arm
+// runs the next-message request whatever ackReplyInfo made of them
+// (:2736-2738).
+func v2AckSubject(stream, consumer string) string {
+	return "$JS.ACK._." + globalAccountHash() + "." + stream + "." + consumer + ".1.1.1.0.0"
+}
+
+// TestCoreEventsAckPlaneSideChannel: the protected-consumer registry names a
+// consumer's create and pull verbs but, before coreEventsAckDenies, not its
+// ack subject — and publishing "+NXT" there IS a pull, served to whatever
+// reply subject the caller chose. Any of the sixteen components holding the
+// matrix-wide $JS.ACK.> grant could therefore read (and drain) a shred,
+// revocation or credential-binding backlog the MSG.NEXT deny closes the front
+// door on.
+//
+// Both wire forms are exercised because the server subscribes both regardless
+// of the js_ack_fc_v2 feature flag (server/consumer.go:1699-1707): the v1 form
+// this deployment's traffic actually uses, and the v2 form that is invisible
+// on the wire yet live in the subscription set. Positive controls come first
+// on both — the v1 subject is taken from a real delivery, the v2 subject is
+// synthesized from the server's own derivation — so the denials below are
+// known to be about permissions and not about a subject nobody listens on.
+func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, "core-events", []string{"events.>"})
+
+	// the Processor holds the events.> publish grant — these are real stream
+	// messages, so every consumer below has something genuine to deliver.
+	proc := connectAs(t, url, "processor")
+	published := 0
+	publishEvent := func(t *testing.T) {
+		t.Helper()
+		published++
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		subject := fmt.Sprintf("events.ackplane.%d", published)
+		if err := proc.Publish(ctx, subject, []byte(`{"probe":true}`), nil); err != nil {
+			t.Fatalf("processor Publish %s: want success, got %v", subject, err)
+		}
+	}
+
+	for _, pc := range coreEventsProtectedConsumers {
+		pc := pc
+		// sequential per consumer: each stage below consumes what the
+		// previous one published, so they must not interleave.
+		t.Run(pc.name, func(t *testing.T) {
+			owner := connectAs(t, url, pc.owner)
+			createSubj := "$JS.API.CONSUMER.CREATE.core-events." + pc.name + ".events.>"
+			createBody := []byte(`{"stream_name":"core-events","config":{"durable_name":"` + pc.name + `","filter_subject":"events.>","ack_policy":"explicit"}}`)
+			if _, err := owner.NATS().Request(createSubj, createBody, 3*time.Second); err != nil {
+				t.Fatalf("%s CREATE own consumer %s: want success, got %v", pc.owner, pc.name, err)
+			}
+			t.Cleanup(func() {
+				_, _ = boot.NATS().Request("$JS.API.CONSUMER.DELETE.core-events."+pc.name, []byte("{}"), 3*time.Second)
+			})
+
+			// v1 positive control, derived from the server rather than from a
+			// template: pull the front way and keep the ack subject the
+			// server stamped on the delivery.
+			publishEvent(t)
+			delivered, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextNoWaitPull, 3*time.Second)
+			if err != nil {
+				t.Fatalf("%s MSG.NEXT %s: want a delivered message, got %v", pc.owner, pc.name, err)
+			}
+			assertDeliveredMessage(t, pc.owner+" MSG.NEXT "+pc.name, delivered)
+			v1Ack := delivered.Reply
+			wantPrefix := "$JS.ACK.core-events." + pc.name + "."
+			if !strings.HasPrefix(v1Ack, wantPrefix) || strings.Count(v1Ack, ".") != 8 {
+				t.Fatalf("delivered ack subject = %q, want the v1 form %s<5 counters> (9 tokens)", v1Ack, wantPrefix)
+			}
+
+			// the premise: that real ack subject is a live inbound READ path.
+			publishEvent(t)
+			pulled, err := owner.NATS().Request(v1Ack, jsAckNoWaitPull, 3*time.Second)
+			if err != nil {
+				t.Fatalf("%s +NXT on its own v1 ack subject %q: want a delivered message, got %v", pc.owner, v1Ack, err)
+			}
+			assertDeliveredMessage(t, pc.owner+" +NXT "+v1Ack, pulled)
+
+			// v2 positive control: proves the synthesized shape is the one the
+			// server actually subscribed, hash and domain included. A failure
+			// here is a broken derivation, not a broken permission — and would
+			// make every v2 denial below meaningless.
+			v2Ack := v2AckSubject("core-events", pc.name)
+			publishEvent(t)
+			pulledV2, err := owner.NATS().Request(v2Ack, jsAckNoWaitPull, 3*time.Second)
+			if err != nil {
+				t.Fatalf("%s +NXT on the v2 ack subject %q: want a delivered message, got %v — the server subscribes the v2 form unconditionally (server/consumer.go:1699-1707), so this failing means the domain/account-hash derivation is wrong", pc.owner, v2Ack, err)
+			}
+			assertDeliveredMessage(t, pc.owner+" +NXT "+v2Ack, pulledV2)
+
+			// leave a message PENDING so the denials below run against a
+			// consumer that genuinely has something to hand out.
+			publishEvent(t)
+
+			// grouped so the parallel denials all complete before the
+			// pending-set check that follows.
+			t.Run("denied", func(t *testing.T) {
+				for _, component := range nonBootstrapComponentNames() {
+					if component == pc.owner {
+						continue
+					}
+					for _, subject := range []string{v1Ack, v2Ack} {
+						component, subject := component, subject
+						t.Run(component+"/"+subject, func(t *testing.T) {
+							t.Parallel()
+							c := connectAs(t, url, component)
+							if _, err := c.NATS().Request(subject, jsAckNoWaitPull, deniedTimeout); err == nil {
+								t.Errorf("%s +NXT %s: want denial, got a reply", component, subject)
+							}
+						})
+					}
+				}
+			})
+
+			// the pending message is still there: no denied component pulled
+			// it, and the vectors above were not shadow-boxing an empty
+			// consumer.
+			survivor, err := owner.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+pc.name, msgNextNoWaitPull, 3*time.Second)
+			if err != nil {
+				t.Fatalf("%s MSG.NEXT %s after the denial vectors: want the pending message, got %v", pc.owner, pc.name, err)
+			}
+			assertDeliveredMessage(t, pc.owner+" MSG.NEXT "+pc.name+" (post-denial)", survivor)
+		})
+	}
+}
+
+// TestVerticalAppHoldsNoAckGrant pins the vertical-app tier's absence of
+// $JS.ACK.> behaviorally, against a durable the protected-consumer registry
+// does NOT cover — so what fails is the missing grant, not a per-consumer
+// deny. The four apps run no JetStream consumer at all (their listing path is
+// nats.go's ordered consumer, built AckNonePolicy, for which the server
+// subscribes no ack subject), so the grant only ever bought them an unscoped
+// "+NXT" read on every other component's consumers.
+//
+// The positive control is a component that still holds the grant: the
+// Processor gets a reply on the very same subject, which is what makes the
+// apps' silence a permission result rather than a property of the subject.
+// The second half is the regression the narrowing has to survive: the apps'
+// real read path — a KV handle on token-revocation, a get and a key listing —
+// still works without it.
+func TestVerticalAppHoldsNoAckGrant(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, "core-events", []string{"events.>"})
+
+	// deliberately NOT a coreEventsProtectedConsumers name.
+	const probe = "app-tier-ack-probe"
+	createBody := []byte(`{"stream_name":"core-events","config":{"durable_name":"` + probe + `","ack_policy":"explicit"}}`)
+	if _, err := boot.NATS().Request("$JS.API.CONSUMER.DURABLE.CREATE.core-events."+probe, createBody, 3*time.Second); err != nil {
+		t.Fatalf("bootstrap DURABLE.CREATE %s: want success, got %v", probe, err)
+	}
+
+	proc := connectAs(t, url, "processor")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		if err := proc.Publish(ctx, fmt.Sprintf("events.apptier.%d", i), []byte(`{"probe":true}`), nil); err != nil {
+			t.Fatalf("processor Publish events.apptier: want success, got %v", err)
+		}
+	}
+
+	// take the real ack subject off a real delivery (bootstrap is denied
+	// nothing), so the vectors below use the wire form the server stamped.
+	delivered, err := boot.NATS().Request("$JS.API.CONSUMER.MSG.NEXT.core-events."+probe, msgNextNoWaitPull, 3*time.Second)
+	if err != nil {
+		t.Fatalf("bootstrap MSG.NEXT %s: want a delivered message, got %v", probe, err)
+	}
+	assertDeliveredMessage(t, "bootstrap MSG.NEXT "+probe, delivered)
+	v1Ack := delivered.Reply
+	v2Ack := v2AckSubject("core-events", probe)
+
+	t.Run("positive-control/processor", func(t *testing.T) {
+		for _, subject := range []string{v1Ack, v2Ack} {
+			pulled, err := proc.NATS().Request(subject, jsAckNoWaitPull, 3*time.Second)
+			if err != nil {
+				t.Fatalf("processor +NXT %s: want a delivered message (it holds $JS.ACK.>), got %v", subject, err)
+			}
+			assertDeliveredMessage(t, "processor +NXT "+subject, pulled)
+		}
+	})
+
+	// The apps hold no allow entry that matches either form, so nothing they
+	// send here reaches the server. A permitted request always draws a reply
+	// — a message, or a 404 status once the pending set empties — so "no
+	// reply" is unambiguously a transport denial.
+	for _, app := range verticalAppNames {
+		app := app
+		for _, subject := range []string{v1Ack, v2Ack} {
+			subject := subject
+			t.Run("denied/"+app+"/"+subject, func(t *testing.T) {
+				t.Parallel()
+				c := connectAs(t, url, app)
+				if _, err := c.NATS().Request(subject, jsAckNoWaitPull, deniedTimeout); err == nil {
+					t.Errorf("%s +NXT %s: want denial (no ack grant), got a reply", app, subject)
+				}
+			})
+		}
+	}
+
+	t.Run("read-path-still-works", func(t *testing.T) {
+		provision(t, boot, bootstrap.GatewayRevocationBucket)
+		const key = "revoked.actor.probe"
+		putCtx, putCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer putCancel()
+		if _, err := boot.KVPut(putCtx, bootstrap.GatewayRevocationBucket, key, []byte(`{"revoked":true}`)); err != nil {
+			t.Fatalf("bootstrap KVPut %s: want success, got %v", bootstrap.GatewayRevocationBucket, err)
+		}
+
+		for _, app := range verticalAppNames {
+			app := app
+			t.Run(app, func(t *testing.T) {
+				t.Parallel()
+				c := connectAs(t, url, app)
+				readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer readCancel()
+				if _, err := c.KVGet(readCtx, bootstrap.GatewayRevocationBucket, key); err != nil {
+					t.Fatalf("%s KVGet %s: want success, got %v", app, bootstrap.GatewayRevocationBucket, err)
+				}
+				keys, err := c.KVListKeys(readCtx, bootstrap.GatewayRevocationBucket)
+				if err != nil {
+					t.Fatalf("%s KVListKeys %s: want success, got %v", app, bootstrap.GatewayRevocationBucket, err)
+				}
+				found := false
+				for _, k := range keys {
+					if k == key {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("%s KVListKeys %s = %v, want it to contain %q", app, bootstrap.GatewayRevocationBucket, keys, key)
+				}
+			})
+		}
+	})
 }
 
 // TestChroniclerBackingStreamSideChannel: chronicler-host-reconciliation's new
