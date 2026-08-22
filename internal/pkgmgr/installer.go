@@ -1324,20 +1324,14 @@ const removalSampleCap = 4
 // and may still bind lenses and targets that other packages own, so "propose it
 // as a new package" is a real move and not a demotion.
 func applyWouldRemoveError(def Definition, declaredKeys, describedKeys int, removed []string) error {
-	sample := removed
-	suffix := ""
-	if len(removed) > removalSampleCap {
-		sample = removed[:removalSampleCap]
-		suffix = fmt.Sprintf(", +%d more", len(removed)-removalSampleCap)
-	}
 	return &ApplyWouldRemoveError{
 		PackageName:   def.Name,
 		DeclaredKeys:  declaredKeys,
 		DescribedKeys: describedKeys,
 		RemovedKeys:   removed,
-		message: fmt.Sprintf("%s: package %q declares %d key(s); this Definition describes %d, so applying it would tombstone %d key(s) it does not describe (%s%s). A capability proposal describes only its own artifacts — propose it as `newPackage` (a proposal-owned package may bind lenses and targets across packages) rather than as an upgrade of a package it does not describe",
+		message: fmt.Sprintf("%s: package %q declares %d key(s); this Definition describes %d, so applying it would tombstone %d key(s) it does not describe (%s). A capability proposal describes only its own artifacts — propose it as `newPackage` (a proposal-owned package may bind lenses and targets across packages) rather than as an upgrade of a package it does not describe",
 			ErrApplyWouldRemove, def.Name, declaredKeys, describedKeys, len(removed),
-			strings.Join(sample, ", "), suffix),
+			sampleWithOverflow(removed, removalSampleCap, "+%d more")),
 	}
 }
 
@@ -1345,11 +1339,21 @@ func applyWouldRemoveError(def Definition, declaredKeys, describedKeys int, remo
 // already-ordered list, noting how many it left unnamed so a sample never reads
 // as the whole set.
 func boundedSample(items []string) string {
-	if len(items) <= occupancySampleCap {
+	return sampleWithOverflow(items, occupancySampleCap, "and %d more")
+}
+
+// sampleWithOverflow renders the first limit items of an already-ordered list,
+// appending overflow — a format string taking the unnamed count — as a final
+// comma-separated element when the list is longer. Each refusal supplies its
+// own limit and its own phrasing, because how many keys a message can carry
+// depends on what else the message has to say; what they share is that a
+// truncated list must never be readable as the whole set.
+func sampleWithOverflow(items []string, limit int, overflow string) string {
+	if len(items) <= limit {
 		return strings.Join(items, ", ")
 	}
-	head := append([]string{}, items[:occupancySampleCap]...)
-	head = append(head, fmt.Sprintf("and %d more", len(items)-occupancySampleCap))
+	head := append([]string{}, items[:limit]...)
+	head = append(head, fmt.Sprintf(overflow, len(items)-limit))
 	return strings.Join(head, ", ")
 }
 
