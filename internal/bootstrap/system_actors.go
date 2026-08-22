@@ -11,6 +11,15 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// ErrPrimordialIDsUnloaded reports that a graph predicate keyed on a
+// primordial identifier ran before Load/LoadOrGenerate populated the
+// identifier table. The wrapping error names the identifiers that were still
+// empty. It is a programming/wiring error — a process that reads the graph by
+// primordial identity must load the bootstrap file first, the way every
+// platform daemon does at start-up (e.g. cmd/processor/main.go:72) — and it is
+// a distinct sentinel so a caller can tell it apart from a substrate failure.
+var ErrPrimordialIDsUnloaded = errors.New("bootstrap: primordial identifiers not loaded (call bootstrap.Load or bootstrap.LoadOrGenerate first)")
+
 // SystemActorKeys scans core-kv and returns the actor keys of the kernel-seeded
 // system identities — the root-equivalent actors the Capability Lens
 // primordial-identity anchor projects root grants for (the primordial admin +
@@ -32,7 +41,16 @@ import (
 // per-identity KVGet across the whole identity population. Only the (small,
 // fixed) set of candidate holdsRole-to-operator link keys found this way is
 // read once each, to exclude a revoked (tombstoned) grant.
+//
+// Returns ErrPrimordialIDsUnloaded when the caller has not loaded the
+// primordial identifier table: the whole predicate is keyed on RoleOperatorID,
+// so an unloaded table would match nothing and hand back an empty set that is
+// indistinguishable from "this deployment has no system actors" — and an empty
+// set routes every actor as ordinary at every consumer of this result.
 func SystemActorKeys(ctx context.Context, conn *substrate.Conn) ([]string, error) {
+	if RoleOperatorID == "" {
+		return nil, fmt.Errorf("%w: roleOperator", ErrPrimordialIDsUnloaded)
+	}
 	keys, err := conn.KVListKeys(ctx, CoreKVBucket)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: list core-kv keys: %w", err)

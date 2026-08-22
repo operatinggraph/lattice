@@ -528,7 +528,7 @@ func TestUpgrade_ConcreteLocationToAbstract(t *testing.T) {
 	// (the tombstoned key resolves), so an exemption keyed only on a missing
 	// key never fires and the read fails on an abstract type that is correctly
 	// declared.
-	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket)
+	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket, nil)
 	aspects, err := tr.ReadDDLAspects(ctx, abstractKey)
 	if err != nil {
 		t.Fatalf("cold-start traversal of an upgraded abstract DDL must succeed: %v", err)

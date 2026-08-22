@@ -189,3 +189,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   binary reads the current kernel's whole delta as retired. Check: any verb keyed on kernel provenance
   states its behaviour under a rollback, and fails closed when the stored generation exceeds the running
   binary's.
+- **An unloaded primordial identifier reads as a value, not as "unconfigured" — so a predicate keyed on one
+  answers "none" instead of failing.** The identifier table is package state populated by `Load` /
+  `LoadOrGenerate`; a binary that never calls either leaves `RoleOperatorID` empty, and
+  `SystemActorKeys`'s `id2 != RoleOperatorID` filter then matches no link and returns an empty set with no
+  error. Every consumer reads that as "this deployment has no system actors". Minted: capability-kv single
+  read path — `lattice capability review approve` and `cmd/refractor`'s control-plane checker both routed
+  every actor, the primordial admin included, as ordinary. Check: a predicate keyed on a primordial
+  identifier refuses an unloaded table (`ErrPrimordialIDsUnloaded`) before it reads the graph — and the test
+  that covers such a path must reach it the way the BINARY does, not by calling `EnsurePrimordials` /
+  `LoadOrGenerate` itself, which loads the file the binary never loads and hides the wiring gap.

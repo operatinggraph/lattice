@@ -5,6 +5,9 @@
 #   - Docker stack running (cd ../.. && make up)
 #   - BOOTSTRAP_ACTOR_KEY env var (obtain via: lattice bootstrap inspect)
 #   - NATS_URL (defaults to nats://localhost:4222)
+#   - BOOTSTRAP_JSON (defaults to the repo root's lattice.bootstrap.json) — the
+#     primordial identifier table ai-agent.go loads to route its Capability-KV
+#     read by actor class
 #   - POSTGRES_URL (defaults to postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable)
 #
 # Usage:
@@ -14,6 +17,9 @@
 NATS_URL ?= nats://localhost:4222
 POSTGRES_URL ?= postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
 LATTICE ?= lattice
+# Absolute, so the path holds no matter which directory a target runs from —
+# the root Makefile passes BOOTSTRAP_JSON_PATH to every daemon the same way.
+BOOTSTRAP_JSON ?= $(abspath ../../lattice.bootstrap.json)
 
 .PHONY: help demo milestone-1 milestone-2 milestone-3 milestone-4 milestone-5
 
@@ -102,5 +108,5 @@ milestone-5:
 	  exit 0; \
 	fi
 	@echo "==> Milestone 5: AI agent traversal"
-	NATS_URL=$(NATS_URL) AGENT_ACTOR_KEY=$(AGENT_ACTOR_KEY) go run ./ai-agent.go
+	NATS_URL=$(NATS_URL) AGENT_ACTOR_KEY=$(AGENT_ACTOR_KEY) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./ai-agent.go
 	@echo "--- Milestone 5 done."

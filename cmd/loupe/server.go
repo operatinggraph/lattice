@@ -102,6 +102,10 @@ type server struct {
 	// Gateway), Loupe's own backend calls it, since some ops (the
 	// pkg-lifecycle batch) are assembled server-side.
 	gatewayURL string
+	// systemActors memoizes the graph-derived system-actor set that decides
+	// Capability-KV key routing (review.go). Resolving it costs a full core-kv
+	// listing, so it is held for the process, not re-derived per request.
+	systemActors systemActorSet
 	// demoMode runs the hosted-demo read-only posture (LOUPE_DEMO_MODE,
 	// demo.go): every non-GET request is refused and the shell renders a
 	// visitor banner. Defense in depth only — the guarantee is the demo

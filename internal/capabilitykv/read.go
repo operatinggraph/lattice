@@ -58,20 +58,79 @@ func ReadAndMerge(ctx context.Context, reader KVGetter, bucket string, keys []st
 	return doc, strings.Join(present, "+"), nil
 }
 
+// ReadPlatformDoc reads the platform-path projection for actor: it derives
+// the key set through ClassAwarePlatformKey(systemActorKeys) (keys.go:58 — a
+// system actor unions {cap.<rest>, cap.roles.<rest>}, every other actor reads
+// cap.roles.<rest> alone) and delegates to ReadAndMerge. The routing is a live
+// predicate over the graph-derived system-actor set
+// (internal/bootstrap/system_actors.go:50), not a property of the key string,
+// which is why a reader must come through here rather than concatenate the
+// keys itself.
+//
+// PRECONDITION: this is the routing the Processor's step-3 platform entry
+// applies when RbacRolesActive. Step 3 has a second derivation
+// (internal/processor/step3_auth_matcher.go:158): with rbac-domain absent, the
+// platform entry falls back to singleKeyList(capabilityKeyFromActor) —
+// cap.<rest> for EVERY actor. Under that posture the two routings are
+// INVERTED for an ordinary actor (step 3 reads its anchor; this reads its
+// roles key), so a caller comparing its result against a step-3 decision is
+// answering the same question only in an rbac-active deployment. Every
+// production deployment runs rbac-active — cmd/{processor,loom,weaver,
+// refractor} wire the class-aware derivation unconditionally — and the
+// fallback is the rbac-absent bootstrap window.
+//
+// It applies NO gates — no reserved-op refusal, no lane check, no scope
+// match — the same posture as ReadAndMerge. That is Contract #6 §6.1/§6.4's
+// split: the projection is a grant set, the matcher belongs to the caller,
+// because each caller asks a different question of it (step 3 authorizes one
+// envelope; a capability-proposal check bounds what a grant may confer). A
+// caller needing a gate applies its own.
+//
+// A nil doc with a nil error means every derived key was absent — deny-closed;
+// what absence means is the caller's decision.
+func ReadPlatformDoc(ctx context.Context, reader KVGetter, bucket string, systemActorKeys []string, actor string) (*Doc, string, error) {
+	keys, err := ClassAwarePlatformKey(systemActorKeys)(actor)
+	if err != nil {
+		return nil, "", err
+	}
+	return ReadAndMerge(ctx, reader, bucket, keys)
+}
+
 // MergeDocs folds extra's grant-bearing fields into base (deny-closed union —
-// Contract #6 §6.1 system-actor platform-path carve-out). platformPermissions
-// concatenate (a permission is granted iff SOME source grants it); lanes and
-// roles union (dedup). projectedFromRevisions merges for auth-trace
-// provenance (both source keys recorded). base is never mutated; a new doc is
-// returned.
+// Contract #6 §6.1 system-actor platform-path carve-out). It is TOTAL over the
+// Doc shape: every grant-bearing field contributes from BOTH docs, so no
+// source's grants can be silently dropped by a caller merging keys whose
+// projections happen to carry a field the merge forgot. platformPermissions,
+// serviceAccess and ephemeralGrants concatenate (a grant holds iff SOME source
+// carries it, and their entries carry distinct provenance so collapsing them
+// would lose it); lanes and roles union (dedup). projectedFromRevisions merges
+// for auth-trace provenance (both source keys recorded). The identity and
+// provenance scalars (key, actor, version, projectedAt) are base's — they name
+// a projection, not a grant. base is never mutated; a new doc is returned.
+//
+// INVARIANT those scalars rest on: ReadAndMerge folds in key order, and
+// ClassAwarePlatformKey emits [anchor, roles] (keys.go:77), so on the platform
+// path base is the ANCHOR doc whenever one is present. Reverse that order and
+// the key/projectedAt reaching a caller's auth trace silently become the roles
+// projection's — a change with no compile error and no failing merge, so the
+// ordering is load-bearing where it is written, not incidental.
 func MergeDocs(base, extra *Doc) *Doc {
 	merged := *base
 	merged.PlatformPermissions = append(
 		append([]PlatformPermission{}, base.PlatformPermissions...),
 		extra.PlatformPermissions...)
+	merged.ServiceAccess = append(
+		append([]ServiceAccessEntry{}, base.ServiceAccess...),
+		extra.ServiceAccess...)
+	merged.EphemeralGrants = append(
+		append([]EphemeralGrant{}, base.EphemeralGrants...),
+		extra.EphemeralGrants...)
 	merged.Lanes = unionStrings(base.Lanes, extra.Lanes)
 	merged.Roles = unionStrings(base.Roles, extra.Roles)
-	if len(extra.ProjectedFromRevisions) > 0 {
+	// Copied unconditionally: a merged doc that aliased base's map would let a
+	// later write through either doc surface in the other, which is the one
+	// way this function could mutate base.
+	if base.ProjectedFromRevisions != nil || extra.ProjectedFromRevisions != nil {
 		merged.ProjectedFromRevisions = make(map[string]uint64, len(base.ProjectedFromRevisions)+len(extra.ProjectedFromRevisions))
 		for k, v := range base.ProjectedFromRevisions {
 			merged.ProjectedFromRevisions[k] = v

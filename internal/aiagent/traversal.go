@@ -10,10 +10,21 @@
 //     path as human actors. Nothing in this package bypasses that contract.
 //   - Zero Processor changes: the story is entirely additive.
 //
+// Prerequisite, before step 1: the caller loads the primordial identifier
+// table (bootstrap.Load — SystemActorKeys' predicate is keyed on the
+// roleOperator NanoID it carries), resolves the kernel-seeded system-actor set
+// (bootstrap.SystemActorKeys — one full core-kv listing), and hands that set to
+// NewTraverser. Not a detail — step 1's keys are chosen by the actor's CLASS,
+// and a traverser given no set treats every actor as ordinary. Do both once at
+// start-up, the way examples/hello-lattice/ai-agent.go does; this package
+// neither loads that file nor lists core-kv on its own behalf.
+//
 // Cold-start traversal algorithm (FR19):
-//  1. Agent reads its capability doc from Capability KV — the key is resolved
-//     by actor class (cap.identity.<actorId> for a kernel-seeded system actor,
-//     cap.roles.identity.<actorId> for an ordinary actor).
+//  1. Agent reads its capability doc from Capability KV — the keys are
+//     resolved by actor class through internal/capabilitykv (a kernel-seeded
+//     system actor reads its cap.<type>.<id> anchor unioned with
+//     cap.roles.<type>.<id>; every other actor reads cap.roles.<type>.<id>
+//     alone).
 //  2. Agent picks an operationType from platformPermissions[].
 //  3. Agent calls DiscoverDDL to find the matching vtx.meta.<NanoID> by
 //     enumerating vtx.meta.* keys and reading .canonicalName aspects.
@@ -31,6 +42,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -105,18 +117,28 @@ type DDLAspects struct {
 // It wraps a substrate.Conn and exposes the three-step FR19 discovery
 // algorithm: ReadCapability → DiscoverDDL → ReadDDLAspects.
 type Traverser struct {
-	conn       *substrate.Conn
-	coreBucket string
-	capBucket  string
+	conn            *substrate.Conn
+	coreBucket      string
+	capBucket       string
+	systemActorKeys []string
 }
 
 // NewTraverser constructs a Traverser. coreBucket is typically "core-kv";
 // capBucket is typically "capability-kv". Both names must match the
 // deployment's bucket provisioning.
 //
+// systemActorKeys is the kernel-seeded system-actor set (from
+// bootstrap.SystemActorKeys) that decides an actor's Capability-KV key routing
+// — see ReadCapability. It is taken here, not per read, because discovering it
+// costs a full core-kv listing: the platform binaries resolve it once at
+// start-up and hold it for the process (cmd/processor/main.go:142), and a
+// traverser is constructed the same way. An empty set routes every actor as
+// ordinary, which is the correct deny-closed reading for a caller that has not
+// discovered the set.
+//
 // Panics if conn is nil or either bucket name is empty — these are
 // programming errors, not runtime conditions.
-func NewTraverser(conn *substrate.Conn, coreBucket, capBucket string) *Traverser {
+func NewTraverser(conn *substrate.Conn, coreBucket, capBucket string, systemActorKeys []string) *Traverser {
 	if conn == nil {
 		panic("aiagent: NewTraverser: conn must not be nil")
 	}
@@ -124,139 +146,61 @@ func NewTraverser(conn *substrate.Conn, coreBucket, capBucket string) *Traverser
 		panic("aiagent: NewTraverser: bucket names must not be empty")
 	}
 	return &Traverser{
-		conn:       conn,
-		coreBucket: coreBucket,
-		capBucket:  capBucket,
+		conn:            conn,
+		coreBucket:      coreBucket,
+		capBucket:       capBucket,
+		systemActorKeys: append([]string(nil), systemActorKeys...),
 	}
 }
 
-// ReadCapability fetches the actor's full resolved capability set from
-// Capability KV. Two producers can carry grants for the same actor and
-// neither is a subset of the other, so both are read and merged:
+// ReadCapability fetches the actor's resolved capability set from Capability
+// KV through capabilitykv.ReadPlatformDoc — in an rbac-active deployment, the
+// key routing and merge the Processor's step-3 platform read applies, so the
+// agent discovers the grant set that will authorize the operations it goes on
+// to submit and no more. (Step 3 routes differently in the rbac-absent
+// bootstrap window; capabilitykv.ReadPlatformDoc states that precondition.)
+// actor is the full `vtx.<type>.<id>` key; the routing derives the
+// Capability-KV keys from it, so a non-`identity` actor is keyed correctly.
 //
-//   - cap.identity.<actorId> — core's kernel-literal root-grant anchor,
-//     projected only for identities holding the primordial `operator` role
-//     (Contract #7 §7.7). Carries kernel-only ops (CreateMetaVertex,
-//     InstallPackage, …) that are package-independent and never backed by
-//     an rbac permission/grantedBy link, so they cannot appear in
-//     cap.roles.*.
-//   - cap.roles.identity.<actorId> — rbac-domain's capabilityRoles
-//     projection, walking identity->holdsRole->role<-grantedBy-permission.
-//     Carries every permission actually granted to a role the actor holds
-//     (including ones granted to `operator` itself after the primordial
-//     seed), which the kernel-literal anchor does not re-derive.
+// Which keys that is depends on the actor's class (Contract #6 §6.1):
 //
-// An actor holding operator role is entitled to both: the fixed kernel set
-// AND whatever rbac grants the operator role (or any other held role) has
-// accumulated. Preferring either single key over the other silently drops
-// the other's grants — picking cap.identity loses runtime-granted
-// permissions (an actor AssignRole'd to operator at runtime immediately
-// satisfies the `holdsRole` check, but permissions granted to operator via
-// GrantPermission live only in cap.roles, not the kernel literal), while
-// picking cap.roles loses the kernel-only ops for a real system actor.
-// Reading both and merging is correct regardless of timing (no
-// snapshot/staleness dependency) and never grants more than the two
-// producers already independently authorize.
+//   - A system actor (in the set given to NewTraverser) reads the UNION of
+//     cap.<type>.<id> — core's kernel-literal root-grant anchor, carrying
+//     kernel-only ops (CreateMetaVertex, InstallPackage, …) that are backed by
+//     no rbac permission and so appear in no roles projection — and
+//     cap.roles.<type>.<id>, rbac-domain's capabilityRoles projection walking
+//     identity->holdsRole->role<-grantedBy-permission, which carries every
+//     permission granted to a role the actor holds (including ones granted to
+//     `operator` after the primordial seed, which the kernel literal does not
+//     re-derive). Neither is a subset of the other, so preferring one drops
+//     the other's grants.
+//   - Every other actor reads cap.roles.<type>.<id> alone. An anchor doc left
+//     behind for such an actor is not part of its grant set: the Processor
+//     would not honor it, so neither does the agent.
 //
-// Returns ErrKeyNotFound (wrapped) when NEITHER key has an entry. Callers
-// should treat this as "agent has no capabilities yet".
+// Duplicate {operationType, scope} entries are NOT collapsed. Two entries
+// differing only in `origin` (Contract #6 §6.1 provenance) are two different
+// grants — a reserved op held at runtime origin is refused at step 3 while the
+// same op at package origin is not — so folding them would hide the
+// distinction that decides the refusal.
+//
+// Returns ErrKeyNotFound (wrapped) when NO key for the actor has an entry.
+// Callers should treat this as "agent has no capabilities yet".
 //
 // Staleness note: the returned doc reflects Refractor projections that may
 // have been written some time ago. ProjectedAt is deterministic provenance
 // ("as-of input state"), not a freshness ceiling — the Processor does not
 // reject operations on projection age (NFR-S7). Callers must NOT rely on
 // the Processor denying stale projections.
-func (t *Traverser) ReadCapability(ctx context.Context, actorID string) (*processor.CapabilityDoc, error) {
-	coreDoc, coreErr := t.readCapabilityAt(ctx, actorID, "cap.identity."+actorID)
-	if coreErr != nil && !errors.Is(coreErr, substrate.ErrKeyNotFound) {
-		return nil, coreErr
-	}
-	rolesDoc, rolesErr := t.readCapabilityAt(ctx, actorID, "cap.roles.identity."+actorID)
-	if rolesErr != nil && !errors.Is(rolesErr, substrate.ErrKeyNotFound) {
-		return nil, rolesErr
-	}
-
-	switch {
-	case coreDoc == nil && rolesDoc == nil:
-		return nil, fmt.Errorf("aiagent: read capability for %s: %w", actorID, substrate.ErrKeyNotFound)
-	case coreDoc == nil:
-		return rolesDoc, nil
-	case rolesDoc == nil:
-		return coreDoc, nil
-	default:
-		return mergeCapabilityDocs(coreDoc, rolesDoc), nil
-	}
-}
-
-// readCapabilityAt reads and parses the capability doc at a specific
-// Capability-KV key. A missing key returns substrate.ErrKeyNotFound
-// (wrapped) — callers distinguish "absent" from a real read failure via
-// errors.Is.
-func (t *Traverser) readCapabilityAt(ctx context.Context, actorID, key string) (*processor.CapabilityDoc, error) {
-	entry, err := t.conn.KVGet(ctx, t.capBucket, key)
+func (t *Traverser) ReadCapability(ctx context.Context, actor string) (*processor.CapabilityDoc, error) {
+	doc, _, err := capabilitykv.ReadPlatformDoc(ctx, t.conn, t.capBucket, t.systemActorKeys, actor)
 	if err != nil {
-		return nil, fmt.Errorf("aiagent: read capability for %s: %w", actorID, err)
+		return nil, fmt.Errorf("aiagent: read capability for %s: %w", actor, err)
 	}
-	doc, err := processor.ParseCapabilityDoc(entry.Value)
-	if err != nil {
-		return nil, fmt.Errorf("aiagent: parse capability doc for %s: %w", actorID, err)
+	if doc == nil {
+		return nil, fmt.Errorf("aiagent: read capability for %s: %w", actor, substrate.ErrKeyNotFound)
 	}
 	return doc, nil
-}
-
-// mergeCapabilityDocs unions two CapabilityDoc projections for the same
-// actor into one. Slice fields are deduplicated; provenance/identity fields
-// are taken from core (the primordial anchor) when both are present — the
-// union already preserves every permission either producer contributed, so
-// no grant is lost by preferring core's metadata.
-func mergeCapabilityDocs(core, roles *processor.CapabilityDoc) *processor.CapabilityDoc {
-	return &processor.CapabilityDoc{
-		Key:                    core.Key,
-		Actor:                  core.Actor,
-		Version:                core.Version,
-		ProjectedAt:            core.ProjectedAt,
-		ProjectedFromRevisions: core.ProjectedFromRevisions,
-		Lanes:                  mergeStrings(core.Lanes, roles.Lanes),
-		Roles:                  mergeStrings(core.Roles, roles.Roles),
-		PlatformPermissions:    mergePlatformPermissions(core.PlatformPermissions, roles.PlatformPermissions),
-		ServiceAccess:          append(append([]processor.ServiceAccessEntry{}, core.ServiceAccess...), roles.ServiceAccess...),
-		EphemeralGrants:        append(append([]processor.EphemeralGrant{}, core.EphemeralGrants...), roles.EphemeralGrants...),
-	}
-}
-
-func mergeStrings(a, b []string) []string {
-	seen := make(map[string]bool, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, s := range append(append([]string{}, a...), b...) {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// mergePlatformPermissions dedups by {operationType, scope} only, so the
-// surviving entry's `origin` (Contract #6 §6.1 provenance) is whichever copy
-// was seen first — the field is effectively DROPPED by this merge. That is
-// tolerable only because this is the client-side FR19 cold-start traversal
-// helper, never an authorization path: nothing derived here may decide whether
-// an actor is authorized. The reserved-grant refusal that reads `origin` lives
-// at step 3 (processor.WouldRefuseReservedGrant), and any future caller
-// wanting this merge for an auth-shaped question must key the dedup on origin
-// too rather than inheriting this one's tolerance.
-func mergePlatformPermissions(a, b []processor.PlatformPermission) []processor.PlatformPermission {
-	type key struct{ op, scope string }
-	seen := make(map[key]bool, len(a)+len(b))
-	out := make([]processor.PlatformPermission, 0, len(a)+len(b))
-	for _, p := range append(append([]processor.PlatformPermission{}, a...), b...) {
-		k := key{p.OperationType, p.Scope}
-		if !seen[k] {
-			seen[k] = true
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // DiscoverDDL resolves an operationType string to the DDL meta-vertex key

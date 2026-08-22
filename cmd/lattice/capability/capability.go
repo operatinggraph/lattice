@@ -52,13 +52,43 @@ type proposalRow struct {
 
 // NewCommand returns the cobra.Command for the capability command group.
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+	var bootstrapJSONPath string
+
 	cmd := &cobra.Command{
 		Use:   "capability",
 		Short: "Inspect and review AI-authored capability proposals",
 	}
+	// An approve of a "grant" artifact resolves the system-actor set, whose
+	// discovery predicate is keyed on the primordial roleOperator NanoID, so
+	// this group reads the same bootstrap file the platform daemons load at
+	// start-up. Same flag + env source as `lattice bootstrap`
+	// (cmd/lattice/bootstrap/bootstrap.go:23).
+	cmd.PersistentFlags().StringVar(&bootstrapJSONPath, "bootstrap-json", "./lattice.bootstrap.json",
+		"path to lattice.bootstrap.json (env: BOOTSTRAP_JSON_PATH)")
+
 	cmd.AddCommand(newListCommand(natsURL, outputFmt))
-	cmd.AddCommand(newReviewCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newReviewCommand(natsURL, outputFmt, defaultActor, &bootstrapJSONPath))
 	return cmd
+}
+
+// errBootstrapIdentifiers marks a failure to obtain the primordial identifier
+// table — a machine/configuration fault, not a verdict on the proposal. It
+// exists so `-o json` can report it under its own code: a caller must be able
+// to tell "this machine cannot validate the proposal" from "this proposal no
+// longer validates", and both funnel through the same return. `lattice
+// bootstrap` draws the same distinction with the same code
+// (cmd/lattice/bootstrap/bootstrap.go:114).
+var errBootstrapIdentifiers = errors.New("bootstrap identifiers unavailable")
+
+// resolveBootstrapJSONPath applies the BOOTSTRAP_JSON_PATH override to the
+// --bootstrap-json flag value, matching `lattice bootstrap`'s precedence
+// (cmd/lattice/bootstrap/bootstrap.go:110): the environment wins, so a
+// deployment that exports it once needs no per-invocation flag.
+func resolveBootstrapJSONPath(flagValue string) string {
+	if envPath := os.Getenv("BOOTSTRAP_JSON_PATH"); envPath != "" {
+		return envPath
+	}
+	return flagValue
 }
 
 func newListCommand(natsURL, outputFmt *string) *cobra.Command {
@@ -116,7 +146,7 @@ func newListCommand(natsURL, outputFmt *string) *cobra.Command {
 	return cmd
 }
 
-func newReviewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+func newReviewCommand(natsURL, outputFmt, defaultActor, bootstrapJSONPath *string) *cobra.Command {
 	var actor string
 	var approve, reject bool
 
@@ -161,10 +191,14 @@ closes the approve to invalid if it no longer validates.`,
 
 			payload := map[string]any{"proposalId": proposalID}
 			if approve {
-				verdict, err := freshApprovalVerdict(ctx, conn, proposalID)
+				verdict, err := freshApprovalVerdict(ctx, conn, proposalID, resolveBootstrapJSONPath(*bootstrapJSONPath))
 				if err != nil {
 					if *outputFmt == "json" {
-						return output.PrintJSONError("ValidationError", err.Error())
+						code := "ValidationError"
+						if errors.Is(err, errBootstrapIdentifiers) {
+							code = "BootstrapLoadError"
+						}
+						return output.PrintJSONError(code, err.Error())
 					}
 					return err
 				}
@@ -231,7 +265,7 @@ closes the approve to invalid if it no longer validates.`,
 // (ai-authored-capabilities-design.md §5 point 3 — record-time and
 // approve-time can drift) and returns the {state, report} payload the
 // ReviewCapabilityProposal op's "validation" field requires on an approve.
-func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID string) (map[string]any, error) {
+func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID, bootstrapJSONPath string) (map[string]any, error) {
 	row, err := readProposal(ctx, conn, proposalID)
 	if err != nil {
 		return nil, err
@@ -242,7 +276,30 @@ func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID 
 
 	var held []pkgmgr.HeldPermission
 	if row.Kind == "grant" {
-		held, err = heldPermissionsForActor(ctx, conn, row.RequesterID)
+		// The system-actor set decides the requester's key routing
+		// (capabilitykv.ClassAwarePlatformKey), so it is discovered from the
+		// live graph here. Its predicate matches holdsRole links against the
+		// primordial roleOperator NanoID, which lives in the bootstrap file
+		// and nowhere else, so the identifier table is loaded first: without
+		// it the predicate matches nothing and every actor — the primordial
+		// admin and the kernel service actors included — routes as ordinary.
+		//
+		// Both reads sit inside the "grant" branch because no other artifact
+		// kind consults either: an approve of a lens or opMeta proposal needs
+		// no bootstrap file present, and pays for no core-kv listing. This is
+		// a one-shot CLI invocation, so that listing runs once per approve.
+		if lErr := bootstrap.Load(bootstrapJSONPath); lErr != nil {
+			return nil, fmt.Errorf("%w: load from %s (set --bootstrap-json or BOOTSTRAP_JSON_PATH): %w",
+				errBootstrapIdentifiers, bootstrapJSONPath, lErr)
+		}
+		systemActorKeys, sErr := bootstrap.SystemActorKeys(ctx, conn)
+		if sErr != nil {
+			if errors.Is(sErr, bootstrap.ErrPrimordialIDsUnloaded) {
+				return nil, fmt.Errorf("%w: %w", errBootstrapIdentifiers, sErr)
+			}
+			return nil, fmt.Errorf("discover system actor keys: %w", sErr)
+		}
+		held, err = pkgmgr.ReadHeldPermissions(ctx, conn, systemActorKeys, row.RequesterID)
 		if err != nil {
 			return nil, fmt.Errorf("read requester %s held permissions: %w", row.RequesterID, err)
 		}
@@ -269,46 +326,6 @@ func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID 
 		verdict["report"] = strings.Join(report.Errors, "; ")
 	}
 	return verdict, nil
-}
-
-// heldPermissionsForActor reads the actor's live Contract #6 §6.1 capability
-// projection from the capability-kv bucket (bootstrap.CapabilityKVBucket —
-// the platform-scope "cap.<rest>" key and the role-derived "cap.roles.<rest>"
-// key, the same disjoint keys internal/processor/step3_auth_capability.go's
-// readAndMergeDoc reads) and
-// returns the union of both docs' platformPermissions as HeldPermission —
-// the basis for the "grant" kind's §5 scope check. A key that doesn't exist
-// contributes no permissions (deny-closed union, not an error) — mirrors the
-// Processor authorizer's own "absent key is an empty skip" posture.
-func heldPermissionsForActor(ctx context.Context, conn *substrate.Conn, actor string) ([]pkgmgr.HeldPermission, error) {
-	rest, ok := strings.CutPrefix(actor, "vtx.")
-	if !ok {
-		return nil, fmt.Errorf("actor %q lacks vtx. prefix", actor)
-	}
-
-	var held []pkgmgr.HeldPermission
-	for _, key := range []string{"cap." + rest, "cap.roles." + rest} {
-		entry, err := conn.KVGet(ctx, bootstrap.CapabilityKVBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // absent key = no permissions from this source, not an error
-			}
-			return nil, fmt.Errorf("read %s: %w", key, err)
-		}
-		doc, err := processor.ParseCapabilityDoc(entry.Value)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", key, err)
-		}
-		for _, p := range doc.PlatformPermissions {
-			// Origin travels with the entry: a reserved op held at runtime
-			// origin is refused at step 3, so it must not count as held when
-			// proposing a grant of that same op (pkgmgr.HeldPermission.covers).
-			held = append(held, pkgmgr.HeldPermission{
-				OperationType: p.OperationType, Scope: p.Scope, Origin: p.Origin,
-			})
-		}
-	}
-	return held, nil
 }
 
 // ddlCacheSensitiveResolver adapts internal/processor.DDLCache to

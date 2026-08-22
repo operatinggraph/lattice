@@ -27,7 +27,10 @@ const (
 
 // setupUnitEnv starts embedded NATS, provisions the two KV buckets used
 // by the traversal unit tests, and returns a ready Traverser + context.
-func setupUnitEnv(t *testing.T) (context.Context, *substrate.Conn, *aiagent.Traverser) {
+// systemActorKeys are the actor keys the Traverser treats as kernel-seeded
+// system actors — the routing decision ReadCapability makes, so a test that
+// seeds a cap.<type>.<id> anchor doc names its actor here.
+func setupUnitEnv(t *testing.T, systemActorKeys ...string) (context.Context, *substrate.Conn, *aiagent.Traverser) {
 	t.Helper()
 	url := testutil.StartEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -47,7 +50,7 @@ func setupUnitEnv(t *testing.T) (context.Context, *substrate.Conn, *aiagent.Trav
 		}
 	}
 
-	tr := aiagent.NewTraverser(conn, unitCoreBucket, unitCapBucket)
+	tr := aiagent.NewTraverser(conn, unitCoreBucket, unitCapBucket, systemActorKeys)
 	return ctx, conn, tr
 }
 
@@ -130,7 +133,8 @@ func seedDDLAspectsFull(t *testing.T, ctx context.Context, conn *substrate.Conn,
 func TestReadCapability_HappyPath(t *testing.T) {
 	ctx, conn, tr := setupUnitEnv(t)
 
-	actorID := "ReadCapTestActrID00001"
+	actorID := "ReadCapTestActrHJKMN"
+	actor := "vtx.identity." + actorID
 	capKey := "cap.roles.identity." + actorID
 	putKV(t, ctx, conn, unitCapBucket, capKey, map[string]any{
 		"key":                    capKey,
@@ -147,12 +151,12 @@ func TestReadCapability_HappyPath(t *testing.T) {
 		"roles":           []string{},
 	})
 
-	doc, err := tr.ReadCapability(ctx, actorID)
+	doc, err := tr.ReadCapability(ctx, actor)
 	if err != nil {
 		t.Fatalf("ReadCapability: %v", err)
 	}
-	if doc.Actor != "vtx.identity."+actorID {
-		t.Errorf("actor mismatch: got %q want %q", doc.Actor, "vtx.identity."+actorID)
+	if doc.Actor != actor {
+		t.Errorf("actor mismatch: got %q want %q", doc.Actor, actor)
 	}
 	if len(doc.PlatformPermissions) != 1 || doc.PlatformPermissions[0].OperationType != "CreateRole" {
 		t.Errorf("unexpected platformPermissions: %+v", doc.PlatformPermissions)
@@ -166,9 +170,10 @@ func TestReadCapability_HappyPath(t *testing.T) {
 // lives in cap.roles.identity.<actor>. Neither producer is a subset of the
 // other, so ReadCapability must return the union of both, not just one.
 func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
-	ctx, conn, tr := setupUnitEnv(t)
+	actorID := "MergeCapTstActrHJKMN"
+	actor := "vtx.identity." + actorID
+	ctx, conn, tr := setupUnitEnv(t, actor)
 
-	actorID := "MergeCapTestActorID001"
 	coreKey := "cap.identity." + actorID
 	putKV(t, ctx, conn, unitCapBucket, coreKey, map[string]any{
 		"key":                    coreKey,
@@ -202,7 +207,7 @@ func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
 		"roles":           []string{"vtx.role.operatorRoLeiD999991"},
 	})
 
-	doc, err := tr.ReadCapability(ctx, actorID)
+	doc, err := tr.ReadCapability(ctx, actor)
 	if err != nil {
 		t.Fatalf("ReadCapability: %v", err)
 	}
@@ -233,11 +238,82 @@ func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
 	}
 }
 
+// TestReadCapability_OrdinaryActorIgnoresAnchorDoc: an actor outside the
+// system set reads cap.roles.<type>.<id> alone, so an anchor doc left behind
+// for it contributes nothing. The agent must discover the grant set step 3
+// would honor — a permission it could see here but never submit against is a
+// cold start into a guaranteed rejection.
+func TestReadCapability_OrdinaryActorIgnoresAnchorDoc(t *testing.T) {
+	actorID := "EveryCapTstActrHJKMN"
+	actor := "vtx.identity." + actorID
+	ctx, conn, tr := setupUnitEnv(t, "vtx.identity.SecondActrHJKMNPQRST")
+
+	putKV(t, ctx, conn, unitCapBucket, "cap.identity."+actorID, map[string]any{
+		"actor": actor,
+		"platformPermissions": []any{
+			map[string]any{"operationType": "InstallPackage", "scope": "any"},
+		},
+	})
+	putKV(t, ctx, conn, unitCapBucket, "cap.roles.identity."+actorID, map[string]any{
+		"actor": actor,
+		"platformPermissions": []any{
+			map[string]any{"operationType": "CreateBook", "scope": "any"},
+		},
+	})
+
+	doc, err := tr.ReadCapability(ctx, actor)
+	if err != nil {
+		t.Fatalf("ReadCapability: %v", err)
+	}
+	if len(doc.PlatformPermissions) != 1 || doc.PlatformPermissions[0].OperationType != "CreateBook" {
+		t.Fatalf("ordinary actor saw the anchor doc: %+v", doc.PlatformPermissions)
+	}
+}
+
+// TestReadCapability_KeepsDuplicatePermissionsWithDistinctOrigin: two entries
+// that agree on {operationType, scope} but differ in `origin` are two
+// different grants — step 3 refuses a reserved op at runtime origin and
+// accepts it at package origin — so the read must surface both rather than
+// collapse them into whichever was seen first.
+func TestReadCapability_KeepsDuplicatePermissionsWithDistinctOrigin(t *testing.T) {
+	actorID := "DupCapTestActrHJKMNP"
+	actor := "vtx.identity." + actorID
+	ctx, conn, tr := setupUnitEnv(t, actor)
+
+	putKV(t, ctx, conn, unitCapBucket, "cap.identity."+actorID, map[string]any{
+		"actor": actor,
+		"platformPermissions": []any{
+			map[string]any{"operationType": "GrantPermission", "scope": "any", "origin": "package"},
+		},
+	})
+	putKV(t, ctx, conn, unitCapBucket, "cap.roles.identity."+actorID, map[string]any{
+		"actor": actor,
+		"platformPermissions": []any{
+			map[string]any{"operationType": "GrantPermission", "scope": "any", "origin": "runtime"},
+		},
+	})
+
+	doc, err := tr.ReadCapability(ctx, actor)
+	if err != nil {
+		t.Fatalf("ReadCapability: %v", err)
+	}
+	if len(doc.PlatformPermissions) != 2 {
+		t.Fatalf("platformPermissions = %+v, want both provenances kept", doc.PlatformPermissions)
+	}
+	origins := map[string]bool{}
+	for _, p := range doc.PlatformPermissions {
+		origins[p.Origin] = true
+	}
+	if !origins["package"] || !origins["runtime"] {
+		t.Fatalf("origin dropped by the merge: %+v", doc.PlatformPermissions)
+	}
+}
+
 // TestReadCapability_NotFound asserts an error is returned when the key
 // is absent from Capability KV.
 func TestReadCapability_NotFound(t *testing.T) {
 	ctx, _, tr := setupUnitEnv(t)
-	_, err := tr.ReadCapability(ctx, "NoSuchActorXXXX000001")
+	_, err := tr.ReadCapability(ctx, "vtx.identity.NoSuchActrHJKMNPQRST")
 	if err == nil {
 		t.Fatal("expected error for missing capability entry, got nil")
 	}

@@ -393,9 +393,13 @@ func TestHelloLattice_Milestone3_CreateBook(t *testing.T) {
 	// (rbac-domain's capabilityRoles lens) before submitting CreateBook —
 	// under real capability mode the Processor authorizes against the live
 	// projection, not the just-committed mutation.
-	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket)
+	systemActorKeys, saErr := bootstrap.SystemActorKeys(ctx, harnessConn)
+	if saErr != nil {
+		t.Fatalf("SystemActorKeys: %v", saErr)
+	}
+	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket, systemActorKeys)
 	capHasCreateBook := func() bool {
-		doc, derr := tr.ReadCapability(ctx, bootstrap.BootstrapIdentityID)
+		doc, derr := tr.ReadCapability(ctx, bootstrap.BootstrapIdentityKey)
 		if derr != nil {
 			return false
 		}
@@ -667,7 +671,6 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	if !strings.HasPrefix(agentKey, "vtx.identity.") {
 		t.Fatalf("agentKey not a vtx.identity.* key: %q", agentKey)
 	}
-	agentID := strings.TrimPrefix(agentKey, "vtx.identity.")
 	t.Logf("AI agent identity: %s", agentKey)
 
 	// Step 2: create a CreateBook permission.
@@ -723,9 +726,13 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	// the capability lens may be draining a burst of events from the earlier
 	// milestones + package preamble, so end-to-end convergence here includes
 	// queue wait, not just per-event projection latency.
-	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket)
-	capHasOp := func(id, op string) bool {
-		doc, derr := tr.ReadCapability(ctx, id)
+	systemActorKeys, saErr := bootstrap.SystemActorKeys(ctx, harnessConn)
+	if saErr != nil {
+		t.Fatalf("SystemActorKeys: %v", saErr)
+	}
+	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket, systemActorKeys)
+	capHasOp := func(actor, op string) bool {
+		doc, derr := tr.ReadCapability(ctx, actor)
 		if derr != nil {
 			return false
 		}
@@ -737,7 +744,7 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 		return false
 	}
 	convergeDeadline := time.Now().Add(15 * time.Second)
-	for !capHasOp(agentID, "CreateBook") {
+	for !capHasOp(agentKey, "CreateBook") {
 		if time.Now().After(convergeDeadline) {
 			t.Fatalf("capability doc for agent %s never reprojected to include CreateBook "+
 				"(Refractor link fan-out / Refractor not running?)", agentKey)
@@ -778,7 +785,7 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 		latency := time.Duration(-1)
 		latencyDeadline := t0.Add(2 * time.Second)
 		for {
-			if capHasOp(agentID, probeOp) {
+			if capHasOp(agentKey, probeOp) {
 				latency = time.Since(t0)
 				break
 			}
@@ -806,9 +813,9 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	t.Logf("NFR-P3 satisfied: best drained per-event projection latency = %v (<= %v)", bestLatency, nfrP3Budget)
 
 	// Step 6: cold-start traversal.
-	cap2, err := tr.ReadCapability(ctx, agentID)
+	cap2, err := tr.ReadCapability(ctx, agentKey)
 	if err != nil {
-		t.Fatalf("ReadCapability for agent %s: %v", agentID, err)
+		t.Fatalf("ReadCapability for agent %s: %v", agentKey, err)
 	}
 	t.Logf("Agent has %d platform permission(s)", len(cap2.PlatformPermissions))
 
@@ -953,7 +960,9 @@ func TestHelloLattice_Milestone6_RollbackBookDDL(t *testing.T) {
 	start := time.Now()
 	ctx := testCtx(t)
 
-	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket)
+	// This milestone reads DDL aspects only, never a capability doc, so the
+	// system-actor set is not consulted.
+	tr := aiagent.NewTraverser(harnessConn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket, nil)
 
 	// Step 1: read the .compensation aspect — verify the forward contract.
 	compData, err := tr.ReadCompensation(ctx, bookDDLKey)

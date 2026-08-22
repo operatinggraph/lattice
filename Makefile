@@ -142,7 +142,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -234,7 +234,7 @@ up: assert-main-checkout
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait; \
 		$(MAKE) provision-vault-kek; \
 		echo "==> Starting refractor in background..."; \
-		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) ./bin/refractor >refractor.log 2>&1 </dev/null & \
+		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) ./bin/refractor >refractor.log 2>&1 </dev/null & \
 		echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver + Bridge + objmgr + privacy cap.* projections land)..."; \
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap; \
 		echo "==> Building processor binary..."; \
@@ -258,7 +258,7 @@ cycle-refractor: assert-main-checkout
 	@echo "==> Rebuilding bin/refractor..."
 	go build -o bin/refractor ./cmd/refractor
 	@echo "==> Starting refractor in background..."
-	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) REFRACTOR_ANCHOR_DERIVATION=$(REFRACTOR_ANCHOR_DERIVATION) REFRACTOR_ACTOR_PEER_ANCHORS=$(REFRACTOR_ACTOR_PEER_ANCHORS) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -x refractor >/dev/null && echo "==> refractor running (PID $$(pgrep -x refractor))" || { echo "!! refractor failed to start — see refractor.log"; exit 1; }
 
 ## cycle-loupe — Rebuild bin/loupe from the current tree and relaunch it against
@@ -2196,6 +2196,22 @@ lint-manifest-entity-type:
 lint-doc-orphan:
 	@echo "==> Linting for orphaned doc comments..."
 	go run ./scripts/lint-doc-orphan.go
+
+## lint-capability-kv-readers — Capability-KV single-read-path gate
+## (capability-kv-single-read-path-design.md §3.5; Contract #6 §6.1): a non-test Go
+## file outside internal/capabilitykv that either (1) performs a KVGet-family call
+## whose bucket argument names the capability bucket, or (2) builds a capability
+## actor key by concatenating/interpolating one of the four "cap."/"cap.roles."
+## prefixes Contract #6 §6.1 owns, has re-implemented the one read path that
+## routing belongs to — a hand-rolled key handed to the sanctioned helper still
+## restates the routing, so check (2) catches what check (1) alone cannot. Named
+## allowlist for the three sanctioned exceptions (cmd/lattice/query's operator
+## inspection, internal/refractor/pipeline/evaluate.go's producer-side key
+## derivation, scripts/'s build-ignore seed/verify tooling). Advisory by default;
+## STRICT=1 exits non-zero.
+lint-capability-kv-readers:
+	@echo "==> Linting Capability-KV single-read-path..."
+	go run ./scripts/lint-capability-kv-readers.go
 
 ## install-skills — Symlink the canonical agentic-ops role-skills from agents/
 ## into the (gitignored) .claude/skills/ where the harness discovers them. A
