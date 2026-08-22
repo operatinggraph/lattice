@@ -14,6 +14,7 @@ package capabilityauthor_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,10 @@ const (
 	capHandleApplyProtNw = "CAHNDApProtNewHJKMNP"
 	capIDApplyModeWS     = "CAApprvModeWsHJKMNPQ"
 	capHandleApplyModeWS = "CAHNDApModeWsHJKMNPQ"
+	capIDApplyShrink     = "CAApprvShrinkHJKMNPQ"
+	capHandleApplyShrink = "CAHNDApShrinkHJKMNPQ"
+	capIDApplyRemedy     = "CAApprvRemedyHJKMNPQ"
+	capHandleApplyRemedy = "CAHNDApRemedyHJKMNPQ"
 )
 
 // applyEnv builds the MarkCapabilityProposalApplied op the operator submits
@@ -77,6 +82,15 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor
 // apply tests rather than widening every existing recordEnv call site.
 func recordEnvForApply(t *testing.T, reqID, handle, packageName, mode string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
+	return recordEnvForApplyTarget(t, reqID, handle,
+		map[string]any{"mode": mode, "packageName": packageName}, content, confidence)
+}
+
+// recordEnvForApplyTarget is recordEnvForApply with the whole target object
+// supplied, for the cases whose subject is a target FIELD (baseVersion,
+// newVersion) rather than the mode/packageName pair.
+func recordEnvForApplyTarget(t *testing.T, reqID, handle string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
+	t.Helper()
 	report, err := pkgmgr.ValidateCapabilityArtifact("lens", content, fullCypherParser{}, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
@@ -87,7 +101,7 @@ func recordEnvForApply(t *testing.T, reqID, handle, packageName, mode string, co
 	result := map[string]any{
 		"kind":       "lens",
 		"content":    string(content),
-		"target":     map[string]any{"mode": mode, "packageName": packageName},
+		"target":     target,
 		"rationale":  "reasoned capability authoring proposal",
 		"confidence": confidence,
 		"validation": map[string]any{"state": "valid"},
@@ -253,6 +267,16 @@ func drivePendingProposalForApply(t *testing.T, ctx context.Context, conn *subst
 // explicit target.mode, for the cases where the mode itself is under test.
 func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle, packageName, mode string) string {
 	t.Helper()
+	return drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, tag, proposalID, handle,
+		map[string]any{"mode": mode, "packageName": packageName}, validLensContent(t, "applyLens"+tag))
+}
+
+// drivePendingProposalForApplyTarget is drivePendingProposalForApplyMode with
+// the whole target object and the artifact content supplied — the shape a case
+// needs when it asserts over a target FIELD, or when two proposals must carry
+// the SAME artifact (a refusal and the remedy it names).
+func drivePendingProposalForApplyTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle string, target map[string]any, content json.RawMessage) string {
+	t.Helper()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	req := requestEnv(testutil.GenReqID("CAReq"+tag), proposalID, "a lens listing active providers")
 	testutil.PublishOp(t, conn, req)
@@ -262,8 +286,7 @@ func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *s
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	content := validLensContent(t, "applyLens"+tag)
-	rec := recordEnvForApply(t, testutil.GenReqID("CARec"+tag), handle, packageName, mode, content, 0.86)
+	rec := recordEnvForApplyTarget(t, testutil.GenReqID("CARec"+tag), handle, target, content, 0.86)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -535,4 +558,137 @@ func readInstalledLensCanonicalName(t *testing.T, ctx context.Context, conn *sub
 	}
 	t.Fatalf("no canonicalName aspect found among declaredKeys for %s", packageKey)
 	return ""
+}
+
+// capUpgradeTargetName is the vertical, non-platform-protected package the
+// coverage e2e upgrades. Its Definition is deliberately multi-entity — two
+// lenses and a role — so a proposal describing ONE lens leaves most of the
+// package undescribed, which is the whole shape under test.
+const capUpgradeTargetName = "capauthor-upgrade-target"
+
+func capUpgradeTargetPackage() pkgmgr.Definition {
+	return pkgmgr.Definition{
+		Name:        capUpgradeTargetName,
+		Version:     "0.1.0",
+		Description: "A multi-entity vertical package an AI-authored proposal may target.",
+		Roles: []pkgmgr.RoleSpec{{
+			CanonicalName: "capUpgradeReviewer",
+			Description:   "Reviews the target package's records.",
+		}},
+		Lenses: []pkgmgr.LensSpec{
+			{
+				CanonicalName: "capUpgradeRosterLens",
+				Class:         "meta.lens",
+				Adapter:       "nats-kv",
+				Bucket:        "capauthor-upgrade-roster",
+				Engine:        "full",
+				Spec:          "MATCH (p:provider) RETURN p.key AS key",
+			},
+			{
+				CanonicalName: "capUpgradeAuditLens",
+				Class:         "meta.lens",
+				Adapter:       "nats-kv",
+				Bucket:        "capauthor-upgrade-audit",
+				Engine:        "full",
+				Spec:          "MATCH (a:audit) RETURN a.key AS key",
+			},
+		},
+	}
+}
+
+// declaredKeysOf returns a package's recorded manifest declaredKeys.
+func declaredKeysOf(t *testing.T, ctx context.Context, conn *substrate.Conn, packageName string) []string {
+	t.Helper()
+	pkgKey := "vtx.package." + substrate.PackageEntityNanoID(packageName, "package")
+	data, _ := readDoc(t, ctx, conn, pkgKey+".manifest")["data"].(map[string]any)
+	raw, _ := data["declaredKeys"].([]any)
+	if len(raw) == 0 {
+		t.Fatalf("package %q records no declaredKeys; the fixture is not what the test assumes", packageName)
+	}
+	keys := make([]string, 0, len(raw))
+	for _, k := range raw {
+		s, _ := k.(string)
+		keys = append(keys, s)
+	}
+	return keys
+}
+
+// TestCapAuthor_Apply_UpgradeExisting_WithoutCoverage_RefusedAndRemedyApplies
+// is the coverage rule on the real stack, and the remedy its refusal names.
+//
+// An AI-authored proposal carries its own artifact and says nothing about the
+// rest of the package it targets, while the in-place apply is a convergence
+// operator — so applying one as an upgrade of a package it does not describe
+// would retire every key it never mentioned. It is refused, and the package is
+// left whole: every declared key is still live afterwards, which is the
+// assertion that would catch a refusal that had already committed something.
+//
+// The second half traces the refusal's stated remedy to its outcome rather
+// than to the existence of its first step: the SAME artifact, proposed as a
+// package of its own, actually installs and is live. A remedy that only reads
+// well is not a remedy.
+func TestCapAuthor_Apply_UpgradeExisting_WithoutCoverage_RefusedAndRemedyApplies(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	installPkg(t, ctx, conn, capUpgradeTargetPackage())
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-shrink")
+
+	declared := declaredKeysOf(t, ctx, conn, capUpgradeTargetName)
+	artifact := validLensContent(t, "capUpgradeRemedyLens")
+
+	pk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "shrink", capIDApplyShrink, capHandleApplyShrink,
+		map[string]any{
+			"mode":        "upgradeExisting",
+			"packageName": capUpgradeTargetName,
+			"baseVersion": "0.1.0",
+			"newVersion":  "0.2.0",
+		}, artifact)
+	driveReview(t, ctx, conn, cp, cons, "shrink", capIDApplyShrink, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+
+	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, pk)
+	if err != nil {
+		t.Fatalf("a well-formed upgradeExisting proposal must build a plan; the refusal belongs at the apply: %v", err)
+	}
+	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
+	defer stop()
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst.RoleIDs = testutil.StandardRoleIDs()
+
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
+	if err == nil {
+		t.Fatalf("an upgrade that does not describe its target package must be refused, got: %+v", res)
+	}
+	if !errors.Is(err, pkgmgr.ErrApplyWouldRemove) {
+		t.Fatalf("want pkgmgr.ErrApplyWouldRemove, got %v", err)
+	}
+
+	// The package is whole: nothing the refusal named was actually retired.
+	for _, k := range declared {
+		if del, _ := readDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
+			t.Fatalf("%s was tombstoned by a refused apply — the whole point of refusing is that it commits nothing", k)
+		}
+	}
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved (a refused apply closes nothing)", got)
+	}
+
+	// The remedy the refusal prints: the same artifact, as its own package.
+	remedyPk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "remedy", capIDApplyRemedy, capHandleApplyRemedy,
+		map[string]any{"mode": "newPackage", "packageName": "capauthor-remedy-pkg"}, artifact)
+	driveReview(t, ctx, conn, cp, cons, "remedy", capIDApplyRemedy, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+
+	remedyPlan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, remedyPk)
+	if err != nil {
+		t.Fatalf("the remedy proposal must build a plan: %v", err)
+	}
+	remedyRes, err := inst.ApplyCapabilityPlan(ctx, remedyPlan)
+	if err != nil {
+		t.Fatalf("the refusal's stated remedy must actually apply: %v", err)
+	}
+	if remedyRes.Action != "install" || remedyRes.Created == 0 {
+		t.Fatalf("the remedy must install the artifact, got %+v", remedyRes)
+	}
+	lensKey := "vtx.meta." + pkgmgr.LensID("capauthor-remedy-pkg", "capUpgradeRemedyLens")
+	if del, _ := readDoc(t, ctx, conn, lensKey)["isDeleted"].(bool); del {
+		t.Fatalf("%s must be live — the remedy is only a remedy if the artifact lands", lensKey)
+	}
 }
