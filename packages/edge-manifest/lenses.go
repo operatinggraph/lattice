@@ -148,6 +148,15 @@ func Lenses() []pkgmgr.LensSpec {
 						"(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)",
 					},
 				},
+				{
+					GrantDomain: domainBase,
+					AnchorType:  "meta",
+					AnchorVar:   "op",
+					Chain: []string{
+						"(identity)<-[:assignedTo]-(task:task)",
+						"(task)-[:forOperation]->(op:meta)",
+					},
+				},
 			},
 			Spec: edgeCatalogTail,
 		},
@@ -585,23 +594,37 @@ RETURN
   via.presentation.data.name AS resolvedViaLabel
 `
 
-// edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta
-// either of edgeCatalog's two Walks reaches: the service-template path
+// edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta any
+// of edgeCatalog's three Walks reaches: the service-template path
 // (`domainBase` — an op offered through a service the actor's residence
-// reaches) and the held-role path (`domainStaff` — an op a permission grants
-// through a role the actor holds, staff-worlds F2's "browse all my ops").
-// Both Walks anchor on the same `op:meta`
+// reaches), the held-role path (`domainStaff` — an op a permission grants
+// through a role the actor holds, staff-worlds F2's "browse all my ops"),
+// and the own-task path (`domainBase` — an op a live task assigned to the
+// actor grants, mirroring edgeTasks's own self-assigned Walk one hop further
+// via the task's own `forOperation` link, orchestration-base/ddls.go). The
+// third exists because a task-scoped submission (e.g. lease-signing's
+// onboarding userTask, identity-domain/ddls.go's RecordIdentityPII
+// resource-bound guard) is authorized independently of any standing role or
+// service reachability — the actor's `cap.ephemeral.*` task grant, not a
+// `cap.roles.*` permission, is what step 3 checks — so without this Walk the
+// op is submittable but its descriptor never reaches the client: the task
+// renders, opening it finds no manifest.op row, and Facet falls back to its
+// undescribed-operation card even though the actor is fully authorized.
+// All three Walks anchor on the same `op:meta`
 // (refractor-shared-keyspace-arbitration-design.md §13.7 build order (c) —
 // the merge that retires the former sibling lens edgeCatalogRoles, whose
-// role-derived columns this tail folds in), so an op reachable both ways
-// projects one row under one key instead of flapping between whichever
+// role-derived columns this tail folds in), so an op reachable more than one
+// way projects one row under one key instead of flapping between whichever
 // sibling lens re-derived last (§1's original defect). §3.3's descriptor
 // vocabulary is read back off the op meta's optional aspects — an op meta
 // that never adopted it still projects a row, just with those fields null.
 //
 // The role Walk's last hop is the install-time edge pkgmgr mints beside
 // `grantedBy` (internal/pkgmgr/build.go): without it the walk dead-ends at
-// perm.data.operationType, a STRING this engine cannot join to a vertex.
+// perm.data.operationType, a STRING this engine cannot join to a vertex. The
+// own-task Walk's last hop is CreateTask's own mandatory mint (ddls.go:
+// `"required":["forOperation","scopedTo","expiresAt"]`) — every live task
+// already carries it, so the Walk needs no install-time plumbing of its own.
 //
 // viaServices answers "which service(s) offer this op" via a pattern
 // comprehension off `op` alone (service-location/lenses.go's

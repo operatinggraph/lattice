@@ -1,14 +1,16 @@
 name: edge-manifest
-version: 0.16.3
+version: 0.16.4
 description: |
   The Facet edge app's world manifest: fifteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeTasks/
   edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/
   edgeEntityTabs/edgeEntityStudios/edgeEntityMenuItems/edgeStaffPanes/
   edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue —
-  edgeEntitySessions, edgeCatalog and edgeTasks each carry a second Walk for
-  their role-derived reachability path, folding the former
-  edgeInstructorSessions, edgeCatalogRoles and edgeTasksQueued siblings in)
+  edgeEntitySessions and edgeTasks each carry a second Walk for their
+  role-derived reachability path, folding the former edgeInstructorSessions
+  and edgeTasksQueued siblings in; edgeCatalog carries a second Walk the same
+  way, folding the former edgeCatalogRoles sibling in, plus a third reaching
+  op-metas through the actor's own assigned tasks)
   projecting identity (incl. the
   provider/instructor/serviceprovider self-anchors for {me.<type>} dispatch,
   and the same bindings

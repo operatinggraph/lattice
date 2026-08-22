@@ -409,6 +409,29 @@ func TestEdgeCatalog_RoleBranchCarriesTheServiceJoin(t *testing.T) {
 	require.Equal(t, f.key("role"), row["viaRole"], "viaRole must carry the granting role")
 }
 
+// TestEdgeCatalog_TaskBranchProjectsAnUngrantedOp is the positive vector for
+// the own-task Walk: an op-meta reachable ONLY through a task assigned to the
+// actor — no held role, no service permitsOperation — still projects a
+// manifest.op row, so a task-scoped submission (identity-domain/ddls.go's
+// RecordIdentityPII resource-bound guard, authorized off the actor's
+// cap.ephemeral task grant rather than any cap.roles permission) has a
+// descriptor to open. viaRole nulls out exactly as it does on the
+// service-template branch, proving the tail's unbound-variable handling
+// covers this Walk too, not just the two it was written against.
+func TestEdgeCatalog_TaskBranchProjectsAnUngrantedOp(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "resident", "identity")
+	f.vtx(t, "task", "task")
+	f.vtx(t, "opMeta", "meta")
+	f.edge(t, "assignedTo", "task", "resident")
+	f.edge(t, "forOperation", "task", "opMeta")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeCatalog", 2), f.key("resident")))
+	row, ok := rows[f.ids["opMeta"]]
+	require.True(t, ok, "the task-assigned op must project with no role or service reach at all")
+	require.Empty(t, row["viaRole"], "no role granted this op — viaRole must null out, not error")
+}
+
 // TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey proves the shared
 // tail's bridging OPTIONAL MATCH: a resident's residence-anchored session row
 // (emResidentWorld, coverage_proof_test.go), reached via the domainBase
