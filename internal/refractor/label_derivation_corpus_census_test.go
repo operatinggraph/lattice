@@ -165,6 +165,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"demoOperatorReadGrants":         {narrow, "identity role", modeRelation},
 	"duplicateCandidates":            {narrow, "identity", modeRelation},
 	"edgeCatalog#1":                  {narrow, "identity meta permission role service", modeBroad},
+	"edgeCatalog#2":                  {narrow, "identity meta service task", modeBroad},
 	"edgeEntityBookings":             {narrow, "booking identity instructor session studio", modeBroad},
 	"edgeEntitySessions#1":           {narrow, "identity instructor session studio", modeBroad},
 	"edgeEntityTabs":                 {narrow, "identity leaseapp tab unit", modeBroad},

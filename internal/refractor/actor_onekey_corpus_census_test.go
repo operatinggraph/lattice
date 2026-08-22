@@ -100,6 +100,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"capabilityRoles":                   oneKey,
 	"edgeCatalog#0":                     walkNoHealer,
 	"edgeCatalog#1":                     walkNoHealer,
+	"edgeCatalog#2":                     walkNoHealer,
 	"edgeEntityBookings":                walkNoHealer,
 	"edgeEntityMenuItems":               walkNoHealer,
 	"edgeEntityProviders":               walkNoHealer,

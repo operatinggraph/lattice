@@ -93,6 +93,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"clinicSiteBackfill":                hopIndexed,
 	"edgeCatalog#0":                     hopVarLengthHop,
 	"edgeCatalog#1":                     hopIndexed,
+	"edgeCatalog#2":                     hopIndexed,
 	"edgeEntityBookings":                hopIndexed,
 	"edgeEntityMenuItems":               hopVarLengthHop,
 	"edgeEntityProviders":               hopVarLengthHop,
