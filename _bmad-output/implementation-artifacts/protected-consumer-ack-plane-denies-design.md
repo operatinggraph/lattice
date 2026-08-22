@@ -311,3 +311,121 @@ scope: it belongs with the read-scope design's `TestAppTierRevocationCheckStillW
 `lint-package-version` with `DIFF_BASE`, and `go test ./... -p 4` with `POSTGRES_TEST_DSN` set against a
 native Postgres at CI parity (REMOTE.md §3 — a remote suite without it is falsely green). CI green on the
 merge.
+
+---
+
+## 8. The reply-subject write primitive needs no `AllowResponses` — grounding, 2026-08-22
+
+**Status of this section: 🔭 GROUNDED FINDING, unbuilt.** Lattice Steward fire 2026-08-22 (unattended,
+remote), selected as the board's *[natsperm] A consumer's `DeliverSubject` is unchecked* row, whose stated
+first task was to ground the Processor arm. The grounding refuted the row's mechanism and found a sharper
+one, which belongs here because it is the same root cause §3.3 names: **reply subjects carry write authority
+the matrix does not model.**
+
+### 8.1 What was probed, and what each probe returned
+
+Every result below is a live probe against the committed `deploy/nats-server.conf` with the real dev seeds
+(`startServerFromConf`), connecting as `clinic-app` — a component that carries **no `AllowResponses`**
+(`matrix.go`'s app rows) and is therefore inside the population §3.3 called an *unconditional guarantee*.
+
+| Route | Mechanism | Result |
+|---|---|---|
+| Direct publish to `ops.default` | plain JetStream publish | **DENIED** — the #75 Fire 2b grant is genuinely absent |
+| Push consumer, `DeliverSubject: ops.default` | `$JS.API.CONSUMER.CREATE.KV_health-kv.<n>`, raw request | **CONTAINED** — see §8.2 |
+| Pull consumer, `MSG.NEXT` reply `ops.default` | `$JS.API.CONSUMER.MSG.NEXT.…` | **CONTAINED** — same mechanism |
+| `DIRECT.GET`, subject-token form, reply `ops.default` | `$JS.API.DIRECT.GET.KV_health-kv.$KV.health-kv.<k>` | **LANDS** on `core-operations` |
+| `DIRECT.GET`, bare form, reply `ops.default` | `$JS.API.DIRECT.GET.KV_health-kv` + `last_by_subj` | **LANDS** on `core-operations` |
+| `DIRECT.GET`, bare form, reply `$KV.core-kv.<key>` | as above | **LANDS — arbitrary Core KV value written** |
+| `DIRECT.GET`, bare form, reply `$KV.capability-kv.<key>` | as above | **LANDS — arbitrary auth-plane value written** |
+
+The attacker controls the bytes by first writing them to its own `health-kv` key (`SharedWrite`, granted to
+every non-bootstrap component by `Allow()`), then naming a protected subject as the *reply* of a DIRECT.GET
+for that key. The server's response carries the stored bytes verbatim.
+
+### 8.2 Why the consumer routes are contained — and why that is not a permission check
+
+A push or pull delivery is re-subjected at the routing layer only: the message the subscriber receives keeps
+its **original** subject (`$KV.health-kv.…`), with the deliver subject used for routing and the ack subject as
+its reply. Probed: with the app subscribed to `ops.default`, its own subscriber **did** receive the delivered
+message — so the vector reached the mechanism — while `core-operations` captured **nothing**, because a
+stream's capture predicate reads the message's subject, which was never `ops.default`.
+
+This matters for how the class is designed against: `DeliverSubject` is *not* a write primitive, and a
+narrowing aimed at `CONSUMER.CREATE` would buy nothing. The primitive is the **request/reply response path**,
+where the responder publishes with the reply subject as the message's own subject.
+
+### 8.3 Why `AllowResponses` is irrelevant here
+
+§3.3's route needs the flag, a wildcard subscribe, and an inbound delivery, because it works by the *client*
+accruing a dynamic response permission. This route needs none of them: for a `$JS.API.*` request the
+responder is the server's **internal JetStream client**, created with `perms == nil`
+(`nats-server@v2.14.0 server/client.go:4280-4287` — the permission branch is gated on `c.perms != nil`), so
+its publish to the requester-named reply subject is never permission-checked. `isReservedReply`
+(`server/client.go:4215-4226`) rejects only service replies, `$JS.ACK.` and the gateway prefix; `$KV.…` and
+`ops.…` are ordinary subjects.
+
+**Consequence — the correction this section exists to make.** §3.3's closing sentence and `matrix.go`'s
+KNOWN LIMIT both say the denies are *an unconditional guarantee for the twelve without the flag and
+defence-in-depth for the six that carry it*. That is **false for every deny outside the `$JS.ACK.` family**:
+all seventeen components holding `$JS.API.>` can self-serve a write on any subject the matrix denies them,
+with one request and no flag. The `$JS.ACK.` family remains genuinely closed, for the reason §3.3 already
+gives. Both texts are corrected in place by this fire.
+
+`facet` is the sole contained component, and the reason is the remedy's shape: it holds no `$JS.API.>` at all.
+
+### 8.4 Why no narrowing of this matrix closes it
+
+Recorded so a later fire does not re-derive it:
+
+- **Not a `CONSUMER.CREATE` deny** — §8.2: the consumer routes are already contained.
+- **Not a `DIRECT.GET` deny on the writable bucket.** It would remove *content control* only, and it is not
+  free: nats.go sets `AllowDirect: true` on every KV bucket it creates (`nats.go@v1.52.0 jetstream/kv.go:684`)
+  and on the object store (`object.go:589`), so `KVGet` reads DIRECT.GET — and all four apps read `health-kv`
+  through `projectionhealth.Check()`. A denied publish is fire-and-forget, so they would stall, not fail.
+- **Not content control at all, for the corruption case.** The response of *any* request/reply API — a
+  `STREAM.INFO`, a JSON API error — is bytes published to the named reply subject. Removing raw-bytes reads
+  downgrades forgery of a *valid* envelope or capability document to corruption with junk; it does not
+  remove the write.
+- **Not a server option.** nats-server 2.14 has no setting binding a reply subject to the requester's publish
+  permissions; the only reply subjects it reserves are the three in §8.3.
+
+**The candidate remedy, named so the decision is one look, not a research project:** NATS's own answer to
+cross-tenant write authority is **account isolation** — the protected buckets in an account that exports a
+controlled surface, rather than the single global account `$G` this deployment uses (`G6` in §2 records that
+the conf declares no `accounts` block). That reshapes the platform's trust topology, so the fork is Andrew's;
+removing `$JS.API.>` from the app tier (the shelved read-scope design) narrows the population but does not
+close the class, since the remaining API calls still respond to a named reply.
+
+### 8.5 Fire brief (build note, 2026-08-22)
+
+1. **Scope sentence.** Ground the filed `DeliverSubject` row against the running server; correct every
+   security claim the grounding falsifies, in place; pin all four outcomes — the two contained routes and the
+   two live ones — as live tests against the committed conf. **No matrix narrowing** (§8.4: none is sound).
+2. **Verified touch-list** (checked live). `internal/natsperm/matrix.go:262-361` (`Allow`/`Deny` + the KNOWN
+   LIMIT), `:616-648` (the four app rows' `Desc`); new `internal/natsperm/replysubject_test.go`; this doc;
+   `app-tier-transport-read-scope-design.md:757+` (§14/F2's disposition);
+   `nats-account-write-restriction-design.md:208`; `docs/components/substrate.md` (dossier);
+   `_bmad-output/planning-artifacts/backlog/lattice.md`.
+3. **Precedents to mirror.** Test fixtures + idiom: `conf_test.go:60-181` (`startServerFromConf`,
+   `connectAs`, `provision`, `provisionStream`, and the positive-control-beside-every-denial shape).
+   Roster-style premise pinning: `TestAckGrantRoster`. Deny wire-form completeness: `bridge`'s
+   `ExtraPubDeny` (`matrix.go:492-497`), which already carries both DIRECT.GET forms and says why the bare
+   one is required alongside the wildcard.
+4. **Increment order + green checks.** Inc 1 tests → `go test ./internal/natsperm/...`. Inc 2 claim
+   corrections → `STRICT=1 go run ./scripts/lint-conventions.go`. Inc 3 board + dossier →
+   `go run scripts/lint-board.go` (reads its output; it exits 0 on FAIL). Whole: `go build ./...`,
+   `make vet`, `golangci-lint run ./...`, `go test ./... -p 4` with `POSTGRES_TEST_DSN`.
+5. **In-scope gotchas.** The substrate dossier's *permission edit complete in BOTH directions* entry — both
+   DIRECT.GET wire forms are live and each is probed separately here. Its *vendor-behaviour claim needs a
+   pinned `file:line` on the path this code executes* entry, whose third sighting was a citation that was
+   real, on-path and still carried a false conclusion: that is exactly what §8.3 corrects, so every vendor
+   line above was read in `v2.14.0`, not inferred. Standing checklist #3 — the contained routes carry a
+   positive control (§8.2) so they cannot pass vacuously. Standing checklist #2 — nats.go's `AllowDirect`
+   default was re-derived from the vendor source after a census answered it from the Lattice config struct
+   and got it backwards.
+6. **Adjacent finds.** (a) `nats-account-write-restriction-design.md:208`'s grant table lists `core-operations`
+   for the vertical apps, which the code contradicts — corrected in this fire. (b) The false-scope-claim class
+   now has its third sighting in this package; promoted to the substrate dossier in this fire.
+7. **Non-goals.** Any change to `Allow`/`Deny` output, the shelved read-scope design, account isolation, and
+   any Processor-side envelope authentication — §8.4 shows the first three do not close the class and the
+   last is a Contract #2 posture change.
