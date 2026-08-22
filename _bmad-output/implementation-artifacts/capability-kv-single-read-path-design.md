@@ -306,6 +306,11 @@ What review found, and what it cost:
   stated rather than implied away.
 - The FR19 north-star test had been kept green by declaring the cold-start agent root-equivalent, which
   retired the very branch this fire narrows. Reseeded onto the ordinary-actor route.
+- **CI went red on the merge and was fixed forward** (`553249f`): `lint-package-version` refuses the pair
+  "`internal/pkgmgr/` changed AND a package declaring `ReadGrantDomains` kept its version", and this item
+  added one file to that tree. The gate is diff-based against CI's merge base and reads the *committed*
+  tree, so no local run over the working tree could see it. Third sighting of that class, now a
+  `docs/components/pkgmgr.md` dossier entry naming the command.
 - Three reviewers independently mutation-tested the new tests: reverting the class-aware routing fails five
   tests across five packages, reverting `MergeDocs` totality fails the totality test, re-introducing the
   `{op, scope}` dedup fails the origin test. No vacuous pins.

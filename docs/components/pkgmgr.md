@@ -150,3 +150,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   analyzed. Minted: grant-provenance §12 (un-tombstone prerequisite), caught by cold adversarial review.
   Check: none yet (key the guard on the anchor-type prefix, e.g. `metaVertexPrefix`, never on
   tombstone-state alone).
+- **A diff-based gate reads the COMMITTED tree against CI's merge base, so a local run over a working tree
+  cannot see what it will say.** `lint-package-version` fires on the pair "`internal/pkgmgr/` changed AND a
+  package declaring `ReadGrantDomains` kept its version", and an unchanged version no-ops a plain install,
+  so the regenerated lens never reaches a running stack. Every other gate in the fire's list ran clean
+  locally. Minted three times, each costing a red `main`: uninstall-attestation (`c91d3a4a`), edge-manifest
+  (`5c9a2354`), capability-kv single read path (`553249f`) — the last one added a single new file to
+  `internal/pkgmgr` and nothing else. Check: any fire touching `internal/pkgmgr` runs
+  `DIFF_BASE=<CI's base> go run ./scripts/lint-package-version.go` **after committing**, not before.
