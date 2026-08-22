@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-05 · `2b8af63d` · A café tab opened before staleAt shipped can finally auto-settle — missing_staleat gap + BackfillTabStaleAt backfills the 11 stranded legacy tabs. cafe-domain 0.11.17
+- 2026-08-05 · `11bc39df` · clinic-domain's README finally documents BindProviderIdentity, its identityClaim/providerClaim guards, CreatePatient's patientClaim guard, leaseAppKey/site, and noShowFeeCents + terminal-status finality.
+- 2026-08-05 · `99055858` · A cancelled priced class finally refunds — wellnessrefund marker + wellnessRefundSettlement convergence. wellness-domain 0.21.1, wellness-ledger 0.2.4
 - 2026-08-05 · `5d6db584` · A café tab can finally produce an itemized receipt — `.status.lines` + lineId-targeted VoidCharge, POS gains a per-line Void button. cafe-domain 0.11.16
 - 2026-08-05 · `018bc6d7` · A lease applicant can finally see their own progress — leaseApplicationsRead gains the four-gate stepper state, mirroring D1.5's landlord-side pattern. lease-signing 0.27.14
 - 2026-08-05 · `3294be37` · A paused clinic projection no longer reads as "no results" — `internal/projectionhealth` + clinic-app's 6 RLS reads gain `projectionHealthy`; FE shows "data paused" not empty.
