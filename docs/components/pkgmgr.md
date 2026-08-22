@@ -48,10 +48,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `validateAll` carries at least one test that drives `def.validateAll()` — not the rule — over a fixture
   legal in all other respects, asserting wording only that member emits, so a short-circuit from an earlier
   validator cannot pass for it. `packagename_test.go` is the idiom.**
-- **A gate that cannot price one input must not present the remaining sum as a worst case** — an
-  unresolvable expansion label contributed 0 to a total the refusal message then called "the worst case",
-  sending an author to shrink the wrong budget. Minted: dynamic-type-taxonomy C3.7. Check: the un-priced
-  labels are named in the message and the total is stated as a floor.
 - **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
   granted" is NOT evidence the remedy works.** Two sightings. The cap refusal advised dropping the redundant
   concrete label, which clears exhaustiveness and trades the refusal for the exact silent regression the gate
@@ -80,14 +76,39 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   map proves nothing on its own** (§31): the uninstall path listed `ErrNotInstalled` in the 409 arm and a
   table test went green while the producing call site returned a BARE `fmt.Errorf`, so the real request
   still 502'd — a code that UI treats as a retryable blip. The row must be driven from the entry point
-  that produces the error, not asserted against the mapping function in isolation.
+  that produces the error, not asserted against the mapping function in isolation. **Third sighting
+  (capability-apply removal refusal): `undeclaredSecureColumnDropError` was a bare `fmt.Errorf` too, and
+  the removal guard's own reordering put it on a path a capability proposal reaches.** The bare-error half
+  is now MECHANIZED — `scripts/lint-conventions.go`'s `refusal-sentinel` rule fails any `fmt.Errorf` in
+  `internal/pkgmgr` whose text says it refuses and which wraps no sentinel, with a declared
+  `refusal-sentinel: (transient)` exemption for the refusals a retry can genuinely clear (a torn
+  multi-key read). The rest of the entry stands: the gate cannot tell whether the sentinel reached the
+  status mapping, so the handler-driven test is still the check.
 - **A corpus-wide guard read must exclude the churn namespaces** — an install-time scan over every vertex
   root also walks `vtx.op.<requestId>` idempotency trackers, a 24h-horizon population that is millions of
   keys on a busy kernel, against a 45-60s install deadline (and the long-lived Loupe process). Minted:
   dynamic-type-taxonomy C1.1. Check: the candidate set excludes reserved segments, and the losslessness of
   the exclusion is argued at the call site rather than assumed.
-- **RETIRED (the model of a retired entry):** a package-content edit without a version bump silently
-  no-ops on a live stack — mechanized: `scripts/lint-package-version.go`.
+- **RETIRED (the model of a retired entry):** a lint gate reads its scan set from git, so an uncommitted
+  or untracked file is not what the gate judged — mechanized: `lint-conventions` names the untracked `.go`
+  files it did not scan, and diff-based gates take `DIFF_BASE=<merge-base>`. Run them after committing.
+- **A guard written over what a mechanism EMITS tests emission, not the intent it stands for** — the
+  capability removal guard refused on a tombstone in the delta, while the property it existed to protect
+  was that a partial Definition never narrows what a package declares. The two came apart in every shape
+  that drops a key without retiring an entity: a dropped retention-class holder is preserved rather than
+  tombstoned, a dropped key already absent from KV emits nothing — and both still rewrote `declaredKeys`,
+  blanked the manifest body and reported success, because the in-place branch takes all of it from the
+  Definition it is handed. The ratified state table had three wrong verdicts for the same reason. Minted:
+  capability-apply removal refusal, all three cold reviews independently. Check: state the property in
+  terms of the DECLARED set (`old \ new`), not the emitted mutations, and write the state table over the
+  states the entry point can reach — not only the ones the mechanism under the guard can produce.
+- **An accessor that returns a struct of slices is a write handle, not a copy** — `MaterializedDefinition()`
+  was unexported-field-plus-getter precisely so the applied artifact would be the reviewed artifact, and it
+  handed back the plan's own backing arrays: a caller could rewrite the reviewed lens body and have the
+  sanctioned apply submit it, with no `Apply(` call in the shape for a lint to match. Minted: capability-apply
+  removal refusal, cold review, demonstrated by mutation. Check: an accessor that exists to protect a value
+  deep-copies it (a reflection walk, so a field added to a spec struct later cannot silently re-alias), and
+  a test mutates what the accessor returned and asserts the source is unchanged.
 - **A guard protecting what a consumer READS must enumerate every condition under which that consumer
   stops seeing the thing** — the retention-class destruction oracle drops a lens on THREE independent
   conditions (secure-column content, the vertex root's `class`, an `eventStream` source), and a guard built
@@ -117,14 +138,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `packageName` follow-on. Check: normalize symmetrically where a match GRANTS nothing, and where a match
   selects something destructive keep the comparison exact and make the near-miss a loud refusal; every
   identity string resolving to a deterministic key carries a whitespace/case vector in its own test.
-- **A local gate run and CI's gate run do not see the same tree** — every `scripts/lint-*.go` reads its
-  scan set from git, so what the author has not committed is not what the gate judged. Two sightings: a
-  version bump unified away by a rebase, where the merged base read unchanged while `internal/pkgmgr/`
-  still differed; and a brand-new **untracked** file, invisible to `git ls-files` and so reported "0
-  issues" locally while CI — linting a committed tree — failed on it. Minted: §30's CI red; second
-  sighting the privacy-base ceremony's CI red. Check (mechanized): `lint-conventions` now names the
-  untracked `.go` files it did not scan; for diff-based gates re-run against CI's base,
-  `DIFF_BASE=<merge-base> go run ./scripts/lint-package-version.go`. Run both **after committing**.
 - **A security-plane skip guard keyed on tombstone-state alone, with no anchor-type check, silently widens
   past its ratified scope** — a fix scoped to "respect a revoked grant" first-cut as "respect any
   surviving tombstoned key," quietly covering package definitions (`vtx.meta.*`) the design never

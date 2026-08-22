@@ -202,6 +202,12 @@ func spellings(trimmed, raw string) []string {
 	return []string{trimmed, raw}
 }
 
+// ErrUndeclaredSecureColumnDrop is the sentinel every undeclared secure-column
+// erasure refusal wraps. cmd/loupe maps it to 409: an erasure stays undeclared
+// until an author adds the attestation, so the refusal is identical on every
+// retry and is not the transient a 502 would tell the console to wait out.
+var ErrUndeclaredSecureColumnDrop = errors.New("pkgmgr: upgrade refused — a committed secure-column custody record would be erased without an attestation")
+
 // undeclaredSecureColumnDropError renders the refusal. It names the erasure
 // precisely — the lens, its spec key, the columns going, and the holder types
 // they recorded — and then the exact declaration to add.
@@ -212,11 +218,6 @@ func spellings(trimmed, raw string) []string {
 // is also always a compiling Go literal, including when the lens's own
 // canonicalName could not be read — a remedy that has to be repaired before it
 // can be pasted is a remedy an author edits their way around.
-// ErrUndeclaredSecureColumnDrop is the sentinel every undeclared secure-column
-// erasure refusal wraps. cmd/loupe maps it to 409: an erasure stays undeclared
-// until an author adds the attestation, so the refusal is identical on every
-// retry and is not the transient a 502 would tell the console to wait out.
-var ErrUndeclaredSecureColumnDrop = errors.New("pkgmgr: upgrade refused — a committed secure-column custody record would be erased without an attestation")
 
 func undeclaredSecureColumnDropError(drop droppedSecureColumn, blanketDeclared bool) error {
 	lens := drop.Lens

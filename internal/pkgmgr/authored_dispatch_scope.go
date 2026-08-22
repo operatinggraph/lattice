@@ -82,6 +82,11 @@ func loadProtectedDispatchSets(ctx context.Context, conn *substrate.Conn) (prote
 			if !ok || entry == nil {
 				// A manifest key that listed but did not read back is a torn view
 				// of the trust base; refuse rather than proceed half-blind.
+				//
+				// refusal-sentinel: (transient) a torn multi-key read is not a
+				// package state — the same call can read back whole a moment
+				// later, so this is one of the few refusals a retry can clear
+				// and the caller is right to treat it as one.
 				return zero, fmt.Errorf("package manifest %s did not read back; refusing to build a partial protected set", mk)
 			}
 			name, declaredKeys, perr := parseManifestNameAndKeys(entry.Value)

@@ -497,6 +497,27 @@ var (
 	// default, and it is not worth a smarter pattern.
 	capabilityPlanConverge = regexp.MustCompile(`\.(?:Apply|Upgrade)\([^\n]*\b(?:plan\.|MaterializedDefinition\(\))`)
 
+	// sentinellessRefusal anchors a refusal built with fmt.Errorf that wraps no
+	// sentinel. A refusal names a deterministic package state — it fails
+	// identically on every retry — so every consumer has to be able to
+	// recognize it by class. cmd/loupe's packageApplyStatus switches on
+	// errors.Is and falls through to 502 for anything it cannot name, and 502
+	// is the code its own front end treats as a transport blip worth retrying.
+	// So a refusal without a sentinel tells the operator to retry a state that
+	// will never change, and the message they were meant to read never reaches
+	// them. Wrap a sentinel with %w and add it to the 409 arm.
+	//
+	// Not every refusal names a deterministic state, so the rule is a
+	// default-deny with a declared exemption rather than a ban: a refusal
+	// whose condition is TRANSIENT — a torn multi-key read, a lost
+	// connection — is one a retry can legitimately clear, and 502 is the
+	// honest answer for it. Declare that with `refusal-sentinel: (transient)`
+	// and a reason, on the line or in the comment block above it, the same
+	// shape read-posture and grant-change-posture use. The declaration is the
+	// point: it makes the author say which kind of refusal they wrote.
+	sentinellessRefusal = regexp.MustCompile(`fmt\.Errorf\("[^"]*\brefus(?:e|ed|es|ing)\b[^"]*"`)
+	refusalSentinelDecl = regexp.MustCompile(`refusal-sentinel:\s*\(transient\)\s*\S`)
+
 	// kvListAssign / kvGetCall / kvBatchShape — Fire 1 Inc 3's list-then-get
 	// gate (script-live-read-round-trip-collapse-design.md), scoped to
 	// internal/processor/** + internal/substrate/**: a KVListKeysPrefix/
@@ -966,6 +987,12 @@ func scanSource(path string, data []byte) []finding {
 	// banned shape.
 	materializedDefinitionScoped := !strings.HasPrefix(slash, pkgmgrPkg) &&
 		!strings.HasPrefix(slash, "scripts/lint-")
+	// The refusal-sentinel rule binds internal/pkgmgr, which is where the
+	// package-state refusals live and where cmd/loupe's status mapper reads
+	// them from. Tests are exempt: a fixture asserting on a refusal builds
+	// throwaway errors that no consumer maps.
+	refusalSentinelScoped := strings.HasPrefix(slash, pkgmgrPkg) &&
+		!strings.HasSuffix(slash, "_test.go")
 	// internal/substrate OWNS the connection-state handler slots and is the
 	// one place allowed to set them; everyone else registers through
 	// OnConnectionStateChange. Scoped to non-test files: a test that builds
@@ -1061,9 +1088,25 @@ func scanSource(path string, data []byte) []finding {
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
+	// transientRefusalDeclared carries a `refusal-sentinel: (transient)`
+	// declaration from the comment block above a statement onto that statement,
+	// and is cleared by the first line that is neither a comment nor the
+	// declaration itself — so a declaration cannot reach past the refusal it
+	// sits on and amnesty a later one.
+	transientRefusalDeclared := false
 	for sc.Scan() {
 		ln++
 		line := sc.Text()
+		// Read the declaration BEFORE clearing it: the refusal it covers is
+		// itself a non-comment line, so clearing first would drop the
+		// declaration on the very statement it was written for.
+		declaredTransient := transientRefusalDeclared || refusalSentinelDecl.MatchString(line)
+		switch {
+		case refusalSentinelDecl.MatchString(line):
+			transientRefusalDeclared = true
+		case !isCommentLine(line) && strings.TrimSpace(line) != "":
+			transientRefusalDeclared = false
+		}
 		if historyScoped && historyComment.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "history/changelog comment — git blame + the commit message are the record"})
 		}
@@ -1099,6 +1142,10 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if materializedDefinitionScoped && capabilityPlanConverge.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "capability-apply: a capability plan's Definition passed to Installer.Apply/Upgrade — a capability Definition describes one artifact, and both verbs converge the package onto whatever they are given, so this retires or undeclares every declared key the proposal never mentioned; apply a plan with inst.ApplyCapabilityPlan(ctx, plan), which sets RefuseRemovals (both modes) and RequireInstalled (upgradeExisting). MaterializedDefinition() is for inspection"})
+		}
+		if refusalSentinelScoped && sentinellessRefusal.MatchString(line) && !strings.Contains(line, "%w") &&
+			!declaredTransient {
+			out = append(out, finding{file: path, line: ln, msg: "refusal-sentinel: a refusal built with fmt.Errorf and no wrapped sentinel — a refusal names a deterministic package state, so every consumer must recognize it by class; cmd/loupe's packageApplyStatus falls through to 502 for an error it cannot name, which is the code its front end retries. Wrap a sentinel with %w and add it to the 409 arm"})
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
@@ -2804,6 +2851,30 @@ func selfTest() []string {
 			"\tres, err := inst.ApplyCapabilityPlan(ctx, plan)\n", ""},
 		{"the gate does not bind internal/pkgmgr, which owns both sides of the seam", "internal/pkgmgr/capabilityapply.go",
 			"\tres, err := i.Apply(ctx, plan.MaterializedDefinition(), opts)\n", ""},
+		{"a refusal with no wrapped sentinel is denied", "internal/pkgmgr/upgrade.go",
+			"\treturn fmt.Errorf(\"pkgmgr: upgrade refused — it drops column %q\", col)\n",
+			"a refusal built with fmt.Errorf and no wrapped sentinel"},
+		{"a declared-transient refusal passes", "internal/pkgmgr/upgrade.go",
+			"\t// refusal-sentinel: (transient) a torn multi-key read clears on retry\n" +
+				"\treturn fmt.Errorf(\"pkgmgr: refusing a partial view of %q\", mk)\n", ""},
+		{"a bare transient label with no reason is still denied", "internal/pkgmgr/upgrade.go",
+			"\t// refusal-sentinel: (transient)\n" +
+				"\treturn fmt.Errorf(\"pkgmgr: refusing a partial view of %q\", mk)\n",
+			"a refusal built with fmt.Errorf and no wrapped sentinel"},
+		{"a declaration does not reach a later refusal past its statement", "internal/pkgmgr/upgrade.go",
+			"\t// refusal-sentinel: (transient) a torn multi-key read clears on retry\n" +
+				"\treturn fmt.Errorf(\"pkgmgr: refusing a partial view of %q\", mk)\n" +
+				"\tx := 1\n" +
+				"\treturn fmt.Errorf(\"pkgmgr: upgrade refused — it drops column %q\", col)\n",
+			"a refusal built with fmt.Errorf and no wrapped sentinel"},
+		{"a refusal wrapping a sentinel passes", "internal/pkgmgr/upgrade.go",
+			"\treturn fmt.Errorf(\"%w: pkgmgr: upgrade refused — it drops column %q\", ErrDropRefused, col)\n", ""},
+		{"a non-refusal fmt.Errorf passes", "internal/pkgmgr/upgrade.go",
+			"\treturn fmt.Errorf(\"pkgmgr: read declared keys: %v\", err)\n", ""},
+		{"a refusal assertion in a pkgmgr test passes", "internal/pkgmgr/upgrade_test.go",
+			"\twant := fmt.Errorf(\"pkgmgr: upgrade refused — it drops column %q\", col)\n", ""},
+		{"the refusal-sentinel rule does not bind outside internal/pkgmgr", "internal/refractor/pipeline.go",
+			"\treturn fmt.Errorf(\"refractor: projection refused — no lens\")\n", ""},
 		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
 			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
 				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
@@ -2829,6 +2900,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "primordial-actor:") &&
 				!strings.HasPrefix(fd.msg, "actor-guard:") &&
 				!strings.HasPrefix(fd.msg, "capability-apply:") &&
+				!strings.HasPrefix(fd.msg, "refusal-sentinel:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") {
 				continue
 			}
