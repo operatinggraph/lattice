@@ -485,3 +485,21 @@ Weaver-internal sibling, no display concern).
 
 **Adjacent finds:** none — the `landlord` display field predates this row and already resolves via
 `landlordMin`/`landlordKey`; no second raw-key surface found in the renewal card.
+
+**Adversarial pass (3 parallel `opus` reviewers — security/mechanism, edge-case, contract/convention),
+this fire.** Verdict: safe to ship, PII exposure is a strict subset of what `landlordLeaseApplicationsRead`
+/ `applicantRosterRead` already disclose to the same anchor set (no new category, no new authorization
+path — a `SecureColumn` is a value transform, never a grant). Two real gaps found and fixed before merge,
+not filed:
+- `internal/refractor/grouping_reduction_corpus_census_test.go`'s `renewalsRead` pin didn't include the
+  new `tenantNameEnv` WITH item — the pin is a deliberate "force a re-reading of the grouping change"
+  gate (its own header), and the re-reading (does the new map-valued key mis-partition rows?) checks
+  out: `normalizeForKey` is injective, and `tenantNameEnv` is functionally determined by the already-keyed
+  `tenantKey`, so no group splits. Pin updated to match; a new
+  `TestRenewalsRead_CoManagedUnitWithTenantNamePresent` pins that co-management + a present name envelope
+  still collapses to one row.
+- `make refresh-loftspace` never called `provision-readpath` (unlike `refresh-cafe`/`refresh-wellness`/
+  `refresh-clinic`, which all do) — so this being the FIRST `SecureColumns` declaration on `renewalsRead`
+  would have left the dev-loop refresh 502ing the renewals tab (missing `tenant_name` column; hot-reload
+  refuses a `secureColumns` change and Refractor pauses fail-closed rather than issuing DDL itself).
+  Fixed in the Makefile to match the other three verticals' refresh targets.

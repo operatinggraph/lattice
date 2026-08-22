@@ -108,6 +108,42 @@ func TestRenewalsRead_ProjectsDualAnchor(t *testing.T) {
 		"authz_anchors must carry BOTH the tenant's and the managing landlord's bare NanoID")
 }
 
+// TestRenewalsRead_ProjectsTenantNameEnvelopeWhole — the Secure-Lens contract
+// (Contract #3 §3.10), same shape as
+// TestLandlordLeaseApplicationsRead_ProjectsContactEnvelopesWhole:
+// tenant_name RETURNs the tenant identity's .name aspect envelope WHOLE
+// (tenant.name.data — ciphertext at rest), never a plaintext hop, so the
+// pipeline's SecureDecryptor is the only place plaintext appears.
+func TestRenewalsRead_ProjectsTenantNameEnvelopeWhole(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	nameEnv := map[string]any{"ct": "b64-name-ct", "nonce": "b64-nonce-1", "keyId": "tina-key"}
+	f.aspect(t, "tina", "name", "name", nameEnv)
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, nameEnv, rows[0].Values["tenant_name"], "tenant_name carries the ciphertext envelope whole")
+}
+
+// TestRenewalsRead_MissingTenantNameProjectsNullNotDroppedRow — a tenant with
+// no .name aspect still projects a renewal row (tenant_name null); the
+// contact column is display enrichment, never a row gate, matching
+// landlordLeaseApplicationsRead's applicant_name convention.
+func TestRenewalsRead_MissingTenantNameProjectsNullNotDroppedRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1, "a nameless tenant's renewal still projects")
+	require.Nil(t, rows[0].Values["tenant_name"])
+}
+
 // TestRenewalsRead_ProjectsChainFacts — the display facts a real card renders:
 // terms once set, guarantor verification once done, the signature once
 // signed — all aspect-real hops, none bridged from the Weaver-internal
@@ -212,4 +248,25 @@ func TestRenewalsRead_CoManagedUnitPicksMinLandlord(t *testing.T) {
 	require.Equal(t, "vtx.identity."+minID, v["landlord"], "the display/action-target field is still the canonical min-key manager")
 	require.ElementsMatch(t, []string{f.ids["tina"], f.ids["larry"], f.ids["linda"]}, anchorStrings(t, v["authz_anchors"]),
 		"authz_anchors must carry EVERY co-manager, not just the canonical min-key pick — a non-canonical co-manager must still be able to READ this renewal")
+}
+
+// TestRenewalsRead_CoManagedUnitWithTenantNamePresent — tenant_name is a
+// map-valued WITH item and therefore part of the grouping key alongside
+// landlordAnchors' aggregation; a co-managed unit still collapses to one row
+// with the tenant's name intact, not split per co-manager or dropped by the
+// aggregation.
+func TestRenewalsRead_CoManagedUnitWithTenantNamePresent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	f.vtx(t, "linda", "identity")
+	f.edge(t, "manages", "linda", "unit1")
+	nameEnv := map[string]any{"ct": "b64-name-ct", "nonce": "b64-nonce-1", "keyId": "tina-key"}
+	f.aspect(t, "tina", "name", "name", nameEnv)
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1, "co-management still collapses to one row even with a tenant_name envelope present")
+	require.Equal(t, nameEnv, rows[0].Values["tenant_name"], "the co-managers' aggregation does not disturb the tenant's own name envelope")
 }

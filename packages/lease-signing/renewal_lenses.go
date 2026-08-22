@@ -93,6 +93,7 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				{Name: "entity_key", Type: "text"},
 				{Name: "lease_app", Type: "text"},
 				{Name: "tenant", Type: "text"},
+				{Name: "tenant_name", Type: "text"},
 				{Name: "landlord", Type: "text"},
 				{Name: "status", Type: "text"},
 				{Name: "cycle_end", Type: "text"},
@@ -105,6 +106,9 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				{Name: "guarantor_method", Type: "text"},
 				{Name: "signed_at", Type: "text"},
 				{Name: "cancel_reason", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "tenant_name", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 	}
@@ -297,6 +301,13 @@ RETURN
 //     third party sees nothing (the primordial cap-read self-grant already
 //     grants every identity its own NanoID, so no new grant-lens is needed
 //     for any of them).
+//   - tenant_name is a SECURE column (see the Lenses() declaration), the same
+//     shape landlordLeaseApplicationsRead's applicant_name uses: it RETURNs
+//     the tenant identity's .name aspect envelope whole (tenant.name.data —
+//     ciphertext at rest), and the Secure-Lens decryptor rewrites it to the
+//     decrypted `value` before the row reaches the RLS-protected adapter. No
+//     WHERE keys on its presence — a tenant with no .name aspect still
+//     projects a row, with tenant_name null.
 const renewalsReadSpec = `
 MATCH (rn:renewal)
 MATCH (rn)-[:renews]->(app:leaseapp)
@@ -310,6 +321,7 @@ WITH
   rn.data.reason                           AS cancelReason,
   app.key                                  AS leaseAppKey,
   tenant.key                               AS tenantKey,
+  tenant.name.data                         AS tenantNameEnv,
   min(DISTINCT landlord.key)               AS landlordKey,
   collect(DISTINCT nanoIdFromKey(landlord.key)) AS landlordAnchors,
   u.address.data.line1                     AS unitAddress,
@@ -325,6 +337,7 @@ RETURN
   entityKey                                AS entity_key,
   leaseAppKey                              AS lease_app,
   tenantKey                                AS tenant,
+  tenantNameEnv                            AS tenant_name,
   landlordKey                              AS landlord,
   status,
   cycleEnd                                 AS cycle_end,
