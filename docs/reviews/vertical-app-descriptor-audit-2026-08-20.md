@@ -124,3 +124,68 @@ fourth entry. All four residuals are owed by named increments of the ratified
 [staff-descriptor-rendering-design.md](../../_bmad-output/implementation-artifacts/staff-descriptor-rendering-design.md)
 (Winston-adjudicated under Andrew's 2026-08-20 delegation: no-fork/no-contract designs need no
 Andrew approval), whose Inc 1 (op-catalog lens + loftspace pilot) is build-ready.
+
+## 7. Fire brief — the D4 always-on raw-key sweep (2026-08-22, Vertical Steward)
+
+**Scope sentence (verbatim from `backlog/verticals.md`):** "Always-on floor-rule violations
+(display-name D4): clinic's front-desk header is the user's own bare NanoID + 3 toasts echo full
+`vtx.*` keys; loftspace prints key 'reference codes' on cards + 4 toasts; wellness asks staff to
+TYPE `vtx.identity.…` to book a guest." Name-missing *fallback* patterns (café's `shortKey` when a
+roster lookup fails, wellness's studio/instructor `shortKey` fallbacks, loftspace's
+`applicantName || shortKey(a.applicant)` roster fallback) are **out of scope** — they ride their own
+per-lens rows (already filed above) — this row is only the **unconditional** always-on cases.
+
+**Verified touch-list:**
+
+- **Clinic header** — `cmd/clinic-app/web/app.js:226-231` (`nameForIdentity`) falls back to
+  `shortKey(key)` whenever the signed-in identity is neither a patient (`clinicPatientsRead`) nor a
+  bound provider (`clinicProviders`) — i.e. every front-desk staffer, *by design of the fallback
+  chain* (the function's own doc comment). Clinic has no self-anchored identity-name lens; loftspace
+  (`applicantRosterRead`), café (`cafeIdentitiesRead`), and wellness (`wellnessIdentitiesRead`) each
+  already carry one, self-anchored via the base cap-read self-grant (`packages/wellness-domain/lenses.go:96-124`
+  doc comment names the shape). Clinic-app already has the full Postgres/RLS plumbing this needs —
+  `pgPool`/`pgxBeginner` (`cmd/clinic-app/server.go:33-53`), the `queryPatients`-shaped protected
+  query pattern (`cmd/clinic-app/patients.go:80-147`) — just no identities lens/handler yet.
+- **Clinic toasts** (raw key passed as `toast(msg, kind, extra)`'s third arg, rendered verbatim —
+  `cmd/clinic-app/web/app.js:819-833`): `app.js:822` (`"Patient created."`, `name` is already in
+  local scope from the submitted payload one line above), `app.js:1355` (`"Provider added."`), `app.js:2332`
+  (`"Appointment booked."`). No sibling success toast in this file passes `extra`; dropping it here
+  matches the file's own dominant convention.
+- **LoftSpace toasts** (same `toast(msg, kind, extra)` shape, `cmd/loftspace-app/web/app.js:819-833`):
+  `app.js:1388` (`"Application submitted."`), `app.js:3135` (`"Document uploaded."`), `app.js:4065`
+  (`"Listing updated."`), `app.js:4086` (`"Listing posted…"`) — all four pass a raw key as `extra`;
+  every other toast call in the file omits it.
+- **LoftSpace reference codes** (unconditional `shortKey()` DOM nodes, no label, no click/copy
+  handler bound — verified via grep for `.mono`/`copy` listeners): `app.js:1521-1522` (`ref`, inside
+  `renderApplicationCard`), `app.js:1991-1992` (`scope`, inside the task card renderer), `app.js:2428-2429`
+  (`meta`, inside the renewal card renderer). A fourth `.mono` site (`app.js:3072-3073`, a document's
+  `oid`) is a byte-plane object reference, not an entity/identity key — **not** a D4 instance, left
+  alone.
+- **Wellness guest-booking placeholder** (`cmd/wellness-app/web/index.html:66`,
+  `placeholder="vtx.identity.…"`) — **investigated, deliberately NOT built this fire.** The
+  surrounding doc comment (`cmd/wellness-app/web/app.js:1174-1182`) explains why the adjacent
+  member picker can't cover a guest: `wellnessIdentitiesRead`'s `authz_anchors`
+  (`packages/wellness-domain/lenses.go:424-432`) is lease→unit→building anchored, same as café's
+  and loftspace's own identity rosters (verified all three specs read identically) — a genuine
+  walk-in with no lease anywhere has no anchor any staffer's grant resolves against, so no existing
+  roster (and no established un-anchored search pattern in any of the three sibling packages) can
+  back a name-search picker. This is a real new lens shape (an un-anchored, staff-searchable identity
+  index) with a security-relevant question attached (who may search identities system-wide by name)
+  — not a mechanical mirror. **Filed to `verticals.md` as `📐 needs designer pass · no-pattern:
+  un-anchored staff identity search`, this item's row left `🚧 blocked-on:` it; everything else in
+  this brief is built and shipped below.**
+
+**Increment order:**
+1. `clinicIdentitiesRead` — new self-anchored Protected Postgres lens in `packages/clinic-domain`
+   (mirror `wellnessIdentitiesReadSpec`, self-anchor only — clinic only needs a staffer's OWN name,
+   not a fan-out to others', so the lease/building comprehension wellness/café carry is not needed
+   here), version bump, `cmd/clinic-app/identities.go` + `/api/identities` route (mirror
+   `cmd/wellness-app/identities.go` + `server.go:93` + `health.go:39` + `main.go`'s pool-wiring
+   comments verbatim), `nameForIdentity`/`loadIdentities`/boot-wiring in `web/app.js` mirroring
+   wellness's shape exactly.
+2. Drop the raw-key `extra` arg from the 7 toasts (clinic ×3, loftspace ×4); remove the 3 loftspace
+   reference-code DOM nodes.
+
+**Non-goals:** wellness guest-booking search (design gap, filed above); the name-missing fallback
+rows (café, wellness studio/instructor, loftspace applicant roster — separate board rows); the
+document-OID mono span (not a D4 instance).
