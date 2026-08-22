@@ -371,12 +371,19 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 // fails identically forever until an operator supplies the attestation. So is a
 // raced declared key: the batch was rejected against the state this run read,
 // and re-running is an operator's decision about a changed package, not a
-// transient the UI should retry on its own.
+// transient the UI should retry on its own. So is a Definition that does not
+// describe the package it targets — it will not describe it on the retry
+// either, and the remedy the refusal names is a differently-authored proposal.
 func packageApplyStatus(err error) int {
 	switch {
 	case errors.Is(err, pkgmgr.ErrNotInstalled),
 		errors.Is(err, pkgmgr.ErrCanonicalNameCollision),
 		errors.Is(err, pkgmgr.ErrDeclaredKeysOccupied),
+		errors.Is(err, pkgmgr.ErrApplyWouldRemove),
+		errors.Is(err, pkgmgr.ErrApplyWouldRevive),
+		errors.Is(err, pkgmgr.ErrPackageNameClaimed),
+		errors.Is(err, pkgmgr.ErrMalformedDeclaredKeys),
+		errors.Is(err, pkgmgr.ErrUndeclaredSecureColumnDrop),
 		errors.Is(err, pkgmgr.ErrUndeclaredSecureLensErasure),
 		errors.Is(err, pkgmgr.ErrUninstallConflict):
 		return http.StatusConflict

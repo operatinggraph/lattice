@@ -20,6 +20,14 @@ type ApplyOptions struct {
 	// missing base install is ErrNotInstalled rather than a fresh create. The
 	// `install` command leaves it false (create-if-absent).
 	RequireInstalled bool
+	// RefuseRemovals makes Apply refuse — atomically with the delta computation —
+	// any in-place apply whose diff would tombstone a declared key. Set it whenever
+	// the Definition is a PARTIAL description of the package rather than its whole
+	// desired state: Apply's in-place branch is a convergence operator, so a partial
+	// Definition otherwise reads as "everything I do not mention is retired".
+	// Its zero value keeps the whole-Definition convergence semantics every
+	// source-authored install/upgrade depends on.
+	RefuseRemovals bool
 }
 
 // ApplyResult is the unified outcome of Apply across the fresh-install,
@@ -177,6 +185,54 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		RetentionHoldersAlreadyStranded: sum.retentionHoldersAlreadyStranded,
 		SecureColumnsWidened:            sum.secureColumnsWidened,
 		LeafBudgetWarnings:              leafBudgetWarnings,
+	}
+
+	// The coverage refusal (capability-apply-removal-refusal-design.md §3.1) for
+	// a caller whose Definition is a partial description of the package.
+	//
+	// It runs FIRST — ahead of the Secure-Lens retirement guard below, and ahead
+	// of the dry-run return so that a preview whose real run would be refused
+	// says so rather than describing a batch that cannot commit. (It also
+	// precedes the empty-delta return, but nothing rests on that: a Definition
+	// that stops describing a declared key necessarily rewrites the manifest
+	// aspect's declaredKeys, so the delta it produces is never empty. The
+	// retirement guard below genuinely can face dropped columns with no
+	// mutations; this one cannot.) It is the harder boundary: that guard
+	// asks whether an erasure this apply performs was attested for, and this one
+	// asks whether the apply may happen at all. Running them the other way round
+	// answers a partial Definition that drops a secure lens with the retirement
+	// guard's refusal, whose remedy is to declare a RetiredSecureColumn — an
+	// attestation about ciphertext that a caller describing one artifact of
+	// somebody else's package is in no position to make. A source-authored
+	// caller leaves RefuseRemovals false, so for every one of them this block is
+	// a no-op and the retirement guard still sees exactly what it saw before.
+	//
+	// The predicate is COVERAGE, not emission. The removal arm leaves a
+	// retention-class holder live and skips a key already absent from KV, so
+	// neither is tombstoned — but the manifest this apply writes takes
+	// declaredKeys, depends, description and version from the submitted
+	// Definition (build.go), so a key it does not describe stops being declared
+	// either way. Testing the emitted tombstone list would admit exactly those
+	// two shapes while they silently narrow the declaration.
+	if opts.RefuseRemovals {
+		// A declaration that could not be read whole yields a short `old` set,
+		// which this predicate would read as "the Definition covers everything".
+		// Fail closed: the one thing a coverage guard must never do is conclude
+		// coverage from a list it knows is incomplete.
+		if sum.declarationMalformed != nil {
+			return nil, fmt.Errorf("%w: refusing a partial apply to %q, whose declared-key list cannot be read whole — coverage cannot be judged against it",
+				sum.declarationMalformed, def.Name)
+		}
+		if len(sum.undescribedKeys) > 0 {
+			return nil, applyWouldRemoveError(def, sum.oldKeyCount, sum.newKeyCount, sum.undescribedKeys, "")
+		}
+		// The same rule read the other way: an apply may not change what its
+		// Definition does not describe, and an operator's out-of-band tombstone
+		// on a key this Definition happens to describe is not something the
+		// submitter described either.
+		if len(sum.resurrectedKeys) > 0 {
+			return nil, applyWouldReviveError(def, sum.resurrectedKeys)
+		}
 	}
 
 	// The Secure-Lens key-custody retirement guard (retention-class-key-

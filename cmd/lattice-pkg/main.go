@@ -557,7 +557,7 @@ func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Lo
 
 	inst := newInstaller(conn, adminActor)
 	inst.RoleIDs = roleIDsFromBootstrap(bs)
-	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
 	if err != nil {
 		return fmt.Errorf("apply %s: %w", plan.PackageName, err)
 	}

@@ -708,6 +708,18 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 			id, cols.TargetPackageName))
 		return
 	}
+	// A proposal the plan builder would refuse must be refused rather than
+	// reported recoverable. The recovery classification below answers "is this
+	// package live at the target version" — which is the same state an
+	// upgradeExisting proposal declaring newVersion == the installed version
+	// produces WITHOUT ever having applied, so with the plan builder running
+	// only afterwards that proposal is closed over an artifact that never
+	// landed. Asking the preconditions here puts the refusal back in front of
+	// the classification it would otherwise be mistaken for.
+	if err := pkgmgr.ValidateCapabilityApplyTarget(ctx, conn, proposalKey); err != nil {
+		s.writeError(w, http.StatusConflict, "build apply plan: "+err.Error())
+		return
+	}
 	if haveRow && cols.ReviewState == "approved" {
 		if packageKey, installed, err := s.targetInstall(ctx, conn, cols); err == nil && installed {
 			s.writeJSON(w, http.StatusConflict, map[string]any{
@@ -730,7 +742,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 	inst.RoleIDs = kernelRoleIDs()
 	inst.Submit = s.pkgmgrSubmit
 
-	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
 	if err != nil {
 		s.writeError(w, packageApplyStatus(err), "apply "+plan.PackageName+": "+err.Error())
 		return

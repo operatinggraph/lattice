@@ -229,15 +229,18 @@ func (i *Installer) preflight(def Definition) (Definition, error) {
 // surfaced. Shared by Upgrade and Apply's in-place path; the caller already
 // holds the installed base, so it is not re-resolved here.
 func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installedPackage, def Definition) ([]installMutation, diffSummary, []string, error) {
-	oldKeys, err := i.readDeclaredKeys(ctx, existing.Key)
-	if err != nil {
-		return nil, diffSummary{}, nil, err
+	oldKeys, declErr := i.readDeclaredKeys(ctx, existing.Key)
+	if declErr != nil && !errors.Is(declErr, ErrMalformedDeclaredKeys) {
+		return nil, diffSummary{}, nil, declErr
 	}
 	newOps, _, _, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, metaScanResult{})
 	if err != nil {
 		return nil, diffSummary{}, nil, err
 	}
 	mutations, sum, err := i.diffManifest(ctx, oldKeys, newOps)
+	if errors.Is(declErr, ErrMalformedDeclaredKeys) {
+		sum.declarationMalformed = declErr
+	}
 	return mutations, sum, leafBudgetWarnings, err
 }
 
@@ -364,6 +367,64 @@ type diffSummary struct {
 	// The widen (secureColumnsWidened) protects a column the new spec still
 	// names; nothing protected one it stopped naming.
 	droppedSecureColumns []droppedSecureColumn
+	// oldKeyCount is the size of the installed manifest's declaredKeys SET this
+	// delta diffed against — every key the package currently owns, the package
+	// root vertex and its `.manifest` aspect included, so it is a KEY count and
+	// not a count of lenses/roles/permissions. It is the deduplicated size: a
+	// manifest whose recorded declaredKeys names a key twice owns it once, and
+	// a count that said otherwise would put an off-by-one in the one number an
+	// operator uses to judge coverage.
+	//
+	// It exists because it is one of the two numbers the coverage refusal
+	// (ApplyWouldRemoveError) quantifies: "the package declares N keys, this
+	// Definition describes M" is the whole diagnosis for an author who
+	// submitted a partial description of a package, and neither number is
+	// recoverable from a mutation list that only carries what changed.
+	oldKeyCount int
+	// newKeyCount is the size of the rebuilt create-batch's key set — every key
+	// the submitted Definition describes, again deduplicated and again
+	// including the package root and the `.manifest` aspect, so the two counts
+	// are comparable and a covering Definition reports the same number on both
+	// sides. It is the second number the coverage refusal quantifies (see
+	// oldKeyCount).
+	newKeyCount int
+	// undescribedKeys is old \ new: every key the installed manifest declares
+	// that the submitted Definition does not describe, deduplicated and sorted.
+	//
+	// This is deliberately the raw set difference and NOT the emitted tombstone
+	// list, which is a strict subset of it. The removal arm drops two classes of
+	// key without emitting anything — a retention-class holder it preserves, and
+	// a key already absent from KV — and for a caller converging the WHOLE
+	// package that is the right non-action, because the manifest it writes still
+	// describes the package. For a caller whose Definition is partial it is not:
+	// the same in-place branch rewrites declaredKeys, depends, description and
+	// version from that Definition (build.go's manifest body), so a key silently
+	// dropped from the declaration is undeclared afterwards whether or not
+	// anything was tombstoned — a preserved retention holder loses the custody
+	// declaration that made it findable. Coverage is therefore the property the
+	// refusal has to test, and emission is only its loudest symptom.
+	undescribedKeys []string
+	// declarationMalformed is non-nil when the installed manifest's declaredKeys
+	// could not be read whole (readDeclaredKeys' ErrMalformedDeclaredKeys). The
+	// diff still runs on the keys that WERE readable, because for a caller
+	// converging a package on its own source that run is the repair. It is
+	// carried rather than returned so that the one caller whose safety depends
+	// on `old` being complete — the RefuseRemovals coverage guard, which reads a
+	// short `old` as "this Definition covers everything" — can refuse instead.
+	declarationMalformed error
+	// resurrectedKeys names every SURVIVING key whose committed document is
+	// already tombstoned and which this delta would un-tombstone by updating it
+	// — the definition keys (vtx.meta.*) the respect-the-revocation branch
+	// deliberately excludes, so that a package can revive its own definition by
+	// re-declaring it.
+	//
+	// Recorded at the point an update is actually emitted, not where the
+	// exclusion is taken: a tombstoned key whose body is byte-equal skips the
+	// update and is revived by nothing. Source-authored convergence keeps this
+	// revival; it is the caller submitting a PARTIAL Definition that has no
+	// authority to perform it, having described nothing about the operator's
+	// decision to kill the key.
+	resurrectedKeys []string
 }
 
 // droppedSecureColumn names one erasure of a lens's committed key-custody
@@ -453,7 +514,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 	}
 
 	var out []installMutation
-	var sum diffSummary
+	sum := diffSummary{oldKeyCount: len(oldSet), newKeyCount: len(newSet)}
 
 	for _, op := range newOps {
 		_, survives := oldSet[op.Key]
@@ -490,7 +551,8 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			sum.created++
 			continue
 		}
-		if del, _ := committed["isDeleted"].(bool); del && !strings.HasPrefix(op.Key, metaVertexPrefix) {
+		del, _ := committed["isDeleted"].(bool)
+		if del && !strings.HasPrefix(op.Key, metaVertexPrefix) {
 			// A surviving key (present in both old and new sets) that is already
 			// tombstoned can only have been tombstoned out-of-band: this diff's
 			// own tombstone emission (below) touches exclusively old \ new keys,
@@ -527,7 +589,19 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 		}
 		out = append(out, installMutation{Op: "update", Key: op.Key, Document: op.Document, ExpectedRevision: &rev})
 		sum.updated++
+		if del {
+			// This update lands a live body over a tombstoned one — the
+			// definition-key revival the branch above deliberately leaves open.
+			// Recorded here rather than there because a byte-equal body skips
+			// the update and revives nothing.
+			sum.resurrectedKeys = append(sum.resurrectedKeys, op.Key)
+		}
 	}
+
+	// Sorted so the refusal that reads it names the same keys in the same order
+	// on every run — an operator comparing two runs is comparing lists, and the
+	// field's own contract says sorted.
+	sort.Strings(sum.resurrectedKeys)
 
 	// Removed keys (old \ new) → tombstone, in deterministic sorted order.
 	seen := make(map[string]struct{}, len(oldKeys))
@@ -543,6 +617,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 		removed = append(removed, k)
 	}
 	sort.Strings(removed)
+	sum.undescribedKeys = removed
 	for _, k := range removed {
 		committed, rev, err := i.getCommitted(ctx, k)
 		if err != nil {
@@ -607,15 +682,47 @@ func (i *Installer) readDeclaredKeys(ctx context.Context, pkgKey string) ([]stri
 	if err := json.Unmarshal(entry.Value, &env); err != nil {
 		return nil, fmt.Errorf("pkgmgr: parse %s: %w", manifestKey, err)
 	}
-	declaredRaw, _ := env.Data["declaredKeys"].([]any)
+	declaredRaw, declaredPresent := env.Data["declaredKeys"].([]any)
 	keys := make([]string, 0, len(declaredRaw)+1)
+	malformed := !declaredPresent
 	for _, dk := range declaredRaw {
 		if s, ok := dk.(string); ok && s != "" {
 			keys = append(keys, s)
+			continue
 		}
+		malformed = true
 	}
 	keys = append(keys, manifestKey)
+	if malformed {
+		// The declaration this diff is about to reason over could not be read
+		// whole: `declaredKeys` is absent, is not a list, or carries an entry
+		// that is not a non-empty string.
+		//
+		// Every caller gets the keys that WERE readable, because a convergence
+		// run over a partially-readable manifest is still the operation that
+		// repairs it — dropping the bad entries and re-declaring from source is
+		// the outcome an operator wants. What none of them may do is treat the
+		// shortened list as the truth: a manifest that lost half its
+		// declaredKeys yields a short `old` set, hence few or no removals, and a
+		// coverage guard reading it would admit a partial apply as fully
+		// covering. So the shortfall is reported alongside the keys and the
+		// RefuseRemovals path in Apply refuses on it, while Uninstall and
+		// source-authored upgrades proceed as before. The sibling precedent is
+		// loadProtectedDispatchSets, which fails closed on the same class.
+		return keys, errMalformedDeclaredKeys(manifestKey)
+	}
 	return keys, nil
+}
+
+// ErrMalformedDeclaredKeys reports a package manifest whose declaredKeys could
+// not be read as a complete list of keys. It is returned ALONGSIDE the keys
+// that were readable, so a caller chooses between repairing and refusing; only
+// a caller that has declared its Definition partial (ApplyOptions.RefuseRemovals)
+// must refuse, because only that caller's safety rests on `old` being complete.
+var ErrMalformedDeclaredKeys = errors.New("pkgmgr: package manifest declaredKeys is absent or malformed")
+
+func errMalformedDeclaredKeys(manifestKey string) error {
+	return fmt.Errorf("%w: %s", ErrMalformedDeclaredKeys, manifestKey)
 }
 
 // reactivationNote reports, for one updated key, whether the edit is a lens spec

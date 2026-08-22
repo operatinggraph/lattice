@@ -236,10 +236,11 @@ func TestCapabilityAuthorAppliesEndToEnd(t *testing.T) {
 	if pkgmgr.PlatformProtectedPackage(plan.PackageName) {
 		t.Errorf("plan.PackageName %q is platform-protected — an AI-authored name must never be", plan.PackageName)
 	}
-	if len(plan.Definition.WeaverTargets) != 1 {
-		t.Fatalf("plan defines %d weaver targets, want 1", len(plan.Definition.WeaverTargets))
+	materialized := plan.MaterializedDefinition()
+	if len(materialized.WeaverTargets) != 1 {
+		t.Fatalf("plan defines %d weaver targets, want 1", len(materialized.WeaverTargets))
 	}
-	if got := plan.Definition.WeaverTargets[0].LensRef; got != staleLensNanoID {
+	if got := materialized.WeaverTargets[0].LensRef; got != staleLensNanoID {
 		t.Errorf("plan target lensRef = %q, want the NanoID %q that install resolves", got, staleLensNanoID)
 	}
 }
