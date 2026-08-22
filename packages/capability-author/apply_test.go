@@ -76,18 +76,11 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor
 	}
 }
 
-// recordEnvForApply mirrors recordEnv (proposal_test.go) but attaches a real
-// target.packageName + mode — the shared recordEnv leaves the target empty
-// (Fire 1 never needed to apply anything), so this variant is local to the
-// apply tests rather than widening every existing recordEnv call site.
-func recordEnvForApply(t *testing.T, reqID, handle, packageName, mode string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
-	t.Helper()
-	return recordEnvForApplyTarget(t, reqID, handle,
-		map[string]any{"mode": mode, "packageName": packageName}, content, confidence)
-}
-
-// recordEnvForApplyTarget is recordEnvForApply with the whole target object
-// supplied, for the cases whose subject is a target FIELD (baseVersion,
+// recordEnvForApplyTarget mirrors recordEnv (proposal_test.go) but attaches a
+// real target object — the shared recordEnv leaves the target empty (Fire 1
+// never needed to apply anything), so this variant is local to the apply tests
+// rather than widening every existing recordEnv call site. The whole target is
+// a parameter because a case's subject may be a target FIELD (baseVersion,
 // newVersion) rather than the mode/packageName pair.
 func recordEnvForApplyTarget(t *testing.T, reqID, handle string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
