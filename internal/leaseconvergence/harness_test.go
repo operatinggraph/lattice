@@ -326,13 +326,30 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	h.bgFake = bridge.NewFakeBackgroundCheck()
 	h.stripe = bridge.NewFakeStripe()
 	bridgeEng := bridge.NewEngine(conn, bridge.Config{
-		EventsStream:    bootstrap.CoreEventsStreamName,
-		HealthKVBucket:  bootstrap.HealthKVBucket,
-		ActorKey:        bootstrap.BridgeIdentityKey,
-		Lane:            "system",
-		Instance:        "lc-bridge",
-		HeartbeatEvery:  150 * time.Millisecond,
-		RedeliveryDelay: 300 * time.Millisecond,
+		EventsStream:   bootstrap.CoreEventsStreamName,
+		HealthKVBucket: bootstrap.HealthKVBucket,
+		ActorKey:       bootstrap.BridgeIdentityKey,
+		Lane:           "system",
+		Instance:       "lc-bridge",
+		HeartbeatEvery: 150 * time.Millisecond,
+		// The bridge's egress-unwrap retry budget (maxEgressUnwrapAttempts, a
+		// FIXED 5 in internal/bridge/egress.go — production code, out of a test's
+		// reach) gives up on the piiKeyEnvelope lens after 4 NakWithDelay gaps of
+		// this floor, and gives up PERMANENTLY: a stale privacy-pii-key-envelopes
+		// miss on RecordIdentityPII's freshly-minted identity becomes a terminal
+		// failed .outcome with no auto-retry (egress.go's "converge, never park"),
+		// which then never closes missing_bgcheck/missing_payment and the whole
+		// application never converges. At the 300ms this used to be, that budget
+		// was ~1.2s — comfortably inside the lens's usual projection latency on a
+		// quiet box, but not against this shared runner's own measured worst
+		// case: the sibling `TestRefractor_E2E_P99` board row clocked a
+		// comparable projection at 10.03s under CI's parallel-job contention (CI
+		// run 31288862556). 2.5s buys a ~10s window across the 4 gaps — matching
+		// that measured worst case with margin — while the happy path (no
+		// retries needed) pays nothing extra, and 10s still leaves ample room
+		// inside drainUntilConverged's 30s ceiling for the rest of the flow.
+		// Eighth sighting: CI run 32575444538 (convergence job, unrelated diff).
+		RedeliveryDelay: 2500 * time.Millisecond,
 		PollInterval:    hc.bridgePollInterval,
 		CallDeadline:    hc.bridgeCallDeadline,
 	})
