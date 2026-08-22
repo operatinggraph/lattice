@@ -52,9 +52,22 @@ coordination) is **void**: the container's stack is yours and disposable.
 
 - **Unit + e2e `go test`:** self-contained — NATS is embedded in the test binaries (`nats-server` is a
   Go dependency). `go test ./... -p 4` runs as-is.
-- **Postgres-gated tests:** postgresql-16 is installed natively (`/usr/lib/postgresql/16/bin`). Init a
-  cluster, start it, `export POSTGRES_TEST_DSN=postgres://…` — full CI-unit parity (CI does the same
-  via a service container).
+- **Postgres-gated tests: `go test ./...` WITHOUT `POSTGRES_TEST_DSN` is falsely green.** The gated
+  tests skip silently, so a remote fire can watch the whole tree pass and still redden CI's `unit-1`
+  (this shipped: a lens change landed on `main` with `internal/refractor`'s corpus census pins stale,
+  and two consecutive `main` runs were red before anyone noticed). **Bring Postgres up before you claim
+  a green suite** — postgresql-16 is installed natively (`/usr/lib/postgresql/16/bin`). Two things bite:
+  `initdb` refuses to run as **root**, which the container is, and it also refuses a data directory it
+  cannot chown, which rules out the scratchpad. Run it as the `postgres` user against a plain path, and
+  match CI's DSN (`.github/workflows/ci.yml`):
+
+  ```sh
+  D=/var/tmp/pgtest; mkdir -p $D && chown postgres:postgres $D && chmod 700 $D
+  su postgres -s /bin/sh -c "/usr/lib/postgresql/16/bin/initdb -D $D/data -U postgres --auth=trust"
+  su postgres -s /bin/sh -c "/usr/lib/postgresql/16/bin/pg_ctl -D $D/data -l $D/pg.log -o '-p 5433 -k /tmp' -w start"
+  psql -h /tmp -p 5433 -U postgres -c "CREATE ROLE lattice LOGIN SUPERUSER PASSWORD 'lattice_dev';" -c "CREATE DATABASE lattice OWNER lattice;"
+  export POSTGRES_TEST_DSN="postgres://lattice:lattice_dev@127.0.0.1:5433/lattice?sslmode=disable"
+  ```
 - **Live stack (`verify-kernel` / `verify-package-*` need `NATS_URL` up):** replace `make up`'s two
   compose containers natively — `go run github.com/nats-io/nats-server/v2 -js` (offline from the
   module cache) + the native Postgres + the repo's own component binaries (they already run as native
