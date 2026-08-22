@@ -109,14 +109,24 @@ func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApp
 //     semantic-contracts — whose blast radius spans every vertical.
 //
 // A vertical business-domain package (cafe-domain, clinic-domain, …) is
-// deliberately absent: upgradeExisting there is precisely what this fire
-// exists to allow. "Widely depended on" is not by itself a reason to add one —
-// lease-signing, location-domain and service-domain are each depended on
-// across verticals, yet every operation their Permissions() grant is an
-// ordinary business-domain write over the existing operator/consumer/provider
-// role vocabulary, with no authz-plane, identity or capability-grant
-// primitive among them. They are shared vertical packages, not platform-trust
-// ones, and their absence here is a decision rather than an oversight.
+// deliberately absent, on trust grounds: this list is about which packages an
+// AI-authored proposal may never name at all, and a vertical package is not
+// part of the platform's trust base. "Widely depended on" is not by itself a
+// reason to add one — lease-signing, location-domain and service-domain are
+// each depended on across verticals, yet every operation their Permissions()
+// grant is an ordinary business-domain write over the existing
+// operator/consumer/provider role vocabulary, with no authz-plane, identity or
+// capability-grant primitive among them. They are shared vertical packages,
+// not platform-trust ones, and their absence here is a decision rather than an
+// oversight.
+//
+// Absence from this list is not permission to reshape such a package. An
+// upgradeExisting proposal still has to describe the package it targets: the
+// apply seam refuses one whose Definition would retire declared keys it says
+// nothing about (ApplyCapabilityPlan / ErrApplyWouldRemove), whatever the name.
+// The two guards answer different questions — this one asks whether the name
+// may be touched, that one asks whether the submitted Definition covers what
+// it would converge.
 var platformProtectedPackages = map[string]bool{
 	"rbac-domain":            true,
 	"control-authz":          true,
