@@ -216,8 +216,11 @@ reliability/data-integrity rather than security scope, unchanged by this fire an
 (b) The per-identity edge grant lists only the v1 ack form (`internal/gateway/natsauth/natsauth.go:371`);
 safe today (allow-side, and the server stamps v1 while `js_ack_fc_v2` is off) but it would break edge sync
 if that flag were ever enabled — noted here, not filed: it is a latent vendor-flag coupling with no consumer
-and no defect today. (c) `83891a8c`, the SHA the 2026-08-20 backlog audit cites for the MSG.NEXT registry, is
-not an object in this repository — a stale citation in that audit doc, corrected where it is quoted.
+and no defect today. (c) A scout reported the 2026-08-20 backlog audit's `83891a8c` citation unresolvable;
+it resolves fine (`fix(natsperm): close the core-events JS.API side channel for six security-plane
+consumers`). The clone this fire ran in was **shallow** — 76 commits — so every history-based negative in it
+was an artifact until `--deepen`. Recorded as an environment rule in `agents/steward/REMOTE.md` §7 rather
+than left as a one-off correction here.
 
 **7 · Non-goals.** No `ReadBuckets` / declared-read-scope mechanism (that is the awaiting-Andrew fork). No
 narrowing of `$JS.API.>` for anyone. No change to `SubscribeAllow` for any component. No change to the
