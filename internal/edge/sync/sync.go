@@ -579,7 +579,7 @@ func (m *Manager) hydrate(ctx context.Context) (syncStartSeq uint64, err error) 
 	if err := m.registerInterest(ctx); err != nil {
 		return 0, fmt.Errorf("personal.register: %w", err)
 	}
-	revision, lenses, syncStartSeq, err := m.callHydrate(ctx)
+	revision, lenses, syncStartSeq, _, err := m.callHydrate(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("personal.hydrate: %w", err)
 	}
@@ -648,21 +648,21 @@ func (m *Manager) registerInterest(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) callHydrate(ctx context.Context) (revision uint64, lenses []string, syncStartSeq uint64, err error) {
+func (m *Manager) callHydrate(ctx context.Context) (revision uint64, lenses []string, syncStartSeq uint64, syncEndSeq uint64, err error) {
 	resp, err := m.controlRequest(ctx, "hydrate", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 	})
 	if err != nil {
-		return 0, nil, 0, err
+		return 0, nil, 0, 0, err
 	}
 	if resp.Error != "" {
-		return 0, nil, 0, fmt.Errorf("%s", resp.Error)
+		return 0, nil, 0, 0, fmt.Errorf("%s", resp.Error)
 	}
 	if resp.PersonalHydrate == nil || !resp.PersonalHydrate.Hydrated {
-		return 0, nil, 0, fmt.Errorf("control plane did not confirm hydration")
+		return 0, nil, 0, 0, fmt.Errorf("control plane did not confirm hydration")
 	}
-	return resp.PersonalHydrate.Revision, resp.PersonalHydrate.Lenses, resp.PersonalHydrate.SyncStartSeq, nil
+	return resp.PersonalHydrate.Revision, resp.PersonalHydrate.Lenses, resp.PersonalHydrate.SyncStartSeq, resp.PersonalHydrate.SyncEndSeq, nil
 }
 
 // controlRequest issues one request-reply against the "personal" pseudo-lens

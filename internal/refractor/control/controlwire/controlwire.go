@@ -182,6 +182,21 @@ type PersonalHydrateResult struct {
 	// position (unset seam or a read error) — the requesting node falls
 	// back to today's DeliverAll behaviour.
 	SyncStartSeq uint64 `json:"syncStartSeq,omitempty"`
+	// SyncEndSeq is the SYNC stream's last sequence on the identity's own
+	// subject, read again after the hydrate fan-out has returned
+	// (edge-first-paint-gate-identity-design.md §3.1): because
+	// substrate.Conn.Publish waits for the JetStream store ack, every message
+	// of every lens's burst — rows, keyset frames, markers — has already been
+	// appended by the time this second read runs, so SyncEndSeq is always at
+	// or above the burst's last sequence. A client uses it as the position
+	// its first-paint gate waits for the delivery floor to reach. Zero means
+	// the control host could not name a position (older control plane, unset
+	// seam, or a read error) — the requesting node falls back to its
+	// degraded gate. SyncEndSeq may exceed the burst's true last sequence
+	// when unrelated traffic on the same subject races the read (another
+	// device's burst, a live delta); that only moves a client's release
+	// later, never earlier.
+	SyncEndSeq uint64 `json:"syncEndSeq,omitempty"`
 }
 
 // PersonalSessionKeyResult is the synchronous acknowledgement returned by the
