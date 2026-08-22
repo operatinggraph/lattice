@@ -166,6 +166,30 @@ func TestLandlordLeaseApplicationsRead_UnmanagedUnitProducesNoRow(t *testing.T) 
 	require.Equal(t, []string{f.ids["larry"]}, anchorStrings(t, rows[0].Values["authz_anchors"]))
 }
 
+// TestLandlordLeaseApplicationsRead_BuildingFanOut — a managed application
+// whose unit is covered by a building anchors to the landlord PLUS that
+// building, the same `[landlordKey] + [containedIn building tokens]` shape
+// loftspace-domain's landlordUnitsRead/applicantRosterRead anchor on — a
+// front-desk staffer's worksAt-building grant resolves this model too. Also
+// the empirical proof this package's own single-hop `[:containedIn]` rewrite
+// (2026-08-22, narrowing the prior `*1..` unbounded walk) still projects
+// correctly through the multi-`WITH`-segment spec this lens compiles to,
+// closing typed-relation-signatures-design.md §9.3's open conjunct-walk.
+func TestLandlordLeaseApplicationsRead_BuildingFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
+	f.vtx(t, "tower", "building")
+	f.edge(t, "containedIn", "unit1", "tower")
+
+	rows := f.projectLandlordRead(t)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []string{f.ids["larry"], f.ids["tower"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"authz_anchors must carry the managing landlord PLUS every building covering the unit")
+}
+
 // TestLandlordLeaseApplicationsRead_ProjectsProfileSignals — D1.5 Rec C: the
 // applicant qualification-profile signals (income/employment/references/
 // co-applicant/guarantor) project as informational scalars on the landlord row,

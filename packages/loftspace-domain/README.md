@@ -91,7 +91,7 @@ Both are flat (no `WITH`/aggregation) `full`-engine projections.
   exists only in the RLS-protected table; a shredded identity's name projects NULL. Each row's
   `authz_anchors` carries the identity's own bare NanoID plus the managing landlord and covering
   buildings of any unit it has a live lease application against (`applicationFor -> appliesToUnit ->
-  manages` / `containedIn*1..`, mirroring `cafe-domain`'s `cafeIdentitiesRead` and `lease-signing`'s
+  manages` / `containedIn`, mirroring `cafe-domain`'s `cafeIdentitiesRead` and `lease-signing`'s
   `landlordLeaseApplicationsRead` anchor shape), plus the reserved WildcardAnchor grant — `cmd/loftspace-app`
   reads the table as the SIGNED-IN caller, for the picker and for server-side name resolution alike.
 

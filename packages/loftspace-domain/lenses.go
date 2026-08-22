@@ -42,7 +42,7 @@ func Lenses() []pkgmgr.LensSpec {
 			// (a signed-in actor always resolves their own name) PLUS the bare
 			// NanoID of every landlord managing a unit the identity has a live
 			// lease application against, PLUS every building covering that unit
-			// (applicationFor -> appliesToUnit -> manages / containedIn*1..,
+			// (applicationFor -> appliesToUnit -> manages / containedIn,
 			// mirroring cafe-domain's cafeIdentitiesRead self+fan-out and
 			// lease-signing's landlordLeaseApplicationsRead anchor shape) — so
 			// the SAME managing landlord and worksAt-anchored staffer whose
@@ -172,13 +172,18 @@ RETURN
 // colliding on the single-valued identity_id IntoKey), mirroring
 // cafe-domain's cafeIdentitiesRead self+fan-out idiom and reusing
 // lease-signing's landlordLeaseApplicationsRead anchor shape
-// (`[landlordKey] + [containedIn*1.. building tokens]`) one hop further in
-// (identity -> leaseapp -> unit, not leaseapp -> unit). The reserved
+// (`[landlordKey] + [containedIn building tokens]`) one hop further in
+// (identity -> leaseapp -> unit, not leaseapp -> unit). Single fixed hop, not
+// `*1..`: WireContainedIn (location-domain) permits chaining (unit -> building
+// -> property), but every live site only ever wires unit -> building directly
+// (verified 2026-08-22 — no site creates a containedIn link out of a building
+// vertex); a future property-tier container reintroduces a real chain and
+// must revisit this lens, not silently absorb it. The reserved
 // WildcardAnchor grant still matches every row on top of these (mirrors
 // clinic-domain's clinicPatientsReadSpec). An identity with no leaseapp at
 // all (e.g. a staffer with no lease of their own) still projects — the
-// variable-length walk finds no match and the fan-out is simply empty, the
-// self-anchor survives on its own.
+// walk finds no match and the fan-out is simply empty, the self-anchor
+// survives on its own.
 const applicantRosterReadSpec = `MATCH (i:identity)
 WHERE i.name.data.ct <> null
 RETURN
@@ -187,17 +192,18 @@ RETURN
   i.key                 AS identity_key,
   i.name.data           AS name,
   i.state.data.value    AS state,
-  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(la:leaseapp)-[:appliesToUnit]->(ua:unit)<-[:manages]-(landlord:identity) | nanoIdFromKey(landlord.key)] + [(i)<-[:applicationFor]-(lb:leaseapp)-[:appliesToUnit]->(ub:unit)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]
+  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(la:leaseapp)-[:appliesToUnit]->(ua:unit)<-[:manages]-(landlord:identity) | nanoIdFromKey(landlord.key)] + [(i)<-[:applicationFor]-(lb:leaseapp)-[:appliesToUnit]->(ub:unit)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)]
                         AS authz_anchors
 `
 
 // landlordUnitsReadSpec projects one row per (unit, managing landlord) pair —
 // see the Lenses() declaration above for the shape rationale. authz_anchors
 // carries the managing landlord's bare NanoID PLUS every building covering
-// the unit, the same `[landlordKey] + [containedIn*1.. building tokens]`
+// the unit, the same `[landlordKey] + [containedIn building tokens]`
 // shape landlordLeaseApplicationsRead already anchors on — a front-desk
 // staffer's worksAt-building grant resolves both models identically, so a
-// portfolio card composed from the two never goes half-populated.
+// portfolio card composed from the two never goes half-populated. Single
+// fixed hop (see applicantRosterReadSpec's doc above for why).
 const landlordUnitsReadSpec = `MATCH (u:unit)<-[:manages]-(landlord:identity)
 RETURN
   nanoIdFromKey(u.key)          AS unit_id,
@@ -210,5 +216,5 @@ RETURN
   u.listing.data.status         AS unit_status,
   u.listing.data.rentAmount     AS unit_rent,
   u.listing.data.rentCurrency   AS unit_currency,
-  [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
+  [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
 `

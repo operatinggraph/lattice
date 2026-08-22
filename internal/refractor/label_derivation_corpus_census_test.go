@@ -125,6 +125,11 @@ const (
 // installed corpus ships, keyed by canonical name (`name#N` for one branch of a
 // multi-walk lens, in Walks declaration order).
 var corpusLabelVerdicts = map[string]labelVerdict{
+	// applicantRosterRead converted 2026-08-22: its sole exhaustiveness
+	// blocker was the `containedIn*1..` variable-length hop
+	// (typed-relation-signatures-design.md §9.2), rewritten to a fixed
+	// single hop now every live wiring is verified unit->building at depth 1.
+	"applicantRosterRead":            {narrow, "building identity leaseapp unit", modeLabel},
 	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
 	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},
 	"augurProposals":                 {narrow, "augurproposal", modeRelation},
@@ -175,25 +180,29 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"identityCredentialBindingsRead": {narrow, "identity", modeRelation},
 	"identityCredentialsRead":        {narrow, "identity", modeRelation},
 	"identityIndexHint":              {narrow, "identityindex", modeRelation},
-	"leaseAccounts":                  {narrow, "account leaseapp", modeRelation},
-	"leaseApplicationsRead":          {narrow, "augurproposal identity leaseapp object service unit", modeLabel},
-	"leaseExpiry":                    {narrow, "identity leaseapp renewal unit", modeLabel},
-	"leaseRentSettlement":            {narrow, "clause leaseapp", modeRelation},
-	"ledgerHistory":                  {narrow, "account clause leaseapp transaction", modeLabel},
-	"oneBillCafeEntries":             {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
-	"oneBillClinicEntries":           {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
-	"oneBillRentEntries":             {narrow, "account leaseapp transaction", modeRelation},
-	"oneBillWellnessEntries":         {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
-	"opCatalog":                      {narrow, "meta permission role", modeRelation},
-	"pastDueAppointments":            {narrow, "appointment patient provider", modeRelation},
-	"pastDueBookings":                {narrow, "booking identity session", modeRelation},
-	"patientIdentityReadGrants":      {narrow, "identity patient", modeRelation},
-	"piiKeyEnvelope":                 {narrow, "identity", modeRelation},
-	"providerAppointmentsRead":       {narrow, "appointment building identity patient provider", modeLabel},
-	"providerIdentityReadGrants":     {narrow, "identity provider role", modeRelation},
-	"providerSites":                  {narrow, "building provider", modeRelation},
-	"renewalComplete":                {narrow, "identity leaseapp renewal service unit", modeLabel},
-	"renewalsRead":                   {narrow, "identity leaseapp renewal unit", modeLabel},
+	// The landlord* pair converted alongside applicantRosterRead (same fire,
+	// same `containedIn*1..` -> single-hop rewrite, both verified live).
+	"landlordLeaseApplicationsRead": {narrow, "building identity leaseapp service unit", modeLabel},
+	"landlordUnitsRead":             {narrow, "building identity unit", modeRelation},
+	"leaseAccounts":                 {narrow, "account leaseapp", modeRelation},
+	"leaseApplicationsRead":         {narrow, "augurproposal identity leaseapp object service unit", modeLabel},
+	"leaseExpiry":                   {narrow, "identity leaseapp renewal unit", modeLabel},
+	"leaseRentSettlement":           {narrow, "clause leaseapp", modeRelation},
+	"ledgerHistory":                 {narrow, "account clause leaseapp transaction", modeLabel},
+	"oneBillCafeEntries":            {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
+	"oneBillClinicEntries":          {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
+	"oneBillRentEntries":            {narrow, "account leaseapp transaction", modeRelation},
+	"oneBillWellnessEntries":        {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
+	"opCatalog":                     {narrow, "meta permission role", modeRelation},
+	"pastDueAppointments":           {narrow, "appointment patient provider", modeRelation},
+	"pastDueBookings":               {narrow, "booking identity session", modeRelation},
+	"patientIdentityReadGrants":     {narrow, "identity patient", modeRelation},
+	"piiKeyEnvelope":                {narrow, "identity", modeRelation},
+	"providerAppointmentsRead":      {narrow, "appointment building identity patient provider", modeLabel},
+	"providerIdentityReadGrants":    {narrow, "identity provider role", modeRelation},
+	"providerSites":                 {narrow, "building provider", modeRelation},
+	"renewalComplete":               {narrow, "identity leaseapp renewal service unit", modeLabel},
+	"renewalsRead":                  {narrow, "identity leaseapp renewal unit", modeLabel},
 	// retentionKeyStatus narrows to the holder type alone, and that single
 	// label is what makes the lens self-updating: a shred writes
 	// vtx.retentionclass.<H>.piiKey, which matches the one subject this
@@ -226,7 +235,6 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// consumers take the unconditional fan-out. The label set is still pinned:
 	// widening it is safe, but a label DROPPING out is how a broad lens quietly
 	// stops being judged against a type it reads.
-	"applicantRosterRead": {broad, "building identity leaseapp unit", modeBroad},
 	"cafeIdentitiesRead":  {broad, "identity leaseapp", modeBroad},
 	"cafeLeaseWorkplaces": {broad, "leaseapp", modeBroad},
 	"capabilityEphemeral": {broad, "identity role task", modeBroad},
@@ -263,18 +271,16 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// a live link naming the erased person remains, and the completion seal would
 	// be written over it. The reprojection cost is bounded by the anchor
 	// predicate: only erasure-requested identities have a row at all.
-	"identityErasureResidue":        {broad, "identity", modeBroad},
-	"landlordLeaseApplicationsRead": {broad, "building identity leaseapp service unit", modeBroad},
-	"landlordUnitsRead":             {broad, "building identity unit", modeBroad},
-	"leaseApplicationComplete":      {broad, "identity leaseapp object service task unit", modeBroad},
-	"menuCatalog":                   {broad, "menuitem", modeBroad},
-	"myTasks":                       {broad, "identity role task", modeBroad},
-	"objectAttachments":             {broad, "object", modeBroad},
-	"objectLiveness":                {broad, "object", modeBroad},
-	"orphanedTaskGrants":            {broad, "task", modeBroad},
-	"wellnessIdentitiesRead":        {broad, "identity leaseapp", modeBroad},
-	"wellnessMembers":               {broad, "identity leaseapp", modeBroad},
-	"wellnessSessions":              {broad, "instructor session studio", modeBroad},
+	"identityErasureResidue":   {broad, "identity", modeBroad},
+	"leaseApplicationComplete": {broad, "identity leaseapp object service task unit", modeBroad},
+	"menuCatalog":              {broad, "menuitem", modeBroad},
+	"myTasks":                  {broad, "identity role task", modeBroad},
+	"objectAttachments":        {broad, "object", modeBroad},
+	"objectLiveness":           {broad, "object", modeBroad},
+	"orphanedTaskGrants":       {broad, "task", modeBroad},
+	"wellnessIdentitiesRead":   {broad, "identity leaseapp", modeBroad},
+	"wellnessMembers":          {broad, "identity leaseapp", modeBroad},
+	"wellnessSessions":         {broad, "instructor session studio", modeBroad},
 }
 
 // consumerFilterMode runs a compiled cypher through the SAME

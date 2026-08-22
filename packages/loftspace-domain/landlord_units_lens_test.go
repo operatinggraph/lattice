@@ -19,7 +19,7 @@ package loftspacedomain
 //     only that landlord.
 //   - TestLandlordUnitsRead_BuildingFanOut: a managed unit covered by a
 //     building projects authz_anchors = [landlord, building] — the same
-//     `[landlordKey] + [containedIn*1.. building tokens]` shape
+//     `[landlordKey] + [containedIn building tokens]` shape
 //     landlordLeaseApplicationsRead already anchors on, so a front-desk
 //     staffer's worksAt-building grant resolves this model too (the
 //     portfolio-pulse composition gap: landlordUnitsRead used to be
@@ -221,7 +221,7 @@ func TestLandlordUnitsRead_BuildingFanOut(t *testing.T) {
 func TestLandlordUnitsRead_UsesComprehensionNotLiteralElement(t *testing.T) {
 	spec := landlordUnitsReadSpec
 
-	if !strings.Contains(spec, "[(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]") {
+	if !strings.Contains(spec, "[(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)]") {
 		t.Fatal("the workplace anchor must be a pattern comprehension (yields [] when absent), not an array element (yields a null element)")
 	}
 	if !strings.Contains(spec, "[nanoIdFromKey(landlord.key)] +") {

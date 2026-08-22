@@ -23,7 +23,7 @@ import (
 func TestWorkplaceAnchor_UsesComprehensionNotLiteralElement(t *testing.T) {
 	spec := landlordLeaseApplicationsReadSpec
 
-	if !strings.Contains(spec, "[(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]") {
+	if !strings.Contains(spec, "[(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)]") {
 		t.Fatal("the workplace anchor must be a pattern comprehension (yields [] when absent), not an array element (yields a null element)")
 	}
 	// The landlord anchor stays a required, always-present token.

@@ -98,7 +98,12 @@ type plainScanRootVerdict struct {
 // table honest against the shipped corpus, the same way
 // TestCorpusAnchorHopIndex_PinnedConjuncts keeps the anchored table honest.
 var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
-	"applicantRosterRead":            {hasNeighbour: true, reason: rootVarLengthHop},
+	// applicantRosterRead/landlordUnitsRead/landlordLeaseApplicationsRead
+	// converted 2026-08-22 alongside their corpusLabelVerdicts row: the
+	// `containedIn*1..` hop that declined ScanRootHopIndex was rewritten to a
+	// fixed single hop (typed-relation-signatures-design.md §9), so all three
+	// are now indexed (derived, not asserted — see the design doc's §9.3 note).
+	"applicantRosterRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"augurProposals":                 {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"availableListings":              {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"cafeIdentitiesRead":             {hasNeighbour: true, reason: rootVarLengthHop},
@@ -131,8 +136,8 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"identityCredentialBindingsRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"identityCredentialsRead":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"identityIndexHint":              {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"landlordLeaseApplicationsRead":  {hasNeighbour: true, reason: rootVarLengthHop},
-	"landlordUnitsRead":              {hasNeighbour: true, reason: rootVarLengthHop},
+	"landlordLeaseApplicationsRead":  {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"landlordUnitsRead":              {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"leaseAccounts":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},

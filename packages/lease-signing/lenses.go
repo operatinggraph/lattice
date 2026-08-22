@@ -1039,6 +1039,6 @@ RETURN
   applicantNameEnv                AS applicant_name,
   applicantEmailEnv               AS applicant_email,
   applicantPhoneEnv               AS applicant_phone,
-  [nanoIdFromKey(landlordKey)] + [(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors,
+  [nanoIdFromKey(landlordKey)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS qualified
 `, readinessOptionalMatch, readinessWithItems)

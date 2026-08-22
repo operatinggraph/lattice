@@ -14,6 +14,12 @@ incident. **The miss this hold teaches:** §10 priced five alternatives and neve
 narrow under existing machinery); then assess the `*0..` `coveringLocations` family per lens.
 **Contract edit reverted** (the staged §1.7 paragraph was withdrawn from the tree at hold).
 
+**Shipped, 2026-08-22:** all three `*1..` sites converted (`landlordUnitsRead`, `applicantRosterRead`,
+and `landlordLeaseApplicationsRead` — §9.3's open question, answered live, folded in as the same
+mechanical class). The `*0..` `coveringLocations` family was assessed and left unchanged: it is a
+different shape (already depth-bounded, and `*0..` includes the depth-0 self-match on purpose), not an
+instance of this defect.
+
 **Revive triggers, any of:** (a) an intermediate containment level (`floor`/`room`) is declared in the
 taxonomy — the moment fixed-depth rewrites silently under-deliver ancestor anchors (fail-closed direction,
 but wrong); (b) a conversion census shows a varlength population per-lens rewrites cannot reach; (c) a
@@ -620,6 +626,12 @@ The same `[(u)-[:containedIn*1..]->(b:building) | …] AS authz_anchors` shape, 
 label-constrained in the segment that reaches the hop is a question for the compiled AST, not for a reading of
 the source string. **Not asserted here.** Fire 2's Phase 0 walks it and the conversion census records the
 answer either way.
+
+**Answered, 2026-08-22 (Steward, verticals lane):** rewritten to the single fixed hop `[:containedIn]` alongside
+the other two, and proven live rather than by AST reading — `TestLandlordLeaseApplicationsRead_BuildingFanOut`
+(`packages/lease-signing/landlord_protected_lens_test.go`) seeds a `containedIn` edge across the multi-`WITH`
+segments and asserts the building anchor still projects. It converts; the multi-segment assembly was not a
+blocker. All three of the corpus's `*1..` sites are now single-hop.
 
 ### 9.4 Does **not** convert: `capabilityServiceAccess` — and the board row is corrected
 
