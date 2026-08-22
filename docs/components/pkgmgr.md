@@ -32,9 +32,9 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   conflating the label namespace with either one is wrong a third way). Minted: dynamic-type-taxonomy
   §17.9 — it both retired ratified check A3-1 and left the flip guard's divergent-type gap. Check: none
   yet (the board row's fix).
-- **Two writers of one deterministic key** — a create-only writer bricks the second; a second writer needs
-  an explicit arbitration or a single owner, decided before it is added. Minted: package-authoring
-  incident. Check: standing checklist #5.
+- **RETIRED (the model of a retired entry):** two writers of one deterministic key — a create-only writer
+  bricks the second — now carried by the fire-brief standing checklist (#5), which every brief copies in,
+  so it reaches a builder without a dossier slot.
 - **An injected dependency held in a nil-able field silently disables the gate it feeds** — the compiler
   enforces the interface and sees nothing at the injection site, so a fixture that builds the struct by hand
   runs the gate as a no-op and reports green on code the real entry point refuses. Minted:
@@ -89,9 +89,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   keys on a busy kernel, against a 45-60s install deadline (and the long-lived Loupe process). Minted:
   dynamic-type-taxonomy C1.1. Check: the candidate set excludes reserved segments, and the losslessness of
   the exclusion is argued at the call site rather than assumed.
-- **RETIRED (the model of a retired entry):** a lint gate reads its scan set from git, so an uncommitted
-  or untracked file is not what the gate judged — mechanized: `lint-conventions` names the untracked `.go`
-  files it did not scan, and diff-based gates take `DIFF_BASE=<merge-base>`. Run them after committing.
+- **A gate you run locally and the gate CI runs are not the same gate** — two dimensions, both sighted.
+  **Scope:** `golangci-lint run ./internal/pkgmgr/... ./cmd/...` is not `golangci-lint run`; a Steward
+  linted every tree the fire touched except `packages/`, and CI — which lints the whole module — failed on
+  a helper the fire's own refactor had left unused. **Tracked-ness:** every `scripts/lint-*.go` reads its
+  scan set from git, so an uncommitted edit or an untracked new file is invisible locally and fails on CI's
+  committed tree. Minted: §30's CI red and the privacy-base ceremony's; scope sighting, capability-apply
+  removal refusal (main went red). Check: invoke the gate the way `.github/workflows/ci.yml` invokes it —
+  no path arguments where CI passes none — and run it AFTER committing. `lint-conventions` names the
+  untracked `.go` files it did not scan; diff-based gates take `DIFF_BASE=<merge-base>`.
 - **A guard written over what a mechanism EMITS tests emission, not the intent it stands for** — the
   capability removal guard refused on a tombstone in the delta, while the property it existed to protect
   was that a partial Definition never narrows what a package declares. The two came apart in every shape
