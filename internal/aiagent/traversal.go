@@ -10,12 +10,14 @@
 //     path as human actors. Nothing in this package bypasses that contract.
 //   - Zero Processor changes: the story is entirely additive.
 //
-// Prerequisite, before step 1: the caller resolves the kernel-seeded
-// system-actor set (bootstrap.SystemActorKeys — one full core-kv listing) and
-// hands it to NewTraverser. Not a detail — step 1's keys are chosen by the
-// actor's CLASS, and a traverser given no set treats every actor as ordinary.
-// Resolve it once per process, the way examples/hello-lattice/ai-agent.go
-// does; this package never lists core-kv on its own behalf.
+// Prerequisite, before step 1: the caller loads the primordial identifier
+// table (bootstrap.Load — SystemActorKeys' predicate is keyed on the
+// roleOperator NanoID it carries), resolves the kernel-seeded system-actor set
+// (bootstrap.SystemActorKeys — one full core-kv listing), and hands that set to
+// NewTraverser. Not a detail — step 1's keys are chosen by the actor's CLASS,
+// and a traverser given no set treats every actor as ordinary. Do both once at
+// start-up, the way examples/hello-lattice/ai-agent.go does; this package
+// neither loads that file nor lists core-kv on its own behalf.
 //
 // Cold-start traversal algorithm (FR19):
 //  1. Agent reads its capability doc from Capability KV — the keys are

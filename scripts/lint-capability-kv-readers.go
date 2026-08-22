@@ -111,10 +111,10 @@ type allowEntry struct {
 	reason string
 }
 
-// allowlist v2 (capability-kv-single-read-path-design.md §3.5, widened at
-// Winston's fix-round). Each entry is a path PREFIX (repo-relative) a
-// violating file/call may sit under; scoped as narrowly as the exemption it
-// actually covers, not blanket over a whole subtree.
+// allowlist — the declared exemptions (capability-kv-single-read-path-design.md
+// §3.5). Each entry is a path PREFIX (repo-relative) a violating file/call may
+// sit under, scoped as narrowly as the exemption it actually covers rather than
+// blanket over a whole subtree, and carrying its own reason.
 var allowlist = []allowEntry{
 	{
 		prefix: "cmd/lattice/query/",

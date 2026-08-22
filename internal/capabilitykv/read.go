@@ -107,6 +107,13 @@ func ReadPlatformDoc(ctx context.Context, reader KVGetter, bucket string, system
 // for auth-trace provenance (both source keys recorded). The identity and
 // provenance scalars (key, actor, version, projectedAt) are base's — they name
 // a projection, not a grant. base is never mutated; a new doc is returned.
+//
+// INVARIANT those scalars rest on: ReadAndMerge folds in key order, and
+// ClassAwarePlatformKey emits [anchor, roles] (keys.go:77), so on the platform
+// path base is the ANCHOR doc whenever one is present. Reverse that order and
+// the key/projectedAt reaching a caller's auth trace silently become the roles
+// projection's — a change with no compile error and no failing merge, so the
+// ordering is load-bearing where it is written, not incidental.
 func MergeDocs(base, extra *Doc) *Doc {
 	merged := *base
 	merged.PlatformPermissions = append(

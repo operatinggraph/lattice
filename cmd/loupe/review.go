@@ -480,15 +480,24 @@ func newInstaller(conn *substrate.Conn, adminActor string) *pkgmgr.Installer {
 // (cmd/processor/main.go:142, cmd/loom/main.go:181, cmd/weaver/main.go:184),
 // and the reason a handler must never re-derive it per request.
 //
-// Loupe resolves it at boot but memoizes only a NON-EMPTY result: a Loupe
-// whose NATS was down at start-up still serves the UI and reconnects in the
-// background, and a kernel that has not finished seeding its primordial
-// holdsRole links yet answers with an empty set rather than an error. Latching
-// either outcome would route every actor as ordinary for the process lifetime,
-// under-reporting a real system actor's held permissions on every later
-// request. An empty result therefore stays unresolved and the next use retries;
-// a deployment that genuinely has no system actors pays one listing per
-// capability-grant approve, which is the rarest path in the console.
+// Loupe resolves it at boot but memoizes only a NON-EMPTY result, because two
+// causes give a not-yet answer that must not be latched: a Loupe whose NATS was
+// down at start-up still serves the UI and reconnects in the background, and a
+// kernel that has not finished seeding its primordial holdsRole links answers
+// with an empty set rather than an error. Latching either would route every
+// actor as ordinary for the process lifetime, under-reporting a real system
+// actor's held permissions on every later request. An empty result therefore
+// stays unresolved and the next use retries; a deployment that genuinely has no
+// system actors pays one listing per capability-grant approve, the rarest path
+// in the console.
+//
+// One cause is NOT retryable and the retry loop cannot fix it: if this process
+// started without a readable lattice.bootstrap.json, bootstrap.Load failed
+// (non-fatally, main.go) and SystemActorKeys returns ErrPrimordialIDsUnloaded
+// before it ever reaches the substrate — so every capability-GRANT approve
+// fails for the life of the process, while every other console path keeps
+// working. That is fail-closed and correct, and the fix is operational: give
+// the process the file (BOOTSTRAP_JSON_PATH) and restart it.
 type systemActorSet struct {
 	mu       sync.Mutex
 	keys     []string
@@ -512,6 +521,9 @@ func (s *systemActorSet) get(ctx context.Context, conn *substrate.Conn) ([]strin
 	}
 	keys, err := bootstrap.SystemActorKeys(ctx, conn)
 	if err != nil {
+		if errors.Is(err, bootstrap.ErrPrimordialIDsUnloaded) {
+			return nil, fmt.Errorf("discover system actor keys: %w — this process started without a readable lattice.bootstrap.json; set BOOTSTRAP_JSON_PATH and restart Loupe", err)
+		}
 		return nil, fmt.Errorf("discover system actor keys: %w", err)
 	}
 	if len(keys) == 0 {

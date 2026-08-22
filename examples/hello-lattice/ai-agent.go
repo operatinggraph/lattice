@@ -13,6 +13,11 @@
 //   - make up (NATS + Postgres + Refractor running)
 //   - AGENT_ACTOR_KEY env var set to a vtx.identity.<NanoID> that has
 //     CreateBook permission granted (via CreatePermission + AssignRole)
+//   - the deployment's lattice.bootstrap.json readable — step 1's Capability-KV
+//     keys are chosen by actor class, and the class predicate is keyed on a
+//     primordial NanoID that lives only in that file. BOOTSTRAP_JSON_PATH
+//     overrides its location; the default resolves from the repo root whether
+//     this program is run from here or from examples/hello-lattice.
 //
 // Usage:
 //
@@ -39,6 +44,16 @@ func main() {
 	natsURL := getEnv("NATS_URL", "nats://localhost:4222")
 	actorKey := mustGetEnv("AGENT_ACTOR_KEY")
 
+	// The primordial identifier table, loaded once at start the way every
+	// platform binary does (cmd/processor/main.go:71). bootstrap.SystemActorKeys
+	// below matches holdsRole links against the roleOperator NanoID, which lives
+	// in this file and nowhere else.
+	if err := bootstrap.Load(bootstrapJSONPath()); err != nil {
+		log.Fatalf("load bootstrap identifiers from %s: %v\n"+
+			"Set BOOTSTRAP_JSON_PATH to the deployment's lattice.bootstrap.json.",
+			bootstrapJSONPath(), err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -52,8 +67,8 @@ func main() {
 	defer conn.Close()
 
 	// The system-actor set decides which Capability-KV keys the agent's own
-	// grants live at, so it is discovered once here and handed to the
-	// traverser rather than re-listed per read.
+	// grants live at, so it is resolved once here and handed to the traverser
+	// rather than re-listed per read.
 	systemActorKeys, err := bootstrap.SystemActorKeys(ctx, conn)
 	if err != nil {
 		log.Fatalf("discover system actor keys: %v", err)
@@ -215,6 +230,24 @@ func verifyPermittedCommands(ctx context.Context, conn *substrate.Conn, ddlKey, 
 		}
 	}
 	return fmt.Errorf("operationType %q not in permittedCommands %v", operationType, aspDoc.Data.Commands)
+}
+
+// bootstrapJSONPath resolves the deployment's lattice.bootstrap.json.
+// BOOTSTRAP_JSON_PATH wins, as it does for every daemon. The fallback tries
+// the repo root both from the repo root itself and from this example's own
+// directory, because the tutorial runs this program from
+// examples/hello-lattice (its Makefile's milestone-5) while a direct
+// `go run examples/hello-lattice/ai-agent.go` runs it from the root.
+func bootstrapJSONPath() string {
+	if p := os.Getenv("BOOTSTRAP_JSON_PATH"); p != "" {
+		return p
+	}
+	for _, candidate := range []string{"lattice.bootstrap.json", "../../lattice.bootstrap.json"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "lattice.bootstrap.json"
 }
 
 func getEnv(key, fallback string) string {

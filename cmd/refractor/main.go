@@ -411,13 +411,22 @@ func main() {
 	instance := "rfx-" + randHex(6)
 	logger.Info("refractor starting", "instance", instance, "natsURL", *natsURL)
 
-	// The primordial identifier table, loaded before anything reads the graph
-	// by primordial identity. wireControlChecker's bootstrap.SystemActorKeys
-	// call matches holdsRole links against the roleOperator NanoID, which
-	// lives in this file and nowhere else, so without it the control-plane
-	// checker would route every actor — the primordial admin and the kernel
-	// service actors included — as ordinary. Same env/default as every other
-	// daemon (cmd/processor/main.go:71).
+	// The primordial identifier table, loaded before anything in this process
+	// names a primordial entity. Two consumers depend on it, and an empty table
+	// silently degrades both rather than failing:
+	//
+	//   - wireControlChecker's bootstrap.SystemActorKeys matches holdsRole links
+	//     against the roleOperator NanoID, so an empty one routes every actor —
+	//     the primordial admin and the kernel service actors included — as
+	//     ordinary at the control-plane capability checker.
+	//   - The KeyShredded nullification listener's target is
+	//     {RuleID: bootstrap.CapabilityReadLensID} (see the keyshredded.New call
+	//     below). An empty RuleID matches no registered rule, so every
+	//     ShredIdentityKey's cap-read nullification would nak to the redelivery
+	//     cap and give up, leaving the shredded identity's read-grant
+	//     projections in place — privacy residue, reported only as a warning.
+	//
+	// Same env/default as every other daemon (cmd/processor/main.go:71).
 	bootstrapJSONPath := envOr("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
 	if err := bootstrap.Load(bootstrapJSONPath); err != nil {
 		logger.Error("load bootstrap JSON", "path", bootstrapJSONPath, "err", err)

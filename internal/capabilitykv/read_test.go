@@ -32,7 +32,8 @@ func (f *fakeReader) KVGet(_ context.Context, _ string, key string) (*substrate.
 }
 
 // docWithPermission renders a minimal Capability KV doc carrying one platform
-// permission.
+// permission, self-identifying through its own `key` field so a merged result
+// can be traced back to the projection it came from.
 func docWithPermission(t *testing.T, key, operationType string) []byte {
 	t.Helper()
 	raw, err := json.Marshal(Doc{
@@ -77,6 +78,14 @@ func TestReadPlatformDoc_SystemActorReadsBothKeys(t *testing.T) {
 	want := "cap.identity.SystemActorHJKMNPQRS+cap.roles.identity.SystemActorHJKMNPQRS"
 	if key != want {
 		t.Errorf("present-key trace: got %q, want %q", key, want)
+	}
+	// The anchor is read FIRST, which is what makes it MergeDocs' base and so
+	// the source of the identity/provenance scalars a caller's auth trace
+	// records. Reversing the derivation order would flip those to the roles
+	// projection's with nothing else failing, so the outcome is asserted here
+	// rather than left to the ordering's author.
+	if doc.Key != "cap.identity.SystemActorHJKMNPQRS" {
+		t.Errorf("merged doc key = %q, want the anchor's — the anchor must be the merge base", doc.Key)
 	}
 }
 

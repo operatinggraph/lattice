@@ -241,13 +241,19 @@ func run(logger *slog.Logger) error {
 	// (cmd/processor/main.go:142): it costs a full core-kv listing and decides
 	// Capability-KV key routing for the capability-proposal review path. A
 	// failure is not fatal — the memo stays unresolved and the first request
-	// that needs it retries, which is the same posture as the NATS connect
-	// above.
+	// that needs it retries, the same posture as the NATS connect above. Which
+	// failures a retry can actually clear differs, so the two are logged
+	// differently: an unreadable bootstrap file is not one of them.
 	if conn != nil {
 		warmCtx, warmCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if _, wErr := srv.systemActors.get(warmCtx, conn); wErr != nil {
-			logger.Warn("system actor set not resolved at startup; the capability review path will retry on first use",
-				"error", wErr)
+			if errors.Is(wErr, bootstrap.ErrPrimordialIDsUnloaded) {
+				logger.Warn("system actor set unavailable: no primordial identifier table loaded, and a retry cannot resolve it — approving a capability GRANT proposal will fail for the life of this process (every other console path is unaffected). Set BOOTSTRAP_JSON_PATH to the deployment's lattice.bootstrap.json and restart",
+					"bootstrapJSONPath", bootstrapJSONPath, "error", wErr)
+			} else {
+				logger.Warn("system actor set not resolved at startup; the capability review path will retry on first use",
+					"error", wErr)
+			}
 		}
 		warmCancel()
 	}

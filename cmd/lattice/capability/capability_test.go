@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -287,6 +288,30 @@ func TestFreshApprovalVerdict_GrantReadsTheBootstrapFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), missing) {
 		t.Fatalf("err = %v, want it to name the bootstrap path %q", err, missing)
+	}
+	// A machine that cannot obtain the identifier table has not judged the
+	// proposal, and `-o json` must not report it as though it had: the
+	// approve path renders this class as BootstrapLoadError, everything else
+	// as ValidationError.
+	if !errors.Is(err, errBootstrapIdentifiers) {
+		t.Fatalf("err = %v, want it to wrap errBootstrapIdentifiers so the CLI reports BootstrapLoadError", err)
+	}
+}
+
+// TestFreshApprovalVerdict_ValidationFailureIsNotABootstrapError is the
+// discriminator's other side: a proposal that genuinely fails §5 must NOT be
+// tagged as a configuration fault, or the two become indistinguishable again.
+func TestFreshApprovalVerdict_ValidationFailureIsNotABootstrapError(t *testing.T) {
+	ctx, conn := setupCapabilityEnv(t)
+	requester := "vtx.identity.anchorRestReqHJKMNPQ"
+	seedPendingGrantProposal(t, ctx, conn, "capPropAnchorHJKMNPQ", requester, "CreateTask", "any", []string{"operator"})
+
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropAnchorHJKMNPQ", bootstrapJSONForTest(t))
+	if err != nil {
+		t.Fatalf("freshApprovalVerdict: %v", err)
+	}
+	if verdict["state"] != "invalid" {
+		t.Fatalf("verdict = %+v, want invalid", verdict)
 	}
 }
 

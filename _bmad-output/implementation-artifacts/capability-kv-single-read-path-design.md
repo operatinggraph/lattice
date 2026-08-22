@@ -68,7 +68,7 @@ mis-keyed.
 | G8 | `cmd/lattice/capability` reads inline at `{"cap."+rest, "cap.roles."+rest}` | `cmd/lattice/capability/capability.go:283-311` | feeds `pkgmgr.HeldPermission` |
 | G9 | `cmd/loupe/review.go` reads inline — byte-identical to G8 | `cmd/loupe/review.go:486-513` | feeds `pkgmgr.HeldPermission` |
 | G10 | `MergeDocs` silently drops `extra`'s `ServiceAccess` + `EphemeralGrants` (`merged := *base`) | `internal/capabilitykv/read.go:67-84` | inert for today's only caller (the platform path's two keys carry neither), a landmine for the next |
-| G11 | `pkgmgr` imports `bootstrap`; `bootstrap` imports neither `pkgmgr` nor `capabilitykv` | `internal/pkgmgr/bucketguard.go:7` | the shared helper can live in `pkgmgr` with no cycle |
+| G11 | `pkgmgr` imports `bootstrap`; `bootstrap` imports neither `pkgmgr` nor `capabilitykv` | `internal/pkgmgr/bucketguard.go:7` | the shared helper can live in `pkgmgr` with no cycle. **Superseded by the build (§6, bullet 1):** `bootstrap` now imports `capabilitykv` for the anchor-key derivation. Still no cycle — `go list -deps ./internal/capabilitykv` returns only `substrate` + `substrate/keys`. |
 | G12 | `cmd/lattice/query/query.go:65` reads a **caller-supplied** capability key | — | operator inspection, not an authorization-surface read — **non-goal** |
 | G13 | `containsSensitiveRefLiteral` is a deliberate, documented advisory pre-flight; the MAC is the real enforcement, and its doc comment says "Do not 'harden' this into a smarter parser" | `internal/pkgmgr/capabilitymaterializer_starlark.go:42-64` | the row's absorbed observation is **already adjudicated upstream** — see §6 |
 
@@ -161,15 +161,16 @@ than re-listing core-kv per read.
    does not know escapes it — and the gate's own residual note states that bound rather than implying
    coverage it does not have.
 
-A violation of either fails unless the file is on a named allowlist carrying its reason in source. Allowlist
-v1: `cmd/lattice/query` (operator inspection of a caller-supplied key, G12) and `internal/refractor` (the
-*producer* side: `pipeline/evaluate.go`'s `capabilityKeyForActor` is a documented deliberate duplicate that
-exists to break an import cycle). This is the
+A violation of either fails unless the file is on a named allowlist carrying its reason in source. Three
+entries: `cmd/lattice/query` (operator inspection of a caller-supplied key, G12);
+`internal/refractor/pipeline/evaluate.go`, scoped to the one file rather than the subtree (the *producer*
+side's `capabilityKeyForActor`, a documented deliberate duplicate that exists to break an import cycle —
+the key-derivation check is what makes this exemption load-bearing at all); and `scripts/`. This is the
 twice-seen-class mechanization the improvement loop calls for: the class has now been minted twice in the
 same bucket (`aiagent`, and the `cmd/lattice`+`cmd/loupe` pair), so the check becomes a lint rather than a
 dossier line.
 
-Allowlist v1 carries a third entry, adjudicated when the gate's first run surfaced six `//go:build ignore`
+The `scripts/` entry was adjudicated when the gate's first run surfaced six `//go:build ignore`
 seed/verify harnesses reading the bucket directly (`scripts/seed-edge-demo.go`, `scripts/seed-showcase.go`,
 `scripts/verify-{claim-ceremony,erasure-ceremony,loupe-operator-tier,real-actor-write-auth}.go`):
 **`scripts/` is allowlisted as a class.** Those tools inspect raw projection state and never authorize
@@ -274,9 +275,18 @@ Deviations from §3, each argued above where it lands:
   caller already held the full key.
 - `MergeDocs`' "base wins" for the identity/provenance scalars is equivalent to the merge it replaced **only
   because `ClassAwarePlatformKey` returns `[anchor, roles]` in that order**, making the anchor the base. The
-  equivalence now rests on key order rather than on named parameters; `MergeDocs`' comment says so.
-  `ProjectedFromRevisions` changed from anchor-only to a merge of both — strictly more provenance, no grant
-  impact, no consumer.
+  equivalence now rests on key order rather than on named parameters, and `MergeDocs`' comment states that
+  invariant so a later change to the key order cannot silently flip which projection's `key`/`projectedAt`
+  reach the auth trace. `ProjectedFromRevisions` changed from anchor-only to a merge of both — strictly more
+  provenance, no grant impact, no consumer.
+- **`cmd/refractor` never loaded the primordial identifier table**, discovered while fixing the CLI's half of
+  the same class. Fixing it re-arms a *second* consumer that had been silently dead:
+  `bootstrap.CapabilityReadLensID`, empty in every shipped refractor, is the `RuleID` of the cap-read
+  `keyshredded.NullifyTarget` (`cmd/refractor/main.go:626`) — so a `ShredIdentityKey`'s cap-read
+  nullification returned `ErrRuleNotRegistered`, nak-looped to the redelivery cap, and gave up. It runs now,
+  and the privacy-critical `PauseRule` branch (`keyshredded/manager.go:391-396`) becomes reachable for the
+  first time. Shipped deliberately: the prior state was shred residue, and the newly-live behavior is
+  ratified, tested code — not a new mechanism this fire invented.
 - The §3.5 gate grew a second, primary check (key derivation) after review showed the bucket-argument check
   mechanized the wrong half of the class.
 

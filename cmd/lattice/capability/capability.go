@@ -7,6 +7,7 @@ package capability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -69,6 +70,15 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd.AddCommand(newReviewCommand(natsURL, outputFmt, defaultActor, &bootstrapJSONPath))
 	return cmd
 }
+
+// errBootstrapIdentifiers marks a failure to obtain the primordial identifier
+// table — a machine/configuration fault, not a verdict on the proposal. It
+// exists so `-o json` can report it under its own code: a caller must be able
+// to tell "this machine cannot validate the proposal" from "this proposal no
+// longer validates", and both funnel through the same return. `lattice
+// bootstrap` draws the same distinction with the same code
+// (cmd/lattice/bootstrap/bootstrap.go:114).
+var errBootstrapIdentifiers = errors.New("bootstrap identifiers unavailable")
 
 // resolveBootstrapJSONPath applies the BOOTSTRAP_JSON_PATH override to the
 // --bootstrap-json flag value, matching `lattice bootstrap`'s precedence
@@ -184,7 +194,11 @@ closes the approve to invalid if it no longer validates.`,
 				verdict, err := freshApprovalVerdict(ctx, conn, proposalID, resolveBootstrapJSONPath(*bootstrapJSONPath))
 				if err != nil {
 					if *outputFmt == "json" {
-						return output.PrintJSONError("ValidationError", err.Error())
+						code := "ValidationError"
+						if errors.Is(err, errBootstrapIdentifiers) {
+							code = "BootstrapLoadError"
+						}
+						return output.PrintJSONError(code, err.Error())
 					}
 					return err
 				}
@@ -275,10 +289,14 @@ func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID,
 		// no bootstrap file present, and pays for no core-kv listing. This is
 		// a one-shot CLI invocation, so that listing runs once per approve.
 		if lErr := bootstrap.Load(bootstrapJSONPath); lErr != nil {
-			return nil, fmt.Errorf("load bootstrap identifiers from %s (set --bootstrap-json or BOOTSTRAP_JSON_PATH): %w", bootstrapJSONPath, lErr)
+			return nil, fmt.Errorf("%w: load from %s (set --bootstrap-json or BOOTSTRAP_JSON_PATH): %w",
+				errBootstrapIdentifiers, bootstrapJSONPath, lErr)
 		}
 		systemActorKeys, sErr := bootstrap.SystemActorKeys(ctx, conn)
 		if sErr != nil {
+			if errors.Is(sErr, bootstrap.ErrPrimordialIDsUnloaded) {
+				return nil, fmt.Errorf("%w: %w", errBootstrapIdentifiers, sErr)
+			}
 			return nil, fmt.Errorf("discover system actor keys: %w", sErr)
 		}
 		held, err = pkgmgr.ReadHeldPermissions(ctx, conn, systemActorKeys, row.RequesterID)
