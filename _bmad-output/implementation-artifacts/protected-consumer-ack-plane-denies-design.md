@@ -326,7 +326,32 @@ merge.
 
 ## 8. The reply-subject write primitive needs no `AllowResponses` — grounding, 2026-08-22
 
-**Status of this section: 🔭 GROUNDED FINDING, unbuilt.** Lattice Steward fire 2026-08-22 (unattended,
+**Status of this section: 🗄️ SHELVED — ACCEPTED AND PINNED (Andrew, 2026-08-22).** The mechanism is real,
+independently re-verified against the pinned vendor source and re-run live outside the fire's own
+environment, so the embedded-vs-real explanation is refuted. It is shelved on **reachability, not doubt**:
+every route here requires a component to *actively exploit* it — write chosen bytes, then craft a request
+naming a protected subject as its reply, or create a mirror stream with a `RePublish` dest. No legitimate
+code path does this by accident, nothing spills passively, and no untrusted input can steer a reply subject
+(no browser, package script, or authored artifact reaches one). The precondition is therefore a **hostile
+component binary or a stolen NKey seed** — trusted infra under the current threat model, and game-over
+independently of this primitive.
+
+**What this section is FOR, now:** it is the standing record of what the denies are actually worth, so no
+future design treats a subject deny as a boundary it is not. The corrections in `matrix.go`, the conf `Desc`
+comments, `conf_test.go`, `doc.go`, the isolation tests, `gateway.md` and `control-plane.md` all stand — the
+platform no longer *claims* a guarantee it does not hold, which was the actionable half. The conformance
+tests characterise the live behaviour; **when a fix ever lands those assertions invert rather than being
+deleted.**
+
+**Not shelved by trigger — shelved by fork.** The only remedy that closes the class is §8.4's **account
+isolation** (protected buckets in their own account with a controlled export, replacing the single global
+`$G`). That is a trust-topology change and Andrew's call; it was not taken. Narrowing the subject matrix
+does not close it, for the reasons §8.4 records. Two sub-mechanism rows shelve with this one: the
+`STREAM.CREATE` mirror/`RePublish` reach, and the authored-Starlark plaintext-laundering row.
+
+*Grounding, verbatim from the fire, retained below — the mechanism is sound and should not be re-derived.*
+
+**Origin: 🔭 GROUNDED FINDING.** Lattice Steward fire 2026-08-22 (unattended,
 remote), selected as the board's *[natsperm] A consumer's `DeliverSubject` is unchecked* row, whose stated
 first task was to ground the Processor arm. The grounding refuted the row's mechanism and found a sharper
 one, which belongs here because it is the same root cause §3.3 names: **reply subjects carry write authority
