@@ -652,3 +652,144 @@ convenient: no new Core-KV read (all reads are pre-existing and submitter-side),
 ordering token, no cardinality change, no container-level default, no auto-recovery loop, no new NATS
 API call (so no `natsperm` envelope to check), no handed-down measurement, and no new stateful mechanism
 (§5).
+
+---
+
+## 14. Fire brief (build note, 2026-08-22)
+
+Compiled at selection by the Lattice Steward (fire branch `claude/great-lamport-bj40v0`) from two read-only
+scouts. Anchors below are **live line numbers re-verified now**, not the design's.
+
+### 1. Scope sentence (verbatim, §12)
+
+> **One fire, two ordered steps.** Step 1 — `internal/pkgmgr`: the refusal (`ApplyOptions.RefuseRemovals`;
+> `ErrApplyWouldRemove` + `ApplyWouldRemoveError`; enforcement in `Apply` after
+> `enforceSecureColumnRetirement` and before both the empty-delta and `DryRun` returns). Step 2 — the seam:
+> `CapabilityApplyPlan.Definition` unexported + `MaterializedDefinition()`; `Installer.ApplyCapabilityPlan`;
+> §3.3's three `upgradeExisting` preconditions; migrate both capability call sites; the `lint-conventions`
+> rule; the tests of §10; the §9 item-4 prose correction.
+
+**Green bar:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`, every
+`scripts/lint-*.go`, and `go test ./internal/pkgmgr/ ./cmd/loupe/ ./cmd/lattice-pkg/ ./cmd/bridge/
+./packages/capability-author/`.
+
+### 2. Censuses re-run live — all three match the design
+
+| Census | Expected (§6) | Measured | Verdict |
+|---|---|---|---|
+| A — producers of `upgradeExisting` | 26 lines, **zero** producing occurrences | 26 lines; zero `= "upgradeExisting"` / `: "upgradeExisting"` anywhere | §4's deferral premise **holds** |
+| B — `inst.Apply(ctx` non-test | 4 → 2 after | 4: `loupe/review.go:733`, `loupe/pkg.go:540`, `lattice-pkg/main.go:227`, `:560` | matches |
+| C — plan-Definition readers | 9 → 7 after | 9, exactly as enumerated | matches |
+
+### 3. Verified touch-list
+
+| File | Anchor (live) | Edit |
+|---|---|---|
+| `internal/pkgmgr/apply.go` | `ApplyOptions` :11-23 (`Force`, `DryRun`, `RequireInstalled`) | add `RefuseRemovals` |
+| | `Apply` :123; `findInstalledPackage` :132; skip branch :146; `computeDeltaAgainst` :~176; `enforceSecureColumnRetirement` :192; empty-delta :199; `DryRun` :205 | insert the guard at :198 (after :192-197, before :199) |
+| `internal/pkgmgr/upgrade.go` | `diffSummary` :305-367 — **`tombstoned` is a COUNT; there is NO key list** | add `oldKeyCount`/`newKeyCount` ints, set in `diffManifest` |
+| | `diffManifest` :445 (`oldKeys []string, newOps []installMutation`) | set the two counts |
+| | tombstone emission — **exactly one site, :581** (removal arm :532-589) | unchanged; the guard reads the emitted `mutations` |
+| | retention exemption :557-577 (`continue`, no mutation) · absent-from-KV skip :551-556 (`continue`) | unchanged — both are already "not a removal" by emission |
+| `internal/pkgmgr/installer.go` | `ErrDeclaredKeysOccupied` :724 · `DeclaredKeysOccupiedError` :734-746 | precedent only |
+| `internal/pkgmgr/capabilityapply.go` | `CapabilityApplyPlan` :18-22 · deny-list comment :55-77 · `CapabilityApplyPlanForProposal` :134-228 · `newVersion` default :182-188 · mode switch :199-210 | unexport `definition`; accessor; `ApplyCapabilityPlan`; three preconditions; §9 item-4 comment fix |
+| `cmd/loupe/pkg.go` | `packageApplyStatus` :375-386 — the **single** error→status mapper outside `internal/pkgmgr` | add `ErrApplyWouldRemove` to the 409 arm |
+| `cmd/loupe/review.go` | apply :733; status mapping :735; recovery discriminator :711-721; its doc :862-878 | migrate to `ApplyCapabilityPlan`; recovery branch unchanged (§3.4) |
+| `cmd/lattice-pkg/main.go` | `runApplyProposal` :528-582, apply :560, `submitMarkApplied` :569 | migrate; assert no mark-applied on refusal |
+| `cmd/bridge/capability_author_test.go` | :239-242 | → `MaterializedDefinition()` |
+| `scripts/lint-conventions.go` | pattern `var (…)` block :222-488 | one blocking rule (§3.5) |
+| `packages/capability-author/apply_test.go` | `TestCapAuthor_Apply_UnknownPackage_Rejected` :371-382 | mirror for the refusal e2e |
+
+**Rot found:** none material. `getCommitted` is *called* at :460 (defined :1035), not :459; the skip
+condition is at :146, not :150; the retention arm spans :557-577, not :558-575.
+
+**One design detail the code does not supply as written.** §3.1 gives `ApplyWouldRemoveError` a
+`RemovedKeys []string` and two counts, and §3.1's prose says the guard "reads `sum.tombstoned` and the
+mutation list". `diffSummary.tombstoned` is a **count only** — no key list — and neither key-set size
+reaches `Apply`. Resolution (Winston, decided at Phase 0, no scope change): derive `RemovedKeys` from the
+emitted `mutations` (`Op == "tombstone"`, sorted) — sound because the census above shows **one** tombstone
+emission site in the whole package, the removal arm — and carry the two sizes as new `diffSummary` fields
+set inside `diffManifest`, where `oldKeys`/`newOps` both already are. Both counts include the package root
+and manifest aspect; the field doc says so rather than implying entity counts.
+
+### 4. Increment order
+
+1. **Inc 1 — `diffSummary` key counts.** Two ints, set in `diffManifest`. Green: `go test ./internal/pkgmgr/`.
+2. **Inc 2 — the refusal (step 1).** `RefuseRemovals`, the sentinel + typed error, the guard, five §10 unit
+   tests. Green: `go test ./internal/pkgmgr/ -run 'TestApply'`.
+3. **Inc 3 — the seam (step 2).** Unexport + accessor + `ApplyCapabilityPlan` + the three preconditions +
+   both call-site migrations + the `cmd/bridge` assertion. Green:
+   `go test ./internal/pkgmgr/ ./cmd/loupe/ ./cmd/lattice-pkg/ ./cmd/bridge/`.
+4. **Inc 4 — the gate + the e2e + the prose.** `lint-conventions` rule, the capability-author e2e, the
+   Loupe/CLI handler tests, the §9 item-4 comment. Green: `go run ./scripts/lint-conventions.go` (zero
+   findings of the new rule) + `go test ./packages/capability-author/` + the full green bar.
+
+### 5. In-scope gotchas
+
+**Standing checklist** — the two that bite here: **#2 every census is a premise** (re-run, done above; and
+the guard's predicate is written over the enumerated state table of §3.1, not one clause over a multi-shape
+set); **#3 a negative test needs its positive vector proven first** (§10's `AdmitsCoveringDefinition` and
+`ZeroValueStillConverges` are that vector — write them, then prove each refusal by reverting the guard and
+watching its test fail). #1 does not apply (§5: no new state). #5 does not apply (no new deterministic key).
+#4 applies only in the weak sense that nothing is being removed. #6 applies to the
+`DeclaredKeysOccupiedError` mirror — read its doc comment before copying its shape.
+
+**`docs/components/pkgmgr.md` dossier — the four entries this fire trips, verbatim:**
+
+- **A new failure mode is not shipped until every surface that renders it says the right thing** — the
+  message, the error's own shape, and each status/UX mapping downstream. `ErrDeclaredKeysOccupied` fell
+  through `cmd/loupe`'s default arm to **502**, the code that UI's own front end treats as a transport blip
+  worth retrying, for a state that fails identically forever; and the two occupancy buckets were carried
+  only in prose, so a review got a real defect — every tombstoned key also reported live — past the FULL
+  suite by lowercasing one word. Check: a new sentinel is grepped across every `errors.Is` status/UX
+  mapping in `cmd/` before it ships; a distinction the code MAKES is carried in fields and asserted from
+  fields, never scraped from the rendered message. **Adding the sentinel to the map proves nothing on its
+  own**: the uninstall path listed `ErrNotInstalled` in the 409 arm and a table test went green while the
+  producing call site returned a BARE `fmt.Errorf`, so the real request still 502'd. The row must be driven
+  from the entry point that produces the error, not asserted against the mapping function in isolation.
+- **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
+  granted" is NOT evidence the remedy works.** Check: trace the remedy to the OUTCOME it promises, through
+  the projection or consumer that delivers it, not to the existence of its first step; and a remedy printed
+  for every caller must be qualified per caller — name the states it is false in. A refusal that renders a
+  command feeds that exact rendered string through the real parser in a test.
+- **A local gate run and CI's gate run do not see the same tree** — every `scripts/lint-*.go` reads its scan
+  set from git, so what the author has not committed is not what the gate judged. Check (mechanized):
+  `lint-conventions` names the untracked `.go` files it did not scan. **Run the gates after committing.**
+- **An injected dependency held in a nil-able field silently disables the gate it feeds** … second sighting,
+  in the thinner shape: the RULE was covered twelve ways and the line DELIVERING it was covered zero.
+  Mandated test shape here: the test that pins the guard drives the **real entry point**
+  (`Apply` / `ApplyCapabilityPlan`), never the predicate helper in isolation — deleting the guard line from
+  `Apply` must turn a test red.
+
+**Consequences for this fire, stated so they are checkable:** (a) `ErrApplyWouldRemove` goes in
+`packageApplyStatus`'s 409 arm **and** the Loupe test drives `reviewCapabilityApply` end-to-end, not
+`packageApplyStatus(err)` directly; (b) `RemovedKeys` is asserted from the typed error's **field**, never by
+substring-matching the message; (c) the remedy clause names `newPackage` — the e2e must show that a
+`newPackage` proposal for the same content actually applies, so the remedy is traced to its outcome;
+(d) commit before running `lint-conventions`.
+
+`docs/components/loupe.md` carries no dossier; `_packages.md`'s three entries are package-authoring
+classes that this Go-only fire does not trip (no guard wrapper, no shared-vertex repoint, no cross-package
+type guard).
+
+### 6. Adjacent finds
+
+None out of scope surfaced at Phase 0. §9 item 4 (the `capabilityapply.go` deny-list comment) is **in**
+scope, not a find. The `📐 needs designer pass` additive-apply row (§4) is already filed `🗄️ shelved` with
+its named trigger, and census A confirms the trigger has **not** fired.
+
+### 7. Non-goals (drift fence)
+
+Additive/partial-Definition apply (§4, shelved). Inverting `ApplyOptions`'s zero value (§11). A semver
+comparator for the downgrade residual (§11). Any change to `cmd/loupe/review.go`'s recovery discriminator
+(§3.4), to the Processor's step-8 guard, to `UpgradePackage`'s payload, or to any `docs/contracts/*` file.
+No package version bump, no DDL/lens edit, no bootstrap change.
+
+### Scope-diff gate — PASS
+
+Every touch in part 3 traces to a §12 step. Part 4 narrows (Inc 1 splits out the mechanical counts) and
+never widens. Declared dependencies re-verified both ways: `retention-class-key-custody`'s guard-placement
+precedent **is** load-bearing (it fixes where the guard sits); `package-restore-design.md` is declared
+adjacent and confirmed non-colliding (it adds `RestoreOptions`/`Installer.Restore`, touching neither `Apply`
+nor `capabilityapply.go`); `capability-proposal-bundles-design.md` is unbuilt, so no live coupling. No
+unlisted load-bearing dependency found.
