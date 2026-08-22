@@ -541,9 +541,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   conclusion, because the window cited stops short of a guard that changes the answer. The ack fire's
   KNOWN LIMIT read `client.go:4280-4287` — a publisher's reply subject is not permission-checked — and
   concluded every deny is self-service defeasible; `:4305-4307` rejects a `$JS.ACK.` reply outright, so the
-  ack denies the comment was written to caveat are the one family that route cannot reach. Check: trace the
-  call graph to the line you cite and cite the one on the path you describe — and for a claim that
-  something is *not* checked, run the probe, because reading forward far enough is precisely what fails.
+  ack denies the comment was written to caveat are the one family that route cannot reach. Its fourth
+  sighting moved the class from the citation to the **scope**: that same correction then claimed the ack
+  family was contained and that `facet` was contained "absolutely", both on citations that were exact and
+  on-path. Cold review probed each named population and broke both — a stream `RePublish` destination is
+  emitted by the internal client with no reply and no `CLIENT` kind, so it reaches ack subjects; and a plain
+  PubAck reply reaches a denied subject for a component holding no `$JS.API.>` at all. A claim's MECHANISM
+  and its POPULATION are two premises, and citing the first proves nothing about the second. Check: trace
+  the call graph to the line you cite and cite the one on the path you describe; for a claim that something
+  is *not* checked, run the probe, because reading forward far enough is precisely what fails; and for a
+  claim that names WHO is bound, probe one member of every class named — with a roster test that fails when
+  the population changes (`TestReplySubjectBypassIsNotAllowResponsesGated`, `TestAckGrantRoster`), never an
+  exact-string check against a hand-listed grant.
 - **A reopen/retry loop needs a connection-closed exit of its own** — an "is it really gone" probe is a
   round trip, so it cannot answer over a closed connection, and its unanswerable case resolves to keep
   trying: right for a stall, unbounded for a close. The loop then spins at its backoff for as long as the

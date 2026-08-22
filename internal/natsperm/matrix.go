@@ -292,34 +292,74 @@ func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 // closes the $JS.API.> backing-stream side channel matrix-wide, not just for
 // the buckets a component doesn't own.
 //
-// KNOWN LIMIT — a deny below binds the twelve components without
-// AllowResponses absolutely, and the six that carry it (refractor, loom,
-// weaver, bridge, model-runner, gateway) only conditionally. nats-server
-// checks a static deny FIRST and consults the client's dynamic response
-// permissions only if the subject was denied (server/client.go:4120-4141);
-// and a message delivered to such a client registers its reply subject as a
-// response permission precisely WHEN the client is denied on it (:3881-3884).
-// A publisher's chosen reply subject is not permission-checked (:4280-4287),
-// so for most subjects the six can hand themselves the grant unaided:
-// demonstrated against this matrix, loom publishes to a subject it is allowed
-// with reply=$KV.core-kv.>, receives its own message back through its wildcard
-// subscribe, and then takes a PubAck on the denied subject.
+// WHAT A DENY BELOW IS WORTH — every deny below, the $JS.ACK.* family
+// included, is self-service defeasible by every component in this matrix.
+// The governing fact is not a grant any row carries: a message published by
+// the server's own internal JetStream client carries perms == nil, so the
+// permission branch never runs (server/client.go:4280-4287, gated on
+// c.perms != nil), and the reserved-reply guard never runs either, because
+// it is gated on c.kind == CLIENT (:4305-4307). Two routes reach that
+// publisher, and between them they need no grant a component can be stripped
+// of:
 //
-// The $JS.ACK.* denies are the exception, and the difference is worth stating
-// because it changes what has to be designed against. A CLIENT publish whose
-// reply is prefixed $JS.ACK. is rejected outright by isReservedReply before
-// any permission logic runs (:4218-4224, :4305-4307), so the self-service
-// route above cannot reach them. Registration still happens when the reply
-// arrives from the SERVER — a real delivery to a legitimate puller, seen by a
-// component whose subscribe is ">" — which needs an in-flight delivery it does
-// not control and yields one bounded registration (MaxMsgs 1, 2 minutes;
-// server/const.go:228,232). For those six the front door is the open one
-// anyway: MSG.NEXT is not a reserved reply, so the same self-service route
-// reaches it directly.
+//  1. Name a denied subject as the REPLY of a request. Any $JS.API.* verb
+//     answers there. DIRECT.GET is the sharp one — it returns the stored
+//     bytes verbatim, and the caller chose those bytes by first writing them
+//     to its own health-kv key, which SharedWrite grants every non-bootstrap
+//     component. Probed in both DIRECT.GET wire forms as clinic-app, which
+//     carries NO AllowResponses, onto ops.default and onto arbitrary core-kv
+//     and capability-kv keys (TestReplySubjectWriteAuthority). A component
+//     with no $JS.API.> at all still reaches this: a plain JetStream PubAck
+//     is the same internal publisher, so facet — the narrowest row here —
+//     lands PubAck JSON on a denied core-kv key. What a component loses
+//     without $JS.API.> is CONTENT CONTROL, not the write.
 //
-// Expressing reply authority without AllowResponses is filed as its own item
-// (backlog/lattice.md). Until it lands, read a deny here as a guarantee for
-// the twelve and as defence-in-depth for the six.
+//  2. Point a stream's RePublish destination at the denied subject. The
+//     bytes arrive with dest as their OWN subject and no reply involved, so
+//     this reaches even the $JS.ACK.* family: probed, a mirror of
+//     KV_health-kv republishing to a literal $JS.ACK.core-events.<consumer>
+//     subject forges an ack and clears a protected consumer's pending
+//     delivery, with a harmless dest as the negative control. No subject
+//     deny can reach it — the mirror source is in the request BODY, so
+//     STREAM.CREATE.<attacker-chosen-name> is always subject-allowed. This
+//     is the CONSUMER.CREATE body-vs-subject hijack shape below, one verb
+//     over.
+//
+// AllowResponses is a third and much narrower route, and not the governing
+// one: a static deny is checked first and the client's dynamic response
+// permissions consulted only if the subject was not allowed
+// (server/client.go:4120-4141), and a delivery registers its reply subject
+// as a response permission precisely WHEN the client is denied on it
+// (:3881-3884), so the six carrying the flag (refractor, loom, weaver,
+// bridge, model-runner, gateway) can also self-serve by receiving their own
+// message through a wildcard subscribe. That route needs the flag, the
+// subscribe and an inbound delivery, and it yields one bounded registration
+// (MaxMsgs 1, 2 minutes; server/const.go:228,232). Routes 1 and 2 need none
+// of that.
+//
+// What IS true of the $JS.ACK.* family: a CLIENT publish whose reply is
+// prefixed $JS.ACK. is refused by isReservedReply (:4215-4226, called at
+// :4305-4307, after the publish-subject permission check at :4281), so
+// route 1 cannot reach an ack subject. Route 2 can, which is why the ack
+// denies are no longer an exception to anything.
+//
+// A DeliverSubject is NOT a route here, and a narrowing aimed at
+// CONSUMER.CREATE would buy nothing. A push or pull delivery is re-subjected
+// for routing only: the capturing stream's subscription does fire and the
+// message IS ingested, but under its ORIGINAL subject
+// (server/stream.go:8058-8060, client.go:5088-5092), so a consumer filtered
+// on the lane never sees it. What that costs is stream capacity, not
+// authority (TestPushConsumerDeliverSubjectDoesNotReachOpsLane pins both
+// halves, with the delivery itself as the positive control). The exception
+// is a pull consumer's STATUS frame, which is an ordinary server publish and
+// does reach the reply subject.
+//
+// So read a deny below as an honest description of a component's ordinary
+// client paths, and as no barrier at all to one that goes looking — for
+// every row, facet included. Closing the class needs authority the subject
+// matrix cannot express; the grounding, why no narrowing here closes it, and
+// the candidate remedy are in
+// implementation-artifacts/protected-consumer-ack-plane-denies-design.md §8.
 //
 // The same precedent applies to core-events even though it is a plain
 // stream outside the PlatformBuckets() registry, not a KV bucket: bootstrap
@@ -615,7 +655,7 @@ var Matrix = []Component{
 	// read on every consumer in the deployment (coreEventsAckDenies).
 	{
 		Name: "loftspace-app",
-		Desc: "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		Desc: "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish (#75 Fire 2b), which closes the app's ordinary publish path onto the lane but NOT env.Actor forgery — a server-published reply, or a stream RePublish, reaches ops.> anyway, as it does for every row here (see Deny)",
 		// $O.core-objects.> — document byte uploads (objects.go ObjectPut); bytes
 		// are inert until a browser-direct AttachObject (via the Gateway) anchors
 		// them, so the byte-ingest grant carries no actor authority.
@@ -631,17 +671,17 @@ var Matrix = []Component{
 	},
 	{
 		Name:          "clinic-app",
-		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish (#75 Fire 2b), which closes the app's ordinary publish path onto the lane but NOT env.Actor forgery — a server-published reply, or a stream RePublish, reaches ops.> anyway, as it does for every row here (see Deny)",
 		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
 		Name:          "cafe-app",
-		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish (#75 Fire 2b), which closes the app's ordinary publish path onto the lane but NOT env.Actor forgery — a server-published reply, or a stream RePublish, reaches ops.> anyway, as it does for every row here (see Deny)",
 		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
 		Name:          "wellness-app",
-		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish (#75 Fire 2b), which closes the app's ordinary publish path onto the lane but NOT env.Actor forgery — a server-published reply, or a stream RePublish, reaches ops.> anyway, as it does for every row here (see Deny)",
 		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
