@@ -3,6 +3,7 @@ package pkgmgr
 import (
 	"context"
 	"fmt"
+	"sort"
 )
 
 // ApplyOptions tunes the upgrade-aware install/upgrade dispatch
@@ -20,6 +21,14 @@ type ApplyOptions struct {
 	// missing base install is ErrNotInstalled rather than a fresh create. The
 	// `install` command leaves it false (create-if-absent).
 	RequireInstalled bool
+	// RefuseRemovals makes Apply refuse — atomically with the delta computation —
+	// any in-place apply whose diff would tombstone a declared key. Set it whenever
+	// the Definition is a PARTIAL description of the package rather than its whole
+	// desired state: Apply's in-place branch is a convergence operator, so a partial
+	// Definition otherwise reads as "everything I do not mention is retired".
+	// Its zero value keeps the whole-Definition convergence semantics every
+	// source-authored install/upgrade depends on.
+	RefuseRemovals bool
 }
 
 // ApplyResult is the unified outcome of Apply across the fresh-install,
@@ -195,6 +204,33 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 	}
 	res.SecureColumnsRetired = retired
 	res.SecureColumnRetirementsUnused = unusedRetirements
+
+	// The removal refusal (capability-apply-removal-refusal-design.md §3.1) for
+	// a caller whose Definition is a partial description of the package. Like
+	// the retirement guard above it runs before the empty-delta AND the dry-run
+	// returns, for the same reason: it is pure, so a preview whose real run
+	// would be refused must say so rather than describe a batch that cannot
+	// commit.
+	//
+	// The removals are read off the EMITTED mutation list rather than off the
+	// diff's raw old \ new set, because those two are deliberately different:
+	// diffManifest leaves a dropped retention-class holder live and skips a
+	// dropped key that is already absent from KV, neither of which removes
+	// anything. Every tombstone the delta does emit comes from the removal arm,
+	// so this list is exactly the set of keys the apply would retire — and
+	// sum.tombstoned is its size.
+	if opts.RefuseRemovals {
+		var removed []string
+		for _, m := range mutations {
+			if m.Op == "tombstone" {
+				removed = append(removed, m.Key)
+			}
+		}
+		if len(removed) > 0 {
+			sort.Strings(removed)
+			return nil, applyWouldRemoveError(def, sum.oldKeyCount, sum.newKeyCount, removed)
+		}
+	}
 
 	if len(mutations) == 0 {
 		res.Action = "skip"

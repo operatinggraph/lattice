@@ -364,6 +364,22 @@ type diffSummary struct {
 	// The widen (secureColumnsWidened) protects a column the new spec still
 	// names; nothing protected one it stopped naming.
 	droppedSecureColumns []droppedSecureColumn
+	// oldKeyCount is the size of the installed manifest's declaredKeys set this
+	// delta diffed against — every key the package currently owns, the package
+	// root vertex and its `.manifest` aspect included, so it is a KEY count and
+	// not a count of lenses/roles/permissions. It exists because it is one of
+	// the two numbers the removal refusal (ApplyWouldRemoveError) quantifies:
+	// "the package declares N keys, this Definition describes M" is the whole
+	// diagnosis for an author who submitted a partial description of a package,
+	// and neither number is recoverable from a mutation list that only carries
+	// what changed.
+	oldKeyCount int
+	// newKeyCount is the size of the rebuilt create-batch this delta diffed —
+	// every key the submitted Definition describes, again including the package
+	// root and the `.manifest` aspect, so the two counts are comparable and a
+	// covering Definition reports the same number on both sides. It is the
+	// second number the removal refusal quantifies (see oldKeyCount).
+	newKeyCount int
 }
 
 // droppedSecureColumn names one erasure of a lens's committed key-custody
@@ -453,7 +469,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 	}
 
 	var out []installMutation
-	var sum diffSummary
+	sum := diffSummary{oldKeyCount: len(oldKeys), newKeyCount: len(newOps)}
 
 	for _, op := range newOps {
 		_, survives := oldSet[op.Key]

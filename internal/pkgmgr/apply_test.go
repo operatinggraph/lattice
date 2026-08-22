@@ -1,11 +1,15 @@
 package pkgmgr
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // applyV2 returns a v2 of sampleDef that exercises all three diff partitions:
@@ -433,5 +437,334 @@ func TestApply_UndeclaredSecureColumnDropRefused(t *testing.T) {
 	}
 	if got := committedSecureColumnNames(t, kvDoc(t, ctx, conn, specKey)); !slices.Equal(got, []string{"applicant_name"}) {
 		t.Fatalf("committed secure columns = %v, want the declared retirement to have landed", got)
+	}
+}
+
+// removalFixtureDef returns the multi-entity package the RefuseRemovals tests
+// shrink: sampleDef's DDL and lens plus a second lens, a declared role, and the
+// permission granted by that role — so the installed declared set spans
+// meta-vertices, a topology vertex, a role index and a link, and a refusal that
+// only ever saw one entity kind could not pass. Built as its own definition
+// rather than as an edit of sampleDef, which every other test here shares.
+func removalFixtureDef(version string) Definition {
+	def := sampleDef(version)
+	def.Name = "removal-fixture-pkg"
+	def.Roles = []RoleSpec{{
+		CanonicalName: "sampleReviewer",
+		Description:   "Reviews sample entities.",
+	}}
+	def.Permissions[0].GrantsTo = []string{"sampleReviewer"}
+	def.Lenses = append(def.Lenses, LensSpec{
+		CanonicalName: "sampleLens2",
+		Class:         "meta.lens",
+		Adapter:       "nats-kv",
+		Bucket:        "sample-bucket-2",
+		Engine:        "full",
+		Spec:          `MATCH (n:sample2) RETURN n.key AS key`,
+	})
+	return def
+}
+
+// removalShrunkenDef is a PARTIAL description of removalFixtureDef's package:
+// the same name at a new version, carrying only the second lens. This is the
+// shape an AI-authored capability proposal submits — its own artifact and
+// nothing else about the package it names — and against the convergence
+// semantics of Apply's in-place branch it reads as "retire everything else".
+func removalShrunkenDef(version string) Definition {
+	full := removalFixtureDef(version)
+	return Definition{
+		Name:    full.Name,
+		Version: version,
+		Lenses:  []LensSpec{full.Lenses[1]},
+	}
+}
+
+// coreKVSnapshot reads every Core KV key and its raw value, so a test can
+// assert that a refused apply committed nothing at all rather than only that
+// the one key it thought to check survived.
+func coreKVSnapshot(t *testing.T, ctx context.Context, conn *substrate.Conn) map[string]string {
+	t.Helper()
+	keys, err := conn.KVListKeys(ctx, CoreBucket)
+	if err != nil {
+		t.Fatalf("KVListKeys: %v", err)
+	}
+	snap := make(map[string]string, len(keys))
+	for _, k := range keys {
+		entry, err := conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			t.Fatalf("KVGet %s: %v", k, err)
+		}
+		snap[k] = string(entry.Value)
+	}
+	return snap
+}
+
+// TestApply_RefuseRemovals_AdmitsCoveringDefinition is the positive vector: a
+// Definition that covers every declared key still applies with the option set,
+// so the refusals below are proven to be about coverage rather than about the
+// option disabling the in-place branch outright. The edit is one lens's cypher
+// body on the SAME version under Force — the smallest real in-place delta this
+// package can produce.
+func TestApply_RefuseRemovals_AdmitsCoveringDefinition(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	covering := removalFixtureDef("0.1.0")
+	covering.Lenses[0].Spec = `MATCH (n:sample) RETURN n.key AS key, n.extra AS extra`
+
+	res, err := inst.Apply(ctx, covering, ApplyOptions{Force: true, RefuseRemovals: true})
+	if err != nil {
+		t.Fatalf("a covering Definition must apply with RefuseRemovals set: %v", err)
+	}
+	if res.Action != "upgrade" || res.Skipped {
+		t.Fatalf("covering apply: want an in-place upgrade, got %+v", res)
+	}
+	if res.Updated != 1 || res.Tombstoned != 0 || res.Created != 0 {
+		t.Fatalf("covering apply: want exactly the edited lens spec updated, got %+v", res)
+	}
+	specKey := metaVertexPrefix + LensID(v1.Name, "sampleLens") + ".spec"
+	spec, _ := kvDoc(t, ctx, conn, specKey)["data"].(map[string]any)
+	if rule, _ := spec["cypherRule"].(string); rule != covering.Lenses[0].Spec {
+		t.Fatalf("the covering apply did not land the edited lens body: got %q", rule)
+	}
+}
+
+// TestApply_RefuseRemovals_ZeroValueStillConverges is the second positive
+// vector: ApplyOptions' zero value keeps the whole-Definition convergence
+// semantics every source-authored install/upgrade depends on. The same
+// shrinking Definition that the option refuses below tombstones here, and the
+// dropped keys really are tombstoned in Core KV — asserted rather than assumed,
+// because the option's blast radius is exactly this default.
+func TestApply_RefuseRemovals_ZeroValueStillConverges(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	roleKey := "vtx.role." + RoleID(v1.Name, "sampleReviewer")
+
+	res, err := inst.Apply(ctx, removalShrunkenDef("0.2.0"), ApplyOptions{})
+	if err != nil {
+		t.Fatalf("Apply (zero value, shrinking): %v", err)
+	}
+	if res.Tombstoned == 0 {
+		t.Fatalf("the zero value must still converge — a shrinking Definition tombstones: %+v", res)
+	}
+	for _, k := range []string{permKey, roleKey} {
+		if del, _ := kvDoc(t, ctx, conn, k)["isDeleted"].(bool); !del {
+			t.Fatalf("%s should be tombstoned by the default convergence path", k)
+		}
+	}
+	survivor := metaVertexPrefix + LensID(v1.Name, "sampleLens2")
+	if del, _ := kvDoc(t, ctx, conn, survivor)["isDeleted"].(bool); del {
+		t.Fatalf("%s is the one entity the shrunken Definition describes; it must stay live", survivor)
+	}
+}
+
+// TestApply_RefuseRemovals_RefusesShrunkenDefinition is the defect itself: a
+// partial Definition applied over a package it does not describe. The
+// assertion that pins it is that Core KV is byte-unchanged afterwards — an
+// error string proves only that something was said, not that nothing was done.
+func TestApply_RefuseRemovals_RefusesShrunkenDefinition(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	pkgKey := PackageVertexPrefix + entityNanoID(v1.Name, "package")
+	declared, err := inst.readDeclaredKeys(ctx, pkgKey)
+	if err != nil {
+		t.Fatalf("readDeclaredKeys: %v", err)
+	}
+	before := coreKVSnapshot(t, ctx, conn)
+
+	res, err := inst.Apply(ctx, removalShrunkenDef("0.2.0"), ApplyOptions{RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("a shrinking Definition must be refused, got: %+v", res)
+	}
+	if res != nil {
+		t.Fatalf("a refused apply must return no ApplyResult, got %+v", res)
+	}
+	if !errors.Is(err, ErrApplyWouldRemove) {
+		t.Fatalf("want ErrApplyWouldRemove, got %v", err)
+	}
+	var refusal *ApplyWouldRemoveError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+
+	// Nothing committed: the whole bucket, not just the keys this test thought
+	// to name.
+	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatalf("a refused apply must commit nothing; %d keys before, %d after, and the values differ", len(before), len(after))
+	}
+
+	// The counts are the diagnosis, and they count KEYS (package root and
+	// manifest aspect included), not entities.
+	if refusal.PackageName != v1.Name {
+		t.Errorf("PackageName = %q, want %q", refusal.PackageName, v1.Name)
+	}
+	if refusal.DeclaredKeys != len(declared) {
+		t.Errorf("DeclaredKeys = %d, want %d (the installed manifest's declaredKeys)", refusal.DeclaredKeys, len(declared))
+	}
+	if refusal.DescribedKeys >= refusal.DeclaredKeys {
+		t.Errorf("DescribedKeys = %d, DeclaredKeys = %d: a shrinking Definition describes strictly fewer",
+			refusal.DescribedKeys, refusal.DeclaredKeys)
+	}
+
+	// The removed set is read from the field, never scraped from the message —
+	// which names only the first few keys anyway.
+	if !slices.IsSorted(refusal.RemovedKeys) {
+		t.Errorf("RemovedKeys must be sorted, got %v", refusal.RemovedKeys)
+	}
+	permID := entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	roleID := RoleID(v1.Name, "sampleReviewer")
+	for _, want := range []string{
+		metaVertexPrefix + LensID(v1.Name, "sampleLens"),
+		"vtx.role." + roleID,
+		"vtx.permission." + permID,
+		"lnk.permission." + permID + ".grantedBy.role." + roleID,
+	} {
+		if !slices.Contains(refusal.RemovedKeys, want) {
+			t.Errorf("RemovedKeys is missing %s: %v", want, refusal.RemovedKeys)
+		}
+	}
+	for _, kept := range []string{
+		metaVertexPrefix + LensID(v1.Name, "sampleLens2"),
+		metaVertexPrefix + LensID(v1.Name, "sampleLens2") + ".spec",
+	} {
+		if slices.Contains(refusal.RemovedKeys, kept) {
+			t.Errorf("%s is described by the submitted Definition and must not be a removal: %v", kept, refusal.RemovedKeys)
+		}
+	}
+	for _, k := range refusal.RemovedKeys {
+		if !slices.Contains(declared, k) {
+			t.Errorf("RemovedKeys names %s, which the installed package never declared", k)
+		}
+	}
+}
+
+// TestApply_RefuseRemovals_DryRunRefusesIdentically pins the guard's placement:
+// it sits before the dry-run return, so a preview whose real run would be
+// refused says so rather than describing a batch that cannot commit. Same
+// typed error, same removed set.
+func TestApply_RefuseRemovals_DryRunRefusesIdentically(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	if _, err := inst.Install(ctx, removalFixtureDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	shrunken := removalShrunkenDef("0.2.0")
+
+	res, err := inst.Apply(ctx, shrunken, ApplyOptions{RefuseRemovals: true, DryRun: true})
+	if err == nil {
+		t.Fatalf("a preview of a refused apply must refuse, got: %+v", res)
+	}
+	if res != nil {
+		t.Fatalf("a refused preview must return no ApplyResult, got %+v", res)
+	}
+	var preview *ApplyWouldRemoveError
+	if !errors.As(err, &preview) {
+		t.Fatalf("want *ApplyWouldRemoveError from the preview, got %T (%v)", err, err)
+	}
+
+	real, err := inst.Apply(ctx, shrunken, ApplyOptions{RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("the real run must refuse too, got: %+v", real)
+	}
+	var committed *ApplyWouldRemoveError
+	if !errors.As(err, &committed) {
+		t.Fatalf("want *ApplyWouldRemoveError from the real run, got %T (%v)", err, err)
+	}
+	if !slices.Equal(preview.RemovedKeys, committed.RemovedKeys) {
+		t.Fatalf("the preview must refuse identically to the real run:\npreview %v\nreal    %v",
+			preview.RemovedKeys, committed.RemovedKeys)
+	}
+	if preview.Error() != committed.Error() {
+		t.Fatalf("the preview's refusal must read identically:\npreview %q\nreal    %q", preview.Error(), committed.Error())
+	}
+}
+
+// TestApply_RefuseRemovals_RetentionHolderIsNotARemoval pins that the guard
+// reads the EMITTED mutation list rather than the diff's raw old \ new set. A
+// dropped retention-class holder is left live-but-undeclared (only
+// ShredRetentionClassKey may destroy its DEK), so it emits no tombstone and
+// removes nothing — a guard written over the raw dropped-key set would refuse
+// this apply, which is the one shape where refusing is wrong.
+func TestApply_RefuseRemovals_RetentionHolderIsNotARemoval(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := defWithRetentionClass("0.1.0", "sampleClass1")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	holderKey := RetentionClassKey(v1.Name, "sampleClass1")
+	policyKey := holderKey + ".retentionPolicy"
+
+	// v2 covers every declared key EXCEPT the retention class's two.
+	res, err := inst.Apply(ctx, sampleDef("0.2.0"), ApplyOptions{RefuseRemovals: true})
+	if err != nil {
+		t.Fatalf("dropping a retention class removes nothing and must not be refused: %v", err)
+	}
+	if res.Tombstoned != 0 {
+		t.Fatalf("dropping a retention class must emit no tombstone, got %d (%+v)", res.Tombstoned, res)
+	}
+	if res.RetentionHoldersPreserved != 2 {
+		t.Fatalf("RetentionHoldersPreserved = %d, want 2 (holder root + .retentionPolicy) (%+v)", res.RetentionHoldersPreserved, res)
+	}
+	for _, k := range []string{holderKey, policyKey} {
+		if del, _ := kvDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
+			t.Fatalf("%s must stay live so ShredRetentionClassKey can still destroy the class key", k)
+		}
+	}
+}
+
+// TestApply_RefuseRemovals_AlreadyTombstonedDeclaredKeyStillRefuses covers the
+// state table row the clause decides least obviously: a declared key the
+// submitted Definition drops that is ALREADY tombstoned in Core KV, so
+// tombstoning it again would change nothing.
+//
+// It refuses anyway, and that is deliberate. The guard's question is what the
+// submitter DESCRIBED, not what happens to be live: a Definition that omits a
+// key its package declares is a partial description either way, and admitting
+// this one would make the refusal depend on KV liveness — the same apply would
+// be refused on Monday and admitted on Tuesday because somebody revoked a
+// permission in between, and the author would learn nothing about the coverage
+// problem that is still there. The removal is a no-op; the misdescription is
+// not.
+func TestApply_RefuseRemovals_AlreadyTombstonedDeclaredKeyStillRefuses(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// A non-retention declared key, killed by a direct KV write the way
+	// RevokePermission would — never through Apply, which would rewrite
+	// declaredKeys and leave the key undeclared instead of dead-but-declared.
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	tombstoneOutOfBand(t, ctx, conn, permKey)
+	if del, _ := kvDoc(t, ctx, conn, permKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s must be tombstoned before the apply for this row to mean anything", permKey)
+	}
+
+	res, err := inst.Apply(ctx, removalShrunkenDef("0.2.0"), ApplyOptions{RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("a Definition that omits a declared key must be refused whether or not the key is live, got: %+v", res)
+	}
+	var refusal *ApplyWouldRemoveError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if !slices.Contains(refusal.RemovedKeys, permKey) {
+		t.Fatalf("RemovedKeys must name the already-tombstoned %s — the diff still re-emits it, and the Definition still fails to describe it: %v",
+			permKey, refusal.RemovedKeys)
 	}
 }

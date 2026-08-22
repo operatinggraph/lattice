@@ -749,6 +749,55 @@ func (e *DeclaredKeysOccupiedError) Error() string { return e.message }
 
 func (e *DeclaredKeysOccupiedError) Unwrap() error { return ErrDeclaredKeysOccupied }
 
+// ErrApplyWouldRemove is the sentinel every removal refusal wraps, for callers
+// that only need to know an apply was refused for this reason — cmd/loupe maps
+// it to 409, because a Definition that does not describe the package's declared
+// keys fails identically on every retry.
+//
+// Apply's in-place branch is a convergence operator: a key the installed
+// manifest declares and the submitted Definition omits is tombstoned, because
+// that is what "make the package match this Definition" means. A caller whose
+// Definition describes only PART of the package (an AI-authored capability
+// proposal carries its own artifacts and nothing else) is therefore asking for
+// a retirement it never wrote, and gets a success signal on it. ApplyOptions
+// .RefuseRemovals is how such a caller declares that its Definition is partial;
+// the refusal happens before the op is submitted because the tombstones are
+// committed atomically with the rest of the batch, so there is no after.
+var ErrApplyWouldRemove = errors.New("pkgmgr: apply refused — it would remove keys its Definition does not describe")
+
+// ApplyWouldRemoveError is the typed removal refusal. Error() renders the
+// operator-facing message, and the fields carry the same answer structurally so
+// a caller (or a test) reads the removed set and the two key-set sizes from
+// data rather than by scraping prose — the message names only the first few
+// keys, so prose is not even a complete source for the set.
+//
+// Unwrap yields ErrApplyWouldRemove, so errors.Is keeps working for callers
+// that only need the class.
+type ApplyWouldRemoveError struct {
+	// PackageName is the package whose apply was refused.
+	PackageName string
+	// DeclaredKeys is how many Core KV keys the INSTALLED package declares —
+	// its recorded manifest declaredKeys set, package root and manifest aspect
+	// included.
+	DeclaredKeys int
+	// DescribedKeys is how many keys the SUBMITTED Definition describes, on the
+	// same counting basis as DeclaredKeys, so the pair reads as coverage: equal
+	// numbers on a Definition that covers the package, a much smaller
+	// DescribedKeys on the partial description this refusal exists for.
+	DescribedKeys int
+	// RemovedKeys names every key the refused diff would have tombstoned.
+	// Sorted. It is the diff's emitted removal set, not the raw old \ new set:
+	// a dropped retention-class holder and a dropped key already absent from KV
+	// emit no tombstone and are therefore not removals.
+	RemovedKeys []string
+
+	message string
+}
+
+func (e *ApplyWouldRemoveError) Error() string { return e.message }
+
+func (e *ApplyWouldRemoveError) Unwrap() error { return ErrApplyWouldRemove }
+
 // ErrBootstrapRequired is returned when the core-kv bucket is absent,
 // indicating bootstrap has not been run.
 var ErrBootstrapRequired = errors.New("pkgmgr: core-kv bucket not found — run bootstrap (or make up) before installing packages")
@@ -1254,6 +1303,41 @@ func occupiedDeclaredKeysError(def Definition, tombstoned, live []string) error 
 		Live:        live,
 		message: fmt.Sprintf("%s: package %q declares %d already-committed key(s): %s",
 			ErrDeclaredKeysOccupied, def.Name, len(tombstoned)+len(live), strings.Join(clauses, "; ")),
+	}
+}
+
+// removalSampleCap bounds how many removed keys the refusal message names
+// inline. Smaller than occupancySampleCap because this list rides in a
+// parenthetical between the counts that diagnose the refusal and the remedy
+// clause that resolves it, and a long list buries both. The complete sorted set
+// is on ApplyWouldRemoveError.RemovedKeys, so nothing is lost by naming few.
+const removalSampleCap = 4
+
+// applyWouldRemoveError renders the refusal for an in-place apply whose diff
+// would tombstone keys the submitted Definition does not describe.
+//
+// The message leads with the coverage arithmetic because that is the diagnosis:
+// an author who reads "declares 61, describes 4" knows immediately that they
+// submitted a partial description of somebody else's package rather than an
+// edit of their own. It then carries the remedy, because the next move is not
+// obvious from the refusal alone — a proposal-owned package is its own package
+// and may still bind lenses and targets that other packages own, so "propose it
+// as a new package" is a real move and not a demotion.
+func applyWouldRemoveError(def Definition, declaredKeys, describedKeys int, removed []string) error {
+	sample := removed
+	suffix := ""
+	if len(removed) > removalSampleCap {
+		sample = removed[:removalSampleCap]
+		suffix = fmt.Sprintf(", +%d more", len(removed)-removalSampleCap)
+	}
+	return &ApplyWouldRemoveError{
+		PackageName:   def.Name,
+		DeclaredKeys:  declaredKeys,
+		DescribedKeys: describedKeys,
+		RemovedKeys:   removed,
+		message: fmt.Sprintf("%s: package %q declares %d key(s); this Definition describes %d, so applying it would tombstone %d key(s) it does not describe (%s%s). A capability proposal describes only its own artifacts — propose it as `newPackage` (a proposal-owned package may bind lenses and targets across packages) rather than as an upgrade of a package it does not describe",
+			ErrApplyWouldRemove, def.Name, declaredKeys, describedKeys, len(removed),
+			strings.Join(sample, ", "), suffix),
 	}
 }
 
