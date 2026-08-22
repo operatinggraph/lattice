@@ -145,7 +145,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-22 · `TBASHA` · [natsperm] `DeliverSubject` row GROUNDED + REFUTED — the real primitive is server-published bytes; folded into the ★★★ row
+- 2026-08-22 · `de193db` · [natsperm] `DeliverSubject` row GROUNDED + REFUTED — the real primitive is server-published bytes; folded into the ★★★ row
 - 2026-08-22 · `a70fb07a` · [Contract #1] §1.5 "default class from localName" DELETED — clause was implemented nowhere and asserted key-decides-class against document-is-source-of-truth
 - 2026-08-22 · `1509cd1` · [Core] capability-kv single read path CLOSED — 4 restatements of §6.1 routing folded in + a 2-check lint gate; 3 cold reviews + close pass
 - 2026-08-22 · `9c24c918` · [natsperm] ack-plane read primitive CLOSED — registry covers both wire forms owner-scoped, app tier loses the grant, LEADER.STEPDOWN closed; 3 cold reviews, MAJOR was a false KNOWN LIMIT claim
