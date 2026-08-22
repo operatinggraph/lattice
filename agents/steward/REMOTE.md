@@ -112,3 +112,24 @@ GOTOOLCHAIN=go1.26.1 go install github.com/golangci/golangci-lint/v2/cmd/golangc
 
 The result lands in `$(go env GOPATH)/bin` (typically `/root/go/bin`), which must precede the stale
 system binary on `PATH`: `export PATH="$(go env GOPATH)/bin:$PATH"` before `golangci-lint run`.
+
+## 8. The clone is SHALLOW — every history-based negative is an artifact until you deepen
+
+The remote container clones with a truncated history (76 commits in the 2026-08-22 fire, against 693 after
+one `--deepen`). Anything that reads git history therefore lies by omission, and it lies in the direction
+that costs you: `git log -S`, `git log --all --grep`, `git show <sha>`, blame, and "when did this land"
+all return *nothing found* for objects that exist perfectly well on the remote. A design doc's or an audit's
+`file:line`-plus-SHA citation is the common victim — a fire concluded a correct citation was stale and was
+about to "correct" it.
+
+Before you report ANY negative derived from history — a missing commit, an unreferenced symbol's
+introduction, a claim that something was never touched — run:
+
+```sh
+git rev-parse --is-shallow-repository          # true => you cannot conclude anything from history yet
+git fetch --deepen=400 origin main             # repeat, or --unshallow, until the object resolves
+```
+
+This binds sub-agents too: a scout asked to check history in this environment will confidently report
+"does not exist". State the shallow-clone caveat in the scout's brief, or verify its history negatives
+yourself before folding them into a doc.

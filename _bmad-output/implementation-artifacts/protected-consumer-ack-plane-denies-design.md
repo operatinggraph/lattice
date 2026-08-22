@@ -83,7 +83,37 @@ ack-policy consumer of its own — §4 is the census. This is a strict narrowing
 posture change: it neither adds a read scope nor removes `$JS.API.>`, so it is independent of the read-scope
 design's Andrew fork, and it shrinks that design's Increment 1 rather than pre-empting it.
 
-**3.3 What this does NOT close, stated plainly.** `$JS.ACK.>` remains an unscoped read primitive against
+**3.3 What this does NOT close, stated plainly.**
+
+**First, and larger than this design: every deny in the matrix is defeasible for a component carrying
+`AllowResponses`.** The cold bypass review found it and I reproduced it independently. nats-server checks a
+static deny first and then, *only if the subject was denied*, consults the client's dynamic response
+permissions (`server/client.go:4126-4141`); a message delivered to such a client registers its reply subject
+as a response permission **precisely when the client is denied on it** (`:3881-3884`); and a publisher's
+chosen reply subject is never permission-checked (`:4278-4295`). So a component with `AllowResponses` and a
+wildcard subscribe grants itself publish on any denied subject by receiving a message whose reply *is* that
+subject. Verified against the committed conf with the real dev seeds: `loom`, denied `$KV.core-kv.>`, takes a
+`PubAck={"stream":"KV_core-kv","seq":1}` and the forged value reads back — the transport half of P2, which
+`matrix.go` calls the load-bearing invariant.
+
+This is **pre-existing** and not caused by anything here, but it bounds what this design may claim. Filed as
+[its own board row](../planning-artifacts/backlog/lattice.md), because expressing reply authority without
+`AllowResponses` spans the control plane, the auth-callout plane and the micro-service plane at once and has
+no ratified pattern here to extend.
+
+**Amended 2026-08-22, post-build.** As first written this section went on to call the ack denies "advisory"
+for the six components carrying the flag. That is **false for the ack family specifically**, and the cold
+bypass review found it by probing rather than reading: a *client* publish whose reply is prefixed `$JS.ACK.`
+is rejected by `isReservedReply` before any permission logic runs (`server/client.go:4218-4224`,
+`:4305-4307`), so the self-service route cannot reach an ack subject at all. Probed against the committed
+conf: `loom` takes the `$KV.core-kv.>` grant this way and is refused outright on the ack subject. What
+remains for those six is narrower and materially different to design against — a reply arriving from the
+*server*, on a real delivery to the legitimate puller, seen through a `>` subscribe, yielding one bounded
+registration. The correct statement, now carried in `matrix.go`'s KNOWN LIMIT: the ack denies are an
+unconditional guarantee for the twelve and defence-in-depth for the six. The front door (`MSG.NEXT`) is
+genuinely open to the six, which the review also confirmed by probe — that half stands.
+
+**Second, the read primitive at large.** `$JS.ACK.>` remains an unscoped read primitive against
 every *other* consumer on every stream for the twelve platform components that keep it. Closing that needs
 per-component ack scoping, which needs a component's consumer names to be statically enumerable — they are
 not (Loom/Weaver mint per-domain consumers, Refractor per-lens). The read-scope design owns that; this fire
@@ -110,11 +140,15 @@ other three), `KVGet`/`KVListKeys*` (`internal/substrate/kv.go:37`, `:195`, `:23
 `$KV.health-kv.>`. None of the four creates a consumer, and none calls `Ack`/`Nak`/`Term`/`InProgress`/
 `DoubleAck`.
 
-The listing path is the one that could have surprised us, and it does not: `KVListKeys` bottoms out in
-nats.go's **ordered** consumer, which is constructed `AckPolicy: AckNonePolicy`
-(`nats.go@v1.52.0/jetstream/ordered.go:634`; the legacy KV watcher takes the same route,
-`jetstream/kv.go:1304-1305`). By G8 the server does not even subscribe an ack subject for such a consumer,
-so there is nothing for the app to publish to.
+The listing path is the one that has to be traced rather than assumed. `substrate.KVListKeys` holds a
+`jetstream.KeyValue` (`internal/substrate/conn.go:502`), and that package's watcher builds its consumer
+through the **legacy** push-subscribe API — `nats.OrderedConsumer()` passed as a `nats.SubOpt`
+(`nats.go@v1.52.0/jetstream/kv.go:1304-1305`) — which forces `FlowControl: true` and
+`AckPolicy: AckNonePolicy` (`js.go:1780-1781`). By G8 the server subscribes no ack subject for such a
+consumer, so there is nothing for the app to publish to; what the listing actually depends on is
+`$JS.FC.>`, which every component keeps. (`jetstream/ordered.go:634` sets `AckNonePolicy` for the *new*
+ordered-consumer type — the right citation for `cmd/loupe/events.go:157`, the wrong one for this tier, and
+naming it here would have pinned a line the app tier never executes.)
 
 For contrast, every component that *does* run a durable consumer builds it `AckExplicitPolicy` and acks
 (`internal/substrate/consumer.go:214`, `internal/substrate/consumer_supervisor.go:592`;
@@ -216,8 +250,11 @@ reliability/data-integrity rather than security scope, unchanged by this fire an
 (b) The per-identity edge grant lists only the v1 ack form (`internal/gateway/natsauth/natsauth.go:371`);
 safe today (allow-side, and the server stamps v1 while `js_ack_fc_v2` is off) but it would break edge sync
 if that flag were ever enabled — noted here, not filed: it is a latent vendor-flag coupling with no consumer
-and no defect today. (c) `83891a8c`, the SHA the 2026-08-20 backlog audit cites for the MSG.NEXT registry, is
-not an object in this repository — a stale citation in that audit doc, corrected where it is quoted.
+and no defect today. (c) A scout reported the 2026-08-20 backlog audit's `83891a8c` citation unresolvable;
+it resolves fine (`fix(natsperm): close the core-events JS.API side channel for six security-plane
+consumers`). The clone this fire ran in was **shallow** — 76 commits — so every history-based negative in it
+was an artifact until `--deepen`. Recorded as an environment rule in `agents/steward/REMOTE.md` §7 rather
+than left as a one-off correction here.
 
 **7 · Non-goals.** No `ReadBuckets` / declared-read-scope mechanism (that is the awaiting-Andrew fork). No
 narrowing of `$JS.API.>` for anyone. No change to `SubscribeAllow` for any component. No change to the
@@ -229,3 +266,48 @@ that provably needs no ack, the conf regeneration to the generated-artifact rule
 mechanism is substituted. The design's one census (§4) was re-run live before the first edit.
 
 ## 7. Build note
+
+**Fire 1 — the whole design — shipped 2026-08-22.** Built across two runs: a first that landed Inc 1–3 on a
+branch and died before gating or review, and a second that took the item over (the branch had been idle three
+hours with the work unmerged), ran the gates, ran the review, fixed what it found and merged.
+
+Built as specified, with one addition the build made and the design did not anticipate: `LEADER.STEPDOWN`
+joins both `protectedStreamDenies` and `coreEventsAdminDenies`. It is the clustered analogue of the `PAUSE`
+verb already denied there — inert at 503 on a single server, invoked by nothing in this repo, and a live
+stall primitive the day JetStream is clustered. Closing it now costs nothing; discovering it later costs a
+fire. The regenerated conf's diff decomposes exactly and only into the three intended shapes: 96 ack denies
+(6 protected consumers × 16 non-owner components × 2 wire forms, halved per consumer by the owner
+exclusion), 102 consumer + 13×17 stream `LEADER.STEPDOWN` denies, and the four `$JS.ACK.>` removals.
+
+**Review — three cold passes (bypass · test-oracle · vendor-citation), none by the implementer.** No blocking
+findings; the deny is complete in both wire forms, the owner exclusion is real, and the app tier's removal was
+re-derived independently rather than taken from §4. The vendor pass verified all 14 citations against the
+pinned `nats-server` v2.14.0 and `nats.go` v1.52.0 and found none wrong.
+
+One MAJOR, and it was in a security comment rather than in the code. §3.3 and `matrix.go`'s KNOWN LIMIT both
+claimed the `AllowResponses` reply-registration bypass made the ack denies advisory for six components. It
+does not: `isReservedReply` refuses a client publish carrying a `$JS.ACK.` reply before any permission logic
+runs. The review established this by probe, not by reading — the same probe that confirmed the bypass IS real
+for `$KV.*` and for `MSG.NEXT`. Both texts are corrected in place (§3.3 carries the amendment); the failure
+mode it prevents is a later reader dropping a deny they were told was worthless.
+
+Four minors fixed in the same round: the ack rationale led with confidentiality, which this matrix does not
+defend (`MSG.GET`/`DIRECT.GET` stay open on core-events by design) — rewritten to lead with control of the
+durable, which is what the deny actually buys, and to note `+NXT` is pull-only; `TestAckGrantRoster` compared
+the grant by exact string, so `$JS.ACK.*.>` would have reported not-granted and passed — now a prefix test;
+both new `LEADER.STEPDOWN` denial loops asserted refusal with no positive control, breaking the file's own
+idiom, so bootstrap now proves each endpoint answers at all; and `model-runner`'s roster entry read as
+containment when it carries `AllowResponses`.
+
+Three findings deliberately not acted on, each with its reason. The substrate dossier's "model of a retired
+entry" illustration was dropped to stay at the cap of 12 — correct: its gate (`lint-conventions` blocking a
+bare `nats.Connect` in tests) has landed, which is exactly when the dossier's contract says an entry retires.
+`verticalAppNames` stays hardcoded because `Matrix` carries no *is a vertical app* field, and the roster's
+exhaustiveness clause already forces a new component to declare its side. And the read-path regression writes
+one key, so it cannot trip the flow-control stall its own rationale names — true, and out of this item's
+scope: it belongs with the read-scope design's `TestAppTierRevocationCheckStillWorks`.
+
+**Gates.** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), all 10 `STRICT=1 lint-*.go`,
+`lint-package-version` with `DIFF_BASE`, and `go test ./... -p 4` with `POSTGRES_TEST_DSN` set against a
+native Postgres at CI parity (REMOTE.md §3 — a remote suite without it is falsely green). CI green on the
+merge.

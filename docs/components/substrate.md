@@ -501,9 +501,22 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **The batch CAS is per-subject** (`Nats-Expected-Last-Subject-Sequence`), not whole-stream —
   different-key writes never serialize, so don't design contention remedies for a lock that does not
   exist. Minted: `substrate/batch.go` grounding (designer SKILL §2 trial). Check: none yet.
-- **RETIRED (the model of a retired entry):** hand-rolled embedded-NATS test fixtures inherit nats.go's
-  2-second no-retry handshake — mechanized: `lint-conventions` blocks bare `nats.Connect` in tests; use
-  `internal/natsfixture`.
+- **A permission edit must be complete in BOTH directions, and the two halves fail differently.** On the
+  deny side, completeness means every **wire form the server accepts**, not the one the deployment emits:
+  a consumer subscribes both ack formats unconditionally (`nats-server` 2.14 `server/consumer.go:1699-1707`)
+  even though the `js_ack_fc_v2` flag is off, so `$JS.ACK.<stream>.<consumer>.>` alone is walk-aroundable via
+  a v2 subject nothing on the wire ever shows — and the domain and account-hash tokens are derivable
+  offline, not secrets. An **allow** that misses a form merely breaks a client; a **deny** that misses one
+  is a bypass. On the allow side, completeness means every legitimate holder: a component that loses a
+  grant it needs does not fail a test, it stalls forever, because a denied publish is fire-and-forget
+  client-side (`nats.go` `jetstream/message.go:430-441` marks the message acked anyway), the server's
+  `-ERR` reaches nothing (`substrate` registers no `nats.ErrorHandler`), and nothing here sets
+  `MaxDeliver`, so there is no poison exit. Third sighting of the deny half (`DIRECT.GET` bare-vs-wildcard;
+  `CONSUMER.CREATE` filtered-vs-bare-vs-legacy; ack v1-vs-v2); first of the allow half, minted by a bulk
+  edit over four byte-identical `ExtraPubAllow` literals that also matched `chronicler`'s. Check:
+  `TestCoreEventsAckPlaneSideChannel` drives every form with the positive control on each proving the
+  subject is really subscribed, and `TestAckGrantRoster` pins every component's posture with no component
+  unaccounted for.
 - **A multi-round or incremental read must RETRACT, not merely skip, a tombstone** — a delete marker
   arriving in a later round than the entry it kills leaves the accumulated map holding a hard-deleted key,
   and downstream that is an over-grant. A single-round read hides the class entirely, because the marker is
@@ -516,10 +529,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   a mark cache that outlived a wiped bucket (deleted), and a `MaxPayload` memo whose "fixed for the
   connection's lifetime" premise the pinned nats.go contradicts via `processAsyncInfo` (reverted). Check:
   for any such memo, name the boundary that moves the source and either follow it or say why it cannot move.
-- **A vendor-behaviour claim in a comment needs a pinned `file:line`** — this package cites
-  `nats-server/server/*.go:NNN` for every protocol constant; the one comment that asserted a nats.go
-  contract without a citation was wrong. Minted: adjacency Shape B (`valueSizeLimit`'s memo justification).
-  Check: a claim about vendor behaviour carries the pinned source location, or it is a hypothesis.
+- **A vendor-behaviour claim in a comment needs a pinned `file:line`, and the line must be one this code
+  path actually executes** — this package cites `nats-server/server/*.go:NNN` for every protocol constant;
+  the one comment that asserted a nats.go contract without a citation was wrong. The sharper form takes a
+  citation that is real and still misleading: the app tier's "listings use an ordered consumer, AckNone"
+  cited `jetstream/ordered.go:634`, the *new* ordered-consumer type, while `KVListKeys` reaches
+  `AckNonePolicy` through the **legacy** push path (`jetstream/kv.go:1304-1305` → `js.go:1780-1781`) — same
+  conclusion, wrong evidence, and it hid that the listing genuinely depends on `$JS.FC.>`. Minted:
+  adjacency Shape B (`valueSizeLimit`'s memo justification); sharpened by the ack-plane fire's cold review.
+  Check: trace the call graph to the line you cite, and cite the one on the path you are describing.
 - **A reopen/retry loop needs a connection-closed exit of its own** — an "is it really gone" probe is a
   round trip, so it cannot answer over a closed connection, and its unanswerable case resolves to keep
   trying: right for a stall, unbounded for a close. The loop then spins at its backoff for as long as the
