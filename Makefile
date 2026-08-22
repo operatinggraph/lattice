@@ -1738,7 +1738,9 @@ run-loftspace-app:
 	@echo "==> Building loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
 	@echo "==> LoftSpace applicant app on http://127.0.0.1:7788 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOFTSPACE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loftspace-app
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOFTSPACE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		LOFTSPACE_APP_PG_DSN="$(LOFTSPACE_APP_PG_DSN)" LOFTSPACE_APP_DEV_AUTH=1 \
+		./bin/loftspace-app
 
 ## run-clinic-app — Build + run the Clinic app in the FOREGROUND. Open
 ## http://127.0.0.1:7799. Requires a running deployment with the clinic vertical
@@ -1758,7 +1760,9 @@ run-cafe-app:
 	@echo "==> Building cafe-app binary..."
 	go build -o bin/cafe-app ./cmd/cafe-app
 	@echo "==> Café app on http://127.0.0.1:7801 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) CAFE_APP_DEV_AUTH=1 ./bin/cafe-app
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		CAFE_APP_PG_DSN="$(CAFE_APP_PG_DSN)" CAFE_APP_DEV_AUTH=1 \
+		./bin/cafe-app
 
 ## run-wellness-app — Build + run the Wellness app in the FOREGROUND. Open
 ## http://127.0.0.1:7802. Requires a running deployment with the Wellness
@@ -1767,7 +1771,9 @@ run-wellness-app:
 	@echo "==> Building wellness-app binary..."
 	go build -o bin/wellness-app ./cmd/wellness-app
 	@echo "==> Wellness app on http://127.0.0.1:7802 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) WELLNESS_APP_DEV_AUTH=1 ./bin/wellness-app
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		WELLNESS_APP_PG_DSN="$(WELLNESS_APP_PG_DSN)" WELLNESS_APP_DEV_AUTH=1 \
+		./bin/wellness-app
 
 ## test — Run all Go unit + integration tests.
 ## Test packages run concurrently (-p 4). Every embedded NATS/JetStream fixture

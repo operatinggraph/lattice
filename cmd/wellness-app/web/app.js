@@ -281,7 +281,8 @@ async function loadIdentities() {
   try {
     const data = await api("/api/identities", { credentials: "same-origin" });
     state.identities = (data && data.identities) || [];
-  } catch (_) {
+  } catch (e) {
+    console.warn("identities roster unavailable:", e);
     state.identities = [];
   }
   refreshMeBar();

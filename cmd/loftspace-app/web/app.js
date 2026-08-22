@@ -854,7 +854,8 @@ async function loadIdentities() {
   try {
     const data = await appGet("/api/staff/identities");
     state.identities = data.identities || [];
-  } catch (_) {
+  } catch (e) {
+    console.warn("identities roster unavailable:", e);
     state.identities = [];
   }
   renderSignedInAs();
