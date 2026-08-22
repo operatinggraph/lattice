@@ -151,7 +151,10 @@ When the Processor validates a mutation (commit step 6), it resolves the DDL for
 
 **Class lookup is exact match** at step 3. Hierarchical class strings (e.g., `identity.ai.onboarding-assistant`) match only DDLs with exactly that canonical name. To validate AI-specific identities under their own rules, operators register a DDL with canonical name `identity.ai.onboarding-assistant`. To use the generic identity DDL, set `class: "identity"`. Prefix matching is not part of Phase 1. **A fine-grained subtype class that is not itself a registered DDL** resolves its governing DDL via the step-5 `instanceOf` chain rather than by prefix — the type relationship is an explicit link, not a string convention.
 
-**Default class:** If a write submission omits the `class` field, the Processor uses the entity's local name (aspect/link key segment) or the type (vertex key segment) as the implicit class. This keeps the simple case trivial — `vtx.identity.<id>.email` without explicit class defaults to `class: "email"`.
+**No default class.** A write submission that omits the `class` field resolves no governing DDL — step 6
+takes the permissive-by-default path above (no schema validation, no `permittedCommands`, no sensitivity
+constraint). The document's `class` field is the sole source of truth for an entity's type and sensitivity;
+nothing defaults or infers it from the key.
 
 **Class uniqueness:** Within each DDL kind, canonical names must be globally unique:
 - Aspect-type DDLs: unique `canonicalName` across all `class: "meta.ddl.aspectType"` meta-vertices
