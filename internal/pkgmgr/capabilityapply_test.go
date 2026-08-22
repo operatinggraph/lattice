@@ -691,10 +691,16 @@ func TestCapabilityApplyPlan_UpgradeExisting_RequiresMovedVersion(t *testing.T) 
 		baseVersion string
 		wantField   string // "" → the admitted case
 	}{
-		{"newVersion absent", "", installedVersion, "newVersion"},
-		{"newVersion equals installed", installedVersion, installedVersion, "newVersion"},
-		{"baseVersion absent", "1.2.0", "", "baseVersion"},
-		{"baseVersion not installed", "1.2.0", "1.0.0", "baseVersion"},
+		// Each wantField is a clause unique to ITS refusal. Matching on the bare
+		// field name would let a row pass on its neighbour's message — both
+		// version rules name "baseVersion", so a disabled absent-check would go
+		// green on the mismatch-check's wording.
+		{"newVersion absent", "", installedVersion, "no target.newVersion"},
+		{"newVersion equals installed", installedVersion, installedVersion, "which is the version already installed"},
+		{"newVersion equals installed modulo whitespace", " " + installedVersion + " ", installedVersion, "which is the version already installed"},
+		{"baseVersion absent", "1.2.0", "", "no target.baseVersion"},
+		{"baseVersion not installed", "1.2.0", "1.0.0", "no longer there"},
+		{"baseVersion matches modulo whitespace", "1.2.0", " " + installedVersion + " ", ""},
 		{"admitted", "1.2.0", installedVersion, ""},
 	}
 	for n, tc := range cases {
@@ -862,5 +868,205 @@ func TestApplyCapabilityPlan_NewPackageRaceAtSameVersionIsNotSuccess(t *testing.
 	// it nor took anything from it.
 	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
 		t.Fatal("the occupant's keys must be untouched by the refused race")
+	}
+}
+
+// TestApplyCapabilityPlan_UpgradeRequiresTheBaseStillInstalled pins
+// RequireInstalled, which nothing else does: the option's other stated effect
+// (defeating Apply's same-version skip) is unreachable through this entry point,
+// because the plan builder refuses a newVersion equal to the installed version
+// before a plan carrying one can exist. So this is the only observable
+// consequence, and without it the option is unfalsifiable.
+//
+// The package is uninstalled between the plan build and the apply. The honest
+// answer is that the base is gone; the answer without RequireInstalled is a
+// fresh install landing on the uninstall's own tombstones, which fails later and
+// says something else entirely.
+func TestApplyCapabilityPlan_UpgradeRequiresTheBaseStillInstalled(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	installed := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, installed); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	proposalKey := seedApprovedProposalWithTarget(t, ctx, conn, "CAApplyGoneHJKMNPQR", map[string]any{
+		"packageName": installed.Name,
+		"mode":        "upgradeExisting",
+		"newVersion":  "0.2.0",
+		"baseVersion": "0.1.0",
+	})
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+
+	// The base goes away between the plan and the apply.
+	if _, err := inst.Uninstall(ctx, installed.Name, UninstallOptions{}); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
+	if err == nil {
+		t.Fatalf("an upgrade whose base was uninstalled must say so, got: %+v", res)
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("want ErrNotInstalled — anything else means the apply tried a fresh install onto the uninstall's tombstones; got %v", err)
+	}
+}
+
+// TestApplyCapabilityPlan_NeverForces pins that Force is not set. Force would
+// defeat the same-version skip, which is the tempting thing for a future author
+// to reach for, and it would simultaneously re-open the same-version diff path
+// the plan builder refuses for an independent reason.
+//
+// It is observable through the one behaviour only Force produces here: with the
+// package installed at the plan's own version and RequireInstalled in play, a
+// covering apply either skips or diffs, and Force is what decides. Setting it
+// would turn this same-version case into an in-place diff.
+func TestApplyCapabilityPlan_NeverForces(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	installed := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, installed); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// A newPackage plan whose name is occupied at its own version. Without
+	// Force, Apply's same-version branch returns skip and the post-condition
+	// converts it. With Force, Apply would diff-apply into the occupant instead
+	// and the error would be the coverage refusal — a different sentinel, on an
+	// apply that had no business computing a delta at all.
+	proposalKey := seedApprovedProposal(t, ctx, conn, "CAApplyNoForceHJKMN", installed.Name, "newPackage")
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err == nil {
+		t.Fatalf("precondition: a newPackage plan for an installed name must not build; got %+v", plan)
+	}
+
+	// Build the plan while the name is free, then let it be claimed.
+	ctx2, conn2, inst2 := newInstallerHarness(t)
+	const racedName = "cap-noforce-pkg"
+	pk2 := seedApprovedProposal(t, ctx2, conn2, "CAApplyNoForce2HJKM", racedName, "newPackage")
+	plan2, err := CapabilityApplyPlanForProposal(ctx2, conn2, pk2)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+	occupant := removalFixtureDef("0.1.0")
+	occupant.Name = racedName
+	if _, err := inst2.Install(ctx2, occupant); err != nil {
+		t.Fatalf("install the occupant: %v", err)
+	}
+	_, err = inst2.ApplyCapabilityPlan(ctx2, plan2)
+	if !errors.Is(err, ErrPackageNameClaimed) {
+		t.Fatalf("want ErrPackageNameClaimed from the un-forced same-version path; Force would have produced a delta instead. got %v", err)
+	}
+	_ = inst
+}
+
+// TestApplyCapabilityPlan_RemedyIsQualifiedPerMode pins that the refusal's
+// stated next move depends on what the proposal was trying to do. "Propose it
+// as a new package" is the answer for an upgrade of a package the proposal does
+// not own, and is nonsense for a proposal that already IS a new package and lost
+// a race for its name — a fixed clause would be false for one of them.
+func TestApplyCapabilityPlan_RemedyIsQualifiedPerMode(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	installed := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, installed); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	upgradeKey := seedApprovedProposalWithTarget(t, ctx, conn, "CAApplyRemedyUpHJKM", map[string]any{
+		"packageName": installed.Name,
+		"mode":        "upgradeExisting",
+		"newVersion":  "0.2.0",
+		"baseVersion": "0.1.0",
+	})
+	upgradePlan, err := CapabilityApplyPlanForProposal(ctx, conn, upgradeKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+	_, err = inst.ApplyCapabilityPlan(ctx, upgradePlan)
+	var upgradeRefusal *ApplyWouldRemoveError
+	if !errors.As(err, &upgradeRefusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if !strings.Contains(upgradeRefusal.Remedy, "newPackage") {
+		t.Errorf("an upgradeExisting refusal must point at newPackage, got %q", upgradeRefusal.Remedy)
+	}
+	if !strings.Contains(upgradeRefusal.Remedy, "RENAMED") {
+		t.Errorf("the remedy must cover the rename case, which lands here looking like an edit; got %q", upgradeRefusal.Remedy)
+	}
+
+	// The newPackage arm: a race onto an occupied name at a DIFFERENT version,
+	// which reaches the delta and so produces the coverage refusal.
+	ctx2, conn2, inst2 := newInstallerHarness(t)
+	const racedName = "cap-remedy-race-pkg"
+	newKey := seedApprovedProposal(t, ctx2, conn2, "CAApplyRemedyNwHJKM", racedName, "newPackage")
+	newPlan, err := CapabilityApplyPlanForProposal(ctx2, conn2, newKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+	occupant := removalFixtureDef("0.2.0")
+	occupant.Name = racedName
+	if _, err := inst2.Install(ctx2, occupant); err != nil {
+		t.Fatalf("install the occupant: %v", err)
+	}
+	_, err = inst2.ApplyCapabilityPlan(ctx2, newPlan)
+	var newRefusal *ApplyWouldRemoveError
+	if !errors.As(err, &newRefusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if strings.Contains(newRefusal.Remedy, "propose it as `newPackage`") {
+		t.Errorf("a proposal that already IS newPackage must not be told to become one: %q", newRefusal.Remedy)
+	}
+	if !strings.Contains(newRefusal.Remedy, "name that is free") {
+		t.Errorf("the newPackage remedy must send the author to a free name, got %q", newRefusal.Remedy)
+	}
+}
+
+// TestMaterializedDefinition_IsNotAWriteHandle pins that inspection cannot
+// become authorship.
+//
+// Definition is a struct of slices and maps, so an accessor returning it by
+// value hands out the plan's own backing arrays: a caller "inspecting" the plan
+// could edit the lens body and have ApplyCapabilityPlan submit the edited one.
+// That defeats the entire reason the field is unexported — what lands has to be
+// what review approved — and no lint rule can see it, because the attack
+// involves no call to Apply at all.
+func TestMaterializedDefinition_IsNotAWriteHandle(t *testing.T) {
+	ctx, conn := newCapabilityApplyHarness(t)
+	proposalKey := seedApprovedProposal(t, ctx, conn, "CAApplyAliasHJKMNPQ", "alias-target-pkg", "newPackage")
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+	if len(plan.definition.Lenses) != 1 {
+		t.Fatalf("fixture: want one lens, got %d", len(plan.definition.Lenses))
+	}
+	approvedSpec := plan.definition.Lenses[0].Spec
+	approvedName := plan.definition.Lenses[0].CanonicalName
+
+	// Everything a caller holding the returned value could reach.
+	inspected := plan.MaterializedDefinition()
+	inspected.Lenses[0].Spec = "MATCH (x:anything) RETURN x.key AS key"
+	inspected.Lenses[0].CanonicalName = "smuggledLens"
+	inspected.Name = "some-other-package"
+	if len(inspected.Depends) > 0 {
+		inspected.Depends[0] = "smuggled-dependency"
+	}
+
+	if plan.definition.Lenses[0].Spec != approvedSpec {
+		t.Fatalf("the plan's lens body was rewritten through the accessor: %q", plan.definition.Lenses[0].Spec)
+	}
+	if plan.definition.Lenses[0].CanonicalName != approvedName {
+		t.Fatalf("the plan's lens identity was rewritten through the accessor: %q", plan.definition.Lenses[0].CanonicalName)
+	}
+	if plan.definition.Name != "alias-target-pkg" {
+		t.Fatalf("the plan's target package was rewritten through the accessor: %q", plan.definition.Name)
+	}
+
+	// And what a second inspection sees is still the approved artifact — the
+	// assertion that would catch a copy shallow enough to share one level down.
+	again := plan.MaterializedDefinition()
+	if again.Lenses[0].Spec != approvedSpec || again.Lenses[0].CanonicalName != approvedName {
+		t.Fatalf("a later inspection saw the mutation: %+v", again.Lenses[0])
 	}
 }

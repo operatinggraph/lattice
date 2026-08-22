@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1151,5 +1152,66 @@ func TestReviewCapabilityApply_RemovalRefusalIs409(t *testing.T) {
 	}
 	if !strings.Contains(msg, "newPackage") {
 		t.Errorf("the refusal must carry its remedy through to the console, got %q", msg)
+	}
+}
+
+// TestReviewCapabilityApply_SameVersionUpgradeIsNotResumable pins the ordering
+// that makes the console's recovery classification sound.
+//
+// The classification answers "is this package live at the target version", and
+// treats yes as "the install committed, close it with mark-applied". An
+// upgradeExisting proposal declaring newVersion EQUAL to the installed version
+// produces that same yes without ever having applied — so with the target
+// preconditions running only inside the plan builder, which this branch returns
+// before reaching, every such proposal was closed over an artifact that never
+// landed. The refusal has to be asked for first.
+func TestReviewCapabilityApply_SameVersionUpgradeIsNotResumable(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+
+	const pkgName = "gamma"
+	putInstalledPackage(t, put, "liveGamma", pkgName, "1.2.0", false)
+
+	proposalKey := "vtx.capabilityproposal.samever1"
+	contentJSON, err := json.Marshal(validLensContent)
+	if err != nil {
+		t.Fatalf("marshal artifact content: %v", err)
+	}
+	put(bootstrap.CoreKVBucket, proposalKey+".review", `{"isDeleted":false,"data":{"state":"approved"}}`)
+	put(bootstrap.CoreKVBucket, proposalKey+".artifact",
+		`{"isDeleted":false,"data":{"kind":"lens","content":`+string(contentJSON)+`}}`)
+	put(bootstrap.CoreKVBucket, proposalKey+".target",
+		`{"isDeleted":false,"data":{"packageName":"`+pkgName+`","mode":"upgradeExisting",`+
+			`"newVersion":"1.2.0","baseVersion":"1.2.0"}}`)
+
+	putCapProposal(t, put, "samever1", map[string]any{
+		"intent": "approved, targets its own installed version", "kind": "lens",
+		"content": validLensContent, "reviewState": "approved", "targetMode": "upgradeExisting",
+		"targetPackageName": pkgName, "targetNewVersion": "1.2.0",
+	})
+
+	res, body := postReview(t, client, base, "/api/review/capability/samever1/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %+v", res.StatusCode, body)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("a proposal that never applied was offered the mark-applied recovery, which would close it over nothing: %+v", body)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "which is the version already installed") {
+		t.Fatalf("want the precondition's own refusal, got %+v", body)
+	}
+}
+
+// TestPackageApplyStatus_UndeclaredSecureColumnDropIs409 covers the refusal a
+// partial capability apply used to reach FIRST, before the coverage guard was
+// moved ahead of it — and which any source-authored upgrade still reaches. It
+// returned a bare error, so it fell through to 502: the code this console's own
+// front end retries, for a state that stays refused until an author writes an
+// attestation.
+func TestPackageApplyStatus_UndeclaredSecureColumnDropIs409(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", pkgmgr.ErrUndeclaredSecureColumnDrop)
+	if got := packageApplyStatus(err); got != http.StatusConflict {
+		t.Fatalf("packageApplyStatus = %d, want 409 — an unattested erasure is not a transient", got)
 	}
 }

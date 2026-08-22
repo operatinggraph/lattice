@@ -2440,3 +2440,97 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestSampleWithOverflow_Truncates covers the renderer both refusal messages
+// share. Its whole job is to stop a sample reading as the whole set, and
+// nothing else asserted that it truncates at all — a cap raised to a huge
+// number, or an overflow marker that never printed, would have been invisible.
+func TestSampleWithOverflow_Truncates(t *testing.T) {
+	items := []string{"a", "b", "c", "d", "e", "f", "g"}
+
+	t.Run("under the cap names everything and says nothing more", func(t *testing.T) {
+		got := sampleWithOverflow(items[:3], 5, "and %d more")
+		if got != "a, b, c" {
+			t.Fatalf("got %q, want the whole list unannotated", got)
+		}
+	})
+	t.Run("at the cap is still the whole list", func(t *testing.T) {
+		if got := sampleWithOverflow(items[:5], 5, "and %d more"); got != "a, b, c, d, e" {
+			t.Fatalf("got %q — the cap is inclusive, so five of five names five", got)
+		}
+	})
+	t.Run("over the cap names the cap and counts the rest", func(t *testing.T) {
+		got := sampleWithOverflow(items, 5, "and %d more")
+		if got != "a, b, c, d, e, and 2 more" {
+			t.Fatalf("got %q, want five names plus the unnamed count", got)
+		}
+	})
+	t.Run("each refusal keeps its own phrasing", func(t *testing.T) {
+		if got := sampleWithOverflow(items, removalSampleCap, "+%d more"); got != "a, b, c, d, +3 more" {
+			t.Fatalf("got %q, want the coverage refusal's shorter cap and marker", got)
+		}
+	})
+}
+
+// TestOccupancyRefusalTruncates drives the occupancy refusal's own message,
+// which reaches the renderer through boundedSample. The two refusals share one
+// implementation, so this is what keeps a change made for one of them from
+// silently re-shaping the other.
+func TestOccupancyRefusalTruncates(t *testing.T) {
+	live := []string{"vtx.a", "vtx.b", "vtx.c", "vtx.d", "vtx.e", "vtx.f", "vtx.g"}
+	err := occupiedDeclaredKeysError(Definition{Name: "sample-pkg"}, nil, live)
+	msg := err.Error()
+	if !strings.Contains(msg, "and 2 more") {
+		t.Fatalf("the occupancy refusal must count what it did not name; got %q", msg)
+	}
+	if strings.Contains(msg, "vtx.g") {
+		t.Fatalf("the occupancy refusal named a key past its cap, so the sample reads as the whole set: %q", msg)
+	}
+	if !strings.Contains(msg, "7 already-committed key(s)") {
+		t.Fatalf("the refusal must still state the TOTAL, or a truncated sample understates the problem; got %q", msg)
+	}
+}
+
+// TestApply_RefuseRemovals_MalformedDeclarationRefuses pins the fail-closed
+// direction of the one read the coverage guard rests on.
+//
+// A manifest whose declaredKeys cannot be read whole yields a SHORT old set,
+// and a short old set makes any Definition look like it covers everything. That
+// is the one wrong answer a coverage guard can give, so the partial-Definition
+// caller refuses instead. A source-authored caller still converges: re-declaring
+// from source is how the damaged manifest gets repaired, and refusing there
+// would strand it.
+func TestApply_RefuseRemovals_MalformedDeclarationRefuses(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	def := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	manifestKey := PackageVertexPrefix + entityNanoID(def.Name, "package") + ".manifest"
+	doc := kvDoc(t, ctx, conn, manifestKey)
+	data, _ := doc["data"].(map[string]any)
+	// The real declaration, plus one entry that is no longer a key. Keeping the
+	// real keys matters: the package still owns exactly what it owns, so the
+	// only thing under test is the unreadable entry.
+	data["declaredKeys"] = append(data["declaredKeys"].([]any), 42)
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	entry, err := conn.KVGet(ctx, CoreBucket, manifestKey)
+	if err != nil {
+		t.Fatalf("KVGet manifest: %v", err)
+	}
+	if _, err := conn.KVUpdate(ctx, CoreBucket, manifestKey, raw, entry.Revision); err != nil {
+		t.Fatalf("corrupt the manifest: %v", err)
+	}
+
+	if _, err := inst.Apply(ctx, sampleDef("0.2.0"), ApplyOptions{RefuseRemovals: true}); !errors.Is(err, ErrMalformedDeclaredKeys) {
+		t.Fatalf("want ErrMalformedDeclaredKeys — a coverage guard may not conclude coverage from a list it cannot read; got %v", err)
+	}
+	// The source-authored path still converges over the same damage.
+	if _, err := inst.Apply(ctx, sampleDef("0.2.0"), ApplyOptions{}); err != nil {
+		t.Fatalf("the source-authored path must still repair a damaged manifest, got %v", err)
+	}
+}
