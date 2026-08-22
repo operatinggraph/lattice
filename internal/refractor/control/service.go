@@ -1323,6 +1323,24 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 		return ControlResponse{Error: fmt.Sprintf("hydrate: %s", errors.Join(errs...))}
 	}
 
+	// The SYNC end position is read a second time, here, after every hydrator
+	// has returned (edge-first-paint-gate-identity-design.md §3.1): because
+	// substrate.Conn.Publish waits for the JetStream store ack, every message
+	// the fan-out above just published — rows, keyset frames, markers, across
+	// every lens — is already appended by the time this read runs, so it
+	// bounds the whole cycle. Same own-subject, fail-soft posture as the
+	// start read: an unset seam or a read error degrades to 0, and the
+	// requesting node falls back to its degraded gate rather than the op
+	// failing.
+	var syncEndSeq uint64
+	if lastSeqFn == nil {
+		slog.Warn("control: hydrate: sync end seq not configured, client falls back to degraded gate", "identityId", body.IdentityID)
+	} else if seq, err := lastSeqFn(ctx, body.IdentityID); err != nil {
+		slog.Warn("control: hydrate: read sync end seq, client falls back to degraded gate", "identityId", body.IdentityID, "err", err)
+	} else {
+		syncEndSeq = seq
+	}
+
 	if body.DeviceID != "" && kv != nil {
 		if cerr := personalinterest.SetRevisionCursor(ctx, kv, body.IdentityID, body.DeviceID, highWater,
 			time.Now().UTC().Format(time.RFC3339)); cerr != nil {
@@ -1330,7 +1348,7 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 				"deviceId", body.DeviceID, "err", cerr)
 		}
 	}
-	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs, SyncStartSeq: syncStartSeq}}
+	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs, SyncStartSeq: syncStartSeq, SyncEndSeq: syncEndSeq}}
 }
 
 // personalSessionKey mints a transient Vault session key for the requesting

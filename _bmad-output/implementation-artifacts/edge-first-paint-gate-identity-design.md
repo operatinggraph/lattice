@@ -84,14 +84,26 @@ Two arming rules the adversarial pass forced (§10 findings 1 and 3):
   floor is same-session, same-numbering-space state — floor ≥ endSeq genuinely means "burst already
   applied". On the `ensureFresh`-triggered paths (cold boot, gap, operator-requested hydration) the floor
   at arm time derives from the **persisted cursor of a previous session**, and `floor ≤ syncStartSeq ≤
-  endSeq` provably holds absent a stream reset — so an arm-time `floor > endSeq` there is not a release,
-  it is **evidence the sequence spaces diverged** (stream recreation, DR restore, world wipe — reachable:
-  `personalSyncGap` deliberately does no cursor validation, so a numerically-huge stale cursor reads as
-  not-gapped, and the operator-requested `hydrationRequested` bit independently forces a hydrate). The
-  cold-path arm therefore never releases immediately: `floor > endSeq` logs Error and degrades to the
-  deadline-only mode (§3.4's fallback family) instead of painting an empty store. The old revision-space
-  gate had no such failure mode, so the new position-space gate must refuse the comparison exactly where
-  its precondition (monotone growth) is broken.
+  endSeq` provably holds absent a stream reset — so an arm-time floor at or above `endSeq` there is not a
+  release, it is **evidence the sequence spaces diverged** (stream recreation, DR restore, world wipe —
+  reachable: `personalSyncGap` deliberately does no cursor validation, so a numerically-huge stale cursor
+  reads as not-gapped, and the operator-requested `hydrationRequested` bit independently forces a hydrate).
+  The cold-path arm therefore never releases immediately: it logs Error and degrades to §3.4's fallback
+  family instead of painting an empty store. The old revision-space gate had no such failure mode, so the
+  new position-space gate must refuse the comparison exactly where its precondition (monotone growth) is
+  broken.
+
+  **Amended at build, 2026-08-22 — two corrections to this bullet, both proven by test.** *(a)* The
+  comparison is **`cursor >= endSeq`, not `>`**: the floor is seeded at the cursor and only ever released
+  past what is already persisted, so a gate whose end position is *exactly* the cursor cannot be satisfied
+  by any message of its own burst — every one sits at or below it — and left in position mode it would wait
+  out a whole deadline window for nothing. Equality degrades for a different reason than divergence, with
+  the same answer. *(b)* The check **cannot run at arm time at all**: `Run` calls `ensureFresh` (which arms)
+  *before* it seeds `m.floor.reset(stored)`, so at cold-arm time the floor still holds the previous attach's
+  state — on a first `Run` that is 0, and on a host that re-`Run`s the same Manager it is the previous
+  attach's cursor. It runs in `Run`, immediately after the floor is seeded and before the consumer starts,
+  which is the only moment the two numbers are comparable undisturbed, and still strictly before any
+  delivery can be consumed (R3 intact).
 - **Ready-evaluation, disarm, and the fire decision are one generation-checked critical section** under
   the existing `gateMu` (the callback itself runs outside the lock). Release can fire from three
   goroutines (floor advance, arming, timer); without the generation re-check inside the same section that
@@ -139,6 +151,25 @@ that legitimately count as progress, and foreign deliveries above `endSeq` relea
 refuted shape's idle timer failed the other way around: it *reset on* traffic while measuring idleness of
 the wrong thing.
 
+**Amended at build, 2026-08-22 — the paragraph above is a POSITION-MODE argument, and applying it to the
+fallback mode is exactly the refuted shape's bug.** A fallback gate (§3.4) releases on a *marker*, so a
+delivered delta is no evidence at all that its release is approaching; and because the SYNC subject is
+per-**actor**, ordinary live traffic — this device's own writes, a second device's — would re-arm the
+window indefinitely and the fallback gate would **never open**, while also swallowing every later marker
+below its target for the life of the process. Both halves are R1 and R2 refuted on precisely the path R4's
+fail-soft selects. So: **only a position-mode gate records progress. For a fallback gate the deadline is a
+total bound of one window** — which is what makes the degraded mode *bounded* rather than merely different,
+as §3.4 claims.
+
+Second correction, same date: **progress is RESOLUTION, not the persisted floor moving.** `deliveryFloor`
+reports no advance whenever the computed floor sits at or below what is already persisted — so a hydrate
+whose *start* read fail-softed to 0 while its *end* read succeeded delivers the whole retained subject
+below an already-higher cursor, advancing the floor by nothing for as long as that takes, and the window
+would expire mid-burst and paint on a world that had not been delivered at all. The gate's progress signal
+is therefore "a sequence this attach had not passed before resolved" (newly delivered, or newly un-held),
+which is strictly stronger than "the floor moved" and still untriggerable by a duplicate. Release continues
+to follow the persisted floor: **release follows applied state, progress follows resolution.**
+
 Fail direction on a genuine stall is paint-possibly-partial — today's shipped first-marker behaviour was
 also unbounded-wrong in that direction, but the pass is right that a zero-delivery release is a **new**
 outcome (today's gate has no timer and fires only on a marker): accepted, rare (requires an armed gate and
@@ -164,9 +195,35 @@ a full window with no floor movement at all), and loud. Cancelled on release, sh
 | released | floor ≥ endSeq (at arm — `Rehydrate` path only — or on advance), generation-checked under `gateMu` → disarm + cancel timer + fire once |
 | deadline | timer expiry with zero floor progress since (re)arm → disarm + fire once, Warn; progress re-arms |
 | replaced | a newer cycle's arming cancels it silently |
-| reconnect without re-hydrate | gate persists — the floor is monotone across attaches (cursor-backed), endSeq stays valid |
+| reconnect without re-hydrate, **or a `Run` that returns on a transient failure** | gate persists — the floor is monotone across attaches (cursor-backed), endSeq stays valid |
 | crash | in-memory, gone; next boot re-hydrates (new gate) or warm-resumes (no gate — host paints from the local store, existing behaviour) |
 | shutdown | timer cancelled with the Manager's ctx |
+
+**Amended at build, 2026-08-22.** The "shutdown" row is keyed on **ctx cancellation specifically**, and the
+distinction is load-bearing rather than pedantic: disarming on *every* `Run` return deletes the deadline —
+first paint's only liveness backstop — on exactly the transient consumer failure where a host most needs the
+gate to open on what arrived. The browser host gets **one `Run` per page and no restart loop**, so that
+would hang its first paint for the life of the page; `cmd/facet`'s restart loop loses it differently, because
+the retry warm-resumes and arms no new gate at all. A host that does restart and re-hydrates supersedes any
+surviving gate by generation, so nothing accumulates. Hence the transient-failure return shares the
+reconnect row above.
+
+Also corrected here: the callback-threading sentence below overstates the guarantee. **The release
+*decision* is serialized by the generation-checked critical section; the callback *delivery* is not** — two
+goroutines that decided in order can invoke the host in the opposite order. That is sound only because both
+hosts' callbacks are mutex-guarded idempotent re-marks that derive nothing from the value, which the
+adversarial pass verified rather than assumed.
+
+**Accepted residuals, named at build (2026-08-22), none of them changing the shape above:**
+
+- A `Term` whose cursor write fails on the burst's *last* message leaves the gate unconsulted (the floor
+  never reached the store), so release falls to the deadline.
+- A `Rehydrate`-armed gate whose `Run` is not running has no owner — the `Manager` has no `Close` — so it
+  holds a timer for at most one window and may fire one idempotent re-mark into a host mid-teardown.
+- On the **fallback** path R3 is not structural: `Rehydrate`'s marker can be consumed before the response
+  arms the gate, and there is no arm-time equivalent of the floor check to recover it, so that cycle
+  releases one deadline window late. Shipped behaviour in the same situation was to hang forever, so this
+  is bounded where it was not — §3.4's own standard.
 
 Callback threading: release fires from the consumer goroutine (floor advance), the arming goroutine
 (`Rehydrate` arm-time release), or the timer goroutine (deadline) — serialized by §3.2's generation-checked
@@ -430,3 +487,52 @@ None out of scope so far; anything the build surfaces is absorbed into this run'
 Narrowing the no-gate-armed steady-state marker behaviour (§3.2 says so by name); any wire/envelope change
 to deltas or markers; a per-hydrate correlation id (§4); an injectable clock for the package; the EDGE.5
 browser-node transport work.
+
+---
+
+## Close-out (2026-08-22) — BUILT, both increments, one fire
+
+**Status: ✅ BUILT.** Inc 1 `9d1c861`; Inc 2 in the same fire. No checkpoint to resume — the item is
+complete, and the board row moves to the Done log.
+
+### Deviations from the ratified body
+
+Four, each argued and amended **in the body where it stands** rather than only here: the cold-path
+comparison is `>=` and lives in `Run` (§3.2); the deadline is a stall detector in position mode and a
+total bound in fallback (§3.3); progress follows resolution, not the persisted floor (§3.3); the
+"shutdown" row is ctx-cancellation specifically, and a transient `Run` return keeps the gate (§3.5).
+The design's `SyncEndSeq == 0` fallback family, replacement rules, marker handling and §7 test list
+shipped as written.
+
+### Review — 3-layer adversarial (three cold reviewers, none the implementer), one fix round
+
+Two blocking defects and a blocking test gap, all fixed pre-ship:
+
+- **The fallback gate could never open** — the progress signal was recorded for any armed gate, so
+  ordinary live traffic on the per-actor subject re-armed the window indefinitely, and the permanently
+  armed gate swallowed every later marker below its target. R1 and R2 refuted on the path R4 selects.
+- **`Run`'s unconditional deferred disarm deleted the liveness backstop** on a transient consumer
+  failure — a hang for the whole page on the browser host, which gets one `Run` and no restart loop.
+- **The `armCold`/`armLive` discriminator — the entire embodiment of §10's blocker — had no test.**
+  Deleting it left the package green, and it is production-reachable because a host that re-`Run`s the
+  same Manager arms while the floor still holds the previous attach's cursor.
+
+Plus five material fixes: the progress signal was blind to a burst replayed below an already-higher
+cursor; the diverged-position check needed its equality boundary; three tests pinned a fixture artifact
+or passed with the position mechanism switched off.
+
+Fourteen mutations were run against the final tree, including every one that survived the first pass, and
+all are now killed by a named test — among them "force `endSeq = 0` at arming", which must fail every
+position-mode test and does.
+
+### Findings classification (`agents/steward/SKILL.md` §4)
+
+| class | count | routed to |
+|---|---|---|
+| design-gap (a ratified argument that did not survive contact) | 3 | body amendments above |
+| implementation-bug | 1 | fixed |
+| test-gap (a mechanism with no test, or a test pinning a fixture) | 4 | fixed; two classes to the dossier |
+| review-over-reach (raised, ruled against, recorded) | 3 | §3.5's accepted residuals |
+
+Two classes reached `docs/components/edge.md`'s dossier; two existing entries gained the check that now
+catches them.

@@ -247,12 +247,24 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   opens** — a release rule whose liveness fallback is armed only *after* its own release precondition is
   met cannot bound the case where that precondition never arrives. Hanging first paint forever is
   strictly worse than the partial paint being fixed. Minted: cold-sign-in Fire 4, built and refuted
-  (`fab96db4`, not merged). Check: none yet — routed to a designer pass.
+  (`fab96db4`, not merged). Check: `TestManager_FirstPaintGate_DeadlineIsAStallDetector` +
+  `..._FallbackDeadlineIsATotalBound` + `..._ShutdownRetiresTheGateButAFailureKeepsIt`.
+- **A liveness backstop's PROGRESS signal must be evidence its OWN release condition is approaching** —
+  borrowed from a neighbouring mode it makes the gate never open. A stall-detecting deadline that re-arms
+  on delivery is sound while the gate releases on *delivery position*; the same rule under a gate that
+  releases on a *marker* lets ordinary traffic on the per-actor subject extend the window forever. A gate
+  with two release modes needs its liveness argument re-run per mode, not inherited. Minted: first-paint
+  position gate, cold review (this fire). Check: `..._FallbackDeadlineIsATotalBound`.
+- **A single-critical-section invariant cannot be pinned by a racing test** — the window a split
+  critical section would open is narrower than goroutine start latency, so the mutation survives thousands
+  of `-race` iterations and the test proves only that neither coarse ordering misbehaves. Either say so in
+  the test's own comment or pin the property structurally; do not let a loop-count imply a barrier that
+  is not there. Minted: first-paint position gate, two cold reviewers independently. Check: none — the
+  claim was narrowed to what the test proves.
 - **The SYNC subject is per-ACTOR, not per-device** — a second device signed in as the same identity
   publishes onto the same feed, so any per-device rule keyed on "what arrived on my subject" (an idle
   timer, a membership set, a freshness test) can be satisfied or reset by the other device. Minted:
-  cold-sign-in Fire 4 review. Check: none yet; board row *"A second device's hydrate releases this
-  device's first-paint gate"*.
+  cold-sign-in Fire 4 review. Check: `TestManager_FirstPaintGate_SecondDeviceTrafficCannotRelease`.
 - **On the browser, resolving a position and using it are separated by an UNBOUNDED wait** — the Web-Locks
   leader gate sits between them, so a follower tab computes its cursor, gap check and floor at page boot
   and may attach days later, after retention has passed the position it named. An out-of-range

@@ -68,6 +68,14 @@ const (
 	// doubled each retry. Short enough not to stall a healthy boot, present so
 	// a transient control-plane blip does not fail the whole session.
 	syncGapRetryBaseBackoff = 100 * time.Millisecond
+
+	// defaultHydrateGateDeadline is how long the first-paint gate waits with no
+	// delivery progress at all before releasing anyway
+	// (Config.HydrateGateDeadline). The hydrate burst is fully appended to the
+	// stream before the RPC response returns, so what is being waited on is the
+	// delivery and application of a bounded backlog — generous here is cheap,
+	// because progress re-arms the window rather than consuming it.
+	defaultHydrateGateDeadline = 30 * time.Second
 )
 
 // deltaEnvelope mirrors the wire shape a Personal Lens delta publishes to
@@ -127,6 +135,16 @@ type Config struct {
 	// (facet-app-ux.md §2/§3.0: "nothing today tells a host process the
 	// initial catch-up is done").
 	OnHydrationComplete func(revision uint64)
+	// HydrateGateDeadline bounds how long the first-paint gate (hydrateGate)
+	// waits before firing OnHydrationComplete anyway. For a gate holding a
+	// burst end position it is a stall detector rather than a total bound:
+	// every delivery that resolves a new sequence re-arms the window, so a
+	// large world — or a browser tab whose timers and IndexedDB writes are
+	// background-throttled — takes as long as it needs, and only a full window
+	// in which nothing resolved at all releases the gate (loudly, and possibly
+	// on a partial world). For a gate with no end position to wait for it is a
+	// total bound of one window. Zero uses defaultHydrateGateDeadline.
+	HydrateGateDeadline time.Duration
 	// OnRunEstablished, if set, is invoked once per Run call, after
 	// ensureFresh succeeds and before the durable consumer starts — on the
 	// cold-hydrate and warm-resume paths alike (OnHydrationComplete fires
@@ -156,18 +174,89 @@ type Manager struct {
 	durable string
 	logger  *slog.Logger
 
-	// gateMu guards hydrateTarget/hydrateArmed (see armHydrateGate /
-	// hydrationGateReady): hydrate() arms it from Run's/Rehydrate's calling
-	// goroutine while handle() reads it from the durable consumer's delivery
-	// goroutine.
-	gateMu        stdsync.Mutex
-	hydrateTarget uint64
-	hydrateArmed  bool
+	// gateMu guards gate. Three goroutines reach it — hydrate() arms from
+	// Run's/Rehydrate's calling goroutine, handle() releases from the durable
+	// consumer's delivery goroutine, and the deadline timer expires on its own
+	// — so every operation decides UNDER this lock and returns whether the
+	// caller must fire; the callback itself always runs outside it.
+	gateMu stdsync.Mutex
+	gate   hydrateGate
+	// gateDeadline is how long an armed gate tolerates zero delivery progress
+	// (Config.HydrateGateDeadline, or defaultHydrateGateDeadline).
+	gateDeadline time.Duration
 
 	// floor keeps the persisted cursor a contiguous resume floor rather than a
 	// high-water mark. See deliveryFloor.
 	floor deliveryFloor
 }
+
+// hydrateGate is one hydrate cycle's first-paint gate: the state that decides
+// when OnHydrationComplete fires, so a host paints the world that cycle brought
+// rather than whatever fraction of it arrived first.
+//
+// It is a LEVEL, not an edge. In POSITION mode (endSeq > 0) it releases when
+// the delivery floor reaches endSeq — the sequence the control plane read on
+// this identity's own SYNC subject after its hydrate fan-out returned, which
+// sits at or above every message of every lens's burst (substrate.Conn.Publish
+// waits for the store ack, so the whole burst is appended before the response
+// exists). Because the floor is contiguous, reaching endSeq means every
+// sequence at or below it is applied, terminal, or never delivered: the whole
+// world, not whichever lens happened to publish its marker first, and a second
+// device's traffic on the shared per-actor subject can only delay the release,
+// never cause it. In FALLBACK mode — endSeq == 0, either because the control
+// plane could name no position or because a cold arm found the position spaces
+// diverged — it releases instead on a hydrationComplete marker whose revision
+// is at or above the cycle's, bounded by the same deadline.
+//
+// generation stamps each cycle. Because release can be decided from three
+// goroutines, the decision to fire is taken in one gateMu critical section that
+// checks the generation it observed; a newer cycle's arming silently supersedes
+// an older one, which can then never fire.
+//
+// # Lifetime
+//
+//	| boundary | state |
+//	|---|---|
+//	| created — at hydrate()'s response (cold boot, gap, operator-requested, Rehydrate) | armed under a new generation, endSeq/revision from the response, deadline timer running, progressed cleared |
+//	| the floor reaches endSeq — at a live arm, or on an advance in handle | disarmed, timer stopped, callback fired once |
+//	| a marker at or above revision, fallback mode only | disarmed, timer stopped, callback fired once |
+//	| a deadline window that saw a sequence resolved, position mode | progressed cleared, timer reset, still armed |
+//	| a deadline window with nothing resolved — or any window in fallback mode | Warn, disarmed, timer dropped, callback fired once |
+//	| a cold arm whose stored cursor is not below endSeq | endSeq zeroed: the sequence spaces diverged, or the burst is already behind the floor, so the gate degrades to fallback mode rather than paint an empty store or wait for a release that cannot come |
+//	| a newer cycle arms | replaced silently — prior timer stopped, prior state dropped |
+//	| a transport reconnect within one Run, or a Run that returns on a transient failure | untouched — the deadline is first paint's only liveness backstop, and a host that restarts supersedes the gate by generation |
+//	| the Manager's ctx is cancelled (shutdown) | disarmed, timer stopped |
+//	| crash | in memory only, gone; the next boot re-hydrates (new gate) or warm-resumes (no gate) |
+type hydrateGate struct {
+	generation uint64
+	armed      bool
+	endSeq     uint64
+	revision   uint64
+	deadline   *time.Timer
+	// progressed records whether a sequence this attach had not passed before
+	// resolved since the deadline timer was last armed or reset. It is what
+	// makes the deadline a stall detector rather than a total bound: an expiry
+	// that finds it set re-arms the window instead of releasing. Only a
+	// position-mode gate ever records it (noteProgressLocked).
+	progressed bool
+}
+
+// hydrateArm names which of hydrate()'s two callers is arming the gate, because
+// an arm-time release is legal on exactly one of them.
+type hydrateArm int
+
+const (
+	// armCold is ensureFresh's arm: cold boot, retention gap, or an
+	// operator-requested hydration. The consumer has not started, and the
+	// delivery floor still holds a PREVIOUS session's persisted cursor — so
+	// floor >= endSeq there says nothing about this burst having been applied
+	// (see degradeGateOnDivergedPosition for what it does say).
+	armCold hydrateArm = iota
+	// armLive is Rehydrate's arm: the consumer is attached and the floor is
+	// this session's own applied state, so floor >= endSeq means the burst
+	// landed while the RPC was still in flight and the gate releases at once.
+	armLive
+)
 
 // deliveryFloor tracks, for one attach, which delivered sequences are still
 // unresolved, so the persisted cursor never advances past a message the node
@@ -241,11 +330,21 @@ func (f *deliveryFloor) hold(seq uint64) {
 
 // release records that seq is permanently resolved and reports the floor to
 // persist, or advanced=false when the floor has not moved past what is already
-// stored.
-func (f *deliveryFloor) release(seq uint64) (floor uint64, advanced bool) {
+// stored. resolved reports whether seq is one this attach had not passed
+// before — newly delivered or newly un-held — rather than a duplicate of one
+// already behind the floor.
+//
+// The two answers are to different questions, and the first-paint gate asks
+// both. RELEASE follows the persisted floor, because paint must follow applied
+// state. PROGRESS follows resolution: a burst replayed below an
+// already-higher persisted cursor advances the floor by nothing at all, and is
+// emphatically not the stall the gate's deadline exists to detect.
+func (f *deliveryFloor) release(seq uint64) (floor uint64, advanced bool, resolved bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	_, wasHeld := f.pending[seq]
 	delete(f.pending, seq)
+	resolved = wasHeld || seq > f.highest
 	if seq > f.highest {
 		f.highest = seq
 	}
@@ -256,9 +355,21 @@ func (f *deliveryFloor) release(seq uint64) (floor uint64, advanced bool) {
 		}
 	}
 	if floor <= f.persisted {
-		return 0, false
+		return 0, false, resolved
 	}
-	return floor, true
+	return floor, true, resolved
+}
+
+// current reports the floor that has actually reached the store.
+//
+// It answers with `persisted`, not `highest`: handle() consults the first-paint
+// gate immediately after commit, so both release paths — a floor advance and an
+// arm-time check — compare the same number, and paint follows APPLIED state
+// rather than merely delivered state.
+func (f *deliveryFloor) current() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.persisted
 }
 
 // commit records that floor reached the store.
@@ -288,14 +399,19 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 	if prefix == "" {
 		prefix = defaultSubjectPrefix
 	}
+	gateDeadline := cfg.HydrateGateDeadline
+	if gateDeadline <= 0 {
+		gateDeadline = defaultHydrateGateDeadline
+	}
 	return &Manager{
-		tr:      tr,
-		store:   st,
-		cfg:     cfg,
-		stream:  stream,
-		prefix:  prefix,
-		durable: DurableName(cfg.IdentityID, cfg.DeviceID),
-		logger:  logger,
+		tr:           tr,
+		store:        st,
+		cfg:          cfg,
+		stream:       stream,
+		prefix:       prefix,
+		durable:      DurableName(cfg.IdentityID, cfg.DeviceID),
+		logger:       logger,
+		gateDeadline: gateDeadline,
 	}, nil
 }
 
@@ -317,6 +433,23 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 // may have passed that position — which JetStream clamps UP, skipping the span
 // in between, exactly the direction the cursor exists to prevent.
 func (m *Manager) Run(ctx context.Context) error {
+	// A gate armed on this attach must not outlive the Manager, so SHUTDOWN —
+	// which for both hosts means this context being cancelled — drops it and
+	// its timer rather than let a stray expiry fire OnHydrationComplete into a
+	// torn-down engine.
+	//
+	// A Run that returns for any other reason keeps it: the deadline is the
+	// only liveness backstop first paint has, and a transient consumer failure
+	// mid-burst is exactly when a host most needs the gate to open on what
+	// arrived. The browser host gets ONE Run per page and no restart loop, so
+	// disarming there would hang its first paint for the life of the page. A
+	// host that does restart re-hydrates, and that cycle supersedes any
+	// surviving gate by generation, so nothing accumulates.
+	defer func() {
+		if ctx.Err() != nil {
+			m.disarmHydrateGate()
+		}
+	}()
 	if gate, ok := m.tr.(transport.AttachGate); ok {
 		if err := gate.AwaitAttachReady(ctx); err != nil {
 			return fmt.Errorf("edge/sync: await attach readiness: %w", err)
@@ -333,6 +466,12 @@ func (m *Manager) Run(ctx context.Context) error {
 		return fmt.Errorf("edge/sync: read cursor: %w", err)
 	}
 	m.floor.reset(stored)
+	// The cold-path gate's position check belongs HERE, between the seeding and
+	// the consumer: ensureFresh arms before the floor holds the stored cursor,
+	// and no delivery can be consumed until RunDurableConsumer starts, so this
+	// is the first and last moment the two numbers can be compared against each
+	// other undisturbed.
+	m.degradeGateOnDivergedPosition(stored)
 	if m.cfg.OnRunEstablished != nil {
 		m.cfg.OnRunEstablished()
 	}
@@ -359,7 +498,7 @@ func (m *Manager) Run(ctx context.Context) error {
 // to skip, and moving it would mean tearing down a live consumer to buy
 // nothing (edge-cold-signin-delivery-position-design.md §3.5).
 func (m *Manager) Rehydrate(ctx context.Context) error {
-	_, err := m.hydrate(ctx)
+	_, err := m.hydrate(ctx, armLive)
 	return err
 }
 
@@ -478,7 +617,7 @@ func (m *Manager) ensureFresh(ctx context.Context) (startSeq uint64, err error) 
 	} else {
 		m.logger.Info("edge/sync: cold start, hydrating")
 	}
-	syncStartSeq, err := m.hydrate(ctx)
+	syncStartSeq, err := m.hydrate(ctx, armCold)
 	if err != nil {
 		return 0, err
 	}
@@ -568,22 +707,19 @@ func (m *Manager) syncGapOnce(ctx context.Context, cursor uint64) (gapped bool, 
 // caller then asserts none and receives the subject's full retained history,
 // which is what shipped before the position existed.
 //
-// The per-actor subject retains every delta ever published to it, including
-// every prior hydrate cycle's own terminal marker. A caller that discards the
-// returned position — or one attaching to a control plane that named none —
-// replays them all before reaching the fresh burst this call just triggered,
-// so armHydrateGate records the revision this call targets and handle() can
-// tell that fresh marker apart from a stale one rather than releasing the
-// caller's boot gate early.
-func (m *Manager) hydrate(ctx context.Context) (syncStartSeq uint64, err error) {
+// It also arms the first-paint gate (hydrateGate) from the same response: the
+// end position the cycle's whole burst sits at or below, the revision it
+// targets, and a deadline. arm says which caller this is, because only the live
+// path may release the gate against the floor as it stands right now.
+func (m *Manager) hydrate(ctx context.Context, arm hydrateArm) (syncStartSeq uint64, err error) {
 	if err := m.registerInterest(ctx); err != nil {
 		return 0, fmt.Errorf("personal.register: %w", err)
 	}
-	revision, lenses, syncStartSeq, err := m.callHydrate(ctx)
+	revision, lenses, syncStartSeq, syncEndSeq, err := m.callHydrate(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("personal.hydrate: %w", err)
 	}
-	m.armHydrateGate(revision)
+	m.armHydrateGate(syncEndSeq, revision, arm)
 	// A lens dropped from the DDL, or re-minted under a new rule ID, has no
 	// emitter left to heal its stranded attributions (personal-lens-
 	// retraction-design.md §3.4) — a completed hydrate is what closes that
@@ -600,33 +736,239 @@ func (m *Manager) hydrate(ctx context.Context) (syncStartSeq uint64, err error) 
 	return syncStartSeq, nil
 }
 
-// armHydrateGate records the revision the personal.hydrate RPC just
-// targeted, so hydrationGateReady can hold OnHydrationComplete off any
-// hydrationComplete marker replayed from before that point.
-func (m *Manager) armHydrateGate(target uint64) {
+// armHydrateGate installs the first-paint gate for the cycle personal.hydrate
+// just ran, REPLACING whatever was armed before: the prior cycle's timer is
+// stopped and its state dropped under one new generation, so only the newest
+// cycle can ever fire (a reconnect→gap→hydrate, or a Rehydrate racing a boot,
+// leaves exactly one gate behind).
+//
+// The deadline starts unconditionally, before anything has been delivered and
+// without waiting on any marker. A liveness backstop armed only once its own
+// release precondition is met cannot bound the case where that precondition
+// never arrives, which is the failure mode a first-paint gate must not have.
+//
+// arm decides whether the floor as it stands may release the gate on the spot;
+// see hydrateArm.
+func (m *Manager) armHydrateGate(endSeq, revision uint64, arm hydrateArm) {
+	var fire bool
 	m.gateMu.Lock()
-	m.hydrateTarget = target
-	m.hydrateArmed = true
+	generation := m.gate.generation + 1
+	m.stopDeadlineLocked()
+	m.gate = hydrateGate{
+		generation: generation,
+		armed:      true,
+		endSeq:     endSeq,
+		revision:   revision,
+	}
+	m.gate.deadline = time.AfterFunc(m.gateDeadline, func() { m.hydrateGateDeadlineExpired(generation) })
+	if arm == armLive {
+		fire = m.releaseAtFloorLocked(m.floor.current())
+	}
+	m.gateMu.Unlock()
+	if fire {
+		m.fireHydrationComplete(revision)
+	}
+}
+
+// releaseAtFloorLocked releases an armed POSITION-mode gate when floor has
+// reached its end position, and reports whether the caller must fire the
+// callback. Caller holds gateMu; the callback never runs under it. A
+// fallback-mode gate (endSeq == 0) is never released by a floor advance — it
+// waits for its marker or its deadline.
+func (m *Manager) releaseAtFloorLocked(floor uint64) bool {
+	if !m.gate.armed || m.gate.endSeq == 0 || floor < m.gate.endSeq {
+		return false
+	}
+	m.disarmLocked()
+	return true
+}
+
+// hydrateGateFloorAdvanced records that the delivery floor reached floor and
+// reports whether that releases the armed gate. Called from handle() only after
+// the cursor write landed, so an advance the store did not accept neither
+// counts as progress nor paints.
+func (m *Manager) hydrateGateFloorAdvanced(floor uint64) (fire bool, revision uint64) {
+	m.gateMu.Lock()
+	defer m.gateMu.Unlock()
+	if !m.gate.armed {
+		return false, 0
+	}
+	m.noteProgressLocked()
+	if !m.releaseAtFloorLocked(floor) {
+		return false, 0
+	}
+	return true, m.gate.revision
+}
+
+// noteHydrateGateProgress records delivery progress that offers the gate no
+// release: handle() calls it where the persisted floor did not move, so the
+// deadline can tell a slow burst from a stopped one.
+func (m *Manager) noteHydrateGateProgress() {
+	m.gateMu.Lock()
+	if m.gate.armed {
+		m.noteProgressLocked()
+	}
 	m.gateMu.Unlock()
 }
 
-// hydrationGateReady reports whether a hydrationComplete marker at revision
-// satisfies the currently armed gate, disarming it if so, and the target it
-// was checked against (for logging — reading m.hydrateTarget outside gateMu
-// would race armHydrateGate). No gate armed — a warm-resume live tail never
-// called hydrate(), or this Run's gate already cleared — always reports
-// ready, matching handle()'s pre-gate behavior.
-func (m *Manager) hydrationGateReady(revision uint64) (ready bool, target uint64) {
+// noteProgressLocked marks the deadline window as having seen delivery, for a
+// POSITION-mode gate only. Caller holds gateMu and has checked armed.
+//
+// A fallback-mode gate is deliberately excluded. Its release condition is a
+// marker, so a delivered delta is no evidence at all that it is approaching —
+// and because the SYNC subject is per-ACTOR, ordinary live traffic (this
+// device's own writes, a second device's) would otherwise re-arm the window
+// forever and the fallback gate would never open. For that gate the deadline is
+// a total bound of one window, which is what makes the degraded mode bounded
+// rather than merely different.
+func (m *Manager) noteProgressLocked() {
+	if m.gate.endSeq > 0 {
+		m.gate.progressed = true
+	}
+}
+
+// degradeGateOnDivergedPosition compares the cursor an attach resumes from
+// against the end position a cold-path gate is waiting for, and degrades the
+// gate to fallback mode unless the end position is strictly above the cursor.
+//
+// On a cold path the two numbers come from different sessions, and
+// cursor <= syncStartSeq <= endSeq holds by construction while the SYNC stream
+// keeps growing. A cursor ABOVE endSeq therefore reports that the sequence
+// spaces diverged — a stream recreation, a DR restore, a world wipe — which is
+// reachable, because personal.syncgap deliberately validates nothing (a
+// numerically huge stale cursor reads as not-gapped) while the operator's
+// hydration-request bit independently forces a hydrate. Releasing on that
+// comparison would paint an EMPTY store instantly.
+//
+// EQUALITY degrades too, for a different reason with the same answer: the floor
+// is seeded at the cursor and only ever released past what is already
+// persisted, so a gate whose end position is exactly the cursor cannot be
+// satisfied by any message of its own burst — every one of them sits at or
+// below it. Left in position mode it would wait out the whole deadline window
+// for nothing.
+//
+// Either way the position comparison is abandoned for this cycle and the gate
+// falls back to its marker rule plus the deadline.
+func (m *Manager) degradeGateOnDivergedPosition(cursor uint64) {
 	m.gateMu.Lock()
 	defer m.gateMu.Unlock()
-	if !m.hydrateArmed {
-		return true, 0
+	if !m.gate.armed || m.gate.endSeq == 0 || cursor < m.gate.endSeq {
+		return
 	}
-	if revision < m.hydrateTarget {
-		return false, m.hydrateTarget
+	m.logger.Error("edge/sync: the hydrate burst ends at or below the cursor this attach resumes from — the SYNC sequence spaces have diverged, gating first paint on the hydration marker instead",
+		"cursor", cursor, "endSeq", m.gate.endSeq)
+	m.gate.endSeq = 0
+}
+
+// hydrateGateDeadlineExpired runs one deadline window's verdict for the gate of
+// the given generation. For a position-mode gate the window measures STALL, not
+// elapsed time: an expiry that finds a sequence was resolved since the timer was
+// armed re-arms and keeps waiting, so a large world — or a browser tab whose
+// timers and IndexedDB writes are background-throttled — is never cut off while
+// it is making progress. Only a full window in which nothing resolved at all
+// releases the gate, loudly, accepting a possibly-partial paint over a first
+// paint that never comes. A fallback-mode gate records no progress at all
+// (noteProgressLocked), so its first window is its bound.
+//
+// A generation that no longer matches belongs to a superseded cycle and does
+// nothing.
+func (m *Manager) hydrateGateDeadlineExpired(generation uint64) {
+	var fire bool
+	var revision uint64
+	m.gateMu.Lock()
+	if m.gate.armed && m.gate.generation == generation {
+		if m.gate.progressed {
+			m.gate.progressed = false
+			if m.gate.deadline != nil {
+				m.gate.deadline.Reset(m.gateDeadline)
+			}
+		} else {
+			m.logger.Warn("edge/sync: first-paint gate saw no delivery progress for a full window, painting what has arrived",
+				"floor", m.floor.current(), "endSeq", m.gate.endSeq, "revision", m.gate.revision, "window", m.gateDeadline)
+			revision = m.gate.revision
+			m.disarmLocked()
+			fire = true
+		}
 	}
-	m.hydrateArmed = false
-	return true, m.hydrateTarget
+	m.gateMu.Unlock()
+	if fire {
+		m.fireHydrationComplete(revision)
+	}
+}
+
+// markerDisposition is what a delivered hydrationComplete marker means to the
+// gate as it currently stands.
+type markerDisposition int
+
+const (
+	// markerFires releases first paint: either no gate is armed (a steady-state
+	// tail, including a foreign device's completed cycle re-marking an
+	// already-painted host) or a fallback-mode gate's revision is satisfied.
+	markerFires markerDisposition = iota
+	// markerIsAnOrdinaryDelta is a marker arriving under an armed POSITION-mode
+	// gate. That gate releases on the delivery floor, so the marker is worth
+	// exactly one more sequence to resolve — its arrival at the tail of its
+	// lens's segment is part of what walks the floor to the end position.
+	markerIsAnOrdinaryDelta
+	// markerBelowTarget is a marker replayed from before the cycle a
+	// fallback-mode gate is waiting for.
+	markerBelowTarget
+)
+
+// hydrationMarker decides what one delivered hydrationComplete marker does,
+// disarming the gate when the marker releases it. fireRevision is what the
+// callback is handed; target is the number the marker was judged against, for
+// the log line (reading gate state outside gateMu would race arming).
+func (m *Manager) hydrationMarker(revision uint64) (d markerDisposition, fireRevision, target uint64) {
+	m.gateMu.Lock()
+	defer m.gateMu.Unlock()
+	if !m.gate.armed {
+		return markerFires, revision, 0
+	}
+	if m.gate.endSeq > 0 {
+		return markerIsAnOrdinaryDelta, 0, m.gate.endSeq
+	}
+	if revision < m.gate.revision {
+		return markerBelowTarget, 0, m.gate.revision
+	}
+	target = m.gate.revision
+	m.disarmLocked()
+	return markerFires, revision, target
+}
+
+// disarmHydrateGate drops any armed gate and stops its deadline timer. Run
+// calls it when its context is cancelled, so no timer outlives the Manager.
+func (m *Manager) disarmHydrateGate() {
+	m.gateMu.Lock()
+	m.disarmLocked()
+	m.gateMu.Unlock()
+}
+
+// disarmLocked clears the gate and its timer. Caller holds gateMu. The
+// generation and revision survive, so a decision already taken under this lock
+// can still report what it released.
+func (m *Manager) disarmLocked() {
+	m.gate.armed = false
+	m.stopDeadlineLocked()
+}
+
+// stopDeadlineLocked cancels the deadline timer if one is running. Caller holds
+// gateMu. A timer already in flight is harmless: its handler re-checks armed
+// and generation under the same lock.
+func (m *Manager) stopDeadlineLocked() {
+	if m.gate.deadline != nil {
+		m.gate.deadline.Stop()
+		m.gate.deadline = nil
+	}
+}
+
+// fireHydrationComplete announces first paint to the host. Always called
+// OUTSIDE gateMu.
+func (m *Manager) fireHydrationComplete(revision uint64) {
+	m.logger.Info("edge/sync: hydration complete", "revision", revision)
+	if m.cfg.OnHydrationComplete != nil {
+		m.cfg.OnHydrationComplete(revision)
+	}
 }
 
 func (m *Manager) registerInterest(ctx context.Context) error {
@@ -648,21 +990,21 @@ func (m *Manager) registerInterest(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) callHydrate(ctx context.Context) (revision uint64, lenses []string, syncStartSeq uint64, err error) {
+func (m *Manager) callHydrate(ctx context.Context) (revision uint64, lenses []string, syncStartSeq uint64, syncEndSeq uint64, err error) {
 	resp, err := m.controlRequest(ctx, "hydrate", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 	})
 	if err != nil {
-		return 0, nil, 0, err
+		return 0, nil, 0, 0, err
 	}
 	if resp.Error != "" {
-		return 0, nil, 0, fmt.Errorf("%s", resp.Error)
+		return 0, nil, 0, 0, fmt.Errorf("%s", resp.Error)
 	}
 	if resp.PersonalHydrate == nil || !resp.PersonalHydrate.Hydrated {
-		return 0, nil, 0, fmt.Errorf("control plane did not confirm hydration")
+		return 0, nil, 0, 0, fmt.Errorf("control plane did not confirm hydration")
 	}
-	return resp.PersonalHydrate.Revision, resp.PersonalHydrate.Lenses, resp.PersonalHydrate.SyncStartSeq, nil
+	return resp.PersonalHydrate.Revision, resp.PersonalHydrate.Lenses, resp.PersonalHydrate.SyncStartSeq, resp.PersonalHydrate.SyncEndSeq, nil
 }
 
 // controlRequest issues one request-reply against the "personal" pseudo-lens
@@ -700,8 +1042,17 @@ func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decisio
 		m.floor.hold(d.Sequence)
 		return decision
 	}
-	floor, advanced := m.floor.release(d.Sequence)
+	floor, advanced, resolved := m.floor.release(d.Sequence)
 	if !advanced {
+		// The floor did not move, so there is nothing to persist and nothing to
+		// paint on — but a message this attach had never passed did resolve,
+		// which is progress the deadline must not read as a stall (a hydrate
+		// whose start position fail-softed to zero replays the whole retained
+		// subject below an already-higher cursor, advancing the floor by
+		// nothing for as long as that takes).
+		if resolved {
+			m.noteHydrateGateProgress()
+		}
 		return decision
 	}
 	if err := m.store.SetCursor(floor); err != nil {
@@ -719,6 +1070,12 @@ func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decisio
 		return transport.Nak
 	}
 	m.floor.commit(floor)
+	// First paint follows the floor that reached the store, so the gate is
+	// consulted here and on no other branch: a Nak, a floor that did not move,
+	// and either cursor-write failure all leave the store where it was.
+	if fire, revision := m.hydrateGateFloorAdvanced(floor); fire {
+		m.fireHydrationComplete(revision)
+	}
 	return decision
 }
 
@@ -775,13 +1132,17 @@ func (m *Manager) apply(d transport.Delta) transport.Decision {
 			}
 		}
 	case "hydrationComplete":
-		if ready, target := m.hydrationGateReady(env.Revision); !ready {
+		// Whatever the gate makes of it, the marker is Ack'd like any other
+		// delta: the cursor must advance over it, and under a position-mode
+		// gate that advance is precisely what walks the floor toward release.
+		switch disposition, fireRevision, target := m.hydrationMarker(env.Revision); disposition {
+		case markerIsAnOrdinaryDelta:
+			m.logger.Info("edge/sync: hydrationComplete marker delivered under an armed position gate, first paint waits for the delivery floor",
+				"revision", env.Revision, "endSeq", target)
+		case markerBelowTarget:
 			m.logger.Info("edge/sync: stale hydrationComplete marker replayed, ignoring", "revision", env.Revision, "target", target)
-			break
-		}
-		m.logger.Info("edge/sync: hydration complete", "revision", env.Revision)
-		if m.cfg.OnHydrationComplete != nil {
-			m.cfg.OnHydrationComplete(env.Revision)
+		case markerFires:
+			m.fireHydrationComplete(fireRevision)
 		}
 	default:
 		m.logger.Warn("edge/sync: unknown delta op, cursor still advanced", "op", env.Op)
