@@ -78,6 +78,11 @@ func newFakeManager(t *testing.T, tr *fakeControlTransport, cursor uint64, haveC
 	}
 	mgr, err := New(tr, st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
+	// A hydrate arms the first-paint gate's deadline timer, and a test that
+	// drives hydrate/ensureFresh directly never reaches the Run that would
+	// disarm it — leaving a timer to fire into this test's callback long after
+	// it finished.
+	t.Cleanup(mgr.disarmHydrateGate)
 	return mgr
 }
 
@@ -628,6 +633,7 @@ func TestManager_EnsureFresh_GapTriggersHydrate(t *testing.T) {
 
 	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
+	t.Cleanup(mgr.disarmHydrateGate)
 
 	_, freshErr := mgr.ensureFresh(ctx)
 	require.NoError(t, freshErr)
@@ -721,8 +727,11 @@ func TestManager_Handle_HydrationCompleteGateIgnoresStaleReplayedMarker(t *testi
 		OnHydrationComplete: func(revision uint64) { completedAt = append(completedAt, revision) },
 	})
 	require.NoError(t, err)
+	t.Cleanup(mgr.disarmHydrateGate)
 
-	_, hydrateErr := mgr.hydrate(ctx)
+	// No SyncEndSeq on this response, so the gate arms in its fallback mode —
+	// the scalar-revision rule this test was written for.
+	_, hydrateErr := mgr.hydrate(ctx, armCold)
 	require.NoError(t, hydrateErr)
 
 	body := func(env deltaEnvelope) []byte {
@@ -954,8 +963,9 @@ func TestManager_Hydrate_PrunesDeadLensAttributions(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(mgr.disarmHydrateGate)
 
-	_, hydrateErr := mgr.hydrate(ctx)
+	_, hydrateErr := mgr.hydrate(ctx, armCold)
 	require.NoError(t, hydrateErr)
 
 	entry, ok, err := st.Get(deadKey)
