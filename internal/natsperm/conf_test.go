@@ -841,7 +841,7 @@ func TestCoreEventsSideChannel(t *testing.T) {
 
 		// admin verbs (DELETE/RESET/PAUSE): denied to every component,
 		// owner included.
-		for _, verb := range []string{"DELETE", "RESET", "PAUSE", "UNPIN"} {
+		for _, verb := range []string{"DELETE", "RESET", "PAUSE", "UNPIN", "LEADER.STEPDOWN"} {
 			verb := verb
 			for _, component := range nonBootstrapComponentNames() {
 				component := component
@@ -1538,6 +1538,24 @@ func TestRegistryDrivenStreamAdminSideChannel(t *testing.T) {
 					c := connectAs(t, url, name)
 					if _, err := c.NATS().Request(snapshotSubject, []byte("{}"), deniedTimeout); err == nil {
 						t.Errorf("%s SNAPSHOT KV_%s: want denial, got a reply", name, b.Name)
+					}
+				})
+			}
+
+			// LEADER.STEPDOWN forces a re-election and the delivery gap that
+			// comes with it — an availability-shaped write, in the same family
+			// as PURGE. It answers 503 without clustering, so a permitted call
+			// still draws a reply here and the denial signal stays honest;
+			// what this pins is that it is closed BEFORE clustering makes it a
+			// live stall primitive rather than after.
+			stepdownSubject := "$JS.API.STREAM.LEADER.STEPDOWN.KV_" + b.Name
+			for _, name := range nonBootstrapComponentNames() {
+				name := name
+				t.Run("denied-stepdown/"+name, func(t *testing.T) {
+					t.Parallel()
+					c := connectAs(t, url, name)
+					if _, err := c.NATS().Request(stepdownSubject, []byte("{}"), deniedTimeout); err == nil {
+						t.Errorf("%s LEADER.STEPDOWN KV_%s: want denial, got a reply", name, b.Name)
 					}
 				})
 			}

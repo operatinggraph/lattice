@@ -83,7 +83,28 @@ ack-policy consumer of its own — §4 is the census. This is a strict narrowing
 posture change: it neither adds a read scope nor removes `$JS.API.>`, so it is independent of the read-scope
 design's Andrew fork, and it shrinks that design's Increment 1 rather than pre-empting it.
 
-**3.3 What this does NOT close, stated plainly.** `$JS.ACK.>` remains an unscoped read primitive against
+**3.3 What this does NOT close, stated plainly.**
+
+**First, and larger than this design: every deny in the matrix is defeasible for a component carrying
+`AllowResponses`.** The cold bypass review found it and I reproduced it independently. nats-server checks a
+static deny first and then, *only if the subject was denied*, consults the client's dynamic response
+permissions (`server/client.go:4126-4141`); a message delivered to such a client registers its reply subject
+as a response permission **precisely when the client is denied on it** (`:3881-3884`); and a publisher's
+chosen reply subject is never permission-checked (`:4278-4295`). So a component with `AllowResponses` and a
+wildcard subscribe grants itself publish on any denied subject by receiving a message whose reply *is* that
+subject. Verified against the committed conf with the real dev seeds: `loom`, denied `$KV.core-kv.>`, takes a
+`PubAck={"stream":"KV_core-kv","seq":1}` and the forged value reads back — the transport half of P2, which
+`matrix.go` calls the load-bearing invariant.
+
+This is **pre-existing** and not caused by anything here, but it bounds what this design may claim. The ack
+denies bind the twelve components without `AllowResponses` — the vertical-app tier included, which is the
+tier the item is about — and are advisory for the six that carry it (`refractor`, `loom`, `weaver`,
+`bridge`, `model-runner`, `gateway`); for those six the *front* door, `MSG.NEXT`, is equally open, so the
+back-door deny buys them nothing. Filed as its own row, because expressing reply authority without
+`AllowResponses` spans the control plane, the auth-callout plane and the micro-service plane at once and has
+no ratified pattern here to extend.
+
+**Second, the read primitive at large.** `$JS.ACK.>` remains an unscoped read primitive against
 every *other* consumer on every stream for the twelve platform components that keep it. Closing that needs
 per-component ack scoping, which needs a component's consumer names to be statically enumerable — they are
 not (Loom/Weaver mint per-domain consumers, Refractor per-lens). The read-scope design owns that; this fire
@@ -110,11 +131,15 @@ other three), `KVGet`/`KVListKeys*` (`internal/substrate/kv.go:37`, `:195`, `:23
 `$KV.health-kv.>`. None of the four creates a consumer, and none calls `Ack`/`Nak`/`Term`/`InProgress`/
 `DoubleAck`.
 
-The listing path is the one that could have surprised us, and it does not: `KVListKeys` bottoms out in
-nats.go's **ordered** consumer, which is constructed `AckPolicy: AckNonePolicy`
-(`nats.go@v1.52.0/jetstream/ordered.go:634`; the legacy KV watcher takes the same route,
-`jetstream/kv.go:1304-1305`). By G8 the server does not even subscribe an ack subject for such a consumer,
-so there is nothing for the app to publish to.
+The listing path is the one that has to be traced rather than assumed. `substrate.KVListKeys` holds a
+`jetstream.KeyValue` (`internal/substrate/conn.go:502`), and that package's watcher builds its consumer
+through the **legacy** push-subscribe API — `nats.OrderedConsumer()` passed as a `nats.SubOpt`
+(`nats.go@v1.52.0/jetstream/kv.go:1304-1305`) — which forces `FlowControl: true` and
+`AckPolicy: AckNonePolicy` (`js.go:1780-1781`). By G8 the server subscribes no ack subject for such a
+consumer, so there is nothing for the app to publish to; what the listing actually depends on is
+`$JS.FC.>`, which every component keeps. (`jetstream/ordered.go:634` sets `AckNonePolicy` for the *new*
+ordered-consumer type — the right citation for `cmd/loupe/events.go:157`, the wrong one for this tier, and
+naming it here would have pinned a line the app tier never executes.)
 
 For contrast, every component that *does* run a durable consumer builds it `AckExplicitPolicy` and acks
 (`internal/substrate/consumer.go:214`, `internal/substrate/consumer_supervisor.go:592`;
