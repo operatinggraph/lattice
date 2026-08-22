@@ -21,7 +21,7 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | **Aspect types** (12) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter`, `identityPatientClaim` (guard, on the linked identity), `providerIdentityClaim` (guard, on the provider), `identityProviderClaim` (guard, on the linked identity) |
 | **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient/provider → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
 | **Operations** (13) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `BindProviderIdentity` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
-| **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard) |
+| **Projection lenses** (7) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` / `clinicIdentitiesRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard / identity-self) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability
 surface; the trusted-tool operator already holds standing permission, identical to `loftspace-domain`.
@@ -185,9 +185,9 @@ point reads, not an enumeration) — freeing them for a later booking.
 
 ## Projection lenses (P5 — the only application query surface)
 
-A clinic FE reads these projected read models, **never Core KV** (lattice-architecture.md P5). All six
+A clinic FE reads these projected read models, **never Core KV** (lattice-architecture.md P5). All seven
 are flat (no `WITH`/aggregation) `full`-engine projections. The first three are unprotected NATS-KV; the
-next three (below) are the RLS-protected Postgres equivalents a real deployment's FE should read instead.
+next four (below) are the RLS-protected Postgres equivalents a real deployment's FE should read instead.
 
 - **`clinicAppointments`** → `clinic-appointments`. One row per appointment (keyed by the appointment
   key), joined `OPTIONAL` to patient + provider — `0..1 × 0..1 = 1`, the §10.2 one-row-per-anchor
@@ -211,7 +211,7 @@ next three (below) are the RLS-protected Postgres equivalents a real deployment'
 
 ### Protected read models (D1.5, Contract #6 §6.14 RLS)
 
-Three more lenses project the SAME data through a **Postgres, RLS-enforced** read model instead of the
+Four more lenses project the SAME data through a **Postgres, RLS-enforced** read model instead of the
 unprotected NATS-KV buckets above — closing the "any caller can pass `?patient=<any patient>`" vector the
 unprotected lenses left open. Each row's `authz_anchors` set is a bare-NanoID match token; a reading actor's
 JWT-derived grants must intersect it or the row simply does not appear (fail-closed, RLS-enforced, not an
@@ -233,6 +233,14 @@ app-layer filter).
   mirroring `landlordLeaseApplicationsRead`): decrypted at projection from the patient's optional
   `identifiedBy` identity, null for a patient with no linked identity or a shredded one — display enrichment
   only, never a row gate.
+- **`clinicIdentitiesRead`** → `read_clinic_identities`. **Identity-self** audience — a Secure Lens
+  (Contract #3 §3.10) that resolves a signed-in actor's own name from the identity's `name` aspect for
+  "Signed in as `<name>`" (the front-desk staffer who is neither a patient nor a bound provider and so has
+  no row in any other roster). SELF-ANCHORED only: each row's `authz_anchors` carries the identity's own
+  bare NanoID, so the platform's base cap-read self-grant covers it with no extra grant declaration — unlike
+  `cafeIdentitiesRead`/`wellnessIdentitiesRead`, it does not fan a lease's covering buildings into the
+  anchor set, since a clinic front desk's paths to OTHER people's names already run through
+  `clinicPatientsRead` / `clinicProviders` instead. A WildcardAnchor holder still reads every row.
 
 ## Reminders, recurring schedules, and the sibling package
 

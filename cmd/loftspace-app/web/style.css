@@ -248,9 +248,6 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .step.escalated .step-dot { border-color: var(--accent); color: var(--accent); }
 .step.escalated .step-status { color: var(--accent); }
 
-/* Tasks inbox */
-.task-card .task-scope { font-family: var(--mono); font-size: 11px; color: var(--text-dim); word-break: break-all; }
-
 /* Modal */
 .overlay {
   position: fixed;

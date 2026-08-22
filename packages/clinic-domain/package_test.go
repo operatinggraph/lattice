@@ -303,8 +303,8 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends=[location-domain], got %v", got)
 	}
 
-	if got := len(Package.Lenses); got != 14 {
-		t.Fatalf("expected 14 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 15 {
+		t.Fatalf("expected 15 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -377,6 +377,21 @@ func TestPackage_Permissions(t *testing.T) {
 		if sc.Field != col {
 			t.Errorf("clinicEncountersRead secure column %q must name field %q of the decrypted plaintext, got %q", col, col, sc.Field)
 		}
+	}
+	// clinicIdentitiesRead carries a person's real name out of a sensitive
+	// aspect, so PROTECTED + a secure `name` column custodied by the identity
+	// holder is the whole posture: a plain projection would write the
+	// ciphertext envelope into the read model, and an unprotected one would
+	// serve the clinic's whole staff-and-patient name roster to any caller.
+	if l, ok := lensByName["clinicIdentitiesRead"]; !ok ||
+		l.Adapter != "postgres" || l.Table != "read_clinic_identities" || !l.Protected || l.GrantTable {
+		t.Fatalf("unexpected clinicIdentitiesRead shape: %+v", lensByName["clinicIdentitiesRead"])
+	}
+	idSecure := lensByName["clinicIdentitiesRead"].SecureColumns
+	if len(idSecure) != 1 || idSecure[0].Column != "name" ||
+		len(idSecure[0].HolderTypes) != 1 || idSecure[0].HolderTypes[0] != "identity" ||
+		idSecure[0].Field != "value" {
+		t.Fatalf("clinicIdentitiesRead must declare `name` secure under the identity holder, field value; got %+v", idSecure)
 	}
 	if l, ok := lensByName["clinicPatientReadGrants"]; !ok ||
 		l.Adapter != "postgres" || !l.GrantTable || l.Protected {
@@ -496,6 +511,7 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		"providerAppointmentsReadSpec": providerAppointmentsReadSpec,
 		"clinicPatientsSpec":           clinicPatientsSpec,
 		"clinicPatientsReadSpec":       clinicPatientsReadSpec,
+		"clinicIdentitiesReadSpec":     clinicIdentitiesReadSpec,
 	} {
 		if strings.Contains(spec, ".encounter") {
 			t.Errorf("%s must NOT reference the sensitive .encounter aspect — clinicEncountersRead is its only reader", name)

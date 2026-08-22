@@ -816,17 +816,11 @@ async function openDocument(oid, sensitive) {
   setTimeout(() => URL.revokeObjectURL(blobURL), 60000);
 }
 
-function toast(msg, kind, extra) {
+function toast(msg, kind) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
   t.innerHTML = "";
   t.append(document.createTextNode(msg));
-  if (extra) {
-    const span = document.createElement("span");
-    span.className = "mono";
-    span.textContent = " " + extra;
-    t.append(span);
-  }
   t.hidden = false;
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => (t.hidden = true), 6000);
@@ -963,8 +957,8 @@ function closeNewApplicant() {
 // present it when they first sign in. It deliberately does NOT use the shared
 // toast — a toast auto-hides and every later toast() clears the element, either
 // of which would destroy the only way into that account.
-function showClaimSecret(identityKey, secret) {
-  $("#claim-who").textContent = shortKey(identityKey);
+function showClaimSecret(name, secret) {
+  $("#claim-who").textContent = name;
   $("#claim-secret").value = secret;
   $("#claim-overlay").hidden = false;
 }
@@ -1023,11 +1017,10 @@ async function submitNewApplicant(ev) {
       toast("Could not create applicant — " + msg, "err");
       return;
     }
-    const key = reply && reply.primaryKey ? reply.primaryKey : "";
     closeNewApplicant();
     // The claim secret is the single copy and is never stored — surface it now
     // or it is gone, and the new applicant can never sign in.
-    showClaimSecret(key, claimSecret);
+    showClaimSecret(name, claimSecret);
     await loadIdentities();
   } catch (e) {
     toast("Could not create applicant: " + e.message, "err");
@@ -1385,7 +1378,7 @@ async function submitApply(ev) {
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
     closeApply();
-    toast("Application submitted.", "ok", key);
+    toast("Application submitted.", "ok");
     loadListings();
     // Route to My Applications with the new application highlighted (the lens
     // may take a moment to project, so an empty/late row is normal on first load;
@@ -1517,10 +1510,6 @@ function renderApplicationCard(row, highlight) {
     rent.innerHTML = `$${row.unitRent.toLocaleString()} <span>/ month</span>`;
     head.append(rent);
   }
-  const ref = document.createElement("div");
-  ref.className = "addr-sub mono";
-  ref.textContent = shortKey(row.entityKey);
-  head.append(ref);
 
   // Decision banner. Declined takes precedence: a standing rejection (a failed
   // verification OR an explicit landlord decline — both fold into row.declined) is a
@@ -1988,10 +1977,6 @@ function renderTaskCard(t) {
   desc.className = "addr-sub";
   desc.textContent = t.operationDescription || "";
 
-  const scope = document.createElement("div");
-  scope.className = "task-scope mono";
-  scope.textContent = t.scopedTo ? shortKey(t.scopedTo) : shortKey(t.taskKey);
-
   const meta = document.createElement("div");
   meta.className = "meta";
   if (t.expiresAt) meta.textContent = "due " + fmtDate(t.expiresAt);
@@ -2020,7 +2005,6 @@ function renderTaskCard(t) {
 
   card.append(title);
   if (desc.textContent) card.append(desc);
-  card.append(scope);
   if (meta.textContent) card.append(meta);
   card.append(actions);
   return card;
@@ -2424,10 +2408,6 @@ function renderRenewalCard(row, landlord) {
   if (row.status === "cancelled" && row.cancelReason) bits.push("declined: " + row.cancelReason);
   sub.textContent = bits.join(" · ");
 
-  const meta = document.createElement("div");
-  meta.className = "task-scope mono";
-  meta.textContent = shortKey(row.entityKey);
-
   const actions = document.createElement("div");
   actions.className = "card-actions";
   const badge = document.createElement("span");
@@ -2464,7 +2444,7 @@ function renderRenewalCard(row, landlord) {
     actions.append(signBtn);
   }
 
-  card.append(title, sub, meta, actions);
+  card.append(title, sub, actions);
   return card;
 }
 
@@ -3132,7 +3112,7 @@ async function submitUpload(ev) {
     const attached = await attachObject(file, scope, slot, sensitiveOpts);
     state.sessionUploads[attached.oid] = { linkName: slot, ownerKey: scope };
     fileInput.value = "";
-    toast("Document uploaded.", "ok", attached.oid);
+    toast("Document uploaded.", "ok");
     // The lens may take a moment to project; a Refresh shows it once projected.
     loadDocuments();
   } catch (e) {
@@ -4062,7 +4042,7 @@ async function submitPostListing(ev) {
 
     if (editing) {
       closePostListing();
-      toast("Listing updated.", "ok", unitKey);
+      toast("Listing updated.", "ok");
       setTimeout(loadLandlord, 800);
       return;
     }
@@ -4083,7 +4063,7 @@ async function submitPostListing(ev) {
     delete state.unitPhotos[unitKey];
 
     closePostListing();
-    toast(files.length ? `Listing posted with ${uploaded} photo${uploaded === 1 ? "" : "s"}.` : "Listing posted.", "ok", unitKey);
+    toast(files.length ? `Listing posted with ${uploaded} photo${uploaded === 1 ? "" : "s"}.` : "Listing posted.", "ok");
     setTimeout(loadLandlord, 800);
   } catch (e) {
     toast(e.message, "err");

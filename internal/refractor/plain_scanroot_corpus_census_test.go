@@ -113,6 +113,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"clinicAppointments":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"clinicAppointmentsRead":         {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"clinicEncountersRead":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"clinicIdentitiesRead":           {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"clinicLedgerHistory":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"clinicPatientAccounts":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"clinicPatientReadGrants":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
