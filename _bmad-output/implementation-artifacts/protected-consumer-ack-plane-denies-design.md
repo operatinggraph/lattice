@@ -415,7 +415,15 @@ emitted by the internal client with the destination as the message's *own* subje
 so neither the permission branch nor `isReservedReply` applies — and the bytes are attacker-chosen (the
 mirrored value). Cold review probed it landing a chosen envelope on `ops.default`, and — the sharper result —
 landing on a literal `$JS.ACK.core-events.<consumer>.…` subject to **forge an ack**, clearing a protected
-consumer's pending delivery, with a harmless destination as the negative control. That is the outcome
+consumer's pending delivery, with a harmless destination as the negative control. The ack arm carries one
+constraint worth stating precisely, found by the builder rather than assumed: `processAck` treats only a
+zero-length body, `+ACK` or `+OK` as a plain ack (`nats-server@v2.14.0 server/consumer.go:2731`), so the
+republished value has to be one of those — arbitrary bytes are silently dropped. That narrows the vector,
+it does not remove it: the attacker writes the source key empty. How the ack subject is obtained is the
+other half, and it is not a barrier either: `<accHash>` is a deterministic constant anyone can compute
+offline (§2, G6), and the sequence tokens come off the wire — every component's `subscribe { allow: [">"] }`
+makes real deliveries, and therefore their ack subjects, directly observable. The regression test captures
+one from the owner's own delivery, which is fixture convenience, not the attacker's constraint. That is the outcome
 `coreEventsAckDenies` exists to prevent: silent suppression of a pending crypto-shred, revocation or
 credential-binding event. No subject deny can reach it, because a mirror's source is in the request **body**,
 so `STREAM.CREATE.<attacker-chosen-name>` is always subject-allowed.
