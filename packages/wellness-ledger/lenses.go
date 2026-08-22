@@ -78,12 +78,19 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          ledgerHistorySpec,
 		},
 		{
-			CanonicalName: "wellnessMemberAccounts",
-			Class:         "meta.lens",
-			Adapter:       "nats-kv",
-			Bucket:        MemberAccountsBucket,
-			Engine:        "full",
-			Spec:          memberAccountsSpec,
+			// DIFF RETRACTION: like loftspace-domain's landlordUnitsRead, this
+			// walks bookedBy structurally rather than an anchor-key equality —
+			// the output key (id.key) is the identity, not the matched
+			// booking, so Refractor's default anchor-self presence check can
+			// never see a member's LAST booking tombstone and retract their
+			// row. DiffRetraction diffs the target's live key set instead.
+			CanonicalName:  "wellnessMemberAccounts",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         MemberAccountsBucket,
+			Engine:         "full",
+			Spec:           memberAccountsSpec,
+			DiffRetraction: true,
 		},
 		{
 			CanonicalName:  NoShowSettlementTarget,
