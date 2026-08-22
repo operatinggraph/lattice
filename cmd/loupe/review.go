@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -472,44 +473,52 @@ func newInstaller(conn *substrate.Conn, adminActor string) *pkgmgr.Installer {
 	return inst
 }
 
-// heldPermissionsForCapabilityActor reads actor's live Contract #6 §6.1
-// capability projection from the capability-kv bucket
-// (bootstrap.CapabilityKVBucket — the platform-scope "cap.<rest>" key and the
-// role-derived "cap.roles.<rest>" key) and returns the union of both docs'
-// platformPermissions as HeldPermission — the §5 "grant" kind's scope check
-// needs this for the proposal's own REQUESTER (never the approving operator —
-// a grant proposal widens what the requester may already do, so the
-// requester's held permissions are what bounds it). Mirrors
-// cmd/lattice/capability's own helper of the same purpose. A key that doesn't
-// exist contributes no permissions (deny-closed union, not an error).
-func heldPermissionsForCapabilityActor(ctx context.Context, conn *substrate.Conn, actor string) ([]pkgmgr.HeldPermission, error) {
-	rest, ok := strings.CutPrefix(actor, "vtx.")
-	if !ok {
-		return nil, fmt.Errorf("actor %q lacks vtx. prefix", actor)
+// systemActorSet holds the graph-derived system-actor set
+// (bootstrap.SystemActorKeys) for the process. That set decides Capability-KV
+// key routing, and discovering it costs a full core-kv KVListKeys, so it is
+// resolved once and held — the posture every platform daemon takes at start-up
+// (cmd/processor/main.go:142, cmd/loom/main.go:181, cmd/weaver/main.go:184),
+// and the reason a handler must never re-derive it per request.
+//
+// Loupe resolves it at boot but memoizes only a NON-EMPTY result: a Loupe
+// whose NATS was down at start-up still serves the UI and reconnects in the
+// background, and a kernel that has not finished seeding its primordial
+// holdsRole links yet answers with an empty set rather than an error. Latching
+// either outcome would route every actor as ordinary for the process lifetime,
+// under-reporting a real system actor's held permissions on every later
+// request. An empty result therefore stays unresolved and the next use retries;
+// a deployment that genuinely has no system actors pays one listing per
+// capability-grant approve, which is the rarest path in the console.
+type systemActorSet struct {
+	mu       sync.Mutex
+	keys     []string
+	resolved bool
+}
+
+// get returns the memoized set, resolving it on the first non-empty success.
+//
+// The mutex is held across the whole discovery — one core-kv KVListKeys plus a
+// KVGet per candidate holdsRole link — and that call does not abandon early on
+// a caller's cancelled ctx, so a concurrent handler arriving mid-resolution can
+// block for up to the resolving caller's own deadline (10s at boot,
+// s.natsTimeout on a request path) past its own. That is bounded and deliberate:
+// serializing costs one listing for a burst instead of one per request, and the
+// only path that reaches it is a capability-proposal approve.
+func (s *systemActorSet) get(ctx context.Context, conn *substrate.Conn) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.resolved {
+		return s.keys, nil
 	}
-	var held []pkgmgr.HeldPermission
-	for _, key := range []string{"cap." + rest, "cap.roles." + rest} {
-		entry, err := conn.KVGet(ctx, bootstrap.CapabilityKVBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // absent key = no permissions from this source, not an error
-			}
-			return nil, fmt.Errorf("read %s: %w", key, err)
-		}
-		doc, err := processor.ParseCapabilityDoc(entry.Value)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", key, err)
-		}
-		for _, p := range doc.PlatformPermissions {
-			// Origin travels with the entry: a reserved op held at runtime
-			// origin is refused at step 3, so it must not count as held when
-			// proposing a grant of that same op (pkgmgr.HeldPermission.covers).
-			held = append(held, pkgmgr.HeldPermission{
-				OperationType: p.OperationType, Scope: p.Scope, Origin: p.Origin,
-			})
-		}
+	keys, err := bootstrap.SystemActorKeys(ctx, conn)
+	if err != nil {
+		return nil, fmt.Errorf("discover system actor keys: %w", err)
 	}
-	return held, nil
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	s.keys, s.resolved = keys, true
+	return s.keys, nil
 }
 
 // ddlCacheSensitiveResolver adapts internal/processor.DDLCache to
@@ -548,11 +557,19 @@ func newLiveSensitiveAspectResolver(ctx context.Context, conn *substrate.Conn) (
 // freshApprovalVerdict (cmd/lattice/capability): only "grant" reads the
 // requester's live held permissions; only "opMeta" needs the live
 // sensitive-aspect resolver.
-func freshCapabilityVerdict(ctx context.Context, conn *substrate.Conn, cols capabilityProposalCols) (pkgmgr.ArtifactValidationReport, error) {
+//
+// The held permissions are the proposal's own REQUESTER's, never the approving
+// operator's — a grant proposal widens what the requester may already do, so
+// the requester's own grant set is what bounds it (pkgmgr.ReadHeldPermissions).
+func (s *server) freshCapabilityVerdict(ctx context.Context, conn *substrate.Conn, cols capabilityProposalCols) (pkgmgr.ArtifactValidationReport, error) {
 	var held []pkgmgr.HeldPermission
 	if cols.Kind == "grant" {
+		systemActorKeys, sErr := s.systemActors.get(ctx, conn)
+		if sErr != nil {
+			return pkgmgr.ArtifactValidationReport{}, sErr
+		}
 		var err error
-		held, err = heldPermissionsForCapabilityActor(ctx, conn, cols.RequesterID)
+		held, err = pkgmgr.ReadHeldPermissions(ctx, conn, systemActorKeys, cols.RequesterID)
 		if err != nil {
 			return pkgmgr.ArtifactValidationReport{}, fmt.Errorf("read requester %s held permissions: %w", cols.RequesterID, err)
 		}
@@ -613,7 +630,7 @@ func (s *server) reviewCapabilityApprove(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	report, err := freshCapabilityVerdict(ctx, conn, cols)
+	report, err := s.freshCapabilityVerdict(ctx, conn, cols)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "re-validate artifact: "+err.Error())
 		return

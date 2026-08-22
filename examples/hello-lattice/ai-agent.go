@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -40,9 +39,6 @@ func main() {
 	natsURL := getEnv("NATS_URL", "nats://localhost:4222")
 	actorKey := mustGetEnv("AGENT_ACTOR_KEY")
 
-	// Extract actorID from "vtx.identity.<NanoID>" → "<NanoID>".
-	actorID := extractActorID(actorKey)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -55,14 +51,21 @@ func main() {
 	}
 	defer conn.Close()
 
-	t := aiagent.NewTraverser(conn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket)
+	// The system-actor set decides which Capability-KV keys the agent's own
+	// grants live at, so it is discovered once here and handed to the
+	// traverser rather than re-listed per read.
+	systemActorKeys, err := bootstrap.SystemActorKeys(ctx, conn)
+	if err != nil {
+		log.Fatalf("discover system actor keys: %v", err)
+	}
+	t := aiagent.NewTraverser(conn, bootstrap.CoreKVBucket, bootstrap.CapabilityKVBucket, systemActorKeys)
 
 	// Step 1: read capability set.
-	cap, err := t.ReadCapability(ctx, actorID)
+	cap, err := t.ReadCapability(ctx, actorKey)
 	if err != nil {
 		log.Fatalf("ReadCapability for actor %s: %v\n"+
 			"Ensure the agent has a capability doc (run make up, then grant CreateBook to the agent identity).",
-			actorID, err)
+			actorKey, err)
 	}
 	fmt.Printf("Agent has %d platform permission(s)\n", len(cap.PlatformPermissions))
 
@@ -227,13 +230,4 @@ func mustGetEnv(key string) string {
 		log.Fatalf("environment variable %s is required", key)
 	}
 	return v
-}
-
-// extractActorID strips the "vtx.identity." prefix from an actor key.
-func extractActorID(actorKey string) string {
-	const prefix = "vtx.identity."
-	if strings.HasPrefix(actorKey, prefix) {
-		return actorKey[len(prefix):]
-	}
-	return actorKey
 }

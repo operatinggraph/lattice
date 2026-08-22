@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/processor/opwire"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 	"github.com/operatinggraph/lattice/packages/augur"
 	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
 )
@@ -1008,18 +1010,162 @@ func TestReviewCapabilityMarkApplied_NotFound(t *testing.T) {
 	}
 }
 
+// seedCapabilityGrantFixture provisions capability-kv on the fixture's
+// connection and writes one capability doc for actor, carrying operationType
+// at scope "any".
+func seedCapabilityGrantFixture(t *testing.T, srv *server, capKey, actor, operationType string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := srv.conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: bootstrap.CapabilityKVBucket,
+	}); err != nil {
+		t.Fatalf("create %s: %v", bootstrap.CapabilityKVBucket, err)
+	}
+	doc, err := json.Marshal(processor.CapabilityDoc{
+		Actor:               actor,
+		PlatformPermissions: []processor.PlatformPermission{{OperationType: operationType, Scope: "any"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal capability doc: %v", err)
+	}
+	if _, err := srv.conn.KVPut(ctx, bootstrap.CapabilityKVBucket, capKey, doc); err != nil {
+		t.Fatalf("put %s: %v", capKey, err)
+	}
+}
+
+// wantScopeCheckFailure is the §5 no-escalation refusal
+// (pkgmgr.validateGrantArtifact): the reason a correctly-routed held-permission
+// set must produce, so a test asserting only "invalid" cannot pass on an
+// unrelated failure.
+const wantScopeCheckFailure = `requesting operator does not hold "CreateTask" at scope "any" or broader`
+
+func grantProposalCols(requester, operationType string) capabilityProposalCols {
+	content, _ := json.Marshal(pkgmgr.GrantArtifactContent{
+		OperationType: operationType, Scope: "any", GrantsTo: []string{"operator"},
+	})
+	return capabilityProposalCols{
+		Key:         "vtx.capabilityproposal.revGrantHJKMNPQRSTUV",
+		RequesterID: requester,
+		Kind:        "grant",
+		Content:     string(content),
+	}
+}
+
+// TestSystemActorSet_EmptyResultIsNotMemoized: an empty discovery is a
+// not-yet answer, not an answer. A kernel still seeding its primordial
+// holdsRole links returns no system actors and no error, and latching that
+// would route every actor as ordinary for the rest of the process — silently
+// under-reporting a real system actor's held permissions on every later
+// approve. The memo must therefore keep retrying until it sees a non-empty
+// set, and stop listing core-kv once it has.
+func TestSystemActorSet_EmptyResultIsNotMemoized(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	empty, err := srv.systemActors.get(ctx, srv.conn)
+	if err != nil {
+		t.Fatalf("get on an unseeded kernel: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("get = %v, want empty on an unseeded kernel", empty)
+	}
+
+	const actorID = "revLateSeededHJKMNPQ"
+	put(bootstrap.CoreKVBucket,
+		"lnk.identity."+actorID+".holdsRole.role."+bootstrap.RoleOperatorID,
+		`{"class":"holdsRole","isDeleted":false,"data":{}}`)
+
+	seeded, err := srv.systemActors.get(ctx, srv.conn)
+	if err != nil {
+		t.Fatalf("get after seeding: %v", err)
+	}
+	if len(seeded) != 1 || seeded[0] != "vtx.identity."+actorID {
+		t.Fatalf("get = %v, want the newly seeded actor — the empty result was latched", seeded)
+	}
+
+	// Once non-empty, the answer is held: a later revocation does not
+	// re-trigger the listing.
+	put(bootstrap.CoreKVBucket,
+		"lnk.identity."+actorID+".holdsRole.role."+bootstrap.RoleOperatorID,
+		`{"class":"holdsRole","isDeleted":true,"data":{}}`)
+	held, err := srv.systemActors.get(ctx, srv.conn)
+	if err != nil {
+		t.Fatalf("get after revocation: %v", err)
+	}
+	if len(held) != 1 {
+		t.Fatalf("get = %v, want the memoized set — a resolved set is held for the process", held)
+	}
+}
+
+// TestFreshCapabilityVerdict_OrdinaryActorAnchorDocIsNotHeld: on Loupe's
+// approve path, an ordinary requester's cap.<rest> anchor doc is not part of
+// its grant set, so a permission living only there cannot bound what its
+// proposal confers.
+func TestFreshCapabilityVerdict_OrdinaryActorAnchorDocIsNotHeld(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	const requesterID = "revEverydayReqHJKMNP"
+	requester := "vtx.identity." + requesterID
+	seedCapabilityGrantFixture(t, srv, "cap.identity."+requesterID, requester, "CreateTask")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	report, err := srv.freshCapabilityVerdict(ctx, srv.conn, grantProposalCols(requester, "CreateTask"))
+	if err != nil {
+		t.Fatalf("freshCapabilityVerdict: %v", err)
+	}
+	if report.Valid {
+		t.Fatal("verdict is valid — an ordinary actor's anchor doc must not count as held")
+	}
+	// The reason matters: an invalid verdict reached by any other route would
+	// let this pass while the scope check itself was broken or skipped.
+	if !slices.ContainsFunc(report.Errors, func(e string) bool {
+		return strings.Contains(e, wantScopeCheckFailure)
+	}) {
+		t.Fatalf("errors = %v, want one naming the scope check: %q", report.Errors, wantScopeCheckFailure)
+	}
+}
+
+// TestFreshCapabilityVerdict_SystemActorAnchorDocIsHeld is the positive
+// vector: the same anchor-doc-only seeding validates for a requester that
+// really is a system actor (it holds the primordial operator role through a
+// live holdsRole link, the predicate bootstrap.SystemActorKeys discovers).
+func TestFreshCapabilityVerdict_SystemActorAnchorDocIsHeld(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	const requesterID = "revSystemReqHJKMNPQR"
+	requester := "vtx.identity." + requesterID
+	put(bootstrap.CoreKVBucket,
+		"lnk.identity."+requesterID+".holdsRole.role."+bootstrap.RoleOperatorID,
+		`{"class":"holdsRole","isDeleted":false,"data":{}}`)
+	seedCapabilityGrantFixture(t, srv, "cap.identity."+requesterID, requester, "CreateTask")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	report, err := srv.freshCapabilityVerdict(ctx, srv.conn, grantProposalCols(requester, "CreateTask"))
+	if err != nil {
+		t.Fatalf("freshCapabilityVerdict: %v", err)
+	}
+	if !report.Valid {
+		t.Fatalf("verdict is invalid (%v) — a system actor's anchor doc IS part of its grant set", report.Errors)
+	}
+}
+
 func TestFreshCapabilityVerdict_Lens(t *testing.T) {
 	// The lens kind needs no live substrate read (held/sensitiveAspects both
 	// nil), so a nil conn is safe — this is the pure decision-logic seam.
 	ctx := context.Background()
-	valid, err := freshCapabilityVerdict(ctx, nil, capabilityProposalCols{Kind: "lens", Content: validLensContent})
+	valid, err := (&server{}).freshCapabilityVerdict(ctx, nil, capabilityProposalCols{Kind: "lens", Content: validLensContent})
 	if err != nil {
 		t.Fatalf("valid lens: unexpected error: %v", err)
 	}
 	if !valid.Valid {
 		t.Errorf("valid lens: want Valid, got errors %v", valid.Errors)
 	}
-	invalid, err := freshCapabilityVerdict(ctx, nil, capabilityProposalCols{Kind: "lens", Content: invalidLensContent})
+	invalid, err := (&server{}).freshCapabilityVerdict(ctx, nil, capabilityProposalCols{Kind: "lens", Content: invalidLensContent})
 	if err != nil {
 		t.Fatalf("invalid lens: unexpected error: %v", err)
 	}

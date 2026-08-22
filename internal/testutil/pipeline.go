@@ -244,6 +244,20 @@ type PipelineConfig struct {
 	// (internal/vault/local.go's shredded-set + DEK cache are per-instance
 	// in-memory state, not derivable from the KEK alone).
 	Vault vault.Vault
+	// RbacRolesActive routes the platform capability read by actor class, the
+	// posture production always runs (processor.SelectAuthorizerOpts's own
+	// doc: "PRODUCTION ALWAYS SETS THIS TRUE"): the actors named in
+	// SystemActorKeys read a UNION of cap.<actor> and cap.roles.<actor>,
+	// every other actor reads cap.roles.<actor> alone. Left false, the
+	// pipeline uses the rbac-absent fallback — cap.<actor> for EVERY actor —
+	// which is where most harness fixtures seed their docs. Set it when a
+	// test's meaning depends on an actor's CLASS, so the Processor routes the
+	// way the deployment would rather than the way the fixture is convenient.
+	RbacRolesActive bool
+	// SystemActorKeys is the kernel-seeded system-actor set the class-aware
+	// routing consults. Only read when RbacRolesActive; empty means every
+	// actor is ordinary.
+	SystemActorKeys []string
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -271,6 +285,8 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Reader:           conn,
 		CapabilityBucket: HarnessCapBucket,
 		Logger:           logger,
+		RbacRolesActive:  cfg.RbacRolesActive,
+		SystemActorKeys:  cfg.SystemActorKeys,
 	})
 	if err != nil {
 		t.Fatalf("SelectAuthorizerArgs: %v", err)

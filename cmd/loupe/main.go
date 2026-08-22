@@ -237,6 +237,20 @@ func run(logger *slog.Logger) error {
 		gatewayURL:            envOrDefault("LOUPE_GATEWAY_URL", defaultGatewayURL),
 		demoMode:              demoMode,
 	}
+	// Resolve the system-actor set once here, the way the platform daemons do
+	// (cmd/processor/main.go:142): it costs a full core-kv listing and decides
+	// Capability-KV key routing for the capability-proposal review path. A
+	// failure is not fatal — the memo stays unresolved and the first request
+	// that needs it retries, which is the same posture as the NATS connect
+	// above.
+	if conn != nil {
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if _, wErr := srv.systemActors.get(warmCtx, conn); wErr != nil {
+			logger.Warn("system actor set not resolved at startup; the capability review path will retry on first use",
+				"error", wErr)
+		}
+		warmCancel()
+	}
 	if pubOrigin != nil {
 		logger.Info("public origin declared; the same-origin gate accepts it and the session cookie is Secure",
 			"origin", pubOrigin.String())

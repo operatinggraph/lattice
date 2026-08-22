@@ -228,6 +228,19 @@ jobs:
         # executor.go's `propertyOf`), so it is mechanized rather than trusted.
         run: STRICT=1 go run ./scripts/lint-doc-orphan.go
 
+      - name: Capability-KV single-read-path lint (one reader owns Contract #6 §6.1)
+        # A non-test Go file outside internal/capabilitykv that either (1) calls
+        # KVGet/KVGetMulti/KVListKeys with the capability bucket as its own
+        # argument, or (2) concatenates/interpolates one of the four
+        # "cap."/"cap.roles." key prefixes Contract #6 §6.1 owns, has
+        # re-implemented the routing + doc merge internal/capabilitykv exists to
+        # own — check (2) also catches a hand-rolled key handed to the sanctioned
+        # helper, which check (1) cannot see. Three allowlisted exceptions
+        # (cmd/lattice/query's operator inspection, internal/refractor/pipeline/
+        # evaluate.go's producer-side key derivation, scripts/'s build-ignore
+        # seed/verify tooling) are named in the gate with a stated reason.
+        run: STRICT=1 go run ./scripts/lint-capability-kv-readers.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

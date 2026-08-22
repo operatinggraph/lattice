@@ -69,11 +69,19 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 		[]string{bootstrap.RoleOperatorKey})
 	testutil.SeedCapDoc(t, ctx, conn, seederCapDoc)
 
-	// Pipeline for meta-lane (CreateMetaVertex goes to ops.meta).
+	// Pipeline for meta-lane (CreateMetaVertex goes to ops.meta), wired with
+	// the class-aware platform routing production always runs. The two actors
+	// in this test are deliberately of different CLASS — the seeder is a
+	// system actor (it holds the primordial operator role and seeds a DDL),
+	// the agent is an ordinary one — so the Processor must route by class, or
+	// the test would only be exercising the rbac-absent fallback that reads
+	// cap.<actor> for both.
 	metaCP, metaCons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
-		Durable:        "ns-meta-pipeline",
-		Instance:       "ns-meta",
-		FilterSubjects: []string{"ops.meta"},
+		Durable:         "ns-meta-pipeline",
+		Instance:        "ns-meta",
+		FilterSubjects:  []string{"ops.meta"},
+		RbacRolesActive: true,
+		SystemActorKeys: []string{seederActorKey},
 	})
 
 	// Build CreateMetaVertex payload with all nine required fields (Story 5.1).
@@ -122,9 +130,13 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 	// In production, the Capability Lens would project this. In the test
 	// harness we seed it directly (same pattern as all integration tests
 	// since Story 3.x).
-	// Agent holds no platform role — its authorization is permission-based
-	// only (the seeder granted the new op type directly into the cap doc).
-	agentCapDoc := buildCapDoc(agentActorKey, "cap.identity."+northStarAgentActorID,
+	//
+	// The agent holds no platform role — its authorization is permission-based
+	// only (the seeder granted the new op type directly into the cap doc), so
+	// it is an ORDINARY actor and its grants live at cap.roles.identity.<id>,
+	// the single key the class-aware routing derives for one. That is FR19's
+	// headline scenario: a cold-start agent that is not root-equivalent.
+	agentCapDoc := buildCapDoc(agentActorKey, "cap.roles.identity."+northStarAgentActorID,
 		[]processor.PlatformPermission{
 			{OperationType: canonicalName, Scope: "any"},
 		},
@@ -133,12 +145,13 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 
 	// ---- Step 3: Cold-start traversal ----
 	//
-	// The Traverser gets only the connection details — no knowledge of
-	// canonicalName, no knowledge of the meta-vertex key.
-	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket)
+	// The Traverser gets the connection details and an empty system-actor set
+	// — no knowledge of canonicalName, no knowledge of the meta-vertex key,
+	// and no root-equivalence for the agent.
+	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket, nil)
 
 	// 3a: Read capability — discovers what operations the agent can submit.
-	capDoc, err := tr.ReadCapability(ctx, northStarAgentActorID)
+	capDoc, err := tr.ReadCapability(ctx, agentActorKey)
 	if err != nil {
 		t.Fatalf("ReadCapability: %v", err)
 	}
@@ -203,9 +216,14 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 	//
 	// The agent submits as itself. Same step 1-10 Processor path as any
 	// human actor — NFR-S10 is satisfied by design (no AI-specific code).
+	// Same class-aware routing as the meta pipeline above: the agent is an
+	// ordinary actor, so the Processor authorizes it from
+	// cap.roles.identity.<id> — the very doc the traversal above read.
 	defaultCP, defaultCons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
-		Durable:  "ns-default-pipeline",
-		Instance: "ns-default",
+		Durable:         "ns-default-pipeline",
+		Instance:        "ns-default",
+		RbacRolesActive: true,
+		SystemActorKeys: []string{seederActorKey},
 	})
 
 	agentEnv := &processor.OperationEnvelope{

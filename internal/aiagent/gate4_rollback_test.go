@@ -71,7 +71,9 @@ func TestGate4_CompensatingOpRollback(t *testing.T) {
 		FilterSubjects: []string{"ops.meta"},
 	})
 
-	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket)
+	// This test reads DDL aspects and compensation metadata only, never a
+	// capability doc, so the system-actor set is not consulted.
+	tr := aiagent.NewTraverser(conn, testutil.HarnessCoreBucket, testutil.HarnessCapBucket, nil)
 
 	// === Sub-test A: DDL vertex type (is_ddl_class branch, AC6 steps 2–9) ===
 	t.Run("DDL_VertexType", func(t *testing.T) {

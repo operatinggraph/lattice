@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -1398,7 +1399,18 @@ func WaitForBootstrapComplete(ctx context.Context, nc *nats.Conn, logger *slog.L
 }
 
 // capabilityKeyForIdentity maps an identity NanoID to its Capability KV
-// projection key (`cap.identity.<id>`) per Contract #6 §6.1.
+// anchor key per Contract #6 §6.1, deriving it through the package that owns
+// that rule (internal/capabilitykv, a leaf over substrate) rather than
+// concatenating the segments here — one derivation, so a key-shape change
+// reaches every reader at once.
+//
+// Both failure modes are programming errors and panic, matching
+// substrate.VertexKey's own posture for a malformed key segment: the ids
+// passed here are the primordial NanoIDs this file seeds.
 func capabilityKeyForIdentity(id string) string {
-	return "cap.identity." + id
+	key, err := capabilitykv.CapabilityKeyFromActor(substrate.VertexKey("identity", id))
+	if err != nil {
+		panic(fmt.Sprintf("bootstrap: capability key for identity %q: %v", id, err))
+	}
+	return key
 }

@@ -30,8 +30,12 @@ else. The operator role already carries the only `scope: "any"` permissions
 its `grantedBy` links, and the Capability Lens already walks `holdsRole → operator → grantedBy →
 permission` into `platformPermissions[].scope:"any"` for **any** holder. The service actors add
 **no new role, permission, grantedBy link, cypher branch, or step-3 code** — they reuse the
-admin's exact topology. Their `cap.identity.<id>` docs are produced by the Refractor projecting
-that topology, identical to the admin's (Contract #7 §7.1 — no direct `cap.*` seeding).
+admin's exact topology. Their `cap.identity.<id>` anchor docs are produced by the Refractor
+projecting that topology, identical to the admin's (Contract #7 §7.1 — no direct `cap.*` seeding).
+Holding `operator` is also what puts them in the graph-derived system-actor set
+(`bootstrap.SystemActorKeys`), so step 3 reads that anchor UNIONED with their
+`cap.roles.identity.<id>` projection — the kernel floor plus whatever rbac has since granted the
+roles they hold. An actor outside that set reads `cap.roles.identity.<id>` alone.
 
 ## Class never gates capability (Contract #7 §7.2)
 
@@ -44,8 +48,10 @@ The admin identity is plain `class: "identity"`; the service actors are `identit
 - The Refractor actor enumerator and the `cap.*` envelope wrapper anchor on
   `substrate.ParseVertexKey(actorKey)` returning the `identity` type segment — never on the `class`
   field.
-- Processor step-3 authorizes on `env.Actor` (a string) → `cap.identity.<id>` with no `class`
-  check.
+- Processor step-3 authorizes on `env.Actor` (a string) → the Capability-KV keys the class-aware
+  routing derives for it (`cap.identity.<id>` ∪ `cap.roles.identity.<id>` for a system actor,
+  `cap.roles.identity.<id>` alone otherwise) with no `class` check — the routing's "class" is
+  operator-role topology, never the envelope's `class` field.
 
 So a `identity.system.loom` identity **with** the `holdsRole` edge projects root-equivalent caps,
 and one **without** it projects nothing. Capability is topology, not class. (Proved by
@@ -62,7 +68,9 @@ graph material**:
   actors are authenticated at the edge by the **Gateway** (built — it verifies the IdP JWT and stamps
   the verified `actor`; see [gateway.md](./gateway.md)); internal service actors need no such edge, so
   authentication at the commit-path boundary is still *being* `identity:<service>` in the `actor`
-  field and *having* a `cap.identity.<id>` projection — identical to a human operator.
+  field and *having* the Capability-KV projection its class routes to — the `cap.identity.<id>`
+  anchor unioned with `cap.roles.identity.<id>` for an operator-role holder — identical to a human
+  operator holding the same role.
 - The "signing key" is therefore the **engine process's NATS transport credential** (the
   account / nkey / creds it uses to publish to `ops.system.>`), an arch-explicitly-deferred-to-
   Stream-3 deployment concern (arch lines 285 / 325) — provisioned at deployment time, not as graph

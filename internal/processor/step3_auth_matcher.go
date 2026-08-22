@@ -85,7 +85,8 @@ type authEntry struct {
 	// single-key via keyDerivation. Each key is GET independently: KeyNotFound
 	// on one member is an empty skip, not a hard deny — absentKeyCode fires
 	// only when every member is absent. Present docs fold via
-	// mergeCapabilityDocs (concat platformPermissions, union lanes/roles).
+	// capabilitykv.MergeDocs (concat platformPermissions and the serviceAccess /
+	// ephemeralGrants collections, union lanes/roles).
 	keysDerivation func(actor string) ([]string, error)
 	// absentKeyCode is the denial Code emitted when the disjoint key is absent.
 	// Contract #6 §6.8 — no entry equals no access. A soft-tombstoned key is not

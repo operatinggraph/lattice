@@ -411,6 +411,19 @@ func main() {
 	instance := "rfx-" + randHex(6)
 	logger.Info("refractor starting", "instance", instance, "natsURL", *natsURL)
 
+	// The primordial identifier table, loaded before anything reads the graph
+	// by primordial identity. wireControlChecker's bootstrap.SystemActorKeys
+	// call matches holdsRole links against the roleOperator NanoID, which
+	// lives in this file and nowhere else, so without it the control-plane
+	// checker would route every actor — the primordial admin and the kernel
+	// service actors included — as ordinary. Same env/default as every other
+	// daemon (cmd/processor/main.go:71).
+	bootstrapJSONPath := envOr("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
+	if err := bootstrap.Load(bootstrapJSONPath); err != nil {
+		logger.Error("load bootstrap JSON", "path", bootstrapJSONPath, "err", err)
+		os.Exit(1)
+	}
+
 	// Live introspection (heap/goroutine/CPU profiles) on a loopback listener,
 	// enabled only when REFRACTOR_PPROF_ADDR is set — a runaway process can be
 	// asked what it is holding (`go tool pprof http://<addr>/debug/pprof/heap`)

@@ -3,6 +3,8 @@ package capability
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,25 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
+
+// wantScopeCheckFailure is the §5 no-escalation refusal
+// (pkgmgr.validateGrantArtifact): the reason a correctly-routed held-permission
+// set must produce, so a test asserting only "invalid" cannot pass on an
+// unrelated failure.
+const wantScopeCheckFailure = `requesting operator does not hold "CreateTask" at scope "any" or broader`
+
+// bootstrapJSONForTest returns the path of the primordial identifier file
+// `lattice capability review` reads through --bootstrap-json /
+// BOOTSTRAP_JSON_PATH.
+//
+// The tests pass a PATH rather than relying on the in-process identifier
+// table, because that table is exactly what the CLI binary does not have:
+// cmd/lattice's root command loads no bootstrap file, so a test leaning on
+// pre-populated globals would assert nothing about the binary's own wiring.
+func bootstrapJSONForTest(t *testing.T) string {
+	t.Helper()
+	return testutil.PrimordialsFilePath(t)
+}
 
 func setupCapabilityEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
@@ -115,7 +136,7 @@ func TestFreshApprovalVerdict_LensValid(t *testing.T) {
 	ctx, conn := setupCapabilityEnv(t)
 	seedPendingLensProposal(t, ctx, conn, "capPropTwoHJKMNPQRST", "MATCH (p:provider) RETURN p.key AS key")
 
-	verdict, err := freshApprovalVerdict(ctx, conn, "capPropTwoHJKMNPQRST")
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropTwoHJKMNPQRST", bootstrapJSONForTest(t))
 	if err != nil {
 		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
@@ -128,7 +149,7 @@ func TestFreshApprovalVerdict_LensUnparseableCypher(t *testing.T) {
 	ctx, conn := setupCapabilityEnv(t)
 	seedPendingLensProposal(t, ctx, conn, "capPropThreeHJKMNPQRS", "not cypher at all {{{")
 
-	verdict, err := freshApprovalVerdict(ctx, conn, "capPropThreeHJKMNPQRS")
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropThreeHJKMNPQRS", bootstrapJSONForTest(t))
 	if err != nil {
 		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
@@ -145,15 +166,16 @@ func TestFreshApprovalVerdict_GrantWithinRequesterScope(t *testing.T) {
 	requester := "vtx.identity.grantReqHJKMNPQRST"
 	seedPendingGrantProposal(t, ctx, conn, "capPropGrantOkHJKMNPQ", requester, "CreateTask", "any", []string{"operator"})
 
-	// The requester holds CreateTask at scope "any" via the platform-scope
-	// cap.<rest> key — the grant's own requested scope is a subset.
+	// The requester is an ordinary actor, so its held permissions come from
+	// the role-derived cap.roles.<rest> key alone. It holds CreateTask at
+	// scope "any" there — the grant's own requested scope is a subset.
 	rest := "identity.grantReqHJKMNPQRST"
-	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap."+rest, processor.CapabilityDoc{
+	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap.roles."+rest, processor.CapabilityDoc{
 		Actor:               requester,
 		PlatformPermissions: []processor.PlatformPermission{{OperationType: "CreateTask", Scope: "any"}},
 	})
 
-	verdict, err := freshApprovalVerdict(ctx, conn, "capPropGrantOkHJKMNPQ")
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropGrantOkHJKMNPQ", bootstrapJSONForTest(t))
 	if err != nil {
 		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
@@ -170,7 +192,7 @@ func TestFreshApprovalVerdict_GrantExceedsRequesterScope(t *testing.T) {
 	// an absent held-permission projection must fail closed (invalid), never
 	// silently pass the scope check.
 
-	verdict, err := freshApprovalVerdict(ctx, conn, "capPropGrantBadHJKMNPQ")
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropGrantBadHJKMNPQ", bootstrapJSONForTest(t))
 	if err != nil {
 		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
@@ -179,46 +201,109 @@ func TestFreshApprovalVerdict_GrantExceedsRequesterScope(t *testing.T) {
 	}
 }
 
-func TestHeldPermissionsForActor_UnionsPlatformAndRoleKeys(t *testing.T) {
+// TestFreshApprovalVerdict_OrdinaryActorAnchorDocIsNotHeld: an ordinary
+// actor's cap.<rest> anchor doc is not part of its grant set — step 3 routes
+// an actor outside the system set to cap.roles.<rest> alone — so a permission
+// that exists only there can never bound what its proposal may confer. The
+// requester below holds CreateTask/any in the anchor doc and nothing in the
+// roles projection, so the grant it proposes exceeds its own held scope.
+func TestFreshApprovalVerdict_OrdinaryActorAnchorDocIsNotHeld(t *testing.T) {
 	ctx, conn := setupCapabilityEnv(t)
-	actor := "vtx.identity.unionActorHJKMNPQRST"
-	rest := "identity.unionActorHJKMNPQRST"
+	requester := "vtx.identity.anchorRestReqHJKMNPQ"
+	seedPendingGrantProposal(t, ctx, conn, "capPropAnchorHJKMNPQ", requester, "CreateTask", "any", []string{"operator"})
 
-	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap."+rest, processor.CapabilityDoc{
-		Actor:               actor,
+	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap.identity.anchorRestReqHJKMNPQ", processor.CapabilityDoc{
+		Actor:               requester,
 		PlatformPermissions: []processor.PlatformPermission{{OperationType: "CreateTask", Scope: "any"}},
 	})
-	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap.roles."+rest, processor.CapabilityDoc{
-		Actor:               actor,
-		PlatformPermissions: []processor.PlatformPermission{{OperationType: "GrantPermission", Scope: "self"}},
-	})
 
-	held, err := heldPermissionsForActor(ctx, conn, actor)
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropAnchorHJKMNPQ", bootstrapJSONForTest(t))
 	if err != nil {
-		t.Fatalf("heldPermissionsForActor: %v", err)
+		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
-	if len(held) != 2 {
-		t.Fatalf("expected 2 held permissions (platform ∪ roles), got %d: %+v", len(held), held)
+	if verdict["state"] != "invalid" {
+		t.Fatalf("verdict = %+v, want invalid — an ordinary actor's anchor doc must not count as held", verdict)
 	}
-	want := map[pkgmgr.HeldPermission]bool{
-		{OperationType: "CreateTask", Scope: "any"}:       true,
-		{OperationType: "GrantPermission", Scope: "self"}: true,
-	}
-	for _, h := range held {
-		if !want[h] {
-			t.Fatalf("unexpected held permission %+v", h)
-		}
+	// The reason matters: an "invalid" reached by any other route would let
+	// this pass while the scope check itself was broken or skipped.
+	report, _ := verdict["report"].(string)
+	if !strings.Contains(report, wantScopeCheckFailure) {
+		t.Fatalf("report = %q, want it to name the scope check: %q", report, wantScopeCheckFailure)
 	}
 }
 
-func TestHeldPermissionsForActor_AbsentKeysAreEmptyNotError(t *testing.T) {
+// TestFreshApprovalVerdict_SystemActorAnchorDocIsHeld is the positive vector
+// the test above needs to not be vacuous: the SAME anchor-doc-only seeding
+// validates when the requester really is a system actor (it holds the
+// primordial operator role through a live holdsRole link, which is the
+// predicate bootstrap.SystemActorKeys discovers).
+//
+// It also exercises the CLI's own identifier source: the roleOperator NanoID
+// the seeded link key is built from comes from the bootstrap FILE the command
+// reads, not from an in-process table a test populated on its behalf.
+func TestFreshApprovalVerdict_SystemActorAnchorDocIsHeld(t *testing.T) {
+	bootstrapPath := bootstrapJSONForTest(t)
 	ctx, conn := setupCapabilityEnv(t)
-	held, err := heldPermissionsForActor(ctx, conn, "vtx.identity.neverGrantedHJKMNPQR")
+	const requesterID = "systemActorReqHJKMNP"
+	requester := "vtx.identity." + requesterID
+	seedPendingGrantProposal(t, ctx, conn, "capPropSysActrHJKMNP", requester, "CreateTask", "any", []string{"operator"})
+
+	putBucketEntry(t, ctx, conn, bootstrap.CoreKVBucket,
+		"lnk.identity."+requesterID+".holdsRole.role."+bootstrap.RoleOperatorID,
+		map[string]any{"class": "holdsRole", "isDeleted": false, "data": map[string]any{}})
+	putBucketEntry(t, ctx, conn, bootstrap.CapabilityKVBucket, "cap.identity."+requesterID, processor.CapabilityDoc{
+		Actor:               requester,
+		PlatformPermissions: []processor.PlatformPermission{{OperationType: "CreateTask", Scope: "any"}},
+	})
+
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropSysActrHJKMNP", bootstrapPath)
 	if err != nil {
-		t.Fatalf("heldPermissionsForActor: %v", err)
+		t.Fatalf("freshApprovalVerdict: %v", err)
 	}
-	if len(held) != 0 {
-		t.Fatalf("expected no held permissions, got %+v", held)
+	if verdict["state"] != "valid" {
+		t.Fatalf("verdict = %+v, want valid — a system actor's anchor doc IS part of its grant set", verdict)
+	}
+}
+
+// TestFreshApprovalVerdict_GrantReadsTheBootstrapFile: the system-actor
+// routing is keyed on the primordial roleOperator NanoID, which lives only in
+// the bootstrap file — cmd/lattice's root command loads no such file, so the
+// grant path must load it itself. Pointed at a path that does not exist, the
+// approve must fail loudly and name the path.
+//
+// Without that load the identifier is empty, SystemActorKeys matches no link,
+// and every requester — the primordial admin and the kernel service actors
+// included — silently routes as an ordinary actor: a legitimate grant proposal
+// then reports invalid with no indication why.
+func TestFreshApprovalVerdict_GrantReadsTheBootstrapFile(t *testing.T) {
+	ctx, conn := setupCapabilityEnv(t)
+	requester := "vtx.identity.needsBootstrapHJKMNP"
+	seedPendingGrantProposal(t, ctx, conn, "capPropNoBootHJKMNPQ", requester, "CreateTask", "any", []string{"operator"})
+
+	missing := filepath.Join(t.TempDir(), "absent.lattice.bootstrap.json")
+	_, err := freshApprovalVerdict(ctx, conn, "capPropNoBootHJKMNPQ", missing)
+	if err == nil {
+		t.Fatal("approve of a grant proposal succeeded with no bootstrap file — the identifier table was never loaded")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("err = %v, want it to name the bootstrap path %q", err, missing)
+	}
+}
+
+// TestFreshApprovalVerdict_NonGrantNeedsNoBootstrapFile: only the grant kind
+// consults the system-actor set, so a lens approve must not start demanding a
+// bootstrap file (or paying for a core-kv listing) to re-validate.
+func TestFreshApprovalVerdict_NonGrantNeedsNoBootstrapFile(t *testing.T) {
+	ctx, conn := setupCapabilityEnv(t)
+	seedPendingLensProposal(t, ctx, conn, "capPropNoBootLnsHJKM", "MATCH (p:provider) RETURN p.key AS key")
+
+	missing := filepath.Join(t.TempDir(), "absent.lattice.bootstrap.json")
+	verdict, err := freshApprovalVerdict(ctx, conn, "capPropNoBootLnsHJKM", missing)
+	if err != nil {
+		t.Fatalf("freshApprovalVerdict: %v", err)
+	}
+	if verdict["state"] != "valid" {
+		t.Fatalf("verdict = %+v, want valid", verdict)
 	}
 }
 
