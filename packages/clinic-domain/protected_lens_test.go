@@ -363,6 +363,69 @@ func TestClinicPatientsRead_ProjectsWorkplaceAnchor(t *testing.T) {
 		"authz_anchors must carry the patient's own NanoID plus the workplace building of a provider it has an appointment with")
 }
 
+// TestClinicPatientsRead_WorkplaceAnchorDedupesAcrossAppointments — a patient
+// with several appointments through providers who all practise at the SAME
+// building must project that building's token ONCE, not once per appointment:
+// an unbounded authz_anchors array costs every staff roster read an ever-
+// growing RLS `unnest`, and never shrinks on its own. A DIFFERENT building a
+// fourth appointment reaches must still survive DISTINCT alongside it — a fix
+// that collapsed every building to one (under-grant) would pass a
+// single-building fixture as easily as the correct one. The patient also
+// carries a live identifiedBy link, so this is the one fixture proving the
+// WITH doesn't drop the identity-derived columns it asserts
+// (identity_key/email) when the workplace branch is the one doing the
+// folding; name/phone aren't seeded here and rely on the pre-existing
+// identity fixtures instead.
+func TestClinicPatientsRead_WorkplaceAnchorDedupesAcrossAppointments(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+	f.vtx(t, "aliceId", "identity")
+	emailEnv := map[string]any{"ct": "b64-email-ct", "nonce": "b64-nonce-1", "keyId": "alice-key"}
+	f.aspect(t, "aliceId", "email", "email", emailEnv)
+	f.edge(t, "identifiedBy", "alice", "aliceId")
+
+	f.vtx(t, "riverside", "building")
+	f.vtx(t, "downtown", "building")
+
+	f.vtx(t, "appt1", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt1", "alice")
+	f.edge(t, "withProvider", "appt1", "drsam")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+
+	f.vtx(t, "appt2", "appointment")
+	f.vtx(t, "drpat", "provider")
+	f.edge(t, "forPatient", "appt2", "alice")
+	f.edge(t, "withProvider", "appt2", "drpat")
+	f.edge(t, "practicesAt", "drpat", "riverside")
+
+	f.vtx(t, "appt3", "appointment")
+	f.edge(t, "forPatient", "appt3", "alice")
+	f.edge(t, "withProvider", "appt3", "drsam")
+
+	f.vtx(t, "appt4", "appointment")
+	f.vtx(t, "drkim", "provider")
+	f.edge(t, "forPatient", "appt4", "alice")
+	f.edge(t, "withProvider", "appt4", "drkim")
+	f.edge(t, "practicesAt", "drkim", "downtown")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "exactly one roster row per patient regardless of appointment count")
+	v := rows[0].Values
+
+	require.Equal(t, "vtx.identity."+f.ids["aliceId"], v["identity_key"], "the identity branch must survive the WITH alongside the workplace fan-out")
+	require.Equal(t, emailEnv, v["email"], "email must survive the WITH whole, not dropped by the workplace branch's grouping")
+
+	anchors := anchorStrings(t, v["authz_anchors"])
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
+		"three appointments at riverside collapse to one anchor, but the distinct downtown building must still survive DISTINCT")
+	require.Len(t, anchors, 3, "authz_anchors must not grow by one entry per appointment, and must not collapse a genuinely distinct building")
+}
+
 // TestClinicPatientReadGrants_SelfAnchorsEachPatient — the cap-read.clinic.patient
 // GrantTable producer's cypher proof: one grant row per patient, actor_id ==
 // anchor_id == the patient's own bare NanoID, grant_source ==

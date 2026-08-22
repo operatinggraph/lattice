@@ -96,6 +96,13 @@ type branchCorpusShape struct {
 	// The clause: the live lens §4.2 must refuse.
 	Conditions, Inspectors, Transactions int
 
+	// The clinic roster's workplace fan-out: the providers the corpus's patient
+	// has appointments with, and how many appointments with each. Every provider
+	// practises at a SHARED site as well as its own, so the collect(DISTINCT …)
+	// behind the roster's authz anchors has real duplicates to fold rather than a
+	// list DISTINCT happens not to shorten.
+	Providers, AppointmentsPerProvider int
+
 	// The remaining decomposing lenses of the corpus census: rbac permissions
 	// off held roles, residence-reachable service templates, the erasure-residue
 	// fan-outs, augur proposals against the application, and the rent clause.
@@ -108,37 +115,39 @@ type branchCorpusShape struct {
 // non-empty lists rather than a row of empty ones.
 func fullBranchShape(prefix string) branchCorpusShape {
 	return branchCorpusShape{
-		Prefix:               prefix,
-		Tasks:                3,
-		Reports:              2,
-		TasksPerReport:       2,
-		Roles:                2,
-		QueuedPerRole:        2,
-		SharedTasks:          1,
-		Containers:           2,
-		ExtraParents:         1,
-		Managed:              2,
-		Hats:                 1,
-		WorkplaceIsResidence: true,
-		Instances:            3,
-		DocInstances:         2,
-		LeaseDocs:            1,
-		SigTasks:             2,
-		OnbTasks:             2,
-		Managers:             2,
-		Conditions:           1,
-		Inspectors:           1,
-		Transactions:         2,
-		PermsPerRole:         2,
-		Templates:            2,
-		OpsPerTemplate:       2,
-		BoundIn:              2,
-		BoundOut:             1,
-		Indexes:              2,
-		DuplicatesOut:        1,
-		DuplicatesIn:         1,
-		Proposals:            2,
-		RentClauses:          1,
+		Prefix:                  prefix,
+		Tasks:                   3,
+		Reports:                 2,
+		TasksPerReport:          2,
+		Roles:                   2,
+		QueuedPerRole:           2,
+		SharedTasks:             1,
+		Containers:              2,
+		ExtraParents:            1,
+		Managed:                 2,
+		Hats:                    1,
+		WorkplaceIsResidence:    true,
+		Instances:               3,
+		DocInstances:            2,
+		LeaseDocs:               1,
+		SigTasks:                2,
+		OnbTasks:                2,
+		Managers:                2,
+		Conditions:              1,
+		Inspectors:              1,
+		Transactions:            2,
+		Providers:               2,
+		AppointmentsPerProvider: 2,
+		PermsPerRole:            2,
+		Templates:               2,
+		OpsPerTemplate:          2,
+		BoundIn:                 2,
+		BoundOut:                1,
+		Indexes:                 2,
+		DuplicatesOut:           1,
+		DuplicatesIn:            1,
+		Proposals:               2,
+		RentClauses:             1,
 	}
 }
 
@@ -147,37 +156,39 @@ func fullBranchShape(prefix string) branchCorpusShape {
 func randomBranchShape(prefix string, r *rand.Rand) branchCorpusShape {
 	n := func(max int) int { return r.Intn(max + 1) }
 	return branchCorpusShape{
-		Prefix:               prefix,
-		Tasks:                n(3),
-		Reports:              n(2),
-		TasksPerReport:       n(2),
-		Roles:                n(2),
-		QueuedPerRole:        n(3),
-		SharedTasks:          n(2),
-		Containers:           n(3),
-		ExtraParents:         n(2),
-		Managed:              n(2),
-		Hats:                 n(1),
-		WorkplaceIsResidence: r.Intn(2) == 0,
-		Instances:            n(3),
-		DocInstances:         n(2),
-		LeaseDocs:            n(1),
-		SigTasks:             n(2),
-		OnbTasks:             n(2),
-		Managers:             n(2),
-		Conditions:           n(1),
-		Inspectors:           n(1),
-		Transactions:         n(2),
-		PermsPerRole:         n(2),
-		Templates:            n(2),
-		OpsPerTemplate:       n(2),
-		BoundIn:              n(2),
-		BoundOut:             n(1),
-		Indexes:              n(2),
-		DuplicatesOut:        n(1),
-		DuplicatesIn:         n(1),
-		Proposals:            n(2),
-		RentClauses:          n(1),
+		Prefix:                  prefix,
+		Tasks:                   n(3),
+		Reports:                 n(2),
+		TasksPerReport:          n(2),
+		Roles:                   n(2),
+		QueuedPerRole:           n(3),
+		SharedTasks:             n(2),
+		Containers:              n(3),
+		ExtraParents:            n(2),
+		Managed:                 n(2),
+		Hats:                    n(1),
+		WorkplaceIsResidence:    r.Intn(2) == 0,
+		Instances:               n(3),
+		DocInstances:            n(2),
+		LeaseDocs:               n(1),
+		SigTasks:                n(2),
+		OnbTasks:                n(2),
+		Managers:                n(2),
+		Conditions:              n(1),
+		Inspectors:              n(1),
+		Transactions:            n(2),
+		Providers:               n(2),
+		AppointmentsPerProvider: n(2),
+		PermsPerRole:            n(2),
+		Templates:               n(2),
+		OpsPerTemplate:          n(2),
+		BoundIn:                 n(2),
+		BoundOut:                n(1),
+		Indexes:                 n(2),
+		DuplicatesOut:           n(1),
+		DuplicatesIn:            n(1),
+		Proposals:               n(2),
+		RentClauses:             n(1),
 	}
 }
 
@@ -506,6 +517,50 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 		putEdge(t, reg, adjKV, "authorizedBy", tx, clause)
 	}
 
+	// The clinic roster. clinicPatientsRead is UNANCHORED — it binds every
+	// patient the KV holds — and the subtree it defers is the
+	// patient <- appointment -> provider -> building walk behind each row's
+	// workplace authz anchors. The patient, its identity and the shared site are
+	// seeded whatever the random shape drew, for the same reason the attachment
+	// object below is: a corpus that drew this block away entirely would leave
+	// that lens's differential comparing two empty projections over an EMPTY
+	// certified read surface, which executeBothBranchWaysExpanded refuses.
+	//
+	// The .demographics aspect is what the lens's WHERE guard admits the patient
+	// by, and fullName is the unlinked_name column's source — its two fields are
+	// patientDemographics's whole shape (packages/clinic-domain/ddls.go). The
+	// patient's identity hop is a SECOND identity rather than the corpus actor,
+	// so nothing here reaches an actor-anchored lens and no other spec's rows
+	// move.
+	patient := name("roster")
+	putVertex(t, reg, coreKV, patient, "patient", nil)
+	putAspect(t, reg, coreKV, patient, "demographics", map[string]any{
+		"registeredAt": future, "fullName": "roster",
+	})
+	patientIdentity := name("rosteridentity")
+	putVertex(t, reg, coreKV, patientIdentity, "identity", nil)
+	putEdge(t, reg, adjKV, "identifiedBy", patient, patientIdentity)
+	sharedSite := name("sharedsite")
+	putVertex(t, reg, coreKV, sharedSite, "building", nil)
+	for i := 0; i < s.Providers; i++ {
+		clinician := name("clinician%d", i)
+		putVertex(t, reg, coreKV, clinician, "provider", nil)
+		// Two sites per provider, one of them shared with every other provider:
+		// the shared one is reached once per (appointment, provider) pair, so the
+		// DISTINCT really collapses arms that would otherwise each contribute an
+		// entry — the dedup the roster's authz_anchors is written for.
+		ownSite := name("site%d", i)
+		putVertex(t, reg, coreKV, ownSite, "building", nil)
+		putEdge(t, reg, adjKV, "practicesAt", clinician, sharedSite)
+		putEdge(t, reg, adjKV, "practicesAt", clinician, ownSite)
+		for j := 0; j < s.AppointmentsPerProvider; j++ {
+			appt := name("visit_%d_%d", i, j)
+			putVertex(t, reg, coreKV, appt, "appointment", nil)
+			putEdge(t, reg, adjKV, "forPatient", appt, patient)
+			putEdge(t, reg, adjKV, "withProvider", appt, clinician)
+		}
+	}
+
 	// objectAttachments anchors on ONE object, so the corpus always carries one
 	// with an owner link whatever the random shape drew.
 	obj := name("attachment")
@@ -772,9 +827,9 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 			},
 			content: func(row map[string]any) int { return listLen(row, "owners", "ownerKey") }},
 
-		// The two UNANCHORED lease read lenses: they bind every leaseapp in the
-		// KV rather than one, which is the multi-base-row shape the anchored
-		// lenses above cannot reach.
+		// The UNANCHORED read lenses: they bind every vertex of their head's type
+		// in the KV rather than one, which is the multi-base-row shape the
+		// anchored lenses above cannot reach.
 		{name: "leaseApplicationsRead", spec: corpusSpec(t, "leaseApplicationsRead"),
 			evidence: func(t *testing.T, row map[string]any) {
 				// missing_bgcheck false witnesses the readiness-instance subtree
@@ -803,6 +858,27 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				boolEvidence(t, row, "qualified", true, "readiness instance")
 			},
 			content: func(row map[string]any) int { return boolsTrue(row, "qualified") }},
+		// clinicPatientsRead binds every patient. Its identity hop is PINNED (the
+		// `id` node is a non-aggregating item of the WITH), so the one subtree it
+		// defers is the appointment -> provider -> building walk, and
+		// authz_anchors is the only column that walk reaches: the row's own
+		// patient NanoID is a list literal, present whether or not the walk folded
+		// anything, and every entry PAST it is a building the deferred subtree
+		// collected.
+		{name: "clinicPatientsRead", spec: corpusSpec(t, "clinicPatientsRead"),
+			evidence: func(t *testing.T, row map[string]any) {
+				require.Greaterf(t, listLen(row, "authz_anchors"), 1,
+					"authz_anchors carries only the row's own patient anchor — the workplace branch folded empty")
+			},
+			// Counting the whole column would report every corpus as productive on
+			// the self anchor alone, which is the reading the randomized
+			// differential's own guard exists to refuse.
+			content: func(row map[string]any) int {
+				if n := listLen(row, "authz_anchors"); n > 1 {
+					return n - 1
+				}
+				return 0
+			}},
 	}
 }
 
@@ -911,11 +987,12 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 	// package refractor, which sees the whole installed registry; this package
 	// cannot enumerate it, so the names are restated and the two must agree.
 	for _, name := range []string{
-		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess", "edgeIdentity",
-		"edgeManifestProviderReadGrants", "edgeManifestReadGrants", "edgeManifestStaffReadGrants",
-		"identityAnchors", "identityErasureResidue", "landlordLeaseApplicationsRead",
-		"leaseApplicationComplete", "leaseApplicationsRead", "leaseExpiry", "leaseRentSettlement",
-		"myTasks", "objectAttachments", "opCatalog", "renewalComplete",
+		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess", "clinicPatientsRead",
+		"edgeIdentity", "edgeManifestProviderReadGrants", "edgeManifestReadGrants",
+		"edgeManifestStaffReadGrants", "identityAnchors", "identityErasureResidue",
+		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",
+		"leaseExpiry", "leaseRentSettlement", "myTasks", "objectAttachments", "opCatalog",
+		"renewalComplete",
 	} {
 		require.Truef(t, covered[name],
 			"%s decomposes in the shipped corpus but no differential in this package executes it "+

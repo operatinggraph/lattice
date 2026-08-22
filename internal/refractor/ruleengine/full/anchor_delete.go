@@ -173,9 +173,11 @@ func (cr *CompiledRule) anchorProjectionShape() (anchorProjectionShape, bool) {
 
 	// A WITH clause can re-project or re-bind variables (`WITH y AS u`), so a
 	// RETURN expression's variable NAME no longer proves it binds the anchor —
-	// the name-based scope check below would be defeated. No live plain lens
-	// uses WITH (the WITH lenses are actor-aggregates, excluded upstream);
-	// reject wholesale rather than model re-binding.
+	// the name-based scope check below would be defeated. A live plain lens
+	// CAN carry WITH now (clinicPatientsRead, packages/clinic-domain/
+	// lenses.go, folds a workplace-anchor fan-out via WITH+collect(DISTINCT)):
+	// reject wholesale rather than model re-binding, and its lens spec
+	// declares DiffRetraction instead of relying on this fast path.
 	for _, c := range q.Clauses {
 		if _, isWith := c.(*With); isWith {
 			return anchorProjectionShape{}, false

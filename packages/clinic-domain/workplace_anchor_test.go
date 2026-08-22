@@ -37,21 +37,29 @@ func TestWorkplaceAnchor_ProviderLensUnchanged(t *testing.T) {
 	}
 }
 
-// TestWorkplaceAnchor_PatientsRosterUsesComprehension mirrors
-// TestWorkplaceAnchor_AppointmentsUseComprehension: the patient roster's
-// workplace fan-out walks patient -> appointment -> provider -> building as a
-// single pattern comprehension anchored on `p`, keeping the row one-per-patient
-// (a MATCH binding the appointment/provider hops in the query body would fan a
-// multi-appointment patient into one row per appointment, colliding on the
-// patient_id IntoKey) and yielding [] rather than a null element for a patient
-// with none.
-func TestWorkplaceAnchor_PatientsRosterUsesComprehension(t *testing.T) {
+// TestWorkplaceAnchor_PatientsRosterDedupesViaWith — the patient roster's
+// workplace fan-out walks patient -> appointment -> provider -> building as an
+// OPTIONAL MATCH folded by WITH p, id, collect(DISTINCT ...) back to one row
+// per patient (WITH's implicit GROUP BY on p, id), rather than a plain MATCH
+// left un-folded (which would fan a multi-appointment patient into one row
+// per appointment, colliding on the patient_id IntoKey) or an un-deduped
+// pattern comprehension (which grows authz_anchors by one entry per
+// appointment forever — see clinicPatientsReadSpec's doc comment).
+// collect(DISTINCT ...) drops nulls, so a patient with no appointments still
+// yields buildingAnchors = [] rather than a null element.
+func TestWorkplaceAnchor_PatientsRosterDedupesViaWith(t *testing.T) {
 	spec := clinicPatientsReadSpec
 
-	if !strings.Contains(spec, "[(p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]") {
-		t.Fatal("the patient roster's workplace anchor must be a single pattern comprehension over the patient's appointments' providers' buildings")
+	if !strings.Contains(spec, "OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)") {
+		t.Fatal("the patient roster's workplace anchor must walk patient -> appointment -> provider -> building via an OPTIONAL MATCH")
 	}
-	if !strings.Contains(spec, "[nanoIdFromKey(p.key)] +") {
+	if !strings.Contains(spec, "collect(DISTINCT nanoIdFromKey(b.key))") {
+		t.Fatal("the workplace anchor must dedupe via collect(DISTINCT ...), not accumulate one entry per appointment")
+	}
+	if !strings.Contains(spec, "WITH p, id, collect(DISTINCT nanoIdFromKey(b.key)) AS buildingAnchors") {
+		t.Fatal("the WITH must re-project p and id explicitly, keeping the row one-per-patient")
+	}
+	if !strings.Contains(spec, "[nanoIdFromKey(p.key)] + buildingAnchors") {
 		t.Error("the patient self-anchor must remain the first, unconditional element")
 	}
 }

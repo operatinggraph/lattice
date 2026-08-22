@@ -93,7 +93,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"clinicPatientAccounts":             {"p", 0},
 	"clinicPatientReadGrants":           {"p", 0},
 	"clinicPatients":                    {"p", 0},
-	"clinicPatientsRead":                {"p", 0},
+	"clinicPatientsRead":                {"key(id p) p!id", 0},
 	"clinicProviderReadGrants":          {"p", 0},
 	"clinicProviders":                   {"p", 0},
 	"clinicSiteBackfill":                {"p", 0},

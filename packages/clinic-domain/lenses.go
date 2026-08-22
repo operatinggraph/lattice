@@ -44,11 +44,14 @@ const ClinicProviderSitesBucket = "clinic-provider-sites"
 // own appointment shape.
 const ClinicSiteBackfillTarget = "clinicSiteBackfill"
 
-// Lenses returns the package's two projection lenses. Both are flat projections
+// Lenses returns the package's projection lenses. Most are flat projections
 // (no aggregation / WITH), so OPTIONAL-matched neighbour bindings are live
-// directly in RETURN and the §4-B1 "WITH-drop" hazard does not apply. Aspect
-// fields are read by the documented node.<aspect>.data.<field> form (the same
-// access loftspace-domain / lease-signing use), including neighbour aspect-hops
+// directly in RETURN and the §4-B1 "WITH-drop" hazard does not apply.
+// clinicPatientsReadSpec is the exception — its WITH re-projects p and id
+// explicitly (see its own doc comment), so the hazard is avoided by carrying
+// the needed bindings through rather than by skipping WITH. Aspect fields are
+// read by the documented node.<aspect>.data.<field> form (the same access
+// loftspace-domain / lease-signing use), including neighbour aspect-hops
 // (lease-signing reads id.ssn.data.value off an OPTIONAL-matched identity the
 // same way).
 func Lenses() []pkgmgr.LensSpec {
@@ -301,14 +304,42 @@ func Lenses() []pkgmgr.LensSpec {
 			// projects null email/phone — never an error (right-to-erasure and
 			// the pre-Vault/no-backfill posture both fall through the same
 			// null path).
-			CanonicalName: "clinicPatientsRead",
-			Class:         "meta.lens",
-			Adapter:       "postgres",
-			Table:         "read_clinic_patients",
-			Engine:        "full",
-			Spec:          clinicPatientsReadSpec,
-			Protected:     true,
-			IntoKey:       []string{"patient_id"},
+			//
+			// DiffRetraction: true — clinicPatientsReadSpec's WITH (the
+			// authz_anchors dedup) takes this rule out of the anchor-delete
+			// fast path: anchorProjectionShape rejects any WITH-bearing query
+			// wholesale (internal/refractor/ruleengine/full/anchor_delete.go),
+			// so a TombstonePatient event can no longer resolve a Delete key
+			// read-free and would otherwise leave the tombstoned patient's
+			// row — carrying decrypted name/email/phone PHI — stale in
+			// read_clinic_patients forever. Fire 3's target-diff retraction is
+			// the alternative for exactly this shape (mirrors
+			// loftspace-domain's landlordUnitsRead, packages/loftspace-domain/
+			// lenses.go, same Protected+postgres+WITH-blocks-anchor-delete
+			// shape); this query is genuinely unanchored (no $actorKey — a
+			// whole-roster scan), which is what
+			// ValidateUnanchoredForDiffRetraction requires, and both the
+			// Postgres and Protected adapters implement adapter.KeyLister, so
+			// the mechanism activates rather than installing dark.
+			//
+			// Cost: DiffRetraction disables both anchor seeding (rulestate.go)
+			// and the plain-derivation narrowing licence (anchor_derivation_
+			// plain.go) for this lens, so every reacting event — appointment,
+			// building, identity, patient, or provider — now re-evaluates the
+			// whole patient corpus plus a full ListKeys() of
+			// read_clinic_patients, versus the single-patient seed the old
+			// comprehension-only spec got. Priced against the roster sizes
+			// this vertical carries (reference-vertical scale, not a claim
+			// about how far it scales), not a defect.
+			CanonicalName:  "clinicPatientsRead",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			Table:          "read_clinic_patients",
+			Engine:         "full",
+			Spec:           clinicPatientsReadSpec,
+			Protected:      true,
+			DiffRetraction: true,
+			IntoKey:        []string{"patient_id"},
 			Columns: []pkgmgr.PostgresColumn{
 				{Name: "entity_key", Type: "text"},
 				{Name: "patient_key", Type: "text"},
@@ -748,26 +779,43 @@ RETURN
 // clinic-wide patient roster (D1.5, the staff-wildcard increment; Vault Fire 5
 // added the identifiedBy contact columns). Same WHERE guard as
 // clinicPatientsSpec (only NAMED patients project). authz_anchors carries the
-// row's own patient NanoID plus the WORKPLACE token of every building a
-// provider practises at, for a provider this patient has an appointment with
-// — mirroring clinicAppointmentsReadSpec's own `[(pr)-[:practicesAt]->(b) |
-// ...]` idiom one hop further out (patient -> appointment -> provider ->
-// building), so a front-desk actor's cap-read.staff grant (service-location's
-// staffReadGrants, anchored on the building it worksAt) now matches every
-// patient whose care touches that building, not only the reserved
-// WildcardAnchor holder. Three kinds of actor match: the WildcardAnchor grant
-// (the whole roster), a worksAt-anchored front-desk actor for a shared
-// building, and, via patientIdentityReadGrants below, the signed-in identity
-// that patient is identifiedBy (its own row only — see clinicPatientsRead's
-// doc comment).
+// row's own patient NanoID plus the WORKPLACE token of every DISTINCT building
+// a provider practises at, for a provider this patient has an appointment
+// with — the same self-plus-workplace anchor concept clinicAppointmentsReadSpec
+// establishes with its own `[(pr)-[:practicesAt]->(b) | ...]` comprehension,
+// one hop further out (patient -> appointment -> provider -> building), though
+// this query folds that fan-out through WITH + collect(DISTINCT) rather than
+// projecting a comprehension directly (see below) — so a front-desk actor's
+// cap-read.staff grant (service-location's staffReadGrants, anchored on the
+// building it worksAt) now matches every patient whose care touches that
+// building, not only the reserved WildcardAnchor holder. Three kinds of actor
+// match: the WildcardAnchor grant (the whole roster), a worksAt-anchored
+// front-desk actor for a shared building, and, via patientIdentityReadGrants
+// below, the signed-in identity that patient is identifiedBy (its own row
+// only — see clinicPatientsRead's doc comment).
 //
-// The workplace fan-out is a pattern COMPREHENSION anchored on `p` (mirrors
-// wellnessMembersSpec's coveringLocations idiom), not a separate MATCH: a
-// MATCH binding the appointment/provider hops in the query body would fan a
+// The workplace fan-out is an OPTIONAL MATCH folded back to one row per
+// (patient, identity) pair by WITH p, id, collect(DISTINCT ...) — one row per
+// patient in the common single-identifiedBy case, pre-existing multiplicity
+// this WITH neither introduces nor fixes if a patient ever carries more than
+// one identifiedBy link (ddls.go documents that link key as
+// (patient, identity)-composite) — combining two separately precedented
+// idioms rather than mirroring one: privacy-base's
+// `WITH i, count(DISTINCT c.key) AS boundInResidue` (packages/privacy-base/
+// lenses.go) carries a bound node through WITH alongside a DISTINCT
+// aggregate, and edge-manifest's edgeIdentitySpec collect(DISTINCT {...})
+// (packages/edge-manifest/lenses.go) dedupes a fan-out into a projected
+// array — not a plain MATCH left un-folded: a MATCH binding the
+// appointment/provider hops that carried straight into RETURN would fan a
 // multi-appointment patient into one row per appointment, colliding on the
-// single-valued patient_id IntoKey. The comprehension keeps the row
-// one-per-patient regardless of how many appointments or providers it walks,
-// yielding [] (never a null element) for a patient with none.
+// single-valued patient_id IntoKey.
+// WITH's implicit GROUP BY on its non-aggregating items (p, id) is what
+// re-collapses those fanned rows to one per patient before RETURN ever runs,
+// and collect() drops nulls (internal/refractor/ruleengine/full/aggregate.go),
+// so a patient with no appointments yields buildingAnchors = [] rather than
+// [null]. DISTINCT is load-bearing, not cosmetic: without it a patient's
+// authz_anchors grows by one entry per appointment forever (an RLS array
+// `unnest` on every staff roster read pays the cost of every duplicate).
 //
 // identifiedBy is OPTIONAL — a patient created before its contact was minted,
 // or one with no contact at all, has no linked identity, so identityKey /
@@ -780,6 +828,8 @@ RETURN
 const clinicPatientsReadSpec = `MATCH (p:patient)
 WHERE p.demographics.data.registeredAt <> null
 OPTIONAL MATCH (p)-[:identifiedBy]->(id:identity)
+OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)
+WITH p, id, collect(DISTINCT nanoIdFromKey(b.key)) AS buildingAnchors
 RETURN
   nanoIdFromKey(p.key)         AS patient_id,
   p.key                        AS entity_key,
@@ -789,7 +839,7 @@ RETURN
   id.key                       AS identity_key,
   id.email.data                AS email,
   id.phone.data                AS phone,
-  [nanoIdFromKey(p.key)] + [(p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+  [nanoIdFromKey(p.key)] + buildingAnchors
                                AS authz_anchors
 `
 

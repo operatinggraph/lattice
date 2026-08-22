@@ -1,7 +1,7 @@
 package refractor_test
 
 // corpusBranchVerdicts pins every executable cypher the installed corpus ships.
-// Eighteen lenses decompose; every other row records a cypher this mechanism
+// Nineteen lenses decompose; every other row records a cypher this mechanism
 // leaves on the product path, which is the half of the census an eye-reading
 // gets wrong.
 var corpusBranchVerdicts = map[string]branchVerdict{
@@ -37,7 +37,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"clinicPatientAccounts":             {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicPatientReadGrants":           {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicPatients":                    {"g0/o0!no-aggregating-item", 0, 0},
-	"clinicPatientsRead":                {"g1/o1!no-aggregating-item", 0, 1},
+	"clinicPatientsRead":                {"g2/o2[a,b,pr] g0/o0!no-aggregating-item", 1, 2},
 	"clinicProviderReadGrants":          {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicProviders":                   {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicSiteBackfill":                {"g1/o1!no-aggregating-item", 0, 1},
@@ -127,7 +127,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 // now evaluates apart.
 //
 // Every name here is executed under BOTH configurations by a differential in
-// ruleengine/full — the fifteen hand-authored lenses by
+// ruleengine/full — the sixteen hand-authored lenses by
 // TestBranchDecomposition_ShippedLensesProjectIdenticalRows and its randomized
 // sibling, the three generated read-grant producers by
 // TestBranchDecomposition_GeneratedProducersProjectIdenticalRows. That coverage
@@ -138,6 +138,7 @@ var decomposingCorpusLenses = []string{
 	"capabilityEphemeral",
 	"capabilityRoles",
 	"capabilityServiceAccess",
+	"clinicPatientsRead",
 	"edgeIdentity",
 	"edgeManifestProviderReadGrants",
 	"edgeManifestReadGrants",
@@ -158,7 +159,7 @@ var decomposingCorpusLenses = []string{
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
 // holding two or more SIBLING branch groups in one stage. The design said
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
-// thirty-two clause-counted literals; the analysis derives TWENTY-FOUR.
+// thirty-two clause-counted literals; the analysis derives TWENTY-FIVE.
 var siblingBranchGroupLenses = []string{
 	"appointmentReminders",
 	"cafeTabSettlement",
@@ -167,6 +168,7 @@ var siblingBranchGroupLenses = []string{
 	"clinicAppointments",
 	"clinicAppointmentsRead",
 	"clinicNoShowSettlement",
+	"clinicPatientsRead",
 	"edgeIdentity",
 	"followUpReminders",
 	"identityAnchors",
@@ -192,6 +194,7 @@ var siblingBranchGroupLenses = []string{
 // §4.2's non-DISTINCT collect/count, clauseSatisfaction included.
 var multiGroupDecomposingLenses = []string{
 	"capabilityEphemeral",
+	"clinicPatientsRead",
 	"edgeIdentity",
 	"identityAnchors",
 	"leaseApplicationComplete",
