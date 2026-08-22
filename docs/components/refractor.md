@@ -1162,15 +1162,9 @@ The component's recurring review-finding classes — fire briefs copy the applic
 **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike
 the entry).
 
-- **A projection read as a decision input by another projection needs its own change edge** — a lens whose
-  security filter reads a second lens's output (not the walked Core-KV subgraph) gets no CDC notification
-  when that second lens's answer changes, so a revoked grant (or any input flip) surfaces only on unrelated
-  traffic. Minted: the Personal Lens's D1 `capabilityread.IsReadable` gate had no change edge on
-  `cap-read.*` for its whole life (personal-lens-grant-change-trigger-design.md). Check: every producer a
-  lens depends on for AUTHORIZATION (not anchor data) declares a `grant-change-posture` comment at its read
-  call site, enforced by `scripts/lint-conventions.go`'s blocking `IsReadable(` gate.
-
-Retired so far — the gate is the record, so the prose is gone: *site censuses derived from key
+Retired so far — the gate is the record, so the prose is gone: *a projection read as a decision input by
+another projection needs its own change edge* (`scripts/lint-conventions.go`'s blocking `IsReadable(` gate,
+which default-denies a read call site carrying no `grant-change-posture` annotation), *site censuses derived from key
 shapes undercount* (`label_derivation_corpus_census_test.go`, `grouping_reduction_corpus_census_test.go`),
 *turning on a behaviour an existing predicate gated hands it the complement*
 (`TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation`), *a label narrows the binder, not
