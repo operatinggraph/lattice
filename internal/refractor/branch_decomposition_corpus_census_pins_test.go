@@ -112,7 +112,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"wellnessClassPriceSettlement":      {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
 	"wellnessIdentitiesRead":            {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessInstructors":               {"g1/o1!no-aggregating-item", 0, 1},
-	"wellnessLedgerHistory":             {"g0/o0!no-aggregating-item", 0, 0},
+	"wellnessLedgerHistory":             {"g1/o2!no-aggregating-item", 0, 1},
 	"wellnessMemberAccounts":            {"g0/o0!no-aggregating-item g1/o1!no-aggregating-item", 0, 1},
 	"wellnessMembers":                   {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessNoShowSettlement":          {"g2/o2!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item", 0, 2},
