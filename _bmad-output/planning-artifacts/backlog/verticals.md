@@ -76,7 +76,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-22 · `815d91bf` · Three Protected authz lenses drop their unbounded containedIn walk for a single fixed hop (typed-relation-signatures' zero-platform replacement). loftspace-domain 0.11.1, lease-signing 0.31.5
+- 2026-08-22 · `8dea6284` · Three Protected authz lenses drop their unbounded containedIn walk for a single fixed hop (typed-relation-signatures' zero-platform replacement). loftspace-domain 0.11.1, lease-signing 0.31.5
 - 2026-08-22 · `cca9b4d4` · A landlord setting renewal terms finally sees the tenant's name, not a raw key — renewalsRead gains a SECURE tenant_name column. lease-signing 0.31.4
 - 2026-08-22 · `b757bab0` · Clinic's front-desk header and 7 toasts stop showing raw keys; loftspace drops 3 unlabeled reference codes. clinic-domain 0.34.1
 - 2026-08-22 · `cde1826b` · A wellness no-show fee finally names its class — wellnessLedgerHistory walks settles→forSession to the session's display name, mirroring clinic-ledger's `15f628f4`. wellness-ledger 0.2.10
