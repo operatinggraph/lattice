@@ -598,6 +598,11 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 		}
 	}
 
+	// Sorted so the refusal that reads it names the same keys in the same order
+	// on every run — an operator comparing two runs is comparing lists, and the
+	// field's own contract says sorted.
+	sort.Strings(sum.resurrectedKeys)
+
 	// Removed keys (old \ new) → tombstone, in deterministic sorted order.
 	seen := make(map[string]struct{}, len(oldKeys))
 	var removed []string

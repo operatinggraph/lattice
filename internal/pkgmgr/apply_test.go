@@ -932,3 +932,47 @@ func TestApply_RefuseRemovals_CoveringDefinitionCountsMatch(t *testing.T) {
 		t.Fatalf("a covering Definition leaves nothing undescribed, got %v", sum.undescribedKeys)
 	}
 }
+
+// TestApply_RefuseRemovals_OutranksTheSecureColumnGuard pins the order the two
+// guards run in, which decides which refusal an operator is handed.
+//
+// Both are fed by the same dropped-key set, so a partial Definition that drops a
+// Secure Lens trips both. The secure-column guard's remedy is to declare a
+// RetiredSecureColumn — an attestation that the ciphertext those columns
+// encrypted is safe to stop tracking. A caller describing one artifact of
+// somebody else's package cannot make that attestation and has no standing to:
+// it is not their ciphertext. Answering them with it sends them to a dead end
+// and, worse, invites the one author who CAN write it to write it for a removal
+// nobody intended.
+//
+// The coverage refusal is the harder boundary — the apply must not happen at
+// all, by any attestation — so it answers first. The source-authored path is
+// untouched: with RefuseRemovals unset the coverage guard is a no-op and the
+// retirement guard still owns the refusal, which the assertion below pins so
+// that reordering cannot quietly disarm it.
+func TestApply_RefuseRemovals_OutranksTheSecureColumnGuard(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	v1 := defWithTwoSecureColumns("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// A partial Definition: the secure lens is not described at all, so its
+	// spec — and the custody record on it — is among the keys being dropped.
+	partial := Definition{Name: v1.Name, Version: "0.2.0"}
+	_, err := inst.Apply(ctx, partial, ApplyOptions{RefuseRemovals: true})
+	if !errors.Is(err, ErrApplyWouldRemove) {
+		t.Fatalf("a partial Definition must get the coverage refusal, not an attestation demand it cannot satisfy; got %v", err)
+	}
+	if errors.Is(err, ErrUndeclaredSecureColumnDrop) {
+		t.Fatalf("the secure-column guard answered first: %v", err)
+	}
+
+	// The source-authored path still gets the retirement guard, unchanged.
+	sourceAuthored := defWithOneSecureColumn("0.2.0")
+	_, err = inst.Apply(ctx, sourceAuthored, ApplyOptions{})
+	if !errors.Is(err, ErrUndeclaredSecureColumnDrop) {
+		t.Fatalf("a source-authored erasure must still be refused by the retirement guard; got %v", err)
+	}
+}

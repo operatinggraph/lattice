@@ -526,11 +526,19 @@ func checkUpgradeExistingVersions(ctx context.Context, conn *substrate.Conn, pro
 	if strings.TrimSpace(newVersion) == strings.TrimSpace(existing.Version) {
 		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with target.newVersion %q, which is the version already installed — an upgrade must move the version, so that a package live at newVersion can only mean this apply committed", proposalKey, packageName, newVersion)
 	}
-	// The mode's optimistic-concurrency check. A proposal authored against
-	// 1.0.0 and applied over 1.1.0 is a stale apply: the artifacts it DOES
-	// describe overwrite whatever 1.1.0 changed to them. The proposal already
-	// records the version it was authored against, so absence is refused rather
-	// than tolerated.
+	// A precondition, not an optimistic-concurrency check — the distinction
+	// matters because the name "OCC" would promise atomicity this does not have.
+	// The installed version is read here, and Apply reads it again independently
+	// when it runs; nothing re-compares baseVersion at that point, so a version
+	// that moves in between is not caught by this. What holds that line is the
+	// coverage refusal, which is evaluated inside the call that computes the
+	// delta and so is atomic with it.
+	//
+	// What this DOES catch is the stale proposal: one authored against 1.0.0 and
+	// submitted at a package now at 1.1.0, whose described artifacts would
+	// overwrite whatever 1.1.0 changed to them. The proposal already records the
+	// version it was authored against, so absence is refused rather than
+	// tolerated.
 	if baseVersion == "" {
 		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with no target.baseVersion — an upgrade must declare the version it was authored against, or it cannot be told from a stale apply", proposalKey, packageName)
 	}
