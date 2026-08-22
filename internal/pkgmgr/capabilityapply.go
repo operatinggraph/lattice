@@ -15,10 +15,67 @@ import (
 // Installer.Apply (InstallPackage on a fresh target / UpgradePackage on an
 // existing one), plus the proposal id the subsequent
 // MarkCapabilityProposalApplied op needs to close the loop.
+// The Definition is unexported so that ApplyCapabilityPlan is the only way to
+// APPLY one. A capability Definition describes the proposal's own artifact and
+// nothing else about the package it names, and Installer.Apply's in-place
+// branch is a convergence operator — handing that Definition to Apply directly
+// retires every key the proposal did not mention. MaterializedDefinition
+// re-opens the value for inspection, which is a different act.
 type CapabilityApplyPlan struct {
 	ProposalID  string
 	PackageName string
-	Definition  Definition
+	definition  Definition
+	// mode is the proposal's declared target.mode ("newPackage" /
+	// "upgradeExisting"), carried because it is what ApplyCapabilityPlan
+	// resolves RequireInstalled from. Unexported for the same reason the
+	// Definition is: the decision it feeds belongs to ApplyCapabilityPlan, not
+	// to a caller assembling its own ApplyOptions.
+	mode string
+}
+
+// MaterializedDefinition returns the package Definition this plan materialized
+// from the proposal's stored artifact, for INSPECTION — logging it, diffing it,
+// asserting over it in a test, showing an operator what is about to land.
+//
+// It is not a way to apply the plan. Apply the plan with ApplyCapabilityPlan,
+// which sets the options a partial, AI-authored Definition requires; passing
+// this value to Installer.Apply directly discards them and converges the target
+// package onto a Definition that describes only one artifact of it.
+func (p *CapabilityApplyPlan) MaterializedDefinition() Definition { return p.definition }
+
+// ApplyCapabilityPlan is the sanctioned way to apply an APPROVED capability
+// proposal's plan. It exists because the correct ApplyOptions for a plan are a
+// property of the plan rather than of the caller, and an option a caller must
+// remember is an option a caller will forget.
+func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApplyPlan) (*ApplyResult, error) {
+	opts := ApplyOptions{
+		// Always, in both modes. A capability Definition is never authorized to
+		// remove: it describes its own artifact, so every key it omits is a key
+		// it has nothing to say about rather than one it retires. On the
+		// newPackage arm the option is inert by construction — applyFreshInstall
+		// runs a create-only batch with no diff — and that inertness is the
+		// point: it closes the window in which the name becomes installed
+		// between the plan build's IsPackageInstalled check and Apply's own
+		// findInstalledPackage, where Apply would otherwise silently take the
+		// in-place branch and tombstone the occupant's keys.
+		RefuseRemovals: true,
+	}
+	if plan.mode == "upgradeExisting" {
+		// Two effects, both wanted. (i) If the package is uninstalled between
+		// the plan build and here, the honest outcome is ErrNotInstalled, not a
+		// fresh install landing on the uninstall's tombstones and failing later
+		// as an occupancy refusal. (ii) It is a conjunct of Apply's same-version
+		// skip branch, so setting it defeats that skip — which matters because a
+		// skipped apply returns success having committed nothing, and the
+		// callers here go straight on to stamp MarkCapabilityProposalApplied
+		// over an artifact that never landed.
+		//
+		// Force would defeat the same skip and is deliberately NOT set: it would
+		// additionally re-open the same-version diff path that
+		// CapabilityApplyPlanForProposal refuses for an independent reason.
+		opts.RequireInstalled = true
+	}
+	return i.Apply(ctx, plan.definition, opts)
 }
 
 // platformProtectedPackages is the package-name deny-list an AI-authored
@@ -183,8 +240,9 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 	if err != nil {
 		return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s .target.%w", proposalKey, err)
 	}
-	if version == "" {
-		version = "0.1.0"
+	baseVersion, err := typedStringField(target, "baseVersion")
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s .target.%w", proposalKey, err)
 	}
 
 	// Bind the proposal's declared intent (newPackage vs upgradeExisting) to
@@ -201,9 +259,18 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 		if installed {
 			return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s targets packageName %q as newPackage, but a package by that name is already installed", proposalKey, packageName)
 		}
+		// A first version an author did not state is a version nobody needs to
+		// state: the package is new, so any starting point is as true as the
+		// next. The same silence over an upgrade is refused below.
+		if version == "" {
+			version = "0.1.0"
+		}
 	case "upgradeExisting":
 		if !installed {
 			return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s targets packageName %q as upgradeExisting, but no package by that name is installed", proposalKey, packageName)
+		}
+		if err := checkUpgradeExistingVersions(ctx, conn, proposalKey, packageName, version, baseVersion); err != nil {
+			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("pkgmgr: capability apply: proposal %s has unrecognized target.mode %q", proposalKey, mode)
@@ -224,7 +291,55 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 		return nil, err
 	}
 
-	return &CapabilityApplyPlan{ProposalID: proposalID, PackageName: packageName, Definition: def}, nil
+	return &CapabilityApplyPlan{ProposalID: proposalID, PackageName: packageName, definition: def, mode: mode}, nil
+}
+
+// checkUpgradeExistingVersions enforces the three preconditions an
+// upgradeExisting proposal must satisfy before a Definition is built for it.
+// All three read fields the proposal already carries, so none needs a package
+// version bump or a new op field.
+//
+// It resolves the installed version itself rather than threading it down from
+// the caller's IsPackageInstalled check: that check answers a different
+// question (does the declared mode match the live catalog) and its fold-equal
+// near-miss refusal is what makes the mode binding safe, so it stays. This one
+// runs only on the upgradeExisting arm, after that check has already passed.
+func checkUpgradeExistingVersions(ctx context.Context, conn *substrate.Conn, proposalKey, packageName, newVersion, baseVersion string) error {
+	// The shared newVersion default is meaningful for a new package and
+	// meaningless for an upgrade: defaulting here would record cafe-domain@1.3.0
+	// as 0.1.0. An upgrade's target version must be declared, not inferred.
+	if newVersion == "" {
+		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with no target.newVersion — an upgrade's target version must be declared, since the shared default would record the package at 0.1.0", proposalKey, packageName)
+	}
+	existing, err := NewInstaller(conn, "").findInstalledPackage(ctx, packageName)
+	if err != nil {
+		return fmt.Errorf("pkgmgr: capability apply: resolve installed version of %q: %w", packageName, err)
+	}
+	if existing == nil {
+		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting, but no package by that name is installed", proposalKey, packageName)
+	}
+	// The console answers "did this proposal's apply already commit?" by asking
+	// whether the target package is live AT THE TARGET VERSION. If an upgrade's
+	// newVersion equals the version already installed, that question has no
+	// answer — "installed at newVersion" means both "applied" and "never
+	// applied" — and every such proposal is 409'd as recoverable and closed over
+	// an artifact that never landed. Refusing here makes the discriminator sound
+	// by construction rather than by convention.
+	if newVersion == existing.Version {
+		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with target.newVersion %q, which is the version already installed — an upgrade must move the version, so that a package live at newVersion can only mean this apply committed", proposalKey, packageName, newVersion)
+	}
+	// The mode's optimistic-concurrency check. A proposal authored against
+	// 1.0.0 and applied over 1.1.0 is a stale apply: the artifacts it DOES
+	// describe overwrite whatever 1.1.0 changed to them. The proposal already
+	// records the version it was authored against, so absence is refused rather
+	// than tolerated.
+	if baseVersion == "" {
+		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with no target.baseVersion — an upgrade must declare the version it was authored against, or it cannot be told from a stale apply", proposalKey, packageName)
+	}
+	if baseVersion != existing.Version {
+		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with target.baseVersion %q, but %q is installed — this proposal was authored against a version that is no longer there, so applying it would overwrite whatever changed since", proposalKey, packageName, baseVersion, existing.Version)
+	}
+	return nil
 }
 
 // typedStringField returns m[key] as a string. Absence is not an error

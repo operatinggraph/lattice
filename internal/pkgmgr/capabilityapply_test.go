@@ -3,6 +3,8 @@ package pkgmgr
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"maps"
 	"sort"
 	"strings"
 	"testing"
@@ -58,6 +60,15 @@ func guardProposalID(t *testing.T, n int) string {
 // proposal key.
 func seedApprovedProposal(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalID, packageName, mode string) string {
 	t.Helper()
+	return seedApprovedProposalWithTarget(t, ctx, conn, proposalID,
+		map[string]any{"packageName": packageName, "mode": mode})
+}
+
+// seedApprovedProposalWithTarget is seedApprovedProposal with the whole .target
+// body supplied, for the cases whose subject is a target FIELD (newVersion,
+// baseVersion) rather than the packageName/mode pair.
+func seedApprovedProposalWithTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalID string, target map[string]any) string {
+	t.Helper()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 
 	content, err := json.Marshal(LensArtifactContent{
@@ -73,7 +84,7 @@ func seedApprovedProposal(t *testing.T, ctx context.Context, conn *substrate.Con
 	aspects := map[string]map[string]any{
 		proposalKey + ".review":   {"state": "approved"},
 		proposalKey + ".artifact": {"kind": "lens", "content": string(content)},
-		proposalKey + ".target":   {"packageName": packageName, "mode": mode},
+		proposalKey + ".target":   target,
 	}
 	for key, data := range aspects {
 		b, err := json.Marshal(map[string]any{"isDeleted": false, "data": data})
@@ -380,8 +391,8 @@ func TestCapabilityApplyPlan_AuthoredBusinessOp_Unaffected(t *testing.T) {
 	if plan.PackageName != "ai-target-escalation" {
 		t.Fatalf("plan.PackageName = %q, want ai-target-escalation", plan.PackageName)
 	}
-	if len(plan.Definition.WeaverTargets) != 1 {
-		t.Fatalf("plan defines %d weaver targets, want 1", len(plan.Definition.WeaverTargets))
+	if len(plan.definition.WeaverTargets) != 1 {
+		t.Fatalf("plan defines %d weaver targets, want 1", len(plan.definition.WeaverTargets))
 	}
 }
 
@@ -638,7 +649,163 @@ func TestCapabilityApplyPlan_VerticalPackage_Unaffected(t *testing.T) {
 	if plan.PackageName != "cafe-domain" {
 		t.Fatalf("plan.PackageName = %q, want cafe-domain", plan.PackageName)
 	}
-	if len(plan.Definition.Lenses) != 1 {
-		t.Fatalf("plan.Definition.Lenses = %d, want 1", len(plan.Definition.Lenses))
+	if len(plan.definition.Lenses) != 1 {
+		t.Fatalf("plan.definition.Lenses = %d, want 1", len(plan.definition.Lenses))
+	}
+}
+
+// seedInstalledManifest writes the one aspect findInstalledPackage matches on:
+// a live vtx.package.<id>.manifest carrying name + version. Enough for the
+// version preconditions, which read the installed version and nothing else.
+func seedInstalledManifest(t *testing.T, ctx context.Context, conn *substrate.Conn, name, version string) {
+	t.Helper()
+	pkgKey := PackageVertexPrefix + entityNanoID(name, "package")
+	putEnvelope(t, ctx, conn, pkgKey, map[string]any{"class": "package", "isDeleted": false, "data": map[string]any{}})
+	putEnvelope(t, ctx, conn, pkgKey+".manifest", map[string]any{"isDeleted": false, "data": map[string]any{
+		"name": name, "version": version, "declaredKeys": []string{pkgKey, pkgKey + ".manifest"},
+	}})
+}
+
+// TestCapabilityApplyPlan_UpgradeExisting_RequiresMovedVersion covers the three
+// preconditions an upgradeExisting proposal must satisfy, plus the admitted
+// case that proves each refusal is about the field it names rather than about
+// the fixture being unbuildable for some other reason.
+//
+// Each refusal reads a field the proposal already carries, so none of them
+// needs a new op field: the shared newVersion default is meaningful only for a
+// package that does not exist yet; a newVersion equal to the installed version
+// leaves "installed at newVersion" meaning both "this apply committed" and "it
+// never ran", which is the discriminator the console's recovery branch rests
+// on; and a baseVersion that is absent or no longer installed is a stale apply
+// whose described artifacts overwrite whatever moved since.
+func TestCapabilityApplyPlan_UpgradeExisting_RequiresMovedVersion(t *testing.T) {
+	ctx, conn := newCapabilityApplyHarness(t)
+
+	const packageName = "cap-version-guard-pkg"
+	const installedVersion = "1.1.0"
+	seedInstalledManifest(t, ctx, conn, packageName, installedVersion)
+
+	cases := []struct {
+		name        string
+		newVersion  string
+		baseVersion string
+		wantField   string // "" → the admitted case
+	}{
+		{"newVersion absent", "", installedVersion, "newVersion"},
+		{"newVersion equals installed", installedVersion, installedVersion, "newVersion"},
+		{"baseVersion absent", "1.2.0", "", "baseVersion"},
+		{"baseVersion not installed", "1.2.0", "1.0.0", "baseVersion"},
+		{"admitted", "1.2.0", installedVersion, ""},
+	}
+	for n, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proposalKey := seedApprovedProposalWithTarget(t, ctx, conn, guardProposalID(t, n), map[string]any{
+				"packageName": packageName,
+				"mode":        "upgradeExisting",
+				"newVersion":  tc.newVersion,
+				"baseVersion": tc.baseVersion,
+			})
+
+			plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+			if tc.wantField == "" {
+				if err != nil {
+					t.Fatalf("a well-formed upgradeExisting proposal must build a plan, got %v", err)
+				}
+				if plan.mode != "upgradeExisting" {
+					t.Fatalf("plan.mode = %q, want upgradeExisting — ApplyCapabilityPlan resolves RequireInstalled from it", plan.mode)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want a refusal naming %s, got plan %+v", tc.wantField, plan)
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Fatalf("refusal must name the offending field %q, got %v", tc.wantField, err)
+			}
+		})
+	}
+}
+
+// TestApplyCapabilityPlan_SetsRefuseRemovals is what makes the whole design
+// falsifiable: a real upgradeExisting proposal at a real multi-entity package,
+// applied the sanctioned way, refuses instead of retiring every key the
+// proposal's one-lens artifact does not describe. It drives ApplyCapabilityPlan
+// rather than asserting over the options it builds, so deleting the guard from
+// Apply — or the option from ApplyCapabilityPlan — turns this red.
+func TestApplyCapabilityPlan_SetsRefuseRemovals(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	installed := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, installed); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	proposalKey := seedApprovedProposalWithTarget(t, ctx, conn, "CAApplyUpgradeHJKMN", map[string]any{
+		"packageName": installed.Name,
+		"mode":        "upgradeExisting",
+		"newVersion":  "0.2.0",
+		"baseVersion": "0.1.0",
+	})
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal: %v", err)
+	}
+	before := coreKVSnapshot(t, ctx, conn)
+
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
+	if err == nil {
+		t.Fatalf("a one-artifact proposal applied over a multi-entity package must refuse, got: %+v", res)
+	}
+	var refusal *ApplyWouldRemoveError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if refusal.PackageName != installed.Name {
+		t.Errorf("PackageName = %q, want %q", refusal.PackageName, installed.Name)
+	}
+	if len(refusal.RemovedKeys) == 0 {
+		t.Fatal("a refusal with an empty RemovedKeys names nothing an operator can act on")
+	}
+	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatal("the refused capability apply must commit nothing")
+	}
+}
+
+// TestApplyCapabilityPlan_NewPackageRaceRefuses covers why RefuseRemovals is
+// set on the newPackage arm too, where it is otherwise inert. The plan builder
+// established the name was free; by the time the apply runs it is taken, so
+// Apply dispatches on install state and takes the IN-PLACE branch — and a
+// newPackage Definition describes none of the occupant's keys. Without the
+// option the apply would tombstone a package it has never seen.
+//
+// The occupant is installed at a different version on purpose: Apply's
+// same-version skip branch returns before the delta is computed, so a race onto
+// an identically-versioned name is a skip rather than a refusal.
+func TestApplyCapabilityPlan_NewPackageRaceRefuses(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	const racedName = "cap-race-target-pkg"
+	proposalKey := seedApprovedProposal(t, ctx, conn, "CAApplyRaceHJKMNPQ", racedName, "newPackage")
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal (name free): %v", err)
+	}
+
+	// The name is claimed between the plan build and the apply.
+	occupant := removalFixtureDef("0.2.0")
+	occupant.Name = racedName
+	if _, err := inst.Install(ctx, occupant); err != nil {
+		t.Fatalf("install the racing occupant: %v", err)
+	}
+	before := coreKVSnapshot(t, ctx, conn)
+
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
+	if err == nil {
+		t.Fatalf("a newPackage plan landing on an occupied name must refuse, got: %+v", res)
+	}
+	if !errors.Is(err, ErrApplyWouldRemove) {
+		t.Fatalf("want ErrApplyWouldRemove, got %v", err)
+	}
+	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatal("the occupant's keys must be untouched by the refused race")
 	}
 }

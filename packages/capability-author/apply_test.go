@@ -277,8 +277,10 @@ func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *s
 // reads the plan (read-only, no submission), stands up a temporary meta-lane
 // pipeline exactly like the package installs earlier in the test used, and
 // submits the real InstallPackage/UpgradePackage op through
-// pkgmgr.Installer.Apply — the SAME unmodified path every human package
-// install runs. Returns the resulting pkgmgr.ApplyResult.
+// pkgmgr.Installer.ApplyCapabilityPlan — the sanctioned entry point, which
+// carries the options a partial, AI-authored Definition requires into the SAME
+// unmodified F-004 path every human package install runs. Returns the
+// resulting pkgmgr.ApplyResult.
 func applyRealPackage(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalKey string) *pkgmgr.ApplyResult {
 	t.Helper()
 	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
@@ -291,9 +293,9 @@ func applyRealPackage(t *testing.T, ctx context.Context, conn *substrate.Conn, p
 
 	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = testutil.StandardRoleIDs()
-	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
 	if err != nil {
-		t.Fatalf("Installer.Apply(%s): %v", plan.PackageName, err)
+		t.Fatalf("Installer.ApplyCapabilityPlan(%s): %v", plan.PackageName, err)
 	}
 	return res
 }

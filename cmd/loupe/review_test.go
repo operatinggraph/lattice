@@ -16,6 +16,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/processor/opwire"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -1077,5 +1078,78 @@ func TestReviewQueue_UnprovisionedWhenBucketAbsent(t *testing.T) {
 		if cnt, _ := body["count"].(float64); cnt != 0 {
 			t.Errorf("%s: want count 0, got %v", c.tab, body["count"])
 		}
+	}
+}
+
+// TestReviewCapabilityApply_RemovalRefusalIs409 drives the apply endpoint end
+// to end over a proposal whose one-lens artifact does not describe the package
+// it upgrades. The refusal is deterministic — the same Definition will describe
+// the same package just as poorly tomorrow — so it must reach the console as a
+// 409 carrying the remedy, not as the 502 the UI treats as a transport blip
+// worth retrying.
+//
+// It posts the real request rather than calling packageApplyStatus directly:
+// the mapping function agreeing about a sentinel proves nothing if the call
+// site never produces it.
+func TestReviewCapabilityApply_RemovalRefusalIs409(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+
+	const pkgName = "alpha"
+	const installedVersion = "1.2.0"
+
+	// The installed package, on the deterministic keys a real install writes:
+	// its manifest declares a lens the proposal's artifact says nothing about,
+	// so that lens is what the apply would retire.
+	pkgKey := "vtx.package." + substrate.PackageEntityNanoID(pkgName, "package")
+	lensKey := "vtx.meta." + pkgmgr.LensID(pkgName, "legacyLens")
+	declared := []string{pkgKey, pkgKey + ".manifest", lensKey, lensKey + ".canonicalName"}
+	declaredJSON, err := json.Marshal(declared)
+	if err != nil {
+		t.Fatalf("marshal declaredKeys: %v", err)
+	}
+	put(bootstrap.CoreKVBucket, pkgKey, `{"class":"package","isDeleted":false,"data":{}}`)
+	put(bootstrap.CoreKVBucket, pkgKey+".manifest",
+		`{"class":"packageManifest","isDeleted":false,"data":{"name":"`+pkgName+
+			`","version":"`+installedVersion+`","declaredKeys":`+string(declaredJSON)+`}}`)
+	put(bootstrap.CoreKVBucket, lensKey, `{"class":"meta.lens","isDeleted":false,"data":{}}`)
+	put(bootstrap.CoreKVBucket, lensKey+".canonicalName",
+		`{"class":"canonicalName","isDeleted":false,"data":{"value":"legacyLens"}}`)
+
+	// The proposal's own aspects, which the plan builder reads.
+	proposalKey := "vtx.capabilityproposal.remove1"
+	contentJSON, err := json.Marshal(validLensContent)
+	if err != nil {
+		t.Fatalf("marshal artifact content: %v", err)
+	}
+	put(bootstrap.CoreKVBucket, proposalKey+".review", `{"isDeleted":false,"data":{"state":"approved"}}`)
+	put(bootstrap.CoreKVBucket, proposalKey+".artifact",
+		`{"isDeleted":false,"data":{"kind":"lens","content":`+string(contentJSON)+`}}`)
+	put(bootstrap.CoreKVBucket, proposalKey+".target",
+		`{"isDeleted":false,"data":{"packageName":"`+pkgName+`","mode":"upgradeExisting",`+
+			`"newVersion":"2.0.0","baseVersion":"`+installedVersion+`"}}`)
+
+	// The read-model row the handler classifies first. newVersion differs from
+	// the installed version, so the resumable recovery branch does not fire and
+	// the request reaches the apply.
+	putCapProposal(t, put, "remove1", map[string]any{
+		"intent": "approved, describes one lens of a package it does not own", "kind": "lens",
+		"content": validLensContent, "reviewState": "approved", "targetMode": "upgradeExisting",
+		"targetPackageName": pkgName, "targetNewVersion": "2.0.0",
+	})
+
+	res, body := postReview(t, client, base, "/api/review/capability/remove1/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — a removal refusal fails identically on every retry: %+v", res.StatusCode, body)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("a refused apply committed nothing, so it is not recoverable via mark-applied: %+v", body)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "would remove keys its Definition does not describe") {
+		t.Fatalf("want the removal refusal in the body, got %+v", body)
+	}
+	if !strings.Contains(msg, "newPackage") {
+		t.Errorf("the refusal must carry its remedy through to the console, got %q", msg)
 	}
 }

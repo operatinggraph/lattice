@@ -730,7 +730,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 	inst.RoleIDs = kernelRoleIDs()
 	inst.Submit = s.pkgmgrSubmit
 
-	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
 	if err != nil {
 		s.writeError(w, packageApplyStatus(err), "apply "+plan.PackageName+": "+err.Error())
 		return
