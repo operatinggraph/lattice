@@ -187,6 +187,7 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .item-line .item-amount { font-family: var(--mono); color: var(--text-dim); }
 .item-line.voided { text-decoration: line-through; color: var(--text-dim); }
 .item-line.voided .item-amount { text-decoration: line-through; }
+.item-line.pending { font-style: italic; opacity: 0.7; }
 .item-line button { font-size: 11px; padding: 2px 8px; }
 
 .toast {

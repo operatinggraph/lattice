@@ -348,7 +348,9 @@ function orderedByLabel(orderedBy) {
 // yet) falls back to the flat itemsMemo line — the only place old and new
 // tabs still look the same. voidableTabKey, when given, adds a per-line
 // Void action (wired by the caller after insertion) — staff POS only, since
-// VoidCharge grants no self-service scope.
+// VoidCharge grants no self-service scope. A synthetic {pending: true} line
+// (renderResident's own optimistic overlay, not real cafeTabs data) renders
+// muted and labeled instead of getting a Void button.
 function chargeLinesBlock(lines, memo, voidableTabKey) {
   if (!lines || !lines.length) return itemsMemoLine(memo);
   return (
@@ -356,11 +358,13 @@ function chargeLinesBlock(lines, memo, voidableTabKey) {
     lines
       .map(
         (l) =>
-          '<li class="item-line' + (l.voided ? " voided" : "") + '">' +
+          '<li class="item-line' + (l.voided ? " voided" : "") + (l.pending ? " pending" : "") + '">' +
           '<span class="item-desc">' + escapeHtml(l.description) + orderedByLabel(l.orderedBy) + "</span>" +
           '<span class="item-amount">' + money(l.amountCents) + "</span>" +
           (l.voided
             ? '<span class="meta">(voided)</span>'
+            : l.pending
+            ? '<span class="meta">(pending)</span>'
             : voidableTabKey
             ? '<button type="button" class="ghost" data-void-line="' + escapeHtml(l.id) + '">Void</button>'
             : "") +
@@ -1042,6 +1046,15 @@ async function loadManageMenu() {
 
 let residentOwnLeaseAppKey = "";
 
+// pendingCafeCharges holds Charge ops this session just submitted whose
+// cafeTabs projection hasn't landed yet (measured live at up to ~40s) — a
+// naive re-fetch right after would show the tab's pre-charge totalCents
+// unchanged, so a resident sees their new item vanish for the price of a
+// misleading $0.00-look flash right after the success toast. Each entry
+// clears itself the next time renderResident() observes the tab's real
+// totalCents move past what it was when the charge went in.
+let pendingCafeCharges = []; // { tabKey, name, priceCents, baselineTotalCents }
+
 async function loadResident() {
   const select = document.getElementById("resident-lease");
   const label = document.getElementById("resident-lease-label");
@@ -1087,12 +1100,21 @@ async function renderResident() {
   }
   const open = (tabs.tabs || []).find((t) => t.status === "open");
   const pendingSettled = (tabs.tabs || []).find((t) => t.status === "settled" && !t.posted);
+  pendingCafeCharges = open
+    ? pendingCafeCharges.filter((p) => p.tabKey === open.tabKey && p.baselineTotalCents === open.totalCents)
+    : [];
+  const openDisplayTotal = open ? open.totalCents + pendingCafeCharges.reduce((s, p) => s + p.priceCents, 0) : 0;
+  const openDisplayLines = open
+    ? (open.lines || []).concat(
+        pendingCafeCharges.map((p, i) => ({ id: "pending-" + i, description: p.name, amountCents: p.priceCents, pending: true }))
+      )
+    : [];
   const parts = [];
   if (open) {
     parts.push(
-      '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(open.totalCents) +
+      '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(openDisplayTotal) +
       '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p>" +
-      chargeLinesBlock(open.lines, open.itemsMemo, null) + "</div>" +
+      chargeLinesBlock(openDisplayLines, open.itemsMemo, null) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
     if (selfMode) {
@@ -1339,7 +1361,15 @@ async function renderResident() {
             "add the item to your tab",
             true
           );
+          const chosen = ((menu && menu.menu) || []).find((it) => it.menuItemKey === menuItemKey);
+          pendingCafeCharges.push({
+            tabKey: open.tabKey,
+            name: chosen ? chosen.name : "New item",
+            priceCents: chosen ? chosen.priceCents : 0,
+            baselineTotalCents: open.totalCents,
+          });
           toast("Added to your tab.", true);
+          await renderResident();
           setTimeout(renderResident, 700);
         } catch (e) {
           toast(e.message, false);
