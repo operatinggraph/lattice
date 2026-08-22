@@ -306,3 +306,127 @@ Winston-adjudicated: no fork, no contract edit. The one thing worth your eyes: t
 refuted); this design concludes the id was an artifact of gating on marker *events* and ships a
 **position-level gate** instead — §4 runs both directions of the argument. If you disagree with that
 collapse, the id-shaped design is §4's first bullet, fully sketched and buildable.
+
+---
+
+## Fire brief (build note, 2026-08-22)
+
+Compiled at selection per `agents/fire-brief-template.md`. Two read-only scouts (control-plane seam;
+`internal/edge/sync` Manager) plus lead re-verification of every anchor below.
+
+### 1. Scope sentence (verbatim, §9)
+
+> **Inc 1 — control plane:** the second `lastSeqFn` read + `SyncEndSeq` on the result. Owns test 10.
+> **Inc 2 — Manager gate:** the level-triggered gate, deadline, fallback, replacement; `callHydrate`
+> surfaces the new field; marker handling per §3.2. Owns tests 1–9.
+
+Green bar: §7's ten tests pass; `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/edge/... ./internal/refractor/control/...
+./cmd/facet/... -count=1` green; CI green on `main`.
+
+### 2. Verified touch-list (`file:line`, checked live 2026-08-22)
+
+| file:line | what |
+|---|---|
+| `internal/refractor/control/controlwire/controlwire.go:167` | `PersonalHydrateResult` — 4 fields today; add `SyncEndSeq` |
+| `internal/refractor/control/service.go:1267` | `personalHydrate` — matches the design's citation |
+| `internal/refractor/control/service.go:1296-1302` | the `SyncStartSeq` read + fail-soft; the mirror for the second read |
+| `internal/refractor/control/service.go:1304-1321` | the hydrator fan-out loop; the second read goes after it |
+| `internal/refractor/control/service.go:1333` | the result literal |
+| `internal/refractor/control/service.go:343` / `:535` | `syncLastSeq` field + `SetSyncLastSeq` |
+| `internal/edge/sync/sync.go:99-138` | `Config` — add `HydrateGateDeadline` |
+| `internal/edge/sync/sync.go:159-168` | `gateMu` / `hydrateTarget` / `hydrateArmed` / `floor` |
+| `internal/edge/sync/sync.go:211-271` | `deliveryFloor` — `reset`/`hold`/`release`/`commit`; **no read accessor** |
+| `internal/edge/sync/sync.go:275-299` | `New` — where field defaults are applied |
+| `internal/edge/sync/sync.go:325-334` | `Run`: `ensureFresh` **then** `m.floor.reset(stored)` |
+| `internal/edge/sync/sync.go:361-364` | `Rehydrate` — the live path |
+| `internal/edge/sync/sync.go:481` | `ensureFresh`'s `hydrate` call — the cold path |
+| `internal/edge/sync/sync.go:578-604` | `hydrate` — arms at :586 |
+| `internal/edge/sync/sync.go:606-630` | `armHydrateGate` / `hydrationGateReady` |
+| `internal/edge/sync/sync.go:651-666` | `callHydrate` — returns `(revision, lenses, syncStartSeq)` |
+| `internal/edge/sync/sync.go:697-723` | `handle` — floor advance + cursor persist + `commit` at :721 |
+| `internal/edge/sync/sync.go:777-786` | the `hydrationComplete` case — **in `apply`, not `handle`** |
+| `cmd/facet/feed.go:223-229`, `internal/edge/browser/feed.go:219-224` | both callbacks confirmed mutex-guarded idempotent re-marks |
+
+**Two premises the scope-diff gate corrected — both load-bearing:**
+
+1. **§3.2's arm-time floor read is unavailable on the cold path as written.** `Run` calls `ensureFresh`
+   (which arms the gate) at `sync.go:325` and only *then* seeds `m.floor.reset(stored)` at `:334`, so at
+   cold-arm time `m.floor` still holds the previous attach's state (zero on a first `Run`) — the stale
+   cursor the anomaly check exists to catch is not yet in it. The check therefore evaluates against the
+   **stored cursor at reset time**, in `Run` immediately after `m.floor.reset(stored)` and before
+   `RunDurableConsumer` starts. R3 is preserved: no delivery can be consumed before the consumer starts.
+   The `Rehydrate` path is unaffected — its consumer is live and its floor is same-session.
+2. **`deliveryFloor` exposes no current value.** `release` returns `(0, false)` when the floor has not
+   advanced, so the gate needs a `current()` accessor. It returns `persisted` — the floor that reached the
+   store — which is exactly "paint follows applied state" and is the same number `handle` holds after
+   `commit`, so both release paths compare like with like.
+
+Also resolved here, not left for admit: **§3.2's "deadline-only mode"** for the cold-path anomaly is
+implemented as §3.4's fallback family (scalar-revision marker gate **plus** the deadline), which is what
+§3.2's own parenthetical names. Deadline-*only* would be strictly worse than shipped behaviour on the one
+path the design argues must never be; the fallback family is never worse and is bounded.
+
+### 3. Precedents to mirror
+
+- Inc 1's second read mirrors `service.go:1296-1302` clause for clause (nil seam → Warn; error → Warn;
+  else assign), with its own message naming the end read.
+- Inc 1's tests mirror `internal/refractor/control/personal_hydrate_syncstartseq_test.go` — six tests,
+  inline `func(context.Context, string) (uint64, error)` mocks, `bumpingHydrator` (`:20`) to prove read
+  ordering relative to the fan-out.
+- `Config.HydrateGateDeadline` default applied in `New` beside `stream`/`prefix`/`logger` (`sync.go:275-299`).
+- Timer: `time.AfterFunc`; the package's existing timer precedent is `sync.go:517`'s `time.NewTimer`
+  backoff. **No injectable clock exists in this package** — testability comes from `HydrateGateDeadline`
+  being settable small, and tests wait on a channel fired from `OnHydrationComplete` (never `time.Sleep`,
+  per CLAUDE.md).
+- Fake transport / delta delivery: `sync_test.go:33` `fakeControlTransport`, `:498` `publishDelta`,
+  `delivery_position_test.go:54` `countingTransport`.
+
+### 4. Increment order
+
+1. **Inc 1 — control plane.** `SyncEndSeq` on `PersonalHydrateResult`; second `lastSeqFn` read after the
+   fan-out loop; `callHydrate` surfaces it (client-side plumbing only, no behaviour).
+   Green: `go test ./internal/refractor/control/... ./internal/edge/... -count=1`.
+2. **Inc 2 — Manager gate.** `hydrateGate` struct (generation, endSeq, revision, timer, progressed);
+   `current()` on `deliveryFloor`; arm from `hydrate`; cold-path seed/anomaly check in `Run`; release on
+   floor advance in `handle` after `commit`; marker handling per §3.2; stall-detector deadline; fallback
+   and replacement. Green: the §7 tests + the whole package.
+
+### 5. In-scope gotchas + the touched component's dossier (`docs/components/edge.md`, verbatim)
+
+- **The local cursor is a FLOOR, not "the sequence that just succeeded"** — delivery is serial but a Nak'd
+  frame redelivers later, so a cursor written per-success sits above the hole, and the next attach starts
+  past it. Anything that makes the cursor a resume authority must keep it at or below every unresolved
+  sequence.
+- **A skipped delta is invisible to gap detection** — `personal.syncgap` tests `cursor < firstSeq`, so a
+  cursor that is too HIGH is not a gap. Any change to delivery positioning must argue the skip direction
+  explicitly.
+- **A first-paint gate is state with a LIFETIME, and the failure to design for is the gate that never
+  opens** — a release rule whose liveness fallback is armed only *after* its own release precondition is
+  met cannot bound the case where that precondition never arrives. Hanging first paint forever is strictly
+  worse than the partial paint being fixed.
+- **The SYNC subject is per-ACTOR, not per-device** — a second device signed in as the same identity
+  publishes onto the same feed, so any per-device rule keyed on "what arrived on my subject" can be
+  satisfied or reset by the other device.
+- **On the browser, resolving a position and using it are separated by an UNBOUNDED wait.**
+- **The browser host gets ONE attach per page — it has no restart loop.**
+
+Standing checklist (`agents/fire-brief-template.md`) — the two that bite hardest here: **#1 new state needs
+a LIFETIME** (§3.5 is that table; every new field must appear in it) and **#4 a demoted mechanism needs
+EVERY obligation enumerated** — `hydrationComplete`-drives-the-callback is *demoted, not deleted*: its
+steady-state (no gate armed) and fallback-mode duties both survive, and §3.2 says so explicitly.
+
+Other obligations: no Core KV touch, no lens/DDL/op change, no package version bump, no frozen contract
+(`controlwire` is internal control wire, §8). `SyncEndSeq` is `omitempty`, so an older client decoding a
+newer control plane, and a newer client against an older one, both degrade to the §3.4 fallback.
+
+### 6. Adjacent finds
+
+None out of scope so far; anything the build surfaces is absorbed into this run's batch per
+`agents/steward/SKILL.md` §4.
+
+### 7. Non-goals
+
+Narrowing the no-gate-armed steady-state marker behaviour (§3.2 says so by name); any wire/envelope change
+to deltas or markers; a per-hydrate correlation id (§4); an injectable clock for the package; the EDGE.5
+browser-node transport work.
