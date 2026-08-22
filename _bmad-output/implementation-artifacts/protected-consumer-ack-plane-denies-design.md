@@ -109,9 +109,19 @@ is rejected by `isReservedReply` before any permission logic runs (`server/clien
 conf: `loom` takes the `$KV.core-kv.>` grant this way and is refused outright on the ack subject. What
 remains for those six is narrower and materially different to design against — a reply arriving from the
 *server*, on a real delivery to the legitimate puller, seen through a `>` subscribe, yielding one bounded
-registration. The correct statement, now carried in `matrix.go`'s KNOWN LIMIT: the ack denies are an
-unconditional guarantee for the twelve and defence-in-depth for the six. The front door (`MSG.NEXT`) is
-genuinely open to the six, which the review also confirmed by probe — that half stands.
+registration. The front door (`MSG.NEXT`) is genuinely open to the six, which the review also confirmed by
+probe — that half stands.
+
+**Amended again 2026-08-22 by §8, which supersedes this section's scoping.** Two claims above are wrong and
+are corrected there, not here, so read §8 as the current statement. (i) *"every deny in the matrix is
+defeasible for a component carrying `AllowResponses`"* under-scopes it: every deny is defeasible for **every**
+component, because the governing publisher is the server's own internal client (`perms == nil`, and the
+reserved-reply guard is gated on `c.kind == CLIENT`), which no grant a row carries can take away. (ii) the
+sentence this amendment originally ended on — that the ack denies are *an unconditional guarantee for the
+twelve and defence-in-depth for the six*, a phrasing `matrix.go` also carried — is false: a stream
+`RePublish` destination lands on an ack subject with no reply and no `CLIENT` kind, and cold review probed it
+forging an ack on a protected consumer. `matrix.go`'s block is rewritten accordingly and no longer carries
+the "KNOWN LIMIT" heading this text pointed at.
 
 **Second, the read primitive at large.** `$JS.ACK.>` remains an unscoped read primitive against
 every *other* consumer on every stream for the twelve platform components that keep it. Closing that needs
@@ -332,11 +342,16 @@ Every result below is a live probe against the committed `deploy/nats-server.con
 |---|---|---|
 | Direct publish to `ops.default` | plain JetStream publish | **DENIED** — the #75 Fire 2b grant is genuinely absent |
 | Push consumer, `DeliverSubject: ops.default` | `$JS.API.CONSUMER.CREATE.KV_health-kv.<n>`, raw request | **CONTAINED** — see §8.2 |
-| Pull consumer, `MSG.NEXT` reply `ops.default` | `$JS.API.CONSUMER.MSG.NEXT.…` | **CONTAINED** — same mechanism |
+| Pull consumer, `MSG.NEXT` reply `ops.default`, message present | `$JS.API.CONSUMER.MSG.NEXT.…` | **CONTAINED** — same mechanism, data path only |
+| Pull consumer, `MSG.NEXT` reply `ops.default`, nothing to deliver | as above | **LANDS** — the STATUS/408 frame is an ordinary server publish |
 | `DIRECT.GET`, subject-token form, reply `ops.default` | `$JS.API.DIRECT.GET.KV_health-kv.$KV.health-kv.<k>` | **LANDS** on `core-operations` |
 | `DIRECT.GET`, bare form, reply `ops.default` | `$JS.API.DIRECT.GET.KV_health-kv` + `last_by_subj` | **LANDS** on `core-operations` |
 | `DIRECT.GET`, bare form, reply `$KV.core-kv.<key>` | as above | **LANDS — arbitrary Core KV value written** |
 | `DIRECT.GET`, bare form, reply `$KV.capability-kv.<key>` | as above | **LANDS — arbitrary auth-plane value written** |
+| Any other `$JS.API.*` verb, reply `ops.default` | e.g. `CONSUMER.CREATE` | **LANDS** — server-chosen bytes; the class is not DIRECT.GET-specific |
+| PubAck reply, as **facet** (no `$JS.API.>`) | publish `$KV.health-kv.<k>` with reply `$KV.core-kv.<key>` | **LANDS** — PubAck JSON; corruption, not forgery |
+| Stream `RePublish` dest `ops.default` | `STREAM.CREATE` a mirror of `KV_health-kv` | **LANDS — attacker-chosen bytes, no reply subject** |
+| Stream `RePublish` dest `$JS.ACK.core-events.<consumer>.…` | as above | **LANDS — forges an ack, clears a protected consumer's pending delivery** |
 
 The attacker controls the bytes by first writing them to its own `health-kv` key (`SharedWrite`, granted to
 every non-bootstrap component by `Allow()`), then naming a protected subject as the *reply* of a DIRECT.GET
@@ -350,9 +365,19 @@ its reply. Probed: with the app subscribed to `ops.default`, its own subscriber 
 message — so the vector reached the mechanism — while `core-operations` captured **nothing**, because a
 stream's capture predicate reads the message's subject, which was never `ops.default`.
 
-This matters for how the class is designed against: `DeliverSubject` is *not* a write primitive, and a
-narrowing aimed at `CONSUMER.CREATE` would buy nothing. The primitive is the **request/reply response path**,
-where the responder publishes with the reply subject as the message's own subject.
+**Corrected by cold review 2026-08-22: "captured nothing" was measured through a lane-filtered consumer and
+is too strong.** The capturing stream's subscription *does* fire — the sublist match is on the deliver
+subject — and `core-operations` *does* store the message, but under its **original** subject
+(`server/client.go:5088-5092`, `server/stream.go:8058-8060`). Probed: `State.Msgs=1`,
+`subjects=map[$KV.health-kv.…:1]`. What that costs is stream capacity, not authority: the Processor's
+consumers filter `ops.<lane>` (`internal/processor/step1_consume.go:47`), so no forged operation is ever
+dispatched. The residual is real but different in kind — any component can inflate `core-operations`, which
+against a `DiscardOld` limit is an eviction primitive on pending operations.
+
+This matters for how the class is designed against: `DeliverSubject` is *not* an authority primitive, and a
+narrowing aimed at `CONSUMER.CREATE` would buy nothing against the routes that are. One exception belongs
+here rather than in the "contained" column: a pull consumer's **status/timeout frame** is an ordinary server
+publish and does reach the reply subject, so `MSG.NEXT` is contained only on its data path.
 
 ### 8.3 Why `AllowResponses` is irrelevant here
 
@@ -367,11 +392,33 @@ its publish to the requester-named reply subject is never permission-checked. `i
 **Consequence — the correction this section exists to make.** §3.3's closing sentence and `matrix.go`'s
 KNOWN LIMIT both say the denies are *an unconditional guarantee for the twelve without the flag and
 defence-in-depth for the six that carry it*. That is **false for every deny outside the `$JS.ACK.` family**:
-all seventeen components holding `$JS.API.>` can self-serve a write on any subject the matrix denies them,
-with one request and no flag. The `$JS.ACK.` family remains genuinely closed, for the reason §3.3 already
-gives. Both texts are corrected in place by this fire.
+every component can self-serve a write on any subject the matrix denies it, with one request and no flag.
+The `$JS.ACK.` family is **not** an exception either, via the `RePublish` route below. Both texts are
+corrected in place by this fire — `matrix.go`'s block is rewritten and no longer carries the "KNOWN LIMIT"
+heading, and §3.3 above carries a second amendment pointing here.
 
-`facet` is the sole contained component, and the reason is the remedy's shape: it holds no `$JS.API.>` at all.
+**Corrected by two independent cold reviews 2026-08-22 — the draft of this section named the wrong
+precondition, and the correction is the same defect class it was written to fix.** `$JS.API.>` is not what
+gates the route. *Any* subject whose responder is a server-internal client answers to a caller-named reply,
+and an ordinary JetStream **PubAck** is exactly that. `facet` — the narrowest row in the matrix, holding no
+`$JS.API.>` — publishes `$KV.health-kv.<k>` with reply `$KV.core-kv.<key>` and the PubAck JSON lands on the
+denied key; probed, with facet's own direct `KVPut` to core-kv denied on the same connection as the positive
+control. So **no component here is contained**, and the population is all eighteen, not seventeen.
+
+What `$JS.API.>` actually buys is **content control**, not the write: without it a component is limited to
+server-chosen bytes (a PubAck, an API response) — corruption — while a DIRECT.GET holder chooses the bytes
+and can forge a well-formed envelope or capability document. That distinction is what §8.4's remedy
+discussion turns on, and the draft conflated it with containment.
+
+There is also a route that needs no reply subject at all: a stream's **`RePublish` destination**. It is
+emitted by the internal client with the destination as the message's *own* subject and `c.kind == JETSTREAM`,
+so neither the permission branch nor `isReservedReply` applies — and the bytes are attacker-chosen (the
+mirrored value). Cold review probed it landing a chosen envelope on `ops.default`, and — the sharper result —
+landing on a literal `$JS.ACK.core-events.<consumer>.…` subject to **forge an ack**, clearing a protected
+consumer's pending delivery, with a harmless destination as the negative control. That is the outcome
+`coreEventsAckDenies` exists to prevent: silent suppression of a pending crypto-shred, revocation or
+credential-binding event. No subject deny can reach it, because a mirror's source is in the request **body**,
+so `STREAM.CREATE.<attacker-chosen-name>` is always subject-allowed.
 
 ### 8.4 Why no narrowing of this matrix closes it
 
@@ -389,22 +436,34 @@ Recorded so a later fire does not re-derive it:
 - **Not a server option.** nats-server 2.14 has no setting binding a reply subject to the requester's publish
   permissions; the only reply subjects it reserves are the three in §8.3.
 
+- **Not a `STREAM.CREATE` subject deny either, as currently shaped.** `protectedStreamDenies` scopes its
+  denies to *registered* stream names; the `RePublish` route creates a stream under a name of the attacker's
+  choosing and names its mirror source in the request **body**. Denying `$JS.API.STREAM.CREATE.>` matrix-wide
+  outside bootstrap is the one narrowing that would bite this route, and it is not free — it needs a census
+  of every runtime stream/bucket creation (package install's read-model targets are the obvious consumer).
+  That census is filed as its own row rather than guessed at here.
+
 **The candidate remedy, named so the decision is one look, not a research project:** NATS's own answer to
 cross-tenant write authority is **account isolation** — the protected buckets in an account that exports a
 controlled surface, rather than the single global account `$G` this deployment uses (`G6` in §2 records that
-the conf declares no `accounts` block). That reshapes the platform's trust topology, so the fork is Andrew's;
-removing `$JS.API.>` from the app tier (the shelved read-scope design) narrows the population but does not
-close the class, since the remaining API calls still respond to a named reply.
+the conf declares no `accounts` block). That reshapes the platform's trust topology, so the fork is Andrew's.
+Note what removing `$JS.API.>` from the app tier (the shelved read-scope design) does and does not buy, since
+the draft of this section got it wrong: it removes the tier's **content control**, downgrading forgery to
+corruption — it does **not** narrow the population that can write, because the PubAck route survives on the
+`$KV.health-kv.>` grant every row keeps.
 
 ### 8.5 Fire brief (build note, 2026-08-22)
 
 1. **Scope sentence.** Ground the filed `DeliverSubject` row against the running server; correct every
    security claim the grounding falsifies, in place; pin all four outcomes — the two contained routes and the
    two live ones — as live tests against the committed conf. **No matrix narrowing** (§8.4: none is sound).
-2. **Verified touch-list** (checked live). `internal/natsperm/matrix.go:262-361` (`Allow`/`Deny` + the KNOWN
-   LIMIT), `:616-648` (the four app rows' `Desc`); new `internal/natsperm/replysubject_test.go`; this doc;
-   `app-tier-transport-read-scope-design.md:757+` (§14/F2's disposition);
-   `nats-account-write-restriction-design.md:208`; `docs/components/substrate.md` (dossier);
+2. **Verified touch-list** (line numbers as of `bf1b9f7`, before this fire's own commits shifted them —
+   locate by symbol, not by line). `internal/natsperm/matrix.go` (`Allow`/`Deny`'s doc comment + the four
+   app rows' `Desc`), `doc.go`, `conf_test.go` (the three write-isolation/ops-denial doc comments); new
+   `internal/natsperm/replysubject_test.go`; this doc (§3.3 + §8);
+   `app-tier-transport-read-scope-design.md` §14/F2 and its restatements;
+   `nats-account-write-restriction-design.md` (the vertical-apps grant row and the "invariant that does all
+   the work" paragraph); `docs/components/{substrate,gateway,control-plane}.md`;
    `_bmad-output/planning-artifacts/backlog/lattice.md`.
 3. **Precedents to mirror.** Test fixtures + idiom: `conf_test.go:60-181` (`startServerFromConf`,
    `connectAs`, `provision`, `provisionStream`, and the positive-control-beside-every-denial shape).
@@ -423,9 +482,48 @@ close the class, since the remaining API calls still respond to a named reply.
    positive control (§8.2) so they cannot pass vacuously. Standing checklist #2 — nats.go's `AllowDirect`
    default was re-derived from the vendor source after a census answered it from the Lattice config struct
    and got it backwards.
-6. **Adjacent finds.** (a) `nats-account-write-restriction-design.md:208`'s grant table lists `core-operations`
-   for the vertical apps, which the code contradicts — corrected in this fire. (b) The false-scope-claim class
-   now has its third sighting in this package; promoted to the substrate dossier in this fire.
+6. **Adjacent finds.** (a) `nats-account-write-restriction-design.md`'s grant table lists `core-operations`
+   for the vertical apps, which the code contradicts. (b) The false-scope-claim class recurs in this package.
+   (c) Cold review found bridge's core-KV read-side denies defeated by the same mirror trick, so
+   `matrix.go`'s "closes the CORE-KV read side channel specifically" is false — pre-existing, and it is
+   further evidence for §8.4. Each of these is either corrected in this fire's commits or carries a board
+   row; §8.6 is the accounting, and nothing here claims completion on its own.
 7. **Non-goals.** Any change to `Allow`/`Deny` output, the shelved read-scope design, account isolation, and
    any Processor-side envelope authentication — §8.4 shows the first three do not close the class and the
    last is a Contract #2 posture change.
+
+### 8.6 Accounting — every discovery, and where it went
+
+Cold review (three lenses, none the implementer) returned four blocking findings, three of them against
+**this section's own first draft**. The audit lens also produced a ledger of texts elsewhere in the repo
+still asserting what §8 falsifies. Nothing below is filed under a "residual" label; each line is either
+fixed in this fire's commits or carries a row with one of the two outs stated.
+
+**Fixed in this fire.**
+
+| Discovery | Where it landed |
+|---|---|
+| `facet` is not contained; `$JS.API.>` is the wrong precondition | §8.3 rewritten; `matrix.go`'s block rewritten; pinned by a facet PubAck vector |
+| The `$JS.ACK.*` family is reachable via `RePublish` (ack forgery on a protected consumer) | §8.3 + §8.1 table; `matrix.go`; pinned with its negative control |
+| "a stream capturing the deliver subject never ingests it" — it ingests it, under the original subject | §8.2 + `matrix.go`; the test now pins both halves |
+| Pull `MSG.NEXT` is contained on its data path only — the status frame lands | §8.1 table + §8.2; own subtest |
+| The class is not DIRECT.GET-specific (any `$JS.API.*` verb answers to the reply) | §8.1 table; a non-DIRECT.GET subtest |
+| `isReservedReply` runs *after* the publish-permission check, not before | `matrix.go` (inherited unexamined from §3.3) |
+| §3.3's `AllowResponses` scoping, and its pointer to a "KNOWN LIMIT" heading that no longer exists | §3.3's second amendment |
+| The negative assertion passed vacuously (`msgs.Error()` unchecked, observer liveness unproven) | the test's observer now carries a positive control |
+| The roster pin used exact-string equality on raw `ExtraPubAllow`, with sole-ness unpinned | prefix test over the derived grant list + two-way roster |
+| "a compromised app cannot forge an `env.Actor`" surviving in `conf_test.go` after being corrected in four other places | `conf_test.go` |
+| `doc.go`, `TestCoreKVWriteIsolation`, `TestCapabilityKVWriteIsolation`, the ack-plane PASS comment — all claiming an invariant this package now disproves | each scoped to "the ordinary client path" |
+| `docs/components/gateway.md`'s "no actor can fabricate a Core-KV write", `control-plane.md`'s "cannot reach the planes at the transport layer" | both scoped |
+| `nats-account-write-restriction-design.md`'s vertical-apps grant row + its "invariant that does all the work" | corrected in place |
+| `app-tier-transport-read-scope-design.md` §14/F2 and its restatements — the refuted `DeliverSubject` mechanism | disposition rewritten |
+| The false-scope-claim class, fourth sighting | `docs/components/substrate.md` dossier entry extended (at the cap of 12, so extended rather than added) |
+
+**Carries a row, with its out stated.**
+
+| Discovery | Out |
+|---|---|
+| Closing the reply/RePublish write authority at all | **Needs Andrew** — account isolation is a trust-topology fork (§8.4). Folded into the existing ★★★ reply-authority row, whose scope this fire corrects. |
+| Denying `$JS.API.STREAM.CREATE.>` outside bootstrap — the one narrowing that bites the `RePublish` route | **Steward `📋`** — a precedent exists (`protectedStreamDenies`); what it needs is the runtime stream/bucket-creation census, not a new pattern. Own row. |
+| Bridge's core-KV read-side denies defeated by the same mirror trick (`matrix.go`'s "closes the CORE-KV read side channel specifically") | Same row as above — one root cause, one row, per the consolidation gate. |
+| `core-operations` inflation via consumer delivery (eviction pressure against a `DiscardOld` limit) | Same row: it is the same missing authority, and no separate mechanism closes it. |

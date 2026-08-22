@@ -139,7 +139,11 @@ reply.
      `lattice.ctrl.weaver.>`; Refractor via `allowResponses`);
    - the **Loupe** and **`lattice` CLI** nkeys are granted `lattice.ctrl.>` publish — they are the
      sanctioned request issuers.
-   A component with no `lattice.ctrl.>` grant cannot reach the planes at the transport layer.
+   A component with no `lattice.ctrl.>` grant cannot reach the planes by publishing to them directly.
+   It is not an absolute transport bar: `lattice.ctrl.*` is an ordinary subject, so a server-published
+   reply or a stream RePublish reaches it like any other (`internal/natsperm`'s `Deny` doc comment).
+   Content there is server-chosen, so the reachable shape is malformed-request noise rather than a
+   forged command — the responders' own request validation is what stands between that and an action.
 
 2. **Application capability check (a stub — allow-all).** Loom and Weaver call
    `CapabilityChecker.Authorize(ctx, actor, op, targetID)` before acting, but production wires the

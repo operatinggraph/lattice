@@ -13,10 +13,13 @@ nothing reverts.
 > `#75 Fire 2b` started on the publish side.
 
 **Related rows.** F1 (`$JS.ACK.>` cross-stream read) shipped independently as a parallel steward fire
-(`9c24c918`, ack-plane read primitive CLOSED). F2 (`DeliverSubject` unchecked) stays a standalone `📋` —
-it tests the **publish**-side Fire-2b integrity boundary the platform *does* enforce, gated on the cheap
-Processor-arm verification (if the Processor rejects the forged envelope at step-1/step-3, F2 is moot;
-else it is a real hole in a ratified boundary and returns to Andrew) — independent of this read-side shelve.
+(`9c24c918`, ack-plane read primitive CLOSED). **F2 (`DeliverSubject` unchecked) was grounded on 2026-08-22
+and its MECHANISM IS REFUTED** — a push or pull delivery keeps its original subject, so a stream capturing
+the deliver subject never dispatches it. Do not build against F2 as written; §14's row carries the
+correction. The *conclusion* F2 drew — that the Fire-2b integrity boundary is bypassable — is right, and by
+a different and broader route (a server-published reply, or a stream `RePublish`), grounded in
+[protected-consumer-ack-plane-denies-design.md](protected-consumer-ack-plane-denies-design.md) §8, which now
+owns the class.
 
 *Original design retained below for the record — do not build it.*
 
@@ -213,10 +216,12 @@ ReadBuckets map[string]ReadMode
 
 // ReadMode distinguishes the two shapes, because they are not the same
 // privilege. ReadGet grants point reads only. ReadList additionally grants
-// consumer create/delete on the backing stream — and a consumer carries a
-// caller-chosen DeliverSubject the server does NOT permission-check, which
-// makes CONSUMER.CREATE an arbitrary-subject publish primitive (§14/F2).
-// So ReadList is never granted on a bucket the component can also WRITE,
+// consumer create/delete on the backing stream. (The first draft justified
+// the split by a caller-chosen DeliverSubject being an arbitrary-subject
+// publish primitive; that mechanism is REFUTED — §14/F2. The split still
+// earns its keep on least-privilege grounds, but it buys no forgery
+// containment, so do not cite it as one.)
+// ReadList is never granted on a bucket the component can also WRITE,
 // and never by default.
 type ReadMode int
 const (
@@ -676,7 +681,7 @@ the matrix, boots an embedded server from the rendered conf, and connects as eac
 | `TestReadScopedComponentHasNoBlanketGrants` | I1 | `ReadBuckets` + `$JS.API.>` / an overlapping wildcard / `$JS.ACK.>` / a `>` subscribe / an **empty** `SubscribeAllow` are each refused — the five ways to silently void the scope (§4.5) |
 | `TestEmptySubscribeAllowIsRefused` | I1 | the fail-open that `RenderConf` would otherwise emit: `subscribe { allow: [] }` renders never, and a live server started from such a conf is proven to accept `>` (the positive control that makes the gate meaningful, not the gate alone) |
 | ~~`TestAppTierHoldsNoAckGrant`~~ | I1 | **Shipped 2026-08-22 by the F1 fire as `TestVerticalAppHoldsNoAckGrant`** (`internal/natsperm/conf_test.go`), with the vector as specified — a `+NXT` publish against a live pull consumer, both ack wire forms, the Processor as the positive control — plus `TestAckGrantRoster` pinning the converse. Increment 1 inherits it; writing it again would duplicate |
-| `TestAppTierCannotCreateForeignDeliverySubject` | I1 | the B2 primitive: an app is denied `CONSUMER.CREATE` on a bucket it can write (`health-kv`), so it cannot mint a consumer whose `DeliverSubject` is `ops.system` |
+| ~~`TestAppTierCannotCreateForeignDeliverySubject`~~ | I1 | **DROP — rests on the refuted F2 mechanism** (see §14/F2): a `DeliverSubject` mints nothing on the ops lane, so this test would pin a containment that already holds for an unrelated reason |
 | `TestAppTierRevocationCheckStillWorks` | I1 | `token-revocation` `KVGet` succeeds for all four apps — the fail-closed auth path (§4.3), the single most breakable thing in this increment |
 | `TestLoftspaceObjectStoreStillWorks` | I1 | `ObjectPut` **and** `ObjectGet` round-trip on `core-objects` under the narrowed grant (§4.2's `OBJ_` derivation) |
 | `TestAppTierReadsItsOwnBuckets` | I1 | **positive control, per app per bucket**: `KVGet` *and* `KVListKeys` both succeed for every entry in §4.3 (two distinct permission paths — the `TestCapabilityAuthorCatalogAccess` precedent pins both for exactly this reason) |
@@ -715,10 +720,13 @@ negative therefore pairs with a positive control write by the bucket's real owne
   deliberately shared convergence bucket, so it stays in every app's read scope; a cross-vertical read *within*
   it is unaffected by this design. Naming it so nobody reads §4.4 as "cross-vertical reads are closed" —
   they are closed except through the buckets the platform deliberately shares.
-- **R5 — the F2 primitive is pre-existing and this design only declines to extend it.** Every `$JS.API.>`
-  holder can already mint a consumer with a caller-chosen `DeliverSubject`. Increment 1 closes it for the four
-  apps as a side effect of the `ReadGet`/`ReadList` split, and leaves it wide for the thirteen rows that keep
-  the blanket grant. Do not read this design as closing actor-forgery; the filed row (§14/F2) owns that, and
+- **R5 — REFUTED as written (2026-08-22): the `DeliverSubject` primitive does not exist.** A delivery keeps
+  its original subject, so minting a consumer whose `DeliverSubject` is a protected lane dispatches nothing
+  (§14/F2). The `ReadGet`/`ReadList` split therefore closes no forgery route for the four apps, and the
+  thirteen rows that keep the blanket grant were never exposed by *this* mechanism. The real route is a
+  server-published reply or a stream `RePublish`, which this design does not touch and which no read-scope
+  narrowing closes — see protected-consumer-ack-plane-denies-design.md §8.4. The rest of this bullet is
+  retained for the record. Do not read this design as closing actor-forgery; the filed row (§14/F2) owns that, and
   its first task is to verify whether the Processor actually accepts such an envelope.
 - **R6 — Increment 2's Gateway declaration touches the auth-callout responder's component.** It changes only
   the Gateway's own JS API surface, not the callout-issued permissions (§8), but it is the one place where a
@@ -759,7 +767,7 @@ left open for the Steward.
 | # | Finding | Verified | Disposition |
 |---|---|---|---|
 | **F1** | **`$JS.ACK.>` is a cross-stream READ primitive, not plumbing.** `+NXT` on an ack subject dispatches a next-message request delivering to the caller's reply subject; nothing checks the publisher. G17 (quoting the matrix's own comment) was false. | `server/consumer.go:2736-2738`, `:1386-1390`, `:1704`; the AckNone gate at `:1699-1707` | **Folded.** `$JS.ACK.>` removed from every read-scoped row (§4.2); the apps provably need none (ordered consumers are forced `AckNone`, `js.go:1781`). Gate + `TestAppTierHoldsNoAckGrant` added. **Also retargets an existing board row** filed as *ack-forge/suppression on six core-events consumers* — the mechanism is broader and is a read. |
-| **F2** | **A consumer's `DeliverSubject` is not permission-checked**, making `CONSUMER.CREATE` an arbitrary-subject publish primitive: write a forged envelope to `$KV.health-kv.<k>` (a `SharedWrite` grant every component holds), create a push consumer filtered to it with `DeliverSubject: ops.system`, and the server publishes it onto the ops lane. | no permission check anywhere in `server/jetstream_api.go` (grep for `perms`/`pubAllowed`/`canSubscribe` → empty); delivery re-subjects at `server/stream.go:8058`; `core-operations` captures `ops.>` (`internal/bootstrap/primordial.go:186-191`) | **Partly folded, partly filed.** Folded: `ReadBuckets` gains a per-bucket **mode**, and `ReadList` is never granted on a bucket the component can write (§4.1/§4.2) — so this design does not hand the primitive out. **Filed as its own row:** the chain is *pre-existing* (any `$JS.API.>` holder can do it today) and it falsifies the #75 Fire 2b claim that an app "cannot forge an `env.Actor`". Different root cause from the read scope, so a separate row, not a fold. **Caveat stated in the row:** the Processor-side reachability (does the delivered envelope survive its validation?) is **not** verified — the row's first task is to ground that before sizing. |
+| **F2** | ~~**A consumer's `DeliverSubject` is not permission-checked**, making `CONSUMER.CREATE` an arbitrary-subject publish primitive: write a forged envelope to `$KV.health-kv.<k>` (a `SharedWrite` grant every component holds), create a push consumer filtered to it with `DeliverSubject: ops.system`, and the server publishes it onto the ops lane.~~ **REFUTED 2026-08-22 by probe** — `DeliverSubject` is unchecked, but it is not a publish primitive: the delivery is re-subjected for *routing* only and keeps its ORIGINAL subject, so no consumer on the ops lane ever sees it (`server/client.go:5088-5092` reads `pa.deliver`, which `server/stream.go:8059` sets to the original — the citation below stops one line short of the guard that changes the answer). The real primitive is a server-published **reply** or a stream **`RePublish`**; see [protected-consumer-ack-plane-denies-design.md](protected-consumer-ack-plane-denies-design.md) §8. | no permission check anywhere in `server/jetstream_api.go` (grep for `perms`/`pubAllowed`/`canSubscribe` → empty); delivery re-subjects at `server/stream.go:8058`; `core-operations` captures `ops.>` (`internal/bootstrap/primordial.go:186-191`) | **Partly folded, partly filed.** Folded: `ReadBuckets` gains a per-bucket **mode**, and `ReadList` is never granted on a bucket the component can write (§4.1/§4.2) — so this design does not hand the primitive out. **Filed as its own row:** the chain is *pre-existing* (any `$JS.API.>` holder can do it today) and it falsifies the #75 Fire 2b claim that an app "cannot forge an `env.Actor`". Different root cause from the read scope, so a separate row, not a fold. **Caveat stated in the row:** the Processor-side reachability (does the delivered envelope survive its validation?) is **not** verified — the row's first task is to ground that before sizing. |
 | **F3** | **`token-revocation` was missing from all four app rows and listed among what the tier loses** — while every app `KVGet`s it on every authenticated request, fail-closed. | `cmd/{clinic,cafe,wellness,loftspace}-app/main.go` `OpenKV(revocation.BucketName)`; `internal/gateway/revocation/revocation.go:54-62`; `internal/gateway/auth/auth.go:557-559` | **Folded.** Added as `ReadGet` to all four (§4.3), removed from §4.4's loss list, and given its own test. As first drafted this was a 100%-authenticated-request outage in all four apps. |
 | **F4** | **The object store was not covered.** `$O.core-objects.>` is the chunk/meta publish family, not the JS-API surface an object handle needs (`STREAM.INFO.OBJ_*`, a meta `GetLastMsg`, an ordered consumer for chunks). | `nats.go@v1.52.0` `object.go:312-314`, `:959-961`, `:697-703`; call sites `cmd/loftspace-app/objects.go:419`, `:489`, `objects_crypto.go:110`, `:159`, `lease_document.go:99` | **Folded.** `ReadObjectStores map[string]ReadMode` added, deriving the same rows against `OBJ_<bucket>` (§4.2); the lease-signing PDF upload **and download** are in the regression set (§10). |
 | **F5** | **`CONSUMER.DELETE` is on the read path.** `lister.Stop()` → `Unsubscribe` → a *synchronous* `DeleteConsumer`; denied, every listing stalls for `defaultRequestWait` = 5s. | `nats.go@v1.52.0` `js.go:2012`, `nats.go:5199-5202`, `js.go:1452-1467`, `js.go:299`; `internal/substrate/kv.go:203`, `:242` | **Folded.** Row 5 of §4.2, `ReadList` only; `TestAppTierListingCompletesPromptly` pins it. |

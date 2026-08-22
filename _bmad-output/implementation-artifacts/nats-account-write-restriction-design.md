@@ -205,7 +205,7 @@ Refractor-only). Operational buckets are owner-scoped; Health is shared.
 | **lattice-pkg / package-installer** | `core-operations` (+ provisioning verbs it needs — §3.4 verify), `health.>`, `$JS.API.>` | `$KV.core-kv.>` (unless it direct-seeds DDL — then provisioner) | `InstallPackage`/`UninstallPackage` kernel ops |
 | **loupe (trusted inspector)** | `core-operations`, `health.>`, `$JS.API.>` (read APIs) | `$KV.core-kv.>`, `$KV.capability-kv.>` | reads **all** KV (subscribe/get); writes state only via ops — even the inspector gets no direct Core-KV write |
 | **lattice CLI / verify tools** | `core-operations`, `$JS.API.>`, `health.>` | `$KV.core-kv.>` | operator ops + read |
-| **vertical apps** (`loftspace-app`, `clinic-app`) | `core-operations`, `health.>`, `$JS.API.>` (read) | `$KV.core-kv.>`, `$KV.capability-kv.>` | P5 readers; write via ops |
+| **vertical apps** (`loftspace-app`, `clinic-app`, `cafe-app`, `wellness-app`) | `health.>`, `$JS.API.>` (read) — **NOT** `core-operations`; the shipped matrix gives the tier no ops publish (#75 Fire 2b) | `$KV.core-kv.>`, `$KV.capability-kv.>` | P5 readers; write via the Gateway, not by publishing ops |
 
 **Subscribe permissions** are permissive for internal components (they must consume `core-events`,
 read Core-KV CDC, run control responders, read their buckets); the security value is in the **publish**
@@ -220,6 +220,14 @@ scoping each untrusted Edge connection to its own `lattice.sync.user.<id>` subje
 The **invariant that does all the work**: *no user except `processor` may publish `$KV.core-kv.>`;
 no user except `refractor` may publish `$KV.capability-kv.>` or the lens-target buckets.* Everything
 else is convenience scoping.
+
+**Amended 2026-08-22 — that invariant binds the ordinary client publish path, and only that.** A message
+the SERVER publishes on a component's behalf carries no permissions: a request's reply subject, a PubAck,
+and a stream's `RePublish` destination all land bytes on a denied subject, for every row in the matrix.
+Probed against this design's own committed conf. The scoping above is still worth having — it is what makes
+the ordinary path honest and it is what an accident hits — but it is not the load-bearing guarantee this
+sentence claims. See [protected-consumer-ack-plane-denies-design.md](protected-consumer-ack-plane-denies-design.md)
+§8 for the routes, why no narrowing of the subject matrix closes them, and the candidate remedy.
 
 ### 3.3 The credential seam (`substrate.ConnectOpts`)
 

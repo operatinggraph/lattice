@@ -21,8 +21,12 @@ request body, and **stamps the verified actor** into the operation envelope befo
 submitting operations (P2: the Processor is the sole writer).
 
 It is the *authentication* seam that closes actor impersonation, working with the NATS account-level
-write restriction (transport-authZ — only the Processor + bootstrap may publish `$KV.core-kv.>`, so no
-actor can fabricate a Core-KV write and bypass the ledger; live via `#75` Fire 2) and the Capability KV
+write restriction (transport-authZ — only the Processor + bootstrap may publish `$KV.core-kv.>`; live via
+`#75` Fire 2). That restriction binds a component's ordinary client paths, not the server's own publishes:
+a reply subject, a PubAck or a stream RePublish lands bytes on `$KV.core-kv.>` for any component, so the
+transport does **not** on its own make a fabricated Core-KV write impossible — see
+`internal/natsperm`'s `Deny` doc comment and
+[`protected-consumer-ack-plane-denies-design.md`](../../_bmad-output/implementation-artifacts/protected-consumer-ack-plane-denies-design.md) §8) and the Capability KV
 (actor-authZ, step-3 lookup of the now unforgeable actor). Note the transport restriction is on *direct
 KV writes*, **not** on `core-operations` publish — every sanctioned actor (the engines, the vertical
 apps, the CLI, Loupe) submits ops; the Gateway is the external door, not the sole ops publisher.
