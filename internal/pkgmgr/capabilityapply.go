@@ -75,7 +75,33 @@ func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApp
 		// CapabilityApplyPlanForProposal refuses for an independent reason.
 		opts.RequireInstalled = true
 	}
-	return i.Apply(ctx, plan.definition, opts)
+	res, err := i.Apply(ctx, plan.definition, opts)
+	if err != nil {
+		return nil, err
+	}
+	// A newPackage plan that comes back skipped installed nothing, and the
+	// caller is about to record that it did.
+	//
+	// The check is on the RESULT rather than on a branch, because two different
+	// branches produce it and both mean the same thing: Apply's same-version
+	// skip (the name was already installed when Apply looked) and Install's own
+	// idempotency skip, which applyFreshInstall mirrors (the name was free when
+	// Apply looked and taken by the time Install re-checked). A newPackage plan
+	// sets neither Force nor RequireInstalled, so no other skip is reachable
+	// for it: the remaining one is the in-place empty-delta return, which
+	// requires a version difference, and a version difference always makes the
+	// package vertex and its manifest aspect updates. So for this mode, skipped
+	// means claimed.
+	//
+	// The upgradeExisting arm is deliberately not covered here. Its skips are
+	// already closed upstream — RequireInstalled defeats the same-version
+	// branch, and the plan builder refuses a newVersion equal to the installed
+	// one, which is what keeps the empty-delta return out of reach.
+	if plan.mode == "newPackage" && res.Skipped {
+		return nil, fmt.Errorf("%w: package %q was installed before this apply ran, so the apply matched what was already there and installed nothing (%s). This proposal's artifact did NOT land: do not mark it applied. Re-review it against the package now holding the name, or propose it under a name that is free",
+			ErrPackageNameClaimed, plan.PackageName, res.Reason)
+	}
+	return res, nil
 }
 
 // platformProtectedPackages is the package-name deny-list an AI-authored

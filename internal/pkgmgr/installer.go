@@ -798,6 +798,27 @@ func (e *ApplyWouldRemoveError) Error() string { return e.message }
 
 func (e *ApplyWouldRemoveError) Unwrap() error { return ErrApplyWouldRemove }
 
+// ErrPackageNameClaimed is returned by ApplyCapabilityPlan when a newPackage
+// plan's apply committed nothing because the name it was building on had been
+// installed by the time the apply ran. cmd/loupe maps it to 409: the name is
+// held by another package, which is a state conflict rather than a transport
+// fault, and a retry against the same state does the same nothing.
+//
+// It exists because the outcome it names arrives wearing a success signal.
+// Apply dispatches on install state, so a plan built while the name was free
+// and applied after it was taken reports Action "skip" with a nil error — and
+// both callers of this method go straight on to submit
+// MarkCapabilityProposalApplied, closing the proposal over an artifact that
+// never landed. Nothing is destroyed; what is produced is a falsified audit
+// record, which the apply itself can no longer contradict.
+//
+// No typed error accompanies it, unlike ErrDeclaredKeysOccupied and
+// ErrApplyWouldRemove: those carry fields because each separates buckets a
+// reader would otherwise conflate (tombstoned vs live occupancy; which keys a
+// diff would retire). This condition is one indivisible fact — the apply
+// installed nothing — so a field would only restate the sentinel.
+var ErrPackageNameClaimed = errors.New("pkgmgr: capability apply committed nothing — the target package name was claimed before the apply ran")
+
 // ErrBootstrapRequired is returned when the core-kv bucket is absent,
 // indicating bootstrap has not been run.
 var ErrBootstrapRequired = errors.New("pkgmgr: core-kv bucket not found — run bootstrap (or make up) before installing packages")

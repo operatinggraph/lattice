@@ -777,9 +777,11 @@ func TestApplyCapabilityPlan_SetsRefuseRemovals(t *testing.T) {
 // newPackage Definition describes none of the occupant's keys. Without the
 // option the apply would tombstone a package it has never seen.
 //
-// The occupant is installed at a different version on purpose: Apply's
-// same-version skip branch returns before the delta is computed, so a race onto
-// an identically-versioned name is a skip rather than a refusal.
+// The occupant is installed at a DIFFERENT version here, which is what routes
+// the race into the delta and therefore into this refusal. Its same-version
+// twin never computes a delta at all and is caught by a separate post-condition
+// — see TestApplyCapabilityPlan_NewPackageRaceAtSameVersionIsNotSuccess, which
+// covers that half.
 func TestApplyCapabilityPlan_NewPackageRaceRefuses(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 
@@ -805,6 +807,59 @@ func TestApplyCapabilityPlan_NewPackageRaceRefuses(t *testing.T) {
 	if !errors.Is(err, ErrApplyWouldRemove) {
 		t.Fatalf("want ErrApplyWouldRemove, got %v", err)
 	}
+	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatal("the occupant's keys must be untouched by the refused race")
+	}
+}
+
+// TestApplyCapabilityPlan_NewPackageRaceAtSameVersionIsNotSuccess covers the
+// half of the newPackage race that never reaches a delta, and therefore never
+// reaches the removal refusal: the occupant holds the name at the SAME version
+// the plan carries, so Apply's same-version branch returns Action "skip" with a
+// nil error before anything is computed.
+//
+// Nothing is destroyed on that path, which is exactly why it needs pinning: the
+// caller reads a nil error and goes on to submit
+// MarkCapabilityProposalApplied, closing the proposal over an artifact that was
+// never installed. A skip is a truthful answer to "did this apply change
+// anything" and a false answer to "did this proposal land", and only the second
+// question is the one being asked here.
+func TestApplyCapabilityPlan_NewPackageRaceAtSameVersionIsNotSuccess(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	const racedName = "cap-race-samever-pkg"
+	proposalKey := seedApprovedProposal(t, ctx, conn, "CAApplySameVerHJKMN", racedName, "newPackage")
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		t.Fatalf("CapabilityApplyPlanForProposal (name free): %v", err)
+	}
+
+	// The occupant claims the name at the version the plan itself carries — a
+	// newPackage proposal declaring no newVersion takes the shared 0.1.0
+	// default, so this is the version an unlucky race actually collides on.
+	occupant := removalFixtureDef("0.1.0")
+	occupant.Name = racedName
+	if _, err := inst.Install(ctx, occupant); err != nil {
+		t.Fatalf("install the racing occupant: %v", err)
+	}
+	before := coreKVSnapshot(t, ctx, conn)
+
+	res, err := inst.ApplyCapabilityPlan(ctx, plan)
+	if err == nil {
+		t.Fatalf("an apply that installed nothing must not be reported as success: %+v", res)
+	}
+	if !errors.Is(err, ErrPackageNameClaimed) {
+		t.Fatalf("want ErrPackageNameClaimed, got %v", err)
+	}
+	if res != nil {
+		t.Fatalf("a caller reading Action/PackageKey off this result would record an install that never happened, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), racedName) {
+		t.Errorf("the refusal must name the claimed package, got %v", err)
+	}
+
+	// The occupant is somebody else's package, and this apply neither wrote to
+	// it nor took anything from it.
 	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
 		t.Fatal("the occupant's keys must be untouched by the refused race")
 	}
