@@ -2091,9 +2091,22 @@ async function renderSoonest() {
 function refreshBookEnabled() {
   const btn = $("#book-submit");
   if (!btn) return;
-  const ready = !!state.patient && !!$("#provider").value;
+  const provider = $("#provider").value;
+  // A provider with zero or multiple practicesAt sites has no safe default
+  // site (providerSoleSite returns "" — ambiguous), so booking one requires
+  // an explicit #book-site pick instead of silently falling back to no site
+  // at all (submitBook mirrors this same check as its authoritative
+  // backstop).
+  const siteAmbiguous = provider && !providerSoleSite(provider) && !($("#book-site") ? $("#book-site").value : "");
+  const ready = !!state.patient && !!provider && !siteAmbiguous;
   btn.disabled = !ready;
-  btn.title = !state.patient ? "Select a patient first" : !$("#provider").value ? "Select a provider" : "";
+  btn.title = !state.patient
+    ? "Select a patient first"
+    : !provider
+      ? "Select a provider"
+      : siteAmbiguous
+        ? "This provider works at multiple locations (or none on file) — pick a site above"
+        : "";
 }
 
 // toRFC3339 converts a datetime-local value (local wall time, no zone) to a
@@ -2252,10 +2265,17 @@ async function submitBook(ev) {
   // assigned to it, so a chosen site is guaranteed valid for this provider —
   // still hard-validated server-side (require_site_membership, ddls.go). When
   // the filter is left on "Any site", fall back to the provider's own sole
-  // practicesAt site rather than booking with no site at all — ambiguous
-  // (0 or 2+ sites) providers still book site-less.
+  // practicesAt site. A provider with zero or multiple sites has no safe
+  // default (providerSoleSite returns "") — refreshBookEnabled already
+  // disables #book-submit in that case; this is the authoritative re-check
+  // at payload-build time, same pattern as the grid-snap backstop above,
+  // so an ambiguous provider can never reach the server site-less.
   const site = ($("#book-site") ? $("#book-site").value : "") || providerSoleSite(provider);
-  if (site) payload.site = site;
+  if (!site) {
+    toast("This provider works at multiple locations (or none on file) — pick a site above.", "err");
+    return;
+  }
+  payload.site = site;
 
   const asSelf = actingAsSelf();
 
