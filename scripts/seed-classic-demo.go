@@ -244,6 +244,7 @@ func main() {
 			OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
 		})
 	fmt.Printf("==> tab:             %s (open)\n", tabReply.PrimaryKey)
+	reapGhostLeases(ctx, conn, adminKey)
 
 	// Both items are served at the demo unit, which is where the resident
 	// lives — the residence chain a Facet browse walk descends binds the unit
@@ -455,6 +456,58 @@ func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, k
 	}
 }
 
+// reapGhostLeases withdraws every live leaseapp whose applicant is the
+// bootstrap admin identity itself — verify-fire litter (verticals.md:
+// verify-staff-write-confinement.go mints a fresh one per run with
+// "applicant": admin and no cleanup step of its own), never a real resident.
+// cafeIdentitiesReadSpec (cafe-domain/lenses.go) correctly excludes an
+// unnamed identity (its WHERE requires a `.name` aspect), so a lease held by
+// admin renders as a raw shortKey in the café POS lease picker instead of
+// dropping out, and its verify-only unit — minted by CreateLocation alone,
+// never given a `.listing` via SetUnitAddress/SetListing — reads blank
+// address / $0 rent in frontDeskLeaseDetails. Generic over the admin's bare
+// ID rather than two hardcoded lease keys, so any future admin-applicant
+// litter (this script or another verify tool) is caught the same way.
+func reapGhostLeases(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	adminID := strings.TrimPrefix(adminKey, "vtx.identity.")
+	appForSuffix := ".applicationFor.identity." + adminID
+	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
+	must(err, "list lnk.leaseapp. keys")
+	for _, link := range links {
+		if !strings.HasSuffix(link, appForSuffix) || !alive(ctx, conn, link) {
+			continue
+		}
+		leaseID := strings.TrimSuffix(strings.TrimPrefix(link, "lnk.leaseapp."), appForSuffix)
+		leaseKey := "vtx.leaseapp." + leaseID
+		if !alive(ctx, conn, leaseKey) {
+			continue
+		}
+		unitPrefix := "lnk.leaseapp." + leaseID + ".appliesToUnit.unit."
+		unitLinks, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, unitPrefix)
+		if err != nil || len(unitLinks) == 0 || !alive(ctx, conn, unitLinks[0]) {
+			continue
+		}
+		unitID := strings.TrimPrefix(unitLinks[0], unitPrefix)
+		unitKey := "vtx.unit." + unitID
+		// The admin identity holds no `operator` role link in this topology
+		// (it is used here purely as the applicant), so the scope=any grant
+		// doesn't apply — withdraw via the consumer scope=self grant instead,
+		// which is in fact the semantically correct path: the applicant is
+		// withdrawing its OWN application.
+		submitSelfOp(ctx, conn, adminKey, "WithdrawLeaseApplication", "leaseapp",
+			map[string]any{"leaseAppKey": leaseKey, "unit": unitKey, "applicant": adminKey},
+			&processor.ContextHint{
+				Reads: []string{
+					leaseKey,
+					unitPrefix + unitID,
+					link,
+				},
+				OptionalReads: []string{"lnk.identity." + adminID + ".appliedToUnit.unit." + unitID},
+			})
+		fmt.Printf("==> reaped ghost lease: %s (applicant=admin, verify-fire litter)\n", leaseKey)
+	}
+}
+
 // alive reports whether key names a live (non-tombstoned) Core KV document —
 // a direct Core KV read, sanctioned here only because this is a dev/ops
 // loader tool, not a P5 vertical-app read path (mirrors seed-showcase.go's
@@ -490,6 +543,32 @@ func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Payload:       payloadBytes,
 		ContextHint:   hint,
+	}
+	reply, err := output.SubmitOp(ctx, conn, env)
+	must(err, "submit "+operationType)
+	mustAccepted(reply, operationType)
+	return reply
+}
+
+// submitSelfOp is submitOp for a platform scope=self grant, where
+// authContext.target must equal the acting identity itself (Contract #6) —
+// the "withdraw my own application" shape, as opposed to submitOp's
+// operator/scope=any actions.
+func submitSelfOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, payload map[string]any, hint *processor.ContextHint) *processor.OperationReply {
+	reqID, err := substrate.NewNanoID()
+	must(err, "generate requestId")
+	payloadBytes, err := json.Marshal(payload)
+	must(err, "marshal payload")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: operationType,
+		Actor:         actorKey,
+		Class:         class,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Payload:       payloadBytes,
+		ContextHint:   hint,
+		AuthContext:   &processor.AuthContext{Target: actorKey},
 	}
 	reply, err := output.SubmitOp(ctx, conn, env)
 	must(err, "submit "+operationType)
