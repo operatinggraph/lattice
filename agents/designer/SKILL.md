@@ -912,6 +912,40 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   bundle cap specified only in `ValidateCapabilityBundle`.) Same family as *enforcement point follows the
   threat*, with the repo-specific fact that makes it concrete.
 
+- **A census you author can be shaped by the answer you expect — check the PATTERN, not just the glob, and
+  RUN the pin your own design proposes before you ship the design.** The glob reflex above says a census's
+  *file pattern* is a premise. This is the sharper form: the **match pattern itself** can structurally
+  exclude the counterexample, and it does so invisibly, because a census that returns the expected number
+  reads as confirmation. (Trialed 2026-08-22, the authored-artifact admission design. I wrote
+  `grep -rnE 'cap\.[a-z-]+\.'` to prove the auth-plane key space was "exhaustively five" — the regex
+  requires a literal `.` after `cap`, so it **could not match `cap-read.`**, the sixth family, which shares
+  the same bucket, is package-extensible by a *ratified* clause of the very contract I was amending, and is
+  read by a wildcard enumeration. A second census was scoped to `packages/` and so could not see the three
+  producers **generated** in `internal/pkgmgr`. Both numbers propagated into the registry design, the
+  migration size, the test plan, and a contract edit that contradicted §6.14 of its own file.) **Two
+  mechanical checks.** (1) For any census whose job is to prove a set is *complete*, write the pattern to
+  match the **family** (`cap[.-]`), then subtract, rather than matching the shape you already have in mind;
+  and name the unit before the number sizes anything. (2) **If the design proposes a pinning test or census
+  as its own correctness gate, run that gate against the current tree during the design fire.** Mine — "every
+  auth-plane lens's key stays in its registered space" — would have failed on a stock stack on day one and
+  handed me the blocker before the reviewers did. A pin you only *specify* is a pin that has never disagreed
+  with you.
+
+- **A reassuring negative proved for ONE member of an enumeration you have already read is not a fact about
+  the enumeration — and the most relevant in-flight design is often UNCOMMITTED in your own working tree.**
+  Two halves of one miss, same fire. (1) I proved "an authored artifact cannot reach sensitive plaintext"
+  for the `lens` kind — soundly, through five conjuncts — and wrote it as *"hole 2 is falsified"* for the
+  whole loop. `EnabledArtifactKinds` has **six** members and I had read that map an hour earlier; two of
+  them carry live Starlark, where a script's undeclared `kv.Read` decrypts to plaintext that the commit
+  guard's own doc comment says it deliberately permits into an ordinary domain event. The falsification was
+  real and its scope was a *set membership question I had already answered*. **When a negative clears one
+  member of a named family, restate it as "for X" and walk the other members explicitly** — the enumeration
+  is right there. (2) The §2 rule to grep the other in-flight designs, which I invoked by name, I ran over
+  *committed* design docs and their code seams — and missed the design sitting **uncommitted in `main`** in
+  my own tree, which refuted my headline in its opening paragraph. `git status` was my first tool call of
+  the fire. **Add the dirty tree to that grep**: a contract edit or design staged for the principal is, by
+  construction, the newest and most load-bearing thing in flight, and it is invisible to `git log`.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
