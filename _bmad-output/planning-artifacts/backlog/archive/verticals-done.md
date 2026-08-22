@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-05 · `5d6db584` · A café tab can finally produce an itemized receipt — `.status.lines` + lineId-targeted VoidCharge, POS gains a per-line Void button. cafe-domain 0.11.16
+- 2026-08-05 · `018bc6d7` · A lease applicant can finally see their own progress — leaseApplicationsRead gains the four-gate stepper state, mirroring D1.5's landlord-side pattern. lease-signing 0.27.14
+- 2026-08-05 · `3294be37` · A paused clinic projection no longer reads as "no results" — `internal/projectionhealth` + clinic-app's 6 RLS reads gain `projectionHealthy`; FE shows "data paused" not empty.
+- 2026-08-05 · `c643cf06` · An unmanaged leased unit no longer vanishes from every staff view — seed fix + a missing_manager convergence flag (human-gated, no auto-dispatch). lease-signing 0.27.13
+- 2026-08-05 · `2d8604f4` · The one-bill statement now covers clinic + wellness, not just rent + café — oneBillClinicEntries/oneBillWellnessEntries added, live-verified against a real Riverside lease. one-bill 0.3.0
+- 2026-08-05 · `a587b245` · A LoftSpace tenant can finally pay their own rent — CreditAccount grants a consumer scope=self, ownership + balance checked. loftspace-ledger 0.4.7
+- 2026-08-05 · `305fd25c` · A wellness member's balance can finally be settled — WellnessDebitAccount/WellnessCreditAccount grant frontOfHouse; Roster gains a Billing panel (member picker + record charge/payment). wellness-ledger 0.2.3
+- 2026-08-05 · `af3e472e` · The café Manage Menu panel no longer AuthDenies its own staff — CreateMenuItem/RetireMenuItem now grant frontOfHouse too, workplace-confined like the tab ops. cafe-domain 0.11.13
+- 2026-08-05 · `2c231189` · The café front-desk card now shows a resident's next visit, not their last — keepSoonest picks the earliest startsAt per lease instead of a last-write-wins map overwrite.
+- 2026-08-05 · `7a440030` · The café Manage Menu grid no longer shows every property's catalog — menuCatalogSpec projects per-item coveringLocations, handleMenu confines staff to their own workplace's items. cafe-domain 0.11.12
 - 2026-08-04 · `02b812c4` · The renewal cycle finally opens in the live demo — seedResidentTenancies' move-in pushed back 11 months (was 2) so leaseEnd lands inside the 60-day renewal window on the seed's first tick.
 - 2026-08-04 · `ab971faa` · A screening budget that runs out no longer dead-ends in silence — leaseApplicationComplete escalates "exhausted" gaps to Augur reasoning instead of an unread GapBudgetExhausted warning. lease-signing 0.27.12
 - 2026-08-04 · `329dc7d2` · The clinic front desk can finally record a charge or payment — DebitAccount/CreditAccount renamed Clinic{Debit,Credit}Account + frontOfHouse granted; the patient hat no longer sees Record charge. clinic-ledger 0.2.7
