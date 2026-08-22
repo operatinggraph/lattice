@@ -471,6 +471,21 @@ var (
 	// only appears outside the package, which is exactly where SpecParser is
 	// left nil unless the caller wires it by hand.
 	pkgmgrNewInstallerCall = regexp.MustCompile(`\bpkgmgr\.NewInstaller\(`)
+	// materializedDefinitionApply anchors a capability plan's materialized
+	// Definition handed straight to Installer.Apply. A capability Definition
+	// describes the proposal's own artifact and nothing else about the package
+	// it names, while Apply's in-place branch is a convergence operator — so
+	// applying one directly retires every key the proposal never mentioned.
+	// Installer.ApplyCapabilityPlan is the entry point that carries the options
+	// which make that safe (RefuseRemovals in both modes, RequireInstalled on
+	// an upgrade), and MaterializedDefinition exists for INSPECTION — logging,
+	// diffing, asserting — which its own doc comment states.
+	//
+	// Stated residual, matching this file's pragmatic-scanner posture:
+	// assigning the accessor's result to a local and passing the local evades
+	// this regex. That is a deliberate two-step rather than the shape an author
+	// reaches for by default, and it is not worth a smarter pattern.
+	materializedDefinitionApply = regexp.MustCompile(`\.Apply\([^\n]*MaterializedDefinition\(\)`)
 
 	// kvListAssign / kvGetCall / kvBatchShape — Fire 1 Inc 3's list-then-get
 	// gate (script-live-read-round-trip-collapse-design.md), scoped to
@@ -933,6 +948,14 @@ func scanSource(path string, data []byte) []finding {
 		!strings.HasPrefix(slash, "internal/testutil/") &&
 		!strings.HasPrefix(slash, "cmd/lattice-pkg/") &&
 		!strings.HasPrefix(slash, "cmd/loupe/")
+	// internal/pkgmgr owns both sides of this seam — ApplyCapabilityPlan hands
+	// the plan's own definition to Apply, which is the sanctioned call — so the
+	// rule binds every caller outside it. scripts/lint-*.go are excluded on the
+	// same idiom (and for the same reason) as derivedKeyScoped/historyScoped
+	// above: their own self-test fixtures are string literals carrying the
+	// banned shape.
+	materializedDefinitionScoped := !strings.HasPrefix(slash, pkgmgrPkg) &&
+		!strings.HasPrefix(slash, "scripts/lint-")
 	// internal/substrate OWNS the connection-state handler slots and is the
 	// one place allowed to set them; everyone else registers through
 	// OnConnectionStateChange. Scoped to non-test files: a test that builds
@@ -1063,6 +1086,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if pkgmgrInstallerScoped && pkgmgrNewInstallerCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "pkgmgr.NewInstaller call outside its sanctioned callers — SpecParser stays nil unless the caller wires it by hand, and a nil SpecParser silently disables the install-time lens label-cap gate (internal/pkgmgr/lenslabelcap.go); use testutil.NewInstaller(conn, adminActor) (internal/testutil), which wires it"})
+		}
+		if materializedDefinitionScoped && materializedDefinitionApply.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "capability-apply: MaterializedDefinition() passed to Installer.Apply — a capability Definition describes one artifact, and Apply's in-place branch converges the package onto whatever it is given, so this retires every declared key the proposal never mentioned; apply a plan with inst.ApplyCapabilityPlan(ctx, plan), which sets RefuseRemovals (both modes) and RequireInstalled (upgradeExisting). MaterializedDefinition() is for inspection"})
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
@@ -2747,6 +2773,18 @@ func selfTest() []string {
 		{"the gate skips package test files", "packages/self-test/ddls_test.go",
 			"    if ot == \"CreateThing\":\n" +
 				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
+		{"a materialized capability Definition passed to Apply is denied", "cmd/loupe/review.go",
+			"\tres, err := inst.Apply(ctx, plan.MaterializedDefinition(), pkgmgr.ApplyOptions{})\n",
+			"MaterializedDefinition() passed to Installer.Apply"},
+		{"an ordinary source-authored Apply passes", "cmd/loupe/pkg.go",
+			"\tres, err := inst.Apply(ctx, def, opts)\n", ""},
+		{"inspecting the materialized Definition away from Apply passes", "cmd/bridge/capability_author_test.go",
+			"\tmaterialized := plan.MaterializedDefinition()\n" +
+				"\tif len(materialized.WeaverTargets) != 1 {\n\t\tt.Fatal(\"x\")\n\t}\n", ""},
+		{"applying the plan through the sanctioned entry point passes", "cmd/lattice-pkg/main.go",
+			"\tres, err := inst.ApplyCapabilityPlan(ctx, plan)\n", ""},
+		{"the gate does not bind internal/pkgmgr, which owns both sides of the seam", "internal/pkgmgr/capabilityapply.go",
+			"\tres, err := i.Apply(ctx, plan.MaterializedDefinition(), opts)\n", ""},
 		{"kv-batch scope excludes the wider corpus outside internal/processor and internal/substrate", "cmd/loupe/handlers.go",
 			"func f(ctx context.Context, conn *substrate.Conn) {\n" +
 				"\tkeys, err := conn.KVListKeysPrefix(ctx, bucket, prefix)\n" +
@@ -2771,6 +2809,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "max-reconnects:") &&
 				!strings.HasPrefix(fd.msg, "primordial-actor:") &&
 				!strings.HasPrefix(fd.msg, "actor-guard:") &&
+				!strings.HasPrefix(fd.msg, "capability-apply:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") {
 				continue
 			}
