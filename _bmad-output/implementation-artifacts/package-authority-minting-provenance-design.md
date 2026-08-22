@@ -1,16 +1,57 @@
 # Package authority-minting provenance — closing the create-forgery gap
 
-**Status: 📐 awaiting-Andrew (ratification)** — Designer fire (Winston), 2026-08-21. Security &
-trust-boundary item, ★★★. **Carries one architectural fork** (§13) **and frozen-contract edits**
-(Contract #8 §8.4 + Contract #6 §6.1, staged uncommitted — §12), so it is not self-adjudicable under the
-2026-08-20 delegation.
+**Status: ✅ RATIFIED-AND-PARKED (Andrew, 2026-08-21).** Design signed off; **not scheduled**. Board row
+is `🗄️ shelved`, not build-ready `✅ ratified` — the Steward must not pull it until the revive trigger
+below fires. The security analysis stands; parking is a capacity/priority call, not a rejection.
+
+**The decisions (Andrew, this session):**
+- **Increment 1 only.** Inc 1 (the commit-time admission guard + server-derived `origin` stamp) is the
+  actual hole-closure. **Increment 3** (the `pkgstd` authoring gate + 54-pair sanction migration) is a
+  lint ratchet, **deferred** — it rides the revive fire or a later hardening pass, never blocks Inc 1.
+  **Increment 2**'s `bucketguard` reserved-key-pattern refusal overlaps the standing ★★★ *"three
+  admission holes let an authored artifact reach the auth plane"* row (`lattice.md`) — **folded there**,
+  not carried by this design.
+- **R3 is DROPPED.** DD found R3 as drafted refused a shipped flow (it keyed the *submitting* actor at
+  `scope: any`, while the invariant it claimed to mirror checks the *proposer* at the *requested* scope).
+  R0 + R1 close the named escalation for the shapes that matter; R3 is not revived without a consumer
+  that needs it and a corrected scope predicate. Every "R0, R1 and R3" below reads **R0 + R1**.
+- **Fork §13 resolved to Branch A** — "my own ops, yes; other people's, no": a non-root console operator
+  may install a package that confers only operationTypes the package itself implements (R1), never a
+  core-owned authority-minting op. Branch B (withdraw the lifecycle trio from `consoleOperator`) and C
+  (signed manifests) are not taken.
+
+**Why parked, and the revive trigger.** The escalation is real and premise-inverting — `consoleOperator`
+is *deliberately sub-root* ([console-operator/permissions.go:19-21](../../packages/console-operator/permissions.go);
+the whole point of `loupe-operator-auth-lift-design.md` branch B was to move the routine Loupe login off
+root onto it), it holds `InstallPackage`/`UpgradePackage`, and the install path is a plain operator
+manifest upload — so a `consoleOperator` can upload a crafted package, forge a permission (or a
+`holdsRole→operator` edge) the commit guards skip, and become root, erasing the sub-root boundary four
+shipped designs were built to establish. **But** the escalation has a *distinct victim* only once
+`consoleOperator` (or any sub-root holder of the package-lifecycle trio) is delegated to a principal not
+already trusted as root. Today the sole live holder is trusted as root, so the boundary is not yet
+load-bearing in practice.
+
+> **Revive trigger:** `consoleOperator` (or any sub-root package-lifecycle holder) is delegated to a
+> principal you do not already trust as root — a real multi-operator deployment, or a runtime/AI actor
+> granted the lifecycle trio (e.g. AI-authored-capabilities Fire 4+ shipping a non-human lifecycle
+> actor). At that point the sub-root boundary becomes load-bearing and Inc 1 ships before the delegation.
+
+**Contract edits — reverted, ride the revive fire.** The paired edits (Contract #6 §6.1 rule 4;
+Contract #8 §8.4 authority-minting admission block) are **reverted from the working tree**, not
+committed: a parked design has no build fire, and committing "the Processor stamps `origin`, never trusts
+the body" as present-tense contract text while the Processor still trusts the body would be a
+committed-but-unimplemented **fail-open security clause** — the exact trap ratification exists to prevent.
+Contract #8 §8.4 is shared with `package-restore-design.md`; its detangle happens with that item's
+decision. The still-open gap stays honestly documented by §8.4's pre-existing *"Not closed by this guard:
+a create of a fresh permission/role vertex…"* residual, which this design's edit had removed and which is
+restored on revert.
 
 **Pre-build gate: DISCHARGED.** The adversarial pass this design owes itself was run cold this fire and
 returned four blockers, all confirmed at the source and folded — two of them fatal to the draft as
-written. §16 records what they were and where each landed. No gate is left dangling for the Steward.
+written. §16 records what they were and where each landed. No gate is left dangling for the revive fire.
 
-Board row: *"[bootstrap] `UpgradePackage`'s create arm can forge a package-origin permission/role
-vertex"* (`lattice.md`, Security & trust boundary, ★★★, M). Filed as
+Board row: *"[bootstrap] A package-plane actor can forge a package-origin permission and grant it to
+itself"* (`lattice.md`, Security & trust boundary, ★★★). Filed as
 `permission-role-provenance-write-once-design.md` §8(a); the row also carries the §15
 `grantedBy`-revival gap, which this design closes as a consequence rather than as a second mechanism.
 
@@ -314,6 +355,10 @@ custody; it is a narrowing, not a placeholder, and nothing in it has to be undon
 ## 5. The shape
 
 ### 5.1 One admission rule, path-independent — and the set it governs, derived not listed
+
+> **Banner supersedes this section on R3:** R3 is dropped (see the ratification banner). The revive fire
+> builds R0 + R1 only. R3's text below is retained for the record; do not build it without a named
+> consumer and a corrected scope predicate (submitter at a *covering* scope, not `scope: any`).
 
 Grounding (§3.6, census §10.2) narrows the diagnosis past the filed row. The runtime plane is **not**
 broken: minting a permission, granting it, and assigning a role are themselves operations —
@@ -763,7 +808,7 @@ Two frozen contracts, both **edited in `main` and left UNCOMMITTED** — the dif
   exemption rests on a server-side verdict rather than on a submitted field. **Appended as rule 4, not
   inserted as rule 3** — five live call sites cite *"Contract #6 §6.1 rule 3"* for the
   reserved-operationType refusal (`internal/processor/step3_auth_capability.go:440,611`;
-  `internal/processor/step3_grant_provenance_test.go:9`; `internal/pkgmgr/capabilitymaterializer.go:240`;
+  `internal/processor/step3_grant_provenance_test.go:9`; `internal/pkgmgr/capabilitymaterializer.go:246`;
   `internal/pkgmgr/grantlaundering_test.go:8`), and an inserted rule would silently invalidate every one.
   The list intro changes "Three rules" → "Four rules". *An earlier draft did insert it; a citation grep
   is what caught it, and that grep is owed by any edit to a numbered contract list.*
@@ -962,10 +1007,18 @@ green at every increment — it is the test that broke §14's attempt, and it is
 
 ## 12. Staging note, and what this design supersedes
 
-Both contract edits are staged **uncommitted** in `main` for Andrew — `docs/contracts/06-capability-kv.md`
-(§6.1 gains rule 3, the Processor-derived stamp; the old rules 3+ renumber) and
+> **Superseded by the ratification banner (2026-08-21): parked ⇒ contract edits REVERTED, not committed.**
+> Both edits below (Contract #6 §6.1 rule 4; Contract #8 §8.4 authority-minting admission block) are
+> reverted from the working tree — a parked design has no build fire, and a committed-but-unbuilt
+> present-tense security clause is fail-open. They ride the revive fire. On revert, §8.4's original *"Not
+> closed by this guard: a create of a fresh permission/role vertex…"* residual (which this edit had
+> removed) is restored, so the still-open gap stays documented. Contract #8 §8.4 is shared with
+> `package-restore-design.md`; the file's detangle happens with that item's decision.
+
+The originally-proposed edits were — `docs/contracts/06-capability-kv.md`
+(§6.1 gains rule **4**, the Processor-derived stamp, appended so rules 1–3 keep their numbers — §8) and
 `docs/contracts/08-package-install.md` (§8.4 gains the authority-minting admission paragraph). The tree
-was otherwise clean at fire start (`6218550a`); this fire commits only this design doc and the board row.
+was otherwise clean at fire start (`6218550a`).
 
 **Superseded text, rewritten rather than banner-annotated.** The §8.4 edit **deletes** the sentence
 *"**Not closed by this guard:** a `create` of a fresh permission/role vertex … closing that needs
@@ -977,7 +1030,12 @@ provenance marker; folding into manifest scoping) are both superseded by §5.5 h
 gap as confined to `UpgradePackage`'s create arm is corrected by §3.6. The board row is likewise renamed
 to the corrected scope.
 
-## 13. The fork for Andrew
+## 13. The fork for Andrew — RESOLVED: Branch A (Andrew, 2026-08-21)
+
+**Resolution:** Branch A. A non-root console operator may install a package that confers only
+operationTypes the package itself implements (R1), never a core-owned authority-minting op. "My own ops,
+yes; other people's, no" is the permanent line. Branch B (withdraw the trio from `consoleOperator`) and
+Branch C (signed manifests) are not taken. The original fork text follows for the record.
 
 ### 13.1 The question
 
@@ -1056,9 +1114,9 @@ document migration. Happy to leave it filed.
 
 ## 15. Decomposition for the Steward
 
-Three increments, each independently shippable and green. **Increment 1 is the posture-changing one** (it
-introduces the refusal); 2 and 3 are additive. Review depth stays the Steward's sizing
-(`agents/steward/SKILL.md` §4).
+> **Superseded by the ratification banner (2026-08-21): Increment 1 only; R3 dropped; Inc 2 folds into
+> the ★★★ three-admission-holes row; Inc 3 deferred.** The revive fire builds **Inc 1 with R0 + R1**
+> (not R3). Increments 2 and 3 as written below are retained for reference, not for scheduling.
 
 **Increment 1 — the admission rule, the claimant index, and the derived stamp (path-independent).**
 Phase 0 re-runs §10.2 (the producer census, tests and docs included) and §10.1(ii), and confirms the
@@ -1066,9 +1124,9 @@ exact rbac-domain op names R0 keys on (`CreatePermission`/`GrantPermission`/`Ass
 against `packages/rbac-domain/ddls.go` rather than assuming them. Builds `byCommandClaimants` (§5.2,
 §10.3) and the `readPriorDocuments` endpoint rule (§5.1.2); changes `rejectPackageScopeViolations` to
 return its resolved scope (§5.2); derives `AuthorityMintContext` inside step 3 (§5.3.1) with `RootPlane`
-left false. Ships `rejectUnauthorizedAuthorityMint` over **all five mutation shapes** with **R0, R1 and
-R3**, the `AuthorityMintError` type, the wire code, the reply mapping, §5.4's stamp, §5.1.1's state
-table, and the reserved-role-name refusal.
+left false. Ships `rejectUnauthorizedAuthorityMint` over **all five mutation shapes** with **R0 and R1**
+(R3 dropped — banner), the `AuthorityMintError` type, the wire code, the reply mapping, §5.4's stamp,
+§5.1.1's state table, and the reserved-role-name refusal.
 
 *Note the earlier draft predicted rbac-domain's own first install would break under R0-only. It does
 not — R1's first row admits it, since every rbac-domain permission's only claimant is a DDL created in
