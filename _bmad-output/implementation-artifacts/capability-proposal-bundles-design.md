@@ -1,6 +1,27 @@
 # Co-proposed capability bundles — one proposal, a lens + the target that binds it, one atomic apply — design
 
-**Status: 📐 awaiting-Andrew (ratification).** No frozen-contract change. It goes to Andrew rather than
+**Status: 🗄️ SHELVED (Andrew, 2026-08-22).** Not built. No contract edit was staged; nothing reverts.
+Refuse/simplify call in the ratify session: the two-artifact co-authoring flow is **already shipped** as a
+loud, documented two-step (the Studio emits `{target, lens}` as two sequential proposals,
+`cmd/loupe/web/js/logic/weaverauthor.js:290`; the target-only case returns a *good* error telling the
+operator to apply the lens first). **What is missing is atomicity, not capability** — and this design costs
+**L + M + M across three lanes** plus a permanent dual-shape reader to turn a two-click flow into one-click.
+Demand is self-filed (the NL fire's own build-time amendment, `c6875934`; the NL design scoped it out as a
+non-goal) — no surveyor/PO/operator request. **Zero dependents** in code or on the board.
+
+> **Revive trigger:** a real authoring intent that needs a NEW lens + its binding target created
+> atomically, **or** an operator reports a torn bundle (lens applied, target rejected, or vice versa) —
+> the concrete harm this design's Alt-1 rejection names.
+
+**Coupling now moot.** The banner below noted a ratification-ordering coupling to
+`package-authority-minting-provenance-design.md` R1. That design is now **parked** (Inc 1 only, R3
+dropped), and the ★★★ *"three admission holes"* security row it shared a seam with is **fully
+independent** of this one (all three holes reach the auth plane from a single artifact today — see the
+in-flight `authored-artifact-admission-model-design.md`). Nothing waits on bundles.
+
+*Original design retained below for the record — do not build it.*
+
+**Status (original): 📐 awaiting-Andrew (ratification).** No frozen-contract change. It goes to Andrew rather than
 Winston-adjudication for one reason: §3.2's kind allow-list exists to keep an **unratified sibling
 design**'s admission rule true (`package-authority-minting-provenance-design.md` R1, also
 📐 awaiting-Andrew), so the two are coupled and whichever ratifies second inherits the constraint —
