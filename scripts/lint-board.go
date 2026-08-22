@@ -24,6 +24,13 @@
 //	                 rotation memory became a per-fire run-log).
 //	FAIL  doneline — a Done-log entry that is not one line (over doneEntryMax).
 //	FAIL  filesize — a lane file over fileMaxBytes.
+//	FAIL  conflict — a git conflict marker committed into a tracked text file.
+//	                 Swept repo-wide, not just the lane files: a marker inside a
+//	                 .go file fails the build, but in markdown nothing notices.
+//	                 1caaaf8 committed a `<<<<<<< Updated upstream` block into
+//	                 backlog/lattice.md — duplicating one row and contradicting
+//	                 its own state — and CI passed on it, because every gate that
+//	                 reads the board parses rows and no gate read the raw text.
 //	FAIL  shipped  — a row still in the open-items table whose State reads as
 //	                 shipped (e.g. "✅ shipped `sha`") — "Open items only —
 //	                 shipped demand is in the Done log" (verticals.md's own
@@ -46,8 +53,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -86,12 +96,16 @@ var (
 	// touched file cannot hide behind the designer out (§2.5).
 	designerPassRe = regexp.MustCompile(`(?i)needs designer pass`)
 	noPatternRe    = regexp.MustCompile(`(?i)no-pattern:\s*\S`)
+	// conflictRe matches the three marker lines `git merge` / `git stash pop`
+	// leave behind. The `=======` arm is anchored to a whole line of exactly
+	// seven, which no setext underline in this tree uses (every heading is ATX).
+	conflictRe = regexp.MustCompile(`^(?:<{7}|>{7})[ \t]|^={7}$`)
 )
 
 type finding struct {
 	file string
 	line int
-	kind string // row | journal | section | doneline | filesize | dep | openrows
+	kind string // row | journal | section | doneline | filesize | conflict | dep | openrows
 	warn bool
 	msg  string
 }
@@ -117,6 +131,7 @@ func main() {
 		rowStates = append(rowStates, rows...)
 	}
 	all = append(all, depCheck(rowStates, doneItems)...)
+	all = append(all, conflictSweep()...)
 
 	fails, warns := 0, 0
 	for _, x := range all {
@@ -246,6 +261,52 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 			fmt.Sprintf("lane has %d open rows > %d — prefer a closure/consolidation unit next (steward SKILL §4)", openRowCount, openRowWarnMax)})
 	}
 	return out, doneItems, rows
+}
+
+// conflictSweep reports any git conflict marker committed into a tracked text
+// file. It is a repo invariant rather than a board one — the board is only
+// where it bit first — so it runs over `git ls-files` regardless of which files
+// the caller named. Outside a git checkout it reports nothing rather than
+// failing: the gate's job is to catch a marker, not to police the environment.
+func conflictSweep() []finding {
+	out, err := exec.Command("git", "ls-files", "-z").Output()
+	if err != nil {
+		return nil
+	}
+	var found []finding
+	for _, path := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if path == "" || skipConflictScan(path) {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || bytes.IndexByte(data, 0) >= 0 { // unreadable or binary
+			continue
+		}
+		sc := bufio.NewScanner(strings.NewReader(string(data)))
+		sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+		n := 0
+		for sc.Scan() {
+			n++
+			if conflictRe.MatchString(sc.Text()) {
+				found = append(found, finding{path, n, "conflict", false,
+					fmt.Sprintf("git conflict marker %q committed — resolve the merge, never commit the markers", sc.Text())})
+			}
+		}
+	}
+	return found
+}
+
+// skipConflictScan excludes trees whose contents are not ours to police and
+// file shapes a marker line cannot meaningfully appear in.
+func skipConflictScan(path string) bool {
+	if strings.HasPrefix(path, "vendor/") || strings.HasPrefix(path, "deploy/nkeys/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".woff", ".woff2":
+		return true
+	}
+	return false
 }
 
 // isTableMeta reports whether a |-line is a header or the |---| separator (not a data row).
