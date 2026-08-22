@@ -448,3 +448,40 @@ rule) — all pass.
   proves noisy.
 - **Lens walk depth** (renewal→leaseapp→identity→instances, depth 3) — inside the BFS cap with shipped
   depth-2 precedent; flagged for the R2 reviewer to profile on the e2e stack.
+
+## Build note — R3 residual: name the tenant on the renewal card (verticals lane, steward fire 2026-08-22)
+
+**Scope sentence:** `renewalsReadSpec` (`packages/lease-signing/renewal_lenses.go:300`) projects only
+`tenant.key`, so `renewalsRead`'s `tenant` column is a bare key and `renderRenewalCard`
+(`cmd/loftspace-app/web/app.js:2393`) never shows who the landlord is setting terms for or declining.
+Mirror `landlordLeaseApplicationsRead`'s SECURE `applicant_name` column
+(`packages/lease-signing/lenses.go:967-1044`) verbatim onto `renewalsReadSpec`.
+
+**Verified touch-list (scout `haiku`, re-verified live by this fire):**
+- `packages/lease-signing/renewal_lenses.go` — `renewalsReadSpec` WITH/RETURN (add
+  `tenant.name.data AS tenantNameEnv` → `tenantNameEnv AS tenant_name`); the `renewalsRead` lens's
+  `Columns` (add `tenant_name text`) and a new `SecureColumns` field (none existed on this lens before).
+- `packages/lease-signing/package.go:85` — version bump (additive column, `0.31.3` → `0.31.4`).
+- `cmd/loftspace-app/renewals.go` — `renewalRow` struct + `selectRenewalsSQL` + the `Scan` call gain
+  `tenant_name` / `TenantName *string`.
+- `cmd/loftspace-app/web/app.js:2393` (`renderRenewalCard`) — landlord-only title line names the tenant,
+  mirroring the established `a.applicantName || shortKey(a.applicant)` idiom
+  (`app.js:3389`/`3698`/`3795`); the tenant's own view of their own renewal is unchanged (no self-name).
+- `packages/lease-signing/renewals_read_lens_test.go` — extend `seedOpenRenewal` to optionally seed a
+  `.name` aspect (mirroring `TestLandlordLeaseApplicationsRead_ProjectsContactEnvelopesWhole`'s
+  `nameEnv` ciphertext-envelope fixture), add a `tenant_name` assertion to
+  `TestRenewalsRead_ProjectsDualAnchor` (or a sibling) plus a missing-aspect-projects-null case.
+
+**Precedent to mirror:** `landlordLeaseApplicationsReadSpec` (`packages/lease-signing/lenses.go:978-1044`)
+— `id.name.data AS applicantNameEnv` in WITH, `applicantNameEnv AS applicant_name` in RETURN, declared as
+a `SecureColumn{Column: "applicant_name", HolderTypes: []string{"identity"}, Field: "value"}`. The
+Secure-Lens decryptor rewrites the ciphertext envelope to plaintext before the row reaches the adapter
+(Contract #3 §3.10) — the RETURN must stay the whole envelope, never a `.value` hop.
+
+**Non-goals:** landlord naming (already shipped, `landlord_key` stays a display body column, not
+SECURE — landlord identity isn't sensitive contact PII the same way an applicant's is, and the FE never
+needed it); re-deriving `qualified`-style readiness columns; touching `renewalComplete` (the
+Weaver-internal sibling, no display concern).
+
+**Adjacent finds:** none — the `landlord` display field predates this row and already resolves via
+`landlordMin`/`landlordKey`; no second raw-key surface found in the renewal card.
