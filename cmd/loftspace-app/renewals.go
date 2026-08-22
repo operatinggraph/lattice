@@ -29,6 +29,7 @@ type renewalRow struct {
 	EntityKey           string   `json:"entityKey"`
 	LeaseApp            string   `json:"leaseApp"`
 	Tenant              string   `json:"tenant"`
+	TenantName          *string  `json:"tenantName"`
 	Landlord            string   `json:"landlord"`
 	Status              string   `json:"status"`
 	CycleEnd            *string  `json:"cycleEnd"`
@@ -49,7 +50,7 @@ type renewalRow struct {
 // lattice.actor_id session variable. Rows sort by (status, entity_key) so an
 // open cycle needing action surfaces before a completed/cancelled one.
 const selectRenewalsSQL = `
-SELECT entity_key, lease_app, tenant, landlord, status, cycle_end,
+SELECT entity_key, lease_app, tenant, tenant_name, landlord, status, cycle_end,
        unit_address, rent_amount, term_months, terms_set_at,
        has_guarantor, guarantor_verified_at, guarantor_method,
        signed_at, cancel_reason
@@ -84,7 +85,7 @@ func queryRenewals(ctx context.Context, pool pgxBeginner, actorID string) ([]ren
 	for rows.Next() {
 		var row renewalRow
 		if err := rows.Scan(
-			&row.EntityKey, &row.LeaseApp, &row.Tenant, &row.Landlord, &row.Status, &row.CycleEnd,
+			&row.EntityKey, &row.LeaseApp, &row.Tenant, &row.TenantName, &row.Landlord, &row.Status, &row.CycleEnd,
 			&row.UnitAddress, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
 			&row.HasGuarantor, &row.GuarantorVerifiedAt, &row.GuarantorMethod,
 			&row.SignedAt, &row.CancelReason,

@@ -1684,6 +1684,7 @@ refresh-loftspace:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-ledger
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/semantic-contracts
 	@$(MAKE) provision-loftspace-role
+	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
 	@echo "==> Restarting loftspace-app..."

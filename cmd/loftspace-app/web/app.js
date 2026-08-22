@@ -2401,6 +2401,7 @@ function renderRenewalCard(row, landlord) {
   const sub = document.createElement("div");
   sub.className = "addr-sub";
   const bits = [];
+  if (landlord) bits.push(row.tenantName || shortKey(row.tenant));
   if (row.cycleEnd) bits.push("term ends " + fmtDate(row.cycleEnd));
   if (row.termsSetAt) bits.push((row.rentAmount != null ? "$" + row.rentAmount + "/mo" : "terms set") + (row.termMonths != null ? " · " + row.termMonths + " mo" : ""));
   if (row.hasGuarantor === true) bits.push(row.guarantorVerifiedAt ? "guarantor verified " + fmtDate(row.guarantorVerifiedAt) : "guarantor pending");
