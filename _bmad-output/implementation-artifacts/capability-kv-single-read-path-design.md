@@ -1,6 +1,6 @@
 # Capability KV — one read path for the authorization surface
 
-**Status: ✅ Winston-ratified — build-ready (in-fire, 2026-08-22).** Implementation-level decision only: no
+**Status: ✅ BUILT AND SHIPPED (2026-08-22, `1509cd1`).** Winston-ratified in-fire; implementation-level decision only: no
 frozen-contract change (Contract #6's key routing is restated nowhere new — it is *removed* from three
 restatements and left in the one package that owns it), no architectural fork. Author: Winston (Lattice
 Steward fire, 2026-08-22). Board row: `backlog/lattice.md` → "[Core] `capability-kv` has ≥8 readers, two
