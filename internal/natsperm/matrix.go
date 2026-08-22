@@ -65,6 +65,13 @@ type Component struct {
 // RESTORE wholesale-replaces it; verified no production code in this repo
 // uses either (both are external-operator disaster-recovery tools, never
 // this codebase's own runtime path), so closing them costs nothing.
+// LEADER.STEPDOWN belongs to the same family for the same reason: it forces a
+// re-election and a delivery pause on the stream, which is a write-shaped
+// effect on availability rather than a read. It is inert on a single server
+// (the endpoint answers 503 without clustering) and no code in this repo
+// invokes it, so closing it costs nothing now and is already closed the day
+// JetStream is clustered — the point at which it would otherwise become a
+// live stall primitive for any $JS.API.> holder.
 // Ordinary reads (MSG.GET, DIRECT.GET, INFO) and consumer ops stay allowed
 // so CDC readers are unaffected.
 func protectedStreamDenies(stream string) []string {
@@ -76,6 +83,7 @@ func protectedStreamDenies(stream string) []string {
 		"$JS.API.STREAM.MSG.DELETE." + stream,
 		"$JS.API.STREAM.SNAPSHOT." + stream,
 		"$JS.API.STREAM.RESTORE." + stream,
+		"$JS.API.STREAM.LEADER.STEPDOWN." + stream,
 	}
 }
 
@@ -127,12 +135,18 @@ var coreEventsProtectedConsumers = []coreEventsProtectedConsumer{
 // NATS pause verb — so denying it costs no component a legitimate
 // operation. UNPIN is inert without a priority group (none of these
 // consumers use one, so it always errors) but costs nothing to close too.
+// LEADER.STEPDOWN is the clustered analogue of PAUSE — it forces a consumer
+// re-election and the delivery gap that comes with it. Like UNPIN it is inert
+// on a single server (503 without clustering) and no code here invokes it, so
+// it closes for free and is already closed if this deployment is ever
+// clustered.
 func coreEventsAdminDenies(stream, name string) []string {
 	return []string{
 		"$JS.API.CONSUMER.DELETE." + stream + "." + name,
 		"$JS.API.CONSUMER.RESET." + stream + "." + name,
 		"$JS.API.CONSUMER.PAUSE." + stream + "." + name,
 		"$JS.API.CONSUMER.UNPIN." + stream + "." + name,
+		"$JS.API.CONSUMER.LEADER.STEPDOWN." + stream + "." + name,
 	}
 }
 
@@ -163,11 +177,60 @@ func coreEventsAdminDenies(stream, name string) []string {
 // steal-and-ack that starves the real consumer without touching an admin
 // verb at all.
 func coreEventsOwnerOnlyDenies(stream, name string) []string {
-	return []string{
+	return append([]string{
 		"$JS.API.CONSUMER.CREATE." + stream + "." + name,
 		"$JS.API.CONSUMER.CREATE." + stream + "." + name + ".>",
 		"$JS.API.CONSUMER.DURABLE.CREATE." + stream + "." + name,
 		"$JS.API.CONSUMER.MSG.NEXT." + stream + "." + name,
+	}, coreEventsAckDenies(stream, name)...)
+}
+
+// coreEventsAckDenies returns the ack-subject family of a protected consumer
+// — the fifth inbound path into it, alongside the four verbs
+// coreEventsOwnerOnlyDenies names, and owner-scoped for the same reason: the
+// owner publishes an ack for its own durable on every delivery, so this
+// cannot be universal like coreEventsAdminDenies.
+//
+// The ack subject is a READ primitive, not just an acknowledgement lane. A
+// body of "+NXT" makes the server ack the referenced message and then run
+// processNextMsgRequest, delivering the consumer's next message to the
+// PUBLISHER's own reply subject with no check on who published (nats-server
+// v2.14.0 server/consumer.go:2716, :2736-2738). That is
+// $JS.API.CONSUMER.MSG.NEXT by another door, against consumers the deny above
+// closes MSG.NEXT on. A bare "+ACK"/"+TERM" on the same subject is the other
+// half: silent suppression of a pending shred, revocation or credential-
+// binding event without touching an admin verb.
+//
+// Both wire forms are listed because a consumer whose AckPolicy is neither
+// AckNone nor AckFlowControl subscribes BOTH, unconditionally
+// (server/consumer.go:1699-1707). The js_ack_fc_v2 feature flag
+// (server/feature_flags.go:35, default false) only selects which form the
+// server STAMPS on delivered messages; it does not gate the v2 subscription,
+// so the v2 subject is live inbound in this deployment even though nothing
+// here is stamped with it.
+//
+//	v1: $JS.ACK.<stream>.<consumer>.*.*.*.*.*   (server/consumer.go:1388-1390)
+//	v2: $JS.ACK.<domain>.<accHash>.<stream>.<consumer>.*.*.*.*.>
+//	                                            (server/consumer.go:1395-1398)
+//
+// The v2 form is wildcarded on its first two tokens because both are runtime
+// values a static conf cannot name: <domain> is the configured JetStream
+// domain, or the literal "_" when none is set (server/consumer.go:1377-1379),
+// and <accHash> is an 8-character base-62 SHA-256 of the account name
+// (server/consumer.go:1381; server/events.go:1151-1163). Wildcards over-deny
+// nothing real: matching a v1 ack subject would require its five trailing
+// tokens to begin with <stream>.<consumer>, and those tokens are always the
+// numeric sequence/delivery counters the server formats in
+// (server/consumer.go:1389).
+//
+// No bare-subject deny is needed, unlike the DIRECT.GET denies on the core-kv
+// backing stream: both subscriptions require at least five trailing tokens,
+// so "$JS.ACK.<stream>.<consumer>" with nothing after it is not a live inbound
+// path at all.
+func coreEventsAckDenies(stream, name string) []string {
+	return []string{
+		"$JS.ACK." + stream + "." + name + ".>",
+		"$JS.ACK.*.*." + stream + "." + name + ".>",
 	}
 }
 
@@ -186,9 +249,16 @@ func coreEventsOwnerOnlyDenies(stream, name string) []string {
 // that cannot publish this ack stalls its own listing PERMANENTLY once a
 // bucket is large enough to trigger flow control mid-delivery (the server
 // pauses delivery waiting for the ack, and the stall-recovery heartbeat
-// response is the same denied subject). Like $JS.ACK.>, it is consumer
-// protocol plumbing scoped to consumers the connection itself receives
-// deliveries for — not a data-plane privilege.
+// response is the same denied subject). It is genuinely protocol plumbing:
+// a flow-control ack carries an empty body and moves no data.
+//
+// $JS.ACK.> is NOT the same kind of grant, and is not universal. It is a
+// data-plane privilege: "+NXT" on an ack subject reads the next message off
+// the consumer into the publisher's own reply subject (see
+// coreEventsAckDenies), so a holder reaches any ack-policy consumer whose
+// subject it can name. The components that run durable consumers hold it and
+// are narrowed per-consumer by the protected-consumer denies (Deny); the
+// vertical-app tier holds no ack grant at all.
 func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 	allow := append([]string{}, c.ExtraPubAllow...)
 	allow = append(allow, "$JS.FC.>")
@@ -212,6 +282,23 @@ func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 // stream; bootstrap primordially provisions all of them). This is what
 // closes the $JS.API.> backing-stream side channel matrix-wide, not just for
 // the buckets a component doesn't own.
+//
+// KNOWN LIMIT — every deny below is defeasible for a component carrying
+// AllowResponses. nats-server checks a static deny FIRST and then, only if
+// the subject was denied, consults the client's dynamic response permissions
+// (server/client.go:4126-4141); and a message delivered to such a client
+// registers its reply subject as a response permission precisely WHEN the
+// client is denied on it (:3881-3884), while a publisher's chosen reply
+// subject is never permission-checked (:4278-4295). A component with
+// AllowResponses and a wildcard subscribe can therefore hand itself publish
+// on any subject in this list by receiving a message whose reply is that
+// subject. Demonstrated against this matrix: loom, denied $KV.core-kv.>,
+// obtains a PubAck on it. So these denies bind the twelve components without
+// AllowResponses — the vertical-app tier included — and are advisory for the
+// six that carry it (refractor, loom, weaver, bridge, model-runner, gateway).
+// Expressing reply authority without AllowResponses is filed as its own item
+// (backlog/lattice.md); do not read any deny here as a guarantee against
+// those six until it lands.
 //
 // The same precedent applies to core-events even though it is a plain
 // stream outside the PlatformBuckets() registry, not a KV bucket: bootstrap
@@ -486,6 +573,25 @@ var Matrix = []Component{
 		ExtraPubAllow:  []string{bootstrap.OpsWildcardSubject, "$JS.API.>", "$JS.ACK.>", "lattice.op.status"},
 		AllowResponses: true,
 	},
+	// The four vertical-app rows below hold no $JS.ACK.> grant, deliberately
+	// rather than by oversight: none of them runs a JetStream consumer. Their
+	// whole NATS surface is substrate.Connect, a token-revocation KV read
+	// (internal/gateway/revocation), key listings, and the health-kv heartbeat.
+	//
+	// The listing path is the one that has to be traced rather than assumed.
+	// substrate.KVListKeys holds a jetstream.KeyValue (substrate/conn.go:502),
+	// and that package's watcher builds its consumer through the LEGACY
+	// push-subscribe API — nats.OrderedConsumer() as a nats.SubOpt (nats.go
+	// v1.52.0 jetstream/kv.go:1304-1305) — which forces FlowControl: true and
+	// AckPolicy: AckNonePolicy (js.go:1780-1781). Two consequences, and the
+	// second is the one that matters here: an AckNone consumer gets no ack
+	// subscription on the server at all (nats-server v2.14.0
+	// server/consumer.go:1699), so there is no ack lane to grant; and what the
+	// listing genuinely depends on is $JS.FC.>, which every component keeps.
+	//
+	// The grant would therefore buy these four nothing, while handing the tier
+	// the platform already decided not to trust with ops.> an unscoped "+NXT"
+	// read on every consumer in the deployment (coreEventsAckDenies).
 	{
 		Name: "loftspace-app",
 		Desc: "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
@@ -500,22 +606,22 @@ var Matrix = []Component{
 		// lease-signing PDF upload generates a per-object CEK client-side and
 		// wraps/unwraps it via the Processor's Vault, mirroring Loupe's Fire 2
 		// path, rather than holding the master KEK itself.
-		ExtraPubAllow: []string{"$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.wrapkey", "lattice.vault.unwrapkey"},
+		ExtraPubAllow: []string{"$O.core-objects.>", "$JS.API.>", "lattice.vault.wrapkey", "lattice.vault.unwrapkey"},
 	},
 	{
 		Name:          "clinic-app",
 		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
-		ExtraPubAllow: []string{"$JS.API.>", "$JS.ACK.>"},
+		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
 		Name:          "cafe-app",
 		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
-		ExtraPubAllow: []string{"$JS.API.>", "$JS.ACK.>"},
+		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
 		Name:          "wellness-app",
 		Desc:          "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
-		ExtraPubAllow: []string{"$JS.API.>", "$JS.ACK.>"},
+		ExtraPubAllow: []string{"$JS.API.>"},
 	},
 	{
 		Name: "facet",
