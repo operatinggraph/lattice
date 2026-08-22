@@ -191,15 +191,24 @@ func coreEventsOwnerOnlyDenies(stream, name string) []string {
 // owner publishes an ack for its own durable on every delivery, so this
 // cannot be universal like coreEventsAdminDenies.
 //
-// The ack subject is a READ primitive, not just an acknowledgement lane. A
-// body of "+NXT" makes the server ack the referenced message and then run
-// processNextMsgRequest, delivering the consumer's next message to the
-// PUBLISHER's own reply subject with no check on who published (nats-server
-// v2.14.0 server/consumer.go:2716, :2736-2738). That is
-// $JS.API.CONSUMER.MSG.NEXT by another door, against consumers the deny above
-// closes MSG.NEXT on. A bare "+ACK"/"+TERM" on the same subject is the other
-// half: silent suppression of a pending shred, revocation or credential-
-// binding event without touching an admin verb.
+// What the deny is defending is control of the durable, not confidentiality
+// of the stream: core-events keeps MSG.GET, DIRECT.GET and INFO open by
+// design (see protectedStreamDenies), so any $JS.API.> holder can already
+// read the events by creating a consumer under a name of its own. What it
+// cannot otherwise do is act on THIS consumer's queue — and the ack subject
+// is where that is reachable.
+//
+// Both halves of it are. A bare "+ACK"/"+TERM" is silent suppression of a
+// pending shred, revocation or credential-binding event, with no admin verb
+// touched. And a body of "+NXT" makes the server ack the referenced message
+// and then run processNextMsgRequest, delivering the consumer's next message
+// to the PUBLISHER's own reply subject with no check on who published
+// (nats-server v2.14.0 server/consumer.go:2716, :2736-2738) — a steal that
+// starves the real owner, and $JS.API.CONSUMER.MSG.NEXT by another door
+// against consumers the deny above closes MSG.NEXT on. "+NXT" is pull-only:
+// against a push consumer processNextMsgRequest answers 409 (:4499-4502).
+// All six protected consumers are pull with explicit ack
+// (internal/substrate/consumer.go:210-215), so it reaches every one of them.
 //
 // Both wire forms are listed because a consumer whose AckPolicy is neither
 // AckNone nor AckFlowControl subscribes BOTH, unconditionally
@@ -283,22 +292,34 @@ func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 // closes the $JS.API.> backing-stream side channel matrix-wide, not just for
 // the buckets a component doesn't own.
 //
-// KNOWN LIMIT — every deny below is defeasible for a component carrying
-// AllowResponses. nats-server checks a static deny FIRST and then, only if
-// the subject was denied, consults the client's dynamic response permissions
-// (server/client.go:4126-4141); and a message delivered to such a client
-// registers its reply subject as a response permission precisely WHEN the
-// client is denied on it (:3881-3884), while a publisher's chosen reply
-// subject is never permission-checked (:4278-4295). A component with
-// AllowResponses and a wildcard subscribe can therefore hand itself publish
-// on any subject in this list by receiving a message whose reply is that
-// subject. Demonstrated against this matrix: loom, denied $KV.core-kv.>,
-// obtains a PubAck on it. So these denies bind the twelve components without
-// AllowResponses — the vertical-app tier included — and are advisory for the
-// six that carry it (refractor, loom, weaver, bridge, model-runner, gateway).
+// KNOWN LIMIT — a deny below binds the twelve components without
+// AllowResponses absolutely, and the six that carry it (refractor, loom,
+// weaver, bridge, model-runner, gateway) only conditionally. nats-server
+// checks a static deny FIRST and consults the client's dynamic response
+// permissions only if the subject was denied (server/client.go:4120-4141);
+// and a message delivered to such a client registers its reply subject as a
+// response permission precisely WHEN the client is denied on it (:3881-3884).
+// A publisher's chosen reply subject is not permission-checked (:4280-4287),
+// so for most subjects the six can hand themselves the grant unaided:
+// demonstrated against this matrix, loom publishes to a subject it is allowed
+// with reply=$KV.core-kv.>, receives its own message back through its wildcard
+// subscribe, and then takes a PubAck on the denied subject.
+//
+// The $JS.ACK.* denies are the exception, and the difference is worth stating
+// because it changes what has to be designed against. A CLIENT publish whose
+// reply is prefixed $JS.ACK. is rejected outright by isReservedReply before
+// any permission logic runs (:4218-4224, :4305-4307), so the self-service
+// route above cannot reach them. Registration still happens when the reply
+// arrives from the SERVER — a real delivery to a legitimate puller, seen by a
+// component whose subscribe is ">" — which needs an in-flight delivery it does
+// not control and yields one bounded registration (MaxMsgs 1, 2 minutes;
+// server/const.go:228,232). For those six the front door is the open one
+// anyway: MSG.NEXT is not a reserved reply, so the same self-service route
+// reaches it directly.
+//
 // Expressing reply authority without AllowResponses is filed as its own item
-// (backlog/lattice.md); do not read any deny here as a guarantee against
-// those six until it lands.
+// (backlog/lattice.md). Until it lands, read a deny here as a guarantee for
+// the twelve and as defence-in-depth for the six.
 //
 // The same precedent applies to core-events even though it is a plain
 // stream outside the PlatformBuckets() registry, not a KV bucket: bootstrap

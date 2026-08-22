@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -839,6 +838,21 @@ func TestCoreEventsSideChannel(t *testing.T) {
 			_, _ = boot.NATS().Request("$JS.API.CONSUMER.DELETE.core-events."+pc.name, []byte("{}"), 3*time.Second)
 		})
 
+		// LEADER.STEPDOWN's positive control. The handler rejects an
+		// un-clustered server before it looks the consumer up, so bootstrap —
+		// which carries no denies — draws a 503 reply whether or not the
+		// durable exists, and that reply is what makes the denials below mean
+		// "refused at the permission layer" rather than "the endpoint is
+		// silent". The other four verbs in the loop inherit their control from
+		// the bootstrap DELETE above.
+		t.Run("bootstrap-stepdown-answers/"+pc.name, func(t *testing.T) {
+			boot := connectAs(t, url, "bootstrap")
+			subject := "$JS.API.CONSUMER.LEADER.STEPDOWN.core-events." + pc.name
+			if _, err := boot.NATS().Request(subject, []byte("{}"), 3*time.Second); err != nil {
+				t.Fatalf("bootstrap LEADER.STEPDOWN %s: want a reply (503 without clustering), got %v", pc.name, err)
+			}
+		})
+
 		// admin verbs (DELETE/RESET/PAUSE): denied to every component,
 		// owner included.
 		for _, verb := range []string{"DELETE", "RESET", "PAUSE", "UNPIN", "LEADER.STEPDOWN"} {
@@ -1038,6 +1052,14 @@ func TestCoreEventsAckPlaneSideChannel(t *testing.T) {
 
 			// grouped so the parallel denials all complete before the
 			// pending-set check that follows.
+			//
+			// A PASS here is an unconditional guarantee for the twelve
+			// components without AllowResponses and defence-in-depth for the
+			// six that carry it: their wildcard subscribe can still pick up a
+			// server-stamped ack subject off a legitimate delivery and have it
+			// registered as a response permission. matrix.go's KNOWN LIMIT
+			// states the mechanism and why the self-service form of it cannot
+			// reach an ack subject. Nothing below exercises that path.
 			t.Run("denied", func(t *testing.T) {
 				for _, component := range nonBootstrapComponentNames() {
 					if component == pc.owner {
@@ -1207,7 +1229,7 @@ var ackGrantRoster = map[string]struct {
 	"loupe":                {true, "the inspector consumes streams on demand"},
 	"lattice":              {true, "the operator CLI consumes streams on demand"},
 
-	"model-runner":  {false, "serves micro request/reply and runs no consumer"},
+	"model-runner":  {false, "serves micro request/reply and runs no consumer; carries AllowResponses, so read this as no grant rather than as containment"},
 	"facet":         {false, "health-plane only; per-identity traffic is on the callout connections"},
 	"clinic-app":    {false, "runs no consumer; listings use an AckNone ordered consumer"},
 	"cafe-app":      {false, "runs no consumer; listings use an AckNone ordered consumer"},
@@ -1225,6 +1247,24 @@ var ackGrantRoster = map[string]struct {
 // publish surfaces as silence. This is the check that catches that edit, and
 // the roster's exhaustiveness clause is what forces a newly added component to
 // state which side it is on rather than inheriting a neighbour's literal.
+// holdsAckGrant reports whether an allow list reaches the ack plane at all.
+//
+// It is a prefix test rather than a comparison against "$JS.ACK.>", because
+// the roster is the only oracle standing behind a component that must KEEP its
+// grant, and an exact comparison lets a re-spelled one through: "$JS.ACK.*.>"
+// grants the same reach, reports not-granted, and passes. Every ack subject
+// the server subscribes begins with this prefix (matrix.go's
+// coreEventsAckDenies cites the two templates), so anything under it is a
+// posture the roster must account for — a narrowly scoped grant included.
+func holdsAckGrant(allow []string) bool {
+	for _, s := range allow {
+		if strings.HasPrefix(s, "$JS.ACK.") {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAckGrantRoster(t *testing.T) {
 	t.Parallel()
 	buckets := bootstrap.PlatformBuckets()
@@ -1238,7 +1278,7 @@ func TestAckGrantRoster(t *testing.T) {
 			t.Errorf("component %q is not in ackGrantRoster — decide whether it runs a JetStream consumer and needs $JS.ACK.>, and record the reason there", c.Name)
 			continue
 		}
-		got := slices.Contains(c.Allow(buckets), "$JS.ACK.>")
+		got := holdsAckGrant(c.Allow(buckets))
 		if got != want.granted {
 			t.Errorf("%s holds $JS.ACK.> = %v, want %v (%s)", c.Name, got, want.granted, want.because)
 		}
@@ -1548,7 +1588,16 @@ func TestRegistryDrivenStreamAdminSideChannel(t *testing.T) {
 			// still draws a reply here and the denial signal stays honest;
 			// what this pins is that it is closed BEFORE clustering makes it a
 			// live stall primitive rather than after.
+			//
+			// bootstrap carries no denies, so its call is the positive control
+			// that keeps the denials below from being vacuous: it proves the
+			// endpoint answers an authorised caller at all. Without it, a
+			// vendor bump that made the un-clustered handler return silently
+			// would turn every vector below into a pass with no signal.
 			stepdownSubject := "$JS.API.STREAM.LEADER.STEPDOWN.KV_" + b.Name
+			if _, err := boot.NATS().Request(stepdownSubject, []byte("{}"), 3*time.Second); err != nil {
+				t.Fatalf("bootstrap LEADER.STEPDOWN KV_%s: want a reply (503 without clustering), got %v", b.Name, err)
+			}
 			for _, name := range nonBootstrapComponentNames() {
 				name := name
 				t.Run("denied-stepdown/"+name, func(t *testing.T) {
