@@ -1,6 +1,7 @@
 package pkgmgr
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -211,6 +212,12 @@ func spellings(trimmed, raw string) []string {
 // is also always a compiling Go literal, including when the lens's own
 // canonicalName could not be read — a remedy that has to be repaired before it
 // can be pasted is a remedy an author edits their way around.
+// ErrUndeclaredSecureColumnDrop is the sentinel every undeclared secure-column
+// erasure refusal wraps. cmd/loupe maps it to 409: an erasure stays undeclared
+// until an author adds the attestation, so the refusal is identical on every
+// retry and is not the transient a 502 would tell the console to wait out.
+var ErrUndeclaredSecureColumnDrop = errors.New("pkgmgr: upgrade refused — a committed secure-column custody record would be erased without an attestation")
+
 func undeclaredSecureColumnDropError(drop droppedSecureColumn, blanketDeclared bool) error {
 	lens := drop.Lens
 	unresolved := ""
@@ -225,12 +232,12 @@ func undeclaredSecureColumnDropError(drop droppedSecureColumn, blanketDeclared b
 	}
 	if drop.Column == "" {
 		return fmt.Errorf(
-			"pkgmgr: this upgrade tombstones lens %q (%s), whose committed spec still declares secure column(s) %v holding key custody for %v — "+
+			"%w: this upgrade tombstones lens %q (%s), whose committed spec still declares secure column(s) %v holding key custody for %v — "+
 				"the removal (or rename) erases that custody record while every row those columns encrypted stays in the target store, "+
 				"so the destruction-readiness oracle would attest coverage it no longer has. "+
 				"Declare the retirement: add pkgmgr.RetiredSecureColumn{Lens: %q, Column: \"\", Note: \"why this history is safe to stop carrying\"} "+
 				"to Definition.RetiredSecureColumns (Column \"\" is the whole-spec selector; for a RENAME, Lens is the OLD canonicalName).%s",
-			lens, drop.Key, drop.Erased, drop.Holders, lens, unresolved)
+			ErrUndeclaredSecureColumnDrop, lens, drop.Key, drop.Erased, drop.Holders, lens, unresolved)
 	}
 	blanketNote := ""
 	if blanketDeclared {
@@ -239,12 +246,12 @@ func undeclaredSecureColumnDropError(drop droppedSecureColumn, blanketDeclared b
 			"reason for this one."
 	}
 	return fmt.Errorf(
-		"pkgmgr: this upgrade stops declaring secure column %q on lens %q (%s), whose committed spec still holds it with holderTypes %v — "+
+		"%w: this upgrade stops declaring secure column %q on lens %q (%s), whose committed spec still holds it with holderTypes %v — "+
 			"every row it encrypted stays in the target store, so a spec that has forgotten the column makes the destruction-readiness oracle "+
 			"attest coverage it no longer has. "+
 			"Declare the retirement: add pkgmgr.RetiredSecureColumn{Lens: %q, Column: %q, Note: \"why this history is safe to stop carrying\"} "+
 			"to Definition.RetiredSecureColumns.%s%s",
-		drop.Column, lens, drop.Key, drop.Holders, lens, drop.Column, blanketNote, unresolved)
+		ErrUndeclaredSecureColumnDrop, drop.Column, lens, drop.Key, drop.Holders, lens, drop.Column, blanketNote, unresolved)
 }
 
 // retiredColumnLabel renders a RetiredSecureColumn.Column for an error

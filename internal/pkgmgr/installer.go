@@ -749,25 +749,25 @@ func (e *DeclaredKeysOccupiedError) Error() string { return e.message }
 
 func (e *DeclaredKeysOccupiedError) Unwrap() error { return ErrDeclaredKeysOccupied }
 
-// ErrApplyWouldRemove is the sentinel every removal refusal wraps, for callers
+// ErrApplyWouldRemove is the sentinel every coverage refusal wraps, for callers
 // that only need to know an apply was refused for this reason — cmd/loupe maps
 // it to 409, because a Definition that does not describe the package's declared
 // keys fails identically on every retry.
 //
-// Apply's in-place branch is a convergence operator: a key the installed
-// manifest declares and the submitted Definition omits is tombstoned, because
-// that is what "make the package match this Definition" means. A caller whose
+// Apply's in-place branch is a convergence operator: it makes the package match
+// the submitted Definition, and it rewrites the manifest's declaredKeys,
+// depends, description and version from that Definition. A caller whose
 // Definition describes only PART of the package (an AI-authored capability
-// proposal carries its own artifacts and nothing else) is therefore asking for
-// a retirement it never wrote, and gets a success signal on it. ApplyOptions
-// .RefuseRemovals is how such a caller declares that its Definition is partial;
-// the refusal happens before the op is submitted because the tombstones are
-// committed atomically with the rest of the batch, so there is no after.
-var ErrApplyWouldRemove = errors.New("pkgmgr: apply refused — it would remove keys its Definition does not describe")
+// proposal carries its own artifacts and nothing else) is therefore asking to
+// have the rest of the package retired or undeclared, and gets a success signal
+// on it. ApplyOptions.RefuseRemovals is how such a caller declares that its
+// Definition is partial; the refusal happens before the op is submitted because
+// the batch commits atomically, so there is no after.
+var ErrApplyWouldRemove = errors.New("pkgmgr: apply refused — it would drop keys its Definition does not describe")
 
-// ApplyWouldRemoveError is the typed removal refusal. Error() renders the
+// ApplyWouldRemoveError is the typed coverage refusal. Error() renders the
 // operator-facing message, and the fields carry the same answer structurally so
-// a caller (or a test) reads the removed set and the two key-set sizes from
+// a caller (or a test) reads the undescribed set and the two key-set sizes from
 // data rather than by scraping prose — the message names only the first few
 // keys, so prose is not even a complete source for the set.
 //
@@ -785,11 +785,21 @@ type ApplyWouldRemoveError struct {
 	// numbers on a Definition that covers the package, a much smaller
 	// DescribedKeys on the partial description this refusal exists for.
 	DescribedKeys int
-	// RemovedKeys names every key the refused diff would have tombstoned.
-	// Sorted. It is the diff's emitted removal set, not the raw old \ new set:
-	// a dropped retention-class holder and a dropped key already absent from KV
-	// emit no tombstone and are therefore not removals.
-	RemovedKeys []string
+	// UndescribedKeys names every key the installed package declares that the
+	// submitted Definition does not describe. Sorted.
+	//
+	// It is the raw old \ new set, not the subset the diff would have
+	// tombstoned. A dropped retention-class holder is preserved and a dropped
+	// key already absent from KV is skipped, so neither is tombstoned — but the
+	// manifest this apply would write declares neither of them either, which is
+	// the undeclaration this refusal exists to prevent.
+	UndescribedKeys []string
+	// Remedy is the operator's next move, supplied by the caller that knows
+	// which one is true. "Propose it as a new package" is right for an upgrade
+	// of a package the proposal does not own and wrong for a proposal that
+	// already IS a new package whose name got taken, so a single fixed clause
+	// would be false for one of them.
+	Remedy string
 
 	message string
 }
@@ -797,6 +807,36 @@ type ApplyWouldRemoveError struct {
 func (e *ApplyWouldRemoveError) Error() string { return e.message }
 
 func (e *ApplyWouldRemoveError) Unwrap() error { return ErrApplyWouldRemove }
+
+// ErrApplyWouldRevive is returned when an apply by a partial-Definition caller
+// would un-tombstone a key the package still declares. cmd/loupe maps it to
+// 409 for the same reason as its sibling: the state is deterministic.
+//
+// A surviving definition key whose committed document is already tombstoned was
+// killed out of band, deliberately, by somebody who is not this submitter. The
+// diff's body-update path revives it, which is correct for a package converging
+// on its own source (re-declaring a definition is how a package brings one
+// back) and is not something a caller describing ONE artifact of that package
+// has said anything about. Refusing it is the same rule as the coverage
+// refusal, read the other way: an apply may not change what its Definition does
+// not describe.
+var ErrApplyWouldRevive = errors.New("pkgmgr: apply refused — it would revive keys an operator tombstoned")
+
+// ApplyWouldReviveError is the typed revival refusal, carrying the affected
+// keys as data for the same reason its sibling does.
+type ApplyWouldReviveError struct {
+	// PackageName is the package whose apply was refused.
+	PackageName string
+	// RevivedKeys names every already-tombstoned key this apply would have
+	// written a live body over. Sorted.
+	RevivedKeys []string
+
+	message string
+}
+
+func (e *ApplyWouldReviveError) Error() string { return e.message }
+
+func (e *ApplyWouldReviveError) Unwrap() error { return ErrApplyWouldRevive }
 
 // ErrPackageNameClaimed is returned by ApplyCapabilityPlan when a newPackage
 // plan's apply committed nothing because the name it was building on had been
@@ -1335,24 +1375,56 @@ func occupiedDeclaredKeysError(def Definition, tombstoned, live []string) error 
 const removalSampleCap = 4
 
 // applyWouldRemoveError renders the refusal for an in-place apply whose diff
-// would tombstone keys the submitted Definition does not describe.
+// would drop keys the submitted Definition does not describe.
 //
 // The message leads with the coverage arithmetic because that is the diagnosis:
 // an author who reads "declares 61, describes 4" knows immediately that they
 // submitted a partial description of somebody else's package rather than an
-// edit of their own. It then carries the remedy, because the next move is not
-// obvious from the refusal alone — a proposal-owned package is its own package
-// and may still bind lenses and targets that other packages own, so "propose it
-// as a new package" is a real move and not a demotion.
-func applyWouldRemoveError(def Definition, declaredKeys, describedKeys int, removed []string) error {
+// edit of their own. It says "drop", not "tombstone", because both outcomes are
+// in scope: a key this apply would tombstone and a key it would merely stop
+// declaring end up equally unreachable through the package.
+//
+// The remedy comes from the caller, appended verbatim, because which move is
+// true depends on what the caller was trying to do — see
+// ApplyWouldRemoveError.Remedy. An empty remedy renders no clause rather than a
+// generic one, on the principle that no advice beats advice that is false here.
+func applyWouldRemoveError(def Definition, declaredKeys, describedKeys int, undescribed []string, remedy string) error {
+	msg := fmt.Sprintf("%s: package %q declares %d key(s); this Definition describes %d, so applying it would drop %d key(s) it does not describe (%s)",
+		ErrApplyWouldRemove, def.Name, declaredKeys, describedKeys, len(undescribed),
+		sampleWithOverflow(undescribed, removalSampleCap, "+%d more"))
+	if remedy != "" {
+		msg += ". " + remedy
+	}
 	return &ApplyWouldRemoveError{
-		PackageName:   def.Name,
-		DeclaredKeys:  declaredKeys,
-		DescribedKeys: describedKeys,
-		RemovedKeys:   removed,
-		message: fmt.Sprintf("%s: package %q declares %d key(s); this Definition describes %d, so applying it would tombstone %d key(s) it does not describe (%s). A capability proposal describes only its own artifacts — propose it as `newPackage` (a proposal-owned package may bind lenses and targets across packages) rather than as an upgrade of a package it does not describe",
-			ErrApplyWouldRemove, def.Name, declaredKeys, describedKeys, len(removed),
-			sampleWithOverflow(removed, removalSampleCap, "+%d more")),
+		PackageName:     def.Name,
+		DeclaredKeys:    declaredKeys,
+		DescribedKeys:   describedKeys,
+		UndescribedKeys: undescribed,
+		Remedy:          remedy,
+		message:         msg,
+	}
+}
+
+// withRemedy returns a copy of this refusal carrying a different remedy clause,
+// for a caller that knows which next move is actually true. The facts are
+// unchanged; only the advice is re-rendered.
+func (e *ApplyWouldRemoveError) withRemedy(remedy string) *ApplyWouldRemoveError {
+	out := applyWouldRemoveError(Definition{Name: e.PackageName},
+		e.DeclaredKeys, e.DescribedKeys, e.UndescribedKeys, remedy)
+	return out.(*ApplyWouldRemoveError)
+}
+
+// applyWouldReviveError renders the refusal for an in-place apply by a
+// partial-Definition caller that would write a live body over a key somebody
+// tombstoned out of band. The remedy is not parameterized: there is only one
+// honest next move, and it is the same for every caller that can reach here.
+func applyWouldReviveError(def Definition, revived []string) error {
+	return &ApplyWouldReviveError{
+		PackageName: def.Name,
+		RevivedKeys: revived,
+		message: fmt.Sprintf("%s: package %q declares %d key(s) this Definition describes but an operator has tombstoned (%s); applying it would bring them back. This Definition says nothing about that decision — if the revival is intended, it belongs in a package edit that states it, not in a partial apply",
+			ErrApplyWouldRevive, def.Name, len(revived),
+			sampleWithOverflow(revived, removalSampleCap, "+%d more")),
 	}
 }
 

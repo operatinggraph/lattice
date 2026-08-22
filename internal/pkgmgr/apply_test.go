@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -621,8 +622,8 @@ func TestApply_RefuseRemovals_RefusesShrunkenDefinition(t *testing.T) {
 
 	// The removed set is read from the field, never scraped from the message —
 	// which names only the first few keys anyway.
-	if !slices.IsSorted(refusal.RemovedKeys) {
-		t.Errorf("RemovedKeys must be sorted, got %v", refusal.RemovedKeys)
+	if !slices.IsSorted(refusal.UndescribedKeys) {
+		t.Errorf("RemovedKeys must be sorted, got %v", refusal.UndescribedKeys)
 	}
 	permID := entityNanoID(v1.Name, permTag("SampleOp", "any"))
 	roleID := RoleID(v1.Name, "sampleReviewer")
@@ -632,19 +633,19 @@ func TestApply_RefuseRemovals_RefusesShrunkenDefinition(t *testing.T) {
 		"vtx.permission." + permID,
 		"lnk.permission." + permID + ".grantedBy.role." + roleID,
 	} {
-		if !slices.Contains(refusal.RemovedKeys, want) {
-			t.Errorf("RemovedKeys is missing %s: %v", want, refusal.RemovedKeys)
+		if !slices.Contains(refusal.UndescribedKeys, want) {
+			t.Errorf("RemovedKeys is missing %s: %v", want, refusal.UndescribedKeys)
 		}
 	}
 	for _, kept := range []string{
 		metaVertexPrefix + LensID(v1.Name, "sampleLens2"),
 		metaVertexPrefix + LensID(v1.Name, "sampleLens2") + ".spec",
 	} {
-		if slices.Contains(refusal.RemovedKeys, kept) {
-			t.Errorf("%s is described by the submitted Definition and must not be a removal: %v", kept, refusal.RemovedKeys)
+		if slices.Contains(refusal.UndescribedKeys, kept) {
+			t.Errorf("%s is described by the submitted Definition and must not be a removal: %v", kept, refusal.UndescribedKeys)
 		}
 	}
-	for _, k := range refusal.RemovedKeys {
+	for _, k := range refusal.UndescribedKeys {
 		if !slices.Contains(declared, k) {
 			t.Errorf("RemovedKeys names %s, which the installed package never declared", k)
 		}
@@ -683,22 +684,33 @@ func TestApply_RefuseRemovals_DryRunRefusesIdentically(t *testing.T) {
 	if !errors.As(err, &committed) {
 		t.Fatalf("want *ApplyWouldRemoveError from the real run, got %T (%v)", err, err)
 	}
-	if !slices.Equal(preview.RemovedKeys, committed.RemovedKeys) {
+	if !slices.Equal(preview.UndescribedKeys, committed.UndescribedKeys) {
 		t.Fatalf("the preview must refuse identically to the real run:\npreview %v\nreal    %v",
-			preview.RemovedKeys, committed.RemovedKeys)
+			preview.UndescribedKeys, committed.UndescribedKeys)
 	}
 	if preview.Error() != committed.Error() {
 		t.Fatalf("the preview's refusal must read identically:\npreview %q\nreal    %q", preview.Error(), committed.Error())
 	}
 }
 
-// TestApply_RefuseRemovals_RetentionHolderIsNotARemoval pins that the guard
-// reads the EMITTED mutation list rather than the diff's raw old \ new set. A
-// dropped retention-class holder is left live-but-undeclared (only
-// ShredRetentionClassKey may destroy its DEK), so it emits no tombstone and
-// removes nothing — a guard written over the raw dropped-key set would refuse
-// this apply, which is the one shape where refusing is wrong.
-func TestApply_RefuseRemovals_RetentionHolderIsNotARemoval(t *testing.T) {
+// TestApply_RefuseRemovals_UndeclaredRetentionHolderRefuses pins the shape a
+// tombstone-counting guard would wave through.
+//
+// A dropped retention-class holder is never tombstoned — only
+// ShredRetentionClassKey may destroy its DEK, so the removal arm leaves it live
+// (upgrade.go's retention exemption). Nothing is removed, and that is precisely
+// why the emitted mutation list is the wrong thing to test: the same apply
+// rewrites the manifest's declaredKeys from the submitted Definition, so the
+// holder ends up LIVE AND UNDECLARED — a class key still sitting in Core KV
+// with nothing recording that this package custodies it, and no shred verb able
+// to find it by way of the package. A partial Definition has said nothing about
+// that custody, so it may not end it.
+//
+// The positive vector below is the same drop under the zero value, which must
+// still converge exactly as it always has: preserved, not tombstoned, and the
+// declaration narrowed on purpose by a source-authored package that describes
+// the whole thing.
+func TestApply_RefuseRemovals_UndeclaredRetentionHolderRefuses(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 
 	v1 := defWithRetentionClass("0.1.0", "sampleClass1")
@@ -710,14 +722,29 @@ func TestApply_RefuseRemovals_RetentionHolderIsNotARemoval(t *testing.T) {
 
 	// v2 covers every declared key EXCEPT the retention class's two.
 	res, err := inst.Apply(ctx, sampleDef("0.2.0"), ApplyOptions{RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("a Definition that stops declaring a retention-class holder must be refused, got: %+v", res)
+	}
+	var refusal *ApplyWouldRemoveError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if !slices.Equal(refusal.UndescribedKeys, []string{holderKey, policyKey}) {
+		t.Fatalf("UndescribedKeys = %v, want exactly the holder root and its policy aspect — the keys that would be undeclared without ever being tombstoned",
+			refusal.UndescribedKeys)
+	}
+
+	// The positive vector: the same drop under the zero value still converges,
+	// preserving the holder rather than tombstoning it.
+	zeroRes, err := inst.Apply(ctx, sampleDef("0.2.0"), ApplyOptions{})
 	if err != nil {
-		t.Fatalf("dropping a retention class removes nothing and must not be refused: %v", err)
+		t.Fatalf("the source-authored path must be unchanged: %v", err)
 	}
-	if res.Tombstoned != 0 {
-		t.Fatalf("dropping a retention class must emit no tombstone, got %d (%+v)", res.Tombstoned, res)
+	if zeroRes.Tombstoned != 0 {
+		t.Fatalf("dropping a retention class must emit no tombstone, got %d (%+v)", zeroRes.Tombstoned, zeroRes)
 	}
-	if res.RetentionHoldersPreserved != 2 {
-		t.Fatalf("RetentionHoldersPreserved = %d, want 2 (holder root + .retentionPolicy) (%+v)", res.RetentionHoldersPreserved, res)
+	if zeroRes.RetentionHoldersPreserved != 2 {
+		t.Fatalf("RetentionHoldersPreserved = %d, want 2 (holder root + .retentionPolicy) (%+v)", zeroRes.RetentionHoldersPreserved, zeroRes)
 	}
 	for _, k := range []string{holderKey, policyKey} {
 		if del, _ := kvDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
@@ -763,8 +790,145 @@ func TestApply_RefuseRemovals_AlreadyTombstonedDeclaredKeyStillRefuses(t *testin
 	if !errors.As(err, &refusal) {
 		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
 	}
-	if !slices.Contains(refusal.RemovedKeys, permKey) {
+	if !slices.Contains(refusal.UndescribedKeys, permKey) {
 		t.Fatalf("RemovedKeys must name the already-tombstoned %s — the diff still re-emits it, and the Definition still fails to describe it: %v",
-			permKey, refusal.RemovedKeys)
+			permKey, refusal.UndescribedKeys)
+	}
+}
+
+// TestApply_RefuseRemovals_RevivingATombstonedDescribedKeyRefuses is the
+// coverage rule read in the other direction.
+//
+// A key the Definition DOES describe, whose committed document an operator
+// tombstoned out of band, is un-tombstoned by the diff's ordinary body-update
+// path — for definition keys, deliberately, because re-declaring a definition is
+// how a package brings one back. That reasoning belongs to a package converging
+// on its own source. A caller describing one artifact of somebody else's package
+// has said nothing about the operator's decision to kill that key, so it may not
+// reverse it. Refusing the no-op re-tombstone of an undescribed key while
+// silently resurrecting a described one would be the same rule applied in
+// opposite directions.
+func TestApply_RefuseRemovals_RevivingATombstonedDescribedKeyRefuses(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// A DESCRIBED definition key — the lens the shrunken Definition keeps —
+	// killed the way an operator would, and given a body edit so the update is
+	// actually emitted rather than skipped as byte-equal.
+	specKey := metaVertexPrefix + LensID(v1.Name, "sampleLens2") + ".spec"
+	tombstoneOutOfBand(t, ctx, conn, specKey)
+
+	covering := removalFixtureDef("0.1.0")
+	covering.Lenses[1].Spec = `MATCH (n:sample2) RETURN n.key AS key, n.extra AS extra`
+	before := coreKVSnapshot(t, ctx, conn)
+
+	res, err := inst.Apply(ctx, covering, ApplyOptions{Force: true, RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("reviving a key an operator tombstoned must be refused, got: %+v", res)
+	}
+	var revival *ApplyWouldReviveError
+	if !errors.As(err, &revival) {
+		t.Fatalf("want *ApplyWouldReviveError, got %T (%v)", err, err)
+	}
+	if !slices.Equal(revival.RevivedKeys, []string{specKey}) {
+		t.Fatalf("RevivedKeys = %v, want exactly [%s]", revival.RevivedKeys, specKey)
+	}
+	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {
+		t.Fatal("a refused apply must commit nothing")
+	}
+
+	// The positive vector: the zero value still revives, which is the
+	// source-authored behaviour this refusal deliberately does not change.
+	zeroRes, err := inst.Apply(ctx, covering, ApplyOptions{Force: true})
+	if err != nil {
+		t.Fatalf("the source-authored path must still revive: %v", err)
+	}
+	if zeroRes.Updated == 0 {
+		t.Fatalf("want the revival to land as an update under the zero value, got %+v", zeroRes)
+	}
+	if del, _ := kvDoc(t, ctx, conn, specKey)["isDeleted"].(bool); del {
+		t.Fatalf("%s should have been revived by the source-authored apply", specKey)
+	}
+}
+
+// TestApply_RefuseRemovals_SingleUndescribedKeyRefuses pins the predicate's
+// boundary at one, not at "several". Every other fixture here drops a large
+// handful of keys, so a guard that refused only on two-or-more would pass all of
+// them while admitting the smallest real misdescription there is — and the
+// smallest is the one an author is most likely to make.
+//
+// The one-key drop is a weaver target's optional `.description` aspect, which
+// the builder emits only when the field is non-empty. Everything else about the
+// two Definitions is identical, so the set difference is exactly that key.
+func TestApply_RefuseRemovals_SingleUndescribedKeyRefuses(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	described := weaverTargetDef("one-key-pkg", "okClass", "okLens", "okTarget", "0.1.0")
+	described.WeaverTargets[0].Description = "the target an operator reads about"
+	if _, err := inst.Install(ctx, described); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	dropped := weaverTargetDef("one-key-pkg", "okClass", "okLens", "okTarget", "0.2.0")
+	res, err := inst.Apply(ctx, dropped, ApplyOptions{RefuseRemovals: true})
+	if err == nil {
+		t.Fatalf("a Definition short by ONE declared key must still be refused, got: %+v", res)
+	}
+	var refusal *ApplyWouldRemoveError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want *ApplyWouldRemoveError, got %T (%v)", err, err)
+	}
+	if len(refusal.UndescribedKeys) != 1 {
+		t.Fatalf("this fixture must drop exactly one key or it does not pin the boundary; got %d: %v",
+			len(refusal.UndescribedKeys), refusal.UndescribedKeys)
+	}
+	if !strings.HasSuffix(refusal.UndescribedKeys[0], ".description") {
+		t.Fatalf("UndescribedKeys = %v, want the dropped weaver-target description aspect", refusal.UndescribedKeys)
+	}
+
+	// The exact-value assertion the counts otherwise never get: they are the
+	// stated diagnosis, so an off-by-one in either is a wrong diagnosis.
+	if refusal.DescribedKeys != refusal.DeclaredKeys-1 {
+		t.Fatalf("DeclaredKeys=%d DescribedKeys=%d: dropping one key must move exactly one count by exactly one",
+			refusal.DeclaredKeys, refusal.DescribedKeys)
+	}
+	if refusal.DeclaredKeys != len(refusal.UndescribedKeys)+refusal.DescribedKeys {
+		t.Fatalf("the counts must reconcile: %d declared != %d undescribed + %d described",
+			refusal.DeclaredKeys, len(refusal.UndescribedKeys), refusal.DescribedKeys)
+	}
+}
+
+// TestApply_RefuseRemovals_CoveringDefinitionCountsMatch proves the claim the
+// counts' own documentation makes and no refusal can demonstrate: a covering
+// Definition describes exactly as many keys as the package declares. A covering
+// apply never refuses, so it never produces an error carrying the pair — the
+// diff summary is read directly instead, which is the only place the equality
+// is observable.
+func TestApply_RefuseRemovals_CoveringDefinitionCountsMatch(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	def := removalFixtureDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	existing, err := inst.findInstalledPackage(ctx, def.Name)
+	if err != nil {
+		t.Fatalf("findInstalledPackage: %v", err)
+	}
+	covering := removalFixtureDef("0.1.0")
+	covering.Lenses[0].Spec = `MATCH (n:sample) RETURN n.key AS key, n.extra AS extra`
+	_, sum, _, err := inst.computeDeltaAgainst(ctx, existing, covering)
+	if err != nil {
+		t.Fatalf("computeDeltaAgainst: %v", err)
+	}
+	if sum.oldKeyCount != sum.newKeyCount {
+		t.Fatalf("a covering Definition must report the same key count on both sides; declared=%d described=%d",
+			sum.oldKeyCount, sum.newKeyCount)
+	}
+	if len(sum.undescribedKeys) != 0 {
+		t.Fatalf("a covering Definition leaves nothing undescribed, got %v", sum.undescribedKeys)
 	}
 }

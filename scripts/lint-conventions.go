@@ -471,21 +471,31 @@ var (
 	// only appears outside the package, which is exactly where SpecParser is
 	// left nil unless the caller wires it by hand.
 	pkgmgrNewInstallerCall = regexp.MustCompile(`\bpkgmgr\.NewInstaller\(`)
-	// materializedDefinitionApply anchors a capability plan's materialized
-	// Definition handed straight to Installer.Apply. A capability Definition
+	// capabilityPlanConverge anchors a capability plan's Definition handed
+	// straight to an unconditional convergence verb. A capability Definition
 	// describes the proposal's own artifact and nothing else about the package
-	// it names, while Apply's in-place branch is a convergence operator — so
-	// applying one directly retires every key the proposal never mentioned.
+	// it names, while Apply's in-place branch and Upgrade both converge the
+	// package onto whatever they are given — so applying one directly retires or
+	// undeclares every key the proposal never mentioned.
 	// Installer.ApplyCapabilityPlan is the entry point that carries the options
 	// which make that safe (RefuseRemovals in both modes, RequireInstalled on
 	// an upgrade), and MaterializedDefinition exists for INSPECTION — logging,
 	// diffing, asserting — which its own doc comment states.
 	//
-	// Stated residual, matching this file's pragmatic-scanner posture:
-	// assigning the accessor's result to a local and passing the local evades
-	// this regex. That is a deliberate two-step rather than the shape an author
-	// reaches for by default, and it is not worth a smarter pattern.
-	materializedDefinitionApply = regexp.MustCompile(`\.Apply\([^\n]*MaterializedDefinition\(\)`)
+	// Three shapes, one pattern. Upgrade is covered as well as Apply because it
+	// is exported, takes no ApplyOptions at all, and converges unconditionally —
+	// so it is the more destructive of the two doors, not the safer one. And the
+	// argument matched is any `plan.` expression, not just the accessor: the
+	// regression this rule exists to stop is an author re-exporting the
+	// Definition field the accessor replaced and passing `plan.Definition`
+	// again, which a pattern naming only MaterializedDefinition() would watch
+	// sail past.
+	//
+	// Stated residual, matching this file's pragmatic-scanner posture: assigning
+	// the value to a local and passing the local evades this regex. That is a
+	// deliberate two-step rather than the shape an author reaches for by
+	// default, and it is not worth a smarter pattern.
+	capabilityPlanConverge = regexp.MustCompile(`\.(?:Apply|Upgrade)\([^\n]*\b(?:plan\.|MaterializedDefinition\(\))`)
 
 	// kvListAssign / kvGetCall / kvBatchShape — Fire 1 Inc 3's list-then-get
 	// gate (script-live-read-round-trip-collapse-design.md), scoped to
@@ -1087,8 +1097,8 @@ func scanSource(path string, data []byte) []finding {
 		if pkgmgrInstallerScoped && pkgmgrNewInstallerCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "pkgmgr.NewInstaller call outside its sanctioned callers — SpecParser stays nil unless the caller wires it by hand, and a nil SpecParser silently disables the install-time lens label-cap gate (internal/pkgmgr/lenslabelcap.go); use testutil.NewInstaller(conn, adminActor) (internal/testutil), which wires it"})
 		}
-		if materializedDefinitionScoped && materializedDefinitionApply.MatchString(line) {
-			out = append(out, finding{file: path, line: ln, msg: "capability-apply: MaterializedDefinition() passed to Installer.Apply — a capability Definition describes one artifact, and Apply's in-place branch converges the package onto whatever it is given, so this retires every declared key the proposal never mentioned; apply a plan with inst.ApplyCapabilityPlan(ctx, plan), which sets RefuseRemovals (both modes) and RequireInstalled (upgradeExisting). MaterializedDefinition() is for inspection"})
+		if materializedDefinitionScoped && capabilityPlanConverge.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "capability-apply: a capability plan's Definition passed to Installer.Apply/Upgrade — a capability Definition describes one artifact, and both verbs converge the package onto whatever they are given, so this retires or undeclares every declared key the proposal never mentioned; apply a plan with inst.ApplyCapabilityPlan(ctx, plan), which sets RefuseRemovals (both modes) and RequireInstalled (upgradeExisting). MaterializedDefinition() is for inspection"})
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
@@ -2775,7 +2785,16 @@ func selfTest() []string {
 				"        events = [{\"class\": \"external.\" + adapter, \"data\": d}]\n", ""},
 		{"a materialized capability Definition passed to Apply is denied", "cmd/loupe/review.go",
 			"\tres, err := inst.Apply(ctx, plan.MaterializedDefinition(), pkgmgr.ApplyOptions{})\n",
-			"MaterializedDefinition() passed to Installer.Apply"},
+			"capability plan's Definition passed to Installer.Apply/Upgrade"},
+		{"the same value passed to the ungated Upgrade verb is denied", "cmd/loupe/review.go",
+			"\tres, err := inst.Upgrade(ctx, plan.MaterializedDefinition())\n",
+			"capability plan's Definition passed to Installer.Apply/Upgrade"},
+		{"a re-exported plan.Definition field passed to Apply is denied", "cmd/lattice-pkg/main.go",
+			"\tres, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})\n",
+			"capability plan's Definition passed to Installer.Apply/Upgrade"},
+		{"a re-exported plan.Definition field passed to Upgrade is denied", "cmd/lattice-pkg/main.go",
+			"\tres, err := inst.Upgrade(ctx, plan.Definition)\n",
+			"capability plan's Definition passed to Installer.Apply/Upgrade"},
 		{"an ordinary source-authored Apply passes", "cmd/loupe/pkg.go",
 			"\tres, err := inst.Apply(ctx, def, opts)\n", ""},
 		{"inspecting the materialized Definition away from Apply passes", "cmd/bridge/capability_author_test.go",

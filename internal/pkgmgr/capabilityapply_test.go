@@ -762,7 +762,7 @@ func TestApplyCapabilityPlan_SetsRefuseRemovals(t *testing.T) {
 	if refusal.PackageName != installed.Name {
 		t.Errorf("PackageName = %q, want %q", refusal.PackageName, installed.Name)
 	}
-	if len(refusal.RemovedKeys) == 0 {
+	if len(refusal.UndescribedKeys) == 0 {
 		t.Fatal("a refusal with an empty RemovedKeys names nothing an operator can act on")
 	}
 	if after := coreKVSnapshot(t, ctx, conn); !maps.Equal(before, after) {

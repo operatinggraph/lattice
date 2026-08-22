@@ -380,7 +380,10 @@ func packageApplyStatus(err error) int {
 		errors.Is(err, pkgmgr.ErrCanonicalNameCollision),
 		errors.Is(err, pkgmgr.ErrDeclaredKeysOccupied),
 		errors.Is(err, pkgmgr.ErrApplyWouldRemove),
+		errors.Is(err, pkgmgr.ErrApplyWouldRevive),
 		errors.Is(err, pkgmgr.ErrPackageNameClaimed),
+		errors.Is(err, pkgmgr.ErrMalformedDeclaredKeys),
+		errors.Is(err, pkgmgr.ErrUndeclaredSecureColumnDrop),
 		errors.Is(err, pkgmgr.ErrUndeclaredSecureLensErasure),
 		errors.Is(err, pkgmgr.ErrUninstallConflict):
 		return http.StatusConflict

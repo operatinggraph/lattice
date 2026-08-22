@@ -3,7 +3,9 @@ package pkgmgr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -19,8 +21,9 @@ import (
 // APPLY one. A capability Definition describes the proposal's own artifact and
 // nothing else about the package it names, and Installer.Apply's in-place
 // branch is a convergence operator — handing that Definition to Apply directly
-// retires every key the proposal did not mention. MaterializedDefinition
-// re-opens the value for inspection, which is a different act.
+// retires or undeclares every key the proposal did not mention.
+// MaterializedDefinition re-opens the value for inspection, which is a
+// different act.
 type CapabilityApplyPlan struct {
 	ProposalID  string
 	PackageName string
@@ -41,7 +44,85 @@ type CapabilityApplyPlan struct {
 // which sets the options a partial, AI-authored Definition requires; passing
 // this value to Installer.Apply directly discards them and converges the target
 // package onto a Definition that describes only one artifact of it.
-func (p *CapabilityApplyPlan) MaterializedDefinition() Definition { return p.definition }
+//
+// The returned value is a DEEP COPY. Definition is a struct of slices and maps,
+// so returning it by value would hand out the plan's own backing arrays and let
+// an inspector edit the artifact that ApplyCapabilityPlan then submits — a
+// mutation no lint rule can see, because it involves no call to Apply at all.
+// What lands has to be what review approved, so inspection gets its own copy.
+func (p *CapabilityApplyPlan) MaterializedDefinition() Definition {
+	return deepCopyDefinition(p.definition)
+}
+
+// deepCopyDefinition returns a Definition sharing no mutable state with its
+// argument.
+//
+// It walks the value with reflection rather than copying field by field on
+// purpose: Definition carries a dozen spec slices whose elements carry their own
+// slices and maps, and a hand-written copier silently starts aliasing again the
+// first time somebody adds a field to one of them. The cost is paid once per
+// inspection of an already-materialized plan, which is not a hot path.
+func deepCopyDefinition(def Definition) Definition {
+	out := reflect.New(reflect.TypeOf(def)).Elem()
+	deepCopyValue(out, reflect.ValueOf(def))
+	return out.Interface().(Definition)
+}
+
+// deepCopyValue copies src into dst, allocating fresh backing storage for every
+// slice and map it reaches. Kinds with no interior mutable state (numbers,
+// strings, bools) are assigned directly. An interface or pointer holding an
+// unexported type it cannot construct falls back to a direct assign, which is
+// the pre-existing aliasing rather than a new one; Definition contains none
+// today, and the fallback is what keeps a future field from panicking here.
+func deepCopyValue(dst, src reflect.Value) {
+	switch src.Kind() {
+	case reflect.Slice:
+		if src.IsNil() {
+			return
+		}
+		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Len()))
+		for i := 0; i < src.Len(); i++ {
+			deepCopyValue(dst.Index(i), src.Index(i))
+		}
+	case reflect.Map:
+		if src.IsNil() {
+			return
+		}
+		dst.Set(reflect.MakeMap(src.Type()))
+		for _, k := range src.MapKeys() {
+			v := reflect.New(src.Type().Elem()).Elem()
+			deepCopyValue(v, src.MapIndex(k))
+			dst.SetMapIndex(k, v)
+		}
+	case reflect.Struct:
+		for i := 0; i < src.NumField(); i++ {
+			if !dst.Field(i).CanSet() {
+				continue // an unexported field carries no exported aliasing
+			}
+			deepCopyValue(dst.Field(i), src.Field(i))
+		}
+	case reflect.Pointer:
+		if src.IsNil() {
+			return
+		}
+		dst.Set(reflect.New(src.Type().Elem()))
+		deepCopyValue(dst.Elem(), src.Elem())
+	case reflect.Interface:
+		if src.IsNil() {
+			return
+		}
+		inner := src.Elem()
+		if !inner.CanInterface() {
+			dst.Set(src)
+			return
+		}
+		copied := reflect.New(inner.Type()).Elem()
+		deepCopyValue(copied, inner)
+		dst.Set(copied)
+	default:
+		dst.Set(src)
+	}
+}
 
 // ApplyCapabilityPlan is the sanctioned way to apply an APPROVED capability
 // proposal's plan. It exists because the correct ApplyOptions for a plan are a
@@ -50,14 +131,14 @@ func (p *CapabilityApplyPlan) MaterializedDefinition() Definition { return p.def
 func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApplyPlan) (*ApplyResult, error) {
 	opts := ApplyOptions{
 		// Always, in both modes. A capability Definition is never authorized to
-		// remove: it describes its own artifact, so every key it omits is a key
-		// it has nothing to say about rather than one it retires. On the
+		// reshape a package: it describes its own artifact, so every key it omits
+		// is a key it has nothing to say about rather than one it retires. On the
 		// newPackage arm the option is inert by construction — applyFreshInstall
 		// runs a create-only batch with no diff — and that inertness is the
 		// point: it closes the window in which the name becomes installed
 		// between the plan build's IsPackageInstalled check and Apply's own
 		// findInstalledPackage, where Apply would otherwise silently take the
-		// in-place branch and tombstone the occupant's keys.
+		// in-place branch and converge the occupant onto this Definition.
 		RefuseRemovals: true,
 	}
 	if plan.mode == "upgradeExisting" {
@@ -77,6 +158,12 @@ func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApp
 	}
 	res, err := i.Apply(ctx, plan.definition, opts)
 	if err != nil {
+		var coverage *ApplyWouldRemoveError
+		if errors.As(err, &coverage) {
+			// Apply states the facts; the remedy belongs here, because which one
+			// is true depends on what this proposal was trying to do.
+			return nil, coverage.withRemedy(coverageRemedy(plan.mode))
+		}
 		return nil, err
 	}
 	// A newPackage plan that comes back skipped installed nothing, and the
@@ -102,6 +189,25 @@ func (i *Installer) ApplyCapabilityPlan(ctx context.Context, plan *CapabilityApp
 			ErrPackageNameClaimed, plan.PackageName, res.Reason)
 	}
 	return res, nil
+}
+
+// coverageRemedy is the operator's next move after a coverage refusal, chosen
+// by the mode the proposal declared. A single fixed clause cannot serve both:
+// "propose it as a new package" is the answer for an upgrade of a package the
+// proposal does not own, and is nonsense advice to a proposal that already IS a
+// new package and lost a race for its name.
+func coverageRemedy(mode string) string {
+	switch mode {
+	case "newPackage":
+		return "This proposal already targets a new package: the name is held by an unrelated package that was installed before the apply ran, and its keys are not this proposal's to retire. Re-propose under a name that is free"
+	case "upgradeExisting":
+		// The rename case lands here too and reads oddly unless it is named: an
+		// artifact's key is derived from its canonicalName, so renaming one
+		// produces a new key and drops the old, which is a removal wearing an
+		// edit's clothes.
+		return "A capability proposal describes only its own artifacts — propose it as `newPackage` (a proposal-owned package may bind lenses and targets across packages) rather than as an upgrade of a package it does not describe. If this proposal RENAMED an artifact it already owns, the old name's keys are the ones being dropped: a rename is a removal plus an add, and the whole package has to be described to perform one"
+	}
+	return ""
 }
 
 // platformProtectedPackages is the package-name deny-list an AI-authored
@@ -330,6 +436,62 @@ func CapabilityApplyPlanForProposal(ctx context.Context, conn *substrate.Conn, p
 	return &CapabilityApplyPlan{ProposalID: proposalID, PackageName: packageName, definition: def, mode: mode}, nil
 }
 
+// ValidateCapabilityApplyTarget runs the target preconditions an
+// upgradeExisting proposal must satisfy, for a caller that has to know the
+// answer BEFORE building a plan.
+//
+// It exists because cmd/loupe's apply endpoint classifies a proposal as a
+// recoverable half-commit — "already installed at the target version, close it
+// with mark-applied" — before it ever reaches CapabilityApplyPlanForProposal.
+// A proposal whose newVersion EQUALS the installed version is exactly the state
+// that classification reads as recovered and exactly the state the preconditions
+// refuse, so with the plan builder second the refusal never runs and the console
+// closes a proposal over an artifact that never landed. Asking here restores the
+// order the rules were written for.
+//
+// It shares checkUpgradeExistingVersions with the plan builder rather than
+// restating the rules, so the two cannot drift.
+//
+// A mode other than upgradeExisting returns nil: newPackage's own catalog
+// binding is deliberately NOT re-run here, because the recovery classification
+// bypassing it is the point of that branch — a newPackage proposal whose install
+// committed IS a package of that name, and refusing on that basis would remove
+// the only route out of a half-commit.
+//
+// A .target aspect that cannot be read also returns nil. That is not a gap being
+// left open: CapabilityApplyPlanForProposal re-reads the same aspect and remains
+// the authority, so an unreadable target still refuses there. This function may
+// only move a determination earlier — never be the only one that makes it.
+func ValidateCapabilityApplyTarget(ctx context.Context, conn *substrate.Conn, proposalKey string) error {
+	target, err := readAspectData(ctx, conn, proposalKey+".target")
+	if err != nil {
+		return nil
+	}
+	mode, err := typedStringField(target, "mode")
+	if err != nil || mode != "upgradeExisting" {
+		return nil
+	}
+	packageName, err := typedStringField(target, "packageName")
+	if err != nil || packageName == "" {
+		return nil
+	}
+	newVersion, err := typedStringField(target, "newVersion")
+	if err != nil {
+		return nil
+	}
+	baseVersion, err := typedStringField(target, "baseVersion")
+	if err != nil {
+		return nil
+	}
+	installed, err := IsPackageInstalled(ctx, conn, packageName)
+	if err != nil || !installed {
+		// Not installed is the plan builder's refusal to make, not this one's:
+		// it owns the mode-vs-catalog binding and says so in its own words.
+		return nil
+	}
+	return checkUpgradeExistingVersions(ctx, conn, proposalKey, packageName, newVersion, baseVersion)
+}
+
 // checkUpgradeExistingVersions enforces the three preconditions an
 // upgradeExisting proposal must satisfy before a Definition is built for it.
 // All three read fields the proposal already carries, so none needs a package
@@ -361,7 +523,7 @@ func checkUpgradeExistingVersions(ctx context.Context, conn *substrate.Conn, pro
 	// applied" — and every such proposal is 409'd as recoverable and closed over
 	// an artifact that never landed. Refusing here makes the discriminator sound
 	// by construction rather than by convention.
-	if newVersion == existing.Version {
+	if strings.TrimSpace(newVersion) == strings.TrimSpace(existing.Version) {
 		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with target.newVersion %q, which is the version already installed — an upgrade must move the version, so that a package live at newVersion can only mean this apply committed", proposalKey, packageName, newVersion)
 	}
 	// The mode's optimistic-concurrency check. A proposal authored against
@@ -372,7 +534,7 @@ func checkUpgradeExistingVersions(ctx context.Context, conn *substrate.Conn, pro
 	if baseVersion == "" {
 		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with no target.baseVersion — an upgrade must declare the version it was authored against, or it cannot be told from a stale apply", proposalKey, packageName)
 	}
-	if baseVersion != existing.Version {
+	if strings.TrimSpace(baseVersion) != strings.TrimSpace(existing.Version) {
 		return fmt.Errorf("pkgmgr: capability apply: proposal %s targets %q as upgradeExisting with target.baseVersion %q, but %q is installed — this proposal was authored against a version that is no longer there, so applying it would overwrite whatever changed since", proposalKey, packageName, baseVersion, existing.Version)
 	}
 	return nil

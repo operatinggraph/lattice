@@ -1146,7 +1146,7 @@ func TestReviewCapabilityApply_RemovalRefusalIs409(t *testing.T) {
 		t.Fatalf("a refused apply committed nothing, so it is not recoverable via mark-applied: %+v", body)
 	}
 	msg, _ := body["error"].(string)
-	if !strings.Contains(msg, "would remove keys its Definition does not describe") {
+	if !strings.Contains(msg, "would drop keys its Definition does not describe") {
 		t.Fatalf("want the removal refusal in the body, got %+v", body)
 	}
 	if !strings.Contains(msg, "newPackage") {
