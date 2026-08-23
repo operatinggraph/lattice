@@ -224,12 +224,12 @@ func TestObjectLiveness_ZeroLinks_Orphaned(t *testing.T) {
 	require.EqualValues(t, 5, v["linkEpoch"])
 }
 
-// Test 3 — THE §21 attach-adjacency-lag race guard (the data-loss bug this fix
-// closes): a freshly-attached object commits its link AND liveLinks=1 atomically,
-// but refractor-adjacency lags — so here liveLinks=1 with NO adjacency edge built
-// at all. The object must NOT be flagged orphaned. The OLD adjacency-count cypher
-// saw count(owner)=0 and reaped it → irreversible byte loss. This is the #1
-// regression guard for this fix.
+// Test 3 — THE §21 attach-adjacency-lag race guard (the data-loss bug this
+// guards against): a freshly-attached object commits its link AND liveLinks=1
+// atomically, but refractor-adjacency lags — so here liveLinks=1 with NO
+// adjacency edge built at all. The object must NOT be flagged orphaned. The
+// OLD adjacency-count cypher saw count(owner)=0 and reaped it → irreversible
+// byte loss. This is the #1 regression guard for this invariant.
 func TestObjectLiveness_AttachLag_NotOrphaned(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

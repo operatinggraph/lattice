@@ -306,7 +306,7 @@ type Target struct {
 	Mode string `json:"mode,omitempty"`
 
 	// Admission is the optional Fire-8 dispatch-pacing policy (§10.8 Planner
-	// extension "Admission control"): absent (every target before this fire)
+	// extension "Admission control"): absent (a target declaring no policy)
 	// is unbounded, byte-identical dispatch. See AdmissionPolicy.
 	Admission *AdmissionPolicy `json:"admission,omitempty"`
 }

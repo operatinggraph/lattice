@@ -161,8 +161,8 @@ func TestRequestService_NoServiceAccess_Rejected(t *testing.T) {
 // TestCreateServiceTemplate_PresentationAspect proves the optional
 // "presentation" payload object (edge-manifest Fire 1, §3.3) is written
 // verbatim as the template's .presentation aspect when supplied, and that an
-// absent presentation writes no aspect at all (byte-identical to every
-// template created before this fire).
+// absent presentation writes no aspect at all (byte-identical to a template
+// that never sets presentation).
 func TestCreateServiceTemplate_PresentationAspect(t *testing.T) {
 	ctx, conn := setupServiceEnv(t)
 	cp, cons := newServicePipeline(t, ctx, conn, "tpl-presentation")

@@ -631,8 +631,7 @@ func TestInspectPremises_AlreadyInspected_Rejected(t *testing.T) {
 }
 
 // TestDebitAccount_NoClauseRef_Unaffected (regression) — a plain DebitAccount
-// with no clauseRef behaves exactly as before this fire: no authorizedBy
-// link, no clause touched.
+// with no clauseRef writes no authorizedBy link and touches no clause.
 func TestDebitAccount_NoClauseRef_Unaffected(t *testing.T) {
 	ctx, conn := setupBcEnv(t)
 	cp, cons := newBcPipeline(t, ctx, conn, "debitnoclause")

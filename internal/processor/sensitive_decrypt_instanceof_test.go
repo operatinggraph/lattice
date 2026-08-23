@@ -147,7 +147,8 @@ func TestDecryptSensitiveDoc_MutualInstanceOfCycle_DoesNotRecurse(t *testing.T) 
 // end-to-end against the actual four vertical ledgers' self-credit
 // operations is the Verticals stream's own follow-on once their self-scope
 // grants land (packages/*-ledger, tracked in verticals.md) — building or
-// merging those is out of this fire's ratified scope.
+// merging those belongs to that follow-on, not to this platform mechanism's
+// proof.
 func TestFire1Payoff_EightSiblingReadsShareTemplateNode_MemoCollapsesRoundTrips(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)

@@ -831,14 +831,14 @@ func TestDDLResolutionMemo_BatchTombstoneHonoredAfterMemoWarms(t *testing.T) {
 }
 
 // TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges is a regression
-// test for a review finding on this fire: excludeDead used to compact its
-// input slice IN PLACE (out := edges[:0]), and the memo hands out the exact
-// slice a live read returned — so filtering it against a batch tombstone
-// silently overwrote the memo's own backing array. Two live edges, tombstone
-// ONE of them, resolve twice with the SAME batch: the first call filters and
+// test guarding excludeDead against compacting its input slice IN PLACE
+// (out := edges[:0]): the memo hands out the exact slice a live read
+// returned, so filtering it against a batch tombstone would silently
+// overwrite the memo's own backing array. Two live edges, tombstone ONE of
+// them, resolve twice with the SAME batch: the first call filters and
 // resolves cleanly to the survivor; if that filter corrupted the memo's
-// array, the identical second call sees a duplicated/wrong edge set and
-// resolves AMBIGUOUS instead of the same clean answer — the exact divergence
+// array, the identical second call would see a duplicated/wrong edge set and
+// resolve AMBIGUOUS instead of the same clean answer — the exact divergence
 // that would silently disable a step 6.5 sensitivity gate on a repeat call.
 func TestDDLResolutionMemo_ExcludeDeadDoesNotCorruptStoredEdges(t *testing.T) {
 	t.Parallel()

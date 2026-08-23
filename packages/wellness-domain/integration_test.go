@@ -501,7 +501,7 @@ func TestSetBookingAttendance_CarriesFieldsForwardThenBlocksCancel(t *testing.T)
 		}
 	}
 
-	// A marked booking can no longer be cancelled — the guard this fix adds.
+	// A marked booking cannot be cancelled; this pins the guard.
 	cancelEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("wdattendcancel000001"),
 		Lane:          processor.LaneDefault,
@@ -1419,9 +1419,9 @@ func TestReassignSession_NonOperatorCannotMoveStudio(t *testing.T) {
 
 	// The SAME staffer, this time omitting `studio` entirely (as if the
 	// session's studio were already dead and unknown to the FE) and relying
-	// only on newStudio — the OTHER new auth surface this change adds
-	// (ddls.go's "studio is required unless newStudio is also supplied by an
-	// operator" branch), distinct from the studio_changed gate proven above.
+	// only on newStudio — the OTHER auth surface this exercises (ddls.go's
+	// "studio is required unless newStudio is also supplied by an operator"
+	// branch), distinct from the studio_changed gate proven above.
 	env2 := &processor.OperationEnvelope{
 		RequestID: testutil.GenReqID("wdrsdnyrepair00001"), Lane: processor.LaneDefault,
 		OperationType: "ReassignSession", Actor: staffActorKey, SubmittedAt: "2026-07-08T08:01:00Z", Class: "session",

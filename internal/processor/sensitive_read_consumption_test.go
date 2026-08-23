@@ -486,7 +486,7 @@ def execute(state, op):
 
 // TestSensitiveTracker_NoExternalEvent_NoGuard: the guard's scope is the
 // external-egress plane only. An op that consumes sensitive plaintext and emits
-// ordinary domain events commits — unchanged by this fire.
+// ordinary domain events commits without triggering the guard.
 func TestSensitiveTracker_NoExternalEvent_NoGuard(t *testing.T) {
 	t.Parallel()
 	f := newConsumptionFixture(t)

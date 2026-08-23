@@ -57,7 +57,7 @@ func submitCancelBooking(t *testing.T, ctx context.Context, conn *substrate.Conn
 }
 
 // TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged proves the core
-// mechanism this fire adds: cancelling a booking whose class-price charge
+// refund-marker mechanism: cancelling a booking whose class-price charge
 // already posted mints a wellnessrefund marker (root {} + .detail aspect)
 // carrying the exact accountKey/amountCents the original charge posted,
 // plus a reverses link back to it — the marker wellness-ledger's
@@ -125,7 +125,7 @@ func TestCancelBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T) {
 
 // TestCancelBooking_NoRefundMarkerWhenNeverCharged proves the negative case:
 // cancelling a priced booking that was NEVER charged mints no wellnessrefund
-// marker at all — the tombstoned-booking self-resolution this fire's design
+// marker at all — the tombstoned-booking self-resolution the design
 // relies on (wellnessClassPriceSettlement's own MATCH stops matching a
 // cancelled booking, so no charge — and therefore no refund — ever happens).
 func TestCancelBooking_NoRefundMarkerWhenNeverCharged(t *testing.T) {

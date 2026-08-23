@@ -334,7 +334,7 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 // Alongside the resolved GapAction, it returns the actionRef the caller
 // records on the mark and the `__effect`/oscillation bookkeeping: for every
 // unchanged/candidates shape this is exactly the dispatch contract type
-// (ga.Action / the picked candidate's Action, as before this fire) — a goal
+// (ga.Action / the picked candidate's Action) — a goal
 // leg's ref is its OWN catalog Ref instead, decoupled from its dispatch
 // contract type, because a goal catalog may (and the first real consumer
 // does) declare multiple legs sharing one contract type (e.g. several

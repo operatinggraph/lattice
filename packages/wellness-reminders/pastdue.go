@@ -27,8 +27,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // same status='booked' restriction); `attended`/`noShow` are already
 // terminal. Once dispatched, wellness-ledger's existing wellnessNoShowSettlement
 // lens (unchanged by this package) reads the resulting noShowFeeCents to post
-// the account charge — this fire only closes the missing status transition,
-// not the billing gate, which already converges on its own.
+// the account charge — this closes only the missing status transition, not
+// the billing gate, which already converges on its own.
 const (
 	// PastDueBookingsTarget is the §10.8 TargetID == the pastDueBookings
 	// lens's OutputKeyPattern prefix (the §10.2↔§10.8 binding Weaver reads).
