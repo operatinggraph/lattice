@@ -138,7 +138,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-23 · `7450954` · [Tooling] this-fire narration gate CLOSED — 5 phrases admitted on measurement, matched across a wrapped comment block; 160 sites swept, 113 AST-proven comment-only
+- 2026-08-23 · `5a85ad7` · [Tooling] this-fire narration gate CLOSED — 5 phrases admitted on measurement, matched across a wrapped comment block; 160 sites swept, 113 AST-proven comment-only
 - 2026-08-23 · `e3fc6b2` · [CI] `TestRefractor_E2E_P99` shared-runner contention CLOSED — moved off unit-1's `-p 4` batch into its own sequential step; isolated p99=50ms vs the 500ms budget
 - 2026-08-23 · `69b48ba` · [Bridge] augur adapter registration CLOSED — escalation tier dead in every deployment; composition-root census gate, 3 families mutation-pinned; cold review caught forged model provenance
 - 2026-08-23 · `62432f2` · [Refractor] dispositionEvalErr privacy-critical arm CLOSED — the tier fell through to Nak+nil (no pause, no alert, no backoff); mutation-proven
