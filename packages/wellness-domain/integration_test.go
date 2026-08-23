@@ -1698,6 +1698,73 @@ func TestReassignSession_CarriesPriceCentsForwardOnTimeMove(t *testing.T) {
 	}
 }
 
+// TestReassignSession_EditsNameCapacityAndPrice is the fix this backlog item
+// asks for: a full or mispriced class no longer needs TombstoneSession +
+// recreate (which would strand every booking) just to add seats, fix a
+// typo'd name, or reprice.
+func TestReassignSession_EditsNameCapacityAndPrice(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignedit")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassigneditstd01", "Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdreassigneditsess1",
+		studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, "wdreassigneditedit01", sessionKey, studioKey, domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "name": "Power Vinyasa", "capacity": 30, "priceCents": 1800},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("ReassignSession edit outcome = %v (%s), want Accepted", outcome2, msg)
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if got, _ := schedData["name"].(string); got != "Power Vinyasa" {
+		t.Errorf("schedule.name = %q, want %q", got, "Power Vinyasa")
+	}
+	if got, _ := schedData["capacity"].(float64); got != 30 {
+		t.Errorf("schedule.capacity = %v, want 30", got)
+	}
+	if got, _ := schedData["priceCents"].(float64); got != 1800 {
+		t.Errorf("schedule.priceCents = %v, want 1800", got)
+	}
+	// startsAt/endsAt are untouched by a pure edit call.
+	if got, _ := schedData["startsAt"].(string); got != "2026-07-08T09:00:00Z" {
+		t.Errorf("schedule.startsAt = %q, must be untouched by a name/capacity/price-only edit", got)
+	}
+}
+
+func TestReassignSession_RejectsCapacityAboveMax(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassigncapmax")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassigncapstd01", "Flow Room")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdreassigncapsess01",
+		studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, "wdreassigncapedit01", sessionKey, studioKey, domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "capacity": 500},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeRejected {
+		t.Fatalf("ReassignSession capacity=500 outcome = %v, want Rejected (InvalidArgument)", outcome2)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") {
+		t.Errorf("rejection should be InvalidArgument, got %+v", reply.Error)
+	}
+}
+
 func TestReassignSession_RejectsCollisionWithAnotherSession(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "reassigncollide")
