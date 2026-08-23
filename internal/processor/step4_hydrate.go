@@ -209,7 +209,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	var floor *descriptorFloorResolver
 	if templates, hasDescriptor := h.DDLs.DispatchReadTemplates(env.OperationType); hasDescriptor {
 		floor = newDescriptorFloorResolver(templates, env, h.Logger)
-		declared = applyDescriptorFloor(declared, floor, env, h.Logger)
+		declared = applyDescriptorFloor(declared, floor)
 	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
 		derived, err := deriveReads(ctx, prog, env, declared, floor, h.deriveBudget(), h.PrimordialActors)

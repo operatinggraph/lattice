@@ -141,23 +141,26 @@ func (s *Server) probeExistingIdentityHint(ctx context.Context, actor auth.Verif
 }
 
 // CredentialIndexKey returns the credentialindex vertex key that records which
-// business identity an authenticated actor's credential is bound to. The
-// gateway reports it on GET /v1/actor so a browser — which under Contract #11
-// opaque-mode binding cannot compute its own ActorID, let alone a key derived
-// from it — can declare the dedup read on ClaimIdentity /
-// CompleteCredentialLink.
+// business identity an authenticated actor's credential is bound to. It backs
+// the `credentialIndexKey` field of GET /v1/actor, whose stated purpose — let a
+// browser declare the dedup read on ClaimIdentity / CompleteCredentialLink —
+// no longer holds: identity-domain's `derive_reads` declares that key for both
+// ops itself (packages/identity-domain/ddls.go), so no client has to.
 //
 // The actor key is already a Contract #1 key, so it is hashed as-is: no
 // normalization, matching identity-domain's credential_index_key.
 func CredentialIndexKey(actorKey string) string {
 	// derived-key: the credentialindex vertex key for an actor, the same value
-	// identity-domain's `credential_index_key(actor_key)` computes
-	// (packages/identity-domain/ddls.go). The gateway cannot defer to the
-	// package: the package's version is Starlark SOURCE TEXT that only the
-	// Processor can execute, and this key must be in a whoami response body
-	// before any operation is submitted — there is nothing to defer TO at that
-	// point in the request. TestCredentialIndexKeyAgreesWithIdentityDomain
-	// (packages/identity-domain/gateway_agreement_test.go) drives a real
+	// identity-domain's `credential_index_key(actor_key)` computes. It is not a
+	// declared read the gateway should defer to the package for, because it is
+	// not a declared read at all any more — `derive_reads` supersedes the
+	// purpose this field was added for, no caller in the tree consumes the
+	// field, and client-ceremony-op-descriptors-design.md §A2 rejects
+	// generalizing the gateway-derives direction it was the sole precedent for.
+	// What survives is a legacy field on a public wire response, kept because
+	// removing it is a wire-visible change and a separate decision, and kept
+	// honest by TestCredentialIndexKeyAgreesWithIdentityDomain
+	// (packages/identity-domain/gateway_agreement_test.go), which drives a real
 	// ceremony through the real Starlark and fails if the two stop matching.
 	return "vtx.credentialindex." + substrate.SHA256NanoID(actorKey)
 }

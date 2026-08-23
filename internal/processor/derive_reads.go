@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -199,67 +200,113 @@ func failingModule(module string, members []string) *starlarkstruct.Struct {
 }
 
 // failingMapping binds a mapping-shaped global the pre-pass cannot honestly
-// answer, so that every way of reaching into it raises the reason instead of
-// reporting a miss.
+// answer. It mirrors failingModule's POSTURE, not its type: a module is only
+// reachable by CALLING a member, but a mapping is reached by subscript, by
+// membership, by attribute, by iteration and by length, and none of those is a
+// call, so each surface is answered on its own terms.
 //
-// It mirrors failingModule's POSTURE, not its type. A module is only reachable
-// by calling one of its members, so failing on call covers it; a MAPPING is
-// reached by subscript, by membership, by attribute and by iteration, and none
-// of those is a call. Each surface therefore fails on its own terms:
+// The type is bounded by one hard fact: a Starlark surface can only be loud if
+// its Go signature has an error to return. So the surfaces divide in two, and
+// both halves are stated here because the quiet half is where a wrong belief
+// would cost a wrong read set.
 //
-//   - starlark.Mapping — `state[k]`. getIndex propagates Get's error verbatim.
-//   - starlark.Container — `k in state`. The interpreter's `in` matches
-//     Container BEFORE Mapping and returns Has's error, where the Mapping arm
-//     DISCARDS Get's error ("we cannot distinguish true errors from key not
-//     found") and answers a bare False. A mapping that is not also a Container
-//     is therefore silent for `in` however loudly Get fails, which is the one
-//     access this type most has to refuse: `if k in state` is how a script asks
-//     whether a key was hydrated.
-//   - starlark.HasAttrs — `state.get(k)`, `.keys()`, `.items()`, `.values()`.
-//     Attr answers ANY name with a builtin that fails when called, on the same
-//     reasoning failingModule's members exist: an attribute that is simply
-//     missing is an AttributeError that reads like a typo. AttrNames reports
-//     the read accessors a hydrated mapping carries (stateAttrs), so `dir()`
-//     describes the surface the main pass has rather than a bare struct.
+// # Loud — these raise, naming the binding and the reason
 //
-// Iteration is deliberately NOT implemented. `for k in state` then raises the
-// interpreter's own "<type> value is not iterable" — which is why Type() spells
-// the reason out, since that message is built from it. An Iterator cannot
-// return an error, so implementing Iterable could only yield nothing, and
-// yielding nothing is precisely the silent answer this type exists to refuse.
+//   - `state[k]` — starlark.Mapping. getIndex propagates Get's error verbatim.
+//   - `k in state`, `k not in state` — starlark.Container. The interpreter's
+//     `in` matches Container BEFORE Mapping and returns Has's error, where the
+//     Mapping arm DISCARDS Get's error ("we cannot distinguish true errors from
+//     key not found") and answers a bare False. A mapping that is not also a
+//     Container is therefore silent for `in` however loudly Get fails, and
+//     `if k in state` is how a script asks whether a key was hydrated.
+//   - `state.get(k)`, `.keys()`, `.items()`, `.values()` — starlark.HasAttrs.
+//     Each resolves to a builtin that raises when CALLED, on failingModule's
+//     reasoning: the member must exist, because an attribute that is simply
+//     missing is an AttributeError that reads like a typo.
+//   - `state.<anything else>` — the interpreter's own AttributeError, built
+//     from Type(). Attr answers ONLY the names in AttrNames and returns
+//     (nil, nil) for the rest, so an unknown attribute stays as loud as it is
+//     on any other value, and `hasattr`/`getattr` keep answering about it the
+//     way they answer about a mapping with no such member.
+//   - `for k in state`, `len(state)` — left unimplemented, so the interpreter
+//     raises "<type> value is not iterable" / "has no len". That is why Type()
+//     spells the reason out: those messages are built from it, and they are the
+//     surfaces this type cannot phrase for itself. An Iterator has no error
+//     return, so implementing Iterable could only yield NOTHING, which is the
+//     silent answer the type exists to refuse.
+//   - `{state: v}` — Hash refuses, so the binding cannot be smuggled into a
+//     dict key and compared later.
+//   - `str(state)`, `"%s" % state`, `json.encode(state)` — String renders the
+//     binding and the reason, never `{}`; a rendering that reads as an empty
+//     mapping is the misleading answer, not a neutral one. json.encode reaches
+//     the accessors through the HasAttrs branch and fails on the first.
 //
-// Truth() answers True for the same reason. `if state:` cannot fail — Truth has
-// no error to return — so the binding takes the branch that goes on to touch
-// the mapping and fails there, rather than the empty-dict branch that quietly
-// derives nothing.
+// # Quiet — no error channel exists, so each answers exactly as the empty
+// mapping it stands in for, and no derivation changes branch
+//
+//   - `bool(state)`, `if state:`, `not state` — Truth returns a Bool. It
+//     answers False: an empty mapping is falsy, so a derivation that branches
+//     on truthiness reaches the same branch it always did. Answering True
+//     instead would silently flip `keys = [] if state else [K]` — the
+//     invisible-wrong-read-set failure this binding exists to prevent, moved to
+//     a new place rather than closed.
+//   - `state == None`, `state != None` — the interpreter compares values of
+//     unlike types as unequal without consulting either, and Compare has no
+//     path to an error here. False and True respectively, as for a dict.
+//   - `state == {}` — the same path, and the one place the answer differs from
+//     an empty dict's: unlike types, so False. Nothing derives a key from it
+//     and the honest reading is that this is not an empty mapping.
+//   - `hasattr(state, n)` — go.starlark.net's hasattr swallows an Attr error by
+//     design, so no implementation can make it raise. It is True for the four
+//     accessors and False otherwise, which is what it answers for a mapping.
+//   - `getattr(state, n, d)` — reaches its default branch only when Attr errors
+//     or returns nil, so returning (nil, nil) for an unknown name is what keeps
+//     `getattr(state, "zzz", None)` answering None. This repo's dominant
+//     Starlark idiom is `getattr(x, field, None)`; handing it a truthy value
+//     for a member that does not exist would send a derivation down the wrong
+//     branch with nothing raised.
 type failingMapping struct {
 	// name is the global's name, so an error names what the script reached for
 	// rather than an anonymous mapping.
 	name string
 }
 
-// unavailable is the one message every surface raises; access renders the
+// unavailable is the one message every loud surface raises; access renders the
 // expression the script wrote, so the author sees their own syntax back.
 func (m failingMapping) unavailable(access string) error {
 	return fmt.Errorf("%s is not available inside %s: the pre-pass runs before hydration, and a derivation that reads state is a read, and must be declared as one",
 		access, deriveReadsEntrypoint)
 }
 
+// String renders the binding and the reason. It must never render as `{}`:
+// this value appears inside script-authored error text and Go-side logs, and an
+// empty-dict rendering there asserts the very thing the type refuses to say.
 func (m failingMapping) String() string {
 	return "<" + m.name + " unavailable inside " + deriveReadsEntrypoint + ">"
 }
 
 // Type carries the reason because the interpreter builds its own
-// not-iterable and no-len messages out of it, and those are the surfaces this
-// type cannot supply a message for itself.
+// not-iterable, no-len and AttributeError messages out of it, and those are the
+// surfaces this type cannot supply a message for itself.
 func (m failingMapping) Type() string {
 	return m.name + "-unavailable-inside-" + deriveReadsEntrypoint
 }
 
-func (m failingMapping) Freeze()                 {}
-func (m failingMapping) Truth() starlarklib.Bool { return starlarklib.True }
-func (m failingMapping) Hash() (uint32, error)   { return 0, fmt.Errorf("%s is not hashable", m.name) }
-func (m failingMapping) AttrNames() []string     { return stateAttrs }
+func (m failingMapping) Freeze() {}
+
+// Truth answers as the empty mapping this binding stands in for. See the
+// header's quiet-surface list: truthiness has no error channel, so the only
+// choice is which silent answer to give, and the one that leaves every
+// derivation on the branch it already took is the only safe one.
+func (m failingMapping) Truth() starlarklib.Bool { return starlarklib.False }
+
+func (m failingMapping) Hash() (uint32, error) { return 0, fmt.Errorf("%s is not hashable", m.name) }
+
+// AttrNames is the binding's whole attribute surface, and Attr is derived from
+// it rather than repeating it — the read accessors a hydrated mapping carries
+// (stateAttrs), so a member added there cannot be silently unstubbed here.
+func (m failingMapping) AttrNames() []string { return stateAttrs }
+
 func (m failingMapping) Has(k starlarklib.Value) (bool, error) {
 	return false, m.unavailable(k.String() + " in " + m.name)
 }
@@ -268,7 +315,15 @@ func (m failingMapping) Get(k starlarklib.Value) (starlarklib.Value, bool, error
 	return nil, false, m.unavailable(m.name + "[" + k.String() + "]")
 }
 
+// Attr answers the accessors AttrNames lists with a builtin that raises when
+// called, and every other name with (nil, nil) — "no such member", the answer
+// the interpreter, `hasattr` and `getattr` each turn into their own loud or
+// default behaviour. Answering an unlisted name with a value would make
+// `state.zzz` quieter than it is on any other Starlark value.
 func (m failingMapping) Attr(name string) (starlarklib.Value, error) {
+	if !slices.Contains(m.AttrNames(), name) {
+		return nil, nil
+	}
 	access := m.name + "." + name
 	return starlarklib.NewBuiltin(name, func(*starlarklib.Thread, *starlarklib.Builtin, starlarklib.Tuple, []starlarklib.Tuple) (starlarklib.Value, error) {
 		return nil, m.unavailable(access)
@@ -404,6 +459,34 @@ func derivedKeyList(d *starlarklib.Dict, field string) ([]string, error) {
 // payload-derived and pattern-shaped templates precisely so a request cannot
 // address it.
 //
+// THE FAULT NAMES NO KEY ON THE WIRE. This one *HydrationError sets no
+// MissingKey and quotes no key in its Cause, and both halves matter because
+// classifyStepError copies MissingKey into the reply's `details.missingKey`
+// while the reply message carries Error() verbatim. Class (g) exists because
+// these keys are ones the SUBMITTER CANNOT EXPRESS — a package's own derivation
+// over a payload — so echoing one back hands the caller that derivation's
+// output for an input of their choosing, and where the floor covers by PATTERN
+// the caller need not even have guessed the key to provoke it. The operator
+// gets the key from the Warn below, where it is diagnosable without being
+// answerable.
+//
+// The egress refusal above keeps its MissingKey, and the difference is not an
+// oversight: its `egress` set is built from base.EgressReads, so the key it
+// echoes is always one the ENVELOPE declared and the submitter already holds.
+// That is also why the egress check runs first — of two terminal faults, the
+// one whose key the caller can already see is the one worth naming.
+//
+// SHARP EDGE, PATTERN WIDTH. floored() consults descriptorFloor.covers, which
+// includes the compiled PATTERNS, so a descriptor whose `optionalReads` carries
+// the whole-key `{me.<type>}` form floors every key of the shape
+// `vtx.<type>.<NanoID>` — and every derived REQUIRED vertex of that type then
+// faults, with no way for the package to except one, because
+// resolveDescriptorRequired refuses a pattern-shaped required template for its
+// own (anti-oracle) reasons. No live descriptor has that shape; every shipping
+// client-only template is the `{me.<type>:id}` FRAGMENT form inside a link key,
+// which fixes every other segment. A descriptor that adopts the whole-key form
+// has to state its required keys concretely or stop deriving them.
+//
 // CEILING COUNTED, FAULTED AT RUNTIME. Derived keys count toward
 // opwire.MaxDeclaredReads. The count is of DISTINCT keys, matching
 // distinctKeys' existing semantics: the ceiling has always bounded Core KV
@@ -464,10 +547,15 @@ func mergeDerivedReads(base declaredReads, derived derivedReads, floor *descript
 			// taken the weaker disposition by weakest-wins and contradicts
 			// nothing; a key the envelope declared kept the envelope's
 			// disposition and was floored on the envelope's own pass.
+			//
+			// The key reaches the operator through the resolver's Warn and
+			// stops there — it is neither in MissingKey nor in the Cause text,
+			// both of which the reply carries. See the header.
 			if failClosed && floor.floored(key) {
+				floor.warnContradiction(key)
 				return &HydrationError{
-					Code: "DeriveReadsFloorContradiction", MissingKey: key, OperationRequestID: rid,
-					Cause: fmt.Errorf("derive_reads returned %q under reads, which this operation's own descriptor declares absence-tolerant under optionalReads (the package contradicts itself)", key),
+					Code: "DeriveReadsFloorContradiction", OperationRequestID: rid,
+					Cause: errors.New("derive_reads returned a required read that this operation's own descriptor declares absence-tolerant under optionalReads (the package contradicts itself); the Processor log names the key"),
 				}
 			}
 			claimed[key] = struct{}{}

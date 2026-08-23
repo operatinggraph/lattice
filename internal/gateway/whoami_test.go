@@ -12,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/gateway/rolesanchors"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -327,6 +328,54 @@ func TestHandleWhoami_Probe_NoVerifiedEmail_SkipsLookup(t *testing.T) {
 	}
 	if resolver.gotKey != "" {
 		t.Fatalf("resolver was consulted (key %q), want no lookup for an unverified email", resolver.gotKey)
+	}
+}
+
+// TestEmailIdentityIndexKey_EmptyAfterNormalization proves the ok=false branch:
+// a claim that normalizes to nothing yields no key at all.
+//
+// Without it, a whitespace-only email would derive the constant key for the
+// empty contact — SHA256NanoID("email:") — which is the same key for every such
+// caller and belongs to no identity. The package's normalize_email answers None
+// on exactly these inputs, so ok=false is the Go side of that answer, not a
+// convenience.
+func TestEmailIdentityIndexKey_EmptyAfterNormalization(t *testing.T) {
+	for _, raw := range []string{"", " ", "\t", "  \t\n ", "\u00a0"} {
+		got, ok := EmailIdentityIndexKey(raw)
+		if ok {
+			t.Errorf("EmailIdentityIndexKey(%q) = (%q, true), want no key: it normalizes to the empty contact", raw, got)
+		}
+		if got != "" {
+			t.Errorf("EmailIdentityIndexKey(%q) returned key %q alongside ok=false", raw, got)
+		}
+	}
+	if _, ok := EmailIdentityIndexKey("real@example.test"); !ok {
+		t.Fatal("EmailIdentityIndexKey rejected a well-formed email — the empty-contact guard is over-broad")
+	}
+}
+
+// TestProbeExistingIdentityHint_WhitespaceOnlyEmail_SkipsLookup is the same
+// property at the probe, driven directly rather than over HTTP.
+//
+// It has to bypass the token path to mean anything. auth.Verify already applies
+// strings.TrimSpace to the `email` claim (internal/gateway/auth/auth.go:455), so
+// a whitespace-only claim arrives as VerifiedEmail == "" and never reaches the
+// derivation at all — an HTTP-level version of this test would pass with
+// EmailIdentityIndexKey's empty-contact answer deleted, pinning the auth
+// layer's trim instead of the branch it claims to cover. Handing
+// probeExistingIdentityHint a VerifiedActor whose VerifiedEmail is blank models
+// the caller that trim does not protect, which is the one this branch is for.
+func TestProbeExistingIdentityHint_WhitespaceOnlyEmail_SkipsLookup(t *testing.T) {
+	s := newTestServer(t, nil, nil)
+	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED99999991", found: true}
+	s.ConfigureIdentityIndexHint(resolver)
+
+	actor := auth.VerifiedActor{ActorID: "vtx.identity.NcxqoP292Z4a7uPKftM6", VerifiedEmail: "   \t  "}
+	if hint := s.probeExistingIdentityHint(context.Background(), actor); hint {
+		t.Error("existingIdentityHint = true, want false (the email normalizes to nothing)")
+	}
+	if resolver.gotKey != "" {
+		t.Fatalf("resolver was consulted (key %q), want no lookup for an email that normalizes to nothing", resolver.gotKey)
 	}
 }
 

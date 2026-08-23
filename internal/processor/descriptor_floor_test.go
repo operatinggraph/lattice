@@ -46,7 +46,7 @@ func floorFor(templates ...string) DispatchTemplates {
 // over it. Going through the resolver is what keeps these tests exercising the
 // production path — the same value the merge arm consults.
 func applyFloor(base declaredReads, templates DispatchTemplates, env *OperationEnvelope, logger *slog.Logger) declaredReads {
-	return applyDescriptorFloor(base, newDescriptorFloorResolver(templates, env, logger), env, logger)
+	return applyDescriptorFloor(base, newDescriptorFloorResolver(templates, env, logger))
 }
 
 // capturingLogger records what the floor SAYS as well as what it does. A
@@ -676,4 +676,54 @@ func mustPayload(t *testing.T, env *OperationEnvelope) map[string]interface{} {
 	t.Helper()
 	m, _ := jsonToGenericMap(env.Payload)
 	return m
+}
+
+// TestDescriptorFloorResolver_ResolvesOnceAndOnlyWhenAsked pins the two
+// properties the resolver's own doc claims, both of which are observable ONLY
+// through the Warn an uncompilable template emits.
+//
+// Deferral: the Warn asserts that the floor did not apply TO A KEY. An envelope
+// that declares nothing and a derivation that returns nothing give it no key to
+// be about, so compiling on construction would put that claim in the log of
+// every operation carrying a descriptor — the claim would still be there, and
+// still be false, when the operation had nothing to floor.
+//
+// Memoization: the Warn belongs to the DESCRIPTOR, not to whichever arm asked
+// first. Two arms consulting one resolver must not double the operator's log
+// for one template, and must not make the count depend on which arms happened
+// to have keys.
+func TestDescriptorFloorResolver_ResolvesOnceAndOnlyWhenAsked(t *testing.T) {
+	env := floorEnv(floorPayload())
+	// One template that cannot compile against this envelope (the field is
+	// absent from the payload) beside one that can, so the floor is non-empty
+	// and the Warn has a subject.
+	templates := DispatchTemplates{OptionalReads: []string{"{payload.absentField}", floorTarget}}
+	const uncompilable = "{payload.absentField}"
+
+	t.Run("neither arm has a key, so nothing resolves", func(t *testing.T) {
+		logger, log := capturingLogger()
+		r := newDescriptorFloorResolver(templates, env, logger)
+		_ = applyDescriptorFloor(declaredReads{}, r)
+		if _, err := mergeDerivedReads(declaredReads{}, derivedReads{}, r, testNanoID1); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if log.Len() != 0 {
+			t.Fatalf("log = %q, want silence — the templates were never asked about a key", log.String())
+		}
+	})
+
+	t.Run("both arms ask, the descriptor is warned about once", func(t *testing.T) {
+		logger, log := capturingLogger()
+		r := newDescriptorFloorResolver(templates, env, logger)
+		_ = applyDescriptorFloor(declaredReads{Reads: []string{floorTarget}}, r)
+		// A derived REQUIRED key reaches floored(); it is not covered by this
+		// floor, so it is admitted and the only trace is whether the resolver
+		// compiled the templates a second time.
+		if _, err := mergeDerivedReads(declaredReads{}, derivedReads{Reads: []string{deriveTestKeyB}}, r, testNanoID1); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if n := strings.Count(log.String(), uncompilable); n != 1 {
+			t.Fatalf("the template was warned about %d times, want exactly 1: %q", n, log.String())
+		}
+	})
 }

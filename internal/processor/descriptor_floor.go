@@ -129,8 +129,15 @@ import (
 // depends on turns a HydrationMiss into a silent None, which is the failure
 // the §2.5 authoring rule exists to prevent. So the floor demotes exactly the
 // keys a compilable descriptor names, and nothing else.
-func applyDescriptorFloor(base declaredReads, resolver *descriptorFloorResolver, env *OperationEnvelope, logger *slog.Logger) declaredReads {
-	if len(base.Reads) == 0 && len(base.EgressReads) == 0 {
+//
+// The envelope and the logger are the resolver's, never the caller's. Taking
+// them as separate parameters would let a caller log one envelope's requestId
+// beside a demotion resolved against another's payload; there is nothing to
+// keep in step when there is only one source. A nil resolver is an operation
+// with no descriptor and demotes nothing, which is also what makes the
+// resolver's fields safe to read at the end of this function.
+func applyDescriptorFloor(base declaredReads, resolver *descriptorFloorResolver) declaredReads {
+	if resolver == nil || (len(base.Reads) == 0 && len(base.EgressReads) == 0) {
 		return base
 	}
 	floored := resolver.floored
@@ -179,8 +186,8 @@ func applyDescriptorFloor(base declaredReads, resolver *descriptorFloorResolver,
 	}
 	base.OptionalReads = grown
 	base.Reads = kept
-	logger.Info("step4: descriptor floor demoted declared reads to optional",
-		"operationType", env.OperationType, "requestId", env.RequestID, "keys", demoted)
+	resolver.logger.Info("step4: descriptor floor demoted declared reads to optional",
+		"operationType", resolver.env.OperationType, "requestId", resolver.env.RequestID, "keys", demoted)
 	return base
 }
 
@@ -258,6 +265,16 @@ func (r *descriptorFloorResolver) resolve() {
 		return
 	}
 	r.required = resolveDescriptorRequired(r.templates.Reads, r.env, payload, r.logger)
+}
+
+// warnContradiction records the derived required key the floor refuses
+// (mergeDerivedReads). It lives here because the resolver owns the envelope and
+// the logger, and because this Warn is the ONLY copy of that key an operator
+// gets: the fault deliberately carries no key to the caller, since a derived
+// key is one the submitter could not have expressed.
+func (r *descriptorFloorResolver) warnContradiction(key string) {
+	r.logger.Warn("step4: derive_reads returned a required read this operation's own descriptor declares absence-tolerant; the operation faults",
+		"operationType", r.env.OperationType, "requestId", r.env.RequestID, "key", key)
 }
 
 // descriptorFloor is a descriptor's optionalReads list compiled against one
