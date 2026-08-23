@@ -75,6 +75,21 @@ const (
 	studioID    = "neEA76zkT84xv8tc6CNX"
 	latteID     = "qvVewSfyQZcWCnFAC3sY"
 	croissantID = "8rSutmvxePuueAZSCP8J"
+
+	// rileyPatientID / riversideBuildingID are seed-showcase.go's own pinned
+	// ids (transcribed, not imported — each seed script is a standalone `go
+	// run` file), needed here only as the OTHER entries in
+	// reapNonCanonicalPatients'/reapNonCanonicalSites' keep-allowlists: the
+	// live clinic roster/site directory (verticals.md "the patient-facing
+	// site picker offers a verify artifact as a clinic") has accrued
+	// verify-fire litter whose display names don't share one naming
+	// convention ("Grid Snap Test Patient", "Retention Proof" — neither
+	// contains "Verify"/"Discovery", the marker isVerifyLitterName checks),
+	// so reaping by name would miss rows a naming sweep can't predict.
+	// Reaping by allowlist instead only requires knowing every checked-in
+	// script's canonical id, which is already this file's own convention.
+	rileyPatientID      = "w5sDPrw4eraPfUHk96wo"
+	riversideBuildingID = "A9jnKK2bGwZNrfHHkLme"
 )
 
 func main() {
@@ -186,6 +201,13 @@ func main() {
 			map[string]any{"fullName": "Classic Demo Patient", "patientId": patientID}, nil)
 	}
 	fmt.Printf("==> patient:         %s\n", patientKey)
+	reapNonCanonicalPatients(ctx, conn, adminKey, map[string]bool{
+		patientKey:                      true,
+		"vtx.patient." + rileyPatientID: true,
+	})
+	reapNonCanonicalSites(ctx, conn, adminKey, map[string]bool{
+		"vtx.building." + riversideBuildingID: true,
+	})
 
 	providerKey := "vtx.provider." + providerID
 	if !alive(ctx, conn, providerKey) {
@@ -431,6 +453,76 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate provider: %s (%s)\n", key, aspect.Data.FullName)
 	}
+}
+
+// reapNonCanonicalPatients tombstones every live vtx.patient.* not in keep
+// (verticals.md "the patient-facing site picker offers a verify artifact as
+// a clinic": the roster carried 5 duplicate "Classic Demo Patient" rows from
+// pre-pin reruns plus ad hoc verify-*.go/PO-discovery patients — "Grid Snap
+// Test Patient", "Post-Merge Verify Patient", "Inc2a Live Verify Patient",
+// "Steward Test Patient", "Retention Proof", "Verify Waiver Patient", live-
+// grepped — none of which reap themselves). Allowlist by key, not
+// isVerifyLitterName's name marker: "Grid Snap Test Patient" and "Retention
+// Proof" contain neither "Verify" nor "Discovery", so a name sweep silently
+// strands them (caught live, this fire) — the only two patient identities
+// any checked-in seed script pins are patientID (this file) and
+// rileyPatientID (seed-showcase.go), so anything else alive is litter by
+// construction, not by guessing a broader name pattern.
+func reapNonCanonicalPatients(ctx context.Context, conn *substrate.Conn, adminKey string, keep map[string]bool) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.patient.")
+	must(err, "list vtx.patient. keys")
+	for _, key := range keys {
+		if strings.Count(key, ".") != 2 || keep[key] || !alive(ctx, conn, key) {
+			continue
+		}
+		name, _ := readAspectFullName(ctx, conn, key+".demographics")
+		submitOp(ctx, conn, adminKey, "TombstonePatient", "patient",
+			map[string]any{"patientKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped non-canonical patient: %s (%s)\n", key, name)
+	}
+}
+
+// reapNonCanonicalSites tombstones every live vtx.building.* not in keep —
+// same allowlist rationale as reapNonCanonicalPatients, applied to the site
+// directory ("PO Discovery Test Site" live-grepped alongside the canonical
+// "Riverside Clinic" seed-showcase.go mints). This script itself never
+// creates a building (the clinic appointment above deliberately carries no
+// site — see its comment), so every live vtx.building.* besides the one
+// canonical id is a verify-fire building from elsewhere in the codebase.
+func reapNonCanonicalSites(ctx context.Context, conn *substrate.Conn, adminKey string, keep map[string]bool) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.building.")
+	must(err, "list vtx.building. keys")
+	for _, key := range keys {
+		if strings.Count(key, ".") != 2 || keep[key] || !alive(ctx, conn, key) {
+			continue
+		}
+		name, _ := readAspectName(ctx, conn, key+".site")
+		submitOp(ctx, conn, adminKey, "TombstoneLocation", "building",
+			map[string]any{"locationKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped non-canonical site: %s (%s)\n", key, name)
+	}
+}
+
+// readAspectFullName reads a {isDeleted, data:{fullName}} aspect and returns
+// its fullName when the aspect is alive — the patient .demographics shape,
+// which carries fullName rather than readAspectName's name field.
+func readAspectFullName(ctx context.Context, conn *substrate.Conn, aspectKey string) (string, bool) {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, aspectKey)
+	if err != nil {
+		return "", false
+	}
+	var aspect struct {
+		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			FullName string `json:"fullName"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+		return "", false
+	}
+	return aspect.Data.FullName, true
 }
 
 // reapDuplicateStudios tombstones every live "Classic Demo Studio" other than
