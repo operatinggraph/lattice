@@ -3743,3 +3743,194 @@ is observable exactly as §5.4 derives it: pass 1 `indexes`, pass 2 `duplicateOf
 stack that never ran `provision-readpath` (which creates that table, and which shells through
 `docker compose` and so could not run in this container). It is a provisioning gap in the verifying
 environment, not a finding, and is recorded here so the next reader of these logs does not re-diagnose it.
+
+---
+
+## Fire brief — the erasure-residual batch: three filed residuals closed (Steward, 2026-08-23)
+
+Three rows on `backlog/lattice.md` trace to this document's own increment build notes. They are built
+as one batch because they share a subject — the erasure spine's declaration and observation surfaces —
+not because they share code: A is a package script, B is a Weaver engine key, C is dispatcher plumbing
+in Loom + Weaver + pkgmgr. Each is its own increment with its own green check.
+
+### 1. Scope sentence (verbatim, per row)
+
+- **A — [identity-domain] `TombstoneOrphanedCredentialIndex`'s outbound arm leaves a phantom entry in
+  the LIVE owner's `credentialBinding` array.** *"The op retires the index vertex only. In the outbound
+  shape the owner is alive, and their sign-in-methods array still lists the erased credential. Rewrite
+  precedent: `unbind_identity_credentials.go`'s `owner_binding_rewrite`."*
+- **B — [Weaver] A `surface` gap's Health issue carries no entity segment.** *"`issueKeyGap` keys per
+  `(target, column)`, so with two erasures in flight the subject whose halves land first clears the
+  issue raised for the stuck one. Wrong per-subject."*
+- **C — [Loom/Weaver] A dispatcher cannot declare its op's class-(e) enumerations.** *"A `kv.Links` walk
+  is declared through `ContextHint.Enumerations`, expressible by neither Loom `systemOp` submit nor
+  Weaver `directOp` (`GapActionSpec` has no field)."* Consumers: `identityErasure`,
+  `identityErasureComplete`.
+
+**Green bar.** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go run scripts/lint-board.go` ·
+`go test ./packages/identity-domain/... ./packages/privacy-base/... ./internal/weaver/...
+./internal/loom/... ./internal/pkgmgr/... ./internal/processor/...` with `POSTGRES_TEST_DSN` set
+(REMOTE.md §3 — without it the Postgres-gated tests skip silently and the suite is falsely green).
+
+### 2. Verified touch-list (`file:line`, checked live this fire)
+
+**A — owner-array rewrite**
+
+| File | What |
+|---|---|
+| `packages/identity-domain/tombstone_orphaned_credential_index.go:381` | the single `tombstone` mutation gains a sibling; the outbound arm rewrites the live owner's array |
+| `…:132-134` · `:407-427` | `contextHint` — the owner's `.credentialBinding` becomes a declared read |
+| `…:130` | `OutputSchema` `primaryKey` stays `index_key` (still in the write footprint — `internal/processor/commit_path.go:389-401`) |
+| `packages/identity-domain/unbind_identity_credentials.go:279-339` | **the precedent, copied**: `owner_binding_rewrite` |
+| `packages/identity-domain/ddls.go:423-449` | the `credentialBinding` aspect shape (`actorKey`/`boundAt` singular + `credentials[]`) |
+| `packages/identity-domain/tombstone_orphaned_credential_index_test.go:337-363` | `OutboundResidue_Tombstoned` — today asserts the live owner's vertex is UNTOUCHED; that assertion inverts |
+| `packages/identity-domain/package.go:33` · `manifest.yaml:2` | version bump (`scripts/lint-package-version.go`) |
+
+**B — entity-segmented gap issue key**
+
+| File | What |
+|---|---|
+| `internal/weaver/evaluator.go:1152` | `issueKeyGap(targetID, col)` — the key shape |
+| `internal/weaver/evaluator.go:146-219` | `dispatchGap`; `entityID` is already a parameter and in scope at the raise (`:216`) |
+| `internal/weaver/evaluator.go:749` | `clearClosedMarks` — the level-reconciled clear; must produce the identical key |
+| `internal/weaver/reconciler.go:763` | `collapseReclaim` — the mark-close clear; same |
+| `internal/weaver/evaluator.go:193,200,452,468,482,491,1039,1043` | the other eight call sites |
+| `docs/observability/health-kv-schema.md:842-867` | the Weaver heartbeat section — a Health-emission change updates the schema doc in the SAME commit (SKILL §4) |
+
+**C — dispatcher enumerations**
+
+| File | What |
+|---|---|
+| `internal/processor/opwire/opwire.go:66-71` · `:112-116` | `ContextHint.Enumerations` + `EnumerationHint` — **already exist**; zero construction sites repo-wide |
+| `internal/loom/pattern.go:51-62` | `Step`'s systemOp-only `Reads`/`OptionalReads` — gains `Enumerations` |
+| `internal/loom/state.go:89-115` | `outboxRecord` — same |
+| `internal/loom/actuator.go:38-42` · `:134` | the local `contextHint` mirror + `buildOutbox`'s signature |
+| `internal/loom/engine.go:895` | the `buildOutbox` call |
+| `internal/pkgmgr/definition.go:392-450` | `GapActionSpec` — gains `Enumerations` beside `Reads` (`:415`) |
+| `internal/weaver/actuator.go:42-45` · `:82` | the local `contextHint` mirror + `submit`'s signature |
+| `packages/privacy-base/patterns.go:153-162` | `identityErasure` steps 3+4 declare their walks |
+| `packages/privacy-base/targets.go:82-89` · `:125-136` | `identityErasureComplete` gaps 1+2 declare theirs; the comment at `:82-89` that says this is inexpressible becomes false and is struck |
+
+**Contract status — re-verified, and it is the finding that makes C buildable.**
+`docs/contracts/02-operation-envelope.md:37` and `:211` **already define** `contextHint.enumerations`
+as `{hub, relation, direction}[]`, and `opwire` already parses and shape-validates it. C adds no
+contract text: `Step` and `GapActionSpec` are dispatcher input types, not contract shapes. **C is L2 —
+not a frozen-contract proposal.** The gap is that nothing has ever *populated* the field.
+
+**Citations that rotted.** The board row for B cites `evaluator.go:1068`; `issueKeyGap` is at
+`evaluator.go:1152` today. The design's inc-7 residual 3 is otherwise accurate.
+
+### 3. Precedents to mirror
+
+- **A** → `unbind_identity_credentials.go:279-339` (`owner_binding_rewrite`), verbatim in shape: read the
+  owner's `.piiKey` FIRST and return `None` on `shredded` (the array is already unreadable), then read
+  `.credentialBinding`, filter the entry, promote-or-omit the singular `actorKey`/`boundAt` pair, and
+  emit an `update` mutation. Its sibling `sweep_outbound` (`:255-277`) is the caller shape.
+- **B** → `issueKeyEffect` (`evaluator.go:1157-1159`) is the house precedent for a THREE-segment issue
+  key; `issueKeyOscillation` (`control.go:317-322`) for a multi-entity one. Not greenfield.
+- **C** → `Reads`/`OptionalReads` are threaded end-to-end through both dispatchers already; `Enumerations`
+  follows the identical path at every hop. The wire type it lands in (`opwire.EnumerationHint`) is shipped.
+
+### 4. Increment order + runnable green checks
+
+- **C1** — `Enumerations` through Loom (`pattern.go` → `state.go` → `actuator.go` → `engine.go`) and
+  Weaver (`definition.go` → `actuator.go`). *Check:* `go build ./... && go test ./internal/loom/...
+  ./internal/weaver/... ./internal/pkgmgr/...`
+- **C2** — the two packages declare their five walks; strike the falsified `targets.go:82-89` comment.
+  *Check:* `go test ./packages/privacy-base/... ./packages/identity-domain/... &&
+  STRICT=1 go run ./scripts/lint-conventions.go`
+- **B1** — entity-segment the gap issue key, raise and clear in lockstep; update the Health-KV schema doc.
+  *Check:* `go test ./internal/weaver/... -run 'Gap|Surface|Mark'`
+- **A1** — the outbound arm's owner-array rewrite + the inverted test assertion + version bump.
+  *Check:* `go test ./packages/identity-domain/... -run Tombstone`
+- **Close** — full green bar above, then the cumulative adversarial pass over the batch's whole diff.
+
+### 5. In-scope gotchas
+
+**This fire's own obligations.** A bumps `packages/identity-domain`'s version (`lint-package-version.go`).
+B is a Health emission → `docs/observability/health-kv-schema.md` moves in the same commit (SKILL §4).
+C adds a field to a persisted `outboxRecord` — `omitempty`, absent on every existing record, so old
+records decode unchanged; state this rather than assume it. `packages/identity-domain` is a known
+ROTATING-membership flake under parallel load (increment-9 build note): **one** re-run of a single
+reddened test before concluding regression; never loosen an assertion.
+
+**Standing checklist** (`agents/fire-brief-template.md`) — all six apply; #4 and #5 bind hardest here:
+1. New state needs a LIFETIME, not a data structure.
+2. Every census is a premise — re-run it live.
+3. A negative test needs its positive vector proven first; prove each fix by reverting it.
+4. **Removal needs a transport AND an observer; a demoted mechanism needs EVERY obligation enumerated.**
+   B is exactly this shape: the issue key is a latch with a raise site and *two* clear sites, and a key
+   changed at the raise but not at a clear leaks a permanently-stuck issue.
+5. **One deterministic key, one writer.**
+6. Precedent may carry debt — verify the mirrored pattern against the rule it claims to follow.
+
+**Dossiers, copied in verbatim.**
+
+`docs/components/weaver.md` (B, C1):
+- *An `error`-severity Health issue must not fire on a self-healing condition* — an unreplayed pattern is
+  replay lag, not a package bug, and the sweep reaches that branch on every restart.
+- *A test that hand-seeds an engine's internal registry map pins the FALLBACK, not its name* — every sweep
+  test seeded `patternMeta` bare, so each silently became a proof about unindexed patterns.
+- *A restated cross-package constant needs a test that pins it* — Weaver may not import `internal/loom`,
+  so step-kind strings are hand-copied and nothing failed if they drifted. **Directly live for C1**: the
+  two `contextHint` mirrors in `loom/actuator.go` and `weaver/actuator.go` are hand-copies of
+  `opwire.ContextHint`, and this fire adds a field to all three.
+- *Classify by whitelist, not blacklist, when the vocabulary can grow.*
+- *A gap class is decided by the dispatch's SHAPE, never by its action name.*
+
+`docs/components/pkgmgr.md` (C1):
+- *An injected dependency held in a nil-able field silently disables the gate it feeds* — second sighting
+  in the thinner shape: the RULE was covered twelve ways and the line DELIVERING it was covered zero.
+  **Live for C2**: a declared `Enumerations` that never reaches the envelope is precisely this shape.
+- *canonicalName and the instance key segment are different namespaces.*
+
+`docs/components/_packages.md` (A, C2):
+- *A shared-vertex repoint needs a content-and-revision gate against EVERY other writer of that vertex,
+  not just atomicity within its own batch.* **Live for A**: the owner's `.credentialBinding` has other
+  writers (`CompleteCredentialLink`, `UnlinkCredential`, `MergeIdentity`).
+- *A cross-package type guard must survive the migration window in BOTH directions.*
+- *Census the CHECK, not the wrapper.*
+
+`docs/components/processor.md` (C):
+- *A read disposition the CLIENT declares is not a server policy* — the Processor validates
+  `enumerations`' shape at parse and otherwise ignores it (`opwire.go:109-110`). C therefore buys
+  **declaration completeness**, not enforcement; the brief must not claim otherwise.
+
+### 6. Adjacent finds
+
+- **[identity-domain] the link-less `credentialindex` row is two-thirds stale — corrected, not deferred.**
+  Its premise *"residue nothing can walk"* is false: the operator CLI enumerates the class today by
+  keyspace prefix (`cmd/lattice/identity/credential_residue.go:209`, `reconcile.go:153`, over
+  `vtx.credentialindex.`), which is how `TombstoneOrphanedCredentialIndex` reaches it at all. And
+  *"the attestation does not [name the class]"* is false as prose: the seal's own DDL text names the
+  omission explicitly (`packages/privacy-base/seal_identity_for_erasure_complete.go:131-135`). What is
+  genuinely open is what §9.2(i) says is open and says this design does not close: **no lens and no
+  in-Starlark walk can reach the class, because no link survives to enumerate from** — so the residue
+  lens cannot count it and the attestation's `coverage` cannot include it. Closing that structurally
+  needs a `credentialindex → owner` link type plus a backfill of the live corpus, which §9.2(i) routes
+  to the credential-binding design's §9 alternative. **Filed under out (2), designer pass**, with the
+  premise corrected on the row: `📐 needs designer pass · no-pattern: a link making credentialindex
+  owner-reachable`.
+- **Enumerations is declared metadata, not enforcement.** After C, a script could still run an
+  *undeclared* `kv.Links` walk and the Processor would not refuse it; only `lint-conventions`' source
+  annotation catches that, and only in `packages/`. Not filed as a row — the enforcement point is the
+  descriptor-pinned disposition Contract #2 §2.5 already names, and no consumer wants it today.
+  Recorded here so a later reader does not read C as having closed enforcement.
+
+### 7. Non-goals (the drift fence)
+
+Not touched: the `unroutedTasks` aggregate gap's key shape (it is correctly aggregate — one issue per
+target, not per entity — and B must leave its behavior identical); enforcement of declared enumerations
+in the Processor; the `credentialindex` reachability link (routed above); any change to
+`SealIdentityForErasureComplete`'s attestation shape; the read-posture warn→block flip itself.
+
+### Scope-diff gate — discharged
+
+Every touch in part 2 traces to one of the three scope sentences in part 1; nothing widened, no adjacent
+mechanism substituted. Dependencies re-verified both ways: C's *stated* dependency on a Contract #2
+change is **refuted** — the contract already carries `enumerations` (`02-operation-envelope.md:37,211`)
+— so C drops from L3-propose to L2 and no unlisted dependency appeared. A's stated precedent is live at
+`unbind_identity_credentials.go:279-339`. B's cited line rotted (`1068` → `1152`) but the mechanism is
+as described. The premise census that mattered — *"zero construction sites for
+`ContextHint.Enumerations`"* — was re-run live and holds at zero.
