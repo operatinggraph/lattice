@@ -29,16 +29,18 @@ type opEnvelope struct {
 	// vertexType DDL, so inference is unambiguous. The field stays for an
 	// explicit override.
 	Class string `json:"class,omitempty"`
-	// ContextHint carries the OCC reads the dispatched op's DDL hydrates, copied
-	// from the outbox record's Reads; omitted for read-free ops.
+	// ContextHint carries the OCC reads the dispatched op's DDL hydrates plus
+	// the link walks it declares, copied from the outbox record; omitted when
+	// the record declares none of them.
 	ContextHint *contextHint `json:"contextHint,omitempty"`
 	AuthContext *authContext `json:"authContext,omitempty"`
 }
 
 type contextHint struct {
-	Reads         []string `json:"reads,omitempty"`
-	OptionalReads []string `json:"optionalReads,omitempty"`
-	EgressReads   []string `json:"egressReads,omitempty"`
+	Reads         []string      `json:"reads,omitempty"`
+	OptionalReads []string      `json:"optionalReads,omitempty"`
+	Enumerations  []Enumeration `json:"enumerations,omitempty"`
+	EgressReads   []string      `json:"egressReads,omitempty"`
 }
 
 type authContext struct {
@@ -98,8 +100,13 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       rec.Payload,
 	}
-	if len(rec.Reads) > 0 || len(rec.OptionalReads) > 0 || len(rec.EgressReads) > 0 {
-		env.ContextHint = &contextHint{Reads: rec.Reads, OptionalReads: rec.OptionalReads, EgressReads: rec.EgressReads}
+	if len(rec.Reads) > 0 || len(rec.OptionalReads) > 0 || len(rec.Enumerations) > 0 || len(rec.EgressReads) > 0 {
+		env.ContextHint = &contextHint{
+			Reads:         rec.Reads,
+			OptionalReads: rec.OptionalReads,
+			Enumerations:  rec.Enumerations,
+			EgressReads:   rec.EgressReads,
+		}
 	}
 	if rec.Target != "" {
 		env.AuthContext = &authContext{Target: rec.Target}
@@ -128,10 +135,12 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 // hydrates), nil/empty for read-free ops; optionalReads is its
 // ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
 // reads, e.g. CreateTask's dedup key), nil/empty when the op reads none;
-// egressReads is its ContextHint.EgressReads (§2.5 class (f) — declared
-// external-egress reads, e.g. an externalTask's subject-templated aspect
-// keys), nil/empty when the op declares none.
-func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads, optionalReads, egressReads []string) (*outboxRecord, error) {
+// enumerations is its ContextHint.Enumerations (§2.5 class (e) — the kv.Links
+// walks it runs, hubs already resolved to concrete keys), nil/empty when the
+// op walks nothing; egressReads is its ContextHint.EgressReads (§2.5 class (f)
+// — declared external-egress reads, e.g. an externalTask's subject-templated
+// aspect keys), nil/empty when the op declares none.
+func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads, optionalReads []string, enumerations []Enumeration, egressReads []string) (*outboxRecord, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("loom: marshal op payload: %w", err)
@@ -145,6 +154,7 @@ func buildOutbox(requestID, operation string, payload map[string]any, target, la
 		Actor:         actor,
 		Reads:         reads,
 		OptionalReads: optionalReads,
+		Enumerations:  enumerations,
 		EgressReads:   egressReads,
 	}, nil
 }

@@ -892,7 +892,8 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 	// which infers it from the step's params (inferExternalTaskReads).
 	reads := systemOpReads(step.Reads, inst.SubjectKey)
 	optionalReads := systemOpReads(step.OptionalReads, inst.SubjectKey)
-	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, optionalReads, nil)
+	enumerations := systemOpEnumerations(step.Enumerations, inst.SubjectKey)
+	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, optionalReads, enumerations, nil)
 	if err != nil {
 		return err
 	}
@@ -925,6 +926,27 @@ func systemOpReads(templates []string, subjectKey string) []string {
 		keys[i] = resolveSubjectTemplate(t, subjectKey)
 	}
 	return keys
+}
+
+// systemOpEnumerations resolves a systemOp step's declared link walks against
+// the running instance's subject: the hub travels the SAME subject-relative
+// template grammar as a declared read (resolveSubjectTemplate), while relation
+// and direction are literals the pattern states outright. Nil in, nil out, for
+// the same reason as systemOpReads — a step that walks nothing keeps a
+// walk-free outbox record.
+func systemOpEnumerations(declared []Enumeration, subjectKey string) []Enumeration {
+	if len(declared) == 0 {
+		return nil
+	}
+	out := make([]Enumeration, len(declared))
+	for i, e := range declared {
+		out[i] = Enumeration{
+			Hub:       resolveSubjectTemplate(e.Hub, subjectKey),
+			Relation:  e.Relation,
+			Direction: e.Direction,
+		}
+	}
+	return out
 }
 
 // userTaskReads is the ContextHint.Reads set for a userTask's CreateTask. The
@@ -1013,7 +1035,7 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 	// un-deduped 3-key set, not Loom's deduped 2-key set.
 	reads := userTaskReads(inst.SubjectKey, forOperation)
 	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey, reads,
-		userTaskOptionalReads(taskKey, inst.SubjectKey), nil)
+		userTaskOptionalReads(taskKey, inst.SubjectKey), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1089,7 +1111,7 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 	if err != nil {
 		return err
 	}
-	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, nil, egressReads)
+	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, nil, nil, egressReads)
 	if err != nil {
 		return err
 	}
@@ -1120,7 +1142,7 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	requestID := deriveRequestID(inst.InstanceID, lifecycleCursor)
 	// CompletePattern is event-only (no mutations, no reads) — read-free envelope.
 	ob, err := buildOutbox(requestID, opCompletePattern,
-		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil)
+		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1150,7 +1172,7 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 		payload["reason"] = reason
 	}
 	// FailPattern is event-only (no mutations, no reads) — read-free envelope.
-	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil)
+	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil, nil)
 	if err != nil {
 		return err
 	}

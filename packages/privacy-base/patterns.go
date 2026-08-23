@@ -153,12 +153,34 @@ func LoomPatterns() []pkgmgr.LoomPatternSpec {
 					Operation:     "UnbindIdentityCredentials",
 					Reads:         []string{"subject"},
 					OptionalReads: []string{"subject.erasureRequested"},
+					// The script sweeps the identity's credential bindings by
+					// walking `boundTo` in both directions, inbound first
+					// (collect_live_sweep, unbind_identity_credentials.go). Both
+					// walks are declared: the pair is what the op enumerates,
+					// and a commit that drains one direction leaves the other
+					// for the next dispatch, so neither is conditional on data.
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "subject", Relation: "boundTo", Direction: "in"},
+						{Hub: "subject", Relation: "boundTo", Direction: "out"},
+					},
 				},
 				{
 					Kind:          "systemOp",
 					Operation:     "PurgeIdentityDedupFootprint",
 					Reads:         []string{"subject"},
 					OptionalReads: []string{"subject.erasureRequested"},
+					// The script sweeps the identity's dedup-hygiene footprint
+					// one relation class per commit, in cost order
+					// (purge_identity_dedup_footprint.go): the inbound
+					// `indexes` walk, then `duplicateOf` outbound and inbound.
+					// All three are declared — which one a given commit drains
+					// depends on what is left, so the op's walk set is the
+					// union, not whichever branch ran.
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "subject", Relation: "indexes", Direction: "in"},
+						{Hub: "subject", Relation: "duplicateOf", Direction: "out"},
+						{Hub: "subject", Relation: "duplicateOf", Direction: "in"},
+					},
 				},
 			},
 		},

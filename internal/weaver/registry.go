@@ -101,6 +101,14 @@ type GapAction struct {
 	// directOp that must read its candidate vertex (e.g. TombstoneObject) routes
 	// the candidate key from the lens row (row.entityKey) into the op's reads.
 	Reads []string `json:"reads,omitempty"`
+	// Enumerations are the Contract #2 §2.5 class-(e) link walks the dispatched
+	// op runs (`kv.Links`), declared onto the envelope as metadata. Each Hub is
+	// a literal or a row.<column> template resolved from the violation row
+	// through the same resolver as Reads; Relation/Direction are literals. The
+	// walk itself stays a bounded paged live read inside the script — the
+	// declaration makes it visible on the envelope rather than knowable only by
+	// reading the script.
+	Enumerations []GapEnumeration `json:"enumerations,omitempty"`
 
 	// Candidates is the Fire-5 selection surface (§10.8 Planner extension): an
 	// explicit, package-authored set of alternative actions the planner ranks
@@ -168,6 +176,18 @@ type GapAction struct {
 	// (nil unless GoalColumns is set). Unexported: read by resolveGoalAction
 	// and releaseCompletedLeg via rowState's aspectCols bridge.
 	goalColumnPaths map[string]guardgrammar.Path `json:"-"`
+}
+
+// GapEnumeration is one declared kv.Links link-enumeration on a gap's playbook
+// entry (Contract #2 §2.5 — `contextHint.enumerations`): the hub vertex the
+// walk starts from, the link relation walked, and the direction the hub sits in
+// the link ("out" = hub is the link source, "in" = hub is the target). Hub
+// carries a literal or a row.<column> template in the playbook and the resolved
+// concrete key on the wire, the same dual life Reads' plain strings have.
+type GapEnumeration struct {
+	Hub       string `json:"hub"`
+	Relation  string `json:"relation"`
+	Direction string `json:"direction"`
 }
 
 // GapCandidate is one playbook-authored alternative in a gap's `candidates`

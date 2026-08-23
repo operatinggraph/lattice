@@ -60,7 +60,44 @@ type Step struct {
 	// rejected instead, the same doctrine as a kind carrying a foreign field.
 	Reads         []string `json:"reads,omitempty"`
 	OptionalReads []string `json:"optionalReads,omitempty"`
+
+	// Enumerations are the Contract #2 §2.5 class-(e) link walks a systemOp
+	// step's bound op runs (`kv.Links`), declared so the envelope carries the
+	// walk as metadata. Each Hub is a subject-relative template (`subject` or
+	// `subject.<aspect>`), resolved against inst.SubjectKey at submit time
+	// exactly like Reads.
+	//
+	// Metadata, not a hydration directive: the enumeration stays a bounded
+	// paged live read inside the script, and the Processor validates the
+	// declaration's shape and otherwise ignores it. What the declaration buys
+	// is that the walk is visible on the envelope rather than knowable only by
+	// reading the script.
+	//
+	// systemOp-only, enforced by validate, on the same doctrine as Reads: a
+	// userTask's and an externalTask's op are engine-chosen, so the engine —
+	// not the pattern — knows what they enumerate.
+	Enumerations []Enumeration `json:"enumerations,omitempty"`
 }
+
+// Enumeration is one declared kv.Links link-enumeration (Contract #2 §2.5 —
+// `contextHint.enumerations`): the hub vertex the walk starts from, the link
+// relation walked, and the direction the hub sits in the link ("out" = hub is
+// the link source, "in" = hub is the target). Hub carries a subject-relative
+// template on a Step and the resolved concrete key on an outbox record and on
+// the wire, the same dual life Reads' plain strings have.
+type Enumeration struct {
+	Hub       string `json:"hub"`
+	Relation  string `json:"relation"`
+	Direction string `json:"direction"`
+}
+
+// Link directions an Enumeration may declare (Contract #2 §2.5): the hub is
+// either the link's source or its target. The Processor rejects any other
+// value at envelope parse, so pattern load holds the same two.
+const (
+	enumerationOut = "out"
+	enumerationIn  = "in"
+)
 
 // subjectToken is the root of a step's declared-read template grammar: the bare
 // token names the instance subject's vertex, `subject.<aspect>` one of its
@@ -92,6 +129,33 @@ func rejectDeclaredReads(patternID string, idx int, s Step, because string) erro
 		if len(f.entries) != 0 {
 			return fmt.Errorf("pattern %q step %d: %s is a systemOp-only field, not permitted on a %s step (%s)",
 				patternID, idx, f.name, s.Kind, because)
+		}
+	}
+	if len(s.Enumerations) != 0 {
+		return fmt.Errorf("pattern %q step %d: enumerations is a systemOp-only field, not permitted on a %s step (%s)",
+			patternID, idx, s.Kind, because)
+	}
+	return nil
+}
+
+// validateEnumerations checks a systemOp step's declared link walks. Hub runs
+// through the same subject-relative grammar as a declared read (the hub is a
+// key, and the same charset argument applies once it is rendered), and the
+// relation/direction pair is held to the shape the Processor's envelope parse
+// enforces — hub and relation non-empty, direction one of "out"/"in". Holding
+// it here means a pattern whose declaration the Processor would reject
+// terminally on every redelivery never loads.
+func validateEnumerations(patternID string, idx int, entries []Enumeration) error {
+	for i, e := range entries {
+		if err := validateSubjectTemplates(patternID, idx, fmt.Sprintf("enumerations[%d].hub", i), []string{e.Hub}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(e.Relation) == "" {
+			return fmt.Errorf("pattern %q step %d: enumerations[%d] requires a relation", patternID, idx, i)
+		}
+		if e.Direction != enumerationOut && e.Direction != enumerationIn {
+			return fmt.Errorf("pattern %q step %d: enumerations[%d] direction must be %q or %q, got %q",
+				patternID, idx, i, enumerationOut, enumerationIn, e.Direction)
 		}
 	}
 	return nil
@@ -304,6 +368,9 @@ func (p *Pattern) validate() error {
 					return err
 				}
 				if err := validateSubjectTemplates(p.PatternID, i, "optionalReads", s.OptionalReads); err != nil {
+					return err
+				}
+				if err := validateEnumerations(p.PatternID, i, s.Enumerations); err != nil {
 					return err
 				}
 			}

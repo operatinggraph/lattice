@@ -413,6 +413,15 @@ type GapActionSpec struct {
 	// the candidate vertex it must read). Used by directOp; the candidate id is
 	// already in the target lens row, so this just routes it into the op's reads.
 	Reads []string
+	// Enumerations are the dispatched op's ContextHint.Enumerations — the
+	// Contract #2 §2.5 class-(e) kv.Links walks its script runs, declared onto
+	// the envelope as metadata. Used by directOp. Each Hub is a literal or a
+	// row.<column> template resolved from the violation row exactly like a
+	// Reads entry; Relation/Direction are literals. Declaring a walk does not
+	// change how the script runs it (bounded, paged, live) — it puts the walk
+	// on the envelope rather than leaving it knowable only by reading the
+	// script.
+	Enumerations []EnumerationSpec
 	// IssueCode/IssueSeverity are consulted only when Action == "surface" (FR29's
 	// "surface, never dispatch" gap, Contract #10 §10.8) — the Health-KV issue
 	// code/severity raised while the gap is open, cleared on close. No op is
@@ -447,6 +456,20 @@ type GapActionSpec struct {
 	// column, or an aspect path this gap's GoalColumns bridges) so no entry is
 	// permanently ineligible or un-satisfiable.
 	Actions []ActionCatalogEntrySpec
+}
+
+// EnumerationSpec is one declared kv.Links link-enumeration (Contract #2 §2.5
+// — `contextHint.enumerations`): the hub vertex the walk starts from, the link
+// relation walked, and the direction the hub sits in the link ("out" = hub is
+// the link source, "in" = hub is the target). Relation and Direction are always
+// literals; Hub's template grammar belongs to the surface carrying it — a gap's
+// enumeration resolves it against the violation row (`row.<column>`), a loom
+// step's against the instance subject (`subject`, `subject.<aspect>`), each the
+// same grammar that surface's Reads use.
+type EnumerationSpec struct {
+	Hub       string `json:"hub"`
+	Relation  string `json:"relation"`
+	Direction string `json:"direction"`
 }
 
 // ActionCatalogEntrySpec mirrors the engine's ActionCatalogEntry (Contract #10
@@ -543,6 +566,16 @@ type StepSpec struct {
 	// declared set on either kind rejects the whole pattern.
 	Reads         []string
 	OptionalReads []string
+
+	// Enumerations are the Contract #2 §2.5 class-(e) kv.Links walks a systemOp
+	// step's bound op runs, declared onto the envelope as metadata. Each Hub is
+	// a subject-relative template resolved against the instance's subjectKey at
+	// submit time, exactly like a Reads entry; Relation/Direction are literals.
+	//
+	// systemOp-only, on the same grounds as Reads: a userTask's and an
+	// externalTask's op are engine-chosen, so the engine — not the pattern —
+	// knows what they walk.
+	Enumerations []EnumerationSpec
 }
 
 // OpMetaSpec is one op-meta vertex a package declares so an op is discoverable

@@ -152,6 +152,7 @@ type GapActionArtifact struct {
 	Target        string            `json:"target,omitempty"`
 	Params        map[string]string `json:"params,omitempty"`
 	Reads         []string          `json:"reads,omitempty"`
+	Enumerations  []EnumerationSpec `json:"enumerations,omitempty"`
 	IssueCode     string            `json:"issueCode,omitempty"`
 	IssueSeverity string            `json:"issueSeverity,omitempty"`
 }
@@ -183,15 +184,16 @@ type WeaverTargetArtifactContent struct {
 // (§10.5), reused verbatim so an AI-authored step can never carry a shape the
 // engine wouldn't already accept from a hand-authored package.
 type StepArtifact struct {
-	Kind          string         `json:"kind"`
-	Operation     string         `json:"operation,omitempty"`
-	Guard         map[string]any `json:"guard,omitempty"`
-	Adapter       string         `json:"adapter,omitempty"`
-	Params        map[string]any `json:"params,omitempty"`
-	ReplyOp       string         `json:"replyOp,omitempty"`
-	InstanceOp    string         `json:"instanceOp,omitempty"`
-	Reads         []string       `json:"reads,omitempty"`
-	OptionalReads []string       `json:"optionalReads,omitempty"`
+	Kind          string            `json:"kind"`
+	Operation     string            `json:"operation,omitempty"`
+	Guard         map[string]any    `json:"guard,omitempty"`
+	Adapter       string            `json:"adapter,omitempty"`
+	Params        map[string]any    `json:"params,omitempty"`
+	ReplyOp       string            `json:"replyOp,omitempty"`
+	InstanceOp    string            `json:"instanceOp,omitempty"`
+	Reads         []string          `json:"reads,omitempty"`
+	OptionalReads []string          `json:"optionalReads,omitempty"`
+	Enumerations  []EnumerationSpec `json:"enumerations,omitempty"`
 }
 
 // LoomPatternArtifactContent is the JSON shape of a "loomPattern"-kind
@@ -476,6 +478,7 @@ var knownGapActionFields = map[string]bool{
 	"target":        true,
 	"params":        true,
 	"reads":         true,
+	"enumerations":  true,
 	"issueCode":     true,
 	"issueSeverity": true,
 }
@@ -545,6 +548,7 @@ var knownStepFields = map[string]bool{
 	"instanceOp":    true,
 	"reads":         true,
 	"optionalReads": true,
+	"enumerations":  true,
 }
 
 // unknownLoomPatternFields decodes content as a generic JSON object and returns
@@ -639,6 +643,7 @@ func weaverTargetArtifactDefinition(wc WeaverTargetArtifactContent, name, versio
 			Target:        ga.Target,
 			Params:        ga.Params,
 			Reads:         ga.Reads,
+			Enumerations:  ga.Enumerations,
 			IssueCode:     ga.IssueCode,
 			IssueSeverity: ga.IssueSeverity,
 		}

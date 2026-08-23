@@ -112,6 +112,11 @@ type plan struct {
 	// assignTask dedup key derives from the claimId-seeded stable taskId. Nil
 	// for ops that read no absence-tolerant keys.
 	optionalReads func(claimID string) []string
+	// enumerations is the dispatched op's ContextHint.Enumerations (Contract #2
+	// §2.5 class (e)): the kv.Links walks the op's script runs, each hub already
+	// resolved from the violation row. Metadata on the envelope — nothing
+	// hydrates from it. Empty for every op that walks no links.
+	enumerations []GapEnumeration
 	// requestID, when non-nil, overrides the ordinary episode-scoped
 	// deriveEpisodeRequestID derivation for this op (Fire 2b's proposedOp
 	// dispatch: the proposed remediation's requestId must be PROPOSAL-scoped,
@@ -278,12 +283,32 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			}
 			reads = append(reads, r)
 		}
+		// The dispatched op's declared link walks: the hub travels the SAME
+		// resolver as a declared read (it is a key, in the same template
+		// grammar), while relation and direction are literals the playbook
+		// states outright. Declaring the walk does not change what the script
+		// does — the kv.Links call is a bounded paged live read either way — it
+		// puts the walk on the envelope instead of leaving it knowable only by
+		// reading the script.
+		var enumerations []GapEnumeration
+		for i, en := range ga.Enumerations {
+			hub, perr := resolveReadKey(fmt.Sprintf("enumerations[%d].hub", i), en.Hub, row)
+			if perr != nil {
+				return nil, perr
+			}
+			enumerations = append(enumerations, GapEnumeration{
+				Hub:       hub,
+				Relation:  en.Relation,
+				Direction: en.Direction,
+			})
+		}
 		return &plan{
 			operationType: ga.Operation,
 			class:         ga.Class,
 			authTarget:    authTarget,
 			payload:       func(string) map[string]any { return params },
 			reads:         reads,
+			enumerations:  enumerations,
 		}, nil
 
 	case actionProposedOp:

@@ -107,6 +107,15 @@ type outboxRecord struct {
 	// known-absent when missing — never a HydrationMiss. Same additive
 	// backward-compat as Reads.
 	OptionalReads []string `json:"optionalReads,omitempty"`
+	// Enumerations is the dispatched op's ContextHint.Enumerations (Contract #2
+	// §2.5 class (e) — declared kv.Links link walks): the step's declared
+	// enumerations with each Hub already resolved to a concrete vertex key.
+	// The relay copies it onto the op envelope as metadata; nothing hydrates
+	// from it (the walk runs live and paged inside the script). Additive +
+	// backward-compatible: an older persisted record with no Enumerations
+	// field decodes to nil → an envelope declaring no walks, exactly as
+	// before.
+	Enumerations []Enumeration `json:"enumerations,omitempty"`
 	// EgressReads is the dispatched op's ContextHint.EgressReads (Contract #2
 	// §2.5 class (f), sensitive-param-egress design §3.4): an externalTask
 	// instanceOp's subject-templated aspect keys, hydrated ref-if-sensitive
