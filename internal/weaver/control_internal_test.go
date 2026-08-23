@@ -371,7 +371,7 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyGapConfig("t1", "missing_x"),
 		issueKeyDataEntity("t1", entityA, "missing_x"),
 		issueKeyDataEntity("t1", entityB, freshUntilColumn),
-		issueKeyData("t1", "entityKey"),
+		issueKeyDataEntity("t1", entityB, "entityKey"),
 		issueKeyInflightMismatch("t1", "missing_x"),
 	}
 	for _, key := range revoked {

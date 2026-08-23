@@ -337,6 +337,145 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		if sev := issueSeverity(h.engine.issues.snapshot(), "RowDataError"); sev != "warning" {
 			t.Fatalf("a violating row missing entityKey must surface a `warning` (degraded) RowDataError, got %q", sev)
 		}
+		// The fact is about the one row that projected without its echo, so the
+		// entry hangs at that row's key — not at a per-target one every sibling
+		// row would share.
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "entityKey")); !ok {
+			t.Fatalf("the RowDataError must be keyed to the row that carries it, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+}
+
+// TestHandleRow_MissingEntityKeyIssueIsLevelDriven pins the LIFECYCLE of the
+// malformed-anchor entry, not just its raise: the decision is re-taken on every
+// delivery that reaches reconciliation, so a repaired projection retires the
+// entry with no restart — the echo appearing, the row ceasing to violate, and
+// either of those while the target is DISABLED, which is the case that holds the
+// step's placement above the dispatch-skip return. The entity-deletion and
+// two-entity subtests pin what the per-entity key shape buys: the entry rides
+// the existing entity-teardown prefix clear, and two entities missing their echo
+// on the SAME target are two independent entries where repairing one leaves the
+// other standing.
+func TestHandleRow_MissingEntityKeyIssueIsLevelDriven(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const targetID = "fixtureAnchorLatch"
+	// seed returns a harness with the target registered and one entity's
+	// violating-but-anchorless row already delivered, so each subtest starts from
+	// a standing entry and asserts only what retires it.
+	seed := func(t *testing.T) (*handlerHarness, string) {
+		t.Helper()
+		h := newHandlerHarness(t, ctx)
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				"missing_y": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"},
+			},
+		})
+		entityID := testNanoID(t)
+		bare := map[string]any{"violating": true, "missing_y": true}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, bare, 5, 1)); dec != substrate.Ack {
+			t.Fatalf("a row missing entityKey must Ack (skip), got %v", dec)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "entityKey")); !ok {
+			t.Fatalf("setup: the anchor issue must stand, issues = %+v", h.engine.issues.snapshot())
+		}
+		return h, entityID
+	}
+	requireRetired := func(t *testing.T, h *handlerHarness, entityID string) {
+		t.Helper()
+		if is, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "entityKey")); ok {
+			t.Fatalf("the anchor issue must not survive this delivery; still standing as %+v", is)
+		}
+	}
+
+	t.Run("re-projected with its entityKey", func(t *testing.T) {
+		h, entityID := seed(t)
+		// The pattern is not installed, so the repaired row defers on the
+		// reference — the anchor entry must still retire: the read that clears it
+		// runs before the dispatch leg is reached at all.
+		fixed := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_y": true}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, fixed, 6, 1)); dec != substrate.NakWithDelay {
+			t.Fatalf("repaired row with an unresolved pattern must NakWithDelay, got %v", dec)
+		}
+		requireRetired(t, h, entityID)
+	})
+
+	t.Run("re-projected not violating", func(t *testing.T) {
+		h, entityID := seed(t)
+		quiet := map[string]any{"violating": false}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, quiet, 6, 1)); dec != substrate.Ack {
+			t.Fatalf("a non-violating row must Ack, got %v", dec)
+		}
+		requireRetired(t, h, entityID)
+	})
+
+	t.Run("disabled target still retires the repaired row", func(t *testing.T) {
+		// The clear sits ABOVE the dispatch-skip return, so disablement — which
+		// stops remediation, not detection bookkeeping — cannot strand the entry.
+		// Moving the raise/clear below that return leaves every other case in this
+		// test green, so this subtest is what holds the placement.
+		h, entityID := seed(t)
+		h.engine.disabled.set(targetID, true)
+		fixed := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_y": true}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, fixed, 6, 1)); dec != substrate.Ack {
+			t.Fatalf("a disabled target's row must Ack at the dispatch skip, got %v", dec)
+		}
+		requireRetired(t, h, entityID)
+	})
+
+	t.Run("entity deleted, retired by the data-family prefix clear", func(t *testing.T) {
+		// The deletion tombstone is retired wholesale by clearClosedMarks'
+		// clearPrefix over `data:<target>.<entity>.`, which runs before the
+		// raise/clear step reaches its own no-op clear. What this pins is that the
+		// entityKey entry sits under that prefix — the per-entity key shape is what
+		// buys the entity teardown for free.
+		h, entityID := seed(t)
+		tombstone := substrate.Message{
+			Subject:      h.engine.rowSubjectPrefix + targetID + "." + entityID,
+			Sequence:     6,
+			NumDelivered: 1,
+		}
+		if dec := h.engine.handleRow(ctx, tombstone); dec != substrate.Ack {
+			t.Fatalf("the deletion tombstone must Ack, got %v", dec)
+		}
+		requireRetired(t, h, entityID)
+	})
+
+	t.Run("two entities on one target are independent", func(t *testing.T) {
+		h, entityA := seed(t)
+		entityB := testNanoID(t)
+		bare := map[string]any{"violating": true, "missing_y": true}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityB, bare, 6, 1)); dec != substrate.Ack {
+			t.Fatalf("a row missing entityKey must Ack (skip), got %v", dec)
+		}
+		keyA := issueKeyDataEntity(targetID, entityA, "entityKey")
+		keyB := issueKeyDataEntity(targetID, entityB, "entityKey")
+		if _, ok := issueAt(h.engine.issues, keyA); !ok {
+			t.Fatalf("entity A's anchor issue must stand, issues = %+v", h.engine.issues.snapshot())
+		}
+		if _, ok := issueAt(h.engine.issues, keyB); !ok {
+			t.Fatalf("entity B's anchor issue must stand alongside A's, issues = %+v", h.engine.issues.snapshot())
+		}
+
+		// Repair only B: A's row is still anchorless, so its entry must survive.
+		fixedB := map[string]any{"entityKey": "vtx.leaseApp." + entityB, "violating": false}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityB, fixedB, 7, 1)); dec != substrate.Ack {
+			t.Fatalf("repaired non-violating row must Ack, got %v", dec)
+		}
+		if _, ok := issueAt(h.engine.issues, keyB); ok {
+			t.Fatalf("entity B's anchor issue must retire on its own repair, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+		if _, ok := issueAt(h.engine.issues, keyA); !ok {
+			t.Fatalf("repairing entity B retired entity A's issue; the two rows are independent facts")
+		}
 	})
 }
 

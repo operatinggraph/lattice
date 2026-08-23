@@ -65,6 +65,30 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	violating := row != nil && e.boolColumn(targetID, entityID, row, "violating")
 	e.contraction.observe(targetID, entityID, violating)
 
+	// Anchor bookkeeping, decided on every delivery that reaches here — a row key
+	// that parses, a registered target, a body that parses, mark-clearing that
+	// succeeded — alongside the contraction monitor above. The fact is "this row
+	// is violating and its body carries no entityKey echo (§10.2)"; not violating
+	// or echo present is the repair, so the same read that raises the entry also
+	// retires it and the next projection of a fixed row clears the level signal.
+	// Runs for a disabled target too: like the two steps above it is
+	// violation-detection bookkeeping, and gating it on enablement would strand
+	// the entry of a row whose target is disabled after the raise. A tombstone
+	// takes the clear branch on the nil map's empty-string index, behind the
+	// data-family prefix clear clearClosedMarks already ran for it.
+	// The log line and the Health entry are one loud-failure pair, raised
+	// together from the one read that decides the fact, so every delivery that
+	// surfaces the entry also names the row in the log — a disabled target
+	// included.
+	entityKey, _ := row["entityKey"].(string)
+	if violating && entityKey == "" {
+		anchorless := "weaver-targets row " + key + " is violating but carries no entityKey"
+		e.logger.Warn("weaver: " + anchorless)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, "entityKey"), "warning", "RowDataError", anchorless)
+	} else {
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, "entityKey"))
+	}
+
 	if row == nil {
 		return substrate.Ack
 	}
@@ -96,18 +120,14 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		return substrate.Ack
 	}
 
-	entityKey, _ := row["entityKey"].(string)
 	if entityKey == "" {
 		// §10.2 requires the entityKey echo; without it the mark and the
 		// remediation cannot name the candidate. A single malformed anchor row is
-		// a per-row DATA error: surface it and skip the row, but keep remediating
-		// every other row — Weaver still fulfils its primary responsibility, so
-		// this is a Contract #5 §5.2 `warning` (degraded), never an `error`
-		// (unhealthy = cannot fulfil the responsibility). Redelivery cannot fix
-		// the projected row.
-		msg := "weaver-targets row " + key + " is violating but carries no entityKey"
-		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, "entityKey"), "warning", "RowDataError", msg)
+		// a per-row DATA error: skip the row (the bookkeeping above holds both
+		// halves of the signal) but keep remediating every other row — Weaver
+		// still fulfils its primary responsibility, so this is a Contract #5 §5.2
+		// `warning` (degraded), never an `error` (unhealthy = cannot fulfil the
+		// responsibility). Redelivery cannot fix the projected row.
 		return substrate.Ack
 	}
 
@@ -1255,24 +1275,22 @@ func issueKeyGapConfig(targetID, col string) string {
 }
 
 // issueKeyDataEntity keys a per-ROW data error — a column whose value is not
-// the §10.2 type the reader expects, a template reference that resolves null,
-// a freshUntil that is not an RFC3339 string. Every one of these is a fact
-// about the one projected row that carries the bad value, fixed for that row
-// alone by the next projection, so the key carries the entity segment: N
-// malformed rows are N independent issues, and repairing one never retires
-// another's.
+// the §10.2 type the reader expects, a template reference that resolves null, a
+// freshUntil that is not an RFC3339 string, a violating row carrying no
+// entityKey echo. Every one of these is a fact about the one projected row that
+// carries the bad value, fixed for that row alone by the next projection, so the
+// key carries the entity segment: N malformed rows are N independent issues, and
+// repairing one never retires another's. The entity the body may be missing is
+// always available from the row KEY (splitRowKey), so every member of the family
+// can be keyed this way. Three teardowns cover the whole family: the read that
+// raises an entry also retires it, clearClosedMarks prefix-clears the entity on
+// its deletion tombstone, and a target leaving by either route — Revoke or
+// registry removal (reconcileConsumers) — prefix-clears the target
+// (issueKeyTargetPrefixes). Between them no exit from handleRow leaves an entry
+// no later pass can reach.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
 }
-
-// issueKeyData keys the malformed-anchor data error raised when a violating row
-// carries no entityKey echo (§10.2). It is keyed per (target, column) with no
-// entity segment — not for want of an entity, which the row KEY supplies
-// (splitRowKey) whatever the body is missing, but because nothing on the live
-// path retires this entry: an entity segment would multiply a permanently
-// standing issue rather than retire any. A target teardown retires it with the
-// rest of the data family (issueKeyTargetPrefixes).
-func issueKeyData(targetID, col string) string { return issuePrefixData + targetID + "." + col }
 
 func issueKeyInflightMismatch(targetID, col string) string {
 	return issuePrefixInflightMismatch + targetID + "." + col

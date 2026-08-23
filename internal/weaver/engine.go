@@ -497,6 +497,16 @@ func (e *Engine) reconcileConsumers() {
 		}
 		e.issues.clear(issueKeyConsumer(id))
 		delete(e.targets, id)
+		// A target leaving the registry retires its whole standing issue set, not
+		// just its consumer's entry. The gap/data/inflight families are keyed per
+		// (entity, column) below the target, so there is no single key to name,
+		// and an unregistered target's rows return at handleRow's registry miss —
+		// no live path can reach a clear once the registration is gone. This is
+		// the same prefix set Revoke retires, so a target torn down by either
+		// route leaves nothing standing; the two overlap idempotently.
+		for _, prefix := range issueKeyTargetPrefixes(id) {
+			e.issues.clearPrefix(prefix)
+		}
 		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states)
 		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("weaver target consumer health-state cleanup failed", "targetId", id, "durable", name, "err", err)
