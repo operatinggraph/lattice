@@ -1173,9 +1173,10 @@ func (e *Engine) alert(key, severity, code, message string) {
 // teardown prefix in issueKeyTargetPrefixes is built from these, so a key shape
 // and the prefix that retires it cannot drift apart.
 const (
-	issuePrefixGapEntity = "gap:"
-	issuePrefixGapConfig = "gapConfig:"
-	issuePrefixData      = "data:"
+	issuePrefixGapEntity        = "gap:"
+	issuePrefixGapConfig        = "gapConfig:"
+	issuePrefixData             = "data:"
+	issuePrefixInflightMismatch = "inflightMismatch:"
 )
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
@@ -1185,11 +1186,20 @@ const (
 // keyed by targetID alone (consumer, timer, owner) are cleared by key at the
 // same site. Each prefix ends in the "." separator, which is what keeps "t1."
 // from matching a key under "t10.".
+//
+// Every family whose entries a revoke would otherwise strand belongs here: a
+// revoked target delivers no rows and keeps no marks, so each of these has no
+// live path left that could ever retire it. The effect family is the one
+// deliberate omission — it needs no prefix clear, because flagEffectMismatches
+// reconciles its alert set against every heartbeat's scan and Revoke deletes
+// the target's `__effect` windows, so those entries self-clear on the next
+// heartbeat.
 func issueKeyTargetPrefixes(targetID string) []string {
 	return []string{
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
 		issuePrefixData + targetID + ".",
+		issuePrefixInflightMismatch + targetID + ".",
 	}
 }
 
@@ -1233,7 +1243,7 @@ func issueKeyDataEntity(targetID, entityID, col string) string {
 func issueKeyData(targetID, col string) string { return issuePrefixData + targetID + "." + col }
 
 func issueKeyInflightMismatch(targetID, col string) string {
-	return "inflightMismatch:" + targetID + "." + col
+	return issuePrefixInflightMismatch + targetID + "." + col
 }
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
 	return "effect:" + targetID + "." + gapColumn + "." + actionRef
