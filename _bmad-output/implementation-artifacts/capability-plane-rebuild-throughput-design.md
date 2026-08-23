@@ -93,11 +93,28 @@ watermark must publish **no** audit entry, while an identical accepted write mus
 
 - **Not narrowing the broad consumer filter.** It is a fail-closed consequence of non-exhaustive label
   derivation; narrowing it without reshaping the cypher would grant access under partial expansion.
-- **Not changing actor fan-out.** Per-message actor attribution during a rebuild is a real open question
-  (`DerivationModeAct` exists but falls back to enumeration when its index is not ready); it needs a design
-  pass, filed separately.
+- **Not changing actor fan-out.** `DerivationModeAct` is the built-in default, and the refractor's own log
+  records why it cannot act on these three lenses — a **static** refusal, fixed for the life of the
+  ruleState, not a per-event fall-back (no `anchor-derivation tally` line is ever emitted for them):
+
+  | lens | logged refusal reason |
+  |---|---|
+  | `capabilityServiceAccess` | *"pattern carries a variable-length relationship"* |
+  | `edgeManifestReadGrants` | *"pattern carries a variable-length relationship"* |
+  | `landlordLeaseApplicationsRead` | *"it uses target-diff retraction, which would read a per-anchor row set as every OTHER anchor's rows"* |
+
+  The variable-length hop is the same root that forces the broad consumer filter, so filter breadth and
+  actor enumeration are one gap seen twice, not two. Deriving anchors across a variable-length relationship
+  is an absent primitive with no ratified pattern to extend — filed as a designer pass, not built here.
 - **Not touching `Wrote` semantics or the guarded watermark write.**
 - **Not changing `REFRACTOR_AUDIT` limits.** Retention returns on its own once the firehose stops.
+
+### Saturation symptoms, deliberately not filed
+
+`refractor.log` carries **7** ERROR lines total for the whole 7 h run — `context deadline exceeded` on a
+`capability-kv` list/get inside fan-out evaluation. They are the load showing through, not an independent
+defect, and they have no separate mechanism to fix; they should disappear with the firehose. Re-check after
+the fix rather than filing them now.
 
 ## 6. Fire brief (build note)
 
