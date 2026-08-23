@@ -153,6 +153,7 @@ func main() {
 	fmt.Printf("==> landlord:        %s manages %s\n", landlordKey, unitKey)
 	reapExcessCoManagers(ctx, conn, adminKey, unitKey, landlordKey)
 	reapDuplicateListings(ctx, conn, adminKey, unitKey)
+	backfillBareListings(ctx, conn, adminKey)
 
 	salt, err := substrate.NewNanoID()
 	must(err, "generate consumer email salt")
@@ -563,6 +564,36 @@ func reapDuplicateListings(ctx context.Context, conn *substrate.Conn, adminKey, 
 			map[string]any{"locationKey": key},
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate listing: %s (12 Classic Demo Ave)\n", key)
+	}
+}
+
+// backfillBareListings gives every live vtx.unit.* still missing a `.listing`
+// aspect an address + an available listing (verticals.md "The applicant
+// storefront is empty and cannot refill"). This script only ever manages its
+// one pinned unitID, so once that unit's lease is signed (status flips to
+// "leased"), /api/listings has nothing left to show — units minted by
+// earlier seed/verify runs sit alive in Core KV with no address or listing
+// at all, permanently unlistable even though they're real vacant inventory.
+// Filtered to root unit keys only (exactly two dots, `vtx.unit.<id>`) so a
+// unit's own `.address`/`.listing`/`.presentation` sub-keys, which also carry
+// the "vtx.unit." prefix, aren't mistaken for separate units.
+func backfillBareListings(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.unit.")
+	must(err, "list vtx.unit. keys")
+	sort.Strings(keys)
+	for i, key := range keys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) || alive(ctx, conn, key+".listing") {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+			map[string]any{"unit": key, "line1": fmt.Sprintf("%d Backfill Ave", i+1),
+				"city": "Springfield", "region": "OR", "postal": "97477"},
+			&processor.ContextHint{Reads: []string{key}})
+		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+			map[string]any{"unit": key, "rentAmount": 1800, "rentCurrency": "USD", "bedrooms": 1,
+				"availableFrom": time.Now().UTC().Format(time.RFC3339), "leaseTermMonths": 12, "status": "available"},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> backfilled listing: %s (available)\n", key)
 	}
 }
 
