@@ -1542,14 +1542,29 @@ async function cancelOwnClass(se, mine) {
 async function renderReassignControl(se, generation) {
   if (!se || !isStaff()) return;
   let instructors = [];
+  let studios = [];
   try {
     instructors = await loadInstructors();
   } catch (e) {
     // Falls back to an instructor-less form (clear/time-move still work)
     // rather than hiding the whole control over a picker-only failure.
   }
+  try {
+    studios = await loadStudios();
+  } catch (e) {
+    // Falls back to a studio-less form (every other edit still works) —
+    // same reasoning as the instructor picker above.
+  }
   if (generation !== rosterGeneration) return;
 
+  // The studio field is the newStudio repair path's only FE caller
+  // (ReassignSession, packages/wellness-domain/ddls.go): the op is
+  // operator-only regardless of hat, same as the instructor/time edits
+  // above, so this is offered to every staffer and the server is the real
+  // gate — the affordance, not the authority. A missingStudio session (its
+  // atStudio link already tombstoned by TombstoneStudio) starts on no
+  // selection and needs one picked before Save; a live session starts on
+  // its current studio and only submits newStudio when the pick changes.
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
   wrap.innerHTML =
@@ -1559,6 +1574,11 @@ async function renderReassignControl(se, generation) {
     '<option value="">(no change)</option>' +
     '<option value="__clear__">(remove instructor)</option>' +
     instructors.map((i) => '<option value="' + esc(i.instructorKey) + '">' + esc(i.displayName) + "</option>").join("") +
+    "</select></div>" +
+    '<div class="field"><label>' + (se.missingStudio ? "Repair studio" : "Studio") + "</label>" +
+    '<select id="reassign-studio">' +
+    (se.missingStudio ? '<option value="">(pick a studio)</option>' : '<option value="">(no change)</option>') +
+    studios.map((s) => '<option value="' + esc(s.studioKey) + '">' + esc(s.name) + "</option>").join("") +
     "</select></div>" +
     '<div class="field"><label>New start</label><input type="datetime-local" id="reassign-starts" step="900" /></div>' +
     '<div class="field"><label>New end</label><input type="datetime-local" id="reassign-ends" step="900" /></div>' +
@@ -1571,6 +1591,8 @@ async function renderReassignControl(se, generation) {
 
   const select = document.getElementById("reassign-instructor");
   if (se.instructorKey) select.value = se.instructorKey;
+  const studioSelect = document.getElementById("reassign-studio");
+  if (!se.missingStudio && se.studioKey) studioSelect.value = se.studioKey;
   document.getElementById("reassign-name").value = se.name || "";
   document.getElementById("reassign-capacity").value = se.capacity || "";
   document.getElementById("reassign-price").value = se.priceCents ? (se.priceCents / 100).toFixed(2) : "";
@@ -1611,8 +1633,27 @@ async function reassignSession(se) {
   const nameInput = document.getElementById("reassign-name").value.trim();
   const capacityInput = document.getElementById("reassign-capacity").value;
   const priceInput = document.getElementById("reassign-price").value;
+  const studioSelect = document.getElementById("reassign-studio");
+  const studioPicked = studioSelect.value;
 
-  const payload = { sessionKey: se.sessionKey, studio: se.studioKey };
+  const payload = { sessionKey: se.sessionKey };
+  // studio/newStudio: a missingStudio session (its atStudio link already
+  // TombstoneStudio'd out from under it, sessions.go) carries no current
+  // studio to confirm, so the repair path omits `studio` entirely and
+  // supplies ONLY newStudio — the server derives the dead current studio
+  // off the session's own still-live atStudio link instead (ddls.go's
+  // operator-repair branch). A live session keeps sending its confirmed
+  // current studio unconditionally (unchanged from before this control
+  // existed) and adds newStudio only when the pick actually changed —
+  // ordinary reassign edits (instructor/time/name/etc.) must keep working
+  // exactly as they did with no studio touched at all.
+  if (se.missingStudio) {
+    if (!studioPicked) throw new Error("Pick a studio to repair this class's location.");
+    payload.newStudio = studioPicked;
+  } else {
+    payload.studio = se.studioKey;
+    if (studioPicked && studioPicked !== se.studioKey) payload.newStudio = studioPicked;
+  }
 
   // name/capacity/price: only sent when the field actually changed from the
   // card's current value — the server-side default for an omitted field is
@@ -1633,8 +1674,17 @@ async function reassignSession(se) {
   }
   const reads = [se.sessionKey, se.sessionKey + ".schedule"];
   // The atStudio link is required on every branch — require_matching_studio
-  // runs before any of the edits below (ddls.go).
-  const optionalReads = ["lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey)];
+  // runs before any of the edits below (ddls.go). A missingStudio session
+  // has none to declare (there is nothing live at that relation).
+  const optionalReads = se.studioKey
+    ? ["lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey)]
+    : [];
+  if (payload.newStudio) {
+    // (a)-declared required read — require_live_typed validates it alive +
+    // class=studio before the move (ddls.go), mirrors newInstructor's
+    // convention just below.
+    reads.push(payload.newStudio);
+  }
 
   if (select.value === "__clear__") {
     payload.clearInstructor = true;
@@ -1651,9 +1701,20 @@ async function reassignSession(se) {
     if (!(Date.parse(startsAt) < Date.parse(endsAt))) throw new Error("End time must be after start time.");
     payload.startsAt = startsAt;
     payload.endsAt = endsAt;
-    // Every cell either span could touch is a (d)-declared optionalRead —
-    // the script releases what only the OLD span held and claims what only
-    // the NEW span needs (mirrors CreateSession's slotCellKeys usage).
+  }
+
+  // Studio cells (studioSlotClaim, ddls.go). Same-studio time move: every
+  // cell either span could touch is a (d)-declared optionalRead — the
+  // script releases what only the OLD span held and claims what only the
+  // NEW span needs (mirrors CreateSession's slotCellKeys usage). Studio
+  // move: the script releases ALL of the OLD studio's cells (resolved live
+  // off the session's own atStudio link for a missingStudio repair — the FE
+  // has no key to declare there) and claims ALL of the NEW studio's cells
+  // for the span this call leaves it holding; only the new side is
+  // nameable from here.
+  if (payload.newStudio) {
+    optionalReads.push(...slotCellKeys(payload.newStudio, payload.startsAt || se.startsAt, payload.endsAt || se.endsAt));
+  } else if (startsAt || endsAt) {
     optionalReads.push(...slotCellKeys(se.studioKey, se.startsAt, se.endsAt));
     optionalReads.push(...slotCellKeys(se.studioKey, startsAt, endsAt));
   }
@@ -1675,12 +1736,13 @@ async function reassignSession(se) {
   if (
     payload.clearInstructor === undefined &&
     payload.newInstructor === undefined &&
+    payload.newStudio === undefined &&
     payload.startsAt === undefined &&
     payload.name === undefined &&
     payload.capacity === undefined &&
     payload.priceCents === undefined
   ) {
-    throw new Error("Pick a new instructor, a new time, or edit the name/capacity/price.");
+    throw new Error("Pick a new instructor, a new studio, a new time, or edit the name/capacity/price.");
   }
 
   await opOrThrow(
