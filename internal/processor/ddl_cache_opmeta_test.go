@@ -212,7 +212,7 @@ func TestDDLCache_DispatchReadsAreNotAFloor(t *testing.T) {
 	env.Payload = []byte(`{"hardKey":"` + hard + `","softKey":"` + soft + `"}`)
 	base := declaredReads{Reads: []string{hard, soft}}
 
-	got := applyDescriptorFloor(base, templates, env, testLogger())
+	got := applyFloor(base, templates, env, testLogger())
 	if !slices.Contains(got.Reads, hard) {
 		t.Fatalf("Reads = %v, want %q still fail-closed — a descriptor `reads` key is not a floor", got.Reads, hard)
 	}

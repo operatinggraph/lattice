@@ -194,18 +194,25 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// untouched — the entrypoint is read off the already-compiled program, so
 	// the check costs no invocation.
 	declared := declaredReadsFromEnvelope(env)
-	// The descriptor floor is applied FIRST, to the envelope's own declaration
-	// (Contract #2 §2.5, "the descriptor's disposition is a floor the envelope
-	// cannot raise"). Before derive_reads, so mergeDerivedReads' "the
-	// envelope's disposition stands" rule sees the DEMOTED set and a derived
-	// `reads` entry cannot re-harden what the floor just softened. See
-	// applyDescriptorFloor for the full precedence, and for why an
+	// One descriptor floor, resolved against this envelope and consulted by
+	// both arms of the declared set (Contract #2 §2.5, "the descriptor's
+	// disposition is a floor the envelope cannot raise").
+	//
+	// The ENVELOPE's own declaration is floored FIRST, before derive_reads, so
+	// mergeDerivedReads' "the envelope's disposition stands" rule sees the
+	// DEMOTED set and a derived `reads` entry cannot re-harden what the floor
+	// just softened. The merge then asks the SAME resolver about the keys the
+	// derivation produced that the envelope never declared — the ones this
+	// demotion pass has no subject for — and refuses a required one the floor
+	// covers. See applyDescriptorFloor for the full precedence, and for why an
 	// unresolvable descriptor demotes nothing rather than everything.
+	var floor *descriptorFloorResolver
 	if templates, hasDescriptor := h.DDLs.DispatchReadTemplates(env.OperationType); hasDescriptor {
-		declared = applyDescriptorFloor(declared, templates, env, h.Logger)
+		floor = newDescriptorFloorResolver(templates, env, h.Logger)
+		declared = applyDescriptorFloor(declared, floor, env, h.Logger)
 	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
-		derived, err := deriveReads(ctx, prog, env, declared, h.deriveBudget(), h.PrimordialActors)
+		derived, err := deriveReads(ctx, prog, env, declared, floor, h.deriveBudget(), h.PrimordialActors)
 		if err != nil {
 			return HydratedState{}, err
 		}

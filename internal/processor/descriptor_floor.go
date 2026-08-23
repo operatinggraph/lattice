@@ -61,6 +61,15 @@ import (
 //     disposition — the same weakest-wins answer the derived-vs-envelope rule
 //     already gives, reached without a second rule.
 //
+//     A key the envelope NEVER declared is outside that rule, so this arm never
+//     sees it, and the floor reaches it at the merge instead: mergeDerivedReads
+//     asks the same resolver and REFUSES a derived required key the descriptor
+//     calls absence-tolerant. Refuses rather than demotes — a derivation and a
+//     descriptor from the SAME package disagreeing about one key is a
+//     package-internal contradiction, and silently softening the derivation's
+//     requirement is the dangerous direction for a read the DDL's own author
+//     demanded fail-closed.
+//
 //  2. The demotion MOVES the key rather than copying it, and moves EVERY
 //     match rather than the first. step4_hydrate's "a key in both lists keeps
 //     fail-closed reads semantics" would otherwise re-harden on the very next
@@ -120,25 +129,11 @@ import (
 // depends on turns a HydrationMiss into a silent None, which is the failure
 // the §2.5 authoring rule exists to prevent. So the floor demotes exactly the
 // keys a compilable descriptor names, and nothing else.
-func applyDescriptorFloor(base declaredReads, templates DispatchTemplates, env *OperationEnvelope, logger *slog.Logger) declaredReads {
-	if len(templates.OptionalReads) == 0 || (len(base.Reads) == 0 && len(base.EgressReads) == 0) {
+func applyDescriptorFloor(base declaredReads, resolver *descriptorFloorResolver, env *OperationEnvelope, logger *slog.Logger) declaredReads {
+	if len(base.Reads) == 0 && len(base.EgressReads) == 0 {
 		return base
 	}
-	var payload map[string]interface{}
-	if len(env.Payload) > 0 {
-		payload, _ = jsonToGenericMap(env.Payload)
-	}
-	floor := resolveDescriptorFloor(templates.OptionalReads, env, payload, logger)
-	if floor.empty() {
-		return base
-	}
-	required := resolveDescriptorRequired(templates.Reads, env, payload, logger)
-	floored := func(key string) bool {
-		if _, isRequired := required[key]; isRequired {
-			return false
-		}
-		return floor.covers(key)
-	}
+	floored := resolver.floored
 
 	// The egress arm: mark, never move. See the header's precedence note 3 —
 	// relocating an egress key would swap a bridge-opened ref for plaintext.
@@ -187,6 +182,82 @@ func applyDescriptorFloor(base declaredReads, templates DispatchTemplates, env *
 	logger.Info("step4: descriptor floor demoted declared reads to optional",
 		"operationType", env.OperationType, "requestId", env.RequestID, "keys", demoted)
 	return base
+}
+
+// descriptorFloorResolver answers one question — "does this operation's own
+// descriptor make this key absence-tolerant?" — for the two arms that must
+// give the same answer to it: applyDescriptorFloor, over the keys the ENVELOPE
+// declared, and mergeDerivedReads, over the keys the DDL's `derive_reads`
+// produced. One resolver per Hydrate call, built by step 4 and handed to both,
+// so the descriptor is compiled against the envelope exactly once and the two
+// arms cannot drift.
+//
+// Resolution is deferred to the first question and memoized. Deferred because
+// an uncompilable template's Warn asserts that the control did not apply TO A
+// KEY, and an envelope declaring nothing whose derivation returns nothing has
+// no key for it to be about — compiling eagerly would log that claim on every
+// operation carrying a descriptor. Memoized because both arms ask, and the
+// Warn belongs to the descriptor, not to the arm that happened to ask first.
+//
+// Lifetime is the Hydrate call: it holds that call's envelope and the
+// descriptor as the cache had it at that instant, and step 4 rebuilds it on
+// every OCC retry from the same two inputs.
+type descriptorFloorResolver struct {
+	templates DispatchTemplates
+	env       *OperationEnvelope
+	logger    *slog.Logger
+
+	resolved bool
+	floor    descriptorFloor
+	required map[string]struct{}
+}
+
+// newDescriptorFloorResolver holds a descriptor's templates against one
+// envelope. An operation with NO descriptor has no resolver at all, and a nil
+// resolver floors nothing — the ordinary case, and the safe one: the rule has
+// no subject, so there is nothing to demote and nothing to refuse.
+func newDescriptorFloorResolver(templates DispatchTemplates, env *OperationEnvelope, logger *slog.Logger) *descriptorFloorResolver {
+	return &descriptorFloorResolver{templates: templates, env: env, logger: logger}
+}
+
+// floored reports whether the descriptor declares this key absence-tolerant:
+// covered by an `optionalReads` template and not pinned by a `reads` one.
+//
+// The predicate is a function of the descriptor's own templates and the
+// step-3-authenticated identity, and of nothing a request body can address —
+// resolveDescriptorRequired is what holds that line, refusing to build an
+// exclusion out of a `{payload.<field>}` template or a key SHAPE. See the
+// header's precedence note 4.
+func (r *descriptorFloorResolver) floored(key string) bool {
+	if r == nil {
+		return false
+	}
+	r.resolve()
+	if _, isRequired := r.required[key]; isRequired {
+		return false
+	}
+	return r.floor.covers(key)
+}
+
+func (r *descriptorFloorResolver) resolve() {
+	if r.resolved {
+		return
+	}
+	r.resolved = true
+	if len(r.templates.OptionalReads) == 0 {
+		return
+	}
+	var payload map[string]interface{}
+	if len(r.env.Payload) > 0 {
+		payload, _ = jsonToGenericMap(r.env.Payload)
+	}
+	r.floor = resolveDescriptorFloor(r.templates.OptionalReads, r.env, payload, r.logger)
+	if r.floor.empty() {
+		// No floor means no key can be excluded FROM one, so the required
+		// templates are never compiled and never logged about.
+		return
+	}
+	r.required = resolveDescriptorRequired(r.templates.Reads, r.env, payload, r.logger)
 }
 
 // descriptorFloor is a descriptor's optionalReads list compiled against one

@@ -103,7 +103,13 @@ func declaredReadsFromEnvelope(env *OperationEnvelope) declaredReads {
 // would discard that demotion — letting a derived `reads` entry re-harden a
 // key the descriptor declared optional, by the very rule below that exists to
 // stop derivation hardening anything.
-func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, base declaredReads, budget starlarksandbox.Budget, primordialActors map[string]string) (declaredReads, error) {
+//
+// floor is the same resolved descriptor floor that demotion ran against, and
+// it is passed rather than re-resolved for the same reason base is: the two
+// arms must agree about which keys the descriptor calls absence-tolerant. It
+// covers the case demotion structurally cannot — a key the envelope never
+// declared. Nil where the operation has no descriptor, which floors nothing.
+func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *OperationEnvelope, base declaredReads, floor *descriptorFloorResolver, budget starlarksandbox.Budget, primordialActors map[string]string) (declaredReads, error) {
 	rid := env.RequestID
 
 	// One op value, bound BOTH as the call argument and as the `op` global.
@@ -128,17 +134,19 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 			Cause: fmt.Errorf("derive_reads: %w", err),
 		}
 	}
-	return mergeDerivedReads(base, derived, rid)
+	return mergeDerivedReads(base, derived, floor, rid)
 }
 
 // deriveReadsGlobals binds the pre-pass's globals: the same NAME set the
-// script was compiled against (scriptGlobalNames), with the impure modules
-// replaced by stubs that fail when CALLED.
+// script was compiled against (scriptGlobalNames), with everything the
+// derivation must not reach replaced by a binding that fails on ACCESS.
 //
 // Stubs, not unbound names. The sandbox resolves globals at compile time and
 // the pre-pass shares the main pass's compiled program, so removing `kv` would
 // not scope a restriction to this pass — it would fail to compile any module
-// that mentions `kv` anywhere, killing every operation on that DDL.
+// that mentions `kv` anywhere, killing every operation on that DDL. The same
+// holds for `state` and `ddl`: every name stays bound, and only reaching into
+// one fails.
 //
 //   - `kv` fails because a derivation that reads state is not a derivation, it
 //     is a read, and a read must be declared like one. Letting it through would
@@ -146,21 +154,23 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 //   - `nanoid` fails because its PCG is seeded from the requestId
 //     (nanoidModule): a `nanoid.new()` here would seed identically to the main
 //     pass's module and hand step 5's first id away to the pre-pass.
+//   - `state` and `ddl` fail for `kv`'s reason, and they FAIL rather than bind
+//     empty. The pre-pass runs before hydration, so there is nothing to expose
+//     — but an empty mapping ANSWERS the question instead of refusing it:
+//     `state.get(k)` is None, `k in state` is False, `len(state)` is 0. A
+//     derivation reaching for hydrated state would then derive a wrong read set
+//     with nothing on the wire to say so, which is the class-(b) undeclared read
+//     this whole posture exists to eliminate, wearing a miss as a disguise.
 //
-// `state` is an empty mapping rather than the hydrated one, and truthfully so:
-// the pre-pass runs BEFORE hydration, so there is no state to expose. `ddl` is
-// likewise empty — the derivation's input is the op, per the contract's
-// `derive_reads(op)` signature.
-//
-// `primordialActor` binds its REAL values here, unlike `state`/`ddl`: it is
-// process configuration, not hydration output, so it is as available before
-// hydration as `crypto` or `time` and binding an empty stand-in would be the
-// only untruthful entry in the dict.
+// `primordialActor` binds its REAL values, unlike `state`/`ddl`: it is process
+// configuration, not hydration output, so it is as available before hydration
+// as `crypto` or `time` and binding an empty stand-in would be the only
+// untruthful entry in the dict.
 func deriveReadsGlobals(opValue *starlarkstruct.Struct, primordialActors map[string]string) starlarklib.StringDict {
 	return starlarklib.StringDict{
-		"state":           starlarklib.NewDict(0),
+		"state":           failingMapping{name: "state"},
 		"op":              opValue,
-		"ddl":             starlarklib.NewDict(0),
+		"ddl":             failingMapping{name: "ddl"},
 		"nanoid":          failingModule("nanoid", []string{"new", "short"}),
 		"crypto":          cryptoModule(),
 		"time":            timeModule(),
@@ -186,6 +196,83 @@ func failingModule(module string, members []string) *starlarkstruct.Struct {
 		})
 	}
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, dict)
+}
+
+// failingMapping binds a mapping-shaped global the pre-pass cannot honestly
+// answer, so that every way of reaching into it raises the reason instead of
+// reporting a miss.
+//
+// It mirrors failingModule's POSTURE, not its type. A module is only reachable
+// by calling one of its members, so failing on call covers it; a MAPPING is
+// reached by subscript, by membership, by attribute and by iteration, and none
+// of those is a call. Each surface therefore fails on its own terms:
+//
+//   - starlark.Mapping — `state[k]`. getIndex propagates Get's error verbatim.
+//   - starlark.Container — `k in state`. The interpreter's `in` matches
+//     Container BEFORE Mapping and returns Has's error, where the Mapping arm
+//     DISCARDS Get's error ("we cannot distinguish true errors from key not
+//     found") and answers a bare False. A mapping that is not also a Container
+//     is therefore silent for `in` however loudly Get fails, which is the one
+//     access this type most has to refuse: `if k in state` is how a script asks
+//     whether a key was hydrated.
+//   - starlark.HasAttrs — `state.get(k)`, `.keys()`, `.items()`, `.values()`.
+//     Attr answers ANY name with a builtin that fails when called, on the same
+//     reasoning failingModule's members exist: an attribute that is simply
+//     missing is an AttributeError that reads like a typo. AttrNames reports
+//     the read accessors a hydrated mapping carries (stateAttrs), so `dir()`
+//     describes the surface the main pass has rather than a bare struct.
+//
+// Iteration is deliberately NOT implemented. `for k in state` then raises the
+// interpreter's own "<type> value is not iterable" — which is why Type() spells
+// the reason out, since that message is built from it. An Iterator cannot
+// return an error, so implementing Iterable could only yield nothing, and
+// yielding nothing is precisely the silent answer this type exists to refuse.
+//
+// Truth() answers True for the same reason. `if state:` cannot fail — Truth has
+// no error to return — so the binding takes the branch that goes on to touch
+// the mapping and fails there, rather than the empty-dict branch that quietly
+// derives nothing.
+type failingMapping struct {
+	// name is the global's name, so an error names what the script reached for
+	// rather than an anonymous mapping.
+	name string
+}
+
+// unavailable is the one message every surface raises; access renders the
+// expression the script wrote, so the author sees their own syntax back.
+func (m failingMapping) unavailable(access string) error {
+	return fmt.Errorf("%s is not available inside %s: the pre-pass runs before hydration, and a derivation that reads state is a read, and must be declared as one",
+		access, deriveReadsEntrypoint)
+}
+
+func (m failingMapping) String() string {
+	return "<" + m.name + " unavailable inside " + deriveReadsEntrypoint + ">"
+}
+
+// Type carries the reason because the interpreter builds its own
+// not-iterable and no-len messages out of it, and those are the surfaces this
+// type cannot supply a message for itself.
+func (m failingMapping) Type() string {
+	return m.name + "-unavailable-inside-" + deriveReadsEntrypoint
+}
+
+func (m failingMapping) Freeze()                 {}
+func (m failingMapping) Truth() starlarklib.Bool { return starlarklib.True }
+func (m failingMapping) Hash() (uint32, error)   { return 0, fmt.Errorf("%s is not hashable", m.name) }
+func (m failingMapping) AttrNames() []string     { return stateAttrs }
+func (m failingMapping) Has(k starlarklib.Value) (bool, error) {
+	return false, m.unavailable(k.String() + " in " + m.name)
+}
+
+func (m failingMapping) Get(k starlarklib.Value) (starlarklib.Value, bool, error) {
+	return nil, false, m.unavailable(m.name + "[" + k.String() + "]")
+}
+
+func (m failingMapping) Attr(name string) (starlarklib.Value, error) {
+	access := m.name + "." + name
+	return starlarklib.NewBuiltin(name, func(*starlarklib.Thread, *starlarklib.Builtin, starlarklib.Tuple, []starlarklib.Tuple) (starlarklib.Value, error) {
+		return nil, m.unavailable(access)
+	}), nil
 }
 
 // deriveReadsOpValue is the `op` argument the contract specifies:
@@ -294,6 +381,29 @@ func derivedKeyList(d *starlarklib.Dict, field string) ([]string, error) {
 // — and it faults naming the derivation, rather than surfacing as an opaque
 // step-6 external-egress rejection.
 //
+// THE DESCRIPTOR FLOOR REFUSES A DERIVED REQUIREMENT IT CONTRADICTS. A key the
+// envelope never declared reaches here with no disposition to defer to, so the
+// weakest-wins rule above has no subject for it and applyDescriptorFloor never
+// saw it — a derived `reads` key the operation's own descriptor lists under
+// `optionalReads` would otherwise be appended fail-closed, out from under the
+// floor every envelope-declared key is held to.
+//
+// It is REFUSED, not demoted. Two authorities inside ONE package disagree about
+// one key: the DDL's derivation says the operation depends on it, the same
+// package's descriptor says its absence is ordinary. Demoting picks the
+// descriptor and turns the HydrationMiss the script's author demanded into a
+// silent None — the dangerous direction, and the same reasoning that makes the
+// floor refuse to demote on doubt (descriptor_floor.go, "direction of
+// failure"). So the operation faults closed naming the derivation, exactly as
+// the egress collision above does, and the package fixes its own contradiction.
+//
+// A submitter CAN provoke this by steering a `{payload.<field>}` optionalReads
+// template onto a derived key. That is a self-DoS on their own operation in the
+// fail-closed direction, never a bypass: the exclusion that would suppress the
+// refusal is the one resolveDescriptorRequired builds, and it refuses
+// payload-derived and pattern-shaped templates precisely so a request cannot
+// address it.
+//
 // CEILING COUNTED, FAULTED AT RUNTIME. Derived keys count toward
 // opwire.MaxDeclaredReads. The count is of DISTINCT keys, matching
 // distinctKeys' existing semantics: the ceiling has always bounded Core KV
@@ -301,7 +411,7 @@ func derivedKeyList(d *starlarklib.Dict, field string) ([]string, error) {
 // must not consume the budget twice. A breach is a step-4 fault and not
 // `EnvelopeMalformed` — the keys are not envelope-supplied, so rejecting the
 // envelope would blame the submitter for the package's derivation.
-func mergeDerivedReads(base declaredReads, derived derivedReads, rid string) (declaredReads, error) {
+func mergeDerivedReads(base declaredReads, derived derivedReads, floor *descriptorFloorResolver, rid string) (declaredReads, error) {
 	if len(derived.Reads) == 0 && len(derived.OptionalReads) == 0 {
 		return base, nil
 	}
@@ -332,7 +442,7 @@ func mergeDerivedReads(base declaredReads, derived derivedReads, rid string) (de
 	merged.Reads = slices.Clone(base.Reads)
 	merged.OptionalReads = slices.Clone(base.OptionalReads)
 	claimed := map[string]struct{}{}
-	appendDerived := func(keys []string, dst *[]string) error {
+	appendDerived := func(keys []string, dst *[]string, failClosed bool) error {
 		for _, key := range keys {
 			if key == "" {
 				continue
@@ -349,15 +459,26 @@ func mergeDerivedReads(base declaredReads, derived derivedReads, rid string) (de
 			if _, dup := claimed[key]; dup {
 				continue // already taken by the weaker derived list
 			}
+			// The floor is asked only about a key that would land fail-closed
+			// and is genuinely new. A key the OPTIONAL list already claimed has
+			// taken the weaker disposition by weakest-wins and contradicts
+			// nothing; a key the envelope declared kept the envelope's
+			// disposition and was floored on the envelope's own pass.
+			if failClosed && floor.floored(key) {
+				return &HydrationError{
+					Code: "DeriveReadsFloorContradiction", MissingKey: key, OperationRequestID: rid,
+					Cause: fmt.Errorf("derive_reads returned %q under reads, which this operation's own descriptor declares absence-tolerant under optionalReads (the package contradicts itself)", key),
+				}
+			}
 			claimed[key] = struct{}{}
 			*dst = append(*dst, key)
 		}
 		return nil
 	}
-	if err := appendDerived(derived.OptionalReads, &merged.OptionalReads); err != nil {
+	if err := appendDerived(derived.OptionalReads, &merged.OptionalReads, false); err != nil {
 		return declaredReads{}, err
 	}
-	if err := appendDerived(derived.Reads, &merged.Reads); err != nil {
+	if err := appendDerived(derived.Reads, &merged.Reads, true); err != nil {
 		return declaredReads{}, err
 	}
 

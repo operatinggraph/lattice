@@ -140,6 +140,11 @@ func TestHandleWhoami_UnboundActor_ReportsRawActor(t *testing.T) {
 	if resp.ResolvedActorID != wantActor {
 		t.Fatalf("resolvedActorId = %q, want %q (unbound falls back to raw actor)", resp.ResolvedActorID, wantActor)
 	}
+	// derived-key: the credentialindex key the response must carry, spelled out
+	// here rather than taken from CredentialIndexKey so the handler is checked
+	// against the derivation instead of against itself. Agreement with
+	// identity-domain's Starlark is pinned separately, by
+	// TestCredentialIndexKeyAgreesWithIdentityDomain.
 	wantIndexKey := "vtx.credentialindex." + substrate.SHA256NanoID(wantActor)
 	if resp.CredentialIndexKey != wantIndexKey {
 		t.Fatalf("credentialIndexKey = %q, want %q", resp.CredentialIndexKey, wantIndexKey)
@@ -248,6 +253,11 @@ func TestHandleWhoami_Probe_HintFound(t *testing.T) {
 	if !resp.ExistingIdentityHint {
 		t.Fatal("existingIdentityHint = false, want true (email matches a different identity)")
 	}
+	// derived-key: the identityindex key the probe must look up, spelled out
+	// here rather than taken from EmailIdentityIndexKey so the handler is
+	// checked against the derivation instead of against itself. Agreement with
+	// identity-domain's Starlark is pinned separately, by
+	// TestEmailIdentityIndexKeyAgreesWithIdentityDomain.
 	wantIndexKey := "vtx.identityindex." + substrate.SHA256NanoID("email:person@example.test")
 	if resolver.gotKey != wantIndexKey {
 		t.Fatalf("looked up %q, want %q", resolver.gotKey, wantIndexKey)

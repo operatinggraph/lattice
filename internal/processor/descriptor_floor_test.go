@@ -41,6 +41,14 @@ func floorFor(templates ...string) DispatchTemplates {
 	return DispatchTemplates{OptionalReads: templates}
 }
 
+// applyFloor runs the envelope arm the way step 4 does: one resolver built
+// from the descriptor's templates and this envelope, then the demotion pass
+// over it. Going through the resolver is what keeps these tests exercising the
+// production path — the same value the merge arm consults.
+func applyFloor(base declaredReads, templates DispatchTemplates, env *OperationEnvelope, logger *slog.Logger) declaredReads {
+	return applyDescriptorFloor(base, newDescriptorFloorResolver(templates, env, logger), env, logger)
+}
+
 // capturingLogger records what the floor SAYS as well as what it does. A
 // template that contributes nothing is only observable through its Warn, so a
 // test asserting the no-contribution posture has to read the log to tell it
@@ -61,7 +69,7 @@ func TestDescriptorFloor_DemotesEnvelopeReads(t *testing.T) {
 	}
 	templates := floorFor("{payload.targetIdentityKey}", "{payload.targetIdentityKey}.state")
 
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, templates, floorEnv(floorPayload()), testLogger())
 
 	if slices.Contains(got.Reads, floorTarget) || slices.Contains(got.Reads, floorTarget+".state") {
 		t.Fatalf("Reads = %v, want the floored keys REMOVED — a key left in both lists is re-hardened by step 4", got.Reads)
@@ -82,7 +90,7 @@ func TestDescriptorFloor_DemotesEnvelopeReads(t *testing.T) {
 // soften reads the operation genuinely depends on.
 func TestDescriptorFloor_NoDescriptorTemplatesLeavesEnvelopeAlone(t *testing.T) {
 	base := declaredReads{Reads: []string{floorTarget, floorTarget + ".state"}}
-	got := applyDescriptorFloor(base, DispatchTemplates{}, floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, DispatchTemplates{}, floorEnv(floorPayload()), testLogger())
 	if !slices.Equal(got.Reads, base.Reads) || len(got.OptionalReads) != 0 {
 		t.Fatalf("got %+v, want the envelope's declaration verbatim", got)
 	}
@@ -95,7 +103,7 @@ func TestDescriptorFloor_NoDescriptorTemplatesLeavesEnvelopeAlone(t *testing.T) 
 func TestDescriptorFloor_DescriptorReadsAreNotAFloor(t *testing.T) {
 	base := declaredReads{Reads: []string{floorTarget}}
 	templates := DispatchTemplates{Reads: []string{"{payload.targetIdentityKey}"}}
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, templates, floorEnv(floorPayload()), testLogger())
 	if !slices.Equal(got.Reads, []string{floorTarget}) {
 		t.Fatalf("Reads = %v, want the key still fail-closed", got.Reads)
 	}
@@ -114,7 +122,7 @@ func TestDescriptorFloor_KeyInBothEnvelopeListsIsRemovedFromReads(t *testing.T) 
 		Reads:         []string{floorTarget},
 		OptionalReads: []string{floorTarget},
 	}
-	got := applyDescriptorFloor(base, floorFor("{payload.targetIdentityKey}"), floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, floorFor("{payload.targetIdentityKey}"), floorEnv(floorPayload()), testLogger())
 	if slices.Contains(got.Reads, floorTarget) {
 		t.Fatalf("Reads = %v, want %q gone — leaving it lets the both-lists rule keep the fail-closed reading", got.Reads, floorTarget)
 	}
@@ -139,7 +147,7 @@ func TestDescriptorFloor_EgressIsMarkedNotMoved(t *testing.T) {
 		EgressReads: []string{floorTarget + ".ssn"},
 	}
 	templates := floorFor("{payload.targetIdentityKey}", "{payload.targetIdentityKey}.ssn")
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, templates, floorEnv(floorPayload()), testLogger())
 
 	if !slices.Equal(got.EgressReads, []string{floorTarget + ".ssn"}) {
 		t.Fatalf("EgressReads = %v, want the key still declared egress", got.EgressReads)
@@ -255,7 +263,7 @@ func TestDescriptorFloor_UncompilableTemplateDemotesNothing(t *testing.T) {
 		"{payload.targetIdentityKey}",
 	)
 	logger, log := capturingLogger()
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), logger)
+	got := applyFloor(base, templates, floorEnv(floorPayload()), logger)
 
 	if slices.Contains(got.Reads, floorTarget) {
 		t.Fatalf("Reads = %v, want the resolvable template's key demoted — the positive vector must reach the floor", got.Reads)
@@ -435,7 +443,7 @@ func TestDescriptorFloor_PatternDemotesEveryMatch(t *testing.T) {
 	otherType := "vtx.tab." + floorTabID
 	base := declaredReads{Reads: []string{mine, victim, notAnID, deeper, otherType}}
 
-	got := applyDescriptorFloor(base, floorFor("{me.leaseapp}"), floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, floorFor("{me.leaseapp}"), floorEnv(floorPayload()), testLogger())
 
 	for _, want := range []string{mine, victim} {
 		if slices.Contains(got.Reads, want) {
@@ -479,7 +487,7 @@ func TestDescriptorFloor_RequiredTemplateWinsOverOptional(t *testing.T) {
 		OptionalReads: []string{"{me.identity}", "{me.identity}.ssn"},
 	}
 
-	got := applyDescriptorFloor(base, templates, env, testLogger())
+	got := applyFloor(base, templates, env, testLogger())
 
 	for _, kept := range []string{self, literal} {
 		if !slices.Contains(got.Reads, kept) {
@@ -518,7 +526,7 @@ func TestDescriptorFloor_PayloadSteeredRequiredTemplateCannotSuppressTheFloor(t 
 	probe := "lnk.leaseapp." + floorLeaseVictim + ".applicationFor.identity." + testNanoID2
 
 	honest := floorEnv(`{"tabKey":"vtx.tab.` + floorTabID + `","menuItemKey":"vtx.menuitem.` + floorLeaseMine + `"}`)
-	control := applyDescriptorFloor(declaredReads{Reads: []string{probe}}, templates, honest, testLogger())
+	control := applyFloor(declaredReads{Reads: []string{probe}}, templates, honest, testLogger())
 	if slices.Contains(control.Reads, probe) {
 		t.Fatalf("Reads = %v, want %q demoted under an honest payload — the floor must cover this key before the steering means anything", control.Reads, probe)
 	}
@@ -526,7 +534,7 @@ func TestDescriptorFloor_PayloadSteeredRequiredTemplateCannotSuppressTheFloor(t 
 	// The same descriptor, the same probe, one payload field aimed at it.
 	hostile := floorEnv(`{"tabKey":"vtx.tab.` + floorTabID + `","menuItemKey":"` + probe + `"}`)
 	logger, log := capturingLogger()
-	got := applyDescriptorFloor(
+	got := applyFloor(
 		declaredReads{Reads: []string{probe}, EgressReads: []string{probe + ".terms"}},
 		DispatchTemplates{
 			Reads: templates.Reads,
@@ -565,7 +573,7 @@ func TestDescriptorFloor_RequiredPatternExcludesNothing(t *testing.T) {
 	}
 	logger, log := capturingLogger()
 
-	got := applyDescriptorFloor(base, templates, floorEnv(floorPayload()), logger)
+	got := applyFloor(base, templates, floorEnv(floorPayload()), logger)
 
 	if slices.Contains(got.Reads, self) {
 		t.Fatalf("Reads = %v, want %q demoted — a required SHAPE excludes nothing", got.Reads, self)
@@ -581,7 +589,7 @@ func TestDescriptorFloor_RequiredPatternExcludesNothing(t *testing.T) {
 	// authenticated identity excludes it, which is what shows the Warn above is
 	// about the shape and not about the required list being ignored wholesale.
 	concrete := DispatchTemplates{Reads: []string{"{actor}"}, OptionalReads: []string{"{me.identity}"}}
-	if kept := applyDescriptorFloor(declaredReads{Reads: []string{self}}, concrete, floorEnv(floorPayload()), testLogger()); !slices.Contains(kept.Reads, self) {
+	if kept := applyFloor(declaredReads{Reads: []string{self}}, concrete, floorEnv(floorPayload()), testLogger()); !slices.Contains(kept.Reads, self) {
 		t.Fatalf("Reads = %v, want %q kept by the actor-rooted required template", kept.Reads, self)
 	}
 }
@@ -595,7 +603,7 @@ func TestDescriptorFloor_EgressPatternIsMarkedInPlace(t *testing.T) {
 	unmatched := "vtx.tab." + floorTabID + ".ssn"
 	base := declaredReads{EgressReads: []string{matched, unmatched}}
 
-	got := applyDescriptorFloor(base, floorFor("vtx.leaseapp.{me.leaseapp:id}.ssn"), floorEnv(floorPayload()), testLogger())
+	got := applyFloor(base, floorFor("vtx.leaseapp.{me.leaseapp:id}.ssn"), floorEnv(floorPayload()), testLogger())
 
 	if !slices.Equal(got.EgressReads, []string{matched, unmatched}) {
 		t.Fatalf("EgressReads = %v, want both keys still declared egress — moving one swaps a bridge-opened ref for plaintext", got.EgressReads)
@@ -635,7 +643,7 @@ func TestDescriptorFloor_DecoupledProbeIsDemoted(t *testing.T) {
 	someoneElsesProbe := "lnk.leaseapp." + floorLeaseVictim + ".applicationFor.identity." + testNanoID3
 	base := declaredReads{Reads: []string{victimOwnership, victimCharge, someoneElsesProbe}}
 
-	got := applyDescriptorFloor(base, templates, env, testLogger())
+	got := applyFloor(base, templates, env, testLogger())
 
 	for _, demoted := range []string{victimOwnership, victimCharge} {
 		if slices.Contains(got.Reads, demoted) {

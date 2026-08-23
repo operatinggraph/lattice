@@ -267,6 +267,10 @@ func (h *harness) attach(targetKey, content string, reads []string) (oid, storeN
 	storeName = mustNanoID(h.t)
 	info, err := h.conn.ObjectPut(h.ctx, bootstrap.CoreObjectsBucket, storeName, bytes.NewReader([]byte(content)), 1<<20)
 	require.NoError(h.t, err)
+	// derived-key: the content-addressed object id of the uploaded bytes, the
+	// value the harness returns so the caller can name the vertex AttachObject
+	// creates. Not a declared read — an object id, derived from the store's own
+	// digest.
 	oid = substrate.SHA256NanoID("object:" + info.Digest)
 	r := h.submitOp("AttachObject", "object", bootstrap.BootstrapIdentityKey, map[string]any{
 		"digest": info.Digest, "size": info.Size, "contentType": "text/plain",
