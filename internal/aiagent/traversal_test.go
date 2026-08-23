@@ -27,7 +27,7 @@ const (
 
 // setupUnitEnv starts embedded NATS, provisions the two KV buckets used
 // by the traversal unit tests, and returns a ready Traverser + context.
-// systemActorKeys are the actor keys the Traverser treats as kernel-seeded
+// systemActorKeys are the actor keys the Traverser treats as root
 // system actors — the routing decision ReadCapability makes, so a test that
 // seeds a cap.<type>.<id> anchor doc names its actor here.
 func setupUnitEnv(t *testing.T, systemActorKeys ...string) (context.Context, *substrate.Conn, *aiagent.Traverser) {

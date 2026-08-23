@@ -138,7 +138,7 @@ type SelectAuthorizerOpts struct {
 	ExtraEntries []authEntry
 
 	// RbacRolesActive routes the platform read by actor class when true: the
-	// kernel-seeded system actors (SystemActorKeys) read a UNION of their core
+	// root system actors (SystemActorKeys) read a UNION of their core
 	// cap.<actor> primordial-anchor doc and cap.roles.<actor> (rbac-domain's
 	// capabilityRoles projection) — the floor plus the rbac-derived
 	// package-op extension (system-actor-package-op-grants-design.md); every
@@ -161,10 +161,10 @@ type SelectAuthorizerOpts struct {
 	// (testutil.CapabilityPipeline / SeedCapDoc), never a production posture.
 	RbacRolesActive bool
 
-	// SystemActorKeys are the full vtx.identity.<id> keys of the kernel-seeded
-	// system actors (the primordial admin + the kernel-seeded service actors)
-	// that read the cap.<actor> ∪ cap.roles.<actor> union when RbacRolesActive
-	// is true.
+	// SystemActorKeys are the full vtx.identity.<id> keys of the root system
+	// actors — the primordial admin + the other identities holding the primordial
+	// `operator` role — that read the cap.<actor> ∪ cap.roles.<actor> union when
+	// RbacRolesActive is true.
 	SystemActorKeys []string
 }
 

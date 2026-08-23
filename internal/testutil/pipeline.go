@@ -254,9 +254,9 @@ type PipelineConfig struct {
 	// test's meaning depends on an actor's CLASS, so the Processor routes the
 	// way the deployment would rather than the way the fixture is convenient.
 	RbacRolesActive bool
-	// SystemActorKeys is the kernel-seeded system-actor set the class-aware
-	// routing consults. Only read when RbacRolesActive; empty means every
-	// actor is ordinary.
+	// SystemActorKeys is the root system-actor set — the identities holding the
+	// primordial `operator` role — the class-aware routing consults. Only read
+	// when RbacRolesActive; empty means every actor is ordinary.
 	SystemActorKeys []string
 }
 

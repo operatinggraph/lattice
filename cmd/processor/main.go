@@ -124,8 +124,9 @@ func run(logger *slog.Logger) error {
 	}
 	defer conn.Close()
 
-	// Class-aware platform routing is unconditional: the kernel-seeded system
-	// actors read a UNION of their cap.<actor> anchor and cap.roles.<actor>,
+	// Class-aware platform routing is unconditional: the root system actors
+	// (identities holding the primordial `operator` role) read a UNION of their
+	// cap.<actor> anchor and cap.roles.<actor>,
 	// every other actor reads cap.roles.<actor> alone. This is correct whether
 	// or not rbac-domain is installed — an absent cap.roles.<actor> is an empty
 	// skip in the union read (capabilitykv.ReadAndMerge), so a fresh kernel
@@ -135,9 +136,9 @@ func run(logger *slog.Logger) error {
 	// Processor booted before packages install (the kernel-first `make up`
 	// order) latched the pre-install state for its whole life and denied every
 	// package-granted actor even after rbac-domain landed — the bug that
-	// blocked running capability mode by default. SystemActorKeys are
-	// primordial (fixed at bootstrap), so discovering them once here is stable
-	// for the process lifetime.
+	// blocked running capability mode by default. SystemActorKeys is discovered
+	// once here from the graph's `holdsRole → operator` topology and held for the
+	// process lifetime.
 	discCtx, discCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	systemActorKeys, err := bootstrap.SystemActorKeys(discCtx, conn)
 	discCancel()

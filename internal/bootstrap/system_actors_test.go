@@ -98,7 +98,7 @@ func TestSystemActorKeys_DiscoversByOperatorTopology(t *testing.T) {
 }
 
 // TestPrivacyActorKey_DiscoversSeeded proves PrivacyActorKey finds the
-// kernel-seeded privacy-plane service actor by class, matching the identity
+// privacy-plane service actor by class, matching the identity
 // primordial.go seeds under bootstrap.PrivacyIdentityKey.
 func TestPrivacyActorKey_DiscoversSeeded(t *testing.T) {
 	if testing.Short() {

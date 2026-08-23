@@ -679,8 +679,8 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 
 	// 5d. Capability-Read WILDCARD Grants Lens — the base ALL-ACCESS read-grant
 	// PRODUCER (Contract #6 §6.14, D1 design §3.4 M5). The wildcard sibling of
-	// 5c: grants the reserved WildcardAnchor ("*") to the same fixed,
-	// kernel-seeded root-equivalent identities the write-path capability lens
+	// 5c: grants the reserved WildcardAnchor ("*") to the same root-equivalent
+	// identities the write-path capability lens
 	// (5) grants root to — those holding the primordial `operator` role via
 	// `holdsRole` (Contract #7 §7.7 / #6 §6.1) — so an all-access read (e.g. a
 	// clinic staff/admin worklist) still passes through the §6.14 set-membership
