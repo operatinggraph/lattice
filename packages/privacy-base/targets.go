@@ -81,19 +81,25 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // dispatcher does; the marker and its siblings still resolve correctly, just
 // lazily.
 //
-// Enumerations on the two sweep gaps declare the five class-(e) kv.Links walks
-// those ops run (Contract #2 §2.5): `boundTo` inbound + outbound for
-// UnbindIdentityCredentials, and `indexes` inbound plus `duplicateOf` outbound
-// + inbound for PurgeIdentityDedupFootprint — the same five each script
-// annotates `# read-posture: (e)`, and the same five the identityErasure
-// pattern's steps 3 and 4 declare, so the op carries an identical walk set
-// whichever dispatcher submits it. The hub of every walk is `row.entityKey`,
-// the erased identity itself, resolved from the violation row exactly like the
-// Reads entry above it. The declaration is metadata: each walk stays a bounded
-// paged live kv.Links call inside the script, and the Processor validates the
-// shape and otherwise ignores it. What it buys is that a reader of the playbook
-// — and of the envelope — sees which relations these ops traverse without
-// reading the Starlark.
+// Enumerations on all three directOp gaps declare the class-(e) kv.Links walks
+// those ops run (Contract #2 §2.5), each the set its own script annotates
+// `# read-posture: (e)`. The two sweeps drain one arm per commit and declare
+// the union of their arms: `boundTo` inbound + outbound for
+// UnbindIdentityCredentials, `indexes` inbound plus `duplicateOf` outbound +
+// inbound for PurgeIdentityDedupFootprint. The seal declares all five, because
+// it re-walks every arm inside its own commit before it will attest — the
+// union of both sweeps, off the same hub. For the two sweeps the identityErasure
+// pattern's steps 3 and 4 declare the identical set, so the op carries the same
+// walks whichever dispatcher submits it; the seal has only this dispatcher, the
+// pattern completing without it.
+//
+// The hub of every walk is `row.entityKey`, the erased identity itself,
+// resolved from the violation row exactly like the Reads entry above it. The
+// declaration is metadata: each walk stays a bounded paged live kv.Links call
+// inside the script, and the Processor validates the shape and otherwise
+// ignores it. What it buys is that a reader of the playbook — and of the
+// envelope — sees which relations these ops traverse without reading the
+// Starlark.
 //
 // No gap declares a retry cap. A maxretries_<g> row column looked like the
 // mechanism for capping a stuck sweep's re-dispatch, but the realized
@@ -165,6 +171,17 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation: "SealIdentityForErasureComplete",
 					Params:    map[string]string{"subjectKey": "row.entityKey"},
 					Reads:     []string{"row.entityKey"},
+					// The seal re-walks all five residue arms inside its own
+					// commit before it will attest, so it enumerates the union
+					// of what the two sweeps do — the same five, off the same
+					// hub.
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.entityKey", Relation: "boundTo", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "boundTo", Direction: "out"},
+						{Hub: "row.entityKey", Relation: "indexes", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "duplicateOf", Direction: "out"},
+						{Hub: "row.entityKey", Relation: "duplicateOf", Direction: "in"},
+					},
 				},
 			},
 		},

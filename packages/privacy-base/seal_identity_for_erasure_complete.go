@@ -217,8 +217,12 @@ def execute(state, op):
 // identity has no .mergedInto, and each absence is an ordinary case the script
 // decides on rather than a fault.
 //
-// The five link walks are class (e) — bounded kv.Links enumerations declared in
-// ContextHint.Enumerations, the same posture the two sweep ops declare.
+// The five link walks are class (e) — bounded kv.Links enumerations, declared
+// in ContextHint.Enumerations by the one dispatcher that submits this op: the
+// identityErasureComplete target's missing_erasureSeal gap (targets.go). The
+// declaration is metadata, not a hydration directive — each arm stays a paged
+// live walk here, and the Processor validates the declaration's shape and
+// otherwise ignores it.
 func SealIdentityForErasureCompleteDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sealIdentityForErasureCompleteDDL,
