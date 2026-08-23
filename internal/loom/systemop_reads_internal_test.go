@@ -210,11 +210,11 @@ func TestPatternValidate_DeclaredReads(t *testing.T) {
 }
 
 // TestPatternStep_ReadsRoundTripFromSpecBody proves the wire half: the `reads`/
-// `optionalReads` keys pkgmgr's loomPatternSpecBody writes into the
-// meta.loomPattern spec aspect deserialize onto Step. The two sides are edited
-// in lockstep by hand, so the json tags are the only thing joining them — a
-// renamed tag would leave a pattern that installs cleanly and then runs
-// read-free.
+// `optionalReads`/`enumerations` keys pkgmgr's loomPatternSpecBody writes into
+// the meta.loomPattern spec aspect deserialize onto Step. The two sides are
+// edited in lockstep by hand, so the json tags are the only thing joining them
+// — a renamed tag would leave a pattern that installs cleanly and then runs
+// read-free, or walk-declaration-free, with nothing red.
 func TestPatternStep_ReadsRoundTripFromSpecBody(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +224,8 @@ func TestPatternStep_ReadsRoundTripFromSpecBody(t *testing.T) {
 	  "steps": [
 	    {"kind": "systemOp", "operation": "ShredIdentityKey",
 	     "reads": ["subject"], "optionalReads": ["subject.piiKey"]},
+	    {"kind": "systemOp", "operation": "UnbindIdentityCredentials",
+	     "enumerations": [{"hub": "subject", "relation": "boundTo", "direction": "in"}]},
 	    {"kind": "systemOp", "operation": "PurgeIdentityDedupFootprint"}
 	  ]
 	}`
@@ -234,14 +236,26 @@ func TestPatternStep_ReadsRoundTripFromSpecBody(t *testing.T) {
 
 	require.Equal(t, []string{"subject"}, p.Steps[0].Reads)
 	require.Equal(t, []string{"subject.piiKey"}, p.Steps[0].OptionalReads)
-	require.Nil(t, p.Steps[1].Reads, "a step declaring nothing round-trips as nil")
-	require.Nil(t, p.Steps[1].OptionalReads)
+
+	// `enumerations` is the same join and the same hazard: pkgmgr's
+	// enumerationBodies writes the three inner keys as string literals, and
+	// Enumeration's tags are the only thing binding them. A drift on either
+	// side installs cleanly, decodes to nil, and publishes a walk-free envelope
+	// for every dispatch — no error anywhere.
+	require.Equal(t,
+		[]Enumeration{{Hub: "subject", Relation: "boundTo", Direction: "in"}},
+		p.Steps[1].Enumerations)
+
+	require.Nil(t, p.Steps[2].Reads, "a step declaring nothing round-trips as nil")
+	require.Nil(t, p.Steps[2].OptionalReads)
+	require.Nil(t, p.Steps[2].Enumerations)
 
 	// And the omitempty half: a read-free step must not gain the keys on the way
 	// back out, or every shipped read-free pattern's spec body changes shape.
-	out, err := json.Marshal(p.Steps[1])
+	out, err := json.Marshal(p.Steps[2])
 	require.NoError(t, err)
 	require.NotContains(t, string(out), "reads")
+	require.NotContains(t, string(out), "enumerations")
 }
 
 // TestHandleTrigger_SubjectKeyMustBeAVertexKey guards the precondition the

@@ -92,8 +92,9 @@ type Enumeration struct {
 }
 
 // Link directions an Enumeration may declare (Contract #2 §2.5): the hub is
-// either the link's source or its target. The Processor rejects any other
-// value at envelope parse, so pattern load holds the same two.
+// either the link's source or its target. The Processor rejects any other value
+// at envelope parse, so pattern load holds the same two; the pair is pinned
+// against that parser by TestEnumerationDirections_MatchTheEnvelopeVocabulary.
 const (
 	enumerationOut = "out"
 	enumerationIn  = "in"

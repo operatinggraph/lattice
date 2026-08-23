@@ -205,6 +205,12 @@ type GapCandidate struct {
 	Target    string            `json:"target,omitempty"`
 	Params    map[string]string `json:"params,omitempty"`
 	Reads     []string          `json:"reads,omitempty"`
+	// Enumerations are the chosen candidate's declared kv.Links walks, carried
+	// for the same reason Reads is: a candidate dispatches through the same
+	// buildPlan as an explicit GapAction, so anything the action contract can
+	// declare it must be able to declare too. A field the candidate shape
+	// omitted would be silently dropped for every planner-selected dispatch.
+	Enumerations []GapEnumeration `json:"enumerations,omitempty"`
 	// Pre gates this candidate's eligibility, evaluated against the §10.2 row
 	// (each row column addressed as subject.data.<column> — the same
 	// row-is-State convention internal/weaver/planner's State documents).
@@ -247,6 +253,11 @@ type ActionCatalogEntry struct {
 	Target    string            `json:"target,omitempty"`
 	Params    map[string]string `json:"params,omitempty"`
 	Reads     []string          `json:"reads,omitempty"`
+	// Enumerations are the chosen entry's declared kv.Links walks, carried for
+	// the same reason Reads is: a synthesized plan's step dispatches through
+	// the same buildPlan as an explicit GapAction, so anything the action
+	// contract can declare it must be able to declare too.
+	Enumerations []GapEnumeration `json:"enumerations,omitempty"`
 
 	// Pre gates this entry's eligibility in the search, evaluated against the
 	// gap's planner.State (row + GoalColumns bridge). Omitted means always
@@ -674,6 +685,9 @@ func validateTarget(t *Target) error {
 			return fmt.Errorf("gaps key %q action %q issueSeverity %q must be \"warning\" or \"error\" (omit for the \"warning\" default) — aggregateStatus only escalates those two",
 				col, ga.Action, ga.IssueSeverity)
 		}
+		if err := validateGapEnumerations(fmt.Sprintf("gaps key %q", col), ga.Enumerations); err != nil {
+			return err
+		}
 		parsedGa, err := validateGapPlannerFields(col, ga)
 		if err != nil {
 			return err
@@ -685,6 +699,47 @@ func validateTarget(t *Target) error {
 	}
 	return nil
 }
+
+// validateGapEnumerations holds a declared link-walk list to the shape
+// opwire's envelope parse enforces: hub and relation non-empty, direction
+// "out" or "in". It is the engine-load counterpart of loom's
+// validateEnumerations, and it is a REFUSAL the target needs rather than a
+// duplicate of the installer's check — a target vertex can reach this engine
+// without passing through this binary's installer (a hand-written meta vertex,
+// an artifact applied by an older build, a version skew between installer and
+// engine), and a malformed declaration that loads here is not merely inert.
+// The Processor refuses the WHOLE envelope on it, terminally, so the gap
+// dispatches an op that can never run, the mark is already written, and every
+// redelivery re-derives the identical dead requestId. Rejecting the target at
+// load is the loud failure; the alternative is a gap that looks live and
+// converges never.
+//
+// Every surface whose declaration reaches buildPlan runs through here — the
+// gap's own entry, a candidate the planner may select, and a catalog entry a
+// synthesized plan may dispatch — because the envelope cannot tell which
+// surface authored the walk it is refusing.
+func validateGapEnumerations(where string, ens []GapEnumeration) error {
+	for i, en := range ens {
+		if en.Hub == "" || en.Relation == "" {
+			return fmt.Errorf("%s: enumerations[%d] requires hub and relation", where, i)
+		}
+		if en.Direction != enumerationDirectionOut && en.Direction != enumerationDirectionIn {
+			return fmt.Errorf("%s: enumerations[%d] direction must be %q or %q, got %q",
+				where, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
+		}
+	}
+	return nil
+}
+
+// Link directions a declared enumeration may name (Contract #2 §2.5): the hub
+// is either the link's source or its target. Restated from the envelope
+// vocabulary because weaver imports no internal/processor, and pinned against
+// the parser that adjudicates them by
+// TestEnumerationDirections_MatchTheEnvelopeVocabulary.
+const (
+	enumerationDirectionOut = "out"
+	enumerationDirectionIn  = "in"
+)
 
 // guardPaths collects every subject-path an install-validated guard tree
 // references — every KindPresent/KindAbsent/KindEquals atom's Path, recursing
@@ -787,6 +842,9 @@ func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
 		if cand.Cost < 0 {
 			return ga, fmt.Errorf("gaps key %q: candidates[%d].cost %d must be >= 0", col, i, cand.Cost)
 		}
+		if err := validateGapEnumerations(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Enumerations); err != nil {
+			return ga, err
+		}
 		if len(cand.Pre) > 0 {
 			g, err := guardgrammar.Parse(cand.Pre)
 			if err != nil {
@@ -862,6 +920,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 		}
 		if entry.Cost < 0 {
 			return fmt.Errorf("gaps key %q: actions[%d] (ref %q): cost %d must be >= 0", col, i, entry.Ref, entry.Cost)
+		}
+		if err := validateGapEnumerations(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Enumerations); err != nil {
+			return err
 		}
 		if entry.Cost == 0 {
 			entry.Cost = 1

@@ -1,7 +1,6 @@
-package weaver
+package bridge
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -10,33 +9,45 @@ import (
 
 	// internal/processor/opwire is imported by this TEST FILE ONLY, to pin the
 	// envelope shape actuator.go's contextHint restates
-	// (TestContextHint_MirrorsOpwire) — the same test-file-only technique
-	// registry_internal_test.go uses for the step-kind vocabulary. Weaver's
-	// production code must never import it — boundary_test's
-	// TestModuleBoundary_OnlySubstrate checks `go list -deps` on the non-test
-	// package, which this import does not enter.
+	// (TestContextHint_MirrorsOpwire) — the same test-file-only technique the
+	// loom and weaver mirrors of this test use. The bridge's production code
+	// must never import it — boundary_test's TestModuleBoundary_OnlySubstrate
+	// checks `go list -deps` on the non-test package, which this import does
+	// not enter.
 	"github.com/operatinggraph/lattice/internal/processor/opwire"
 )
 
-// opwireOmissions are the opwire.ContextHint fields Weaver's mirror
-// deliberately does not carry, each with the reason it cannot arise here.
+// opwireOmissions are the opwire.ContextHint fields the bridge's mirror
+// deliberately does not carry, each with the reason it cannot arise here. The
+// bridge submits exactly one op shape — an adapter's replyOp, carrying an
+// external outcome back onto the claim vertex the instanceOp minted — and its
+// whole declarable read-set is derivable from externalRef, which is all the
+// bridge ever knows about a reply.
 //
 // The list exists so a NEW opwire field cannot be absorbed silently: adding one
 // without mirroring it fails this test until someone either mirrors the field
-// or writes down here why Weaver never declares it.
+// or writes down here why the bridge never declares it. That is the gap this
+// test closes — the two engines' mirrors were pinned and this one was not, so
+// an envelope field could stay undeclarable from the bridge forever with
+// nothing red.
 var opwireOmissions = map[string]string{
-	"egressReads": "class (f) is the external plane's declared egress, and every " +
-		"external-plane dispatch is a Loom externalTask step; a gap's playbook " +
-		"entry dispatches internal-plane ops only.",
+	"optionalReads": "the replyOp's read-set is the claim vertex the reply resolves, " +
+		"a key whose absence is a fault rather than a branch; the bridge declares no " +
+		"absence-tolerant read.",
+	"enumerations": "a replyOp records an outcome onto the claim vertex it was handed " +
+		"by externalRef; it walks no links.",
+	"egressReads": "class (f) declares what leaves the platform, which is the instanceOp's " +
+		"outbound leg (Loom's externalTask, inferExternalTaskReads); the bridge carries " +
+		"the return leg inward.",
 }
 
 // TestContextHint_MirrorsOpwire pins actuator.go's contextHint against its
-// source of truth, opwire.ContextHint. Weaver's PRODUCTION code may not import
-// internal/processor (boundary_test's TestModuleBoundary_OnlySubstrate enforces
-// that via `go list -deps`, which reads the non-test package's imports only), so
-// the envelope's contextHint shape is hand-copied into actuator.go and compared
-// here — the same restated-constant hazard TestPatternStepKinds_MatchLoomVocabulary
-// covers for the step-kind strings.
+// source of truth, opwire.ContextHint. The bridge's PRODUCTION code may not
+// import internal/processor (boundary_test's TestModuleBoundary_OnlySubstrate
+// enforces that via `go list -deps`, which reads the non-test package's imports
+// only), so the envelope's contextHint shape is hand-copied into actuator.go
+// and compared here — the bridge is the third such hand-copy, alongside loom's
+// and weaver's.
 //
 // It checks BOTH directions, because the two failures are different bugs:
 //
@@ -45,11 +56,10 @@ var opwireOmissions = map[string]string{
 //     declaration Loom writes onto the wire and the Processor drops.
 //   - Every opwire field must be either mirrored or listed in opwireOmissions
 //     with a reason. Otherwise a field added to the envelope stays permanently
-//     undeclarable by Weaver, and nothing fails.
+//     undeclarable by the bridge, and nothing fails.
 //
-// Shape, not Go type: the mirror uses weaver.GapEnumeration where opwire uses
-// opwire.EnumerationHint, so the comparison is over the JSON shape each
-// marshals to, recursively.
+// Shape, not Go type: a mirror may restate a nested shape under its own local
+// type, so the comparison is over the JSON shape each marshals to, recursively.
 func TestContextHint_MirrorsOpwire(t *testing.T) {
 	t.Parallel()
 
@@ -59,11 +69,11 @@ func TestContextHint_MirrorsOpwire(t *testing.T) {
 	for _, name := range sortedKeys(mirror) {
 		want, ok := canonical[name]
 		if !ok {
-			t.Errorf("weaver's contextHint declares %q, which opwire.ContextHint does not parse — the Processor would drop it", name)
+			t.Errorf("the bridge's contextHint declares %q, which opwire.ContextHint does not parse — the Processor would drop it", name)
 			continue
 		}
 		if mirror[name] != want {
-			t.Errorf("weaver's contextHint field %q has shape %s but opwire.ContextHint's is %s", name, mirror[name], want)
+			t.Errorf("the bridge's contextHint field %q has shape %s but opwire.ContextHint's is %s", name, mirror[name], want)
 		}
 	}
 
@@ -75,7 +85,7 @@ func TestContextHint_MirrorsOpwire(t *testing.T) {
 		// written justification, and `{"newField": ""}` would otherwise be a
 		// one-word way to silence this gate permanently.
 		if reason := strings.TrimSpace(opwireOmissions[name]); reason == "" {
-			t.Errorf("opwire.ContextHint carries %q and weaver's contextHint does not mirror it — mirror the field, or record in opwireOmissions, with a non-blank reason, why Weaver never declares it", name)
+			t.Errorf("opwire.ContextHint carries %q and the bridge's contextHint does not mirror it — mirror the field, or record in opwireOmissions, with a non-blank reason, why the bridge never declares it", name)
 		}
 	}
 }
@@ -161,48 +171,5 @@ func shapeOf(typ reflect.Type) string {
 		return "{" + strings.Join(parts, ",") + "}"
 	default:
 		return fmt.Sprint(typ.Kind())
-	}
-}
-
-// TestEnumerationDirections_MatchTheEnvelopeVocabulary pins weaver's restated
-// direction constants against the authority that actually adjudicates them:
-// opwire's envelope parse. The constants are restated rather than imported
-// because weaver's production code may not import internal/processor, and a restated constant that drifts is silent — a direction this
-// package admits and the Processor refuses produces an envelope rejected
-// TERMINALLY, on a mark that is already written, so the gap or step
-// re-dispatches the identical dead requestId forever.
-//
-// Comparing against the parser rather than against a copied string literal is
-// the point: a literal here would drift in lockstep with a typo.
-func TestEnumerationDirections_MatchTheEnvelopeVocabulary(t *testing.T) {
-	t.Parallel()
-
-	parseWithDirection := func(direction string) error {
-		env := map[string]any{
-			"requestId": "AAAAAAAAAAAAAAAAAAAA", "lane": "system",
-			"operationType": "Sweep", "actor": "vtx.identity.AAAAAAAAAAAAAAAAAAAA",
-			"submittedAt": "2026-08-23T00:00:00Z", "payload": map[string]any{},
-			"contextHint": map[string]any{"enumerations": []any{map[string]any{
-				"hub": "vtx.identity.AAAAAAAAAAAAAAAAAAAA", "relation": "boundTo", "direction": direction,
-			}}},
-		}
-		body, err := json.Marshal(env)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		_, perr := opwire.ParseEnvelope(body)
-		return perr
-	}
-
-	for _, direction := range []string{enumerationDirectionOut, enumerationDirectionIn} {
-		if err := parseWithDirection(direction); err != nil {
-			t.Errorf("%s restates %q as a direction but opwire's envelope parse refuses it: %v",
-				"weaver", direction, err)
-		}
-	}
-	// The negative vector, so the positive one above is not vacuously green on a
-	// parser that accepts anything.
-	if err := parseWithDirection("both"); err == nil {
-		t.Error("opwire's envelope parse accepted direction \"both\" — this test proves nothing if every value passes")
 	}
 }

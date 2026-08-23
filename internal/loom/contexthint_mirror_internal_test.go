@@ -1,6 +1,7 @@
 package loom
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -66,8 +67,11 @@ func TestContextHint_MirrorsOpwire(t *testing.T) {
 		if _, ok := mirror[name]; ok {
 			continue
 		}
-		if _, excused := opwireOmissions[name]; !excused {
-			t.Errorf("opwire.ContextHint carries %q and loom's contextHint does not mirror it — mirror the field, or record in opwireOmissions why Loom never declares it", name)
+		// A blank reason does not excuse: the ledger's whole value is the
+		// written justification, and `{"newField": ""}` would otherwise be a
+		// one-word way to silence this gate permanently.
+		if reason := strings.TrimSpace(opwireOmissions[name]); reason == "" {
+			t.Errorf("opwire.ContextHint carries %q and loom's contextHint does not mirror it — mirror the field, or record in opwireOmissions, with a non-blank reason, why Loom never declares it", name)
 		}
 	}
 }
@@ -153,5 +157,48 @@ func shapeOf(typ reflect.Type) string {
 		return "{" + strings.Join(parts, ",") + "}"
 	default:
 		return fmt.Sprint(typ.Kind())
+	}
+}
+
+// TestEnumerationDirections_MatchTheEnvelopeVocabulary pins loom's restated
+// direction constants against the authority that actually adjudicates them:
+// opwire's envelope parse. The constants are restated rather than imported
+// because loom's production code may not import internal/processor, and a restated constant that drifts is silent — a direction this
+// package admits and the Processor refuses produces an envelope rejected
+// TERMINALLY, on a mark that is already written, so the gap or step
+// re-dispatches the identical dead requestId forever.
+//
+// Comparing against the parser rather than against a copied string literal is
+// the point: a literal here would drift in lockstep with a typo.
+func TestEnumerationDirections_MatchTheEnvelopeVocabulary(t *testing.T) {
+	t.Parallel()
+
+	parseWithDirection := func(direction string) error {
+		env := map[string]any{
+			"requestId": "AAAAAAAAAAAAAAAAAAAA", "lane": "system",
+			"operationType": "Sweep", "actor": "vtx.identity.AAAAAAAAAAAAAAAAAAAA",
+			"submittedAt": "2026-08-23T00:00:00Z", "payload": map[string]any{},
+			"contextHint": map[string]any{"enumerations": []any{map[string]any{
+				"hub": "vtx.identity.AAAAAAAAAAAAAAAAAAAA", "relation": "boundTo", "direction": direction,
+			}}},
+		}
+		body, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, perr := opwire.ParseEnvelope(body)
+		return perr
+	}
+
+	for _, direction := range []string{enumerationOut, enumerationIn} {
+		if err := parseWithDirection(direction); err != nil {
+			t.Errorf("%s restates %q as a direction but opwire's envelope parse refuses it: %v",
+				"loom", direction, err)
+		}
+	}
+	// The negative vector, so the positive one above is not vacuously green on a
+	// parser that accepts anything.
+	if err := parseWithDirection("both"); err == nil {
+		t.Error("opwire's envelope parse accepted direction \"both\" — this test proves nothing if every value passes")
 	}
 }
