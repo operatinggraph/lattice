@@ -1141,3 +1141,92 @@ finding (`UpgradePackage` accepts unvalidated permission/role-class mutations, �
 pass) and the §9 spawned rows 2–4 (root-actor boot-snapshot latency, stale "kernel-seeded" prose,
 live-vs-declared reconciler) remain as their own already-filed `lattice.md` rows — not this item's to
 carry further.
+
+---
+
+## 11. Live-vs-declared permission reconciler — fire brief (build note, 2026-08-23)
+
+Spawned row 4 (§9). The §5.3 table filed it as "the auditor's follow-on, not a precondition"; Inc 3's
+`origin` stamp shipped, so it is buildable now.
+
+### 11.1 Scope sentence
+
+**Flag any live `vtx.permission.*` no manifest declares** — a live-vs-declared reconciler over Core KV,
+with a gate that fails on drift. Green bar: `go test ./internal/pkgmgr/...`, `make
+verify-permission-provenance` clean against a stack carrying the Phase-1 packages, and the gate wired into
+CI's `stack-gates` job.
+
+### 11.2 Verified touch-list (checked live)
+
+| File | Anchor | Why |
+|---|---|---|
+| `internal/pkgmgr/permissionreconcile.go` | new | the pure reconciliation + the Core-KV gatherer |
+| `internal/pkgmgr/permissionreconcile_test.go` | new | table-driven classification + one end-to-end over `newInstallerHarness` |
+| `internal/pkgmgr/installer.go` | `:443-455` (`entityNanoID`, `RoleID`), `:504-506` (`permTag`), `:308` | the deterministic key derivation the reconciler re-computes; `RoleID` is the export precedent |
+| `internal/pkgmgr/build.go` | `:363-398` | the package-origin body: `operationType`, `scope`, `origin: "package"`, `declaredBy`, optional `note`/`lanes` |
+| `internal/pkgmgr/manifest.go` | `:64-69` (`ManifestPermission`), `:213-232` | the declared side; **`Scope` is `omitempty` and `ParseManifest` does not normalize it** — an omitted scope is the unstated default `any` |
+| `internal/bootstrap/nanoid.go` | `:678-683` | the six kernel permission keys — the third provenance class |
+| `internal/bootstrap/primordial.go` | `:751-774` | kernel permission bodies: `protected: true`, **no `origin`** |
+| `packages/rbac-domain/ddls.go` | `:323` | the runtime mint's `origin: "runtime"` |
+| `scripts/verify-permission-provenance.go` | new | the gate |
+| `Makefile` | the `verify-package-*` block | the target |
+| `.github/workflows/ci.yml` | `stack-gates` | the CI step |
+
+### 11.3 The classification (adjudicated here — decide-don't-defer)
+
+§1.1 frames provenance as package-vs-runtime. That is **two of three**: the six primordial permissions
+(`nanoid.go:678-683`) carry `protected: true` and **no `origin` at all**, so a binary reconciler reports
+every kernel permission as undeclared drift. Every live permission vertex is classified into exactly one:
+
+- **kernel** — key ∈ bootstrap's six. Declared by no manifest, legitimate; reconciled against the constant
+  set, not a manifest.
+- **package** — `origin == "package"`. Must be declared by the installed package its own `declaredBy`
+  names, **and** its key must equal `PermissionID(declaredBy, operationType, scope)`.
+- **runtime** — `origin == "runtime"`. The second grant channel; no manifest can declare it. **Inventory,
+  never drift** — Branch A ratified it as legitimate.
+- **unstamped** — no `origin`, not kernel. A pre-stamp package install; healable
+  (`step8_commit.go:765`), remedy is an upgrade of the declaring package. Reported, not failed.
+
+Drift the gate FAILS on: `undeclared` (package-origin, no declaring manifest — the row's ask) ·
+`keyMismatch` (a body claiming a declaration its key does not derive) · `missing` (declared, not live —
+also the §5.1 non-durable-revoke case) · `kernelMissing`.
+
+### 11.4 Increment order
+
+1. `PermissionID` export + the pure `ReconcilePermissions` + table tests. Green: `go test
+   ./internal/pkgmgr/ -run TestReconcilePermissions`.
+2. The Core-KV gatherer + the end-to-end test over `newInstallerHarness` (real primordial seed, real
+   install through the Processor, then reconcile). Green: `go test ./internal/pkgmgr/ -run Permission`.
+3. The script + Makefile target + CI step. Green: `go vet ./...`, `golangci-lint run ./...`, `STRICT=1 go
+   run ./scripts/lint-conventions.go`, and the CI `stack-gates` job.
+
+### 11.5 In-scope gotchas
+
+- **`KVListKeysPrefix` does not filter soft tombstones** (`substrate/kv.go:234-254`) — every live-side read
+  must `KVGet` and inspect `isDeleted`, on permission vertices *and* package vertices. An uninstalled
+  package whose record survived would otherwise manufacture `missing` findings.
+- **Only 3-segment keys are vertex roots** — `vtx.permission.<id>.<aspect>` and `lnk.permission.*` share
+  the prefix (`verify-package-rbac.go:467-497` filters exactly this way).
+- **Manifest `Scope: ""` means `any`** — apply the default before deriving the expected key, or every
+  scope-omitting manifest entry reports as `missing` + `undeclared` twice over.
+- Dossier, `docs/components/pkgmgr.md`: *"one fact computed twice"* — the key derivation must have one
+  owner (`PermissionID`), used by both the installer and the reconciler; *"corpus-wide guards reading churn
+  namespaces without exclusion"*; *"guard testing emission vs intent"* — assert the finding's meaning, not
+  its string.
+- Standing checklist: **every census is a premise** (the six kernel keys are re-derived from the constant
+  list, never hard-coded here); **a negative test needs its positive vector proven first** (each drift class
+  gets a live-clean control and a seeded-drift case).
+
+### 11.6 Adjacent finds
+
+- `packages/rbac-domain/ddls.go:332-348` — `UpdatePermission` still exists as DDL surface and rewrites
+  `data` to `{operationType, scope}` wholesale, dropping `origin`/`declaredBy`/`note`/`lanes`. It is
+  **inert**: no `PermissionSpec` grants it (Inc 1's nine), and `rejectPermissionRoleRewrites`
+  (`step8_commit.go:788-800`) refuses any provenance-field change at commit. Recorded here as verified-inert,
+  not filed.
+
+### 11.7 Non-goals
+
+The reconciler **reads**; it never repairs. No new op, no KV write, no change to any authorization path,
+no change to the installer's own gates. It does not reconcile roles, `grantedBy` links, or DDL/lens
+entities — permission vertices only.
