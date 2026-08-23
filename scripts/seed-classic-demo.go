@@ -44,6 +44,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,27 +121,38 @@ func main() {
 	// DecideLeaseApplication's self-scoped grant is authorized off the
 	// landlord's `manages` link (require_manages) — with no landlord persona
 	// this world's application can never be decided outside Loupe/operator.
-	// Mirrors seed-showcase.go's seedLandlord: a consumer-only identity whose
-	// entire authority is the manages link over this unit.
-	landlordSalt, err := substrate.NewNanoID()
-	must(err, "generate landlord email salt")
-	landlordReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{
-			"name":         "Classic Demo Landlord " + landlordSalt[:8],
-			"email":        "landlord-" + landlordSalt[:8] + "@dev.lattice.local",
-			"claimKeyHash": mustSHA256Hex("classic-demo-landlord-" + landlordSalt),
-		}, nil)
-	landlordKey := landlordReply.PrimaryKey
-	submitOp(ctx, conn, adminKey, "AssignRole", "",
-		map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
-		&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
-	submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
-		map[string]any{"landlord": landlordKey, "unit": unitKey},
-		&processor.ContextHint{
-			Reads:         []string{landlordKey, unitKey},
-			OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
-		})
+	// Mirrors seed-showcase.go's seedLandlord — but CreateUnclaimedIdentity
+	// mints a fresh vtx.identity on every call (no client-supplied id, unlike
+	// CreateLocation's locationId), so a landlord can't be pinned by const the
+	// way unitID/studioID are. findManagingLandlord instead converges on the
+	// `manages` link itself, mirroring seed-showcase.go's ensureLandlord —
+	// this seed's own prior comment claimed the same precedent but dropped
+	// exactly that guard, so every rerun minted and co-managed a fresh
+	// landlord (verticals.md: 10 co-managers accrued on the pinned unit).
+	landlordKey, foundLandlord := findManagingLandlord(ctx, conn, unitKey)
+	if !foundLandlord {
+		landlordSalt, err := substrate.NewNanoID()
+		must(err, "generate landlord email salt")
+		landlordReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+			map[string]any{
+				"name":         "Classic Demo Landlord " + landlordSalt[:8],
+				"email":        "landlord-" + landlordSalt[:8] + "@dev.lattice.local",
+				"claimKeyHash": mustSHA256Hex("classic-demo-landlord-" + landlordSalt),
+			}, nil)
+		landlordKey = landlordReply.PrimaryKey
+		submitOp(ctx, conn, adminKey, "AssignRole", "",
+			map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
+			&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
+		submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
+			map[string]any{"landlord": landlordKey, "unit": unitKey},
+			&processor.ContextHint{
+				Reads:         []string{landlordKey, unitKey},
+				OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+			})
+	}
 	fmt.Printf("==> landlord:        %s manages %s\n", landlordKey, unitKey)
+	reapExcessCoManagers(ctx, conn, adminKey, unitKey, landlordKey)
+	reapDuplicateListings(ctx, conn, adminKey, unitKey)
 
 	salt, err := substrate.NewNanoID()
 	must(err, "generate consumer email salt")
@@ -453,6 +465,104 @@ func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, k
 			map[string]any{"studioKey": key},
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate studio: %s (%s)\n", key, aspect.Data.Name)
+	}
+}
+
+// findManagingLandlord returns the identity key of any live landlord already
+// holding a `manages` link to unitKey, mirroring seed-showcase.go's
+// ensureLandlord/findLinkedIdentity convergence check (this script is a
+// standalone `go run` file, so the helper is re-derived rather than shared).
+// Prefix-scans lnk.identity. rather than constructing the link key directly —
+// unlike unitID/studioID, the landlord's own NanoID is never client-pinned
+// (CreateUnclaimedIdentity mints it), so the source id isn't known up front.
+func findManagingLandlord(ctx context.Context, conn *substrate.Conn, unitKey string) (string, bool) {
+	suffix := ".manages." + strings.TrimPrefix(unitKey, "vtx.")
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.identity.")
+	must(err, "list lnk.identity. keys")
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !strings.HasSuffix(key, suffix) || !alive(ctx, conn, key) {
+			continue
+		}
+		return "vtx.identity." + landlordIDFromManagesLink(key), true
+	}
+	return "", false
+}
+
+// landlordIDFromManagesLink extracts <landlordID> from a
+// lnk.identity.<landlordID>.manages.unit.<unitID> key.
+func landlordIDFromManagesLink(key string) string {
+	rest := strings.TrimPrefix(key, "lnk.identity.")
+	return rest[:strings.Index(rest, ".manages.")]
+}
+
+// reapExcessCoManagers removes every live `manages` link on unitKey other
+// than keepLandlordKey. findManagingLandlord stops a future rerun from
+// minting a new co-manager, but does not by itself undo the ones a decade of
+// unguarded prior runs already wired (10 accrued on the pinned unit,
+// verticals.md) — RemoveUnitOwner is granted to operator unconditionally
+// (loftspace-domain/ownership.go's enforce_manages exempts the operator
+// role), so adminKey can drop a co-manager it never created.
+func reapExcessCoManagers(ctx context.Context, conn *substrate.Conn, adminKey, unitKey, keepLandlordKey string) {
+	suffix := ".manages." + strings.TrimPrefix(unitKey, "vtx.")
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.identity.")
+	must(err, "list lnk.identity. keys")
+	for _, key := range keys {
+		if !strings.HasSuffix(key, suffix) || !alive(ctx, conn, key) {
+			continue
+		}
+		landlordKey := "vtx.identity." + landlordIDFromManagesLink(key)
+		if landlordKey == keepLandlordKey {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "RemoveUnitOwner", "loftspaceOwnership",
+			map[string]any{"landlord": landlordKey, "unit": unitKey},
+			&processor.ContextHint{
+				Reads:         []string{landlordKey, unitKey},
+				OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+			})
+		fmt.Printf("==> reaped excess co-manager: %s no longer manages %s\n", landlordKey, unitKey)
+	}
+}
+
+// reapDuplicateListings tombstones every live unit at "12 Classic Demo Ave"
+// other than the checked-in canonical one (keep) — unitID has always been
+// pinned by this script mirroring reapDuplicateProviders/reapDuplicateStudios,
+// but earlier reruns (before the id was pinned) each minted a fresh unit +
+// address + listing, so LoftSpace's browsable inventory still renders every
+// one of them, several with no manages landlord at all (undecidable —
+// permissions.go's DecideLeaseApplication self-scope requires one;
+// verticals.md). Address-filtered rather than name-filtered — CreateLocation's
+// presentation.name here is the generic "Unit 1" — mirroring
+// reapDuplicateProviders' safety rationale: no other seed script mints a unit
+// at this address.
+func reapDuplicateListings(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.unit.")
+	must(err, "list vtx.unit. keys")
+	for _, key := range keys {
+		if key == keep || !alive(ctx, conn, key) {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".address")
+		if err != nil {
+			continue
+		}
+		var aspect struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				Line1 string `json:"line1"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+			continue
+		}
+		if aspect.Data.Line1 != "12 Classic Demo Ave" {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneLocation", "unit",
+			map[string]any{"locationKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped duplicate listing: %s (12 Classic Demo Ave)\n", key)
 	}
 }
 
