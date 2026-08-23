@@ -2924,11 +2924,12 @@ function renderLedger(data) {
   empty.hidden = true;
   for (const t of txs) {
     const li = document.createElement("li");
-    li.className = "ledger-entry " + t.type;
+    const isWaiver = t.type === "credit" && t.reason === "waiver";
+    li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "");
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    let line = when + " · " + sign + moneyAmount(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    let line = when + " · " + sign + moneyAmount(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "");
     if (t.visitStartsAt) {
       const vd = new Date(t.visitStartsAt);
       const visitWhen = isNaN(vd) ? t.visitStartsAt : vd.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
@@ -2975,17 +2976,24 @@ async function openLedgerAccount(patientKey) {
 // own record only ever reaches this path via the payment button, since
 // applyHatGating hides #ledger-charge from non-front-desk sessions.
 //
-// The two ops share ONE visible amount/memo field pair behind two buttons
-// (charge vs payment), and neither op's target (the account) exists until
-// the first transaction — so, unlike every other migrated op, this renders
-// the descriptor form into a detached mount that is never shown, purely to
-// assemble the envelope (payload, reads, and — the one part that genuinely
-// differs per button — authContext) from what was already typed into the
-// visible fields. The visible #ledger-amount/#ledger-memo inputs stay put
-// across both buttons; only the hand-rolled payload/authContext assembly is
-// gone, replaced by the descriptor's own dispatch shape for whichever op
-// this call is.
-async function submitLedgerEntry(opType, what) {
+// The two ops share ONE visible amount/memo field pair behind their buttons
+// (charge, payment, waive), and neither op's target (the account) exists
+// until the first transaction — so, unlike every other migrated op, this
+// renders the descriptor form into a detached mount that is never shown,
+// purely to assemble the envelope (payload, reads, and — the one part that
+// genuinely differs per button — authContext) from what was already typed
+// into the visible fields. The visible #ledger-amount/#ledger-memo inputs
+// stay put across all three buttons; only the hand-rolled payload/
+// authContext assembly is gone, replaced by the descriptor's own dispatch
+// shape for whichever op this call is.
+//
+// reason (optional, "waiver" for the waive button) prefills
+// ClinicCreditAccount's reason field — omitted (the charge/payment buttons)
+// it defaults server-side to "payment". Waive is front-desk/operator-only
+// (applyHatGating hides #ledger-waive from a patient's own session) — the
+// server rejects reason:"waiver" on a self-scoped submit regardless, so this
+// is a UI convenience, not the security boundary.
+async function submitLedgerEntry(opType, what, reason) {
   if (!state.patient) {
     toast("Select a patient first.", "err");
     return;
@@ -3001,7 +3009,9 @@ async function submitLedgerEntry(opType, what) {
   const memo = memoInput.value.trim();
   const chargeBtn = $("#ledger-charge");
   const paymentBtn = $("#ledger-payment");
+  const waiveBtn = $("#ledger-waive");
   chargeBtn.disabled = paymentBtn.disabled = true;
+  if (waiveBtn) waiveBtn.disabled = true;
   try {
     let accountKey = state.ledger && state.ledger.accountKey;
     if (!accountKey) accountKey = await openLedgerAccount(state.patient);
@@ -3010,7 +3020,7 @@ async function submitLedgerEntry(opType, what) {
     const { renderOpForm } = await loadDescriptorform();
     const row = (state.opCatalog || {})[opType];
     if (!row) throw new Error("this action is unavailable");
-    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined } };
+    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined, reason } };
     if (opType === "ClinicCreditAccount") {
       context.me = patientIdentityKey();
       context.selfVoice = actingAsSelf();
@@ -3029,6 +3039,7 @@ async function submitLedgerEntry(opType, what) {
     toast("Could not " + what + " — " + e.message, "err");
   } finally {
     chargeBtn.disabled = paymentBtn.disabled = false;
+    if (waiveBtn) waiveBtn.disabled = false;
   }
 }
 
@@ -4554,6 +4565,8 @@ function applyHatGating() {
   if (np) np.hidden = !fd;
   const chargeBtn = $("#ledger-charge");
   if (chargeBtn) chargeBtn.hidden = !fd;
+  const waiveBtn = $("#ledger-waive");
+  if (waiveBtn) waiveBtn.hidden = !fd;
   for (const id of ["#go-availability", "#go-sites"]) {
     const link = $(id);
     const hint = link && link.closest(".hint");
@@ -4736,6 +4749,7 @@ function init() {
   $("#myschedule-filter").addEventListener("change", renderMySchedule);
   $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("ClinicDebitAccount", "record the charge"));
   $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("ClinicCreditAccount", "record the payment"));
+  $("#ledger-waive").addEventListener("click", () => submitLedgerEntry("ClinicCreditAccount", "waive the charge", "waiver"));
   $("#reload-followups").addEventListener("click", loadFollowups);
   $("#followups-filter").addEventListener("change", renderFollowups);
   $("#reload-series").addEventListener("click", loadSeries);

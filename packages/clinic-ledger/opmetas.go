@@ -83,12 +83,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"accountKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> of your own account — auto-filled from the account being viewed."},` +
 				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Payment amount, in whole cents."},` +
-				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."}},` +
+				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."},` +
+				`"reason":{"type":"string","enum":["payment","waiver"],"description":"Optional, defaults to \"payment\". A front-desk/operator submit may set \"waiver\" to forgive a charge instead of recording cash collected; server-rejected on a self-scoped submit — you may only pay down your own balance, never waive it."}},` +
 				`"required":["accountKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
 				"accountKey":  "Your own billing account — auto-filled by the client (dispatch.targetField), not user-entered.",
 				"amountCents": "How much you're paying, entered in dollars — e.g. 25.00. Must be more than zero and cannot exceed what you actually owe (server-verified).",
 				"memo":        "Optional free text describing the payment — e.g. a check number.",
+				"reason":      "\"payment\" or \"waiver\" (default \"payment\"). Front-desk/operator only — a self-scoped submit is rejected server-side if set to \"waiver\".",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "clinictransaction",

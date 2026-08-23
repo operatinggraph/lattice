@@ -19,12 +19,16 @@
 //
 //   - The `clinictransaction` vertex type (DDL `clinictransaction`) —
 //     ClinicDebitAccount (a charge: a copay, an invoice line) and
-//     ClinicCreditAccount (a payment received) each mint
-//     vtx.clinictransaction.<NanoID> (root data {} per D5) with a .entry
-//     aspect {type, amountCents, memo?, postedAt}, linked to the account via
-//     postedTo. The ledger is append-only: a balance is derived by summing
-//     entries (the clinicLedgerHistory lens), never stored as a mutable
-//     aspect — so concurrent debits/credits never race a read-modify-write.
+//     ClinicCreditAccount (a payment received, or reason:"waiver" a charge
+//     forgiven) each mint vtx.clinictransaction.<NanoID> (root data {} per
+//     D5) with a .entry aspect {type, amountCents, memo?, postedAt,
+//     reason? (credit only)}, linked to the account via postedTo. The
+//     ledger is append-only: a balance is derived by summing entries (the
+//     clinicLedgerHistory lens), never stored as a mutable aspect — so
+//     concurrent debits/credits never race a read-modify-write. A waiver
+//     reduces the balance identically to a payment but reason keeps the
+//     two distinguishable in the history; only the operator/frontOfHouse
+//     scope=any grant may waive — a self-scoped patient credit is rejected.
 //
 //   - The `clinicLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
@@ -65,15 +69,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.2.11",
+	Version: "0.2.12",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(ClinicDebitAccount/ClinicCreditAccount, append-only entries linked to the account via postedTo, ClinicDebitAccount " +
-		"taking an optional appointmentRef back-ref) + the clinicLedgerHistory read-model lens (one row per transaction) + the " +
+		"taking an optional appointmentRef back-ref, ClinicCreditAccount taking an optional reason to waive a charge instead " +
+		"of recording cash collected) + the clinicLedgerHistory read-model lens (one row per transaction) + the " +
 		"clinicPatientAccounts lens (patient -> account key lookup) + the clinicNoShowSettlement Weaver playbook " +
 		"(lazily opens the account via ClinicCreateAccount, then auto-charges the no-show fee). All three ops grant " +
 		"front-of-house staff alongside the operator, unconfined. ClinicCreditAccount ALSO grants a patient scope=self " +
-		"(pay down their own balance), ownership + amount proven server-side. Depends clinic-domain.",
+		"(pay down their own balance, never waive it — reason:\"waiver\" is rejected server-side for a self-scoped " +
+		"submit), ownership + amount proven server-side. Depends clinic-domain.",
 	Depends:       []string{"clinic-domain"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

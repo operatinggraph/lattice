@@ -250,3 +250,30 @@ func TestClinicLedgerHistory_NoSettlesLink_ProjectsNullVisit(t *testing.T) {
 	require.Nil(t, v["appointmentKey"], "a copay settles no appointment — OPTIONAL MATCH leaves it null")
 	require.Nil(t, v["visitStartsAt"])
 }
+
+// TestClinicLedgerHistory_ProjectsWaiverReason proves the lens surfaces a
+// credit entry's reason column — the field a reader needs to tell a waived
+// charge apart from cash actually collected, since both reduce the derived
+// balance identically.
+func TestClinicLedgerHistory_ProjectsWaiverReason(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.vtx(t, "waiv_patient", "patient")
+	f.vtx(t, "waiv_acct", "clinicaccount")
+	f.vtx(t, "waiv_tx", "clinictransaction")
+	f.edge(t, "heldFor", "waiv_acct", "waiv_patient")
+	f.edge(t, "postedTo", "waiv_tx", "waiv_acct")
+	f.aspect(t, "waiv_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "credit",
+		"amountCents": 2500.0,
+		"memo":        "Waived — patient hardship",
+		"postedAt":    "2026-08-06T00:00:00Z",
+		"reason":      "waiver",
+	})
+
+	rows := f.project(t, "clinicLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "waiver", rows[0].Values["reason"])
+}

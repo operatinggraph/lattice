@@ -406,6 +406,95 @@ func TestDebitAccount_PayerDimensionValidation(t *testing.T) {
 	}
 }
 
+// TestCreditAccount_Waiver (front-desk/operator, scope=any) proves a credit
+// carrying reason:"waiver" is accepted, stores reason on the .entry aspect
+// (instead of the default "payment"), and reduces the derived balance
+// exactly like a plain payment would — a waiver forgives debt rather than
+// recording cash collected, but the ledger's arithmetic treats the two
+// identically; only the projected reason tells them apart.
+func TestCreditAccount_Waiver(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditwaiver")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatwaiv0000000001", "Farah Nassar")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctwaiv00001", patientKey)
+
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("waiverdebit000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T13:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"No-show fee"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	waiverReqID := testutil.GenReqID("waivercredit00000001")
+	waiverEnv := &processor.OperationEnvelope{
+		RequestID:     waiverReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-01T14:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Waived — patient hardship","reason":"waiver"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, waiverEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	waiverTxKey := "vtx.clinictransaction." + nanoIDFromRequestID(waiverReqID)
+	entryDoc := readDoc(t, ctx, conn, waiverTxKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["type"].(string); got != "credit" {
+		t.Fatalf("entry.type = %q, want credit", got)
+	}
+	if got, _ := entryData["reason"].(string); got != "waiver" {
+		t.Fatalf("entry.reason = %q, want waiver", got)
+	}
+}
+
+// TestCreditAccount_ReasonValidation proves reason is a bounded credit-only
+// dimension, mirroring TestDebitAccount_PayerDimensionValidation's billedTo
+// coverage: an unrecognized value is rejected, a plain payment omitting
+// reason still defaults it (proven separately by TestDebitCreditAccount_
+// PostEntries' absence check pre-dating this field — here we only need the
+// negative cases), and reason on a debit is rejected (a charge has nothing
+// to waive).
+func TestCreditAccount_ReasonValidation(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasonvalidation")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatrv00000000001", "Gio Petrova")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctrv000001", patientKey)
+
+	cases := []struct {
+		name    string
+		opType  string
+		payload string
+	}{
+		{"unrecognized reason value", "ClinicCreditAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"reason":"refund"}`},
+		{"reason on a debit (charge)", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"reason":"waiver"}`},
+	}
+	for i, c := range cases {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID("reasonval" + string(rune('0'+i)) + "00000001"),
+			Lane:          processor.LaneDefault,
+			OperationType: c.opType,
+			Actor:         ledgerActorKey,
+			SubmittedAt:   "2026-07-01T13:00:00Z",
+			Class:         "clinictransaction",
+			Payload:       json.RawMessage(c.payload),
+			ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	}
+}
+
 // TestDebitAccount_UnknownAccount rejects a debit against a non-existent
 // account.
 func TestDebitAccount_UnknownAccount(t *testing.T) {
@@ -830,5 +919,52 @@ func TestCreditAccount_ConsumerSelfScope_DebitStaysStaffOnly(t *testing.T) {
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-scoped ClinicDebitAccount outcome = %v, want Rejected (no matching grant)", outcome)
+	}
+}
+
+// TestCreditAccount_ConsumerSelfScope_RejectedWaiver proves a patient cannot
+// forgive their own debt: a self-scoped credit (ownership + amount both
+// otherwise valid) carrying reason:"waiver" is rejected — post_entry's own
+// authContextTarget branch fails closed on it before the ownership/amount
+// proofs even run, since a patient may only pay down a balance, never waive
+// it (that decision is the operator/front-desk's, scope=any).
+func TestCreditAccount_ConsumerSelfScope_RejectedWaiver(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfwaiver")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFWAVRPATN", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselfwaivsetup1", patientKey)
+
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditselfwaivdebit1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	reqID := testutil.GenReqID("creditselfwaivpay001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reason":"waiver"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-scoped waiver outcome = %v, want Rejected (AuthDenied) — a patient may pay down a balance, never waive it", outcome)
 	}
 }

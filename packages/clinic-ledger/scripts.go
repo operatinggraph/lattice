@@ -121,7 +121,10 @@ def execute(state, op):
 // insurance, expectedReimbursementCents (must be positive, capped at
 // amountCents) — so a clinic can track what it billed insurance for vs. what
 // it collected; a credit (payment) has nothing to bill and rejects both
-// fields.
+// fields. A credit entry instead carries reason (payment|waiver, default
+// payment) — a waiver forgives debt (e.g. a no-show fee) rather than
+// recording cash collected; rejected on a debit, and rejected on a
+// self-scoped (patient) credit, which may only pay down a balance.
 const transactionDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -216,6 +219,21 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
 
+    # reason distinguishes a credit that is cash actually collected from one
+    # that forgives debt (a waived no-show fee) -- both reduce the derived
+    # balance identically (owed_cents -= amount_cents below, and the
+    # ledgerHistory lens's sum(debits)-sum(credits)), but the lens projects
+    # reason so a reader never mistakes forgiven debt for money received.
+    # Credit-only, same bounded-dimension shape as billedTo below.
+    reason = optional_string(p, "reason")
+    if entry_type == "credit":
+        if reason == None:
+            reason = "payment"
+        if reason != "payment" and reason != "waiver":
+            fail("InvalidArgument: reason: must be \"payment\" or \"waiver\", got " + reason)
+    elif reason != None:
+        fail("InvalidArgument: reason: only valid on a credit (payment/waiver), not a debit (charge)")
+
     # Patient-self ownership + amount trust (ClinicCreditAccount only —
     # permissions.go grants no self-scope ClinicDebitAccount), mirroring
     # loftspace-ledger's CreditAccount post_entry. The mere PRESENCE of
@@ -232,6 +250,8 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     if op.authContextTarget != "":
         if entry_type != "credit":
             fail("AuthDenied: a patient may only credit (pay down) their own account, not charge it")
+        if reason == "waiver":
+            fail("AuthDenied: a patient may only pay down their own account, not waive a charge")
         # authcontext-target: (ownership) the value derives an identity whose
         # ownership of the account's own patient is then proven by the
         # identifiedBy link read below -- a forged target only fails closed.
@@ -303,6 +323,8 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     entry_data = {"type": entry_type, "amountCents": amount_cents, "postedAt": posted_at}
     if memo != None:
         entry_data["memo"] = memo
+    if entry_type == "credit":
+        entry_data["reason"] = reason
 
     # billedTo/expectedReimbursementCents is a charge-only dimension (a
     # payment has nothing to bill) — reject either field on a credit so the

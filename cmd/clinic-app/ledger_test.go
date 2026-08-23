@@ -51,6 +51,31 @@ func TestComputeLedgerHistory_CarriesAppointmentTie(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_CarriesWaiverReason proves a credit's reason
+// column round-trips into the FE-facing row, and that balance treats a
+// waiver exactly like a payment (both subtract) — reason is a display-only
+// distinction, never an arithmetic one.
+func TestComputeLedgerHistory_CarriesWaiverReason(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.clinictransaction.7": map[string]any{"transactionKey": "vtx.clinictransaction.7", "accountKey": "vtx.clinicaccount.ppp", "patientKey": "vtx.patient.ppp", "type": "debit", "amountCents": 2500, "memo": "No-show fee", "postedAt": "2026-08-01T00:00:00Z"},
+		"vtx.clinictransaction.8": map[string]any{"transactionKey": "vtx.clinictransaction.8", "accountKey": "vtx.clinicaccount.ppp", "patientKey": "vtx.patient.ppp", "type": "credit", "amountCents": 2500, "memo": "Waived", "postedAt": "2026-08-02T00:00:00Z", "reason": "waiver"},
+	})
+
+	rows, balance := computeLedgerHistory(keys, get, "vtx.patient.ppp")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d (%+v)", len(rows), rows)
+	}
+	if rows[1].Reason != "waiver" {
+		t.Errorf("row[1].Reason = %q, want waiver", rows[1].Reason)
+	}
+	if rows[0].Reason != "" {
+		t.Errorf("row[0].Reason (debit) = %q, want empty", rows[0].Reason)
+	}
+	if balance != 0 {
+		t.Errorf("balance: want 2500-2500=0 (a waiver subtracts like any credit), got %d", balance)
+	}
+}
+
 func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	rows, balance := computeLedgerHistory(nil, func(string) ([]byte, bool) { return nil, false }, "vtx.patient.fresh")
 	if len(rows) != 0 || balance != 0 {

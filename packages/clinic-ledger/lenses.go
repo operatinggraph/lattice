@@ -160,6 +160,7 @@ RETURN
   t.entry.data.postedAt AS postedAt,
   t.entry.data.billedTo AS billedTo,
   t.entry.data.expectedReimbursementCents AS expectedReimbursementCents,
+  t.entry.data.reason AS reason,
   appt.key AS appointmentKey,
   appt.schedule.data.startsAt AS visitStartsAt`
 

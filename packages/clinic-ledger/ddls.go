@@ -104,9 +104,10 @@ func transactionDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"ClinicDebitAccount", "ClinicCreditAccount"},
 		Description: "Ledger transaction DDL. Vertex shape: vtx.clinictransaction.<NanoID>, class=clinictransaction, root data = {} " +
 			"(minimal, D5 — the entry detail is a .entry aspect). ClinicDebitAccount{accountKey, amountCents, memo?, billedTo?, " +
-			"expectedReimbursementCents?} records a charge (a copay, an invoice line); ClinicCreditAccount{accountKey, amountCents, memo?} " +
-			"records a payment received. Each mints a fresh vtx.clinictransaction.<NanoID> + a .entry aspect " +
-			"{type (debit|credit), amountCents, memo?, postedAt, billedTo? (debit only), expectedReimbursementCents? (debit+insurance only)} " +
+			"expectedReimbursementCents?} records a charge (a copay, an invoice line); ClinicCreditAccount{accountKey, amountCents, memo?, " +
+			"reason?} records a payment received OR a waived charge. Each mints a fresh vtx.clinictransaction.<NanoID> + a .entry aspect " +
+			"{type (debit|credit), amountCents, memo?, postedAt, billedTo? (debit only), expectedReimbursementCents? (debit+insurance only), " +
+			"reason? (credit only)} " +
 			"+ the postedTo link (transaction→account, the transaction is the later-arriving vertex so it is the source — " +
 			"Contract #1 §1.1). The ledger is APPEND-ONLY — no balance is stored or mutated on the account; the ledgerHistory " +
 			"lens derives a balance by summing entries, so concurrent debits/credits never race a read-modify-write. Requires " +
@@ -115,6 +116,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"expectedReimbursementCents (positive, capped at amountCents) — so a clinic can track what it billed insurance for " +
 			"vs. what it actually collected (a ClinicCreditAccount payment) — NOT real X12 837/835 claims/clearinghouse integration, " +
 			"which is out of scope for a reference vertical. Both fields reject on a ClinicCreditAccount (a payment has nothing to bill). " +
+			"A credit's reason (payment|waiver, default payment when omitted) distinguishes cash actually collected from debt the " +
+			"clinic forgave (e.g. a no-show fee waived as a courtesy) — both reduce the derived balance identically, but the " +
+			"ledgerHistory lens projects reason so a reader never mistakes a waiver for money received. reason:\"waiver\" is " +
+			"rejected on a self-scoped (patient) credit — post_entry's own authContextTarget branch — since a patient may pay " +
+			"down their own balance but never forgive it. " +
 			"ClinicDebitAccount also accepts an optional appointmentRef (vtx.appointment.<NanoID>, validated alive when supplied — " +
 			"UnknownAppointment otherwise): when present, writes a settles audit link (transaction→appointment) that the " +
 			"clinicNoShowSettlement lens (targets.go) walks to converge the no-show-fee gap once posted. A plain " +
@@ -126,7 +132,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"Office visit copay\", \"Insurance payment\"). Optional."},` +
 			`"billedTo":{"type":"string","enum":["self","insurance"],"description":"ClinicDebitAccount only; who the charge is billed to. Optional, defaults to \"self\" when omitted. Rejected on ClinicCreditAccount."},` +
 			`"expectedReimbursementCents":{"type":"number","description":"ClinicDebitAccount only, and only when billedTo is \"insurance\": the amount expected back from the payer, in integer cents. Required when billedTo is \"insurance\" (rejected otherwise), must be > 0 and <= amountCents."},` +
-			`"appointmentRef":{"type":"string","description":"ClinicDebitAccount only; optional vtx.appointment.<NanoID> back-reference to the no-show appointment this charge settles. When supplied, validated alive (UnknownAppointment otherwise) and a settles audit link (transaction→appointment) is written — the clinicNoShowSettlement lens reads it to converge the gap. Mirrors cafe-ledger's tabRef."}},` +
+			`"appointmentRef":{"type":"string","description":"ClinicDebitAccount only; optional vtx.appointment.<NanoID> back-reference to the no-show appointment this charge settles. When supplied, validated alive (UnknownAppointment otherwise) and a settles audit link (transaction→appointment) is written — the clinicNoShowSettlement lens reads it to converge the gap. Mirrors cafe-ledger's tabRef."},` +
+			`"reason":{"type":"string","enum":["payment","waiver"],"description":"ClinicCreditAccount only; optional, defaults to \"payment\" when omitted. \"waiver\" records the credit as debt the clinic forgave rather than cash collected — both reduce the derived balance the same way, but the ledgerHistory lens projects reason so the two are never confused. Rejected on ClinicDebitAccount, and rejected on a self-scoped (patient) credit — a patient may pay down their own balance but never waive it."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.clinictransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
@@ -137,6 +144,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"billedTo":                   "ClinicDebitAccount only: \"self\" or \"insurance\" (default \"self\" when omitted). Stored on the .entry aspect; projected by the ledgerHistory lens. Rejected on ClinicCreditAccount — a payment has nothing to bill.",
 			"expectedReimbursementCents": "ClinicDebitAccount only, and only when billedTo is \"insurance\": the amount expected back from the payer, in integer cents (required then, must be > 0 and <= amountCents; rejected when billedTo is \"self\" or on a ClinicCreditAccount).",
 			"appointmentRef":             "ClinicDebitAccount only: optional full vtx.appointment.<NanoID> key of the no-show appointment this charge settles. Validated alive when supplied (UnknownAppointment otherwise); writes a settles link (transaction→appointment) the clinicNoShowSettlement lens walks to converge the gap.",
+			"reason":                     "ClinicCreditAccount only: \"payment\" or \"waiver\" (default \"payment\" when omitted). Stored on the .entry aspect; projected by the ledgerHistory lens. Rejected on ClinicDebitAccount, and rejected on a self-scoped (patient) credit — only front-desk staff / the operator may waive a charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -169,6 +177,14 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as ClinicDebitAccount, but writes .entry{type: credit, ...} (no billedTo/expectedReimbursementCents — " +
 					"rejected InvalidArgument if either is supplied) and emits account.credited{accountKey, transactionKey, amountCents}. " +
 					"A payment reduces what the patient owes (the ledgerHistory-derived balance = sum(debits) − sum(credits)).",
+			},
+			{
+				Name:    "ClinicCreditAccount — waive a no-show fee (front-desk/operator only)",
+				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>", "amountCents": 2500, "memo": "Waived — patient hardship", "reason": "waiver"},
+				ExpectedOutcome: "Same shape as a plain payment, but .entry carries reason: \"waiver\" instead of the default \"payment\" — the " +
+					"balance drops identically, but the ledgerHistory lens projects reason so a reader never mistakes forgiven debt for cash " +
+					"collected. Rejects AuthDenied if the caller is a self-scoped patient — only the operator/" +
+					"front-of-house scope=any grant may waive.",
 			},
 		},
 	}
