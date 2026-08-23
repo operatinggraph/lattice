@@ -1098,3 +1098,140 @@ commit to mention the ratchet — the reviewer flagged both as stale (described 
 for Inc 3's four named, unaffected per-app residuals: clinic's five §15 blockers, wellness's four
 §16, café's four §17, loftspace's `CreateLocation`/`AttachObject`/`DetachObject` (§7/§18) — each
 tracked in its own `verticals.md` row, not this design doc's open work.
+
+## 21. CreateLocation `Dispatch.ClassChoices` fire brief (Vertical Steward, committed before code)
+
+Builds the first of §7's two named `CreateLocation`/`AttachObject`/`DetachObject` fixes — per §7's
+own framing ("price the two honest fixes … and build one"), this fire ships `ClassChoices`; the
+`AttachObject`/`DetachObject` upload-ceremony + owner-anchored read surface stays open debt, its
+`appOpDebt` entry untouched.
+
+**1. Scope sentence (verbatim, `verticals.md`).** "`CreateLocation`/`AttachObject`/`DetachObject`
+stay hand-built with a named fix path unbuilt. Class-choice needs a `Dispatch.ClassChoices` enum
+field; the attach pair needs an upload-ceremony affordance + owner-anchored read surface
+(`signInMethods`-pane precedent). Baselined in `appOpDebt`." Green bar: `location-domain` ships a
+full `pkgmgr.OpMetaSpec` for `CreateLocation` naming `Dispatch.ClassChoices: ["unit","building",
+"property"]` (no static `Class`), the op-catalog lens + all four apps' `/api/op-catalog` proxy
+project it, `internal/descriptorform/form.mjs` renders a class-choice op as an enum select and
+resolves the picked choice to the envelope's `class` field at submit, `appOpDebt`'s
+`"CreateLocation"` entry is deleted, and `STRICT=1 go run ./scripts/lint-app-op-descriptors.go`
+reports 0 issues.
+
+**2. Verified touch-list** (checked live 2026-08-23):
+
+- `internal/pkgmgr/definition.go:751-762` — `OpDispatchSpec` struct: add `ClassChoices []string`
+  field, documented alongside `Class` (line 752).
+- `internal/pkgmgr/build.go:673-710` (`opDispatchBody`) — emit `body["classChoices"]` when
+  non-empty, mirroring the existing `Reads`/`OptionalReads` `[]string`→`[]any` conversion
+  (lines 694-700).
+- `packages/edge-manifest/lenses.go:661` (`edgeCatalogTail`) and `:736` (`opCatalogSpec`) — add
+  `op.dispatch.data.classChoices AS dispatchClassChoices` immediately after the existing
+  `dispatchClass` line in both `RETURN` clauses (no `WITH`; §opCatalogSpec's own load-bearing-shape
+  comment at lines 685-719 applies unchanged — copy the RETURN column, never the opener).
+- `packages/edge-manifest/lens_cypher_test.go:596-604` (`emOpCatalogWorld`'s `fullOp` dispatch
+  aspect fixture) — add a `"classChoices": []any{"x", "y"}` entry; `:681`
+  (`TestOpCatalog_FullVocabularyOpProjectsEveryColumn`) — add
+  `require.Equal(t, []any{"x","y"}, row["dispatchClassChoices"])` beside the existing
+  `dispatchClass`/`dispatchReads` assertions, so the new column is mutation-tested through the same
+  positive vector as the rest of the vocabulary (never left to a bare compile check).
+- `cmd/{clinic,cafe,loftspace,wellness}-app/op_catalog.go:19-100` (all four, identical shape) —
+  `opCatalogProjection`: add `DispatchClassChoices []string \`json:"dispatchClassChoices"\`` beside
+  `DispatchClass` (line 34); `opDispatch`: add `ClassChoices []string
+  \`json:"classChoices,omitempty"\`` beside `Class` (line 92); `toDescriptor()`'s dispatch-presence
+  check (line 157-159) and construction (line 160-169): add `len(p.DispatchClassChoices) > 0` to the
+  OR-chain and `ClassChoices: p.DispatchClassChoices` to the struct literal.
+- `internal/descriptorform/form.mjs`:
+  - `:253` (`normalizeCatalogRow`'s refusal) — change `if (!dispatch.class) return null;` to
+    `if (!dispatch.class && !(dispatch.classChoices && dispatch.classChoices.length)) return null;`.
+  - New: when `dispatch.classChoices` is set and `dispatch.class` is not, render one extra `<select>`
+    control (mirroring the existing `enum` field-kind branch's option-building + `titleCase`
+    labelling, `fieldKind`/`buildField` lines 60-70 and 127-234) ahead of the schema-driven fields,
+    with a synthetic field id (e.g. `__classChoice`) excluded from the submitted `payload`.
+  - `:536` (`submit()`'s envelope assembly) — resolve `class: dispatch.class || readClassChoice()`
+    instead of the current bare `dispatch.class`.
+- `internal/descriptorform/form.test.mjs` — add a node test asserting: (a) a row with `classChoices`
+  and no `class` renders the select and is NOT refused by `normalizeCatalogRow`; (b) `submit()`
+  sends the selected choice as `class`; (c) the anti-fallback rule still holds — a row with neither
+  `class` nor `classChoices` is refused exactly as today (regression pin for the line-253 change).
+- `packages/location-domain/opmetas.go` (new file, mirrors `packages/clinic-domain/opmetas.go`'s
+  shape) — `func OpMetas() []pkgmgr.OpMetaSpec` returning one full `CreateLocation` entry:
+  `Presentation.Title`, `InputSchema` reusing the existing `locationType`/`presentation` properties
+  already defined at `ddls.go:168-170` (a `locationType` enum property is REQUIRED input, matching
+  `LocationTypes` at `ddls.go:88`), `FieldDescriptions`, `Dispatch: {ClassChoices: LocationTypes,
+  AuthContext: "standing"}` (operator-only per `permissions.go:28`'s `mk("CreateLocation")` — no
+  consumer/self grant exists, so "standing" per the clinic-domain precedent's
+  `SetProviderHours`/`SetProviderTimeOff` doc comment, lines ~53-57) — no `TargetField` (free-choice
+  create, per form.mjs's own doc comment lines 32-38).
+- `packages/location-domain/package.go:58` — wire `OpMetas: OpMetas()` into `Package`; version bump
+  `0.3.2` → `0.4.0` (new install-time aspect, `docs/reference_package_edit_needs_version_bump`
+  convention).
+- `packages/location-domain/manifest.yaml` — add `declares.opMetas: [{operationType:
+  CreateLocation}]` (minimal shape — mirrors `clinic-domain/manifest.yaml:273-286`, which the
+  `VerifyAgainstDefinition` check does not deep-compare beyond `operationType`) and bump `version:
+  0.3.2` → `0.4.0`.
+- `packages/edge-manifest/package.go:26` — version bump `0.16.9` → `0.17.0` (lens cypher changed);
+  `packages/edge-manifest/manifest.yaml` — matching bump.
+- `packages/location-domain/opmetas_test.go` (new) — mirror `clinic-domain/opmetas_test.go`'s
+  `TestOpMetas_DispatchClassMatchesOwningDDL` pattern, adapted: assert `CreateLocation`'s
+  `Dispatch.Class == ""` (no static class — the whole point) and `Dispatch.ClassChoices` is exactly
+  `LocationTypes` (`["unit","building","property"]`, order-insensitive), plus every choice names a
+  DDL that actually admits `CreateLocation` in its `PermittedCommands` (cross-check against
+  `DDLs()`, same shape as the mirrored test's `classForOp` map).
+- `scripts/lint-app-op-descriptors.go:163-165` — delete the `"CreateLocation": "location-domain"`
+  line from `appOpDebt` (shrink-only ledger; `fullDescriptor(CreateLocation)` now returns true, so
+  the entry becomes a dangling-baseline failure if left in place).
+
+**3. Precedents mirrored.**
+`packages/clinic-domain/opmetas.go`'s `OpMetas()` shape + doc-comment convention (op-meta
+authoring); its sibling `opmetas_test.go`'s `TestOpMetas_DispatchClassMatchesOwningDDL` (adapted for
+the no-static-Class case); `internal/pkgmgr/build.go:694-700`'s `Reads`/`OptionalReads`
+`[]string`→`[]any` aspect-body conversion (for `ClassChoices`); `form.mjs`'s existing `enum`
+field-kind rendering (for the class-choice `<select>`); `edgeCatalogTail`/`opCatalogSpec`'s existing
+column-pair-per-field pattern (add one column, both cyphers, no `WITH`). No greenfield: every touch
+point extends an existing, shipped vocabulary column by exactly the same shape its siblings already
+use.
+
+**4. Increment order + green checks.**
+
+1. `internal/pkgmgr` (`definition.go` + `build.go`) — `go build ./internal/pkgmgr/...` and
+   `go test ./internal/pkgmgr/...`.
+2. `packages/edge-manifest` (lenses.go cypher + lens_cypher_test.go) — `go test
+   ./packages/edge-manifest/...` (mutation-tested via the new `dispatchClassChoices` assertion).
+3. The four `cmd/*-app/op_catalog.go` projections — `go build ./cmd/... && go test ./cmd/...`.
+4. `internal/descriptorform/form.mjs` + `form.test.mjs` — `node --test
+   internal/descriptorform/form.test.mjs` (or the package's existing node-test invocation).
+5. `packages/location-domain` (opmetas.go + package.go + manifest.yaml + opmetas_test.go) — `go
+   test ./packages/location-domain/...`.
+6. `scripts/lint-app-op-descriptors.go` baseline edit — `STRICT=1 go run
+   ./scripts/lint-app-op-descriptors.go` reports `0 issues`.
+7. Whole-repo gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+   ./scripts/lint-conventions.go`, `go run ./scripts/lint-package-version.go`, `go run
+   ./scripts/lint-manifest-entity-type.go`.
+8. If the shared stack is up: `make verify-package-location-domain` and `make
+   verify-package-edge-manifest` live (skip with a note if no stack is running — self-contained unit
+   coverage above already proves the mechanism).
+
+**5. In-scope gotchas.**
+Package edits need version bumps (both `location-domain` and `edge-manifest` — the lens cypher
+changed, not just an app). `lint-package-version` gates this. `location-domain`'s
+`TestPackage_ManifestMatchesDefinition` will fail the moment `OpMetas()` is wired into `Package`
+without the matching `manifest.yaml` `opMetas:` block — add both in the same commit. The
+`opCatalog` lens is a PLAIN nats-kv lens (no anchor/reachability walk) — a hot-reload via
+`refresh-edge-manifest` (if the gate is exercised live) needs no bootstrap restart. Standing
+checklist: (#2) the `LocationTypes` / `PermittedCommands` cross-check in the new
+`opmetas_test.go` is itself a census — assert it against the live `DDLs()` return, never a copied
+literal list, so a future fourth leaf type can't silently go undescribed.
+
+**6. Adjacent finds.** None expected — this is a narrow vocabulary-threading fire through an
+already-fully-mapped pipeline (all touch points above traced live before this brief was written).
+Any find surfacing mid-build gets fixed in this fire if it touches the same mechanism, or routed per
+steward §0/§4 (needs-Andrew / needs-designer-pass) otherwise — never filed as a bare residual.
+
+**7. Non-goals.** `AttachObject`/`DetachObject`'s upload-ceremony + read-surface fix (stays baselined
+in `appOpDebt`, unaffected). Migrating `loftspace-app`'s or `clinic-app`'s hand-wired `CreateLocation`
+call sites (`app.js:3993`, `app.js:1008`) onto the descriptor-driven renderer — the gate only
+requires the op carry a full descriptor, not that every app consume it via `form.mjs`; the hand-built
+forms remain tolerated debt per `lint-app-op-descriptors`'s own `fullDescriptor` branch.
+`descriptorform`'s broader 6-op vocabulary gap (array/multiline/ceremony field kinds, the separate
+`📐 needs designer pass` backlog row) — `ClassChoices` is one narrow, already-scoped addition to an
+existing enum-rendering path, not that redesign.
