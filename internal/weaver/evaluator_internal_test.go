@@ -305,6 +305,12 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		if sev := issueSeverity(h.engine.issues.snapshot(), "TemplateDataError"); sev != "warning" {
 			t.Fatalf("a null template reference must surface a `warning` (degraded) TemplateDataError, got %q", sev)
 		}
+		// A row's own template data is that row's fact: keyed per entity, so a
+		// sibling row resolving cleanly cannot retire it.
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "missing_onboarding")); !ok {
+			t.Fatalf("the TemplateDataError must be keyed to the row that carries it, issues = %+v",
+				h.engine.issues.snapshot())
+		}
 	})
 
 	t.Run("violating row missing entityKey", func(t *testing.T) {
@@ -445,10 +451,11 @@ func TestStaleMark_ExternalDispatchClassifier(t *testing.T) {
 		{"assignTask never dispatches externally", GapAction{Action: actionAssignTask, Operation: "SignLease"}, concluded, false, `action "assignTask" never makes an external call`},
 		{"no inflight_<g> declared", GapAction{Action: actionDirectOp}, map[string]any{col: true}, false, ""},
 	}
+	entityID := testNanoID(t)
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			targetID := fmt.Sprintf("fixtureClassifier%d", i)
-			if got := h.engine.staleMark(targetID, tc.row, col, tc.ga); got != tc.wantStale {
+			if got := h.engine.staleMark(targetID, entityID, tc.row, col, tc.ga); got != tc.wantStale {
 				t.Fatalf("staleMark(%+v, %v) = %v, want %v", tc.ga, tc.row, got, tc.wantStale)
 			}
 			msg := inflightMismatchMessage(h.engine, targetID)
@@ -480,11 +487,12 @@ func TestStaleMark_MismatchAlertSelfHeals(t *testing.T) {
 
 	const targetID = "fixtureSelfHeal"
 	const col = "missing_x"
+	entityID := testNanoID(t)
 	row := map[string]any{col: true, "inflight_x": false}
 	ga := GapAction{Action: actionTriggerLoom, Pattern: "mixedFlow"}
 
 	seedPatternSpec(t, h.engine.source, "mixedFlow", stepKindExternalTask, stepKindUserTask)
-	if stale := h.engine.staleMark(targetID, row, col, ga); stale {
+	if stale := h.engine.staleMark(targetID, entityID, row, col, ga); stale {
 		t.Fatal("a parking pattern must not read as a concluded external gap")
 	}
 	if msg := inflightMismatchMessage(h.engine, targetID); msg == "" {
@@ -493,7 +501,7 @@ func TestStaleMark_MismatchAlertSelfHeals(t *testing.T) {
 
 	// The package fix: the same patternId re-authored with the userTask removed.
 	seedPatternSpec(t, h.engine.source, "mixedFlow", stepKindExternalTask)
-	if stale := h.engine.staleMark(targetID, row, col, ga); !stale {
+	if stale := h.engine.staleMark(targetID, entityID, row, col, ga); !stale {
 		t.Fatal("after the fix the gap must read as a concluded EXTERNAL gap")
 	}
 	if msg := inflightMismatchMessage(h.engine, targetID); msg != "" {
@@ -1376,6 +1384,105 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 	}
 	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
 		t.Fatal("the entity-scoped surface issue must retire on the close")
+	}
+}
+
+// TestColumnReaders_SurfaceDataErrorsPerEntity pins the entity each §10.2
+// column reader names when it surfaces a malformed value — including through
+// the three helpers that read a row without otherwise needing the entity
+// (staleMark, openGapColumns, hasUsableRetryCap). Each raise must land at the
+// reading row's own key: a helper that dropped the entity on the way through
+// would key every row's data error identically, which is the collision these
+// keys exist to prevent, and no end-to-end test distinguishes the reader that
+// raised from the one that did not.
+func TestColumnReaders_SurfaceDataErrorsPerEntity(t *testing.T) {
+	t.Parallel()
+	e := &Engine{issues: newIssueCache(), logger: discardLogger()}
+	const targetID = "fixtureReaders"
+	first, second := testNanoID(t), testNanoID(t)
+
+	// boolColumn, read directly and again through openGapColumns.
+	e.boolColumn(targetID, first, map[string]any{"violating": "yes"}, "violating")
+	e.openGapColumns(targetID, second, map[string]any{"missing_x": "yes"})
+	// intColumn, read directly and again through hasUsableRetryCap.
+	e.intColumn(targetID, first, map[string]any{admissionPriorityColumn: "high"}, admissionPriorityColumn)
+	e.hasUsableRetryCap(targetID, second, map[string]any{"maxretries_x": "three"}, "missing_x")
+	// boolColumn through staleMark's inflight_<g> read.
+	e.staleMark(targetID, first, map[string]any{"missing_x": true, "inflight_x": "maybe"},
+		"missing_x", GapAction{Action: actionDirectOp, Operation: "FixX"})
+
+	for _, want := range []struct {
+		entityID, col string
+	}{
+		{first, "violating"},
+		{second, "missing_x"},
+		{first, admissionPriorityColumn},
+		{second, "maxretries_x"},
+		{first, "inflight_x"},
+	} {
+		if _, ok := issueAt(e.issues, issueKeyDataEntity(targetID, want.entityID, want.col)); !ok {
+			t.Fatalf("no RowDataError at (%s, %s); issues = %+v", want.entityID, want.col, e.issues.snapshot())
+		}
+	}
+	if n := len(e.issues.snapshot()); n != 5 {
+		t.Fatalf("five malformed reads across two rows must raise five issues, got %d: %+v",
+			n, e.issues.snapshot())
+	}
+}
+
+// TestHandleRow_RowDataIssueIsPerEntity proves a malformed COLUMN VALUE is a
+// fact about the one row carrying it, exactly like the gap facts. Two rows on
+// the same target project a non-bool gap column; one is re-projected clean and
+// dispatches, which retires its own data issue — the row still carrying the bad
+// value stays surfaced. A target-scoped key made the two share one latch, so
+// the first repair silenced the surface for a row that was still broken.
+func TestHandleRow_RowDataIssueIsPerEntity(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureRowDataPerEntity"
+	const col = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	broken, repaired := testNanoID(t), testNanoID(t)
+	for i, entityID := range []string{broken, repaired} {
+		// A string where §10.2 requires a bool: read as not actionable, surfaced.
+		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: "yes",
+		}, uint64(i+1), 1))
+		if dec != substrate.Ack {
+			t.Fatalf("a non-bool gap column must Ack, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+	for _, entityID := range []string{broken, repaired} {
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, col)); !ok {
+			t.Fatalf("row %s must carry its own RowDataError; issues = %+v", entityID, h.engine.issues.snapshot())
+		}
+	}
+
+	// The lens re-projects the second row with a real bool: it dispatches, and
+	// the plan that fires retires that row's data issue.
+	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, repaired, map[string]any{
+		"entityKey": "vtx.leaseApp." + repaired, "violating": true, col: true,
+	}, 3, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("the repaired row must dispatch and Ack, got %v", dec)
+	}
+	h.nextOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, repaired, col)); ok {
+		t.Fatal("the repaired row's own data issue must retire")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, broken, col)); !ok {
+		t.Fatalf("the STILL-BROKEN row's issue must survive another row's repair; issues = %+v",
+			h.engine.issues.snapshot())
 	}
 }
 

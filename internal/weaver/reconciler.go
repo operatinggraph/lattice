@@ -274,7 +274,7 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 			return
 		}
 	}
-	if !e.boolColumn(targetID, row, gapColumn) {
+	if !e.boolColumn(targetID, entityID, row, gapColumn) {
 		// The gap is closed (or the column is gone from the row): prompt
 		// level-reconciled clear, no lease wait.
 		s.deleteMark(ctx, key, entry.Revision, rec.Action, sweepReasonGapClosed,
@@ -476,7 +476,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
-	if !e.boolColumn(targetID, row, "violating") {
+	if !e.boolColumn(targetID, entityID, row, "violating") {
 		// Mirrors lane-1's L1 gate (handleRow dispatches only violating rows):
 		// an open missing_* on a non-violating row must not be re-dispatched
 		// here when lane-1 never would fire it. Leave the mark to level
@@ -528,7 +528,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// churn on a still-open human episode; §10.3 already bounds an external
 	// gap's retry by inflight_<g>/maxretries_<g> instead) and the claimId
 	// choice (below the pacing block).
-	confirmedConcluded := e.staleMark(targetID, row, gapColumn, ga)
+	confirmedConcluded := e.staleMark(targetID, entityID, row, gapColumn, ga)
 
 	// Default per-key TTL backstop for the re-armed mark; widened below for any
 	// paced reclaim, so the mark outlives its own backoff window.
@@ -547,7 +547,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// validation is the real fix; until then, pace it. Still unbounded in count,
 	// but no longer unbounded AND unpaced, and the hold is visible on the
 	// sweepReclaimsSuppressed metric.
-	uncappedExternal := confirmedConcluded && !e.hasUsableRetryCap(targetID, row, gapColumn)
+	uncappedExternal := confirmedConcluded && !e.hasUsableRetryCap(targetID, entityID, row, gapColumn)
 
 	if collapseOnly || uncappedExternal {
 		// Collapse-only reclaim: pace repeat reclaims with an exponential backoff

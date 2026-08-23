@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,6 +95,31 @@ func (c *issueCache) clear(key string) {
 	delete(c.issues, key)
 	delete(c.since, key)
 	c.mu.Unlock()
+}
+
+// clearPrefix retires every issue whose key starts with prefix, returning how
+// many it retired. It is the teardown counterpart of clear, for the issue
+// families whose keys carry a per-entity (or per-gap) segment: a target being
+// revoked has no single key to name, and one entry per (entity, column) would
+// otherwise stand until the process restarts.
+//
+// The caller supplies a prefix ending in the family's separator — see
+// issueKeyTargetPrefixes, which builds them from the same constants the key
+// constructors use, so a key shape and its teardown cannot drift apart. That
+// trailing separator is what keeps "t1." from matching a key under "t10."
+// (markStore.deleteByTargetPrefix's rule, applied to the issue keyspace).
+func (c *issueCache) clearPrefix(prefix string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for k := range c.issues {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.issues, k)
+			delete(c.since, k)
+			n++
+		}
+	}
+	return n
 }
 
 // snapshot returns the active issues in deterministic (key) order.

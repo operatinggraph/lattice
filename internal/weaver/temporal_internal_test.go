@@ -302,7 +302,9 @@ func TestHandleRow_SchedulingLeg(t *testing.T) {
 	}
 
 	// Missing entityKey on a freshUntil row: same data-error surface, no schedule.
-	h.engine.issues.clear(issueKeyData(targetID, freshUntilColumn))
+	// The prior row's issue is retired first so the assertion below reads THIS
+	// row's issue and not a leftover — each row's data error is its own entry.
+	h.engine.issues.clear(issueKeyDataEntity(targetID, badEntity, freshUntilColumn))
 	noKeyEntity := testNanoID(t)
 	dec = h.engine.handleRow(ctx, h.rowMessage(t, targetID, noKeyEntity, map[string]any{
 		"violating":  false,
@@ -314,8 +316,9 @@ func TestHandleRow_SchedulingLeg(t *testing.T) {
 	if scheduleMsg(t, ctx, h.conn, scheduleSubjectPrefix+targetID+"."+noKeyEntity) != nil {
 		t.Fatalf("a freshUntil row without entityKey must not schedule")
 	}
-	if !hasIssueCode(h.engine.issues.snapshot(), "RowDataError") {
-		t.Fatalf("a freshUntil row without entityKey must surface a RowDataError issue")
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, noKeyEntity, freshUntilColumn)); !ok {
+		t.Fatalf("a freshUntil row without entityKey must surface a RowDataError issue at its own key, issues = %+v",
+			h.engine.issues.snapshot())
 	}
 
 	// Tombstone row (empty body): clearing runs, no schedule publish, no purge
@@ -633,5 +636,76 @@ func TestHandleFiredTimer_PastDeadlineRequestIDCollapse(t *testing.T) {
 	op2 := h.nextOp(t)
 	if op2["requestId"] != wantRequestID {
 		t.Fatalf("a redelivered past-deadline firing must reuse the same requestId %v, got %v", wantRequestID, op2["requestId"])
+	}
+}
+
+// TestScheduleFreshness_DataIssueIsPerEntity proves a bad freshUntil is a fact
+// about the ONE row carrying it. Two rows on the same target both project a
+// non-string freshUntil; one is re-projected with a valid instant, and its
+// repair must retire its own issue only — the row still carrying garbage stays
+// surfaced. A target-scoped key made the two rows share one latch, so the first
+// repair silenced the operator surface for a row that was still broken.
+func TestScheduleFreshness_DataIssueIsPerEntity(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+	provisionSchedules(t, ctx, h.conn)
+
+	const targetID = "fixtureFreshPerEntity"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_fresh": {Action: actionDirectOp, Operation: "FixFresh"}},
+	})
+	broken, repaired := testNanoID(t), testNanoID(t)
+	for i, entityID := range []string{broken, repaired} {
+		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, map[string]any{
+			"entityKey":  "vtx.leaseApp." + entityID,
+			"violating":  false,
+			"freshUntil": 12345,
+		}, uint64(i+1), 1))
+		if dec != substrate.Ack {
+			t.Fatalf("a non-string freshUntil must Ack, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+	if n := len(h.engine.issues.snapshot()); n != 2 {
+		t.Fatalf("two rows with a bad freshUntil must raise two issues, got %d: %+v",
+			n, h.engine.issues.snapshot())
+	}
+
+	// The lens re-projects the second row with a usable instant.
+	fireAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339)
+	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, repaired, map[string]any{
+		"entityKey":  "vtx.leaseApp." + repaired,
+		"violating":  false,
+		"freshUntil": fireAt,
+	}, 3, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("the repaired row must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, repaired, freshUntilColumn)); ok {
+		t.Fatal("the repaired row's own data issue must retire")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, broken, freshUntilColumn)); !ok {
+		t.Fatalf("the STILL-BROKEN row's issue must survive another row's repair; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+
+	// The other repair shape: the column is dropped from the row entirely. That
+	// row's issue retires on its own key too.
+	dec = h.engine.handleRow(ctx, h.rowMessage(t, targetID, broken, map[string]any{
+		"entityKey": "vtx.leaseApp." + broken,
+		"violating": false,
+	}, 4, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("a row that dropped freshUntil must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, broken, freshUntilColumn)); ok {
+		t.Fatalf("dropping the column repairs the row; its issue must retire, issues = %+v",
+			h.engine.issues.snapshot())
 	}
 }
