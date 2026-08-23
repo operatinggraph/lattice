@@ -56,6 +56,20 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// convergenceCeiling bounds every poll in this harness. It is deliberately far
+// larger than any observed latency: what is being waited on (the Gateway's
+// fire-and-forget provisioning pre-flight, a Refractor lens re-projection) has
+// no SLA, so a ceiling sized to a typical run turns ordinary slowness into a
+// false failure. The ceiling exists only so a genuinely stuck stack stops
+// rather than hangs; the elapsed time is reported on success, which is the
+// number worth watching.
+const convergenceCeiling = 3 * time.Minute
+
+// pollInterval is the gap between condition checks. Nothing here is
+// synchronised by elapsed time — every wait re-reads the real condition and
+// returns the moment it holds.
+const pollInterval = 150 * time.Millisecond
+
 var (
 	okCount   int
 	failCount int
@@ -94,7 +108,7 @@ func mustAccepted(reply *processor.OperationReply, context string) {
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
@@ -357,61 +371,89 @@ func assertDenied(r gatewayResult, label string) {
 	ok("%s: denied with the scoped AuthDenied (HTTP 403)", label)
 }
 
-// waitForConsumerProvisioned polls for the consumer identity the Gateway's
-// ProvisionConsumerIdentity pre-flight creates asynchronously (best-effort,
-// fire-and-forget per gateway.go's provisionActorIfNeeded) and returns its
-// revision for the later idempotency check.
-func waitForConsumerProvisioned(ctx context.Context, conn *substrate.Conn, consumerKey string) uint64 {
-	deadline := time.Now().Add(5 * time.Second)
+// waitFor polls cond to convergence and reports the elapsed time on success.
+// cond returns (satisfied, why-not); the why-not of the LAST attempt is what a
+// timeout reports, so a failure says what the state actually was rather than
+// only that it was not what was wanted.
+func waitFor(ctx context.Context, label string, cond func() (bool, string)) bool {
+	start := time.Now()
+	deadline := start.Add(convergenceCeiling)
+	last := "no attempt completed"
 	for {
-		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, consumerKey)
-		if err == nil {
-			ok("consumer identity %s auto-provisioned on first touch (rev=%d)", consumerKey, entry.Revision)
-			return entry.Revision
+		satisfied, why := cond()
+		if satisfied {
+			ok("%s (converged in %s)", label, elapsed(start))
+			return true
 		}
-		if !errors.Is(err, substrate.ErrKeyNotFound) {
-			fmt.Fprintf(os.Stderr, "FATAL poll consumer identity: %v\n", err)
-			os.Exit(1)
-		}
+		last = why
 		if time.Now().After(deadline) {
-			fmt.Fprintf(os.Stderr, "FATAL consumer identity %s never provisioned within 5s\n", consumerKey)
-			os.Exit(1)
+			fail("%s: still unsatisfied after %s — %s", label, elapsed(start), last)
+			return false
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			fail("%s: context cancelled after %s — %s", label, elapsed(start), last)
+			return false
+		case <-time.After(pollInterval):
+		}
 	}
+}
+
+// elapsed renders a duration at millisecond resolution — the scale these waits
+// actually resolve at, and the number a reader compares between runs.
+func elapsed(start time.Time) time.Duration {
+	return time.Since(start).Round(time.Millisecond)
+}
+
+// waitForConsumerProvisioned polls to convergence for the consumer identity
+// the Gateway's ProvisionConsumerIdentity pre-flight creates asynchronously
+// (best-effort, fire-and-forget per gateway.go's provisionActorIfNeeded) and
+// returns its revision for the later idempotency check.
+func waitForConsumerProvisioned(ctx context.Context, conn *substrate.Conn, consumerKey string) uint64 {
+	var revision uint64
+	if !waitFor(ctx, "consumer identity "+consumerKey+" auto-provisioned on first touch", func() (bool, string) {
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, consumerKey)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return false, "not provisioned yet"
+			}
+			return false, err.Error()
+		}
+		revision = entry.Revision
+		return true, ""
+	}) {
+		fmt.Fprintf(os.Stderr, "FATAL consumer identity %s was never provisioned\n", consumerKey)
+		os.Exit(1)
+	}
+	return revision
 }
 
 // waitForRoleGrant polls actorKey's cap.roles.<actor> projection (Refractor's
 // capabilityRoles lens re-projects asynchronously after a holdsRole change,
-// per Contract #6 — there is no synchronous "projection done" signal) until
-// it carries operationType, so the immediately-following Gateway call doesn't
-// race a projection that hasn't caught up with the AssignRole this script
-// just submitted.
+// per Contract #6 — there is no synchronous "projection done" signal) to
+// convergence until it carries operationType, so the immediately-following
+// Gateway call doesn't race a projection that hasn't caught up with the
+// AssignRole this script just submitted.
 func waitForRoleGrant(ctx context.Context, conn *substrate.Conn, actorKey, operationType string) {
 	rolesKey, err := capabilitykv.RolesKeyFromActor(actorKey)
 	must(err, "derive roles key")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(ctx, fmt.Sprintf("%s: %s projected into %s", actorKey, operationType, rolesKey), func() (bool, string) {
 		entry, err := conn.KVGet(ctx, bootstrap.CapabilityKVBucket, rolesKey)
-		if err == nil {
-			doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value)
-			must(perr, "parse "+rolesKey)
-			for _, p := range doc.PlatformPermissions {
-				if p.OperationType == operationType {
-					ok("%s: %s projected into %s (rev=%d)", actorKey, operationType, rolesKey, entry.Revision)
-					return
-				}
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return false, "key not found"
 			}
-		} else if !errors.Is(err, substrate.ErrKeyNotFound) {
-			fmt.Fprintf(os.Stderr, "FATAL poll %s: %v\n", rolesKey, err)
-			os.Exit(1)
+			return false, err.Error()
 		}
-		if time.Now().After(deadline) {
-			fmt.Fprintf(os.Stderr, "FATAL %s never appeared in %s within 5s\n", operationType, rolesKey)
-			os.Exit(1)
+		doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value)
+		must(perr, "parse "+rolesKey)
+		for _, p := range doc.PlatformPermissions {
+			if p.OperationType == operationType {
+				return true, ""
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return false, "the projection carries no " + operationType + " entry yet"
+	})
 }
 
 func mustSHA256Hex(s string) string {

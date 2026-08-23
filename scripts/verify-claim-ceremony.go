@@ -79,6 +79,19 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// convergenceCeiling bounds every poll in this harness. It is deliberately far
+// larger than any observed latency: what is being waited on (a Refractor lens
+// re-projection) has no SLA, so a ceiling sized to a typical run turns
+// ordinary slowness into a false failure. The ceiling exists only so a
+// genuinely stuck stack stops rather than hangs; the elapsed time is reported
+// on success, which is the number worth watching.
+const convergenceCeiling = 3 * time.Minute
+
+// pollInterval is the gap between condition checks. Nothing here is
+// synchronised by elapsed time — every wait re-reads the real condition and
+// returns the moment it holds.
+const pollInterval = 150 * time.Millisecond
+
 var (
 	okCount   int
 	failCount int
@@ -117,7 +130,7 @@ func mustAccepted(reply *processor.OperationReply, context string) {
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
@@ -397,82 +410,104 @@ func readAspectDoc(ctx context.Context, conn *substrate.Conn, key string) (aspec
 	return doc, nil
 }
 
-// waitForState polls identityKey.state until its data.value equals want (the
-// Processor commits asynchronously relative to the Gateway's HTTP reply on
-// the 202 fallback path; on the normal synchronous-accept path this resolves
-// on the first poll).
-func waitForState(ctx context.Context, conn *substrate.Conn, identityKey, want string) {
-	stateKey := identityKey + ".state"
-	deadline := time.Now().Add(5 * time.Second)
+// waitFor polls cond to convergence and reports the elapsed time on success.
+// cond returns (satisfied, why-not); the why-not of the LAST attempt is what a
+// timeout reports, so a failure says what the state actually was rather than
+// only that it was not what was wanted.
+func waitFor(ctx context.Context, label string, cond func() (bool, string)) bool {
+	start := time.Now()
+	deadline := start.Add(convergenceCeiling)
+	last := "no attempt completed"
 	for {
-		doc, err := readAspectDoc(ctx, conn, stateKey)
-		if err == nil {
-			if got, _ := doc.Data["value"].(string); got == want {
-				ok("%s: state = %q", identityKey, want)
-				return
-			}
-		} else if !errors.Is(err, substrate.ErrKeyNotFound) {
-			fail("poll %s: %v", stateKey, err)
-			return
+		satisfied, why := cond()
+		if satisfied {
+			ok("%s (converged in %s)", label, elapsed(start))
+			return true
 		}
+		last = why
 		if time.Now().After(deadline) {
-			fail("%s never reached state=%q within 5s", identityKey, want)
-			return
+			fail("%s: still unsatisfied after %s — %s", label, elapsed(start), last)
+			return false
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			fail("%s: context cancelled after %s — %s", label, elapsed(start), last)
+			return false
+		case <-time.After(pollInterval):
+		}
 	}
 }
 
-// waitForTombstoned polls key until its aspect envelope carries isDeleted.
+// elapsed renders a duration at millisecond resolution — the scale these waits
+// actually resolve at, and the number a reader compares between runs.
+func elapsed(start time.Time) time.Duration {
+	return time.Since(start).Round(time.Millisecond)
+}
+
+// waitForState polls identityKey.state to convergence until its data.value
+// equals want (the Processor commits asynchronously relative to the Gateway's
+// HTTP reply on the 202 fallback path; on the normal synchronous-accept path
+// this resolves on the first poll).
+func waitForState(ctx context.Context, conn *substrate.Conn, identityKey, want string) {
+	stateKey := identityKey + ".state"
+	waitFor(ctx, fmt.Sprintf("%s: state = %q", identityKey, want), func() (bool, string) {
+		doc, err := readAspectDoc(ctx, conn, stateKey)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return false, "key not found"
+			}
+			return false, err.Error()
+		}
+		got, _ := doc.Data["value"].(string)
+		if got != want {
+			return false, fmt.Sprintf("state = %q", got)
+		}
+		return true, ""
+	})
+}
+
+// waitForTombstoned polls key to convergence until its aspect envelope
+// carries isDeleted.
 func waitForTombstoned(ctx context.Context, conn *substrate.Conn, key string) {
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(ctx, key+": tombstoned", func() (bool, string) {
 		doc, err := readAspectDoc(ctx, conn, key)
-		if err == nil && doc.IsDeleted {
-			ok("%s: tombstoned", key)
-			return
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return false, "key not found"
+			}
+			return false, err.Error()
 		}
-		if err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
-			fail("poll %s: %v", key, err)
-			return
+		if !doc.IsDeleted {
+			return false, "not tombstoned"
 		}
-		if time.Now().After(deadline) {
-			fail("%s never tombstoned within 5s", key)
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return true, ""
+	})
 }
 
 // waitForRoleGrant polls actorKey's cap.roles.<actor> projection (Refractor's
 // capabilityRoles lens re-projects asynchronously after a holdsRole change,
-// per Contract #6 — there is no synchronous "projection done" signal) until
-// it carries operationType.
+// per Contract #6 — there is no synchronous "projection done" signal) to
+// convergence until it carries operationType.
 func waitForRoleGrant(ctx context.Context, conn *substrate.Conn, actorKey, operationType string) {
 	rolesKey, err := capabilitykv.RolesKeyFromActor(actorKey)
 	must(err, "derive roles key")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(ctx, fmt.Sprintf("%s: %s projected into %s", actorKey, operationType, rolesKey), func() (bool, string) {
 		entry, err := conn.KVGet(ctx, bootstrap.CapabilityKVBucket, rolesKey)
-		if err == nil {
-			doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value)
-			must(perr, "parse "+rolesKey)
-			for _, p := range doc.PlatformPermissions {
-				if p.OperationType == operationType {
-					ok("%s: %s projected into %s (rev=%d)", actorKey, operationType, rolesKey, entry.Revision)
-					return
-				}
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return false, "key not found"
 			}
-		} else if !errors.Is(err, substrate.ErrKeyNotFound) {
-			fail("poll %s: %v", rolesKey, err)
-			return
+			return false, err.Error()
 		}
-		if time.Now().After(deadline) {
-			fail("%s never appeared in %s within 5s", operationType, rolesKey)
-			return
+		doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value)
+		must(perr, "parse "+rolesKey)
+		for _, p := range doc.PlatformPermissions {
+			if p.OperationType == operationType {
+				return true, ""
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return false, "the projection carries no " + operationType + " entry yet"
+	})
 }
 
 func mustSHA256Hex(s string) string {
