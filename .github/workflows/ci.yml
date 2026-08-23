@@ -300,14 +300,6 @@ jobs:
       - name: Install + verify lease-signing package (co-installs rbac/identity/orchestration-base/service-domain)
         run: make verify-package-lease-signing
 
-      - name: Reconcile live permission vertices against installed manifests
-        # Cross-package, so it runs after every per-package verify: each of
-        # those asserts only declared→live for its own package and none can
-        # see an EXTRA. Fails on a package-origin permission no manifest
-        # declares, a body whose key it does not derive, a declared key with
-        # nothing live at it, and an absent primordial permission.
-        run: make verify-permission-provenance
-
       - name: Run Hello Lattice integration suite (Phase 1 Gate 5)
         # Runs the six-milestone Hello Lattice vertical slice:
         # DDL definition, book creation, Lens projection, Postgres query,
@@ -316,6 +308,22 @@ jobs:
         run: make test-hello-lattice
         env:
           GITHUB_SHA: ${{ github.sha }}
+
+      - name: Reconcile live permission vertices against installed manifests
+        # Cross-package, so it runs after every per-package verify — but no
+        # per-package verify can see an extra belonging to a package it does
+        # not check, or an unattributed one (each does assert its own
+        # package's extras, e.g. verify-package-rbac.go). Runs after Hello
+        # Lattice too: internal/hellolattice mints permissions via
+        # CreatePermission (origin: runtime, a notice here) and never
+        # tombstones one or uninstalls a package, so this position covers
+        # strictly more committed state at no added false-positive risk, and
+        # exercises the runtime-notice path in CI itself. Fails on a
+        # package-origin permission no manifest declares, a body whose key it
+        # does not derive, a declared key with nothing live at it, an absent
+        # primordial permission, or a vtx.permission.* root this pass could
+        # not even read.
+        run: make verify-permission-provenance
 
       - name: Run Health KV completeness gate (Phase 1 Gate 5)
         # Connects to the live NATS + running Processor/Refractor and asserts

@@ -32,6 +32,7 @@ func classesOf(findings []PermissionFinding) []PermissionFindingClass {
 func TestReconcilePermissions(t *testing.T) {
 	kernelOnly := map[string]bool{"vtx.permission.7LDVS9C2JGmCgTwYXMEP": true}
 	sampleOpKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
+	legacyKey := "vtx.permission.6p5Esr7taUqEp7j61FuE"
 
 	cases := []struct {
 		name              string
@@ -41,6 +42,12 @@ func TestReconcilePermissions(t *testing.T) {
 		kernelKeys        map[string]bool
 		wantDrift         []PermissionFindingClass
 		wantNotices       []PermissionFindingClass
+		// wantReason, when set, is checked against the single Drift finding's
+		// Reason field (the row must produce exactly one Drift finding).
+		// Class/Key/Package/OperationType/Scope are identical across the
+		// different undeclared arms, so only Reason can tell a disabled
+		// branch's finding from the real one.
+		wantReason PermissionUndeclaredReason
 	}{
 		{
 			name: "kernel permission present is silent (positive vector)",
@@ -73,6 +80,7 @@ func TestReconcilePermissions(t *testing.T) {
 			},
 			installedPackages: map[string]bool{},
 			wantDrift:         []PermissionFindingClass{FindingUndeclared},
+			wantReason:        ReasonPackageNotInstalled,
 		},
 		{
 			name: "package permission whose key is not in its declaring package's declaredKeys fires undeclared",
@@ -90,6 +98,31 @@ func TestReconcilePermissions(t *testing.T) {
 			declared:          []DeclaredPermission{{Package: "sample-pkg", Key: sampleOpKey}},
 			installedPackages: map[string]bool{"sample-pkg": true},
 			wantDrift:         []PermissionFindingClass{FindingUndeclared},
+			wantReason:        ReasonKeyNotDeclared,
+		},
+		{
+			name: "an undeclared vertex reports only undeclared, never also keyMismatch",
+			live: []LivePermission{
+				// The legitimately declared permission, present and clean —
+				// isolates the assertion to the forged entry below rather
+				// than incidentally also tripping `missing` on SampleOp.
+				{Key: sampleOpKey, OperationType: "SampleOp", Scope: "any", Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+				// Self-inconsistent (its own key does not derive from its
+				// own claimed OperationType/Scope either) AND absent from
+				// sample-pkg's declaredKeys — both undeclared and keyMismatch
+				// checks would independently fire on this body if keyMismatch
+				// were checked unconditionally, so this row pins that only
+				// undeclared does.
+				{
+					Key:           "vtx.permission." + PermissionID("sample-pkg", "TotallyDifferentOp", "any"),
+					OperationType: "ForgedOp", Scope: "any",
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg",
+				},
+			},
+			declared:          []DeclaredPermission{{Package: "sample-pkg", Key: sampleOpKey}},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantDrift:         []PermissionFindingClass{FindingUndeclared},
+			wantReason:        ReasonKeyNotDeclared,
 		},
 		{
 			name: "package permission body claiming a tuple its own (declared) key does not derive fires keyMismatch",
@@ -112,16 +145,41 @@ func TestReconcilePermissions(t *testing.T) {
 			installedPackages: map[string]bool{"sample-pkg": true},
 		},
 		{
-			name: "declared key with no live vertex fires missing, even with no recoverable tuple",
+			name: "declared key with no document at all fires missing, even with no recoverable tuple",
 			declared: []DeclaredPermission{
-				// No OperationType/Scope set — the exact "no document at all"
-				// shape LoadPermissionReconciliation's gatherer can produce
-				// (a declaredKeys entry backed by nothing readable). Missing
-				// must fire on Key identity alone.
+				// No OperationType/Scope set, Tombstoned false — the exact
+				// "no document at all" shape LoadPermissionReconciliation's
+				// gatherer can produce. Missing must fire on Key/Package
+				// identity alone.
 				{Package: "sample-pkg", Key: sampleOpKey},
 			},
 			installedPackages: map[string]bool{"sample-pkg": true},
 			wantDrift:         []PermissionFindingClass{FindingMissing},
+		},
+		{
+			name: "declared key backed by a tombstoned document is a respected revocation, not missing",
+			declared: []DeclaredPermission{
+				{Package: "sample-pkg", Key: sampleOpKey, OperationType: "SampleOp", Scope: "any", Tombstoned: true},
+			},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantNotices:       []PermissionFindingClass{FindingRevoked},
+			// No drift: revocations are durable (TombstonePermission,
+			// upgrade.go's revival-skip), so this is the correct end state,
+			// not a partial install.
+		},
+		{
+			name: "declared key marked Undecodable produces no missing drift",
+			declared: []DeclaredPermission{
+				// The gatherer sets Undecodable when a document exists at Key
+				// but could not be turned into a usable envelope — the pure
+				// function must not ALSO report missing for it (the gatherer
+				// separately raises FindingUndecodable, outside this pure
+				// call, over its own undecodable list).
+				{Package: "sample-pkg", Key: sampleOpKey, Undecodable: true},
+			},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			// Neither drift nor notice from THIS call: FindingUndecodable is
+			// raised by the gatherer, not by ReconcilePermissions itself.
 		},
 		{
 			name: "runtime-origin permission is inventory, never drift",
@@ -131,14 +189,37 @@ func TestReconcilePermissions(t *testing.T) {
 			wantNotices: []PermissionFindingClass{FindingRuntimeInventory},
 		},
 		{
-			name: "permission with no origin and not a kernel key is inventory, never drift (unstamped)",
+			name: "a no-origin permission whose key IS declared by an installed package is inventory, never drift (unstamped)",
 			live: []LivePermission{
-				{Key: "vtx.permission.6p5Esr7taUqEp7j61FuE", OperationType: "LegacyOp", Scope: "any"},
+				{Key: legacyKey, OperationType: "LegacyOp", Scope: "any"},
 			},
-			wantNotices: []PermissionFindingClass{FindingUnstampedInventory},
+			declared:          []DeclaredPermission{{Package: "sample-pkg", Key: legacyKey}},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantNotices:       []PermissionFindingClass{FindingUnstampedInventory},
 		},
 		{
-			name: "an empty scope derives its key verbatim, never normalized (L2 regression guard)",
+			name: "a no-origin permission whose key is declared nowhere fires undeclared, not a notice (the cheapest forgery)",
+			live: []LivePermission{
+				{Key: legacyKey, OperationType: "LegacyOp", Scope: "any"},
+			},
+			// No declared entry for legacyKey anywhere: a no-origin vertex
+			// whose key no installed package declares is a forgery wearing a
+			// legacy shape, not a legacy install — it must fire drift.
+			wantDrift:  []PermissionFindingClass{FindingUndeclared},
+			wantReason: ReasonNoOriginUndeclared,
+		},
+		{
+			name: "a non-empty, unrecognized origin is drift outright even when its key IS declared",
+			live: []LivePermission{
+				{Key: sampleOpKey, OperationType: "SampleOp", Scope: "any", Origin: "Package"}, // capital-P typo, not the wire value
+			},
+			declared:          []DeclaredPermission{{Package: "sample-pkg", Key: sampleOpKey}},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantDrift:         []PermissionFindingClass{FindingUndeclared},
+			wantReason:        ReasonUnrecognizedOriginValue,
+		},
+		{
+			name: "an empty scope derives its key verbatim, never normalized",
 			live: []LivePermission{
 				{
 					Key:           "vtx.permission." + PermissionID("sample-pkg", "WeirdScopeOp", ""),
@@ -169,6 +250,14 @@ func TestReconcilePermissions(t *testing.T) {
 			wantHasDrift := len(tc.wantDrift) > 0
 			if got.HasDrift() != wantHasDrift {
 				t.Errorf("HasDrift() = %v, want %v", got.HasDrift(), wantHasDrift)
+			}
+			if tc.wantReason != "" {
+				if len(got.Drift) != 1 {
+					t.Fatalf("wantReason %q set but len(Drift) = %d, want exactly 1: %+v", tc.wantReason, len(got.Drift), got.Drift)
+				}
+				if got.Drift[0].Reason != tc.wantReason {
+					t.Errorf("Drift[0].Reason = %q, want %q", got.Drift[0].Reason, tc.wantReason)
+				}
 			}
 		})
 	}
@@ -213,7 +302,7 @@ func TestReconcilePermissions_DeterministicOrder(t *testing.T) {
 	}
 }
 
-// TestKernelPermissionKeySet (L7) pins the fail-loud contract on plain string
+// TestKernelPermissionKeySet pins the fail-loud contract on plain string
 // input, so it never has to touch internal/bootstrap's package-level state
 // (kernelPermissionKeySet's own doc comment explains why that would race
 // installer_test.go's newInstallerHarness in the same test binary).
@@ -274,44 +363,40 @@ func writeForgedPermission(t *testing.T, ctx context.Context, conn *substrate.Co
 	}
 }
 
+// writeRawPermission writes an ARBITRARY raw JSON body at key, bypassing
+// writeForgedPermission's typed `data map[string]any` — the only way to
+// construct an envelope whose `data.declaredBy` is a non-string (A's
+// evasion vector), since json.Marshal of a Go map can never itself produce
+// mismatched-type JSON.
+func writeRawPermission(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, rawJSON string) {
+	t.Helper()
+	if _, err := conn.KVPut(ctx, CoreBucket, key, []byte(rawJSON)); err != nil {
+		t.Fatalf("KVPut raw permission %s: %v", key, err)
+	}
+}
+
 // livePermissionClassCounts independently re-derives the classification
-// LoadPermissionReconciliation's gatherer feeds ReconcilePermissions, so a
-// test can assert "how many kernel/package/runtime/unstamped permissions are
-// live" — a fact ReconcilePermissions itself does not surface for the
-// silent classes (kernel-clean and package-clean produce no finding at all).
+// LoadPermissionReconciliation's gatherer feeds ReconcilePermissions (via the
+// same gatherPermissionInputs both call), so a test can assert "how many
+// kernel/package/runtime/unstamped/unrecognized permissions are live" — a
+// fact ReconcilePermissions itself does not surface for the silent classes
+// (kernel-clean and package-clean produce no finding at all).
 func livePermissionClassCounts(t *testing.T, ctx context.Context, conn *substrate.Conn) map[PermissionProvenance]int {
 	t.Helper()
-	keys, err := conn.KVListKeysPrefix(ctx, CoreBucket, "vtx.permission.")
+	live, declared, _, kernelKeys, undecodable, err := gatherPermissionInputs(ctx, conn)
 	if err != nil {
-		t.Fatalf("KVListKeysPrefix vtx.permission.: %v", err)
+		t.Fatalf("gatherPermissionInputs: %v", err)
 	}
-	roots := permissionVertexRootKeys(keys)
-	entries, err := conn.KVGetMulti(ctx, CoreBucket, roots)
-	if err != nil {
-		t.Fatalf("KVGetMulti permission roots: %v", err)
+	if len(undecodable) > 0 {
+		t.Fatalf("gatherPermissionInputs reported undecodable entries in a clean fixture: %+v", undecodable)
 	}
-	kernelKeys, err := kernelPermissionKeys()
-	if err != nil {
-		t.Fatalf("kernelPermissionKeys: %v", err)
+	anyDeclaredKey := make(map[string]bool, len(declared))
+	for _, d := range declared {
+		anyDeclaredKey[d.Key] = true
 	}
 	counts := map[PermissionProvenance]int{}
-	for _, k := range roots {
-		entry, ok := entries[k]
-		if !ok {
-			continue
-		}
-		var doc permissionDoc
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			t.Fatalf("unmarshal %s: %v", k, err)
-		}
-		if doc.IsDeleted {
-			continue
-		}
-		p := LivePermission{
-			Key: k, OperationType: doc.Data.OperationType, Scope: doc.Data.Scope,
-			Origin: doc.Data.Origin, DeclaredBy: doc.Data.DeclaredBy,
-		}
-		counts[classifyLivePermission(p, kernelKeys)]++
+	for _, p := range live {
+		counts[classifyLivePermission(p, kernelKeys, anyDeclaredKey)]++
 	}
 	return counts
 }
@@ -359,6 +444,17 @@ func TestLoadPermissionReconciliation_CleanInstall(t *testing.T) {
 	if counts[PermissionProvenancePackage] != len(def.Permissions) {
 		t.Errorf("package class count = %d, want %d (sampleDef's declared permission count)", counts[PermissionProvenancePackage], len(def.Permissions))
 	}
+
+	// D's registry-anchor surface: every installed package appears, with its
+	// live declaredKeys' permission-prefixed entries.
+	keys, ok := got.DeclaredKeysByPackage["sample-pkg"]
+	if !ok {
+		t.Fatalf("DeclaredKeysByPackage[%q] missing, want an entry (installed package)", "sample-pkg")
+	}
+	wantKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
+	if !slices.Contains(keys, wantKey) {
+		t.Errorf("DeclaredKeysByPackage[%q] = %v, want it to contain %q", "sample-pkg", keys, wantKey)
+	}
 }
 
 // TestLoadPermissionReconciliation_DetectsUndeclared forges a permission
@@ -388,6 +484,112 @@ func TestLoadPermissionReconciliation_DetectsUndeclared(t *testing.T) {
 	if f.Package != "sample-pkg" {
 		t.Errorf("undeclared finding Package = %q, want %q", f.Package, "sample-pkg")
 	}
+	if f.Reason != ReasonKeyNotDeclared {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, ReasonKeyNotDeclared)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsUndeclared_PackageNotInstalled
+// forges a permission vertex whose declaredBy names a package that was NEVER
+// installed at all — the OTHER undeclared arm from
+// TestLoadPermissionReconciliation_DetectsUndeclared above, which exercises
+// "declaredBy IS installed but doesn't declare this key". If
+// `!installedPackages[p.DeclaredBy]` is disabled, execution falls through to
+// the second arm and produces an identical Class/Key/Package finding — only
+// the Reason field distinguishes which check actually fired.
+func TestLoadPermissionReconciliation_DetectsUndeclared_PackageNotInstalled(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	forgedKey := "vtx.permission." + PermissionID("never-installed-pkg", "GhostOp", "any")
+	writeForgedPermission(t, ctx, conn, forgedKey, map[string]any{
+		"operationType": "GhostOp", "scope": "any",
+		"origin": PermissionOriginPackage, "declaredBy": "never-installed-pkg",
+	})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findByClass(t, got.Drift, FindingUndeclared)
+	if f.Key != forgedKey {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, forgedKey)
+	}
+	if f.Reason != ReasonPackageNotInstalled {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, ReasonPackageNotInstalled)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsUnrecognizedOrigin forges a
+// permission vertex with NO `origin` field at all, whose key is declared by
+// no installed package — the cheapest forgery the fail-open shape treated as
+// a silent, unreconciled notice. Must fire undeclared, not classify as a
+// legacy pre-stamp install.
+func TestLoadPermissionReconciliation_DetectsUnrecognizedOrigin(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	forgedID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	forgedKey := "vtx.permission." + forgedID
+	// No "origin" key at all, and this key is in no package's declaredKeys.
+	writeForgedPermission(t, ctx, conn, forgedKey, map[string]any{
+		"operationType": "SilentGrant", "scope": "any",
+	})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findByClass(t, got.Drift, FindingUndeclared)
+	if f.Key != forgedKey {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, forgedKey)
+	}
+	if f.Reason != ReasonNoOriginUndeclared {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, ReasonNoOriginUndeclared)
+	}
+	// It must NOT also appear as an unstampedInventory notice.
+	for _, n := range got.Notices {
+		if n.Key == forgedKey {
+			t.Errorf("forged key %s appeared as a notice (%+v) as well as drift — it should be drift only", forgedKey, n)
+		}
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsUnrecognizedOriginValue retargets a
+// real, legitimately declared permission key so its body claims an origin
+// value that is neither "package" nor "runtime" (a corrupted/typo'd stamp, or
+// a package upgrade's unvalidated mutations arm dropping the real one) — with
+// an unrecognized, non-empty origin, this must fire drift outright even
+// though the key IS declared (the shape a plain no-origin check would miss).
+func TestLoadPermissionReconciliation_DetectsUnrecognizedOriginValue(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	realKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
+	writeForgedPermission(t, ctx, conn, realKey, map[string]any{
+		"operationType": "SampleOp", "scope": "any", "origin": "Package", // typo, not the wire value
+	})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findByClass(t, got.Drift, FindingUndeclared)
+	if f.Key != realKey {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, realKey)
+	}
+	if f.Reason != ReasonUnrecognizedOriginValue {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, ReasonUnrecognizedOriginValue)
+	}
 }
 
 // TestLoadPermissionReconciliation_DetectsKeyMismatch overwrites the body AT
@@ -414,45 +616,22 @@ func TestLoadPermissionReconciliation_DetectsKeyMismatch(t *testing.T) {
 	if f.Key != realKey {
 		t.Errorf("keyMismatch finding Key = %q, want %q", f.Key, realKey)
 	}
+	// Exactly one finding for this key, not also undeclared.
+	for _, d := range got.Drift {
+		if d.Key == realKey && d.Class != FindingKeyMismatch {
+			t.Errorf("realKey produced an extra finding %+v — should be keyMismatch alone", d)
+		}
+	}
 }
 
 // TestLoadPermissionReconciliation_DetectsMissing tombstones sample-pkg's
-// declared permission out of band (installer_test.go's tombstoneKey — the
-// out-of-band soft delete a non-durable revoke would leave behind) without
-// touching the package's own declaredKeys record, so the declared side still
-// resolves the tuple from the tombstone's preserved data while the live side
-// no longer carries it. See _NoDocumentAtAll below for the sibling vector
-// where no data is recoverable at all.
+// declared permission key via a raw manifest injection that (unlike a real
+// TombstonePermission call) leaves no document at that key at all — no live
+// vertex, no tombstone either, the case B/L1's key-based redesign exists to
+// un-deaden: `missing` must still fire on Key/Package identity alone, with no
+// tuple to enrich the finding. See _RevokedIsNotice below for the sibling
+// vector where a document IS present, tombstoned — that is NOT missing.
 func TestLoadPermissionReconciliation_DetectsMissing(t *testing.T) {
-	ctx, conn, inst := newInstallerHarness(t)
-	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	permKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
-	tombstoneKey(t, ctx, conn, permKey)
-
-	got, err := LoadPermissionReconciliation(ctx, conn)
-	if err != nil {
-		t.Fatalf("LoadPermissionReconciliation: %v", err)
-	}
-	f := findByClass(t, got.Drift, FindingMissing)
-	if f.Key != permKey {
-		t.Errorf("missing finding Key = %q, want %q", f.Key, permKey)
-	}
-	if f.Package != "sample-pkg" || f.OperationType != "SampleOp" || f.Scope != "any" {
-		t.Errorf("missing finding = %+v, want Package=sample-pkg OperationType=SampleOp Scope=any (recovered from the tombstone's preserved data)", f)
-	}
-}
-
-// TestLoadPermissionReconciliation_DetectsMissing_NoDocumentAtAll (L1/L4)
-// injects a declaredKeys entry into sample-pkg's manifest that never had a
-// document written at it at all — no live vertex, no tombstone either, the
-// case L1's key-based redesign exists to un-deaden: `missing` must still
-// fire on Key/Package identity alone, with no tuple to enrich the finding
-// (this is the vector the earlier tuple-reconstruction design silently
-// `continue`d past).
-func TestLoadPermissionReconciliation_DetectsMissing_NoDocumentAtAll(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 	res, err := inst.Install(ctx, sampleDef("0.1.0"))
 	if err != nil {
@@ -487,6 +666,39 @@ func TestLoadPermissionReconciliation_DetectsMissing_NoDocumentAtAll(t *testing.
 	}
 }
 
+// TestLoadPermissionReconciliation_RevokedIsNotice tombstones
+// sample-pkg's declared permission via installer_test.go's tombstoneKey —
+// the out-of-band soft delete TombstonePermission's sanctioned, durable
+// revocation would leave behind — without touching the package's own
+// declaredKeys record. The declared side resolves the tuple from the
+// tombstone's preserved data. This must NOT be `missing` (revocations are
+// durable: a package upgrade or --force re-apply does not revive the key),
+// so it must be a notice, and the reconciliation must report zero drift.
+func TestLoadPermissionReconciliation_RevokedIsNotice(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	permKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
+	tombstoneKey(t, ctx, conn, permKey)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	if got.HasDrift() {
+		t.Fatalf("HasDrift() = true, want false — a tombstoned declared key is a respected revocation, not missing: %+v", got.Drift)
+	}
+	f := findByClass(t, got.Notices, FindingRevoked)
+	if f.Key != permKey {
+		t.Errorf("revoked finding Key = %q, want %q", f.Key, permKey)
+	}
+	if f.Package != "sample-pkg" || f.OperationType != "SampleOp" || f.Scope != "any" {
+		t.Errorf("revoked finding = %+v, want Package=sample-pkg OperationType=SampleOp Scope=any (recovered from the tombstone's preserved data)", f)
+	}
+}
+
 // TestLoadPermissionReconciliation_DetectsKernelMissing tombstones one of
 // bootstrap's six primordial permission keys out of band.
 func TestLoadPermissionReconciliation_DetectsKernelMissing(t *testing.T) {
@@ -509,12 +721,14 @@ func TestLoadPermissionReconciliation_DetectsKernelMissing(t *testing.T) {
 
 // TestLoadPermissionReconciliation_RuntimeAndUnstampedAreNotices forges a
 // runtime-origin permission (the ratified second grant channel) and a
-// no-origin, non-kernel permission (a pre-provenance-stamp package install),
-// asserting the gatherer's own JSON decode of `data.origin` correctly routes
-// both to Notices and neither to Drift.
+// no-origin permission whose key IS injected into an installed package's
+// declaredKeys (the genuine pre-provenance-stamp shape, C's fix), asserting
+// the gatherer's own JSON decode of `data.origin` and the declaredKeys
+// membership check together route both to Notices and neither to Drift.
 func TestLoadPermissionReconciliation_RuntimeAndUnstampedAreNotices(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
-	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+	res, err := inst.Install(ctx, sampleDef("0.1.0"))
+	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -535,6 +749,15 @@ func TestLoadPermissionReconciliation_RuntimeAndUnstampedAreNotices(t *testing.T
 	writeForgedPermission(t, ctx, conn, unstampedKey, map[string]any{
 		"operationType": "LegacyOp", "scope": "any",
 	})
+	// Register unstampedKey as one of sample-pkg's own declaredKeys — the
+	// fact that makes it a genuine pre-stamp legacy install rather than a
+	// forgery that simply omitted `origin` (C's fix).
+	manifestKey := res.PackageKey + ".manifest"
+	patchDoc(t, ctx, conn, manifestKey, func(doc map[string]any) {
+		data, _ := doc["data"].(map[string]any)
+		keys, _ := data["declaredKeys"].([]any)
+		data["declaredKeys"] = append(keys, unstampedKey)
+	})
 
 	got, err := LoadPermissionReconciliation(ctx, conn)
 	if err != nil {
@@ -550,5 +773,69 @@ func TestLoadPermissionReconciliation_RuntimeAndUnstampedAreNotices(t *testing.T
 	uf := findByClass(t, got.Notices, FindingUnstampedInventory)
 	if uf.Key != unstampedKey {
 		t.Errorf("unstampedInventory finding Key = %q, want %q", uf.Key, unstampedKey)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsUndecodable writes a permission
+// envelope whose `data.declaredBy` is a JSON NUMBER rather than a string.
+// `declaredBy` is read by no authorization path
+// (packages/rbac-domain/lenses.go projects only
+// operationType/scope/lanes/origin), so this vertex authorizes normally via
+// its own GrantPermission link regardless of whether this reconciler can
+// decode its envelope — a decode failure must surface as its own finding,
+// never as silence.
+func TestLoadPermissionReconciliation_DetectsUndecodable(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	malformedID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	malformedKey := "vtx.permission." + malformedID
+	writeRawPermission(t, ctx, conn, malformedKey,
+		`{"class":"permission","isDeleted":false,"data":{"operationType":"Sneaky","scope":"any","origin":"package","declaredBy":1}}`)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findByClass(t, got.Drift, FindingUndecodable)
+	if f.Key != malformedKey {
+		t.Errorf("undecodable finding Key = %q, want %q", f.Key, malformedKey)
+	}
+}
+
+// TestLoadPermissionReconciliation_UndecodableDeclaredKeyIsNotAlsoMissing
+// overwrites a REAL, currently-declared permission key — not a fresh one —
+// with a body that is not valid JSON at all: the key is occupied, not
+// absent, so this must fire undecodable only, never missing (a "no live
+// vertex" diagnosis would be actively false for an occupied key, and its
+// printed remedy would not apply). This is the second, distinct vector from
+// TestLoadPermissionReconciliation_DetectsUndecodable above, which uses a
+// fresh, never-declared key.
+func TestLoadPermissionReconciliation_UndecodableDeclaredKeyIsNotAlsoMissing(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	realKey := "vtx.permission." + PermissionID("sample-pkg", "SampleOp", "any")
+	writeRawPermission(t, ctx, conn, realKey, `not json at all {{{`)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findByClass(t, got.Drift, FindingUndecodable)
+	if f.Key != realKey {
+		t.Errorf("undecodable finding Key = %q, want %q", f.Key, realKey)
+	}
+	for _, d := range got.Drift {
+		if d.Key == realKey && d.Class != FindingUndecodable {
+			t.Errorf("realKey produced an extra drift finding %+v — should be undecodable alone; missing must not also fire for an occupied-but-unreadable key", d)
+		}
 	}
 }
