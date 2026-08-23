@@ -300,6 +300,14 @@ jobs:
       - name: Install + verify lease-signing package (co-installs rbac/identity/orchestration-base/service-domain)
         run: make verify-package-lease-signing
 
+      - name: Reconcile live permission vertices against installed manifests
+        # Cross-package, so it runs after every per-package verify: each of
+        # those asserts only declared→live for its own package and none can
+        # see an EXTRA. Fails on a package-origin permission no manifest
+        # declares, a body whose key it does not derive, a declared key with
+        # nothing live at it, and an absent primordial permission.
+        run: make verify-permission-provenance
+
       - name: Run Hello Lattice integration suite (Phase 1 Gate 5)
         # Runs the six-milestone Hello Lattice vertical slice:
         # DDL definition, book creation, Lens projection, Postgres query,
