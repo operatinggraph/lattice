@@ -192,7 +192,7 @@ func TestRowState_AspectColumns_RecognizesGoalAlreadyMet(t *testing.T) {
 		t.Fatalf("plan = %+v, want zero steps — the signature is already present, nothing to remediate", plan)
 	}
 
-	// Sanity: the pre-fix mapping (aspectCols=nil) must get this WRONG —
+	// Sanity: the aspectCols=nil mapping must get this WRONG —
 	// unable to see the aspect-qualified fact under the row's untagged root
 	// key, it synthesizes a spurious SignLease plan for an application that
 	// needs no remediation. This proves the test actually exercises the
@@ -204,7 +204,7 @@ func TestRowState_AspectColumns_RecognizesGoalAlreadyMet(t *testing.T) {
 	}
 	if len(spurious.Steps) != 1 || spurious.Steps[0].ActionRef != "SignLease" {
 		t.Fatalf("unbridged plan = %+v, want a spurious single SignLease step "+
-			"(demonstrating the root/aspect key mismatch this fix resolves)", spurious)
+			"(demonstrating the root/aspect key mismatch aspectCols exists to bridge)", spurious)
 	}
 }
 

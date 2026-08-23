@@ -74,8 +74,8 @@ func computeAvailability(keys []string, get kvGetter, provider string) []availab
 // increment): any caller (typically a patient mid-booking, not the provider)
 // may check a NAMED provider's busy times to compute open slots, but a blank
 // `?provider=` would return the clinic-wide unscoped dump — the
-// follow-ups-worklist/"All providers" vector this increment closes. That
-// clinic-wide view now lives at handleStaffAppointments, the authenticated,
+// follow-ups-worklist/"All providers" vector closed by making `provider`
+// required. That clinic-wide view lives at handleStaffAppointments, the authenticated,
 // RLS-scoped read.
 //
 // It NO LONGER accepts `?patient=` (D1.5): that vector let ANY caller read any

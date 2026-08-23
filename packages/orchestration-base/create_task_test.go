@@ -346,11 +346,11 @@ func TestCreateTask_DeclaredOptionalReads_CreateThenDedup(t *testing.T) {
 }
 
 // TestCreateTask_DeletedTask_ReviveCommits proves the logical-delete
-// create-wedge fix through the real commit path: a task key that reads as
+// create-wedge case through the real commit path: a task key that reads as
 // present-but-isDeleted (an out-of-band operator deletion — no in-repo
 // mutator tombstones a task today) must revive via a CAS-guarded update, not
 // a blind CreateOnly (which would RevisionConflict forever against the
-// still-present key's write history — the pre-fix bug, Contract #10 §10.3).
+// still-present key's write history — Contract #10 §10.3).
 func TestCreateTask_DeletedTask_ReviveCommits(t *testing.T) {
 	ctx, conn := setupOrchEnv(t)
 	cp, cons := newTaskPipeline(t, ctx, conn, "ct-revive")

@@ -175,8 +175,8 @@ func (rl *reloader) taxonomyChanged() {
 // resolver's current answer actually differs from what was last COMMITTED
 // for it (entry.taxExpansion/taxExpansionStatus, guarded by entry.taxMu —
 // see its doc) — comparing against that cached baseline, not against the
-// running pipeline's already-published rule state, is what makes "did this
-// change" answerable at all.
+// running pipeline's already-published rule state, is what makes the
+// did-it-change question answerable at all.
 //
 // A real change re-runs exactly the §6.2-§6.4 sequence reloader.update's
 // MatchChange arm does: UseFullEngineBranchesForReDerivation (the client

@@ -559,7 +559,7 @@ def execute(state, op):
         invalid_reason = ""
         if kind not in ENABLED_KINDS:
             review_state = "invalid"
-            invalid_reason = "artifact kind not enabled in this increment: " + kind
+            invalid_reason = "artifact kind not enabled: " + kind
         elif validation_state != "valid":
             review_state = "invalid"
             if validation_report != "":
@@ -716,7 +716,7 @@ def execute(state, op):
         if review_state == "pending":
             if kind not in ENABLED_KINDS:
                 review_state = "invalid"
-                invalid_reason = "artifact kind not enabled in this increment: " + kind
+                invalid_reason = "artifact kind not enabled: " + kind
             elif confidence < 0.0 or confidence > 1.0:
                 review_state = "invalid"
                 invalid_reason = "confidence out of range [0,1]: " + str(confidence)

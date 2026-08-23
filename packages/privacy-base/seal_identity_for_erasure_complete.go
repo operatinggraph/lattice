@@ -139,7 +139,7 @@ def execute(state, op):
 // The residue lens opens missing_erasureSeal only after vaultKeyDestroyed and
 // projectionsNullified are both true, and its own comment names that ordering
 // as the guarantee "until the seal op re-verifies them itself" — an obligation
-// it hands this increment by name. It is discharged here: a Vault key that is
+// it hands this op by name. It is discharged here: a Vault key that is
 // still live, or projections that were never nullified, refuse the attestation
 // regardless of what any projection ordered. A guarantee that lives only in a
 // lens's column ordering dies the first time a gap is dispatched out of order,

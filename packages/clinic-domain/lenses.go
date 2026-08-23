@@ -280,8 +280,8 @@ func Lenses() []pkgmgr.LensSpec {
 			// matches every patient whose care touches its building, not only
 			// the reserved WildcardAnchor holder. Three kinds of actor match a
 			// row: the WildcardAnchor holder (the whole roster), a
-			// worksAt-anchored front-desk actor for a shared building (this
-			// fix), and, via patientIdentityReadGrants, the signed-in identity
+			// worksAt-anchored front-desk actor for a shared building, and,
+			// via patientIdentityReadGrants, the signed-in identity
 			// the row's own patient is identifiedBy. The roster as a WHOLE
 			// still has no owner but a single row does, and a person being
 			// able to find their own record is what lets a patient session

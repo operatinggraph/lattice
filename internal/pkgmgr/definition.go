@@ -1005,8 +1005,8 @@ const (
 	// retention-class holder: vtx.retentionclass.<NanoID>.
 	RetentionClassVertexType = "retentionclass"
 
-	// RetentionPolicyEraseOnExpiry is the only retention policy this
-	// increment implements. The period is declarative — nothing expires a
+	// RetentionPolicyEraseOnExpiry is the only retention policy the
+	// platform implements. The period is declarative — nothing expires a
 	// class key automatically yet (design §7.2).
 	RetentionPolicyEraseOnExpiry = "eraseOnExpiry"
 )

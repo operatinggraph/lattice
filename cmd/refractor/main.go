@@ -609,8 +609,8 @@ func main() {
 	// bootstrapper.Ready()/src.Start below) correctly hits
 	// ErrRuleNotRegistered → NakWithDelay and retries, instead of an empty
 	// target list vacuously Acking + recording the identity as clean with
-	// nothing actually checked (an adversarial-review-caught regression this
-	// fire must not reintroduce). Hand-authored Postgres GrantTable cap-read
+	// nothing actually checked (a regression this must not reintroduce).
+	// Hand-authored Postgres GrantTable cap-read
 	// producers (packages/clinic-domain's four) carry no Output descriptor and
 	// so are reached by neither this static entry nor the lister — closed by a
 	// separate, parallel mechanism below (SetGrantRevokerLister): the shared
@@ -1428,8 +1428,8 @@ func main() {
 			// from it here exactly as reload.go's own `if threadsKeyColumns`
 			// arm is (reload.go's ValidateReturnAliases call for a Personal
 			// lens's MATCH update sits inside its own `if threaded` block,
-			// one level broader — a pre-existing, narrower divergence this
-			// fire does not touch).
+			// one level broader — a pre-existing, narrower divergence
+			// left untouched here).
 			//
 			// The ordering matters because KeyColumns is the one CompiledRule
 			// field ever mutated after construction, and

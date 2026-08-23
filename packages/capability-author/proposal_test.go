@@ -648,8 +648,7 @@ func TestCapAuthor_RecordAuthoringDispatch_VendorRefRequired_Rejected(t *testing
 // kind is actually enabled on the LIVE RecordCapabilityProposal Starlark op
 // (packages/capability-author/ddls.go's ENABLED_KINDS), not just the Go-side
 // pkgmgr.EnabledArtifactKinds map — the two allow-lists could otherwise drift
-// silently (Go accepts a kind the Starlark op still rejects as "not enabled
-// in this increment").
+// silently (Go accepts a kind the Starlark op still rejects as disabled).
 func TestCapAuthor_ValidVertexTypeDDL_Pending(t *testing.T) {
 	ctx, conn := setupCapAuthorEnv(t)
 	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-vertextypeddl")
@@ -706,7 +705,7 @@ func TestCapAuthor_ValidOpMeta_Pending(t *testing.T) {
 	}
 }
 
-// TestCapAuthor_DisabledKind_Invalid: a kind outside this increment's enabled
+// TestCapAuthor_DisabledKind_Invalid: a kind outside the currently enabled
 // set is stored invalid — the proposal is still recorded (auditability), never
 // pending. weaverTarget is not enabled until Fire 3 (lens + grant are the two
 // kinds enabled today).

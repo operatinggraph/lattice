@@ -65,8 +65,8 @@
 //     validateLoomPatterns a hand-authored package's §10.8/§10.5 declarations
 //     run through; a weaverTarget artifact may not carry an `augur` escalation
 //     block — out of scope for an AI to configure its own reasoning-escalation
-//     policy in this increment), and the "vertexTypeDDL"/"opMeta" kinds (Fire
-//     4 — a verified-pure internal/starlarksandbox.Validate dry-run of a
+//     policy), and the "vertexTypeDDL"/"opMeta" kinds (Fire 4 — a
+//     verified-pure internal/starlarksandbox.Validate dry-run of a
 //     vertexTypeDDL's Script, plus the sensitive-ref-mac-provenance-design.md
 //     §7 condition-2 lint: no artifact of any kind may spell the literal
 //     "$sensitiveRef", and an opMeta's declared Dispatch.Reads may never name
@@ -140,7 +140,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.12.1",
+	Version:       "0.12.2",
 	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds, and the async DispatchOp + catalog widening for the real model-backed adapter (natural-language-weaver-targets-design.md): the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/RecordAuthoringDispatch/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext/capabilityAuthorPackages review + catalog + manifest lenses (the catalog one also projecting the full `.spec` aspect body so a reasoning model sees existing lens/weaverTarget bodies, not just self-description; the manifest one projecting each installed package's name/version/description/depends/declaredKeys so a Core-KV-denied reader can resolve which package owns a meta key and what an in-place upgrade of it would blank). SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart. RecordAuthoringDispatch is the externalTask dispatchOp CreateAuthoringClaim's emitted event now names, so the bridge's async Pending/poll path is dispatchable for this adapter.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),

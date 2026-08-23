@@ -106,7 +106,7 @@ func TestEngineManager_RefCountingLogic(t *testing.T) {
 // load-bearing: a cached engine whose NATS connection has permanently closed
 // (nats.go's own give-up after repeated auth errors, or any other terminal
 // failure) is evicted and replaced by a fresh one on the next Acquire, rather
-// than being handed back forever — the pre-fix dead end this closes.
+// than being handed back forever — the dead end this closes.
 //
 // A real embedded NATS server is used (not a bare *engine{} stand-in, unlike
 // the other tests in this file): the liveness check reads the real

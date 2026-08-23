@@ -138,8 +138,8 @@ func sensitiveReadAspect(entry string) (aspect string, recognized bool) {
 // aspectType Class + its Sensitive flag are deliberately NOT exposed: an
 // aspect-type DDL is where the platform's PII-classification boundary lives
 // (lattice-architecture Item 6, NFR-S3), and Sensitive is meaningful only
-// for that class — out of scope for this increment, same posture as the
-// lens kind excluding protected/secure postures and weaverTarget excluding
+// for that class — out of scope here, same posture as the lens kind
+// excluding protected/secure postures and weaverTarget excluding
 // the augur block. Effects (the §10.8 Weaver-planner extension) is also
 // excluded: every Effects entry requires a matching OpMetaSpec in the SAME
 // Definition (validateEffects), but a vertexTypeDDL artifact never carries
@@ -269,8 +269,8 @@ func ddlScriptSandboxGlobals() starlarklib.StringDict {
 // check (design §3.2/§8 Fire 4): required fields, the verified-pure Starlark
 // sandbox dry-run of Script (compiles + defines a 2-parameter `execute`
 // entrypoint — starlarksandbox.Validate, this package's first caller at
-// package-install/record time per the design's "Piece 1 builds WITH this
-// fire"), and the same validateAll the human package-authoring path runs
+// package-install/record time per the design's Piece 1 scope), and the same
+// validateAll the human package-authoring path runs
 // (validateOpMetas/validateEffects trivially pass — a throwaway
 // single-DDL Definition carries no OpMetas/Effects of its own — plus
 // validateCanonicalNameUniqueness) — reused, not duplicated.

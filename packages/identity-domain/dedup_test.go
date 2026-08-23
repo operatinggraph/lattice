@@ -104,7 +104,8 @@ func TestCreateUnclaimed_DuplicateContact_NoRevisionConflict_EmitsDuplicateOfLin
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	// Second create, same email, declared optionalReads (the dispatcher fix).
-	// Pre-fix this would hard-fail RevisionConflict on the index re-create.
+	// Without the declared read this would hard-fail RevisionConflict on the
+	// index re-create.
 	reqID2 := testutil.GenReqID("DupFlowSecond")
 	secondID := identityIDFromRequestID(reqID2)
 

@@ -315,8 +315,8 @@ func normalizePackageName(name string) string {
 // Installer.Apply. It is read-only: no mutation, no op submission — a caller
 // can preview it (log/diff) before committing to the real F-004 apply, and
 // the F-004 apply itself stays the existing, untouched InstallPackage/
-// UpgradePackage path every human package install already runs (this
-// increment does not special-case it).
+// UpgradePackage path every human package install already runs — no
+// special-casing here.
 //
 // Returns an error for anything short of "approved with a well-formed
 // target" — that boundary was already crossed by RecordCapabilityProposal +

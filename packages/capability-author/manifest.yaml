@@ -1,5 +1,5 @@
 name: capability-author
-version: 0.12.1
+version: 0.12.2
 description: |
   AI-authored capabilities — Fire 1 capture + escalation dispatch + review lenses, Fire 2
   review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern

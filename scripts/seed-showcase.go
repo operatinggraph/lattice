@@ -118,7 +118,7 @@ const (
 	// The staff-worklist beat: a vacant third unit + a walk-in applicant whose
 	// signed lease application sits undecided on the staff persona's worklist
 	// (DecideLeaseApplication is frontOfHouse's own verb). The leaseapp id is
-	// caller-supplied, so it is this increment's idempotency anchor — the
+	// caller-supplied, so it serves as the idempotency anchor here — the
 	// applicant identity is minted and never needs recovering.
 	unit3ID         = "aCEFf63f9K6tR7eGnJ69"
 	leaseApp3ID     = "pbCxpGRQHx9V23TZaC6H"
@@ -1247,13 +1247,13 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 			})
 	}
 
-	// A dedicated resident-visit appointment: oseiAppt/patelAppt above predate
-	// tenant1LeaseAppKey on any world seeded before this increment, and
-	// CreateAppointment's residentVisit link is written only at CREATE time
-	// (no retrofit op exists), so healing them is impossible — a fresh
-	// appointment under its own id namespace is the only way to guarantee one
-	// carries the link. Distinct hour off every other appointment on this day
-	// so slot claims never collide.
+	// A dedicated resident-visit appointment: oseiAppt/patelAppt above can
+	// already exist on a world without tenant1LeaseAppKey wired at their
+	// creation time, and CreateAppointment's residentVisit link is written
+	// only at CREATE time (no retrofit op exists), so healing them is
+	// impossible — a fresh appointment under its own id namespace is the
+	// only way to guarantee one carries the link. Distinct hour off every
+	// other appointment on this day so slot claims never collide.
 	residentApptStart := futureDayAt(1, 11)
 	residentApptEnd := residentApptStart.Add(30 * time.Minute)
 	residentApptID := substrate.DeriveNanoID("showcase-appointment-osei-resident", "")
@@ -1411,12 +1411,13 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 // teachesAt the showcase studio, ledBy on a second, own-led session) — one
 // identity, one login, three bindings. Sam's SECOND session lives in its own
 // day-derived id namespace, two whole days out (mirroring the appointment
-// offsets above, for the same collision-free reason), so it is always minted
-// fresh on the first run of this increment: the existing day-rolled Vinyasa
-// Flow session was created with no instructor and cannot be re-wired after
-// the fact. It also books Sam as a MEMBER into bookableSessionKey (the
-// caller's already-seeded Vinyasa Flow session, distinct from Sam's own
-// taught one) carrying tenant2's own leaseapp key, qualifying for
+// offsets above, for the same collision-free reason), so it is always
+// minted fresh the first time seedSamMultiHat runs against a given world:
+// the existing day-rolled Vinyasa Flow session was created with no
+// instructor and cannot be re-wired after the fact. It also books Sam as a
+// MEMBER into bookableSessionKey (the caller's already-seeded Vinyasa Flow
+// session, distinct from Sam's own taught one) carrying tenant2's own
+// leaseapp key, qualifying for
 // rate=resident and the residentRate link the front desk's 🧘 badge composes
 // on. Per-mutation idempotent; safe to call on every run once ensureStaff/
 // ensureMaintenanceTech's hardening (above) is in place, since Sam then also

@@ -25,7 +25,7 @@
 //  15. TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate — declared rewritten-key optionalRead lets a
 //     real collision merge as a duplicate instead of reaching step 8 as a colliding create
 //  16. TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate — omitting that optionalRead
-//     reproduces the pre-fix failure mode: the whole merge is rejected
+//     reproduces the failure mode the declared read prevents: the whole merge is rejected
 //  17. TestMerge_AspectConflictResolution_CarriesSecondaryValue — a live
 //     secondary-wins aspect is decrypted and written onto the primary
 //  18. TestMerge_AspectConflictResolution_NoValueToCarryRefused — one shared
@@ -1016,12 +1016,12 @@ func TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate(t *testing.T) {
 // --- 16. TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate ---
 
 // TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate mirrors the
-// previous test but omits the rewritten key from ContextHint.OptionalReads
-// (the pre-fix caller behavior). state[new_key] never hydrates, the
-// collision check can't fire, and the script emits a colliding `create`
-// against primary's already-live link — the Committer's CreateOnly semantics
-// reject the whole batch instead of the merge migrating as a duplicate. This
-// locks in the failure mode the caller-side fix closes.
+// previous test but omits the rewritten key from ContextHint.OptionalReads.
+// state[new_key] never hydrates, the collision check can't fire, and the
+// script emits a colliding `create` against primary's already-live link —
+// the Committer's CreateOnly semantics reject the whole batch instead of the
+// merge migrating as a duplicate. This locks in the failure mode an
+// undeclared key leaves open.
 func TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate(t *testing.T) {
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newMergePipeline(t, ctx, conn, "mcollundecl")

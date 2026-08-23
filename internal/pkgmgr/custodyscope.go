@@ -95,7 +95,7 @@ func (def Definition) validateCustodyScope() error {
 }
 
 // validateRetentionClasses enforces the declaration side: a class must be
-// nameable, must state a policy this increment implements, and must not be
+// nameable, must state a policy the platform implements, and must not be
 // declared twice. The canonicalName is what a DDL's Custody.RetentionClass
 // binds to and what RetentionClassID salts the holder's NanoID from, so a
 // duplicate would mint one vertex for two declared obligations.

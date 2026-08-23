@@ -79,7 +79,7 @@
 // dispatches).
 //
 // Inc 2's thin FE (POS→tab · front-desk open-tabs · resident house-tab) and
-// Inc 3's one-bill composition lens are NOT this increment — this ships the
+// Inc 3's one-bill composition lens are NOT included here — this ships the
 // domain + Weaver wiring only (Café row, verticals.md).
 package cafedomain
 

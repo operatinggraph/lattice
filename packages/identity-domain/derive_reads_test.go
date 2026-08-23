@@ -20,9 +20,9 @@
 //  3. TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards — the same for
 //     the actor-derived credentialindex probe, whose every pre-existing test
 //     declares the key itself and so cannot see the derivation at all.
-//  4. TestClaimIdentity_RebindsAfterUnlink — the behaviour this increment
-//     CHANGES: ClaimIdentity never had a submitter that could declare the
-//     probe, so the tombstoned-index revive branch was dead until now.
+//  4. TestClaimIdentity_RebindsAfterUnlink — pins the only path that reaches
+//     the tombstoned-index revive branch: ClaimIdentity's submitter is the
+//     one that declares the probe, so nothing else exercises it.
 package identitydomain_test
 
 import (
@@ -259,8 +259,8 @@ func TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards(t *testing.T) {
 	}
 }
 
-// TestClaimIdentity_RebindsAfterUnlink is the behaviour change this increment
-// makes, asserted rather than discovered later.
+// TestClaimIdentity_RebindsAfterUnlink is the behaviour asserted here rather
+// than discovered later.
 //
 // No ClaimIdentity submitter ever declared the credentialindex probe — opmetas'
 // dispatch template substitutes, it does not hash — so the script's
@@ -287,7 +287,8 @@ func TestClaimIdentity_RebindsAfterUnlink(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	// The same credential now claims a DIFFERENT, fresh unclaimed identity.
-	// Pre-derivation this failed RevisionConflict on the index re-create.
+	// Without the derived read declared, this fails RevisionConflict on the
+	// index re-create.
 	targetKey, claimPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("RebindTarget"))
 	seedIdentityCapDoc(t, ctx, conn, secondCredActorKey, "ClaimIdentity")
 

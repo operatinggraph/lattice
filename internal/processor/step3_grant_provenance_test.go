@@ -108,8 +108,8 @@ func TestMatchPlatformPermission_ReservedOpByOrigin(t *testing.T) {
 		},
 		{
 			// Absence is the migration's whole safety property: every vertex
-			// minted before this increment carries no stamp, and each must be
-			// governed rather than exempted.
+			// minted before provenance stamping existed carries no stamp,
+			// and each must be governed rather than exempted.
 			name:       "ABSENT origin, reserved op — reads as runtime, refused",
 			origin:     "",
 			opType:     reservedOp,

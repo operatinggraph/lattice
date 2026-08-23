@@ -55,7 +55,7 @@ type opCatalogProjection struct {
 	// when the row's Field column equals Equals"). Dropping it here would not
 	// degrade the FE, it would make it fail OPEN — an op the package says to
 	// hide in this state would be offered in every state. It is threaded
-	// through unevaluated: this increment builds no evaluator, and the FE
+	// through unevaluated: no evaluator is built here, and the FE
 	// treats a row that carries one as not-offerable, which is the same
 	// fail-closed answer the descriptor's own contract gives a client
 	// evaluating it against a row that lacks the named column.

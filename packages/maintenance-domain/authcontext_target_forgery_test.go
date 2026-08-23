@@ -84,8 +84,8 @@ func TestResolveWorkOrder_ForgedTargetStaysConfined(t *testing.T) {
 			"(the positive sibling — if this fails the negative below proves nothing)", got)
 	}
 
-	// THE FORGERY: a fabricated non-empty target, which the pre-fix guard
-	// accepted as an exemption from confinement.
+	// THE FORGERY: a fabricated non-empty target, which an unvalidated guard
+	// would accept as an exemption from confinement.
 	if got := mdSubmitResolveForged(t, ctx, conn, cp, cons, "mdfrg00000000000004",
 		mdTechKey, woKey, "Not my building.", woKey); got != processor.OutcomeRejected {
 		t.Fatalf("tech resolve at ANOTHER building with a FORGED authContext.target = %v, want Rejected — "+

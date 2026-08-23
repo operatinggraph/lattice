@@ -54,8 +54,8 @@ func TestExecutor_Footprint_CapturesNodeAndEdgeRevisions(t *testing.T) {
 // snapshot taken at read time, not a live view. This is the seam a future
 // E2E scripted-interleave test (the capabilityEphemeral role-queue tear,
 // evaluation-consistency-design.md §9) commits a mid-evaluation mutation
-// through; that test is out of scope for this increment (needs real lens
-// installs), so this pins only the hook mechanism itself.
+// through; that test is out of scope here (needs real lens installs), so
+// this pins only the hook mechanism itself.
 func TestExecuteWithFootprint_HookFiresAfterFootprintBuilt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -88,9 +88,9 @@ func TestExecuteWithFootprint_HookFiresAfterFootprintBuilt(t *testing.T) {
 		"the mutation committed inside the hook must have landed AFTER the footprint was captured")
 }
 
-// TestExecuteWith_NeverInvokesTheHook pins that the pre-existing ExecuteWith
-// entry point — every packages/* lens test's call shape, untouched by this
-// increment — never even looks at a footprint hook installed on its ctx: it
+// TestExecuteWith_StillInvokesTheHookThroughTheSharedCore pins that the
+// ExecuteWith entry point — every packages/* lens test's call shape — never
+// even looks at a footprint hook installed on its ctx: it
 // is a thin wrapper over ExecuteWithFootprint that discards the footprint,
 // but the hook itself is invoked unconditionally by the shared core, so this
 // pins that ExecuteWith still fires it (proving the wrapper truly shares the

@@ -103,7 +103,7 @@
 // surface at all — it is the weaver-targets convergence lens
 // WeaverTargets() (targets.go) dispatches ReleaseOrphanedBooking over.
 //
-// OUT of scope this increment (the thin FE and the mixed-use composition
+// OUT of scope for this package (the thin FE and the mixed-use composition
 // surfaces that consume it are separate, sequenced items —
 // verticals.md):
 //   - cmd/wellness-app (Inc 2, mirrors cmd/clinic-app's schedule-grid /

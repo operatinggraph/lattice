@@ -436,9 +436,8 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 // — the backlog row's other cited precedent — is engine-internal only,
 // internal/weaver's own temporal sweep; no package script can invoke it,
 // confirmed by grep across packages/.) Extending an open-ended series later
-// (more occurrences past occurrenceCount) is a deliberate non-goal this
-// increment — re-run CreateSessionSeries anchored on the last occurrence's
-// end.
+// (more occurrences past occurrenceCount) is a deliberate non-goal — re-run
+// CreateSessionSeries anchored on the last occurrence's end.
 func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionSeriesVertexDDL,

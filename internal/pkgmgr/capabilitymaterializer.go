@@ -166,8 +166,8 @@ type GapActionArtifact struct {
 // The `augur` escalation-policy block is deliberately NOT exposed here — it
 // configures AI-reasoning escalation (and, via autoApply, the one standing
 // autonomy boundary Andrew has not ratified for even hand-authored packages,
-// design §For-Andrew #1) — so an AI proposing its OWN escalation policy is out
-// of scope for this increment, same posture as the lens kind's excluded
+// design §For-Andrew #1) — so an AI proposing its OWN escalation policy is
+// out of scope here, same posture as the lens kind's excluded
 // protected/secure postures (§3.2).
 type WeaverTargetArtifactContent struct {
 	TargetID string                       `json:"targetId"`
@@ -336,8 +336,8 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 		if err := json.Unmarshal(content, &lc); err != nil {
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed lens artifact content: %w", err)
 		}
-		// A known-fields check catches an artifact trying to smuggle a field this
-		// increment's LensArtifactContent doesn't expose (e.g.
+		// A known-fields check catches an artifact trying to smuggle a field
+		// LensArtifactContent doesn't expose (e.g.
 		// "protected"/"public"/"grantTable"/"columns"/"secureColumns" — the postures
 		// explicitly out of scope, §3.2). Without this, json.Unmarshal above would
 		// SILENTLY DROP the unrecognized field and materialize a plain lens anyway —
@@ -360,8 +360,8 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed grant artifact content: %w", err)
 		}
 		// Same scope-widening defense as the lens kind's unknownLensFields: a
-		// field this increment's GrantArtifactContent doesn't expose would
-		// otherwise be silently dropped by json.Unmarshal rather than rejected.
+		// field GrantArtifactContent doesn't expose would otherwise be
+		// silently dropped by json.Unmarshal rather than rejected.
 		if extra := unknownGrantFields(content); len(extra) > 0 {
 			return ArtifactValidationReport{
 				Valid: false,
@@ -377,9 +377,9 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed weaverTarget artifact content: %w", err)
 		}
 		// Same scope-widening defense as the lens kind's unknownLensFields: a
-		// field this increment's WeaverTargetArtifactContent doesn't expose
-		// (namely "augur") would otherwise be silently dropped by
-		// json.Unmarshal rather than rejected.
+		// field WeaverTargetArtifactContent doesn't expose (namely "augur")
+		// would otherwise be silently dropped by json.Unmarshal rather than
+		// rejected.
 		if extra := unknownWeaverTargetFields(content); len(extra) > 0 {
 			return ArtifactValidationReport{
 				Valid: false,
@@ -415,8 +415,8 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 		if err := json.Unmarshal(content, &vc); err != nil {
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed vertexTypeDDL artifact content: %w", err)
 		}
-		// Same scope-widening defense as the other kinds: a field this
-		// increment's VertexTypeDDLArtifactContent doesn't expose (namely
+		// Same scope-widening defense as the other kinds: a field
+		// VertexTypeDDLArtifactContent doesn't expose (namely
 		// "class"/"sensitive"/"effects") would otherwise be silently dropped
 		// by json.Unmarshal rather than rejected.
 		if extra := unknownVertexTypeDDLFields(content); len(extra) > 0 {
@@ -433,10 +433,10 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 		if err := json.Unmarshal(content, &oc); err != nil {
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed opMeta artifact content: %w", err)
 		}
-		// Same scope-widening defense as the other kinds: a field this
-		// increment's OpMetaArtifactContent doesn't expose (namely
-		// "sensitive") would otherwise be silently dropped by json.Unmarshal
-		// rather than rejected.
+		// Same scope-widening defense as the other kinds: a field
+		// OpMetaArtifactContent doesn't expose (namely "sensitive") would
+		// otherwise be silently dropped by json.Unmarshal rather than
+		// rejected.
 		if extra := unknownOpMetaFields(content); len(extra) > 0 {
 			return ArtifactValidationReport{
 				Valid: false,
@@ -739,9 +739,9 @@ func loomPatternArtifactDefinition(lp LoomPatternArtifactContent, name, version 
 	}
 }
 
-// knownLensFields are the JSON keys LensArtifactContent exposes for this
-// increment's "lens" kind. Kept as an explicit set (rather than deriving it
-// via reflection) so the allow-list is the obviously-correct source of truth
+// knownLensFields are the JSON keys LensArtifactContent exposes for the
+// "lens" kind. Kept as an explicit set (rather than deriving it via
+// reflection) so the allow-list is the obviously-correct source of truth
 // unknownLensFields checks raw content against.
 var knownLensFields = map[string]bool{
 	"canonicalName": true,

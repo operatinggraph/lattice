@@ -156,9 +156,9 @@ func TestValidateCapabilityArtifact_ReservedBucketAliasRejected(t *testing.T) {
 }
 
 func TestValidateCapabilityArtifact_OutOfScopeFieldRejected(t *testing.T) {
-	// A raw content payload that smuggles a field this increment doesn't expose
-	// (e.g. "protected") must be caught, not silently dropped by json.Unmarshal
-	// and downgraded to a plain lens.
+	// A raw content payload that smuggles a field LensArtifactContent
+	// doesn't expose (e.g. "protected") must be caught, not silently
+	// dropped by json.Unmarshal and downgraded to a plain lens.
 	content := json.RawMessage(`{"canonicalName":"sneakyProtected","adapter":"postgres","table":"sneaky","spec":"MATCH (p:provider) RETURN p.key AS key","protected":true}`)
 	report, err := ValidateCapabilityArtifact("lens", content, fullCypherParser{}, nil, nil)
 	if err != nil {

@@ -342,8 +342,8 @@ func (s *server) resolveAllowedObjectOwners(ctx context.Context, r *http.Request
 // bypassing this handler, with a self-consistent-looking but Vault-unwrapped
 // (forged) encryption block claiming an arbitrary governingIdentity — the
 // SAME pre-existing trust boundary every other AttachObject field
-// (targetKey/linkName/storeName) already has today, not something this
-// increment introduces or could close alone (closing it needs a real
+// (targetKey/linkName/storeName) already has today — not introduced here,
+// and not closable by this handler alone (closing it needs a real
 // consumer scope=self grant for AttachObject, mirroring
 // CreateLeaseApplication's; flagged as a residual, not built here). Bounded:
 // no plaintext ever leaks this way — Vault's AEAD tag rejects a forged

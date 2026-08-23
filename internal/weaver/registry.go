@@ -298,8 +298,8 @@ type Target struct {
 	Augur *AugurPolicy `json:"augur,omitempty"`
 
 	// Mode selects the planner-extension posture (§10.8 Planner extension,
-	// Fire 4): "" (absent, the default — every target installed before this
-	// fire) is frozen table-only behavior, byte-identical; targetModeShadow
+	// Fire 4): "" (absent, the default — a target declaring no Mode) is
+	// frozen table-only behavior, byte-identical; targetModeShadow
 	// computes + records the planner's pick per gap but never dispatches it;
 	// targetModePlanned dispatches the planner's pick for real (Fire 5
 	// candidates, Fire 6 goal).
@@ -1033,15 +1033,16 @@ func validateAugurPolicy(a *AugurPolicy) error {
 
 // validateAdmissionPolicy runs the §10.8 "Admission control" install-time
 // validations on a target's optional admission block (Fire 8). A nil block is
-// the default (unbounded dispatch, byte-identical to every target before this
-// fire) and is always valid. A present block must declare at least one
-// positive rate — an empty block is exactly as inert as omitting it and is
-// almost certainly a package-author mistake, so it is rejected rather than
-// silently accepted as a no-op (the same doctrine GoalColumns' "referenced by
-// goal" check applies). Every declared rate, global or per-adapter, must be
-// strictly positive: a zero or negative rate is nonsensical (0 already means
-// "not declared" via the field's absence) and would either wedge every
-// dispatch on this axis forever or panic tokenBucket's capacity math.
+// the default (unbounded dispatch, byte-identical to a target declaring no
+// admission block) and is always valid. A present block must declare at
+// least one positive rate — an empty block is exactly as inert as omitting
+// it and is almost certainly a package-author mistake, so it is rejected
+// rather than silently accepted as a no-op (the same doctrine GoalColumns'
+// "referenced by goal" check applies). Every declared rate, global or
+// per-adapter, must be strictly positive: a zero or negative rate is
+// nonsensical (0 already means "not declared" via the field's absence) and
+// would either wedge every dispatch on this axis forever or panic
+// tokenBucket's capacity math.
 func validateAdmissionPolicy(a *AdmissionPolicy) error {
 	if a == nil {
 		return nil

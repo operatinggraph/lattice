@@ -71,7 +71,7 @@ func TestExec_EdgeReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 // TestExec_NodeRevisionCapturedOnRead pins the vertex half of the footprint
 // primitive: fetchNode's memoized nodeRef carries the Core KV revision it was
 // read at, so a later validating caller (the footprint-validation seam this
-// increment is groundwork for) can detect a mid-evaluation write without a
+// primitive is groundwork for) can detect a mid-evaluation write without a
 // second read.
 func TestExec_NodeRevisionCapturedOnRead(t *testing.T) {
 	if testing.Short() {

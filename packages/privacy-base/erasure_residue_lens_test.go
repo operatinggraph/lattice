@@ -190,12 +190,12 @@ func (f *residueFixture) asyncHalvesDone(t *testing.T, subjectKey string) {
 
 // ---------------------------------------------------------------- the arms
 
-// TestErasureResidueLens_CountsEveryDirectionBothSweepsSweep is the correction
-// increment 4 earned and this increment owed. UnbindIdentityCredentials sweeps
-// boundTo in BOTH directions and PurgeIdentityDedupFootprint sweeps duplicateOf
-// in both — §7.1's ratified spec counted boundTo inbound only and folded
-// duplicateOf away entirely. Each arm carries a DISTINCT cardinality here so a
-// build that cross-wires two of them cannot pass.
+// TestErasureResidueLens_CountsEveryDirectionBothSweepsSweep pins that
+// UnbindIdentityCredentials sweeps boundTo in BOTH directions and
+// PurgeIdentityDedupFootprint sweeps duplicateOf in both — §7.1's ratified spec
+// counted boundTo inbound only and folded duplicateOf away entirely. Each arm
+// carries a DISTINCT cardinality here so a build that cross-wires two of them
+// cannot pass.
 func TestErasureResidueLens_CountsEveryDirectionBothSweepsSweep(t *testing.T) {
 	f := newResidueFixture(t)
 	key := f.residueSubject(t, "residueAllArms", fanOut{boundIn: 3, boundOut: 2, indexes: 5, dupOut: 4, dupIn: 6})

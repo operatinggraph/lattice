@@ -219,7 +219,7 @@ func startStructuralPauseLens(
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 
-	// cmd/refractor's own spec, plus the one field this increment adds. The
+	// cmd/refractor's own spec, plus StructuralProbe set below. The
 	// pipeline fills Handler / Classify / Probe / Health in Run, so the
 	// classifier under test is the real classifyForSupervisor and the probe is
 	// the real adapter Probe — neither is substitutable from here.

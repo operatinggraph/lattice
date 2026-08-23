@@ -149,14 +149,14 @@ func activateLens(t *testing.T, r *lens.Rule, spec string, adpt adapter.Adapter)
 	return p
 }
 
-// TestActivationRecordsTheLensPlane is the pin behind the one line this
-// increment adds to the activation path. Before it, pipeline.authPlane was
-// written by exactly one installer — projection.InstallActorAggregate — so a
-// PLAIN lens projecting an authorization surface carried false by
-// construction, and every guard reading that field was inert for the one shape
-// it most needed to catch. A test that set the field by hand would assert
-// nothing about that; each case here activates a lens from its RULE and reads
-// back what activation recorded.
+// TestActivationRecordsTheLensPlane is the pin behind activation itself
+// setting pipeline.authPlane from the RULE's own projection.IsAuthPlane,
+// not only from projection.InstallActorAggregate. Were that not so, a
+// PLAIN lens projecting an authorization surface would carry false by
+// construction, and every guard reading that field would be inert for the
+// one shape it most needed to catch. A test that set the field by hand
+// would assert nothing about that; each case here activates a lens from
+// its RULE and reads back what activation recorded.
 //
 // One case per projection.IsAuthPlane arm, plus the negative — without which a
 // green result could equally come from an activation that marks everything.
