@@ -38,6 +38,10 @@ const maxHeartbeatIssues = 50
 // heartbeat did not list.
 const issuesTruncatedCode = "IssuesTruncated"
 
+// omittedCodeSampleCap bounds how many distinct codes the truncation entry
+// names before it summarises the remainder.
+const omittedCodeSampleCap = 8
+
 // weaverHealthDoc is the Contract #5 §5.2 heartbeat document Weaver writes to
 // health.weaver.<instance>. Same shape as the Processor/Refractor/Loom docs;
 // component is "weaver".
@@ -309,8 +313,11 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 	// lifecycle phases are reported verbatim (a draining/initializing component
 	// isn't "degraded").
 	//
-	// Computed over the FULL issue set, before the listing is bounded: an issue
-	// too far down the list to be named still decides the reported status.
+	// Computed over the FULL issue set: the status describes every open issue,
+	// not the sample the document happens to carry. boundIssues then selects
+	// severity-first, so the listing keeps the worst severity present and would
+	// reach the same verdict — but the two are computed from different things
+	// on purpose, and this one is the definition.
 	status = aggregateStatus(status, issues)
 	issues = boundIssues(issues, maxHeartbeatIssues)
 
@@ -407,31 +414,91 @@ func (h *heartbeater) flagEffectMismatches(ctx context.Context, metrics map[stri
 	metrics["effectMismatches"] = len(mismatches)
 }
 
-// boundIssues lists at most limit entries of an already deterministically
-// ordered issue set and appends ONE synthetic entry standing for the rest, so a
-// bounded list is never readable as the whole set. Returns issues unchanged
-// when it already fits (and when limit is non-positive — a disabled cap).
+// boundIssues lists at most limit entries of an issue set and appends ONE
+// synthetic entry standing for the rest, so a bounded list is never readable as
+// the whole set. Returns issues unchanged when it already fits (and when limit
+// is non-positive — a disabled cap).
+//
+// SELECTION IS BY SEVERITY FIRST, ties broken on the caller's incoming order
+// (the deterministic key order), because what a cap must not do is evict the
+// entry that explains the fault. The per-entity families are the ones that grow
+// without bound — one entry per violating subject — and they are all
+// `warning`s; the entries an operator needs in front of them (a
+// PlaybookConfigError, a LensEffectMismatch, a paused consumer) are single
+// `error`s that key order would sort behind fifty identical warnings. Sorting
+// by severity means a document can be truncated to fifty instances of one
+// warning only after every error has been listed.
 //
 // The synthetic entry describes the issues it replaces: its severity is theirs
-// (an `error` hiding in the unlisted tail must not present as a warning), its
-// since is the oldest of theirs, and its message carries both the unlisted
-// count and the true total. It never substitutes for the status computation —
-// callers aggregate over the full set first.
+// (an `error` in the unlisted tail must not present as a warning), its since is
+// the oldest of theirs, and its message carries the unlisted count, the true
+// total, and the distinct CODES that went unlisted — an operator who cannot see
+// every instance must still be able to see what kind of thing is missing.
 func boundIssues(issues []healthIssue, limit int) []healthIssue {
 	if limit <= 0 || len(issues) <= limit {
 		return issues
 	}
-	omitted := issues[limit:]
+	ranked := make([]healthIssue, len(issues))
+	copy(ranked, issues)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return severityRank(ranked[i].Severity) < severityRank(ranked[j].Severity)
+	})
+	omitted := ranked[limit:]
 	out := make([]healthIssue, 0, limit+1)
-	out = append(out, issues[:limit]...)
+	out = append(out, ranked[:limit]...)
 	out = append(out, healthIssue{
 		Severity: worstSeverity(omitted),
 		Code:     issuesTruncatedCode,
 		Message: strconv.Itoa(len(omitted)) + " further open issues are not listed in this heartbeat (" +
-			strconv.Itoa(len(issues)) + " open in total, " + strconv.Itoa(limit) + " listed)",
+			strconv.Itoa(len(issues)) + " open in total, " + strconv.Itoa(limit) + " listed): " +
+			omittedCodes(omitted),
 		Since: oldestSince(omitted),
 	})
 	return out
+}
+
+// severityRank orders issues for the listing cut: `error` ahead of everything
+// else, on the same two-way split aggregateStatus and worstSeverity apply. An
+// unrecognised severity ranks with the warnings rather than ahead of the
+// errors — it is already treated as at-least-degraded, and a severity string
+// this build does not know must not be able to displace a known error.
+func severityRank(severity string) int {
+	if severity == "error" {
+		return 0
+	}
+	return 1
+}
+
+// omittedCodes renders the distinct codes in an unlisted set with their counts,
+// most-numerous first and ties broken alphabetically so the same set always
+// renders identically. The list itself is bounded: a `surface` gap's issueCode
+// is package-declared, so the vocabulary is open-ended and a truncation message
+// must not become the thing that needs truncating.
+func omittedCodes(issues []healthIssue) string {
+	counts := make(map[string]int, len(issues))
+	for _, is := range issues {
+		counts[is.Code]++
+	}
+	codes := make([]string, 0, len(counts))
+	for code := range counts {
+		codes = append(codes, code)
+	}
+	sort.Slice(codes, func(i, j int) bool {
+		if counts[codes[i]] != counts[codes[j]] {
+			return counts[codes[i]] > counts[codes[j]]
+		}
+		return codes[i] < codes[j]
+	})
+	rendered := make([]string, 0, len(codes))
+	for _, code := range codes {
+		rendered = append(rendered, code+" ×"+strconv.Itoa(counts[code]))
+	}
+	if len(rendered) > omittedCodeSampleCap {
+		head := append([]string{}, rendered[:omittedCodeSampleCap]...)
+		head = append(head, "+"+strconv.Itoa(len(rendered)-omittedCodeSampleCap)+" more codes")
+		rendered = head
+	}
+	return strings.Join(rendered, ", ")
 }
 
 // worstSeverity collapses an issue set to the single severity that describes it,

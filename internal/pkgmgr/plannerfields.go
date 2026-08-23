@@ -133,6 +133,9 @@ func validateActionsCatalogSpec(targetIdx int, targetID, col string, ga GapActio
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q): cost %d must be >= 0",
 				targetIdx, targetID, col, i, entry.Ref, entry.Cost)
 		}
+		if err := validateGapEnumerations(targetIdx, targetID, col, fmt.Sprintf("actions[%s]", entry.Ref), entry.Enumerations); err != nil {
+			return err
+		}
 		if len(entry.Pre) > 0 {
 			g, err := guardgrammar.Parse(entry.Pre)
 			if err != nil {

@@ -1225,6 +1225,87 @@ func TestHandleRow_RetractionTombstoneRetiresExhaustedIssue(t *testing.T) {
 	}
 }
 
+// TestHandleRow_RowDataIssueRetiresOnACleanRead is the bound on the per-entity
+// data family. Its entries are keyed per (entity, column), and most of the
+// columns the readers surface — violating, inflight_<g>, maxretries_<g>,
+// admissionPriority — have no gap-close or plan-success path that would ever
+// retire them. Without a retirement at the read itself, a lens projecting one
+// of them with the wrong type across N rows would leave N entries standing for
+// the process's lifetime, long after the lens was fixed: the heartbeat's
+// listing cap bounds the DOCUMENT, never the cache behind it.
+//
+// The read is the retirement: the next projection carrying a usable value, or
+// dropping the column, clears that row's entry.
+func TestHandleRow_RowDataIssueRetiresOnACleanRead(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureDataRetire"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	repaired, dropped, deleted := testNanoID(t), testNanoID(t), testNanoID(t)
+	all := []string{repaired, dropped, deleted}
+
+	// A lens projecting `violating` as a string: one entry per row, and no gap
+	// close or successful plan will ever retire any of them.
+	for i, entityID := range all {
+		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": "true",
+		}, uint64(i+1), 1))
+		if dec != substrate.Ack {
+			t.Fatalf("a non-bool violating column must Ack, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+	for _, entityID := range all {
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "violating")); !ok {
+			t.Fatalf("row %s must carry its own RowDataError; issues = %+v", entityID, h.engine.issues.snapshot())
+		}
+	}
+
+	// Retirement 1: the lens is fixed and re-projects a real bool.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, repaired, map[string]any{
+		"entityKey": "vtx.leaseApp." + repaired, "violating": false,
+	}, 4, 1)); dec != substrate.Ack {
+		t.Fatalf("the repaired row must Ack, got %v", dec)
+	}
+	// Retirement 2: the column is dropped from the row (the retraction shape —
+	// a tombstone body carries no columns at all, and an absent column must
+	// clear, never raise).
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, dropped, map[string]any{
+		"isDeleted": true,
+	}, 5, 1)); dec != substrate.Ack {
+		t.Fatalf("the retraction tombstone must Ack, got %v", dec)
+	}
+	// Retirement 3: the entity is deleted outright (empty body). No value is
+	// projected at all, so no reader runs — the level-reconciled pass retires
+	// the row's whole data family instead.
+	if dec := h.engine.handleRow(ctx, substrate.Message{
+		Subject:      h.engine.rowSubjectPrefix + targetID + "." + deleted,
+		Sequence:     6,
+		NumDelivered: 1,
+	}); dec != substrate.Ack {
+		t.Fatalf("the entity-deletion tombstone must Ack, got %v", dec)
+	}
+
+	for _, entityID := range all {
+		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "violating")); ok {
+			t.Fatalf("row %s read clean; its data error must not be retained, issues = %+v",
+				entityID, h.engine.issues.snapshot())
+		}
+	}
+	if n := len(h.engine.issues.snapshot()); n != 0 {
+		t.Fatalf("every row read clean; the cache must retain nothing, got %+v", h.engine.issues.snapshot())
+	}
+}
+
 // TestHandleRow_SurfaceGapIssueIsPerEntity proves a `surface` gap's Health
 // issue states a fact about ONE ROW: two subjects violating the same
 // (target, gap) concurrently raise two independent issues, and the one whose
@@ -1427,6 +1508,32 @@ func TestColumnReaders_SurfaceDataErrorsPerEntity(t *testing.T) {
 	if n := len(e.issues.snapshot()); n != 5 {
 		t.Fatalf("five malformed reads across two rows must raise five issues, got %d: %+v",
 			n, e.issues.snapshot())
+	}
+
+	// Each reader retires its own row's entry on a value that parses — through
+	// the same three helpers, so a helper that surfaced a fault but could not
+	// retire it is caught here too.
+	e.boolColumn(targetID, first, map[string]any{"violating": true}, "violating")
+	e.openGapColumns(targetID, second, map[string]any{"missing_x": true})
+	e.intColumn(targetID, first, map[string]any{admissionPriorityColumn: 7}, admissionPriorityColumn)
+	e.hasUsableRetryCap(targetID, second, map[string]any{"maxretries_x": 3}, "missing_x")
+	e.staleMark(targetID, first, map[string]any{"missing_x": true, "inflight_x": false},
+		"missing_x", GapAction{Action: actionDirectOp, Operation: "FixX"})
+	if n := len(e.issues.snapshot()); n != 0 {
+		t.Fatalf("every column re-read clean; the cache must retain nothing, got %+v", e.issues.snapshot())
+	}
+
+	// An ABSENT column is the retraction shape: it retires too, for both
+	// readers, and must never raise a fault of its own.
+	e.boolColumn(targetID, first, map[string]any{"violating": "yes"}, "violating")
+	e.intColumn(targetID, first, map[string]any{admissionPriorityColumn: "high"}, admissionPriorityColumn)
+	if n := len(e.issues.snapshot()); n != 2 {
+		t.Fatalf("two malformed reads must raise two issues, got %+v", e.issues.snapshot())
+	}
+	e.boolColumn(targetID, first, map[string]any{}, "violating")
+	e.intColumn(targetID, first, map[string]any{}, admissionPriorityColumn)
+	if n := len(e.issues.snapshot()); n != 0 {
+		t.Fatalf("an absent column must retire, never raise; got %+v", e.issues.snapshot())
 	}
 }
 

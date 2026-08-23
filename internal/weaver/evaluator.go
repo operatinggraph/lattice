@@ -746,6 +746,15 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 // alongside.
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
+	if row == nil {
+		// The entity is deleted: every data error its columns ever raised
+		// describes a row that no longer exists. The column readers retire
+		// those on a value that parses, but a deleted entity projects no
+		// values at all, so this is the only pass that can retire them —
+		// by prefix, since the set of columns that raised is not knowable
+		// from an empty body.
+		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
+	}
 	for _, col := range markCandidateColumns(target, row) {
 		if row != nil && e.boolColumn(targetID, entityID, row, col) {
 			continue
@@ -871,9 +880,20 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 // conservatively as not actionable — never silently inverted into a clean
 // false. entityID names the row the bad value is in: the issue is that row's,
 // not the target's, so every caller threads the entity it is reading for.
+//
+// The read is level-driven, like every other Weaver issue: a column that parses
+// — or is absent, the retraction-tombstone shape — RETIRES this row's standing
+// error for it. The reader runs on every delivery, so the next projection that
+// carries a usable value is the retirement; without it the entry would stand
+// for the process's lifetime, one per (entity, column), for a lens fault that
+// has been fixed. No caller of this key clears it anywhere else: the columns
+// read here (violating, inflight_<g>, maxretries_<g>, admissionPriority) have
+// no gap-close or plan-success path of their own.
 func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
+	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
 	if !ok || v == nil {
+		e.issues.clear(key)
 		return false
 	}
 	b, isBool := v.(bool)
@@ -881,8 +901,10 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 		msg := fmt.Sprintf("target %s entity %s: row column %q is %T, not the §10.2 bool; treated as not actionable",
 			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "RowDataError", msg)
+		e.issues.set(key, "warning", "RowDataError", msg)
+		return b
 	}
+	e.issues.clear(key)
 	return b
 }
 
@@ -893,28 +915,37 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 // or int64 — all coerce. A fractional float is floored to its integer part (a cap
 // is a whole count by construction). The bool form of a present-but-wrong-type
 // value is the caller's "no usable value" signal (ok=false), never a silent 0.
-// entityID names the row the bad value is in, exactly as in boolColumn.
+// entityID names the row the bad value is in, and a usable (or absent) value
+// retires this row's standing error for the column, exactly as in boolColumn.
 func (e *Engine) intColumn(targetID, entityID string, row map[string]any, col string) (int, bool) {
+	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
 	if !ok || v == nil {
+		e.issues.clear(key)
 		return 0, false
 	}
-	switch n := v.(type) {
+	n, parsed := 0, true
+	switch t := v.(type) {
 	case float64:
-		return int(n), true
+		n = int(t)
 	case float32:
-		return int(n), true
+		n = int(t)
 	case int:
-		return n, true
+		n = t
 	case int64:
-		return int(n), true
+		n = int(t)
 	default:
+		parsed = false
+	}
+	if !parsed {
 		msg := fmt.Sprintf("target %s entity %s: row column %q is %T, not the §10.2 integer; treated as absent",
 			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "RowDataError", msg)
+		e.issues.set(key, "warning", "RowDataError", msg)
 		return 0, false
 	}
+	e.issues.clear(key)
+	return n, true
 }
 
 // defaultDirectOpRetryBudget is the engine-owned retry cap a "directOp" gap
@@ -1236,10 +1267,11 @@ func issueKeyDataEntity(targetID, entityID, col string) string {
 
 // issueKeyData keys the malformed-anchor data error raised when a violating row
 // carries no entityKey echo (§10.2). It is keyed per (target, column) with no
-// entity segment: the row that would name the entity is the malformed one, and
-// nothing on the live path retires this entry, so an entity segment would
-// multiply a standing issue rather than retire any. A target teardown retires
-// it with the rest of the data family (issueKeyTargetPrefixes).
+// entity segment — not for want of an entity, which the row KEY supplies
+// (splitRowKey) whatever the body is missing, but because nothing on the live
+// path retires this entry: an entity segment would multiply a permanently
+// standing issue rather than retire any. A target teardown retires it with the
+// rest of the data family (issueKeyTargetPrefixes).
 func issueKeyData(targetID, col string) string { return issuePrefixData + targetID + "." + col }
 
 func issueKeyInflightMismatch(targetID, col string) string {

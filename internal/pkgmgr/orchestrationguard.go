@@ -269,7 +269,7 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q is not a known action (triggerLoom | assignTask | directOp | proposedOp | surface)",
 			targetIdx, targetID, col, ga.Action)
 	}
-	return validateGapEnumerations(targetIdx, targetID, col, ga.Enumerations)
+	return validateGapEnumerations(targetIdx, targetID, col, "", ga.Enumerations)
 }
 
 // validateLoomPatterns runs the §10.5 install-time validations on every
@@ -427,19 +427,29 @@ const (
 // The hub's row.<column> template is resolved by the engine at dispatch time
 // against a row this installer cannot see, so only its presence is checkable
 // here — the same division validateGapAction already keeps for Reads.
-func validateGapEnumerations(targetIdx int, targetID, col string, ens []EnumerationSpec) error {
+//
+// where names the sub-location within the gap ("" for the gap's own
+// enumerations, `actions[<ref>]` for a planner catalog entry's). Both surfaces
+// carry the field and both are validated at load by the engine, so both are
+// validated here: a spec that installs clean and then fails engine validation
+// takes the WHOLE target down at load — every gap on it, not just the entry
+// with the bad direction.
+func validateGapEnumerations(targetIdx int, targetID, col, where string, ens []EnumerationSpec) error {
+	if where != "" {
+		where = " " + where
+	}
 	for i, en := range ens {
 		if strings.TrimSpace(en.Hub) == "" {
-			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] requires a Hub",
-				targetIdx, targetID, col, i)
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q%s enumerations[%d] requires a Hub",
+				targetIdx, targetID, col, where, i)
 		}
 		if strings.TrimSpace(en.Relation) == "" {
-			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] requires a Relation",
-				targetIdx, targetID, col, i)
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q%s enumerations[%d] requires a Relation",
+				targetIdx, targetID, col, where, i)
 		}
 		if en.Direction != enumerationDirectionOut && en.Direction != enumerationDirectionIn {
-			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] Direction must be %q or %q, got %q",
-				targetIdx, targetID, col, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q%s enumerations[%d] Direction must be %q or %q, got %q",
+				targetIdx, targetID, col, where, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
 		}
 	}
 	return nil

@@ -208,13 +208,17 @@ func TestFlagEffectMismatches_SetThenClearOnRecovery(t *testing.T) {
 	}
 }
 
-// boundIssues caps how many entries one heartbeat document lists — the two
-// per-entity issue classes (a `surface` gap, GapBudgetExhausted) are unbounded
-// in entity count, and the whole document is a single Health-KV value. The
-// bounded list must never read as the whole set: the synthetic entry names the
-// unlisted count and the true total, and carries the worst severity among the
-// issues it stands for, so an error hiding in the tail is not silently
-// downgraded to a warning.
+// boundIssues caps how many entries one heartbeat document lists — the
+// per-entity issue classes are unbounded in entity count, and the whole
+// document is a single Health-KV value.
+//
+// What the cap must never do is evict the entry that explains the fault. The
+// unbounded families are all warnings and they sort ahead of the config faults
+// in key order, so selection is by SEVERITY first (ties on key order): a
+// document is truncated to fifty instances of one warning only after every
+// error has been listed. The bounded list must also never read as the whole
+// set — the synthetic entry names the unlisted count, the true total, the
+// distinct codes that went unlisted, and the worst severity among them.
 func TestBoundIssues(t *testing.T) {
 	t.Parallel()
 	mk := func(n int, sev string) []healthIssue {
@@ -265,12 +269,102 @@ func TestBoundIssues(t *testing.T) {
 		}
 	})
 
-	t.Run("an error in the unlisted tail keeps the marker at error", func(t *testing.T) {
+	t.Run("an error is never evicted by warnings", func(t *testing.T) {
+		// The error sorts LAST in key order — exactly where the per-entity
+		// families put a config fault once fifty subjects are violating.
 		in := mk(12, "warning")
-		in[11].Severity = "error"
+		in[11].Severity, in[11].Code = "error", "PlaybookConfigError"
+		got := boundIssues(in, 5)
+		if got[0].Code != "PlaybookConfigError" {
+			t.Fatalf("the error must be selected first, got %+v", got[:5])
+		}
+		if !hasIssueCode(got[:5], "PlaybookConfigError") {
+			t.Fatalf("an error must never be evicted while warnings are listed, listed = %+v", got[:5])
+		}
+		if sev := got[len(got)-1].Severity; sev != "warning" {
+			t.Fatalf("only warnings went unlisted, so the marker is a warning; got %q", sev)
+		}
+		// Ties within a severity keep the incoming deterministic key order.
+		for i, is := range got[1:5] {
+			if is.Code != "C"+strconv.Itoa(i) {
+				t.Fatalf("listed entry %d = %+v, want the head of the deterministic order", i+1, is)
+			}
+		}
+	})
+
+	t.Run("errors beyond the cap keep the marker at error", func(t *testing.T) {
+		in := mk(12, "error")
 		got := boundIssues(in, 5)
 		if sev := got[len(got)-1].Severity; sev != "error" {
-			t.Fatalf("truncation severity = %q, want error (one is hiding in the tail)", sev)
+			t.Fatalf("truncation severity = %q, want error (errors themselves went unlisted)", sev)
+		}
+	})
+
+	t.Run("ties keep the incoming deterministic key order", func(t *testing.T) {
+		// Errors interleaved among the warnings: an unstable sort reorders
+		// within each severity group here, so this pins the tiebreak rather
+		// than merely observing an already-ordered slice pass through.
+		const n, errorEvery, cap = 60, 7, 50
+		in := make([]healthIssue, 0, n)
+		var wantErrors, wantWarnings []string
+		for i := 0; i < n; i++ {
+			code := fmt.Sprintf("C%03d", i)
+			sev := "warning"
+			if i%errorEvery == 0 {
+				sev = "error"
+				wantErrors = append(wantErrors, code)
+			} else {
+				wantWarnings = append(wantWarnings, code)
+			}
+			in = append(in, healthIssue{Severity: sev, Code: code})
+		}
+		want := append(append([]string{}, wantErrors...), wantWarnings...)[:cap]
+
+		got := boundIssues(in, cap)
+		for i, is := range got[:cap] {
+			if is.Code != want[i] {
+				t.Fatalf("listed entry %d = %q, want %q — errors first, then ties in the incoming key order",
+					i, is.Code, want[i])
+			}
+		}
+	})
+
+	t.Run("the marker names the omitted codes, most numerous first", func(t *testing.T) {
+		in := append(mk(7, "warning"), healthIssue{Severity: "warning", Code: "UnroutedTasks"})
+		for i := range in[:7] {
+			in[i].Code = "RowDataError"
+		}
+		msg := boundIssues(in, 2)[2].Message
+		const want = "listed): RowDataError ×5, UnroutedTasks ×1"
+		if !strings.HasSuffix(msg, want) {
+			t.Fatalf("marker message = %q, want it to end %q", msg, want)
+		}
+	})
+
+	t.Run("equal code counts render alphabetically", func(t *testing.T) {
+		in := []healthIssue{
+			{Severity: "warning", Code: "Zebra"}, {Severity: "warning", Code: "Alpha"},
+			{Severity: "warning", Code: "Zebra"}, {Severity: "warning", Code: "Alpha"},
+			{Severity: "warning", Code: "Keep"},
+		}
+		// Cap 1 lists the first Zebra; the omitted set is Alpha×2, Zebra×1,
+		// Keep×1 — so the count ordering leads and the equal-count pair (Keep,
+		// Zebra) breaks alphabetically rather than by encounter.
+		msg := boundIssues(in, 1)[1].Message
+		const want = "listed): Alpha ×2, Keep ×1, Zebra ×1"
+		if !strings.HasSuffix(msg, want) {
+			t.Fatalf("marker message = %q, want it to end %q (the same set must always render identically)", msg, want)
+		}
+	})
+
+	t.Run("the code list is itself bounded", func(t *testing.T) {
+		in := make([]healthIssue, 0, 30)
+		for i := 0; i < 30; i++ {
+			in = append(in, healthIssue{Severity: "warning", Code: fmt.Sprintf("Code%02d", i)})
+		}
+		msg := boundIssues(in, 1)[1].Message
+		if !strings.Contains(msg, "+21 more codes") {
+			t.Fatalf("an open-ended code vocabulary must not make the marker the thing needing truncation, got %q", msg)
 		}
 	})
 
@@ -281,12 +375,20 @@ func TestBoundIssues(t *testing.T) {
 	})
 }
 
-// The heartbeat's status is aggregated over EVERY open issue and only then is
-// the listing bounded, so an error too far down the list to be named still
-// drives status:"unhealthy". Truncating first would let a document report
-// "degraded" while an unhealthy condition stood open — exactly the false-clean
-// heartbeat Contract #5 §5.3 forbids.
-func TestEmit_TruncatesListingButNotStatus(t *testing.T) {
+// A truncated heartbeat must still let an operator SEE the cause, not just the
+// verdict. Sixty violating subjects plus one PlaybookConfigError is the shape
+// the per-entity families make routine: in key order the config error sorts
+// behind every `gap:` entry and would be the first thing evicted, leaving a
+// document that reports unhealthy while listing fifty identical warnings and
+// naming nothing that explains it. The error must be listed, and the marker
+// must name what went unlisted.
+//
+// This test makes no claim about the ORDER of aggregation and truncation in
+// emit — see aggregateStatus's own test. Those two orders are provably
+// equivalent (severity-first selection cannot evict an error while warnings are
+// listed, and the marker carries the worst omitted severity besides), so no
+// test can distinguish them.
+func TestEmit_BoundsTheListingWithoutHidingTheCause(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -314,13 +416,13 @@ func TestEmit_TruncatesListingButNotStatus(t *testing.T) {
 		logger:                logger,
 	}
 
-	// One warning per subject, plus a single error whose key sorts LAST — well
-	// past the cap, so only the pre-truncation aggregation can see it.
+	// One warning per violating subject, plus a single config error whose key
+	// sorts behind every one of them — well past the cap.
 	const total = maxHeartbeatIssues + 10
 	for i := 0; i < total-1; i++ {
 		cache.set(fmt.Sprintf("gap:t.%020d.missing_claim", i), "warning", "UnroutedTasks", "row column missing_claim is true")
 	}
-	cache.set("zzz:last", "error", "PlaybookConfigError", "the playbook does not resolve")
+	cache.set(issueKeyGapConfig("t", "missing_claim"), "error", "PlaybookConfigError", "the playbook does not resolve")
 
 	h.emit(ctx, "healthy")
 
@@ -338,16 +440,40 @@ func TestEmit_TruncatesListingButNotStatus(t *testing.T) {
 	if len(doc.Issues) != maxHeartbeatIssues+1 {
 		t.Fatalf("listed %d issues, want the cap (%d) + 1 synthetic entry", len(doc.Issues), maxHeartbeatIssues)
 	}
+	if !hasIssueCode(doc.Issues, "PlaybookConfigError") {
+		t.Fatalf("the cap evicted the only entry that explains the fault; listed codes = %v",
+			listedCodes(doc.Issues))
+	}
+	if doc.Issues[0].Code != "PlaybookConfigError" {
+		t.Fatalf("the error must be selected ahead of the warnings, got %+v", doc.Issues[0])
+	}
 	last := doc.Issues[len(doc.Issues)-1]
-	if last.Code != issuesTruncatedCode || last.Severity != "error" {
-		t.Fatalf("truncation entry = %+v, want %s at error severity", last, issuesTruncatedCode)
+	if last.Code != issuesTruncatedCode {
+		t.Fatalf("last entry = %+v, want the %s marker", last, issuesTruncatedCode)
 	}
 	if !strings.Contains(last.Message, strconv.Itoa(total)+" open in total") {
 		t.Fatalf("truncation message must name the true total (%d), got %q", total, last.Message)
 	}
-	if doc.Status != "unhealthy" {
-		t.Fatalf("status = %q, want unhealthy: the error is open even though it is not listed", doc.Status)
+	if !strings.Contains(last.Message, "UnroutedTasks ×") {
+		t.Fatalf("truncation message must name the unlisted codes, got %q", last.Message)
 	}
+	if doc.Status != "unhealthy" {
+		t.Fatalf("status = %q, want unhealthy", doc.Status)
+	}
+}
+
+// listedCodes renders the distinct codes a heartbeat document listed, for a
+// failure message that has to explain what the cap kept instead.
+func listedCodes(issues []healthIssue) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, is := range issues {
+		if !seen[is.Code] {
+			seen[is.Code] = true
+			out = append(out, is.Code)
+		}
+	}
+	return out
 }
 
 // effectIssue returns the single LensEffectMismatch issue in a snapshot, if
