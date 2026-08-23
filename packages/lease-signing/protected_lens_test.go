@@ -245,6 +245,33 @@ func TestLeaseApplicationsRead_ProjectsGapState(t *testing.T) {
 	require.Equal(t, false, v["escalated_payment"])
 }
 
+// TestLeaseApplicationsRead_RivalGapsClose_WhenUnitLeasesToSomeoneElse — the
+// applicant-facing stepper mirrors leaseApplicationCompleteSpec's fix: a losing
+// rival's own gap columns stop reading "To do" once the unit they applied for
+// has leased to someone else, instead of showing four permanently-open steps
+// for a unit that is already gone.
+func TestLeaseApplicationsRead_RivalGapsClose_WhenUnitLeasesToSomeoneElse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "rival", "leaseapp")
+	f.vtx(t, "bob", "identity")
+	f.edge(t, "applicationFor", "rival", "bob")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.edge(t, "appliesToUnit", "rival", "unit1")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_onboarding"], "unit already leased → stepper stops asking for PII")
+	require.Equal(t, false, v["missing_bgcheck"], "unit already leased → stepper stops asking for a bgcheck")
+	require.Equal(t, false, v["missing_payment"], "unit already leased → stepper stops asking for payment")
+	require.Equal(t, false, v["missing_signature"], "unit already leased → stepper stops asking for a signature")
+	require.Equal(t, false, v["missing_decision"], "no decision left to await once the unit is gone")
+}
+
 // TestLeaseApplicationsRead_MissingDecisionOpensWhenQualifiedAndUndecided — every
 // applicant gate closed (ssn + fresh bgcheck + payment + signature) but no
 // landlord .decision aspect yet: missing_decision opens, mirroring

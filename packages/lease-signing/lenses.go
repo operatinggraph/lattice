@@ -310,6 +310,22 @@ func Lenses() []pkgmgr.LensSpec {
 //   - missing_signature — the application has no .signature aspect. SignLease
 //     writes it, flipping this false.
 //
+// All four applicant gaps ALSO require (unitStatus <> 'leased'): once this
+// application's unit has leased — to this applicant or to a rival — none of the
+// four remediations is still wanted. Without the term a losing rival's
+// still-open gaps kept re-dispatching RecordIdentityPII/SignLease (userTasks
+// asking a real person for their SSN and a signature) against a unit they can no
+// longer get, indefinitely, because nothing in the applicant's own journey ever
+// closes those gaps once someone else wins the unit. `unitStatus <> 'leased'`
+// evaluates true (gap stays reachable) for both a null unitStatus (no unit /
+// no listing yet) and any non-'leased' status (full engine's `<>` — values.go
+// equalsAny/evalBinary: nil <> "leased" is true) — the term only ever narrows a
+// gap CLOSED, on the one value that means "this race is over," and is a no-op
+// for the WINNING applicant: their own four gates always close before
+// missing_listingLeased can flip the unit to 'leased' (see LANDLORD-GATED
+// LISTING-LEASED CONVERGENCE below), so unitStatus is never 'leased' while any
+// of their own gaps would otherwise still be open.
+//
 // violating is the explicit OR of the four applicant gaps PLUS missing_decision
 // PLUS missing_listingLeased (Contract #10 §10.2: violating is lens-projected, not
 // an implicit OR; for this target the rule is "any applicant gap OR a
@@ -319,12 +335,17 @@ func Lenses() []pkgmgr.LensSpec {
 // only fires while the row is violating. missing_decision keeps a
 // qualified-but-undecided application explicitly open (its work is not done until
 // the landlord decides) WITHOUT dispatching anything — it maps to no playbook
-// entry, so the row stays violating while no remediation fires. A landlord-DECLINED
-// application is terminal-not-violating: every violating term is false (the
-// applicant gaps are closed, missing_decision is false because the decision is
-// non-null, and missing_listingLeased is false because the decision is not
-// 'approved'), so Weaver stops reconciling it — there is no work left to do (the
-// FE reads the declined column for the terminal disposition).
+// entry, so the row stays violating while no remediation fires; it too carries
+// the (unitStatus <> 'leased') term, so a rival still awaiting their own decision
+// stops being counted violating the moment the unit leases to someone else. A
+// landlord-DECLINED application is terminal-not-violating: every violating term
+// is false (the applicant gaps are closed, missing_decision is false because the
+// decision is non-null, and missing_listingLeased is false because the decision
+// is not 'approved'), so Weaver stops reconciling it — there is no work left to
+// do (the FE reads the declined column for the terminal disposition). A rival
+// application whose unit leases to someone else reaches the same
+// terminal-not-violating state via the (unitStatus <> 'leased') term instead —
+// its own decision may still be null, but there is no unit left to lease.
 //
 // unitKey / unitAddress / unitRent / unitStatus are columns carried from the
 // appliesToUnit walk (the unit's key, its .address.line1, its .listing.rentAmount
@@ -742,10 +763,10 @@ RETURN
   signedAt,
   landlordDecision,
   declineReason,
-  (ssnVal = null)        AS missing_onboarding,
-  ((ssnVal <> null) AND (freshBgComplete = 0))  AS missing_bgcheck,
-  (payComplete = 0)      AS missing_payment,
-  (signedAt = null)      AS missing_signature,
+  ((ssnVal = null) AND (unitStatus <> 'leased'))        AS missing_onboarding,
+  ((ssnVal <> null) AND (freshBgComplete = 0) AND (unitStatus <> 'leased'))  AS missing_bgcheck,
+  ((payComplete = 0) AND (unitStatus <> 'leased'))      AS missing_payment,
+  ((signedAt = null) AND (unitStatus <> 'leased'))      AS missing_signature,
   (bgInflight > 0)       AS inflight_bgcheck,
   (payInflight > 0)      AS inflight_payment,
   (docGenInflight > 0)   AS inflight_docGen,
@@ -766,12 +787,12 @@ RETURN
   ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) AS missing_leaseDoc,
   ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) AS missing_leaseDocAttach,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS applicantApproved,
-  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) AS missing_decision,
+  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) AS missing_decision,
   ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
   ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) AS missing_manager,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
+  (((ssnVal = null) AND (unitStatus <> 'leased')) OR ((ssnVal <> null) AND (freshBgComplete = 0) AND (unitStatus <> 'leased')) OR ((payComplete = 0) AND (unitStatus <> 'leased')) OR ((signedAt = null) AND (unitStatus <> 'leased')) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
@@ -806,7 +827,11 @@ RETURN
 //     the "exhausted" state) stays Weaver-internal §10.2 state — not a lens
 //     predicate (see readinessOptionalMatch's doc comment) — so this lens's
 //     declined_<gap> reflects a terminal verification failure, never a
-//     retry-budget exhaustion.
+//     retry-budget exhaustion. Each of the four gaps plus missing_decision
+//     also carries the same (unitStatus <> 'leased') term
+//     leaseApplicationCompleteSpec's RETURN uses, so a losing rival's own
+//     stepper stops rendering "To do" steps for a unit that has already leased
+//     to someone else, matching what Weaver stops dispatching.
 //   - authz_anchors = [nanoIdFromKey(id.key)] — the applicant-self anchor only
 //     (the milestone). applicationFor is a REQUIRED MATCH (not OPTIONAL): a
 //     leaseapp with no applicant link projects NO row, so the read model holds
@@ -909,11 +934,11 @@ RETURN
   docStoreName                   AS doc_store_name,
   docFilename                    AS doc_filename,
   docContentType                 AS doc_content_type,
-  (ssnVal = null)                                  AS missing_onboarding,
-  ((ssnVal <> null) AND (freshBgComplete = 0))      AS missing_bgcheck,
-  (payComplete = 0)                                 AS missing_payment,
-  (signedAt = null)                                 AS missing_signature,
-  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) AS missing_decision,
+  ((ssnVal = null) AND (unitStatus <> 'leased'))                                  AS missing_onboarding,
+  ((ssnVal <> null) AND (freshBgComplete = 0) AND (unitStatus <> 'leased'))      AS missing_bgcheck,
+  ((payComplete = 0) AND (unitStatus <> 'leased'))                                 AS missing_payment,
+  ((signedAt = null) AND (unitStatus <> 'leased'))                                 AS missing_signature,
+  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) AS missing_decision,
   (bgInflight > 0)                                  AS inflight_bgcheck,
   (payInflight > 0)                                 AS inflight_payment,
   ((bgFailed > 0) AND (freshBgComplete = 0))        AS declined_bgcheck,

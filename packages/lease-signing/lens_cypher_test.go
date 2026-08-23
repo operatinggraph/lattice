@@ -666,6 +666,42 @@ func TestLeaseApplicationComplete_ListingLeasedGap_ClosedWhenLeased(t *testing.T
 	require.Equal(t, false, v["violating"], "landlord-approved AND unit leased → converged")
 }
 
+// TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse: a
+// second, unrelated application on the SAME unit — with none of its own four
+// applicant gates recorded and no landlord decision on THIS application —
+// stops being violating (and so stops being dispatched RecordIdentityPII /
+// SignLease / the bgcheck+payment patterns) the instant the unit leases to a
+// different applicant. Board fix 2026-08-23: the four applicant gaps + missing_decision
+// previously carried no unitStatus term, so a rival kept re-asking for PII/a
+// signature on a unit they could no longer get.
+func TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "rival", "leaseapp")
+	f.vtx(t, "bob", "identity")
+	f.edge(t, "applicationFor", "rival", "bob")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.edge(t, "appliesToUnit", "rival", "unit1")
+	// bob has recorded no .ssn, no bgcheck/payment instances, no .signature,
+	// and the landlord never decided on THIS application.
+
+	rows := f.project(t, "rival")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "leased", v["unitStatus"])
+	require.Nil(t, v["landlordDecision"], "the rival's own application was never decided")
+	require.Equal(t, false, v["missing_onboarding"], "unit already leased to someone else → no point asking for PII")
+	require.Equal(t, false, v["missing_bgcheck"], "unit already leased to someone else → no point running a bgcheck")
+	require.Equal(t, false, v["missing_payment"], "unit already leased to someone else → no point collecting payment")
+	require.Equal(t, false, v["missing_signature"], "unit already leased to someone else → no point asking for a signature")
+	require.Equal(t, false, v["missing_decision"], "no decision left to make once the unit is gone")
+	require.Equal(t, false, v["missing_listingLeased"], "a rival never landlord-approved → this gap was never open")
+	require.Equal(t, false, v["violating"], "a losing rival converges the instant the unit leases to someone else")
+}
+
 // TestLeaseApplicationComplete_ListingLeasedGap_NotApprovedGatesEachGap: a not-yet-
 // approved application does NOT open the listing gap even on an available unit — a
 // unit is leased only AFTER the applicant is FULLY approved. Each subtest omits
