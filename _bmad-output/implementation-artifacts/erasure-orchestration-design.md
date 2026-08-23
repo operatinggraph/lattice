@@ -3802,7 +3802,7 @@ in Loom + Weaver + pkgmgr. Each is its own increment with its own green check.
 
 | File | What |
 |---|---|
-| `internal/processor/opwire/opwire.go:66-71` · `:112-116` | `ContextHint.Enumerations` + `EnumerationHint` — **already exist**; zero construction sites repo-wide |
+| `internal/processor/opwire/opwire.go:66-71` · `:112-116` | `ContextHint.Enumerations` + `EnumerationHint` — **already exist**; three construction sites, all operator tooling (`cmd/lattice/candidates/candidates.go:240`, `scripts/verify-erasure-ceremony.go:375,421`), none in a dispatcher |
 | `internal/loom/pattern.go:51-62` | `Step`'s systemOp-only `Reads`/`OptionalReads` — gains `Enumerations` |
 | `internal/loom/state.go:89-115` | `outboxRecord` — same |
 | `internal/loom/actuator.go:38-42` · `:134` | the local `contextHint` mirror + `buildOutbox`'s signature |
@@ -3932,5 +3932,18 @@ mechanism substituted. Dependencies re-verified both ways: C's *stated* dependen
 change is **refuted** — the contract already carries `enumerations` (`02-operation-envelope.md:37,211`)
 — so C drops from L3-propose to L2 and no unlisted dependency appeared. A's stated precedent is live at
 `unbind_identity_credentials.go:279-339`. B's cited line rotted (`1068` → `1152`) but the mechanism is
-as described. The premise census that mattered — *"zero construction sites for
-`ContextHint.Enumerations`"* — was re-run live and holds at zero.
+as described.
+
+**The premise census that mattered was stated wrong, and the correction is recorded here rather than
+quietly dropped (2026-08-23, from the increment-C cold review).** This gate claimed *"zero construction
+sites for `ContextHint.Enumerations`, re-run live"*. There are **three** — `cmd/lattice/candidates/
+candidates.go:240` (MergeIdentity's `assignedTo`/`indexes` walks, carrying a full read-posture comment)
+and `scripts/verify-erasure-ceremony.go:375,421`. The count came from a Phase-0 scout and was folded in
+without the lead re-running it, which is the standing checklist's item 2 (*"every census is a premise —
+re-run any stated count live"*) failing on the one number this fire's scope argument rested on.
+
+What survives the correction is the load-bearing claim, now stated exactly: **no DISPATCHER had ever
+populated the field.** All three sites are operator tooling hand-rolling an envelope, which is why the
+walks were undeclarable through Loom and Weaver and why the mechanism was still worth building.
+`candidates.go:238-244` should have been cited as a live precedent — it uses a resolved literal hub and
+corroborates the `out`/`in` semantics independently of the two engines' doc comments.
