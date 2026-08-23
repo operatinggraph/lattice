@@ -27,7 +27,11 @@ type bookingProjection struct {
 	PriceCents   *float64 `json:"priceCents"`
 	StudioKey    string   `json:"studioKey"`
 	StudioName   string   `json:"studioName"`
-	BookerKey    string   `json:"bookerKey"`
+	// MissingStudio mirrors sessionProjection's own column (sessions.go): the
+	// booking's session lost its studio to a TombstoneStudio call after the
+	// booking was made.
+	MissingStudio bool   `json:"missingStudio"`
+	BookerKey     string `json:"bookerKey"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
@@ -36,18 +40,19 @@ type bookingProjection struct {
 // booker's place in line. WaitlistSlot is only set when Status is
 // "waitlisted".
 type bookingRow struct {
-	BookingKey   string   `json:"bookingKey"`
-	Status       string   `json:"status"`
-	Rate         string   `json:"rate"`
-	WaitlistSlot *float64 `json:"waitlistSlot"`
-	SessionKey   string   `json:"sessionKey"`
-	SessionName  string   `json:"sessionName"`
-	StartsAt     string   `json:"startsAt"`
-	EndsAt       string   `json:"endsAt"`
-	PriceCents   int64    `json:"priceCents"`
-	StudioKey    string   `json:"studioKey"`
-	StudioName   string   `json:"studioName"`
-	BookerKey    string   `json:"bookerKey"`
+	BookingKey    string   `json:"bookingKey"`
+	Status        string   `json:"status"`
+	Rate          string   `json:"rate"`
+	WaitlistSlot  *float64 `json:"waitlistSlot"`
+	SessionKey    string   `json:"sessionKey"`
+	SessionName   string   `json:"sessionName"`
+	StartsAt      string   `json:"startsAt"`
+	EndsAt        string   `json:"endsAt"`
+	PriceCents    int64    `json:"priceCents"`
+	StudioKey     string   `json:"studioKey"`
+	StudioName    string   `json:"studioName"`
+	MissingStudio bool     `json:"missingStudio"`
+	BookerKey     string   `json:"bookerKey"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to
@@ -77,18 +82,19 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 			priceCents = int64(*p.PriceCents)
 		}
 		rows = append(rows, bookingRow{
-			BookingKey:   p.BookingKey,
-			Status:       p.Status,
-			Rate:         p.Rate,
-			WaitlistSlot: p.WaitlistSlot,
-			SessionKey:   p.SessionKey,
-			SessionName:  p.SessionName,
-			StartsAt:     p.StartsAt,
-			EndsAt:       p.EndsAt,
-			PriceCents:   priceCents,
-			StudioKey:    p.StudioKey,
-			StudioName:   p.StudioName,
-			BookerKey:    p.BookerKey,
+			BookingKey:    p.BookingKey,
+			Status:        p.Status,
+			Rate:          p.Rate,
+			WaitlistSlot:  p.WaitlistSlot,
+			SessionKey:    p.SessionKey,
+			SessionName:   p.SessionName,
+			StartsAt:      p.StartsAt,
+			EndsAt:        p.EndsAt,
+			PriceCents:    priceCents,
+			StudioKey:     p.StudioKey,
+			StudioName:    p.StudioName,
+			MissingStudio: p.MissingStudio,
+			BookerKey:     p.BookerKey,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

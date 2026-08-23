@@ -109,7 +109,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "ReassignSession",
 			Scope:         "any",
-			Note:          "Grants the operator and front-of-house staff the right to submit ReassignSession (edits a live class's instructor and/or time without cancelling its bookings), and a bound instructor the right to reassign/reschedule a class THEY lead — the script confines a non-operator, non-front-of-house caller to the session it is ledBy-bound to via its own instructor identifiedBy binding, and a front-of-house caller to a studio at a location they worksAt.",
+			Note:          "Grants the operator and front-of-house staff the right to submit ReassignSession (edits a live class's instructor and/or time without cancelling its bookings), and a bound instructor the right to reassign/reschedule a class THEY lead — the script confines a non-operator, non-front-of-house caller to the session it is ledBy-bound to via its own instructor identifiedBy binding, and a front-of-house caller to a studio at a location they worksAt. Moving a session to a DIFFERENT studio (newStudio) is operator-only regardless of hat, including the repair path that omits `studio` for a session whose own studio was already tombstoned — the script re-derives it off the still-live atStudio link.",
 			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
 		},
 		{

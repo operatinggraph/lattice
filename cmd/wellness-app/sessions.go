@@ -10,16 +10,22 @@ import (
 
 // sessionProjection is one row of the wellness-domain `wellnessSessions` lens.
 type sessionProjection struct {
-	SessionKey     string   `json:"sessionKey"`
-	Name           string   `json:"name"`
-	StartsAt       string   `json:"startsAt"`
-	EndsAt         string   `json:"endsAt"`
-	Capacity       *float64 `json:"capacity"`
-	PriceCents     *float64 `json:"priceCents"`
-	StudioKey      string   `json:"studioKey"`
-	StudioName     string   `json:"studioName"`
-	InstructorKey  string   `json:"instructorKey"`
-	InstructorName string   `json:"instructorName"`
+	SessionKey string   `json:"sessionKey"`
+	Name       string   `json:"name"`
+	StartsAt   string   `json:"startsAt"`
+	EndsAt     string   `json:"endsAt"`
+	Capacity   *float64 `json:"capacity"`
+	PriceCents *float64 `json:"priceCents"`
+	StudioKey  string   `json:"studioKey"`
+	StudioName string   `json:"studioName"`
+	// MissingStudio names the gap StudioKey/StudioName being empty otherwise
+	// leaves ambiguous: CreateSession always writes a live atStudio link, so
+	// an empty StudioKey here means the studio was later TombstoneStudio'd
+	// out from under the session (verticals.md "retiring a studio strands
+	// its classes"), not that the session never had one.
+	MissingStudio  bool   `json:"missingStudio"`
+	InstructorKey  string `json:"instructorKey"`
+	InstructorName string `json:"instructorName"`
 	// CoveringLocations is the staff read boundary's term: the studio's own
 	// location plus its containedIn ancestors. Consumed by mayReadRoster, not
 	// rendered — sessionRow deliberately does not carry it, so the schedule
@@ -41,6 +47,7 @@ type sessionRow struct {
 	PriceCents     int64  `json:"priceCents"`
 	StudioKey      string `json:"studioKey"`
 	StudioName     string `json:"studioName"`
+	MissingStudio  bool   `json:"missingStudio"`
 	InstructorKey  string `json:"instructorKey"`
 	InstructorName string `json:"instructorName"`
 	BookedCount    int    `json:"bookedCount"`
@@ -79,6 +86,7 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 			PriceCents:     priceCents,
 			StudioKey:      p.StudioKey,
 			StudioName:     p.StudioName,
+			MissingStudio:  p.MissingStudio,
 			InstructorKey:  p.InstructorKey,
 			InstructorName: p.InstructorName,
 			BookedCount:    bookedCounts[p.SessionKey],
@@ -192,6 +200,7 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 			PriceCents:     priceCents,
 			StudioKey:      p.StudioKey,
 			StudioName:     p.StudioName,
+			MissingStudio:  p.MissingStudio,
 			InstructorKey:  p.InstructorKey,
 			InstructorName: p.InstructorName,
 			BookedCount:    bookedCounts[p.SessionKey],

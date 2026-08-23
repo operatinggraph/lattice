@@ -258,9 +258,16 @@ RETURN
 // wellnessSessionsSpec projects one row per session, walking atStudio and
 // ledBy (each 0..1, so the row stays one-per-anchor — the §10.2 shape,
 // mirroring clinicAppointmentsSpec's forPatient/withProvider walk).
-// studioName is null when the studio link is absent (should not happen
-// post-CreateSession, but the OPTIONAL keeps the lens null-safe rather than
-// dropping the row); instructorKey/instructorName are null for the many
+// studioName/studioKey are null when the studio link is absent — CreateSession
+// always writes atStudio, so in practice this means the studio was later
+// TombstoneStudio'd (no cascade onto the link, ddls.go), not that the
+// session never had one (verticals.md "retiring a studio strands its
+// classes"). missingStudio names that gap explicitly, mirroring lease-
+// signing's missing_manager convergence-flag shape (c643cf06): a session in
+// this state is still live and bookable, just orphaned, and
+// ReassignSession's operator-only newStudio repair path (ddls.go) is what a
+// consumer flagging this column should point staff at.
+// instructorKey/instructorName are null for the many
 // sessions nobody leads, CreateSession's instructor param being optional.
 //
 // instructorKey is what scopes a bound instructor's own-roster read: their
@@ -315,7 +322,8 @@ RETURN
   s.profile.data.name AS studioName,
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
-  [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
+  [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations,
+  (s.key = null) AS missingStudio`
 
 // wellnessBookingsSpec projects one row per booking, walking forSession and
 // bookedBy (each 0..1). bookerKey (not a name) is projected — identity
@@ -325,9 +333,10 @@ RETURN
 //
 // studioKey/studioName walk one further hop off the session, mirroring
 // wellnessSessionsSpec's own atStudio walk above — My Classes otherwise names
-// a class with no place to show up at. Both are null once sessionKey is
-// (session tombstoned, or the studio link absent), same as the session-side
-// projection.
+// a class with no place to show up at. Both go null when sessionKey does
+// (the session was tombstoned) OR when the session's OWN studio was
+// TombstoneStudio'd out from under it (missingStudio, same gap and same
+// meaning as wellnessSessionsSpec's own column above).
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
@@ -345,6 +354,7 @@ RETURN
   se.schedule.data.priceCents AS priceCents,
   s.key AS studioKey,
   s.profile.data.name AS studioName,
+  ((se.key <> null) AND (s.key = null)) AS missingStudio,
   id.key AS bookerKey`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence

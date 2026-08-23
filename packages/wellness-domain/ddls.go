@@ -206,22 +206,31 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"lead — the caller supplies the instructor param and the script requires BOTH " +
 			"lnk.session.<id>.ledBy.instructor.<iid> AND lnk.instructor.<iid>.identifiedBy.identity.<actor> to be " +
 			"alive (known keys), rejecting AuthDenied otherwise; front-of-house staff hold no TombstoneSession " +
-			"grant. ReassignSession edits a LIVE session's instructor and/or time WITHOUT cancelling its " +
+			"grant. ReassignSession edits a LIVE session's instructor, studio and/or time WITHOUT cancelling its " +
 			"bookings — the gap TombstoneSession's all-or-nothing cancel otherwise forces a sub or a moved class " +
-			"through (releasing every seat). It requires sessionKey + studio (validated via atStudio, same as " +
-			"TombstoneSession) and at least one of: newInstructor (assign/replace the class's instructor — " +
-			"validated alive + class=instructor), clearInstructor=true (remove it, no replacement), or a " +
-			"startsAt+endsAt pair (move the class; re-validated against the 15-minute grid + 96-cell span cap, " +
-			"exactly like CreateSession). Instructor swap tombstones the session's current ledBy link (if any, " +
-			"found by the same bounded link-enumeration idiom studio_locations already uses in this file for a " +
-			"studio's locatedAt links — a session carries at most one) and writes a new one, mirroring identity-hygiene's " +
-			"tombstone-old+create-new link-swap idiom (ddls.go). A time move computes the OLD and NEW covered " +
-			"cell sets and mutates only the symmetric difference — cells the new span still covers are left " +
-			"untouched (no release+reclaim round-trip against itself), cells only the old span covered are " +
-			"released, and cells only the new span covers are claimed via the same CreateOnly claim_cell " +
-			"double-book guard CreateSession uses (StudioConflict on collision with another session); the " +
-			"schedule aspect's name/capacity/priceCents carry forward unchanged, OCC-conditioned on its current " +
-			"revision. " +
+			"through (releasing every seat). It requires sessionKey and at least one of: newInstructor " +
+			"(assign/replace the class's instructor — validated alive + class=instructor), clearInstructor=true " +
+			"(remove it, no replacement), newStudio (move the class to a different live studio — operator-only, " +
+			"validated alive + class=studio), or a startsAt+endsAt pair (move the class; re-validated against the " +
+			"15-minute grid + 96-cell span cap, exactly like CreateSession). studio (the session's CURRENT studio, " +
+			"validated via atStudio, same as TombstoneSession) is required UNLESS the caller is an operator " +
+			"supplying newStudio, in which case it is derived server-side off the session's still-live atStudio " +
+			"link — the repair path for a session whose OWN studio TombstoneStudio already tombstoned " +
+			"(verticals.md \"retiring a studio strands its classes\"), since wellnessSessionsSpec's projection " +
+			"(lenses.go) can no longer hand a caller that dead key back to round-trip. Instructor swap tombstones " +
+			"the session's current ledBy link (if any, found by the same bounded link-enumeration idiom " +
+			"studio_locations already uses in this file for a studio's locatedAt links — a session carries at most " +
+			"one) and writes a new one, mirroring identity-hygiene's tombstone-old+create-new link-swap idiom " +
+			"(ddls.go). A studio move (newStudio, operator-only regardless of hat) tombstones the CURRENT atStudio " +
+			"link and writes a new one the same way, releasing every cell the OLD studio held for the session's " +
+			"span and claiming every cell the NEW studio needs for it — a hub change, not a delta, so no " +
+			"symmetric-difference optimization applies. A time move on an UNCHANGED studio instead computes the " +
+			"OLD and NEW covered cell sets and mutates only the symmetric difference — cells the new span still " +
+			"covers are left untouched (no release+reclaim round-trip against itself), cells only the old span " +
+			"covered are released, and cells only the new span covers are claimed via the same CreateOnly " +
+			"claim_cell double-book guard CreateSession uses (StudioConflict on collision with another session); " +
+			"the schedule aspect's name/capacity/priceCents carry forward unchanged, OCC-conditioned on its " +
+			"current revision. " +
 			"Standing binder mirrors the union of CreateSession's and TombstoneSession's: the operator passes " +
 			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
 			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
@@ -233,7 +242,8 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"of which DDL's script executed the op.",
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link)."},` +
+			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link — on ReassignSession only, omittable when an operator supplies newStudio, in which case it is derived server-side instead)."},` +
+			`"newStudio":{"type":"string","description":"vtx.studio.<NanoID> to move the session to (ReassignSession; operator-only regardless of hat; validated alive + class=studio). Releases every cell the old studio held for the session's span and claims every cell the new one needs; StudioConflict on collision."},` +
 			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required)."},` +
 			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with endsAt). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
 			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with startsAt). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
@@ -248,7 +258,8 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.session.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"studio":          "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession/ReassignSession also require it (the session's actual studio, validated via the atStudio link) — TombstoneSession to release the held cells, ReassignSession to workplace-confine a front-of-house caller and to claim/release cells on a time move.",
+			"studio":          "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession/ReassignSession also require it (the session's actual studio, validated via the atStudio link) — TombstoneSession to release the held cells, ReassignSession to workplace-confine a front-of-house caller and to claim/release cells on a time move. On ReassignSession only, an operator supplying newStudio may omit it — the script derives the current studio off the session's atStudio link instead, the repair path for a session whose own studio was already tombstoned.",
+			"newStudio":       "Full vtx.studio.<NanoID> key to move the session to (ReassignSession; operator-only regardless of hat, validated alive + class=studio). Tombstones the current atStudio link and writes a new one; releases every cell the old studio held for the session's span and claims every cell the new one needs (StudioConflict on collision with another session).",
 			"name":            "The session's display name (CreateSession; required).",
 			"startsAt":        "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — moves the class, must be paired with endsAt). Must align to the 15-minute grid (SlotGridViolation).",
 			"endsAt":          "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — must be paired with startsAt). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
@@ -336,6 +347,22 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 					"cells only the OLD span held, and claims cells only the NEW span needs (StudioConflict on collision " +
 					"with another session). The .schedule aspect's startsAt/endsAt update; name/capacity/priceCents/bookings " +
 					"carry forward unchanged. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — operator moves a class to a different studio",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "newStudio": "vtx.studio.<NanoID>"},
+				ExpectedOutcome: "Operator-only. Validates the new studio is alive + class=studio, tombstones the CURRENT " +
+					"atStudio link and writes a new one, releases every cell the OLD studio held for the session's span, " +
+					"and claims every cell the NEW studio needs for it (StudioConflict on collision). Instructor, time, " +
+					"bookings and other schedule fields are untouched. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — operator repairs a session whose studio was already tombstoned",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "newStudio": "vtx.studio.<NanoID>"},
+				ExpectedOutcome: "studio is omitted — only an operator supplying newStudio may do this. The script derives " +
+					"the session's CURRENT (now-dead) studio off its still-live atStudio link, then moves the session " +
+					"exactly as the studio-move example above. Rejects AuthDenied for any non-operator caller, and " +
+					"InvalidArgument if newStudio is also omitted.",
 			},
 			{
 				Name:    "ReassignSession — an instructor reschedules their own class",
@@ -1679,6 +1706,33 @@ def make_link(key, source, target, cls, local_name, data):
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
 
+def make_link_revive_occ(key, source, target, cls, local_name, expected_revision):
+    # A Lattice tombstone is soft — the link key still occupies its subject,
+    # so make_link's CreateOnly write (expectedRevision 0) rejects
+    # RevisionConflict against a key that has EVER been minted before, even
+    # long-dead. Any swap that can land on a key it (or an earlier op) has
+    # already tombstoned once — ReassignSession's atStudio/ledBy swaps move
+    # a session back and forth across a small, reused set of studios/
+    # instructors — needs this OCC-conditioned revive instead, mirroring
+    # clinic-domain's AssignProviderSite (site.go) exactly.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": {}},
+            "expectedRevision": expected_revision}
+
+def make_link_create_or_revive(key, source, target, cls, local_name):
+    # read-posture: (d) declared optionalReads at CreateSession/ReassignSession
+    # dispatch — the create/revive idempotency branch this and clinic-domain's
+    # AssignProviderSite share; an absent link is the common case for a
+    # never-before-used pairing, never a required read.
+    existing = kv.Read(key)
+    if existing != None and not existing.isDeleted:
+        fail("InvalidState: " + key + " is already live — this should have been tombstoned first")
+    if existing != None:
+        return make_link_revive_occ(key, source, target, cls, local_name, existing.revision)
+    return make_link(key, source, target, cls, local_name, {})
+
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
 
@@ -2104,6 +2158,27 @@ def session_ledby_link(sess_key):
             return lk.key, lk.targetVertex
     return None, None
 
+def session_atstudio_link(sess_key):
+    # A session carries EXACTLY ONE studio (CreateSession writes the one
+    # atStudio link at mint time; nothing else ever writes a second one), so
+    # this returns its live (link key, studio vertex key) or (None, None) --
+    # the same bounded, known-hub idiom session_ledby_link uses just above.
+    # This is what lets ReassignSession's operator-repair path (below) name
+    # the CURRENT studio server-side when the studio is already tombstoned:
+    # TombstoneStudio never cascades onto this link (package.go's "no
+    # cascade" doctrine), so the link survives even though wellnessSessionsSpec's
+    # OPTIONAL MATCH on a live :studio vertex (lenses.go) can no longer hand
+    # the FE that key back to round-trip as the studio confirmation param.
+    if not vertex_live(sess_key):
+        return None, None
+    # read-posture: (e) relation=atStudio epoch=none -- a session sits at
+    # exactly one studio, never a keyspace scan.
+    page, _ = kv.Links(sess_key, "atStudio", "out")
+    for lk in page:
+        if not lk.isDeleted:
+            return lk.key, lk.targetVertex
+    return None, None
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -2394,8 +2469,35 @@ def execute(state, op):
         if cls != "session":
             fail("WrongClass: sessionKey: " + sess_key + " has class " + str(cls) + ", required session")
 
-        studio = required_string(p, "studio")
-        require_matching_studio(sess_id, studio)
+        new_studio = optional_string(p, "newStudio")
+        studio = optional_string(p, "studio")
+        if studio != None:
+            require_matching_studio(sess_id, studio)
+        else:
+            # studio is omittable ONLY for an operator repairing a session
+            # whose studio TombstoneStudio already removed (verticals.md
+            # "retiring a studio strands its classes") — wellnessSessionsSpec's
+            # OPTIONAL MATCH on a live :studio (lenses.go) can no longer hand
+            # the FE a key to round-trip once the vertex is tombstoned, so
+            # requiring it unconditionally would make this repair path
+            # unreachable by construction. session_atstudio_link resolves the
+            # CURRENT studio server-side instead, off the untouched link.
+            if new_studio == None:
+                fail("InvalidArgument: studio is required unless newStudio is also supplied by an operator")
+            if not actor_holds_operator(op.actor):
+                fail("AuthDenied: only an operator may reassign a session's studio without confirming the current one")
+            _, studio = session_atstudio_link(sess_key)
+            if studio == None:
+                fail("InvalidState: session " + sess_key + " carries no atStudio link to replace")
+
+        studio_changed = new_studio != None and new_studio != studio
+        if studio_changed and not actor_holds_operator(op.actor):
+            fail("AuthDenied: only an operator may move a session to a different studio")
+        if new_studio != None:
+            # (a)-declared required read — require_live_typed validates it
+            # alive + class=studio before the swap (mirrors newInstructor's
+            # convention just below in this same function).
+            require_live_typed(state, new_studio, "newStudio", "studio")
 
         # Standing binder — the union of CreateSession's and TombstoneSession's:
         # operator passes unconditionally; a bound instructor may reassign or
@@ -2433,8 +2535,8 @@ def execute(state, op):
             fail("InvalidArgument: startsAt and endsAt must be supplied together")
         reschedule = new_starts_raw != None
 
-        if new_instructor == None and not clear_instructor and not reschedule:
-            fail("InvalidArgument: at least one of newInstructor, clearInstructor, or startsAt+endsAt is required")
+        if new_instructor == None and not clear_instructor and not reschedule and not studio_changed:
+            fail("InvalidArgument: at least one of newInstructor, clearInstructor, newStudio, or startsAt+endsAt is required")
 
         mutations = []
 
@@ -2459,8 +2561,12 @@ def execute(state, op):
             if new_instructor != None:
                 require_live_typed(state, new_instructor, "newInstructor", "instructor")
                 _, new_instr_id = parts_of(new_instructor, "newInstructor", "instructor")
-                mutations.append(make_link("lnk.session." + sess_id + ".ledBy.instructor." + new_instr_id,
-                                           sess_key, new_instructor, "ledBy", "ledBy", {}))
+                # revive, not plain create: a tombstone still occupies its
+                # subject, so swapping BACK to an instructor this session led
+                # before (or that led ANOTHER session that later swapped away)
+                # would CreateOnly-reject on a key that already exists dead.
+                mutations.append(make_link_create_or_revive("lnk.session." + sess_id + ".ledBy.instructor." + new_instr_id,
+                                                              sess_key, new_instructor, "ledBy", "ledBy"))
 
         # The schedule is ALWAYS read and ALWAYS re-written (OCC-conditioned),
         # whether or not this call reschedules: an instructor-only swap
@@ -2496,21 +2602,53 @@ def execute(state, op):
             if not (new_starts < new_ends):
                 fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + new_starts + " endsAt=" + new_ends)
             enforce_grid(new_starts, new_ends)
+        else:
+            new_starts = cur_starts
+            new_ends = cur_ends
+
+        old_cells = []
+        if cur_starts != None and cur_ends != None:
+            old_cells = slot_cells(cur_starts, cur_ends)
+        new_cells = []
+        if (reschedule or studio_changed) and new_starts != None and new_ends != None:
             new_cells = slot_cells(new_starts, new_ends)
 
-            old_cells = []
-            if cur_starts != None and cur_ends != None:
-                old_cells = slot_cells(cur_starts, cur_ends)
-
+        if studio_changed:
+            # Hub genuinely changed (mirrors the instructor hub-change branch
+            # below, over a studio instead of an instructor,
+            # verticals.md "retiring a studio strands its classes"): release
+            # ALL of the OLD studio's cells for the span it held and claim
+            # ALL of the NEW studio's for the span this call leaves the
+            # session holding — different keys, so no self-conflict risk the
+            # way a same-hub reschedule delta has to guard against.
+            for c in old_cells:
+                mutations.append(make_tombstone(studio + ".slot" + slot_cellcode(c)))
+            for c in new_cells:
+                mutations.append(claim_cell(new_studio, slot_cellcode(c), "studioSlotClaim", "StudioConflict", "studio"))
+            # studio already names the validated/derived CURRENT studio at
+            # this point (either confirmed by require_matching_studio or
+            # resolved by session_atstudio_link above) — deriving the OLD
+            # link key from it directly, rather than re-walking
+            # session_atstudio_link a second time, avoids a redundant live
+            # read and the (unreachable today, but needless) chance of the
+            # two enumerations disagreeing.
+            _, old_studio_id = parts_of(studio, "studio", "studio")
+            mutations.append(make_tombstone("lnk.session." + sess_id + ".atStudio.studio." + old_studio_id))
+            _, new_studio_id = parts_of(new_studio, "newStudio", "studio")
+            # revive, not plain create: a tombstone still occupies its
+            # subject, so moving a session BACK to a studio it held before
+            # (park in B, move back to A once A is usable again — exactly
+            # the scenario this repair path exists for) would CreateOnly-
+            # reject on a key that already exists dead.
+            mutations.append(make_link_create_or_revive("lnk.session." + sess_id + ".atStudio.studio." + new_studio_id,
+                                                          sess_key, new_studio, "atStudio", "atStudio"))
+        elif reschedule:
             for c in old_cells:
                 if c not in new_cells:
                     mutations.append(make_tombstone(studio + ".slot" + slot_cellcode(c)))
             for c in new_cells:
                 if c not in old_cells:
                     mutations.append(claim_cell(studio, slot_cellcode(c), "studioSlotClaim", "StudioConflict", "studio"))
-        else:
-            new_starts = cur_starts
-            new_ends = cur_ends
 
         # Instructor slot-claim migration (providerSlotClaim mirror,
         # verticals.md), the instructor-hub twin of the studio cell handling
@@ -2558,7 +2696,8 @@ def execute(state, op):
             new_sched["priceCents"] = cur_price_cents
         mutations.append(make_aspect_upsert_occ(sess_key, "schedule", "sessionSchedule", new_sched, sched.revision))
 
-        events = [{"class": "wellness.sessionReassigned", "data": {"sessionKey": sess_key, "studio": studio}}]
+        final_studio = new_studio if studio_changed else studio
+        events = [{"class": "wellness.sessionReassigned", "data": {"sessionKey": sess_key, "studio": final_studio}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
 
     fail("UnknownOperation: " + ot)

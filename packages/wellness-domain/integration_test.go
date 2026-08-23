@@ -1286,6 +1286,231 @@ func TestReassignSession_SwapsInstructor(t *testing.T) {
 	}
 }
 
+// TestReassignSession_OperatorMovesToNewStudio proves the newStudio repair
+// capability's happy path (verticals.md "retiring a studio strands its
+// classes"): an operator moves a still-live session from studio A to studio
+// B. The atStudio link swaps (old tombstoned, new live) and the
+// studioSlotClaim cells migrate hub-to-hub for the session's own span — a
+// hub change, not a reschedule delta, so ALL of A's covered cells release and
+// ALL of B's claim, mirroring the instructor hub-change branch this mirrors.
+func TestReassignSession_OperatorMovesToNewStudio(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignstudio")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdrsmvstudioa000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdrsmvstudiob000001", "Studio B")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdrsmvsession0000001",
+		studioA, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
+	}
+	oldCellKey := studioA + ".slot" + wdSlotCellCode("2026-07-08T09:00:00Z")
+	newCellKey := studioB + ".slot" + wdSlotCellCode("2026-07-08T09:00:00Z")
+	if !keyExists(t, ctx, conn, oldCellKey) {
+		t.Fatalf("CreateSession did not claim %s on studio A", oldCellKey)
+	}
+
+	env := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsmvmove0000001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:00:00Z", Class: "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioA + `","newStudio":"` + studioB + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", studioB},
+			OptionalReads: append([]string{atStudioLnkKey(t, sessionKey, studioA)}, wdSlotClaimKeys(t, studioB, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
+		},
+	}
+	outcome2, _ := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newStudio (operator) outcome = %v, want Accepted", outcome2)
+	}
+	if keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, studioA)) {
+		t.Errorf("the OLD atStudio link (studio A) must be tombstoned after the move")
+	}
+	if !keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, studioB)) {
+		t.Errorf("the NEW atStudio link (studio B) must be live after the move")
+	}
+	if keyExists(t, ctx, conn, oldCellKey) {
+		t.Errorf("studio A's slot cell must be released after the move")
+	}
+	if !keyExists(t, ctx, conn, newCellKey) {
+		t.Errorf("studio B's slot cell must be claimed after the move")
+	}
+
+	// Move it BACK to studio A. The atStudio link and the studioSlotClaim
+	// cell wdrsmvmove0000001 just tombstoned are both being asked to come
+	// back alive at the SAME keys — a plain CreateOnly write (expectedRevision
+	// 0) would reject RevisionConflict against a subject that already exists,
+	// dead or not, which is exactly why the swap uses the revive-OCC idiom
+	// (make_link_create_or_revive) instead of make_link.
+	backEnv := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsmvmoveback0001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:01:00Z", Class: "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioB + `","newStudio":"` + studioA + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", studioA},
+			OptionalReads: append([]string{atStudioLnkKey(t, sessionKey, studioB)}, wdSlotClaimKeys(t, studioA, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
+		},
+	}
+	outcome3, reply3 := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, backEnv)
+	if outcome3 != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newStudio A->B->A round trip = %v, reply = %+v, want Accepted", outcome3, reply3)
+	}
+	if keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, studioB)) {
+		t.Errorf("the atStudio link to studio B must be tombstoned after moving back to A")
+	}
+	if !keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, studioA)) {
+		t.Errorf("the REVIVED atStudio link to studio A must be live after moving back")
+	}
+	if !keyExists(t, ctx, conn, oldCellKey) {
+		t.Errorf("studio A's slot cell must be RE-CLAIMED (revived) after moving back")
+	}
+	if keyExists(t, ctx, conn, newCellKey) {
+		t.Errorf("studio B's slot cell must be released after moving back")
+	}
+}
+
+// TestReassignSession_NonOperatorCannotMoveStudio proves newStudio is
+// operator-only regardless of hat: a front-of-house caller who otherwise
+// holds a full ReassignSession grant (and correctly names the session's
+// CURRENT studio) is still denied a studio move.
+func TestReassignSession_NonOperatorCannotMoveStudio(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignstudiodeny")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdrsdnystudioa000001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdrsdnystudiob000001", "Studio B")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdrsdnysession0000001",
+		studioA, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
+	}
+
+	const staffActorID = "BBWELLRSDENYSTAFFHJK"
+	staffActorKey := "vtx.identity." + staffActorID
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key: "cap.identity." + staffActorID, Actor: staffActorKey, Version: "1.0",
+		ProjectedAt: time.Now().UTC().Format(time.RFC3339Nano), ProjectedFromRevisions: map[string]uint64{staffActorKey: 1},
+		Lanes:               []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{{OperationType: "ReassignSession", Scope: "any"}},
+		ServiceAccess:       []processor.ServiceAccessEntry{},
+		EphemeralGrants:     []processor.EphemeralGrant{},
+		Roles:               []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")},
+	})
+	// NO holdsRole->operator link for staffActorKey — actor_holds_operator
+	// must resolve false, the same graph-not-capdoc gate every other
+	// operator-only test in this file relies on.
+
+	env := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsdnymove0000001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: staffActorKey, SubmittedAt: "2026-07-08T08:00:00Z", Class: "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioA + `","newStudio":"` + studioB + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", studioB},
+			OptionalReads: append([]string{atStudioLnkKey(t, sessionKey, studioA)}, wdSlotClaimKeys(t, studioB, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
+		},
+	}
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeRejected {
+		t.Fatalf("a non-operator moving a session's studio = %v, want Rejected", outcome2)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "only an operator may move a session") {
+		t.Fatalf("rejection should be the studio-move AuthDenied, got %+v", reply.Error)
+	}
+
+	// The SAME staffer, this time omitting `studio` entirely (as if the
+	// session's studio were already dead and unknown to the FE) and relying
+	// only on newStudio — the OTHER new auth surface this change adds
+	// (ddls.go's "studio is required unless newStudio is also supplied by an
+	// operator" branch), distinct from the studio_changed gate proven above.
+	env2 := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsdnyrepair00001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: staffActorKey, SubmittedAt: "2026-07-08T08:01:00Z", Class: "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","newStudio":"` + studioB + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", studioB},
+			OptionalReads: wdSlotClaimKeys(t, studioB, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
+		},
+	}
+	outcome3, reply2 := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env2)
+	if outcome3 != processor.OutcomeRejected {
+		t.Fatalf("a non-operator omitting studio while supplying newStudio = %v, want Rejected", outcome3)
+	}
+	if reply2.Error == nil || !strings.Contains(reply2.Error.Message, "only an operator may reassign a session's studio without confirming the current one") {
+		t.Fatalf("rejection should be the studio-omitted AuthDenied, got %+v", reply2.Error)
+	}
+}
+
+// TestReassignSession_OperatorRepairsSessionWithTombstonedStudio is the
+// board row's actual scenario (verticals.md "retiring a studio strands its
+// classes"): TombstoneStudio already removed the session's studio — exactly
+// as reapDuplicateStudios / an operator's own TombstoneStudio call leaves it
+// — so wellnessSessionsSpec's projection can no longer hand a caller that
+// dead key back to round-trip as `studio`. An operator omits `studio`
+// entirely and supplies only newStudio; the script derives the CURRENT
+// (dead) studio off the session's still-live atStudio link instead.
+func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignstudiofix")
+
+	deadStudio := createStudio(t, ctx, conn, cp, cons, "wdrsfxstudioa000001", "Old Room")
+	liveStudio := createStudio(t, ctx, conn, cp, cons, "wdrsfxstudiob000001", "New Room")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdrsfxsession0000001",
+		deadStudio, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at the soon-to-be-dead studio = %v, want Accepted", outcome)
+	}
+	tsEnv := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsfxtombstone01"), Lane: processor.LaneDefault,
+		OperationType: "TombstoneStudio", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:00:00Z", Class: "studio",
+		Payload:     json.RawMessage(`{"studioKey":"` + deadStudio + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{deadStudio}},
+	}
+	testutil.PublishOp(t, conn, tsEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The atStudio link survives the studio's own tombstone (no cascade,
+	// package.go) — this is what session_atstudio_link (ddls.go) reads.
+	if !keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, deadStudio)) {
+		t.Fatalf("the atStudio link must survive TombstoneStudio (no-cascade doctrine)")
+	}
+
+	env := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsfxrepair0000001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:05:00Z", Class: "session",
+		Payload: json.RawMessage(`{"sessionKey":"` + sessionKey + `","newStudio":"` + liveStudio + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", liveStudio},
+			OptionalReads: wdSlotClaimKeys(t, liveStudio, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
+		},
+	}
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		t.Fatalf("operator repair (studio omitted, newStudio supplied) outcome = %v, reply = %+v, want Accepted", outcome2, reply)
+	}
+	if !keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, liveStudio)) {
+		t.Errorf("the NEW atStudio link (live studio) must be live after the repair")
+	}
+	if keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, deadStudio)) {
+		t.Errorf("the OLD atStudio link (the tombstoned studio) must be tombstoned after the repair")
+	}
+
+	// Even an operator must supply ONE of studio or newStudio — omitting both
+	// hits the InvalidArgument branch before the operator-only gate ever runs.
+	badEnv := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdrsfxbadargs00001"), Lane: processor.LaneDefault,
+		OperationType: "ReassignSession", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:10:00Z", Class: "session",
+		Payload:     json.RawMessage(`{"sessionKey":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule"}},
+	}
+	outcome3, reply3 := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, badEnv)
+	if outcome3 != processor.OutcomeRejected {
+		t.Fatalf("omitting both studio and newStudio = %v, want Rejected", outcome3)
+	}
+	if reply3.Error == nil || !strings.Contains(reply3.Error.Message, "studio is required unless newStudio") {
+		t.Fatalf("rejection should be the missing-studio InvalidArgument, got %+v", reply3.Error)
+	}
+}
+
 // TestReassignSession_CarriesPriceCentsForwardOnInstructorSwap proves an
 // instructor swap leaves .schedule.priceCents untouched, exactly like
 // name/capacity.

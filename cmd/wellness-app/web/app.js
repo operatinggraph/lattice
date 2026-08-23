@@ -821,7 +821,7 @@ function scheduleCard(se, myStatusBySession) {
     '<div class="card">' +
     '<span class="badge ' + (full ? "settled" : "open") + '">' + se.bookedCount + " / " + se.capacity + " seats</span>" +
     '<div class="who">' + esc(se.name || "?") + "</div>" +
-    '<div class="meta">' + esc(se.studioName || shortKey(se.studioKey)) + "</div>" +
+    '<div class="meta">' + esc(se.missingStudio ? "Studio needs reassignment" : se.studioName || shortKey(se.studioKey)) + "</div>" +
     led +
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
     '<div class="meta">' + esc(priceLabel(se.priceCents)) + "</div>" +
@@ -1035,7 +1035,7 @@ function myClassCard(b) {
     waitlistBadge +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
-    (cancelled ? "" : '<div class="meta">' + esc(b.studioName || shortKey(b.studioKey)) + "</div>") +
+    (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(priceLabel(b.priceCents)) + "</div>") +
     '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">" + (waitlisted ? "Leave waitlist" : "Cancel") + "</button></div>" +
