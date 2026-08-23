@@ -98,6 +98,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   removal refusal (main went red). Check: invoke the gate the way `.github/workflows/ci.yml` invokes it —
   no path arguments where CI passes none — and run it AFTER committing. `lint-conventions` names the
   untracked `.go` files it did not scan; diff-based gates take `DIFF_BASE=<merge-base>`.
+  **Diff-basedness:** `lint-package-version` fires on the pair "`internal/pkgmgr/` changed AND a package
+  declaring `ReadGrantDomains` kept its version" — read from the committed tree against CI's merge base, so
+  a working-tree run cannot see what it will say, and an unchanged version no-ops a plain install so the
+  regenerated lens never reaches a running stack. Minted three times, each a red `main`:
+  uninstall-attestation (`c91d3a4a`), edge-manifest (`5c9a2354`), capability-kv single read path
+  (`553249f`) — the last added one new file to `internal/pkgmgr` and nothing else. Check: any fire touching
+  `internal/pkgmgr` runs `DIFF_BASE=<CI's base> go run ./scripts/lint-package-version.go` AFTER committing.
+  A bump the gate asks for is cheap even when the generated artifact is provably unchanged; prove the
+  byte-identity if it matters, then bump anyway (2026-08-23).
 - **A guard written over what a mechanism EMITS tests emission, not the intent it stands for** — the
   capability removal guard refused on a tombstone in the delta, while the property it existed to protect
   was that a partial Definition never narrows what a package declares. The two came apart in every shape
@@ -150,11 +159,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   analyzed. Minted: grant-provenance §12 (un-tombstone prerequisite), caught by cold adversarial review.
   Check: none yet (key the guard on the anchor-type prefix, e.g. `metaVertexPrefix`, never on
   tombstone-state alone).
-- **A diff-based gate reads the COMMITTED tree against CI's merge base, so a local run over a working tree
-  cannot see what it will say.** `lint-package-version` fires on the pair "`internal/pkgmgr/` changed AND a
-  package declaring `ReadGrantDomains` kept its version", and an unchanged version no-ops a plain install,
-  so the regenerated lens never reaches a running stack. Every other gate in the fire's list ran clean
-  locally. Minted three times, each costing a red `main`: uninstall-attestation (`c91d3a4a`), edge-manifest
-  (`5c9a2354`), capability-kv single read path (`553249f`) — the last one added a single new file to
-  `internal/pkgmgr` and nothing else. Check: any fire touching `internal/pkgmgr` runs
-  `DIFF_BASE=<CI's base> go run ./scripts/lint-package-version.go` **after committing**, not before.
+- **One fact computed twice, owned by nobody, is a divergence waiting to be exploited — and one helper
+  answering two different questions is the same defect** — `patternVarNames` served both the accumulator
+  check (which must see every name a clause RESOLVES) and the cross-walk disjointness rule (which must see
+  only what a clause BINDS), so widening it for the first silently widened the second and two sibling walks
+  each carrying `{cancelled: false}` collided on the keyword, refusing a valid package at install time.
+  Beside it, the node parser found a property map's end by counting braces while the extractor found it
+  quote-aware: the two disagreed on a clause carrying a quoted `}`, and an accumulator reference rode
+  straight through the gate into the emitted producer. Minted: the property-map var fix, both halves caught
+  only by cold review (2026-08-23). Check: for each shared helper name the question each caller asks and
+  split them if the answers differ; for each boundary computed in two places, delete one and make the other
+  the single source.

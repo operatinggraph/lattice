@@ -959,5 +959,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   lines can leave the line it was asked to change covered by nothing: reverting the whole feature reds the
   new tests, so the gap is invisible. Minted twice in one item (2026-08-23): the `contextHint` attach-guard
   and the spec-body JSON tag both reverted clean with the full suite green, and three of the gap-key
-  proofs passed vacuously until an isolation vector forced the shadowed path. Check: for each line the
-  commit message claims, revert it alone and name the test that fails.
+  proofs passed vacuously until an isolation vector forced the shadowed path. **Where the claim is about
+  WHERE a block sits, the mutation is a MOVE, not a revert** — reverting proves the block does something,
+  never that it must run before the return the comment names. Minted again (2026-08-23): the anchor
+  bookkeeping's placement above the disabled-target skip is what stops the latch re-forming in a narrower
+  window, and moving it below left the whole suite green. Check: for each line the commit message claims,
+  revert it alone; for each ordering it claims, move it past the boundary it claims to precede — and name
+  the test that fails.
+- **A target leaves the registry by more routes than the teardown verb, and each must retire the whole
+  family** — the issue families are prefix-keyed below the target, so a route that clears only the key it
+  owns strands every per-entity entry: once the registration is gone, `handleRow` returns at its registry
+  miss and no live path can ever reach a clear. Minted: `reconcileConsumers`' removal branch retired
+  `issueKeyConsumer` alone while `Revoke` prefix-cleared, so a spec deletion or a `targetId` rename stranded
+  the set that `Revoke` would have swept (2026-08-23). Check: enumerate every route by which a target stops
+  being registered — revoke, spec delete, vertex remove, rename — and assert each retires
+  `issueKeyTargetPrefixes`, not just its own key.

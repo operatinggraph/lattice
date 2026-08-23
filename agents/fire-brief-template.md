@@ -100,3 +100,13 @@ final report** for Winston to triage; it does **not** `spawn_task` a user-facing
 widen its own scope. Winston files the board row (canonical demand) and, only if a one-click convenience is
 wanted, spawns a chip whose prompt **names the skill to run** (`/steward <stream>` + the row). Dispatched
 builder prompts should state this explicitly. See [[feedback_chip_prompts_name_the_skill]].
+
+**Every dispatched builder prompt forbids the tree-wide git verbs, by name.** Parallel builders share one
+working tree, so `git stash`, `git checkout`, `git reset`, `git restore` and `git clean` reach every other
+builder's uncommitted work, not just the caller's files. A builder reaching for one to isolate a build error
+it did not cause will silently revert the rest of the batch, and the agent that lost its edits reports the
+tree as having been "wiped from under it" rather than as a lost commit — so the damage reads as a mystery
+instead of a cause. Spell the ban out in the prompt (a builder told only "do not commit" still stashes),
+tell the builder that a build error outside its own paths belongs in its report untouched, and give it the
+one safe isolation move: copy the tree to `/tmp` and experiment there. Winston recovers a stash by
+cherry-picking paths (`git checkout stash@{0} -- <path>`), never by popping it over newer work.
