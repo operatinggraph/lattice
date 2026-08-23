@@ -124,7 +124,7 @@ func queryPatients(ctx context.Context, pool pgxBeginner, actorID, q string) ([]
 // a clinic-wide membership-disclosure PHI dump (which patients exist at this
 // clinic, by full name). An actor reads a row here either by holding the
 // reserved WildcardAnchor grant (the bootstrap capabilityReadWildcardGrants
-// lens, kernel-seeded root-equivalent identities only, D1 design §3.4 M5) —
+// lens, root-equivalent identities only, D1 design §3.4 M5) —
 // the whole roster, front-desk's view — or, via patientIdentityReadGrants,
 // by being the identity that row's own patient is identifiedBy — exactly
 // their own row, which is what lets a signed-in patient session find itself

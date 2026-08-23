@@ -113,8 +113,8 @@ func CapabilityLensDefinition() LensDefinition {
 			BodyColumns:      []string{"platformPermissions"},
 			EmptyBehavior:    "delete",
 			Freshness:        "auto",
-			// Per-lane submission grant (Contract #2 §2.3). The protected
-			// kernel-seeded system actors (admin + Loom + Weaver + Bridge +
+			// Per-lane submission grant (Contract #2 §2.3). The root system
+			// actors (admin + Loom + Weaver + Bridge +
 			// object-store-manager) carry the full root-grant set: `meta`
 			// (serialized DDL — installs/lens DDL), `system` (engine result/
 			// dispatch ops), `urgent`, and `default`. This matches their
@@ -189,8 +189,9 @@ RETURN
 // capability lens does.
 //
 // Scope note (D1.1): this increment projects the self anchor for every actor.
-// The primordial root-read scope for kernel-seeded identities (the read analog
-// of the write base's scope:"any" grant — the privileged all-access anchor)
+// The primordial root-read scope for the identities holding the primordial
+// `operator` role (the read analog of the write base's scope:"any" grant —
+// the privileged all-access anchor)
 // lands with the D1 enforcement seam, which defines the wildcard-anchor
 // representation the RLS/read boundary matches against (design §3.3, M5).
 //
@@ -323,8 +324,8 @@ RETURN
 // root-grant set (Contract #6 §6.14, D1 design §3.4 M5). It is
 // CapabilityReadGrantsLensDefinition's wildcard sibling: instead of each
 // actor's self-anchor, it grants the WildcardAnchor ("*",
-// internal/refractor/adapter.WildcardAnchor) to the same fixed set of
-// protected (kernel-seeded, root-equivalent) identities the write-path
+// internal/refractor/adapter.WildcardAnchor) to the same set of
+// root-equivalent identities the write-path
 // CapabilityLensDefinition already special-cases — the primordial admin and
 // the Loom/Weaver/Bridge/object-store-manager service actors.
 //

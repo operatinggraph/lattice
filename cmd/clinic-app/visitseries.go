@@ -131,7 +131,7 @@ func (s *server) handleMyVisitSeries(w http.ResponseWriter, r *http.Request) {
 // that scopes an ordinary patient to their own rows returns EVERY row for an
 // actor holding the reserved WildcardAnchor ("*") grant (internal/refractor/
 // adapter.WildcardAnchor) — the bootstrap capabilityReadWildcardGrants lens
-// grants it to the kernel-seeded root-equivalent identities only (D1 design
+// grants it to the root-equivalent identities only (D1 design
 // §3.4 M5). This is still RLS, never a bypass: an all-access read is
 // attributable and revocable exactly like any other actor_read_grants row.
 func (s *server) handleStaffVisitSeries(w http.ResponseWriter, r *http.Request) {

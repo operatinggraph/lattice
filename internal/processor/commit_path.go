@@ -1101,9 +1101,10 @@ type AuthWiring struct {
 	// that probe was a boot-latch bug. The zero value (false) is a test-only
 	// posture (cap.<actor> single-key for all actors).
 	RbacRolesActive bool
-	// SystemActorKeys are the kernel-seeded system actor keys (vtx.identity.<id>
-	// of admin + the service actors) that read the cap.<actor> ∪ cap.roles.<actor>
-	// union. Primordial, so a one-time discovery at startup is stable.
+	// SystemActorKeys are the root system actor keys (vtx.identity.<id> of the
+	// identities holding the primordial `operator` role — admin + the service
+	// actors) that read the cap.<actor> ∪ cap.roles.<actor> union. Discovered once
+	// from the graph at startup and held for the process lifetime.
 	SystemActorKeys []string
 	// PrimordialActors names the trusted platform engines' bootstrap-seeded
 	// identity keys by engine name ("loom" → bootstrap.LoomIdentityKey). It

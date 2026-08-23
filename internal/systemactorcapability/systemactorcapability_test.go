@@ -9,7 +9,7 @@
 // objects-base -> privacy-base), and submits each of the four
 // system-actor-submitted engine ops the design names — Weaver's MarkExpired,
 // Loom's CreateTask, object-store-manager's DetachObject, the privacy actor's
-// RecordShredFinalization — as the REAL kernel-seeded system actor on the
+// RecordShredFinalization — as the REAL root system actor on the
 // privileged `system` lane, asserting each authorizes (not AuthDenied /
 // LaneUnauthorized) with the stub OFF.
 //

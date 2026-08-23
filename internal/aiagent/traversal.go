@@ -12,8 +12,9 @@
 //
 // Prerequisite, before step 1: the caller loads the primordial identifier
 // table (bootstrap.Load — SystemActorKeys' predicate is keyed on the
-// roleOperator NanoID it carries), resolves the kernel-seeded system-actor set
-// (bootstrap.SystemActorKeys — one full core-kv listing), and hands that set to
+// roleOperator NanoID it carries), resolves the root system-actor set — the
+// identities holding the primordial `operator` role (bootstrap.SystemActorKeys
+// — one full core-kv listing), and hands that set to
 // NewTraverser. Not a detail — step 1's keys are chosen by the actor's CLASS,
 // and a traverser given no set treats every actor as ordinary. Do both once at
 // start-up, the way examples/hello-lattice/ai-agent.go does; this package
@@ -21,8 +22,8 @@
 //
 // Cold-start traversal algorithm (FR19):
 //  1. Agent reads its capability doc from Capability KV — the keys are
-//     resolved by actor class through internal/capabilitykv (a kernel-seeded
-//     system actor reads its cap.<type>.<id> anchor unioned with
+//     resolved by actor class through internal/capabilitykv (a root system
+//     actor reads its cap.<type>.<id> anchor unioned with
 //     cap.roles.<type>.<id>; every other actor reads cap.roles.<type>.<id>
 //     alone).
 //  2. Agent picks an operationType from platformPermissions[].
@@ -127,9 +128,10 @@ type Traverser struct {
 // capBucket is typically "capability-kv". Both names must match the
 // deployment's bucket provisioning.
 //
-// systemActorKeys is the kernel-seeded system-actor set (from
-// bootstrap.SystemActorKeys) that decides an actor's Capability-KV key routing
-// — see ReadCapability. It is taken here, not per read, because discovering it
+// systemActorKeys is the root system-actor set — the identities holding the
+// primordial `operator` role (from bootstrap.SystemActorKeys) — that decides
+// an actor's Capability-KV key routing — see ReadCapability. It is taken
+// here, not per read, because discovering it
 // costs a full core-kv listing: the platform binaries resolve it once at
 // start-up and hold it for the process (cmd/processor/main.go:142), and a
 // traverser is constructed the same way. An empty set routes every actor as

@@ -70,7 +70,7 @@ type CapabilityKVChecker struct {
 // LoomOps / RefractorOps). rbacRolesActive + systemActorKeys mirror the
 // Processor's step-3 platform routing inputs (processor.AuthWiring) so the
 // checker reads the same key the Processor would for any given actor:
-// rbacRolesActive true routes the kernel-seeded system actors to a union of
+// rbacRolesActive true routes the root system actors to a union of
 // their cap.<actor> anchor and cap.roles.<actor>, and every other actor to
 // cap.roles.<actor> alone; false routes every actor to cap.<actor>.
 //

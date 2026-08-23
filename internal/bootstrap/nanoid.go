@@ -122,13 +122,12 @@ var (
 	// empty and RLS denies every protected read.
 	CapabilityReadGrantsLensID  string
 	CapabilityReadGrantsLensKey string
-	// CapabilityReadWildcardGrantsLens is the base ALL-ACCESS read-grant
-	// PRODUCER (Contract #6 §6.14, D1 design §3.4 M5) — the wildcard sibling
-	// of CapabilityReadGrantsLens. It grants the reserved WildcardAnchor ("*")
-	// to the same fixed, kernel-seeded root-equivalent identities the
-	// write-path CapabilityLens special-cases, so an all-access read (e.g. a
-	// clinic staff/admin worklist) passes through the §6.14 set-membership
-	// RLS policy rather than bypassing it.
+	// CapabilityReadWildcardGrantsLens is the base ALL-ACCESS read-grant PRODUCER
+	// (Contract #6 §6.14, D1 design §3.4 M5) — the wildcard sibling of
+	// CapabilityReadGrantsLens. It grants the reserved WildcardAnchor ("*") to the
+	// same root-equivalent identities the write-path CapabilityLens special-cases,
+	// so an all-access read (e.g. a clinic staff/admin worklist) passes through
+	// the §6.14 set-membership RLS policy rather than bypassing it.
 	CapabilityReadWildcardGrantsLensID  string
 	CapabilityReadWildcardGrantsLensKey string
 	RoleOperatorID                      string
@@ -277,8 +276,8 @@ type PrimordialIDsRaw struct {
 //     NanoID field, so the version bump forces regeneration.
 //   - "14": capabilityReadWildcardGrants primordial lens added — the base
 //     ALL-ACCESS read-grant PRODUCER (Contract #6 §6.14, D1 design §3.4 M5)
-//     that grants the reserved WildcardAnchor ("*") to the fixed,
-//     kernel-seeded root-equivalent identities (admin + Loom/Weaver/Bridge/
+//     that grants the reserved WildcardAnchor ("*") to the root-equivalent
+//     identities (admin + Loom/Weaver/Bridge/
 //     object-store-manager), so an all-access read passes through RLS rather
 //     than bypassing it. Like capabilityReadGrants it is seeded +
 //     aspect-verified but kept OUT of the PrimordialVertexKeys() count-only

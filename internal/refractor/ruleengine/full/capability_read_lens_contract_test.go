@@ -62,7 +62,7 @@ func TestCapabilityReadLens_ContractConformance(t *testing.T) {
 	adjKV, coreKV := contractStartKVs(t)
 
 	// An ORDINARY (non-protected) identity — self-read must apply to every
-	// actor, not just kernel-seeded ones.
+	// actor, not just root system actors.
 	aliceKey := contractPutVertex(t, coreKV, "identity", "alice",
 		map[string]any{"name": "alice"})
 

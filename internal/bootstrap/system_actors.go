@@ -20,7 +20,7 @@ import (
 // a distinct sentinel so a caller can tell it apart from a substrate failure.
 var ErrPrimordialIDsUnloaded = errors.New("bootstrap: primordial identifiers not loaded (call bootstrap.Load or bootstrap.LoadOrGenerate first)")
 
-// SystemActorKeys scans core-kv and returns the actor keys of the kernel-seeded
+// SystemActorKeys scans core-kv and returns the actor keys of the root
 // system identities — the root-equivalent actors the Capability Lens
 // primordial-identity anchor projects root grants for (the primordial admin +
 // the internal service actors seeded by primordial.go). They are identified by
@@ -83,7 +83,7 @@ func SystemActorKeys(ctx context.Context, conn *substrate.Conn) ([]string, error
 	return out, nil
 }
 
-// PrivacyActorKey scans core-kv and returns the actor key of the kernel-seeded
+// PrivacyActorKey scans core-kv and returns the actor key of the
 // privacy-plane service actor (class "identity.system.privacy") — the actor
 // the crypto-shred finalization listeners (internal/privacyworker and
 // internal/refractor/keyshredded, vault-crypto-shredding-design.md Fire 4b)

@@ -362,7 +362,7 @@ func TestCapabilityAuthorizer_ServicePath_DenyByAbsence(t *testing.T) {
 }
 
 // TestCapabilityAuthorizer_ServicePath_SystemActorDeniesByAbsence proves the
-// re-point is UNCONDITIONAL: a system (kernel-seeded) actor that drives the
+// re-point is UNCONDITIONAL: a root system actor that drives the
 // service path (sets ac.Service) reads cap.svc.<systemActor> like any other
 // actor and denies by absence when that key is missing. System actors never
 // set ac.Service in production, but the dispatch must not special-case them off
