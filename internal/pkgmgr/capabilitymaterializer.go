@@ -167,8 +167,8 @@ type GapActionArtifact struct {
 // configures AI-reasoning escalation (and, via autoApply, the one standing
 // autonomy boundary Andrew has not ratified for even hand-authored packages,
 // design §For-Andrew #1) — so an AI proposing its OWN escalation policy is
-// out of scope here, same posture as the lens kind's excluded
-// protected/secure postures (§3.2).
+// out of scope here, same posture as the lens kind's excluded protected/secure
+// postures (§3.2).
 type WeaverTargetArtifactContent struct {
 	TargetID string                       `json:"targetId"`
 	LensRef  string                       `json:"lensRef"`
@@ -337,8 +337,8 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed lens artifact content: %w", err)
 		}
 		// A known-fields check catches an artifact trying to smuggle a field
-		// LensArtifactContent doesn't expose (e.g.
-		// "protected"/"public"/"grantTable"/"columns"/"secureColumns" — the postures
+		// LensArtifactContent doesn't expose (e.g. "protected"/"public"/"grantTable"/
+		// "columns"/"secureColumns" — the postures
 		// explicitly out of scope, §3.2). Without this, json.Unmarshal above would
 		// SILENTLY DROP the unrecognized field and materialize a plain lens anyway —
 		// a scope-widening intent quietly downgraded rather than rejected. Treated
@@ -376,10 +376,9 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 		if err := json.Unmarshal(content, &wc); err != nil {
 			return ArtifactValidationReport{}, fmt.Errorf("pkgmgr: capability materializer: malformed weaverTarget artifact content: %w", err)
 		}
-		// Same scope-widening defense as the lens kind's unknownLensFields: a
-		// field WeaverTargetArtifactContent doesn't expose (namely "augur")
-		// would otherwise be silently dropped by json.Unmarshal rather than
-		// rejected.
+		// Same scope-widening defense as the lens kind's unknownLensFields: a field
+		// WeaverTargetArtifactContent doesn't expose (namely "augur") would otherwise be
+		// silently dropped by json.Unmarshal rather than rejected.
 		if extra := unknownWeaverTargetFields(content); len(extra) > 0 {
 			return ArtifactValidationReport{
 				Valid: false,

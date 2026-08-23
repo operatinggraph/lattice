@@ -380,7 +380,9 @@ func TestRefractor_FanInStress_CapabilityRolesAndEphemeral_ConvergeUnderRoleGran
 	}
 
 	rolesHookCtx := full.WithFootprintCapturedHook(ctx, injectOneMoreGrant("Roles"))
-	_, _ = rolesP.Reproject(rolesHookCtx, identityKey) // return value ignored — the retry-count checks below are the assertion
+	// The injected grant makes drift, so an error here is the expected outcome,
+	// not a failure — the retry-count checks below are the assertion.
+	_, _ = rolesP.Reproject(rolesHookCtx, identityKey)
 
 	ephHookCtx := full.WithFootprintCapturedHook(ctx, injectOneMoreGrant("Eph"))
 	_, _ = ephP.Reproject(ephHookCtx, identityKey)

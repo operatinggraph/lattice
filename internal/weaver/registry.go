@@ -54,7 +54,7 @@ const (
 
 // Planner-extension target modes (Contract #10 §10.8 "Planner extension",
 // Fire 4): absent (empty string) is the default — frozen table-only
-// behavior, byte-identical to a target declaring no Mode.
+// behavior, byte-identical to the pre-extension table-only dispatch path.
 // "shadow" computes the planner's pick for each gap declaring candidates and
 // compares it against the table's actual dispatch (never dispatching it);
 // "planned" dispatches the planner's pick for real — Fire 5 for a
@@ -298,16 +298,16 @@ type Target struct {
 	Augur *AugurPolicy `json:"augur,omitempty"`
 
 	// Mode selects the planner-extension posture (§10.8 Planner extension,
-	// Fire 4): "" (absent, the default — a target declaring no Mode) is
-	// frozen table-only behavior, byte-identical; targetModeShadow
-	// computes + records the planner's pick per gap but never dispatches it;
-	// targetModePlanned dispatches the planner's pick for real (Fire 5
-	// candidates, Fire 6 goal).
+	// Fire 4): "" (absent, the default) is frozen table-only behavior,
+	// byte-identical to the pre-extension table-only dispatch path;
+	// targetModeShadow computes + records the planner's pick per gap but
+	// never dispatches it; targetModePlanned dispatches the planner's pick
+	// for real (Fire 5 candidates, Fire 6 goal).
 	Mode string `json:"mode,omitempty"`
 
 	// Admission is the optional Fire-8 dispatch-pacing policy (§10.8 Planner
-	// extension "Admission control"): absent (a target declaring no policy)
-	// is unbounded, byte-identical dispatch. See AdmissionPolicy.
+	// extension "Admission control"): absent (the default) is unbounded — no
+	// pacing is applied. See AdmissionPolicy.
 	Admission *AdmissionPolicy `json:"admission,omitempty"`
 }
 

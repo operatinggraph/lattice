@@ -281,8 +281,8 @@ func (i *Installer) buildInstallBatch(
 	// No spec aspect — operationType lives on the vertex envelope. An op whose
 	// operationType carries declared Effects (§10.8 Planner extension) gets a
 	// sibling `.effects` aspect — the runtime catalog the Weaver planner's goal
-	// regression reads at dispatch time; an op with no Effects emits nothing
-	// extra — the installed bytes are unchanged for a package that declares none.
+	// regression reads at dispatch time; an op with no Effects entry emits
+	// only the base op-meta vertex — no `.effects` aspect is created.
 	for idx, o := range def.OpMetas {
 		opMetaKey := metaVertexPrefix + opMetaIDs[idx]
 		addCreate(opMetaKey, docVertex(opMetaClass,
@@ -293,7 +293,7 @@ func (i *Installer) buildInstallBatch(
 		}
 		// Descriptor-vocabulary aspects (edge-manifest Fire 1): each optional,
 		// each conditional on the field being populated — an op meta that sets
-		// none of them installs byte-identical to one that declares none.
+		// none of them adds no descriptor aspects here.
 		if o.Presentation != nil {
 			addCreate(opMetaKey+".presentation", docAspect(opMetaKey, "presentation", "presentation",
 				opPresentationBody(o.Presentation)))

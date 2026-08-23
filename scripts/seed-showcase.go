@@ -1417,8 +1417,8 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 // instructor and cannot be re-wired after the fact. It also books Sam as a
 // MEMBER into bookableSessionKey (the caller's already-seeded Vinyasa Flow
 // session, distinct from Sam's own taught one) carrying tenant2's own
-// leaseapp key, qualifying for
-// rate=resident and the residentRate link the front desk's 🧘 badge composes
+// leaseapp key, qualifying for rate=resident and the residentRate link the
+// front desk's 🧘 badge composes
 // on. Per-mutation idempotent; safe to call on every run once ensureStaff/
 // ensureMaintenanceTech's hardening (above) is in place, since Sam then also
 // holds frontOfHouse — the very ambiguity that hardening exists to resolve.

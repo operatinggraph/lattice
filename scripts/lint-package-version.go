@@ -323,11 +323,22 @@ const walkGeneratorDir = "internal/pkgmgr/"
 // treated as a real change and the gate stays fail-closed.
 //
 // Directive comments are the exception the AST cannot see: dropping comments
-// drops `//go:build`, `//go:embed` and `//go:generate` with them, yet each one
-// is content. A build tag decides whether the file compiles into the package at
-// all — packages/lease-signing carries four constrained files whose tag picks
-// which freshness/renewal window the installed Definition gets — so the
-// directive lines are compared separately, and any difference answers false.
+// drops `//go:build`, `// +build`, `//go:embed` and `//go:generate` with them,
+// yet each one is content. A build tag decides whether the file compiles into
+// the package at all — packages/lease-signing carries four constrained files
+// whose tag picks which freshness/renewal window the installed Definition gets.
+// So the directives are compared separately, and any difference answers false.
+//
+// Each directive is compared WITH THE DECLARATION IT SITS ON, because a
+// directive's meaning is positional: a `//go:build` line moved below the
+// package clause is silently no longer a build constraint, and a `//go:embed`
+// moved from one var to the next embeds a different file — both leave the
+// directive text itself untouched, so a text-only comparison would call either
+// one a comment edit.
+//
+// cgo is refused outright rather than modelled: in a file importing "C" the
+// preamble is C source living inside a comment, so changing it changes compiled
+// code while the Go AST and the directive list both stay identical.
 func commentOnlyGoChange(rangeMode bool, base, head, path string) bool {
 	oldRef := "HEAD"
 	if rangeMode {
@@ -359,25 +370,69 @@ func commentOnlyGoChange(rangeMode bool, base, head, path string) bool {
 	if !bytes.Equal(oldAST, newAST) {
 		return false
 	}
+	if importsC(path, oldSrc) || importsC(path, newSrc) {
+		return false
+	}
 	return slices.Equal(goDirectives(oldSrc), goDirectives(newSrc))
 }
 
-// goDirectives lists a file's `//go:` directive lines in source order. Matched
-// after trimming leading space and without asking where the directive sits: a
-// line inside a raw string literal that merely looks like one is admitted, and
-// that only ever pushes the comparison toward "this is a real change".
-func goDirectives(src []byte) []string {
-	var out []string
-	for _, ln := range strings.Split(string(src), "\n") {
-		if t := strings.TrimSpace(ln); strings.HasPrefix(t, "//go:") {
-			out = append(out, t)
+// importsC reports whether the file imports "C", i.e. whether its comments can
+// carry compiled cgo preamble.
+func importsC(path string, src []byte) bool {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, parser.ImportsOnly)
+	if err != nil {
+		return true // unparseable: assume the worst, the caller fails closed
+	}
+	for _, imp := range f.Imports {
+		if imp.Path != nil && imp.Path.Value == `"C"` {
+			return true
 		}
+	}
+	return false
+}
+
+// goDirectives lists a file's directive comments in source order, each paired
+// with the declaration it binds to — the next line that is neither blank nor a
+// comment. The pairing is what makes a MOVED directive visible: the text alone
+// is identical whether `//go:build` sits above the package clause (a real build
+// constraint) or below it (inert), and whether a `//go:embed` sits on one var or
+// the next. Matched after trimming leading space and without asking where the
+// line sits, so a line inside a raw string literal that merely looks like a
+// directive is admitted — which only ever pushes the comparison toward "this is
+// a real change".
+func goDirectives(src []byte) []string {
+	lines := strings.Split(string(src), "\n")
+	var out []string
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if !strings.HasPrefix(t, "//go:") && !strings.HasPrefix(t, "// +build") {
+			continue
+		}
+		anchor := "<eof>"
+		for _, next := range lines[i+1:] {
+			nt := strings.TrimSpace(next)
+			if nt == "" || strings.HasPrefix(nt, "//") {
+				continue
+			}
+			anchor = nt
+			break
+		}
+		out = append(out, t+"\x00"+anchor)
 	}
 	return out
 }
 
 // canonicalGo renders src as source text with every comment dropped, so two
 // revisions differing only in comments render identically.
+//
+// Blank lines are then stripped, because the printer keeps node positions and
+// spaces statements by the line gap between them: inserting one comment line
+// between two statements widens that gap and prints a blank line that was not
+// there before. Without this the comparison answers "content changed" for a
+// comment edit that added a line — fail-closed, but it would extort exactly the
+// version bump this exemption exists to stop. Blank lines carry no meaning in
+// Go, so no two programs differ only by them.
 func canonicalGo(path string, src []byte) ([]byte, bool) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, src, 0) // no parser.ParseComments
@@ -388,7 +443,13 @@ func canonicalGo(path string, src []byte) ([]byte, bool) {
 	if err := (&printer.Config{Mode: printer.RawFormat, Tabwidth: 8}).Fprint(&buf, fset, file); err != nil {
 		return nil, false
 	}
-	return buf.Bytes(), true
+	var out [][]byte
+	for _, ln := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		if len(bytes.TrimSpace(ln)) > 0 {
+			out = append(out, ln)
+		}
+	}
+	return bytes.Join(out, []byte("\n")), true
 }
 
 // readGrantDomainDecl is the declaration that makes a package a consumer of the

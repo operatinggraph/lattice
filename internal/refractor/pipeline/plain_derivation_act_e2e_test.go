@@ -77,8 +77,10 @@ RETURN pr.key AS key, id.data.name AS holderName
 // (identity) IS the anchor label and seeds it, but the engine can only ever
 // narrow the ANCHOR pattern position (`b`) — so an event on the vertex
 // playing `a` asks "does this vertex, as `b`, have an outgoing
-// duplicateOf edge", finds none, and the row keyed on `b` never learns
-// `a`'s new value at all.
+// duplicateOf edge" and finds none. The engine-level seed on its own
+// therefore never carries `a`'s new value to the row keyed on `b`; the
+// plain derivation's derived set is what closes that, which is exactly
+// what the seeded multi-position cases below hold it to.
 const plainActDuplicateSpec = `
 MATCH (b:identity)-[:duplicateOf]->(a:identity)
 RETURN b.key AS key, a.key AS dupOf, a.data.name AS dupName

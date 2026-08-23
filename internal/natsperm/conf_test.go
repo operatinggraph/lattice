@@ -745,10 +745,12 @@ func TestBackingStreamSideChannel(t *testing.T) {
 	}
 }
 
-// TestCoreEventsSideChannel guards the side channel where core-events, a
-// plain stream outside the PlatformBuckets() registry, sits beyond
-// protectedStreamDenies' reach: without this test, any $JS.API.> holder
-// could purge the stream or administer a protected consumer's durable
+// TestCoreEventsSideChannel guards the side channel at core-events. It is a
+// plain stream, not a KV bucket, so the PlatformBuckets() loop that hands
+// every bucket its protectedStreamDenies never reaches it; its denies come
+// from the one explicit call beside that loop. Drop that call and any
+// $JS.API.> holder can purge the stream or administer a protected consumer's
+// durable, with nothing else in the matrix covering it
 // (board item: "[natsperm] $JS.API.> lets any component delete a durable or
 // purge core-events"). Registry-driven per
 // TestRegistryDrivenStreamAdminSideChannel's precedent: every non-bootstrap

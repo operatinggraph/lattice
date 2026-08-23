@@ -20,9 +20,10 @@
 //  3. TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards — the same for
 //     the actor-derived credentialindex probe, whose every pre-existing test
 //     declares the key itself and so cannot see the derivation at all.
-//  4. TestClaimIdentity_RebindsAfterUnlink — pins the only path that reaches
-//     the tombstoned-index revive branch: ClaimIdentity's submitter is the
-//     one that declares the probe, so nothing else exercises it.
+//  4. TestClaimIdentity_RebindsAfterUnlink — pins the tombstoned-index revive
+//     branch. No ClaimIdentity submitter declares the credentialindex probe,
+//     so derive_reads is what supplies that key and makes the branch
+//     reachable at all.
 package identitydomain_test
 
 import (
@@ -259,21 +260,20 @@ func TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards(t *testing.T) {
 	}
 }
 
-// TestClaimIdentity_RebindsAfterUnlink is the behaviour asserted here rather
-// than discovered later.
+// TestClaimIdentity_RebindsAfterUnlink pins that a credential whose index was
+// tombstoned by UnlinkCredential can be bound to a fresh identity.
 //
-// No ClaimIdentity submitter ever declared the credentialindex probe — opmetas'
-// dispatch template substitutes, it does not hash — so the script's
-// read-before-create branch was DORMANT on this path: the probe always read
-// absent and `credential_index_mutation` always emitted a plain CreateOnly
-// create. A credential whose index UnlinkCredential had tombstoned therefore
-// could not be re-bound at all; the create asserted revision 0 against a key
-// that already had write history and died on RevisionConflict.
+// No ClaimIdentity submitter declares the credentialindex probe — opmetas'
+// dispatch template substitutes, it does not hash — so the key reaches the
+// script only because derive_reads supplies it. Without that, the script's
+// read-before-create branch is dormant on this path: the probe reads absent,
+// `credential_index_mutation` emits a plain CreateOnly create, and the create
+// asserts revision 0 against a key that already has write history and dies on
+// RevisionConflict, leaving the credential unbindable.
 //
-// derive_reads supplies that key, so the tombstone is now visible and the
-// CAS-guarded revive branch — which the multi-credential design wrote for
-// exactly this case — is reachable. That is the intended behaviour, and
-// this test pins it as reachable.
+// With the key supplied, the tombstone is visible and the CAS-guarded revive
+// branch the multi-credential design wrote for exactly this case is reachable.
+// That is what this test holds the platform to.
 func TestClaimIdentity_RebindsAfterUnlink(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)

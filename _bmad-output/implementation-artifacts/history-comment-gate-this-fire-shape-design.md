@@ -123,4 +123,65 @@ hand rather than by widening the gate to Go string content.
 
 ## 6. Build note
 
-See the commit trail on `claude/great-lamport-2hvzj6`.
+Commit trail on `claude/great-lamport-2hvzj6`. Two sweeps, 160 comment sites across 115 files, plus the
+gate work. What the close adversarial pass found, and what it means for the next sweep of this shape.
+
+### 6.1 The review's findings, classified
+
+**Implementation-bug — the dominant class, and the one the gate cannot see (3 BLOCKING + 1 MAJOR).** Four
+rewrites removed the banned phrase and left a sentence that is *false about current behaviour*:
+
+- `internal/natsperm/conf_test.go` claimed core-events "sits beyond `protectedStreamDenies`' reach"; the
+  matrix denies over it explicitly. The truth is that it is outside the `PlatformBuckets()` *loop*.
+- `packages/identity-domain/derive_reads_test.go` claimed ClaimIdentity's submitter declares the
+  credentialindex probe; the same file's function doc says no submitter ever does, which is the entire point.
+- `internal/refractor/pipeline/plain_derivation_act_e2e_test.go` claimed the far position "never learns"
+  the new value; the seeded multi-position test in the same file asserts that it does.
+- Eight `byte-identical to a target declaring no Mode` rewrites made the comparand the thing being defined,
+  converting a real backward-compatibility invariant into a tautology.
+
+**The lesson, which no gate in this fire mechanizes:** a green gate proves the *phrase* is gone, not that
+the *replacement is true*. A prose sweep is a correctness change to documentation, and it needs an
+independent truth check — a cold reader who re-derives each claim from the code — exactly as a code change
+does. Nothing about "comment-only" makes it safe; the AST proof below establishes only that behaviour did
+not move. If a second sweep of this shape produces the same class, it earns a standing-checklist slot.
+
+**Design-gap — the mirrored helper carried debt (1 MAJOR).** `commentOnlyGoChange` compared directive lines
+as text, which the review defeated four ways: a `//go:build` relocated below the package clause (constraint
+silently deleted), the legacy `// +build` form (unmatched), a `//go:embed` re-associated to a different var,
+and a cgo preamble's C source (a comment that compiles). Each is now refused — directives are compared
+paired with the declaration they bind to, `// +build` is matched, and a file importing `"C"` is refused
+outright. Zero of these shapes exist under `packages/` today, so this was latent, not live.
+
+**Implementation-bug found by the fire's own proof harness.** The AST comparison keeps node positions, and
+the printer spaces statements by the line gap between them — so inserting one comment line *between* two
+statements printed a blank line that was not there before, and the exemption answered "content changed". A
+comment edit that adds a line would have extorted exactly the version bump this exemption exists to stop.
+Blank lines are now stripped before comparing.
+
+**Design-gap — phrase admission (1 MINOR).** `\b` matches a hyphen, so `this fire-and-forget path` tripped
+the gate; `fire-and-forget` is house vocabulary in 20+ comments. A hyphen after the word is now excluded.
+Three false-positive shapes remain, recorded at the phrase list (§2.2 plus the two domain nouns
+`this change request` and `by this increment`).
+
+**Test-gap (1 MINOR).** A self-test case named "…is reported on its own line" asserted only the message; the
+harness never reads `fd.line`, so the offset-to-line arithmetic was unpinned. `historyLineSelfTest` now pins
+it across five shapes, including a three-line span and a match preceded by multi-byte em-dashes.
+
+**Pre-existing hole the new phrases inherited (1 MINOR).** `/* … */` comments evaded the gate entirely.
+Closed; zero live instances, so this was prophylactic.
+
+### 6.2 What the sweep is proven to be
+
+Every changed `.go` file's comment-stripped AST is compared against `main`: **113 proven comment-only, zero
+suspect**, and exactly five declared exceptions — this doc, the `t.Fatalf` message, the `invalid_reason`
+literal, and capability-author's paired version constants. Each of the three new gate mechanisms is
+revert-proven: stub the block pass, restore the `\b`, or drop the `/*` handling, and precisely that
+mechanism's self-test cases fail.
+
+### 6.3 Scope honesty
+
+The sweep is regex-scoped, not rule-scoped: `the old` (103 hits), `no longer` (255), `legacy` (135) and the
+rest of §5's tail are still standing next to comments this fire repaired. That is the declared non-goal, not
+an oversight — but a reader of this doc should not mistake "the gate is green" for "the tree carries no
+change-narration."

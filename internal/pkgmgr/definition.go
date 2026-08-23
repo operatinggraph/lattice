@@ -337,10 +337,11 @@ type WeaverTargetSpec struct {
 
 	// Admission is the optional Fire-8 dispatch-pacing policy (Contract #10
 	// §10.8 "Admission control", mirrors the engine's Target.Admission): nil
-	// (the default — omitted from the emitted body) is unbounded, byte-identical
-	// dispatch to a target with none configured; a declared policy paces WHEN an
-	// already-resolved gap fires, never gating correctness (the §10.3 mark
-	// CAS-create remains the sole anti-storm/idempotency guard).
+	// (the default) omits the `admission` key from the emitted body entirely,
+	// so the installed target dispatches unbounded, with no pacing applied;
+	// a declared policy paces WHEN an already-resolved gap fires, never
+	// gating correctness (the §10.3 mark CAS-create remains the sole
+	// anti-storm/idempotency guard).
 	Admission *AdmissionSpec
 }
 
@@ -595,10 +596,10 @@ type StepSpec struct {
 // Fire 1, edge-showcase-app-design.md §3.3) are the descriptor vocabulary: an
 // edge client renders a form + submits an op from these fields alone, with no
 // hardcoded per-op knowledge. All five are optional — an op meta that omits
-// them installs byte-identical to a bare op-meta vertex; an op meta
-// that supplies none of them still resolves normally, it just isn't
-// Facet-renderable (edge-showcase-app-design.md §3.3: "ops without descriptors
-// still render, degraded").
+// them installs only the bare `vtx.meta.<NanoID>` vertex, with no descriptor
+// aspects attached; an op meta that supplies none of them still resolves
+// normally, it just isn't Facet-renderable (edge-showcase-app-design.md
+// §3.3: "ops without descriptors still render, degraded").
 type OpMetaSpec struct {
 	// OperationType is the op this vertex makes `forOperation`-resolvable.
 	OperationType string

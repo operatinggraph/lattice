@@ -452,8 +452,8 @@ func TestCoreKVSource_TaxonomyBarrier_ConnectionLossDisarmsAndTheDrainedFeedReAr
 	// flag correctly false while every live `*` lens keeps serving through the
 	// narrow client gate it took while armed — acking-and-dropping against a
 	// taxonomy nobody is maintaining, which is the whole state that must stay
-	// unreachable. Counting sweeps against EDGES is what
-	// catches that; a lower bound would be satisfied by the two arms alone.
+	// unreachable. Counting sweeps against EDGES is what catches that; a lower
+	// bound would be satisfied by the two arms alone.
 	require.Eventually(t, func() bool { return rig.livenessSweeps() == len(rig.edges()) },
 		20*time.Second, 10*time.Millisecond,
 		"every liveness transition must produce exactly one re-derivation sweep — got %d sweeps for %v",

@@ -244,20 +244,27 @@ var (
 	// matched: the tree carries none today, and a gate one shift key evades is
 	// not a gate.
 	//
-	// Two false-positive shapes are known and accepted, both costing a reword
-	// rather than a wrong green: "fire" used as a VERB after "this" ("should this
-	// fire next" — say "trigger"), and "change" as a verb inside a quoted
-	// question ("did this change" — name the question instead). RE2 has no
-	// lookahead, and a special case in a lint gate is a worse liability than two
-	// rewordings.
-	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b|[Tt]his (?:fire|fix|change|increment)\b|[Pp]re-fix\b`
+	// A HYPHEN after the word is excluded, because `\b` matches one and
+	// "fire-and-forget" is house vocabulary here (20+ comments across
+	// internal/loom, internal/substrate, internal/refractor/pipeline,
+	// cmd/refractor, internal/processor) — "this fire-and-forget path" is a
+	// legitimate sentence and a blocking gate must not refuse it.
+	//
+	// Three false-positive shapes remain known and accepted, each costing a
+	// reword rather than a wrong green: "fire" as a VERB after "this" ("should
+	// this fire next" — say "trigger"); "change" as a verb inside a quoted
+	// question ("did this change" — name the question instead); and the domain
+	// nouns in "this change request" and "by this increment". RE2 has no
+	// lookahead, and a special case carved into a lint gate is a worse liability
+	// than a rewording.
+	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b|[Tt]his (?:fire|fix|change|increment)(?:[^-\w]|$)|[Pp]re-fix\b`
 	// historyComment flags a comment carrying one of those phrases. The
 	// changelog-tag shape stays anchored to a comment's lead, unlike the rest: a
 	// whole-tree measurement unanchored produced 86 hits, nearly all a
 	// traceability citation mid-sentence, which is an accepted convention here
 	// rather than a narrated change. Every other phrase matches anywhere on the
 	// line, so a clause buried mid-sentence is not invisible to the gate.
-	historyComment = regexp.MustCompile(`//[ \t]*Story [0-9]|` + "//" + `.*\b(` + historyPhrases + `)`)
+	historyComment = regexp.MustCompile(`//[ \t]*Story [0-9]|(?://|/\*).*\b(` + historyPhrases + `)`)
 	// historyPhraseOnly matches the same phrases against comment TEXT that has
 	// already had its `//` markers stripped — the joined-block form below.
 	historyPhraseOnly = regexp.MustCompile(`\b(` + historyPhrases + `)`)
@@ -776,17 +783,40 @@ func isCommentLine(line string) bool {
 // Only comment-ONLY lines join. A run of trailing comments on consecutive code
 // lines is not one sentence, and joining those would manufacture a phrase out
 // of two unrelated remarks.
+//
+// A `/* … */` block counts as one such run. The tree writes `//` almost without
+// exception, but a gate the other comment syntax walks straight through is not
+// a gate, and the block form is exactly where wrapped prose lives.
 func historyBlockHits(lines []string) map[int]bool {
 	hits := map[int]bool{}
 	for i := 0; i < len(lines); i++ {
-		if !isGoCommentLine(lines[i]) {
+		if !isGoCommentLine(lines[i]) && !opensBlockComment(lines[i]) {
 			continue
 		}
 		var segs []string
 		var at []int
-		for ; i < len(lines) && isGoCommentLine(lines[i]); i++ {
-			segs = append(segs, goCommentBody(lines[i]))
+		for i < len(lines) {
+			line := lines[i]
+			if opensBlockComment(line) {
+				// Consume through the closing marker; the run ends there
+				// whether or not the next line is a comment too.
+				for i < len(lines) {
+					segs = append(segs, goCommentBody(lines[i]))
+					at = append(at, i+1)
+					closed := strings.Contains(stripBlockOpen(lines[i]), "*/")
+					i++
+					if closed {
+						break
+					}
+				}
+				continue
+			}
+			if !isGoCommentLine(line) {
+				break
+			}
+			segs = append(segs, goCommentBody(line))
 			at = append(at, i+1)
+			i++
 		}
 		joined := strings.Join(segs, " ")
 		for _, loc := range historyPhraseOnly.FindAllStringIndex(joined, -1) {
@@ -810,10 +840,30 @@ func isGoCommentLine(line string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "//")
 }
 
-// goCommentBody strips a comment-only line's `//` marker and surrounding space,
-// leaving the prose the block walk joins.
+// opensBlockComment reports whether a line begins a `/* … */` comment, with no
+// code ahead of it on the same line.
+func opensBlockComment(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "/*")
+}
+
+// stripBlockOpen drops a leading `/*` so a one-line `/* … */` is not read as
+// closing before it opened.
+func stripBlockOpen(line string) string {
+	return strings.TrimPrefix(strings.TrimSpace(line), "/*")
+}
+
+// goCommentBody strips a line's comment markers and surrounding space, leaving
+// the prose the block walk joins. It handles the `//` form, the `/*` opener, a
+// `*/` closer, and the leading `*` that gofmt puts on a block's inner lines.
 func goCommentBody(line string) string {
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "//"))
+	t := strings.TrimSpace(line)
+	t = strings.TrimPrefix(t, "//")
+	t = strings.TrimPrefix(t, "/*")
+	t = strings.TrimSuffix(strings.TrimSpace(t), "*/")
+	if strings.HasPrefix(t, "*") {
+		t = strings.TrimPrefix(t, "*")
+	}
+	return strings.TrimSpace(t)
 }
 
 // indentWidth counts a line's leading whitespace characters (a tab counts as
@@ -3237,6 +3287,62 @@ func selfTest() []string {
 			// other assertion here still passed.
 			if warned > 0 {
 				failures = append(failures, tc.name+": finding is advisory (warn), but this gate is BLOCKING")
+			}
+		}
+	}
+	failures = append(failures, historyLineSelfTest()...)
+	return failures
+}
+
+// historyLineSelfTest pins WHICH line a block-joined history finding lands on.
+// The table above asserts only on a finding's message, so the offset-to-line
+// arithmetic in historyBlockHits — the part that is easy to get wrong by one
+// segment — would survive a regression there unnoticed. A phrase split across
+// the margin must be reported on the line it STARTS on, not the line that
+// completes it, or the author is sent to the wrong place.
+func historyLineSelfTest() []string {
+	var failures []string
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"a split phrase reports on the line it starts on",
+			"package p\n\n// the default — every target installed before this\n// fire) is frozen table-only behavior.\nvar x = 1\n", 3},
+		{"a phrase spanning three lines reports on the first",
+			"package p\n\n// something something Before\n// the\n// fix the ordering held.\nvar x = 1\n", 3},
+		{"a match late in a block reports on its own line, not the block's first",
+			"package p\n\n// line one, clean.\n// line two, clean.\n// line three mentions this fire.\nvar x = 1\n", 5},
+		{"an em-dash before the match does not shift the line",
+			"package p\n\n// a — b — c — every target installed before this\n// fire) is frozen.\nvar x = 1\n", 3},
+		{"narration inside a block comment is caught",
+			"package p\n\n/*\nthe default — every target installed before this\nfire) is frozen table-only behavior.\n*/\nvar x = 1\n", 4},
+	}
+	for _, tc := range cases {
+		var lines []int
+		for _, fd := range scanSource("internal/weaver/registry.go", []byte(tc.src)) {
+			if strings.HasPrefix(fd.msg, "history/changelog") {
+				lines = append(lines, fd.line)
+			}
+		}
+		switch {
+		case len(lines) == 0:
+			failures = append(failures, tc.name+": expected a history finding, got none")
+		case len(lines) > 1:
+			failures = append(failures, fmt.Sprintf("%s: expected one finding, got %d at lines %v", tc.name, len(lines), lines))
+		case lines[0] != tc.want:
+			failures = append(failures, fmt.Sprintf("%s: finding on line %d, want %d", tc.name, lines[0], tc.want))
+		}
+	}
+	// A legitimate sentence must not be refused by a blocking gate.
+	for _, clean := range []string{
+		"package p\n\n// Rebuild takes this fire-and-forget path to the outbox.\nvar x = 1\n",
+		"package p\n\n// a paragraph ending in the word this\n//\n// fire the retry only after the backoff.\nvar x = 1\n",
+		"package p\n\n/* a plain block comment describing what the code does now. */\nvar x = 1\n",
+	} {
+		for _, fd := range scanSource("internal/weaver/registry.go", []byte(clean)) {
+			if strings.HasPrefix(fd.msg, "history/changelog") {
+				failures = append(failures, fmt.Sprintf("false positive on a legitimate comment (line %d): %q", fd.line, clean))
 			}
 		}
 	}

@@ -33,11 +33,12 @@ const admissionPendingCap = 10_000
 
 // AdmissionPolicy is a target's optional `admission` block (Contract #10 §10.8
 // Planner extension, Fire 8): declared dispatch-pacing budgets. Absent (the
-// default on a target with none configured) is unbounded — byte-identical to
-// every dispatch decision before Fire 8. Config + optional package data, never
-// consulted for correctness (the §10.3 mark CAS-create remains the sole
-// anti-storm/idempotency gate) — admission control only paces WHEN a plan
-// already resolved to fire, deferring the rest to a later redelivery.
+// default) is unbounded — no pacing is applied, so a resolved gap dispatches
+// immediately with no admission-scheduler involvement. Config + optional
+// package data, never consulted for correctness (the §10.3 mark CAS-create
+// remains the sole anti-storm/idempotency gate) — admission control only
+// paces WHEN a plan already resolved to fire, deferring the rest to a later
+// redelivery.
 type AdmissionPolicy struct {
 	// GlobalRate bounds the target's TOTAL dispatch rate (tokens/sec, burst
 	// capacity == the rate — one second of headroom). 0/absent = unbounded on

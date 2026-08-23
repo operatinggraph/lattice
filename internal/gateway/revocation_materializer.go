@@ -191,9 +191,8 @@ func revocationWriteFailed(hb *Heartbeater, logger *slog.Logger, verb, actor str
 // redeliver spin, since the poison message can never be dispatched
 // successfully. ClassTerminal lets the Term decision actually apply,
 // disposing the one bad message while every other event keeps flowing.
-// Any other error (e.g. the bucket unreachable) still classifies
-// ClassInfra, preserving the existing
-// pause+probe behavior for genuine infra faults.
+// Any other error (e.g. the bucket unreachable) still classifies ClassInfra,
+// preserving the pause+probe behavior for genuine infra faults.
 func classifyRevocationError(err error) substrate.FailureClass {
 	if substrate.IsInvalidKeyError(err) {
 		return substrate.ClassTerminal

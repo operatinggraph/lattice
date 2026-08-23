@@ -606,12 +606,12 @@ func main() {
 	// the lister would eventually find — as a floor: it guarantees
 	// effectiveTargets() is never empty at cold boot, so a shred event
 	// redelivered before the lens registry has loaded (Run starts before
-	// bootstrapper.Ready()/src.Start below) correctly hits
-	// ErrRuleNotRegistered → NakWithDelay and retries, instead of an empty
+	// bootstrapper.Ready()/src.Start below) correctly hits ErrRuleNotRegistered
+	// → NakWithDelay and retries, instead of an empty
 	// target list vacuously Acking + recording the identity as clean with
 	// nothing actually checked (a regression this must not reintroduce).
-	// Hand-authored Postgres GrantTable cap-read
-	// producers (packages/clinic-domain's four) carry no Output descriptor and
+	// Hand-authored Postgres GrantTable cap-read producers
+	// (packages/clinic-domain's four) carry no Output descriptor and
 	// so are reached by neither this static entry nor the lister — closed by a
 	// separate, parallel mechanism below (SetGrantRevokerLister): the shared
 	// actor_read_grants table is revoked by DSN, not by per-lens RuleID, since

@@ -4,12 +4,12 @@ package pipeline
 // actor-aware fan-out arms acting on the pattern-directed derivation instead of
 // the ActorEnumerator BFS, and the two conjuncts that decide where they may.
 //
-// §9's e2e (a), tightened to what the flip makes true: AssignRole on actor U
-// projects U's grant and leaves every co-holder's row UNTOUCHED. Before the flip
-// the co-holders were reprojected on every grant — identically, so nothing
-// observable was wrong, which is exactly why the cost was invisible. The
-// assertion here is on the writes, so a regression to the BFS's breadth fails
-// even though every row it writes is correct.
+// §9's e2e (a), tightened to what the pattern-directed derivation makes true:
+// AssignRole on actor U projects U's grant and leaves every co-holder's row
+// UNTOUCHED. The BFS reprojects every co-holder on every grant — identically,
+// so nothing observable is wrong, which is exactly what makes that cost
+// invisible. The assertion here is on the writes, so a regression to the BFS's
+// breadth fails even though every row it writes is correct.
 
 import (
 	"context"
