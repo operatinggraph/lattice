@@ -318,3 +318,23 @@ from which the lease-signing convergence lens + Weaver's `AttachObject` playbook
   built generic, but its broad reuse outside the reference vertical is a Phase 3 concern.
 - The `system` lane on the bridge's capability projection, once lane enforcement lands (the same carry
   as Loom / Weaver).
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **An e2e that builds its own bridge engine registers its own adapters, so a green loop proves nothing
+  about `cmd/bridge`.** The composition root is not on the path any convergence test exercises: the test
+  wires `RegisterAdapter` itself, which is exactly the step a deployment can be missing. Minted: the
+  `augur` adapter was never registered in `cmd/bridge/main.go` while `internal/augurconvergence` proved
+  the whole escalate → reason → record → review loop end-to-end, so every live L3 escalation died on
+  `BridgeAdapterMissing`. Check: `cmd/bridge`'s `TestReferenceAdapters_CoverEveryPackageDeclaredAdapter`
+  censuses the shipped corpus's declared adapter names against the registered set — extend the census
+  when a new declaration site appears, and never let an e2e's private registration stand in for it.
+- **A reference fake's output is read by a human, so its stamped provenance is part of its behaviour.**
+  A fake that fills a provenance field with a real vendor's identifier makes a fixture indistinguishable
+  from the real thing on the surface where someone approves it. Minted: `FakeAugur` stamped
+  `Model: "claude-opus-4-8"` on canned proposals that the `augur-proposals` lens carries into Loupe's
+  review console. Check: a fake names itself in any field an operator reads to judge trustworthiness.
