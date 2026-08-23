@@ -104,7 +104,7 @@ func (e *Engine) scheduleFreshness(ctx context.Context, targetID, entityID, key 
 		// The column is absent (never projected, or a prior bad value was fixed
 		// by removing it): clear any standing RowDataError so the level signal
 		// does not lie quiet-but-set after the data is repaired.
-		e.issues.clear(issueKeyData(targetID, freshUntilColumn))
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, freshUntilColumn))
 		return true
 	}
 	s, isString := v.(string)
@@ -117,7 +117,7 @@ func (e *Engine) scheduleFreshness(ctx context.Context, targetID, entityID, key 
 		msg := fmt.Sprintf("target %s: row %s column %q is not an RFC3339 string (%v); freshness timer not scheduled",
 			targetID, key, freshUntilColumn, v)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, freshUntilColumn), "warning", "RowDataError", msg)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, freshUntilColumn), "warning", "RowDataError", msg)
 		return true
 	}
 	if targetID == firedToken {
@@ -134,10 +134,10 @@ func (e *Engine) scheduleFreshness(ctx context.Context, targetID, entityID, key 
 		msg := fmt.Sprintf("target %s: row %s carries %q but no entityKey; freshness timer not scheduled",
 			targetID, key, freshUntilColumn)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, freshUntilColumn), "warning", "RowDataError", msg)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, freshUntilColumn), "warning", "RowDataError", msg)
 		return true
 	}
-	e.issues.clear(issueKeyData(targetID, freshUntilColumn))
+	e.issues.clear(issueKeyDataEntity(targetID, entityID, freshUntilColumn))
 
 	// Truncate to whole seconds so the header instant, the payload instant,
 	// and the §10.4 requestId seed are byte-identical strings. A past instant
@@ -155,7 +155,7 @@ func (e *Engine) scheduleFreshness(ctx context.Context, targetID, entityID, key 
 		// NakWithDelay.
 		msg := fmt.Sprintf("target %s: row %s: marshalling the freshness timer payload failed: %v; timer not scheduled",
 			targetID, key, err)
-		e.alert(issueKeyData(targetID, freshUntilColumn), "error", "RowDataError", msg)
+		e.alert(issueKeyDataEntity(targetID, entityID, freshUntilColumn), "error", "RowDataError", msg)
 		return true
 	}
 	if err := e.act.scheduleTimer(ctx, targetID, entityID, payload, fireAtStr); err != nil {

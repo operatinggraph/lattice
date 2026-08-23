@@ -344,6 +344,65 @@ func TestRevoke_RemovesDurableMarksAndStaysDisabled(t *testing.T) {
 	}
 }
 
+// TestRevoke_RetiresEveryPerEntityIssueFamily pins the teardown of the issue
+// families whose keys carry a segment below the target — gap (per entity), gap-
+// config (per gap column) and data (per entity). A revoked target has no rows
+// left to close, so nothing on the live path will ever retire these: without
+// the prefix clear, one entry per (entity, column) stands for a target that no
+// longer exists until the process restarts. Another target's identically-shaped
+// entries must survive, which is what makes this a prefix clear rather than a
+// flush.
+func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newControlHarness(t, ctx)
+	h.seedTarget(&Target{
+		TargetID: "t1",
+		LensRef:  "lens-1",
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	h.addConsumer(t, ctx, "t1")
+
+	entityA, entityB := testNanoID(t), testNanoID(t)
+	revoked := []string{
+		issueKeyGapEntity("t1", entityA, "missing_x"),
+		issueKeyGapEntity("t1", entityB, "missing_x"),
+		issueKeyGapConfig("t1", "missing_x"),
+		issueKeyDataEntity("t1", entityA, "missing_x"),
+		issueKeyDataEntity("t1", entityB, freshUntilColumn),
+		issueKeyData("t1", "entityKey"),
+	}
+	for _, key := range revoked {
+		h.engine.issues.set(key, "warning", "Fixture", key)
+	}
+	// A second target whose keys share t1's leading characters: the trailing
+	// separator in each family prefix is what keeps "t1." from matching "t10.".
+	survivors := []string{
+		issueKeyGapEntity("t10", entityA, "missing_x"),
+		issueKeyGapConfig("t10", "missing_x"),
+		issueKeyDataEntity("t10", entityA, "missing_x"),
+	}
+	for _, key := range survivors {
+		h.engine.issues.set(key, "warning", "Fixture", key)
+	}
+
+	if err := h.engine.Revoke(ctx, "t1"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	for _, key := range revoked {
+		if _, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("Revoke left %q standing for a target that no longer exists; issues = %+v",
+				key, h.engine.issues.snapshot())
+		}
+	}
+	for _, key := range survivors {
+		if _, ok := issueAt(h.engine.issues, key); !ok {
+			t.Fatalf("Revoke(t1) retired %q, which belongs to another target", key)
+		}
+	}
+}
+
 // TestRevoke_NotRegistered_NoError verifies Revoke on a never-registered
 // target is NOT an error (idempotent, mirrors ConsumerSupervisor.Remove's
 // no-op-if-unmanaged posture) and still writes the __control marker.

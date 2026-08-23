@@ -62,7 +62,7 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	// safe nil-map false) — the heartbeat-cadence trajectory input. Purely
 	// in-memory bookkeeping; runs even for a disabled target, mirroring
 	// mark-clearing above.
-	violating := row != nil && e.boolColumn(targetID, row, "violating")
+	violating := row != nil && e.boolColumn(targetID, entityID, row, "violating")
 	e.contraction.observe(targetID, entityID, violating)
 
 	if row == nil {
@@ -113,7 +113,7 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 
 	nak := false
 	delayed := false
-	for _, col := range e.openGapColumns(targetID, row) {
+	for _, col := range e.openGapColumns(targetID, entityID, row) {
 		// The static playbook action for this gap (zero value "" when the
 		// column has no gaps entry at all — the "no playbook entry" dead-end
 		// dispatchGap below handles separately): gapSuppressed's cap-fallback
@@ -306,7 +306,7 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// impossibility — tests that shorten the mark lease have to keep it well
 	// clear of that turnaround (see asyncConvergeOpts in
 	// internal/leaseconvergence).
-	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, row, col, ga)
+	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, ga)
 	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, msg.NumDelivered != 1, rec, markRev, found, stale)
 }
 
@@ -340,7 +340,7 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 // spec has not replayed into the registry yet — is only logged: every Weaver
 // restart passes through it, it heals itself within the replay window, and
 // planGap raises its own UnresolvedReference issue if it does not.
-func (e *Engine) staleMark(targetID string, row map[string]any, col string, ga GapAction) bool {
+func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col string, ga GapAction) bool {
 	g, ok := strings.CutPrefix(col, gapColumnPrefix)
 	if !ok {
 		return false
@@ -361,7 +361,7 @@ func (e *Engine) staleMark(targetID string, row map[string]any, col string, ga G
 		return false
 	}
 	e.issues.clear(issueKeyInflightMismatch(targetID, col))
-	return !e.boolColumn(targetID, row, inflightColumnPrefix+g)
+	return !e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g)
 }
 
 // externalDispatchGap reports whether ga's dispatch concludes on an EXTERNAL
@@ -475,7 +475,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			// having closed).
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
-			e.issues.clear(issueKeyData(targetID, col))
+			e.issues.clear(issueKeyDataEntity(targetID, entityID, col))
 			return pl, actionRef, substrate.Ack
 		}
 	}
@@ -492,9 +492,9 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			"target "+targetID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
-		msg := "target " + targetID + " gap " + col + ": " + perr.msg
+		msg := "target " + targetID + " entity " + entityID + " gap " + col + ": " + perr.msg
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, col), "warning", "TemplateDataError", msg)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "TemplateDataError", msg)
 		return nil, "", substrate.Ack
 	default:
 		e.alert(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
@@ -516,7 +516,7 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 	if target.Admission == nil {
 		return true
 	}
-	priority, _ := e.intColumn(targetID, row, admissionPriorityColumn)
+	priority, _ := e.intColumn(targetID, entityID, row, admissionPriorityColumn)
 	id := targetID + "." + entityID + "." + col
 	return e.admission.admit(target.Admission, targetID, id, adapter, priority, time.Now())
 }
@@ -747,7 +747,7 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	for _, col := range markCandidateColumns(target, row) {
-		if row != nil && e.boolColumn(targetID, row, col) {
+		if row != nil && e.boolColumn(targetID, entityID, row, col) {
 			continue
 		}
 		// A closed gap retires the standing issues at this column along with its
@@ -869,17 +869,19 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 // boolColumn reads a §10.2 bool column off a row. A present value of any other
 // type is a Lens data error: surfaced (Warn log + Health KV issue) and treated
 // conservatively as not actionable — never silently inverted into a clean
-// false.
-func (e *Engine) boolColumn(targetID string, row map[string]any, col string) bool {
+// false. entityID names the row the bad value is in: the issue is that row's,
+// not the target's, so every caller threads the entity it is reading for.
+func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
 	v, ok := row[col]
 	if !ok || v == nil {
 		return false
 	}
 	b, isBool := v.(bool)
 	if !isBool {
-		msg := fmt.Sprintf("target %s: row column %q is %T, not the §10.2 bool; treated as not actionable", targetID, col, v)
+		msg := fmt.Sprintf("target %s entity %s: row column %q is %T, not the §10.2 bool; treated as not actionable",
+			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, col), "warning", "RowDataError", msg)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "RowDataError", msg)
 	}
 	return b
 }
@@ -891,7 +893,8 @@ func (e *Engine) boolColumn(targetID string, row map[string]any, col string) boo
 // or int64 — all coerce. A fractional float is floored to its integer part (a cap
 // is a whole count by construction). The bool form of a present-but-wrong-type
 // value is the caller's "no usable value" signal (ok=false), never a silent 0.
-func (e *Engine) intColumn(targetID string, row map[string]any, col string) (int, bool) {
+// entityID names the row the bad value is in, exactly as in boolColumn.
+func (e *Engine) intColumn(targetID, entityID string, row map[string]any, col string) (int, bool) {
 	v, ok := row[col]
 	if !ok || v == nil {
 		return 0, false
@@ -906,9 +909,10 @@ func (e *Engine) intColumn(targetID string, row map[string]any, col string) (int
 	case int64:
 		return int(n), true
 	default:
-		msg := fmt.Sprintf("target %s: row column %q is %T, not the §10.2 integer; treated as absent", targetID, col, v)
+		msg := fmt.Sprintf("target %s entity %s: row column %q is %T, not the §10.2 integer; treated as absent",
+			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyData(targetID, col), "warning", "RowDataError", msg)
+		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "RowDataError", msg)
 		return 0, false
 	}
 }
@@ -970,10 +974,10 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 	if !ok {
 		return false, false, false
 	}
-	if e.boolColumn(targetID, row, inflightColumnPrefix+g) {
+	if e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g) {
 		return true, false, false
 	}
-	capN, ok := e.intColumn(targetID, row, maxretriesColumnPrefix+g)
+	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
 	if !ok || capN <= 0 {
 		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
 			// No usable cap on the row, and either this isn't a directOp gap
@@ -1007,12 +1011,12 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 // whether the budget is spent, and it never falls back to the engine default
 // (gapSuppressed's own default is directOp-only and explicitly declines to
 // apply to a row that declares inflight_<g>).
-func (e *Engine) hasUsableRetryCap(targetID string, row map[string]any, gapCol string) bool {
+func (e *Engine) hasUsableRetryCap(targetID, entityID string, row map[string]any, gapCol string) bool {
 	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
 	if !ok {
 		return false
 	}
-	capN, ok := e.intColumn(targetID, row, maxretriesColumnPrefix+g)
+	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
 	return ok && capN > 0
 }
 
@@ -1129,13 +1133,13 @@ func markCandidateColumns(target *Target, row map[string]any) []string {
 // deterministic order. Gaps fire in parallel-safe sequence (independent
 // marks); gap dependencies are the Lens's problem, not Weaver's (§10.8). A
 // non-bool column value is surfaced and reads as not-open (boolColumn).
-func (e *Engine) openGapColumns(targetID string, row map[string]any) []string {
+func (e *Engine) openGapColumns(targetID, entityID string, row map[string]any) []string {
 	var out []string
 	for col := range row {
 		if !strings.HasPrefix(col, gapColumnPrefix) {
 			continue
 		}
-		if e.boolColumn(targetID, row, col) {
+		if e.boolColumn(targetID, entityID, row, col) {
 			out = append(out, col)
 		}
 	}
@@ -1165,6 +1169,30 @@ func (e *Engine) alert(key, severity, code, message string) {
 	e.issues.set(key, severity, code, message)
 }
 
+// The issue-key family prefixes. Every key constructor below and every
+// teardown prefix in issueKeyTargetPrefixes is built from these, so a key shape
+// and the prefix that retires it cannot drift apart.
+const (
+	issuePrefixGapEntity = "gap:"
+	issuePrefixGapConfig = "gapConfig:"
+	issuePrefixData      = "data:"
+)
+
+// issueKeyTargetPrefixes lists the per-target issue-key families that a target
+// teardown must retire wholesale (Engine.Revoke). These are the families whose
+// keys carry a segment below the target — a per-entity or per-gap one — so a
+// teardown has no single key to name and must clear by prefix; the families
+// keyed by targetID alone (consumer, timer, owner) are cleared by key at the
+// same site. Each prefix ends in the "." separator, which is what keeps "t1."
+// from matching a key under "t10.".
+func issueKeyTargetPrefixes(targetID string) []string {
+	return []string{
+		issuePrefixGapEntity + targetID + ".",
+		issuePrefixGapConfig + targetID + ".",
+		issuePrefixData + targetID + ".",
+	}
+}
+
 // issueKeyGapEntity keys a Health issue whose raised fact is about ONE ROW: a
 // `surface` gap standing open for this entity, or this entity's gap having
 // spent its retry budget. Two entities violating the same (target, gap)
@@ -1172,7 +1200,7 @@ func (e *Engine) alert(key, severity, code, message string) {
 // subject's timeline, so the key carries the entity segment — mirroring
 // issueKeyEffect's three-segment shape.
 func issueKeyGapEntity(targetID, entityID, col string) string {
-	return "gap:" + targetID + "." + entityID + "." + col
+	return issuePrefixGapEntity + targetID + "." + entityID + "." + col
 }
 
 // issueKeyGapConfig keys a Health issue whose raised fact is about the PLAYBOOK
@@ -1182,10 +1210,28 @@ func issueKeyGapEntity(targetID, entityID, col string) string {
 // (target, gap): segmenting it by entity would mint one duplicate config alert
 // per violating row.
 func issueKeyGapConfig(targetID, col string) string {
-	return "gapConfig:" + targetID + "." + col
+	return issuePrefixGapConfig + targetID + "." + col
 }
 
-func issueKeyData(targetID, col string) string { return "data:" + targetID + "." + col }
+// issueKeyDataEntity keys a per-ROW data error — a column whose value is not
+// the §10.2 type the reader expects, a template reference that resolves null,
+// a freshUntil that is not an RFC3339 string. Every one of these is a fact
+// about the one projected row that carries the bad value, fixed for that row
+// alone by the next projection, so the key carries the entity segment: N
+// malformed rows are N independent issues, and repairing one never retires
+// another's.
+func issueKeyDataEntity(targetID, entityID, col string) string {
+	return issuePrefixData + targetID + "." + entityID + "." + col
+}
+
+// issueKeyData keys the malformed-anchor data error raised when a violating row
+// carries no entityKey echo (§10.2). It is keyed per (target, column) with no
+// entity segment: the row that would name the entity is the malformed one, and
+// nothing on the live path retires this entry, so an entity segment would
+// multiply a standing issue rather than retire any. A target teardown retires
+// it with the rest of the data family (issueKeyTargetPrefixes).
+func issueKeyData(targetID, col string) string { return issuePrefixData + targetID + "." + col }
+
 func issueKeyInflightMismatch(targetID, col string) string {
 	return "inflightMismatch:" + targetID + "." + col
 }

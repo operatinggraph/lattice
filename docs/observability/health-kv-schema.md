@@ -879,7 +879,8 @@ decides whose close retires the issue. The key never appears on the wire — it 
 |---|---|---|
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<column>` | one row's data | `RowDataError`, `TemplateDataError` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`), `TemplateDataError` |
+| `data:<targetId>.entityKey` | the target | `RowDataError` for a violating row carrying no `entityKey` echo — see below |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
 | `inflightMismatch:<targetId>.<gapColumn>` | the lens's column declaration | `InflightActionMismatch` |
 
@@ -889,6 +890,22 @@ a document, and each entry's `message` names its `entity <entityId>`. Each retir
 subject's close, so one subject's remediation landing never clears the issue raised for a subject
 still stuck. A config fact is identical for every row of the target and only a package re-author
 can fix it, so it is raised once per `(target, gap)` however many rows are violating.
+
+The same split governs `data:`. A malformed column value is a fact about the one projected row
+carrying it, repaired for that row alone by the next projection, so it is keyed per
+`(target, entity, column)` and repairing one row never retires another's. The one exception is the
+**missing-`entityKey` echo**: the row that would name the entity is the malformed one, so that
+entry is keyed by target and column. Nothing on the live path retires it — only a target teardown
+does — so it is best read as "at least one row of this target projected without its `entityKey`",
+not as a per-row count.
+
+**Teardown (`Revoke`).** The families whose keys carry a segment below the target —
+`gap:`, `gapConfig:` and `data:` — are retired **by prefix** when a target is revoked, since a
+revoked target has no rows left to close and nothing on the live path would ever retire them. Each
+prefix carries its trailing `.` separator, so revoking `t1` does not touch `t10`. The families
+keyed by target alone (consumer, timer, owner) are retired by key at the same point.
+`effect:` needs neither: the heartbeat's own scan reconciles it once the target's `__effect`
+windows are deleted.
 
 #### `IssuesTruncated`
 
