@@ -2,6 +2,25 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-07 · `130d3958` · A wellness member can finally pay down their own balance — WellnessCreditAccount gains a consumer scope=self grant, ownership + amount capped server-side. wellness-ledger 0.2.6
+- 2026-08-07 · `15209753` · A shared café house tab finally names who ordered what — Charge stamps orderedBy (op.actor) on each .status.lines entry, distinguishing a resident's self-order from a staff ring-up on the receipt. cafe-domain 0.11.18
+- 2026-08-07 · `80a1f76c` · A café resident can finally pay down their own house tab — CreditCafeAccount gains a consumer scope=self grant, ownership + amount capped server-side. cafe-ledger 0.3.9
+- 2026-08-07 · `dbe9e65e` · Appointments finally carry a site (new BackfillAppointmentSite op) and Riley Chen's no-show billing stops resetting daily — fixed, non-recurring appointment ids. clinic-domain 0.28.18
+- 2026-08-20 · `0be26875` · Twelve staff ops self-describing (appOpDebt 15→4; residuals folded into staff-descriptor-rendering Inc 0/1/3); five packages bumped; gate gains keyed-op detector
+- 2026-08-06 · `15f628f4` · A no-show fee finally names the visit that caused it — clinicLedgerHistory walks the settles link to project appointmentKey + visit date, billing history shows "(visit <date>)". clinic-ledger 0.2.9
+- 2026-08-06 · `d46ab947` · An executed lease finally names its real landlord, not a hardcoded placeholder — doc.landlordKey resolves off the unit's `manages` link. lease-signing 0.27.16
+- 2026-08-06 · `ea68207b` · A clinic patient can finally pay down their own balance — ClinicCreditAccount gains a consumer scope=self grant, ownership + amount proven server-side. clinic-ledger 0.2.8
+- 2026-08-06 · `1019c68d` · An exhausted screening check finally reads "Escalated" instead of "To do" forever — leaseApplicationsRead gains escalated_bgcheck/escalated_payment off the augurproposal forCandidate link. lease-signing 0.27.15
+- 2026-08-06 · `9982e740` · A Facet `x-entityRef` field finally gets a search-and-pick control instead of a raw-key text field, mirroring `app.js` (§7.13 residual closed).
+- 2026-08-06 · `c97b784f` · The renewal cycle finally has a live instance — seedRenewalDemoTenancy mints a fifth, back-dated unit+lease so renewalOpensAt is already past on approval; read_renewals gained its first open row.
+- 2026-08-06 · ops (no commit) · Every applicant can see "My Applications" again — leaseApplicationsRead resumed after its declined-column structural pause; read_lease_applications repopulated, verified as a signed-in applicant.
+- 2026-08-06 · `5aa05ad0` · A co-managed unit no longer shows the landlord one application card per co-manager — landlordLeaseApplicationsRead dedupes by entity_key.
+- 2026-08-06 · `44ea340c` · A paused projection finally reads as paused, not empty — pkgmgr.LensID resolves the lens NanoID Health KV is actually keyed by; all 12 withProjectionHealth call sites fixed.
+- 2026-08-06 · `8f9b0633` · The seven duplicate "Classic Demo Studio" rows are finally reaped — seed-classic-demo gains reapDuplicateStudios, mirroring reapDuplicateProviders/reapDuplicateMenuItems.
+- 2026-08-06 · `92e8e1f0` · A signed-in resident can no longer read another lease's ledger — `/api/ledger` gains leaseVisibleToActor (tenant OR managing landlord, RLS-backed).
+- 2026-08-06 · `979f9fb9` · A wellness member's bill finally itemizes and names its charges — My Classes gains the ledger-list itemization Roster already had; wellnessNoShowSettlement/wellnessRefundSettlement gain a memo. wellness-ledger 0.2.5
+- 2026-08-05 · `5beeb585` · Seeded wellness classes finally carry a real price — Vinyasa Flow/Evening Flow gain priceCents so wellnessClassPriceSettlement + the transitively-starved wellnessRefundSettlement get a live instance.
+- 2026-08-05 · `d40ce942` · Loftspace/café/wellness reads now signal a paused projection — 6 handlers gain projectionHealthy mirroring clinic-app; loftspace-app FE distinguishes paused from empty on Applications/Renewals/landlord RLS.
 - 2026-08-05 · `2b8af63d` · A café tab opened before staleAt shipped can finally auto-settle — missing_staleat gap + BackfillTabStaleAt backfills the 11 stranded legacy tabs. cafe-domain 0.11.17
 - 2026-08-05 · `11bc39df` · clinic-domain's README finally documents BindProviderIdentity, its identityClaim/providerClaim guards, CreatePatient's patientClaim guard, leaseAppKey/site, and noShowFeeCents + terminal-status finality.
 - 2026-08-05 · `99055858` · A cancelled priced class finally refunds — wellnessrefund marker + wellnessRefundSettlement convergence. wellness-domain 0.21.1, wellness-ledger 0.2.4
