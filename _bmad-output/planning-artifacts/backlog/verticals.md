@@ -72,7 +72,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-23 · `0ee5b819` · A losing rival on a leased unit stops being dispatched RecordIdentityPII/SignLease — the applicant gaps gain the `unitStatus <> 'leased'` term missing_listingLeased already used. lease-signing 0.31.6
+- 2026-08-23 · `c7a8e222` · A losing rival on a leased unit stops being dispatched RecordIdentityPII/SignLease — the applicant gaps gain the `unitStatus <> 'leased'` term missing_listingLeased already used. lease-signing 0.31.7
 - 2026-08-23 · `8f49c13b` · StartVisitSeries's "no descriptor" row closed by verification — visitSeriesOpMetas already ships a full OpMetaSpec (that commit), lint-app-op-descriptors reports 0 issues; no new code.
 - 2026-08-23 · `69823fbe` · The 6 sessions stuck on "Studio needs reassignment" finally have a way out — reassign form gains a studio picker wired to the operator-only newStudio repair path.
 - 2026-08-23 · `c5aabf68` · A full or mispriced class no longer needs TombstoneSession + recreate — ReassignSession edits name/capacity/priceCents/residentPriceCents in place, front-desk Reassign form gains the fields. wellness-domain 0.22.5
