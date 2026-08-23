@@ -893,24 +893,39 @@ can fix it, so it is raised once per `(target, gap)` however many rows are viola
 
 The same split governs `data:`. A malformed column value is a fact about the one projected row
 carrying it, repaired for that row alone by the next projection, so it is keyed per
-`(target, entity, column)` and repairing one row never retires another's. The one exception is the
-**missing-`entityKey` echo**: the row that would name the entity is the malformed one, so that
-entry is keyed by target and column. Nothing on the live path retires it — only a target teardown
-does — so it is best read as "at least one row of this target projected without its `entityKey`",
-not as a per-row count.
+`(target, entity, column)` and repairing one row never retires another's. **The read is the
+retirement**: a column that parses, or that the next projection drops, clears that row's entry.
+Most of the columns these readers surface — `violating`, `inflight_<g>`, `maxretries_<g>`,
+`admissionPriority` — have no gap-close or plan-success path of their own, so without that the
+entries would accumulate one per `(row, column)` for the process's lifetime. The listing cap below
+bounds the *document*, never the cache behind it.
 
-**Teardown (`Revoke`).** The families whose keys carry a segment below the target —
-`gap:`, `gapConfig:`, `data:` and `inflightMismatch:` — are retired **by prefix** when a target is
-revoked, since a revoked target delivers no rows and keeps no marks, so nothing on the live path
-would ever retire them. Each prefix carries its trailing `.` separator, so revoking `t1` does not
-touch `t10`. The families keyed by target alone (consumer, timer, owner) are retired by key at the
-same point.
+The one exception is the **missing-`entityKey` echo**, which is keyed by target and column. Not for
+want of an entity — the row *key* supplies one whatever the body omits — but because nothing on the
+live path retires this entry, so segmenting it per entity would multiply a permanently standing
+entry rather than retire any. Read it as "at least one row of this target projected without its
+`entityKey`", not as a per-row count.
 
-`effect:` is the one family **deliberately excluded**, not merely unconsidered: it needs no prefix
-clear because it already reconciles itself. `flagEffectMismatches` rebuilds its alert set from a
-scan on every heartbeat and clears any entry the scan no longer lists, and `Revoke` deletes the
-target's `__effect` windows along with its other `weaver-state` keys — so a revoked target's
-`LensEffectMismatch` entries self-clear on the next heartbeat.
+#### Teardown (`Revoke`)
+
+| Family | Retired on revoke by | Why |
+|---|---|---|
+| `gap:`, `gapConfig:`, `data:`, `inflightMismatch:` | **prefix clear** | keys carry a segment below the target, so there is no single key to name; a revoked target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
+| `consumer:`, `timer:`, `target:<ownerVertexId>` | key clear | keyed by target alone |
+| `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
+| `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |
+| `pendingSpec:` | nothing — **not target-keyed** | keyed by the meta-vertex id, and `Revoke` does not touch the vertex or its spec; it clears when the spec drains or is evicted |
+| `oscillation:` | **nothing — KNOWN STRANDED** | see below |
+
+Each prefix carries its trailing `.` separator, so revoking `t1` does not touch `t10`.
+
+**`oscillation:` is a known-stranded family.** `TargetOscillation` is raised when two targets fight
+over the same subject path, and **nothing clears it anywhere** — not on revoke, not on the live
+path. A prefix clear cannot reach it either: its key is `oscillation:<targetA>.<targetB>.<path>`
+with the pair sorted, so a revoked target may be the *second* segment. Retiring it needs either a
+scan of the keyspace or a second key form, and neither is built. Until then, a `TargetOscillation`
+entry stands for the process's lifetime — including after one or both targets are revoked. Treat
+it as "this fight was observed since `since`", not as a live condition.
 
 A retired entry is not a suppressed one. Every issue here is level-driven: if a revoked target is
 re-enabled and the condition still holds, the next delivery (or, for `inflightMismatch:`, the next
@@ -920,20 +935,30 @@ target that no longer exists; it does not decide that the underlying fault was f
 #### `IssuesTruncated`
 
 The per-entity classes are unbounded in entity count, so a heartbeat lists at most **50** issues.
-When more are open, the 50 listed are the head of the deterministic key order and one extra
-synthetic entry closes the list:
+When more are open, one extra synthetic entry closes the list:
 
 ```json
 {"severity": "warning | error", "code": "IssuesTruncated",
- "message": "<n> further open issues are not listed in this heartbeat (<total> open in total, 50 listed)",
+ "message": "<n> further open issues are not listed in this heartbeat (<total> open in total, 50 listed): <Code> ×<n>, <Code> ×<n>, …",
  "since": "<RFC3339 — the oldest unlisted issue's first-arose stamp>"}
 ```
 
-Its `severity` is the worst among the issues it stands for, so an `error` in the unlisted tail is
-never presented as a warning. `status` is aggregated over **every** open issue before the listing
-is bounded (§5.3's issues-empty-iff-healthy invariant holds against the full set, not the listed
-one): a truncated document can report `unhealthy` with no `error` entry visible in `issues[]`, and
-`IssuesTruncated` is where that error is accounted for.
+**Which 50 are listed is decided by severity first**, ties broken on the deterministic key order.
+That ordering is the point of the cap: the unbounded families are all `warning`s, and in key order
+they sort *ahead* of the entries that explain a fault — a `gapConfig:` `PlaybookConfigError`, a
+`timer:` failure, a paused consumer. Selecting by key alone would let sixty unrouted tasks evict the
+one `error` naming the cause, leaving a document that reports `unhealthy` while listing fifty
+identical warnings. With severity-first selection an `error` is dropped only once more than 50
+errors are open at once.
+
+The marker names the distinct **codes** that went unlisted, with counts, most-numerous first — an
+operator who cannot see every instance can still see what kind of thing is missing. That code list
+is itself bounded (8 codes, then `+N more codes`), since a `surface` gap's `issueCode` is
+package-declared and the vocabulary is open-ended.
+
+Its `severity` is the worst among the issues it stands for, so an `error` among the unlisted is
+never presented as a warning. `status` is aggregated over **every** open issue, not over the listed
+sample, so §5.3's issues-empty-iff-healthy invariant holds against the full set.
 
 ### `health.loom.<instance>` — Loom heartbeat
 

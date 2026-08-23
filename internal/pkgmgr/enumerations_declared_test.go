@@ -181,6 +181,52 @@ func TestValidateEnumerations_RejectsWhatTheProcessorWould(t *testing.T) {
 			})
 		}
 	})
+
+	// A planner catalog entry carries the same Enumerations field as the gap
+	// itself and faces the same check at engine load. Install must reject it
+	// here too: a spec that installs clean and then fails validateTarget takes
+	// the WHOLE target down at load — every gap on it runs dark, not just the
+	// entry with the bad direction.
+	t.Run("weaver actions-catalog entry", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name    string
+			en      EnumerationSpec
+			wantErr string
+		}{
+			{"a complete declaration is admitted", EnumerationSpec{Hub: "row.entityKey", Relation: "boundTo", Direction: "out"}, ""},
+			{"an empty hub names no vertex", EnumerationSpec{Relation: "boundTo", Direction: "out"}, "requires a Hub"},
+			{"an empty relation names no walk", EnumerationSpec{Hub: "row.entityKey", Direction: "out"}, "requires a Relation"},
+			{"a direction outside out|in is rejected", EnumerationSpec{Hub: "row.entityKey", Relation: "boundTo", Direction: "outward"}, "Direction must be"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				ga := GapActionSpec{
+					Goal: json.RawMessage(`{"present":"subject.data.residueCleared"}`),
+					Actions: []ActionCatalogEntrySpec{{
+						Ref:          "unbind",
+						Action:       "directOp",
+						Operation:    "UnbindIdentityCredentials",
+						Effects:      []json.RawMessage{json.RawMessage(`{"present":"subject.data.residueCleared"}`)},
+						Enumerations: []EnumerationSpec{tc.en},
+					}},
+				}
+				err := Definition{WeaverTargets: []WeaverTargetSpec{{
+					TargetID: "identityErasureComplete",
+					LensRef:  "identityErasureResidue",
+					Mode:     "planned",
+					Gaps:     map[string]GapActionSpec{"missing_residue": ga},
+				}}}.validateWeaverTargets()
+				if tc.wantErr == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, tc.wantErr)
+				require.ErrorContains(t, err, "actions[unbind]",
+					"the error must name the catalog entry, not just the gap")
+			})
+		}
+	})
 }
 
 // TestGapActionArtifact_EnumerationsMaterializeAndValidate walks the

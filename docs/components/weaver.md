@@ -934,10 +934,27 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   every clear, assert each raise still reaches each clear it had, and pin two entities on one column.
 - **A per-entity Health issue is unbounded, and the heartbeat is ONE KV value** — `issueCache.snapshot()`
   feeds the whole slice into `health.weaver.<instance>`, so the moment a key gains an entity segment the
-  document grows with the subject count. Aggregate status over ALL issues, then bound the listing; a
-  truncated list must never read as the whole set, and an `error` in the tail must not present as a
-  warning. Minted: the `issueKeyGap` split. Check: `TestEmit_TruncatesListingButNotStatus`; rule mirrored
-  from `installer.go`'s `sampleWithOverflow`.
+  document grows with the subject count. Aggregate status over ALL issues, then bound the listing, and
+  **select the listing by SEVERITY, never by key order**: the multiplied families sort early, so a
+  key-ordered cap evicts precisely the config and structural issues that explain the status — an operator
+  reads `unhealthy`, fifty identical warnings, and no cause. Name the omitted CODES in the marker. Minted:
+  the `issueKeyGap` split, caught at the batch's close pass. Check:
+  `TestEmit_BoundsTheListingWithoutHidingTheCause`; rule mirrored from `installer.go`'s
+  `sampleWithOverflow`.
+- **Segmenting a Health key by entity is safe only where a clear site names that exact COLUMN — enumerate
+  the raise COLUMNS, not the raise functions** — a shared reader (`boolColumn`/`intColumn`) raises for
+  whatever column its caller passes, so counting the two call sites says nothing about how many latches
+  exist. Six columns flowed through those two readers and one had a clear; segmenting turned four O(1)
+  stuck entries into O(entities), held for process lifetime and re-sorted every heartbeat. The issue cap
+  bounds the DOCUMENT, not the cache. Minted: the `issueKeyData` split (2026-08-23) — the per-increment
+  reviews all passed; only the cumulative close pass saw it. Check: for every raise, name the clear that
+  retires that exact column, and pair the retirement with the READ so it is level-driven.
+- **A redundant safety line cannot be proven by reverting it — check whether the two orders are provably
+  equivalent before citing a test as its proof** — aggregating status before vs. after truncation is
+  identical whenever the severity roll-up collapses on the same split, so the "proof" passes either way.
+  Minted: `TestEmit_TruncatesListingButNotStatus`, which was cited in this dossier as a check it never
+  performed. Check: revert the line; if nothing reds, either make it load-bearing or delete the claim —
+  do not keep both.
 - **Prove each changed line by reverting THAT LINE, not the feature** — a builder who proves its own new
   lines can leave the line it was asked to change covered by nothing: reverting the whole feature reds the
   new tests, so the gap is invisible. Minted twice in one item (2026-08-23): the `contextHint` attach-guard
