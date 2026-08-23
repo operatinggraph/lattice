@@ -3920,10 +3920,21 @@ reddened test before concluding regression; never loosen an assertion.
 
 ### 7. Non-goals (the drift fence)
 
-Not touched: the `unroutedTasks` aggregate gap's key shape (it is correctly aggregate — one issue per
-target, not per entity — and B must leave its behavior identical); enforcement of declared enumerations
-in the Processor; the `credentialindex` reachability link (routed above); any change to
-`SealIdentityForErasureComplete`'s attestation shape; the read-posture warn→block flip itself.
+~~Not touched: the `unroutedTasks` aggregate gap's key shape (it is correctly aggregate — one issue per
+target, not per entity — and B must leave its behavior identical)~~ **— struck, the premise was false
+(2026-08-23, from B's build).** `unroutedTasks` is **per-task-row, not aggregate**: its lens sets
+`KeyColumn: "entityId"` and anchors on the task (`packages/orchestration-base/lenses.go:66-80`), so
+`BuildKey` emits one weaver-targets row per unrouted task. It therefore carried the identical collision
+this item fixes — N unrouted tasks shared one latch, the `message` named whichever row was processed
+last, `since` belonged to the first, and one task being claimed cleared the issue for all the rest.
+Entity-segmentation fixes it rather than breaking it, and Contract #10's *"**a** task left unclaimed …
+rolls **a** `UnroutedTasks` entry"* is only now true per task. The non-goal was written from the
+gap's *action* (`surface`, shared with the erasure gaps) instead of its lens shape; B was told to
+verify it rather than honour it, which is the only reason it did not ship as written.
+
+Still not touched: enforcement of declared enumerations in the Processor; the `credentialindex`
+reachability link (routed above); any change to `SealIdentityForErasureComplete`'s attestation shape;
+the read-posture warn→block flip itself.
 
 ### Scope-diff gate — discharged
 

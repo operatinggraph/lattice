@@ -506,6 +506,21 @@ mechanizes it (name the gate, strike the entry).
   steal a vertex the repoint had just legitimately claimed. Check: for any script that reads a vertex live
   (`kv.Read`, read-posture (e)) then conditionally mutates it, grep for `expectedRevision` on that exact
   mutation — its absence, or a bare content check without the revision pin, is the defect.
+  **Second sighting (2026-08-23), and the precedent was the carrier:** `unbind_identity_credentials.go`'s
+  `owner_binding_rewrite` was the shape a new op was told to mirror, and it had no pin — so the mirror
+  would have inherited the defect had it copied instead of checking. `applyHydratedRevisions` supplies a
+  revision only for keys a DISPATCHER declared, and step 8's own prior-document read happens *after* the
+  script filtered the array, so it closes the window it measures rather than the one that matters. Both
+  ops now pin, each proven by dropping the pin and watching the racing write be accepted instead of
+  conflicting. **Mechanize on the next sighting.**
+- **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
+  break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
+  one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
+  faults at hydration (`vault: identity key shredded`) if it declares that owner's aspect on the arm where
+  the owner is dead. Declare per-arm, from the dispatcher's own classification, and make the residual race
+  fail closed and loudly. Minted: `TombstoneOrphanedCredentialIndex`'s owner-array rewrite (2026-08-23) —
+  nine tests fell to the unconditional declaration. Check: for any `optionalReads` naming a `Sensitive:
+  true` aspect, ask which arm reaches it with the holder's key already destroyed.
 
 ## Related contracts
 

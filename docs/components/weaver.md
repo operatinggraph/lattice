@@ -923,3 +923,24 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **An `error`-severity Health issue must not fire on a self-healing condition** — an unreplayed pattern is
   replay lag, not a package bug, and the sweep reaches that branch on every restart. Minted: the `!known`
   branch of the same classifier. Check: `TestSweep_InflightMarkerIgnoredForUnindexedPattern` asserts no issue.
+- **A Health issue key is a LATCH: scope it to the fact it states, and split it only with every clear
+  re-paired** — a key naming `(target, column)` merges N subjects onto one latch, so the first subject to
+  close retires the issue raised for the one still stuck, and the operator surface stops showing a
+  genuinely broken row. But blanket-segmenting is the opposite error: a raise about the PLAYBOOK
+  (`GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError`) is identical for every row and would
+  mint N copies. Splitting is where clears get stranded — one key served both scopes, so a single clear
+  incidentally retired facts that now need naming. Minted: `issueKeyGap`, two concurrent erasures
+  (2026-08-23); `issueKeyData` carried the same shape one function over. Check: enumerate every raise and
+  every clear, assert each raise still reaches each clear it had, and pin two entities on one column.
+- **A per-entity Health issue is unbounded, and the heartbeat is ONE KV value** — `issueCache.snapshot()`
+  feeds the whole slice into `health.weaver.<instance>`, so the moment a key gains an entity segment the
+  document grows with the subject count. Aggregate status over ALL issues, then bound the listing; a
+  truncated list must never read as the whole set, and an `error` in the tail must not present as a
+  warning. Minted: the `issueKeyGap` split. Check: `TestEmit_TruncatesListingButNotStatus`; rule mirrored
+  from `installer.go`'s `sampleWithOverflow`.
+- **Prove each changed line by reverting THAT LINE, not the feature** — a builder who proves its own new
+  lines can leave the line it was asked to change covered by nothing: reverting the whole feature reds the
+  new tests, so the gap is invisible. Minted twice in one item (2026-08-23): the `contextHint` attach-guard
+  and the spec-body JSON tag both reverted clean with the full suite green, and three of the gap-key
+  proofs passed vacuously until an isolation vector forced the shadowed path. Check: for each line the
+  commit message claims, revert it alone and name the test that fails.
