@@ -305,7 +305,7 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 		lensNanoIDs[idx] = entityNanoID(def.Name, "lens:"+l.CanonicalName)
 	}
 	for idx, p := range def.Permissions {
-		permNanoIDs[idx] = entityNanoID(def.Name, permTag(p.OperationType, p.Scope))
+		permNanoIDs[idx] = PermissionID(def.Name, p.OperationType, p.Scope)
 	}
 	for idx, t := range def.WeaverTargets {
 		weaverTargetNanoIDs[idx] = entityNanoID(def.Name, "weaverTarget:"+t.TargetID)
@@ -452,6 +452,17 @@ func entityNanoID(name, tag string) string {
 // convention.
 func RoleID(packageName, canonicalName string) string {
 	return entityNanoID(packageName, "role:"+canonicalName)
+}
+
+// PermissionID returns the deterministic, version-independent NanoID a
+// package's declared permission receives at install — the exact value
+// entityNanoID computes internally for a PermissionSpec. Exported so Go code
+// outside the installer (e.g. the live-vs-declared permission reconciler,
+// re-deriving a package's expected permission key from Core KV) can address
+// a package-declared permission without a KV read or re-deriving the tag
+// convention.
+func PermissionID(packageName, operationType, scope string) string {
+	return entityNanoID(packageName, permTag(operationType, scope))
 }
 
 // LensID returns the deterministic, version-independent NanoID a package's

@@ -376,7 +376,7 @@ func (i *Installer) buildInstallBatch(
 			// permission vertex, or a projected platformPermissions entry, can
 			// go straight to the manifest that put it there instead of
 			// grepping the corpus for the operationType.
-			"origin":     "package",
+			"origin":     PermissionOriginPackage,
 			"declaredBy": def.Name,
 		}
 		if p.Note != "" {
