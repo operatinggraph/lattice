@@ -29,7 +29,6 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -760,83 +759,6 @@ func TestTombstoneOrphanedCredentialIndex_MarkerClosedOwner_ArrayUntouched(t *te
 	}
 }
 
-// interposingValidator runs hook exactly once, on the first
-// TombstoneOrphanedCredentialIndex to reach step 6, and then delegates. Step 6
-// sits AFTER the script has read state and decided its mutations and BEFORE step
-// 8 takes its own prior-document read and commits, so a write made from the hook
-// lands in precisely the window a concurrent writer of a shared vertex occupies.
-// Nothing else reproduces that window deterministically: the two ends of it are
-// inside one synchronous commit-path call.
-//
-// Keyed on the operation type so the same pipeline can drive the fixture's own
-// create and claim ops without tripping it.
-type interposingValidator struct {
-	inner processor.Validator
-	once  sync.Once
-	hook  func()
-}
-
-func (v *interposingValidator) Validate(ctx context.Context, env *processor.OperationEnvelope,
-	result processor.ScriptResult, state processor.HydratedState) error {
-	if env.OperationType == "TombstoneOrphanedCredentialIndex" {
-		v.once.Do(v.hook)
-	}
-	return v.inner.Validate(ctx, env, result, state)
-}
-
-// newTombOrphanRacingPipeline is testutil.CapabilityPipeline with the validator
-// wrapped, so a test can commit a competing write to a key this op read. Built
-// here rather than added to the shared harness because the interposition is
-// meaningful for exactly one property in this package.
-func newTombOrphanRacingPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
-	durable string, hook func()) (*processor.CommitPath, jetstream.Consumer) {
-	t.Helper()
-	logger := testutil.TestLogger()
-	metrics := &processor.Metrics{}
-	cache := processor.NewDDLCache(conn, testutil.HarnessCoreBucket, logger)
-	if err := cache.Refresh(ctx); err != nil {
-		t.Fatalf("ddl cache refresh: %v", err)
-	}
-	authz, err := processor.SelectAuthorizerArgs(processor.SelectAuthorizerOpts{
-		Mode:             processor.AuthModeCapability,
-		Reader:           conn,
-		CapabilityBucket: testutil.HarnessCapBucket,
-		Logger:           logger,
-	})
-	if err != nil {
-		t.Fatalf("SelectAuthorizerArgs: %v", err)
-	}
-	v := testutil.TestVault(t)
-	hydrator := processor.NewHydratorWithCache(conn, testutil.HarnessCoreBucket, cache, logger)
-	hydrator.Vault = v
-	hydrator.PrimordialActors = testutil.PrimordialActors(t)
-	cp := processor.NewCommitPath(processor.Deps{
-		Conn:        conn,
-		CoreBucket:  testutil.HarnessCoreBucket,
-		HealthKV:    testutil.HarnessHealthBucket,
-		Authorizer:  authz,
-		Hydrator:    hydrator,
-		Executor:    processor.NewExecutor(processor.NewStarlarkRunner(0, 0), logger),
-		Validator:   &interposingValidator{inner: processor.NewValidator(cache, conn, testutil.HarnessCoreBucket, logger), hook: hook},
-		Committer:   processor.NewCommitter(conn, testutil.HarnessCoreBucket, cache, logger, time.Now),
-		Metrics:     metrics,
-		Heartbeater: processor.NewHealthHeartbeater(conn, testutil.HarnessHealthBucket, "tomborphan-"+durable, 10*time.Second, metrics, logger),
-		Logger:      logger,
-		Vault:       v,
-		DDLs:        cache,
-	})
-	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
-		StreamName:     testutil.HarnessOpsStream,
-		Durable:        durable,
-		FilterSubjects: []string{"ops.default"},
-		AckWait:        5 * time.Second,
-	}, logger)
-	if err != nil {
-		t.Fatalf("EnsureConsumer: %v", err)
-	}
-	return cp, cons
-}
-
 // TestTombstoneOrphanedCredentialIndex_OutboundResidue_ConcurrentOwnerWriteConflicts
 // is the shared-vertex property, and it is the one thing the precedent this
 // rewrite copies does not have.
@@ -872,7 +794,11 @@ func TestTombstoneOrphanedCredentialIndex_OutboundResidue_ConcurrentOwnerWriteCo
 	// pointers the setup below fills in.
 	var liveOwner, erasedCred string
 	raced := make(chan struct{})
-	cp, cons := newTombOrphanRacingPipeline(t, ctx, conn, "tomborphan-race", func() {
+	cp, cons := newRacingPipeline(t, ctx, conn, racingPipelineConfig{
+		Durable:       "tomborphan-race",
+		FilterSubject: "ops.default",
+		OperationType: "TombstoneOrphanedCredentialIndex",
+	}, func() {
 		seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
 			[]map[string]any{
 				bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
