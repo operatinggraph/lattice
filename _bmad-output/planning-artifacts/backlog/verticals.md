@@ -33,6 +33,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **`StartVisitSeries` carries no descriptor at all** | Referenced only from tests and `permissions.go` — invisible to the op catalog and to `lint-app-op-descriptors`'s registered-op scan alike. Needs an Inc-0-style descriptor sweep entry (mechanical, mirrors the 15-op sweep already done) before it's even catalog-visible, let alone migratable. | Clinic | pkg | ★ | XS | 📋 ready · [design §15](../../implementation-artifacts/staff-descriptor-rendering-design.md) |
 | **Weaver ignores lease-signing's inflight_onboarding/inflight_signature suppression** | `leaseApplicationComplete`'s lens computes both markers to suppress re-dispatch while a RecordIdentityPII/SignLease task is open (tested, `lens_cypher_test.go`), but Weaver's `InflightActionMismatch` check trusts external-dispatch gaps only (Contract #10 §10.3) and now ignores both — suppression may not actually be firing. | LoftSpace | pkg | ★★ | S | 📋 ready · `health.weaver.weaver-qabvcNp3GnfCxPfpADUm` · [targets.go](../../../packages/lease-signing/targets.go) |
 | **A worksAt front-desk staffer's patient-context switcher is empty despite clinic-wide appointment access** | `/api/staff/appointments` returns 50 rows for a worksAt-anchored actor; `/api/staff/patients` returns 0 for the same actor — blocks Reschedule/Cancel/Set-site on an unreached patient. `handleStaffPatients` ([patients.go:119](../../../cmd/clinic-app/patients.go)) grants the roster only to WildcardAnchor or self, but `package.go` claims workplace-inclusive — ground against `queryPatients`'s RLS SQL. | Clinic | pkg | ★★ | S | 📋 ready |
+| **A verified resident is charged the same class price as a walk-in** | `CreateBooking` runs the full residency check and stamps `rate: resident`, which the FE badges — but `classPriceSettlementSpec` ([lenses.go:233](../../../packages/wellness-ledger/lenses.go)) charges `priceCents` with no rate branch, and no session carries a resident price. Live: a resident's booking projected `priceCents: 1500`. `CASE WHEN` has in-repo precedent ([orchestration-base lenses.go:207](../../../packages/orchestration-base/lenses.go)). | Wellness | pkg | ★★ | S | 📋 ready |
+| **A class's name, capacity and price can never be edited after it is scheduled** | No wellness-domain op writes `.schedule`'s name/capacity/priceCents after mint — `ReassignSession` moves time/instructor/studio only ([ddls.go:232](../../../packages/wellness-domain/ddls.go)). Adding seats to a full class, fixing a typo'd name or repricing all mean `TombstoneSession` + recreate, stranding every booking. Shape precedent: `SetInstructorProfile`. | Wellness | pkg + FE | ★★ | S | 📋 ready |
+| **The shipped orphan-studio repair has no caller in the app** | `ReassignSession`'s operator-only `newStudio` param ([ddls.go:246](../../../packages/wellness-domain/ddls.go)) exists to rescue a session whose studio was tombstoned, but `newStudio` appears nowhere under `cmd/wellness-app`: `reassignSession` ([app.js:1599](../../../cmd/wellness-app/web/app.js)) submits only instructor/time edits and hard-requires `payload.studio = se.studioKey`, which is empty for exactly these sessions. 6 live sessions render "Studio needs reassignment" as dead text. | Wellness | FE | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -52,10 +55,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×23, Clinic ×22, Café ×13, Wellness ×9.
+- **Rotation to date:** LoftSpace ×23, Clinic ×22, Café ×13, Wellness ×10.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
 - **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
 - **2026-08-04:** Café — drove self-order→settle + front-desk hats live; the one bill omits clinic/wellness, the staff menu grid is unconfined, the visit badge is last-wins; filed 4.
 - **2026-08-05:** Wellness — drove member + instructor hats live through book/cancel; billing is unlabeled, no class is priced, studios duplicate; filed 3.
@@ -66,7 +68,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-07:** LoftSpace — drove applicant, landlord + staff hats live through profile/decide/renew/search; 3 listings are unleasable, a renewal never names its tenant; filed 3.
 - **2026-08-07:** Clinic — drove patient, provider + front-desk hats live; 27 of 60 appointments have no location, no no-show fee is reversible; filed 3 + 1 platform.
 - **2026-08-08:** Café — drove resident open→self-order→settle→post live; no self-pay works on any vertical, names are dead, a new order reads $0; filed 3 + 1 platform.
-- **Next:** Wellness.
+- **2026-08-22:** Wellness — drove member, instructor + front-desk hats live through book/cancel/bill; the resident rate charges standard price, a class is uneditable once scheduled, the orphan-studio repair has no caller; filed 3.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
