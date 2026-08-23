@@ -666,6 +666,38 @@ func TestLeaseApplicationComplete_ListingLeasedGap_ClosedWhenLeased(t *testing.T
 	require.Equal(t, false, v["violating"], "landlord-approved AND unit leased → converged")
 }
 
+// TestLeaseApplicationComplete_WinnerBgcheckGap_ReopensAfterOwnUnitLeases: the
+// unitStatus='leased' suppression the fix above adds must NOT wedge shut the
+// WINNING applicant's own freshness reopen — their bgcheck can go stale again
+// after their own unit has already leased, and the EAGER auto-reopen-at-expiry
+// @at timer (FRESHNESS below) depends on missing_bgcheck reopening so Weaver
+// re-dispatches a fresh check. Caught live by
+// TestLeaseConvergence_BgcheckFreshness_EagerReopen
+// (internal/leaseconvergence), which drives a full approve→lease→lapse→reopen
+// cycle; this is the cheap lens-level regression pin for the same defect.
+func TestLeaseApplicationComplete_WinnerBgcheckGap_ReopensAfterOwnUnitLeases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	const staleValidUntil = "2020-01-01T00:00:00Z" // long before now → stale
+	app := bgFreshnessFixture(t, f, staleValidUntil)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+	f.vtx(t, "landlord1", "identity")
+	f.edge(t, "manages", "landlord1", "unit1")
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "leased", v["unitStatus"], "this IS the applicant whose unit leased")
+	require.Equal(t, "approved", v["landlordDecision"], "this row is the winner, not a rival")
+	require.Equal(t, true, v["missing_bgcheck"], "a stale bgcheck reopens even on the winner's own already-leased unit")
+	require.Equal(t, true, v["violating"], "the reopened bgcheck gap must still be violating so Weaver re-dispatches")
+}
+
 // TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse: a
 // second, unrelated application on the SAME unit — with none of its own four
 // applicant gates recorded and no landlord decision on THIS application —
