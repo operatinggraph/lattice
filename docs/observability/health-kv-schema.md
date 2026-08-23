@@ -900,12 +900,22 @@ does — so it is best read as "at least one row of this target projected withou
 not as a per-row count.
 
 **Teardown (`Revoke`).** The families whose keys carry a segment below the target —
-`gap:`, `gapConfig:` and `data:` — are retired **by prefix** when a target is revoked, since a
-revoked target has no rows left to close and nothing on the live path would ever retire them. Each
-prefix carries its trailing `.` separator, so revoking `t1` does not touch `t10`. The families
-keyed by target alone (consumer, timer, owner) are retired by key at the same point.
-`effect:` needs neither: the heartbeat's own scan reconciles it once the target's `__effect`
-windows are deleted.
+`gap:`, `gapConfig:`, `data:` and `inflightMismatch:` — are retired **by prefix** when a target is
+revoked, since a revoked target delivers no rows and keeps no marks, so nothing on the live path
+would ever retire them. Each prefix carries its trailing `.` separator, so revoking `t1` does not
+touch `t10`. The families keyed by target alone (consumer, timer, owner) are retired by key at the
+same point.
+
+`effect:` is the one family **deliberately excluded**, not merely unconsidered: it needs no prefix
+clear because it already reconciles itself. `flagEffectMismatches` rebuilds its alert set from a
+scan on every heartbeat and clears any entry the scan no longer lists, and `Revoke` deletes the
+target's `__effect` windows along with its other `weaver-state` keys — so a revoked target's
+`LensEffectMismatch` entries self-clear on the next heartbeat.
+
+A retired entry is not a suppressed one. Every issue here is level-driven: if a revoked target is
+re-enabled and the condition still holds, the next delivery (or, for `inflightMismatch:`, the next
+mark whose lease expires) raises it again. Retiring on teardown removes an entry that describes a
+target that no longer exists; it does not decide that the underlying fault was fixed.
 
 #### `IssuesTruncated`
 

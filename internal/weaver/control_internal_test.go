@@ -346,9 +346,10 @@ func TestRevoke_RemovesDurableMarksAndStaysDisabled(t *testing.T) {
 
 // TestRevoke_RetiresEveryPerEntityIssueFamily pins the teardown of the issue
 // families whose keys carry a segment below the target — gap (per entity), gap-
-// config (per gap column) and data (per entity). A revoked target has no rows
-// left to close, so nothing on the live path will ever retire these: without
-// the prefix clear, one entry per (entity, column) stands for a target that no
+// config (per gap column), data (per entity) and inflight-mismatch (per gap
+// column). A revoked target has no rows left to close and no marks left to
+// reclaim, so nothing on the live path will ever retire these: without the
+// prefix clear, one entry per (entity, column) stands for a target that no
 // longer exists until the process restarts. Another target's identically-shaped
 // entries must survive, which is what makes this a prefix clear rather than a
 // flush.
@@ -371,6 +372,7 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyDataEntity("t1", entityA, "missing_x"),
 		issueKeyDataEntity("t1", entityB, freshUntilColumn),
 		issueKeyData("t1", "entityKey"),
+		issueKeyInflightMismatch("t1", "missing_x"),
 	}
 	for _, key := range revoked {
 		h.engine.issues.set(key, "warning", "Fixture", key)
@@ -381,6 +383,7 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyGapEntity("t10", entityA, "missing_x"),
 		issueKeyGapConfig("t10", "missing_x"),
 		issueKeyDataEntity("t10", entityA, "missing_x"),
+		issueKeyInflightMismatch("t10", "missing_x"),
 	}
 	for _, key := range survivors {
 		h.engine.issues.set(key, "warning", "Fixture", key)
