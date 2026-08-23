@@ -195,44 +195,74 @@ func TestLoomPatterns_DeclaredReadsMatchWhatTheScriptsRead(t *testing.T) {
 // the same grammar in lockstep, which is what keeps a pattern from installing
 // cleanly and then running dark at CDC load.
 
-// erasureSweepWalks is the class-(e) kv.Links walk set each sweep op runs, as
-// the op's own script runs it: UnbindIdentityCredentials drains `boundTo`
-// inbound then outbound, and PurgeIdentityDedupFootprint drains `indexes`
-// inbound then `duplicateOf` outbound and inbound. Stated once, so the two
-// dispatchers are compared against the ops rather than against each other —
-// two dispatchers agreeing on a wrong set is a failure this would otherwise
-// pass.
+// erasureWalks is the class-(e) kv.Links walk set each erasure op runs, as the
+// op's own script runs it, together with how many dispatchers submit that op.
+// Both halves are stated per op rather than inferred, so a dispatcher is always
+// compared against the OP — two dispatchers agreeing on a wrong set is a
+// failure this would otherwise pass — and so an op reachable from one
+// dispatcher is not silently held to the same arity as one reachable from two.
 //
-// Which arm a given commit drains depends on what is left, so each op's walk
-// set is the UNION of its arms, not whichever branch ran.
-var erasureSweepWalks = map[string][][2]string{
+// The sweeps drain one arm per commit, in cost order, and whichever arm a given
+// commit drains depends on what is left; their walk set is therefore the UNION
+// of their arms, not whichever branch ran. The seal is the opposite shape: it
+// walks all five arms in one commit, in the order the residue lens counts them,
+// because it will not attest until every one is clear.
+var erasureWalks = map[string]struct {
+	walks [][2]string
+	// dispatchers is how many surfaces submit this op: the two sweeps run both
+	// as steps 3 and 4 of the identityErasure pattern during a live erasure and
+	// as the residue target's sweep gaps when the lens finds leftovers, while
+	// the seal is dispatched only by the target's missing_erasureSeal gap — the
+	// pattern completes without it.
+	dispatchers int
+}{
 	"UnbindIdentityCredentials": {
-		{"boundTo", "in"},
-		{"boundTo", "out"},
+		walks: [][2]string{
+			{"boundTo", "in"},
+			{"boundTo", "out"},
+		},
+		dispatchers: 2,
 	},
 	"PurgeIdentityDedupFootprint": {
-		{"indexes", "in"},
-		{"duplicateOf", "out"},
-		{"duplicateOf", "in"},
+		walks: [][2]string{
+			{"indexes", "in"},
+			{"duplicateOf", "out"},
+			{"duplicateOf", "in"},
+		},
+		dispatchers: 2,
+	},
+	"SealIdentityForErasureComplete": {
+		walks: [][2]string{
+			{"boundTo", "in"},
+			{"boundTo", "out"},
+			{"indexes", "in"},
+			{"duplicateOf", "out"},
+			{"duplicateOf", "in"},
+		},
+		dispatchers: 1,
 	},
 }
 
-// TestDeclaredEnumerations_AgreeAtBothDispatchers pins the class-(e)
-// declarations (Contract #2 §2.5) an op carries on its envelope. Both
-// dispatchers submit the SAME two sweep ops — the Loom pattern's steps 3 and 4
-// during a live erasure, the Weaver target's two sweep gaps when the residue
-// lens finds leftovers — so an op that declares its walks under one dispatcher
-// and not the other publishes a different envelope for identical work, and
-// whichever half is missing is invisible to anyone reading the wire.
+// TestDeclaredEnumerations_MatchEachOpsWalks pins the class-(e) declarations
+// (Contract #2 §2.5) every erasure op carries on its envelope, at every
+// dispatcher that submits it.
+//
+// Two failures it exists to catch, and they are different bugs. An op declaring
+// its walks under one dispatcher and not the other publishes a different
+// envelope for identical work, and whichever half is missing is invisible to
+// anyone reading the wire. An op declaring a walk set that is not the one its
+// script runs publishes an envelope that describes work nobody does — which no
+// amount of dispatcher-to-dispatcher agreement would reveal, so every
+// comparison here is against the op's stated set.
 //
 // The hub differs by dispatcher and that is the point of checking both: a step
 // names the subject through the instance-subject template grammar, a gap names
 // it through the violation row's entityKey column. Relation and direction are
 // literals and must match exactly, in order.
-func TestDeclaredEnumerations_AgreeAtBothDispatchers(t *testing.T) {
+func TestDeclaredEnumerations_MatchEachOpsWalks(t *testing.T) {
 	check := func(t *testing.T, where, operation, wantHub string, got []pkgmgr.EnumerationSpec) {
 		t.Helper()
-		want := erasureSweepWalks[operation]
+		want := erasureWalks[operation].walks
 		if len(got) != len(want) {
 			t.Errorf("%s %s declares %d enumerations, want %d (%v)", where, operation, len(got), len(want), want)
 			return
@@ -250,7 +280,7 @@ func TestDeclaredEnumerations_AgreeAtBothDispatchers(t *testing.T) {
 
 	seen := map[string]int{}
 	for _, s := range LoomPatterns()[0].Steps {
-		if _, sweeps := erasureSweepWalks[s.Operation]; !sweeps {
+		if _, walks := erasureWalks[s.Operation]; !walks {
 			if len(s.Enumerations) != 0 {
 				t.Errorf("step %s declares enumerations but runs no kv.Links walk: %v", s.Operation, s.Enumerations)
 			}
@@ -261,16 +291,20 @@ func TestDeclaredEnumerations_AgreeAtBothDispatchers(t *testing.T) {
 	}
 
 	for col, ga := range WeaverTargets()[0].Gaps {
-		if _, sweeps := erasureSweepWalks[ga.Operation]; !sweeps {
+		if _, walks := erasureWalks[ga.Operation]; !walks {
+			if len(ga.Enumerations) != 0 {
+				t.Errorf("gap %s declares enumerations but its op %q runs no kv.Links walk: %v",
+					col, ga.Operation, ga.Enumerations)
+			}
 			continue
 		}
 		seen[ga.Operation]++
 		check(t, "gap "+col, ga.Operation, "row.entityKey", ga.Enumerations)
 	}
 
-	for op := range erasureSweepWalks {
-		if seen[op] != 2 {
-			t.Errorf("%s is declared at %d dispatchers, want both the pattern step and the target gap", op, seen[op])
+	for op, want := range erasureWalks {
+		if seen[op] != want.dispatchers {
+			t.Errorf("%s is declared at %d dispatchers, want %d", op, seen[op], want.dispatchers)
 		}
 	}
 }
