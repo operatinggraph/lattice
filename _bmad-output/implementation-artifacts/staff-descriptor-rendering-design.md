@@ -1235,3 +1235,30 @@ forms remain tolerated debt per `lint-app-op-descriptors`'s own `fullDescriptor`
 `descriptorform`'s broader 6-op vocabulary gap (array/multiline/ceremony field kinds, the separate
 `📐 needs designer pass` backlog row) — `ClassChoices` is one narrow, already-scoped addition to an
 existing enum-rendering path, not that redesign.
+
+### Outcome — shipped `aa04a7a5`
+
+Built exactly per the increment order above; all seven whole-repo gates plus the touched-package
+test suites and `node --test internal/descriptorform/form.test.mjs` (37/37) green, independently
+re-verified after merge (a concurrent Lattice-stream fire had advanced `main` by 121 files in the
+interim — clean auto-merge, zero line-range overlap with this fire's touch-list; full `go test
+./... -p 4` re-run green post-merge). `CreateLocation`'s `appOpDebt` entry is deleted;
+`AttachObject`/`DetachObject` remain, tracked in `verticals.md` as their own row.
+
+Three mechanically-required fixups outside the original touch-list, each a direct consequence of
+adding one RETURN column to `opCatalogSpec`/`edgeCatalogTail` (not a scope widening): the
+`composed_test.go` frozen golden-cypher mirror, `location-domain/package_test.go`'s
+zero-op-metas scope pin (now asserts exactly one), and one reddened corpus-census pinned verdict
+(`internal/refractor/grouping_reduction_corpus_census_test.go`'s `opCatalog` key string) — reviewed
+against the live cypher before repinning, per
+[[reference_corpus_census_pinned_verdicts]].
+
+**Found, reviewed, no fix owed:** `internal/pkgmgr/capabilitymaterializer_starlark.go`'s
+`OpDispatchArtifact` (the AI-authored-capability JSON vocabulary) does not expose `ClassChoices`.
+This is not a gap this fire introduced or is on the hook for — the AI-authoring vocabulary is
+*already*, deliberately, a narrower subset of the full human-authored `OpDispatchSpec` (it excludes
+`VisibleWhen` too, added well before this fire with no corresponding AI-vocabulary extension). An
+AI-authored package proposing a multi-DDL create is exactly the kind of judgment call
+(sensitive-read-adjacent, needs a human to pick the DDL boundary) the existing narrower vocabulary
+routes to human authoring by omission — consistent with, not a regression from, the standing
+posture. No row filed.
