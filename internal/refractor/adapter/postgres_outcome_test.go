@@ -221,7 +221,8 @@ func TestProtectedAdapter_UpsertWithOutcome_ForwardsInsteadOfDefaulting(t *testi
 		id TEXT PRIMARY KEY,
 		authz_anchors TEXT[],
 		projection_seq BIGINT NOT NULL DEFAULT 0,
-		is_deleted BOOLEAN NOT NULL DEFAULT false
+		is_deleted BOOLEAN NOT NULL DEFAULT false,
+		deleted_at TIMESTAMPTZ
 	)`)
 	require.NoError(t, err)
 
