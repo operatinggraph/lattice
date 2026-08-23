@@ -217,8 +217,9 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"through (releasing every seat). It requires sessionKey and at least one of: newInstructor " +
 			"(assign/replace the class's instructor — validated alive + class=instructor), clearInstructor=true " +
 			"(remove it, no replacement), newStudio (move the class to a different live studio — operator-only, " +
-			"validated alive + class=studio), or a startsAt+endsAt pair (move the class; re-validated against the " +
-			"15-minute grid + 96-cell span cap, exactly like CreateSession). studio (the session's CURRENT studio, " +
+			"validated alive + class=studio), a startsAt+endsAt pair (move the class; re-validated against the " +
+			"15-minute grid + 96-cell span cap, exactly like CreateSession), or an edit to name/capacity/" +
+			"priceCents/residentPriceCents (re-validated with CreateSession's own bounds). studio (the session's CURRENT studio, " +
 			"validated via atStudio, same as TombstoneSession) is required UNLESS the caller is an operator " +
 			"supplying newStudio, in which case it is derived server-side off the session's still-live atStudio " +
 			"link — the repair path for a session whose OWN studio TombstoneStudio already tombstoned " +
@@ -235,8 +236,11 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"covers are left untouched (no release+reclaim round-trip against itself), cells only the old span " +
 			"covered are released, and cells only the new span covers are claimed via the same CreateOnly " +
 			"claim_cell double-book guard CreateSession uses (StudioConflict on collision with another session); " +
-			"the schedule aspect's name/capacity/priceCents/residentPriceCents carry forward unchanged, OCC-conditioned on its " +
-			"current revision. " +
+			"the schedule aspect's name/capacity/priceCents/residentPriceCents are edited when the caller supplies " +
+			"them (name non-empty, capacity re-validated 1..200, priceCents/residentPriceCents re-validated >= 0 — " +
+			"the same bounds CreateSession enforces) and otherwise carried forward unchanged, OCC-conditioned on its " +
+			"current revision — a class no longer needs TombstoneSession + recreate (stranding every booking) just " +
+			"to add seats, fix a typo'd name, or reprice. " +
 			"Standing binder mirrors the union of CreateSession's and TombstoneSession's: the operator passes " +
 			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
 			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
@@ -250,12 +254,12 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link — on ReassignSession only, omittable when an operator supplies newStudio, in which case it is derived server-side instead)."},` +
 			`"newStudio":{"type":"string","description":"vtx.studio.<NanoID> to move the session to (ReassignSession; operator-only regardless of hat; validated alive + class=studio). Releases every cell the old studio held for the session's span and claims every cell the new one needs; StudioConflict on collision."},` +
-			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required)."},` +
+			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged)."},` +
 			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with endsAt). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
 			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with startsAt). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
-			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks."},` +
-			`"priceCents":{"type":"integer","description":"Optional class price in integer cents (CreateSession; optional, must be >= 0 when supplied). 0 or omitted means a free class. Stored on the .schedule aspect; wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account. Carried forward unchanged by ReassignSession."},` +
-			`"residentPriceCents":{"type":"integer","description":"Optional resident class price in integer cents (CreateSession; optional, must be >= 0 when supplied). Charged instead of priceCents to a booking whose .status.rate is resident; omitted means a resident pays priceCents same as a standard booker. Stored on the .schedule aspect. Carried forward unchanged by ReassignSession."},` +
+			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks. ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged."},` +
+			`"priceCents":{"type":"integer","description":"Optional class price in integer cents (CreateSession; optional, must be >= 0 when supplied). 0 or omitted means a free class. Stored on the .schedule aspect; wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged."},` +
+			`"residentPriceCents":{"type":"integer","description":"Optional resident class price in integer cents (CreateSession; optional, must be >= 0 when supplied). Charged instead of priceCents to a booking whose .status.rate is resident; omitted means a resident pays priceCents same as a standard booker. Stored on the .schedule aspect. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged."},` +
 			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading the session (CreateSession; validated alive + class=instructor; writes the ledBy link). Listed in ContextHint.Reads when supplied. On TombstoneSession/ReassignSession, required for an instructor (non-operator) caller acting on their OWN class — validated via ledBy + identifiedBy."},` +
 			`"sessionId":{"type":"string","description":"Optional bare NanoID for the new session vertex (CreateSession); absent → minted."},` +
 			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of an existing session (TombstoneSession/ReassignSession; required, validated alive)."},` +
@@ -267,12 +271,12 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"studio":             "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession/ReassignSession also require it (the session's actual studio, validated via the atStudio link) — TombstoneSession to release the held cells, ReassignSession to workplace-confine a front-of-house caller and to claim/release cells on a time move. On ReassignSession only, an operator supplying newStudio may omit it — the script derives the current studio off the session's atStudio link instead, the repair path for a session whose own studio was already tombstoned.",
 			"newStudio":          "Full vtx.studio.<NanoID> key to move the session to (ReassignSession; operator-only regardless of hat, validated alive + class=studio). Tombstones the current atStudio link and writes a new one; releases every cell the old studio held for the session's span and claims every cell the new one needs (StudioConflict on collision with another session).",
-			"name":               "The session's display name (CreateSession; required).",
+			"name":               "The session's display name (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged).",
 			"startsAt":           "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — moves the class, must be paired with endsAt). Must align to the 15-minute grid (SlotGridViolation).",
 			"endsAt":             "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — must be paired with startsAt). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
-			"capacity":           "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted). Carried forward unchanged by ReassignSession.",
-			"priceCents":         "Optional class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; 0 or omitted means a free class. wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account once one exists. Carried forward unchanged by ReassignSession, exactly like name/capacity.",
-			"residentPriceCents": "Optional resident class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays the same priceCents as a standard booker. Carried forward unchanged by ReassignSession, exactly like priceCents.",
+			"capacity":           "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted). ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged.",
+			"priceCents":         "Optional class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; 0 or omitted means a free class. wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account once one exists. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged, exactly like name/capacity.",
+			"residentPriceCents": "Optional resident class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays the same priceCents as a standard booker. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged, exactly like priceCents.",
 			"instructor":         "Optional full vtx.instructor.<NanoID> key leading the session. CreateSession validates it is alive + class=instructor and writes the ledBy link; MUST be listed in ContextHint.Reads when supplied. TombstoneSession's/ReassignSession's standing guard requires it (plus the caller's own identifiedBy binding to it) for a non-operator, instructor-role caller to act on their own class.",
 			"sessionId":          "Optional bare NanoID (no dots / key segments) for the new session vertex. Absent → minted with nanoid.new().",
 			"sessionKey":         "Full vtx.session.<NanoID> key of an existing session. TombstoneSession releases its held studioSlotClaim cells then tombstones it. ReassignSession edits it in place.",
@@ -371,6 +375,21 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 					"cells only the OLD span held, and claims cells only the NEW span needs (StudioConflict on collision " +
 					"with another session). The .schedule aspect's startsAt/endsAt update; name/capacity/priceCents/" +
 					"residentPriceCents/bookings carry forward unchanged. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — grow capacity and reprice a scheduled class",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "capacity": 30, "priceCents": 1800},
+				ExpectedOutcome: "Re-validates capacity in [1, 200] and priceCents >= 0 (same bounds CreateSession " +
+					"enforces), then OCC-conditions the .schedule aspect with the new values — a full class no longer " +
+					"needs TombstoneSession + recreate (which would strand every existing booking) just to add seats " +
+					"or fix a price. name/residentPriceCents/startsAt/endsAt/instructor/bookings/slot claims are " +
+					"untouched. Rejects InvalidArgument on capacity > 200 or a negative price. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — fix a typo'd class name",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "name": "Vinyasa Flow"},
+				ExpectedOutcome: "Rewrites the .schedule aspect's name field only; capacity/priceCents/residentPriceCents/" +
+					"startsAt/endsAt/instructor/bookings/slot claims are untouched. Returns primaryKey.",
 			},
 			{
 				Name:    "ReassignSession — operator moves a class to a different studio",
@@ -511,9 +530,10 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
 			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?, remindAt}. " +
 			"Non-sensitive. Written by " +
-			"CreateSession (mints, priceCents omitted or 0 for a free class), ReassignSession (OCC-conditioned " +
-			"startsAt/endsAt update on a time move; name/capacity/priceCents/residentPriceCents carried forward " +
-			"unchanged, remindAt " +
+			"CreateSession (mints, priceCents omitted or 0 for a free class), ReassignSession (OCC-conditioned; " +
+			"startsAt/endsAt update on a time move, name/capacity/priceCents/residentPriceCents update when the " +
+			"caller supplies them (re-validated with CreateSession's own bounds) else carried forward unchanged, " +
+			"remindAt " +
 			"re-derived), and CreateSessionSeries (mints one per occurrence, same shape as CreateSession's) — all owned " +
 			"by the session vertexType DDL's script; this aspect-type DDL is the step-6 write gate. Declaration-only: " +
 			"no op handler. CreateBooking reads capacity on demand (kv.Read) to bound its seat-claim loop; " +
@@ -2588,8 +2608,23 @@ def execute(state, op):
             fail("InvalidArgument: startsAt and endsAt must be supplied together")
         reschedule = new_starts_raw != None
 
-        if new_instructor == None and not clear_instructor and not reschedule and not studio_changed:
-            fail("InvalidArgument: at least one of newInstructor, clearInstructor, newStudio, or startsAt+endsAt is required")
+        # name/capacity/priceCents/residentPriceCents — edit-if-supplied,
+        # carry-forward-if-omitted, the same optionality shape startsAt/endsAt
+        # already have on this op (required on CreateSession, optional here).
+        # optional_string already treats "" as "no change" (a class always
+        # needs SOME name, so an empty edit reads as omitted, not a blank-out).
+        # capacity's upper bound is checked separately since optional_int only
+        # enforces a floor.
+        new_name = optional_string(p, "name")
+        new_capacity = optional_int(p, "capacity", 1)
+        if new_capacity != None and new_capacity > 200:
+            fail("InvalidArgument: capacity: must be in [1, 200]; got " + str(new_capacity))
+        new_price_cents = optional_int(p, "priceCents", 0)
+        new_resident_price_cents = optional_int(p, "residentPriceCents", 0)
+        editing_schedule = new_name != None or new_capacity != None or new_price_cents != None or new_resident_price_cents != None
+
+        if new_instructor == None and not clear_instructor and not reschedule and not studio_changed and not editing_schedule:
+            fail("InvalidArgument: at least one of newInstructor, clearInstructor, newStudio, startsAt+endsAt, name, capacity, priceCents, or residentPriceCents is required")
 
         mutations = []
 
@@ -2739,16 +2774,25 @@ def execute(state, op):
         # moved (new_starts == cur_starts) it recomputes the same value, so no
         # branch is needed either way.
         new_remind_at = time.rfc3339_add(new_starts, "-24h")
-        new_sched = {"name": sched.data.get("name"), "startsAt": new_starts, "endsAt": new_ends, "capacity": sched.data.get("capacity"), "remindAt": new_remind_at}
-        # priceCents/residentPriceCents carry forward UNCHANGED, exactly like
-        # name/capacity — a session created before either field existed (or
+        new_sched = {
+            "name": new_name if new_name != None else sched.data.get("name"),
+            "startsAt": new_starts, "endsAt": new_ends,
+            "capacity": new_capacity if new_capacity != None else sched.data.get("capacity"),
+            "remindAt": new_remind_at,
+        }
+        # priceCents/residentPriceCents: an explicit edit wins; otherwise carry
+        # forward UNCHANGED — a session created before either field existed (or
         # created free / with no resident rate) simply has none to carry, so
         # the key stays omitted rather than being introduced as null.
         cur_price_cents = sched.data.get("priceCents")
-        if cur_price_cents != None:
+        if new_price_cents != None:
+            new_sched["priceCents"] = new_price_cents
+        elif cur_price_cents != None:
             new_sched["priceCents"] = cur_price_cents
         cur_resident_price_cents = sched.data.get("residentPriceCents")
-        if cur_resident_price_cents != None:
+        if new_resident_price_cents != None:
+            new_sched["residentPriceCents"] = new_resident_price_cents
+        elif cur_resident_price_cents != None:
             new_sched["residentPriceCents"] = cur_resident_price_cents
         mutations.append(make_aspect_upsert_occ(sess_key, "schedule", "sessionSchedule", new_sched, sched.revision))
 

@@ -1525,8 +1525,9 @@ async function cancelOwnClass(se, mine) {
 }
 
 // renderReassignControl appends the front desk's "Reassign" control — sub in
-// or clear the instructor, and/or move the class's time — for a session this
-// staffer's workplace covers. This is deliberately the staff-only path:
+// or clear the instructor, move the class's time, and/or edit its name,
+// capacity, or price — for a session this staffer's workplace covers. This
+// is deliberately the staff-only path:
 // ReassignSession's OTHER grantee, a bound instructor rescheduling their own
 // class, already reaches the op through Facet's "Reschedule class" op-meta
 // self-service surface (packages/wellness-domain/opmetas.go); the gap this
@@ -1561,12 +1562,18 @@ async function renderReassignControl(se, generation) {
     "</select></div>" +
     '<div class="field"><label>New start</label><input type="datetime-local" id="reassign-starts" step="900" /></div>' +
     '<div class="field"><label>New end</label><input type="datetime-local" id="reassign-ends" step="900" /></div>' +
+    '<div class="field"><label>Name</label><input type="text" id="reassign-name" /></div>' +
+    '<div class="field"><label>Capacity</label><input type="number" id="reassign-capacity" min="1" max="200" step="1" /></div>' +
+    '<div class="field"><label>Price ($)</label><input type="number" id="reassign-price" min="0" step="0.01" /></div>' +
     '<button id="reassign-submit">Save</button>' +
     "</div>";
   document.getElementById("roster-body").appendChild(wrap);
 
   const select = document.getElementById("reassign-instructor");
   if (se.instructorKey) select.value = se.instructorKey;
+  document.getElementById("reassign-name").value = se.name || "";
+  document.getElementById("reassign-capacity").value = se.capacity || "";
+  document.getElementById("reassign-price").value = se.priceCents ? (se.priceCents / 100).toFixed(2) : "";
 
   document.getElementById("reassign-toggle").addEventListener("click", () => {
     const form = document.getElementById("reassign-form");
@@ -1589,20 +1596,41 @@ async function renderReassignControl(se, generation) {
 }
 
 // reassignSession submits ReassignSession for the front desk's instructor
-// swap/clear and/or time-move edits above. It carries NO authContext.target
-// and NO `instructor` standing param — that field is the OTHER grantee's
-// binding (a bound instructor acting on their own class, packages/
-// wellness-domain/ddls.go); a staff submit is confined by the workplace walk
-// instead (enforce_workplace, mirroring CreateSession's staff path in this
-// same file). `newInstructor`/`clearInstructor` name the swap itself, which
-// is orthogonal to that standing check.
+// swap/clear, time-move, and/or name/capacity/price edits above. It carries
+// NO authContext.target and NO `instructor` standing param — that field is
+// the OTHER grantee's binding (a bound instructor acting on their own class,
+// packages/wellness-domain/ddls.go); a staff submit is confined by the
+// workplace walk instead (enforce_workplace, mirroring CreateSession's staff
+// path in this same file). `newInstructor`/`clearInstructor` name the swap
+// itself, which is orthogonal to that standing check.
 async function reassignSession(se) {
   const sessId = idOf(se.sessionKey);
   const select = document.getElementById("reassign-instructor");
   const startsAt = toUtcInstant(document.getElementById("reassign-starts").value);
   const endsAt = toUtcInstant(document.getElementById("reassign-ends").value);
+  const nameInput = document.getElementById("reassign-name").value.trim();
+  const capacityInput = document.getElementById("reassign-capacity").value;
+  const priceInput = document.getElementById("reassign-price").value;
 
   const payload = { sessionKey: se.sessionKey, studio: se.studioKey };
+
+  // name/capacity/price: only sent when the field actually changed from the
+  // card's current value — the server-side default for an omitted field is
+  // "carry forward unchanged" (ddls.go's ReassignSession), so an unedited
+  // field must stay absent from the payload rather than round-tripping the
+  // same value back.
+  if (nameInput && nameInput !== se.name) payload.name = nameInput;
+  if (capacityInput !== "") {
+    const capacity = parseInt(capacityInput, 10);
+    if (!Number.isFinite(capacity)) throw new Error("Capacity must be a number.");
+    if (capacity !== se.capacity) payload.capacity = capacity;
+  }
+  if (priceInput !== "") {
+    const priceDollars = parseFloat(priceInput);
+    if (!Number.isFinite(priceDollars) || priceDollars < 0) throw new Error("Price must be a non-negative number.");
+    const priceCents = Math.round(priceDollars * 100);
+    if (priceCents !== (se.priceCents || 0)) payload.priceCents = priceCents;
+  }
   const reads = [se.sessionKey, se.sessionKey + ".schedule"];
   // The atStudio link is required on every branch — require_matching_studio
   // runs before any of the edits below (ddls.go).
@@ -1644,8 +1672,15 @@ async function reassignSession(se) {
   if (se.instructorKey) optionalReads.push(...slotCellKeys(se.instructorKey, se.startsAt, se.endsAt));
   if (finalInstructor) optionalReads.push(...slotCellKeys(finalInstructor, finalStartsAt, finalEndsAt));
 
-  if (payload.clearInstructor === undefined && payload.newInstructor === undefined && payload.startsAt === undefined) {
-    throw new Error("Pick a new instructor or a new time.");
+  if (
+    payload.clearInstructor === undefined &&
+    payload.newInstructor === undefined &&
+    payload.startsAt === undefined &&
+    payload.name === undefined &&
+    payload.capacity === undefined &&
+    payload.priceCents === undefined
+  ) {
+    throw new Error("Pick a new instructor, a new time, or edit the name/capacity/price.");
   }
 
   await opOrThrow(
