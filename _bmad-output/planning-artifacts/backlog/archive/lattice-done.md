@@ -529,3 +529,4 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-07 · `d66cb731` · [identity-domain] erasure Fire B inc 3 — UnbindIdentityCredentials, the bounded credential sweep
 - 2026-08-07 · `df369e13` · [privacy-base] erasure Fire B inc 4 — PurgeIdentityDedupFootprint, the dedup-plane sweep
 - 2026-08-15 · `965a8415` · [Processor] `data.protected`/`data.sensitive` fail-opens CLOSED — mutation gate + a review-found live gap at the `.sensitive` aspect read site, fixed same fire; Loupe sibling filed
+- 2026-08-22 · `0f202d5e` · [bridge/capability-author] NL edit of an installed weaver target — contextRef names the target, adapter files upgradeExisting (first producer); admissible only where the proposal covers the whole package, every silent-change class refused before a vendor call

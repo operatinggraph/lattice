@@ -27,3 +27,4 @@ Rolled from `loupe.md` when its live Done log passed ~25 entries. Full detail is
 - 2026-07-02 · `976a18f` · [Loupe/F2] Graph explorer — faceted/paged list + linkifying renderer + ego-graph hood mode; Core KV tab retired
 - 2026-07-02 · `e6a8a46` · [Loupe/F1] Console shell — hash router + ES-module split + goja logic tier (also closes: static-UI serving test, operator-UI coverage Fire 1)
 - 2026-07-02 · `4b8743f` · [Loupe/deploy] Control planes restored for operator surfaces — `lattice.ctrl.>` grant (write-restriction lockout) + natsperm positive round-trip pin
+- 2026-08-22 · `0f202d5e` · [Loupe] Edit with AI on the target detail — advisory editability verdict, edit label on the review queue, and the demo posture shows Author + Describe submit while the POST still refuses
