@@ -172,8 +172,25 @@ semantics. Its contract:
   Stubs, not unbound names: the sandbox resolves globals at **compile** time, and the pre-pass compiles the
   same module the main pass does. No mutations are emitted; the return value is the entire output. Step 4
   sits inside the OCC retry loop, so a pure derivation recomputes an identical set on every attempt.
+  <!-- 📐 PROPOSED — UNRATIFIED --> **📐 PROPOSED — UNRATIFIED.** `state` and `ddl` are unavailable on the
+  same ground and MUST be bound so that reaching into them raises: the pre-pass runs before hydration, so
+  there is nothing to expose, and reading hydrated state inside a derivation is a read that must be
+  declared rather than a miss answered silently. The surfaces with no error channel (truthiness, identity
+  comparison, `hasattr`) answer exactly as an empty mapping would, so no derivation changes branch.
 - **Validated.** Every returned entry MUST match the Contract #1 key grammar (3-segment vertex, 4-segment
   aspect, 6-segment link); anything else fails the operation closed, naming the derivation.
+- <!-- 📐 PROPOSED — UNRATIFIED --> **📐 PROPOSED — UNRATIFIED. Descriptor contradiction.** A derived entry
+  under `reads` that the operation's OWN descriptor covers under `optionalReads`, and that the envelope did
+  not declare in any class, is a package contradicting itself: its descriptor calls the key
+  absence-tolerant while its derivation demands it be present. The Processor MUST fault the operation
+  closed at step 4 naming the derivation, and MUST NOT demote the derived entry — silently softening a read
+  the DDL's own author demanded fail-closed is the direction the §2.5 authoring rule exists to prevent.
+  *Weakest wins* is unaffected: it governs a key the ENVELOPE declared, and that key still keeps the
+  envelope's disposition, so a submitter who names the key suppresses the fault. The exclusion is the
+  descriptor's own `reads` templates as the Processor admits them (payload-derived and pattern-shaped
+  templates contribute nothing), so it is never addressable from the request. The fault MUST NOT echo the
+  derived key to the submitter: class (g) exists because these keys are ones the submitter cannot express,
+  so naming one in the reply hands the caller the package's derivation over an input of their choosing.
 - **Weakest wins.** A derived entry that collides with a key the envelope already declared keeps the
   **envelope's** disposition — a derived `reads` entry never hardens a declared `optionalReads` key into a
   fail-closed one (that would fault `HydrationMiss` on exactly the dedup branch class (d) exists for).
