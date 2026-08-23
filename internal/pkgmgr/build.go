@@ -849,6 +849,9 @@ func gapActionBody(ga GapActionSpec) map[string]any {
 		}
 		body["reads"] = reads
 	}
+	if len(ga.Enumerations) > 0 {
+		body["enumerations"] = enumerationBodies(ga.Enumerations)
+	}
 	if ga.IssueCode != "" {
 		body["issueCode"] = ga.IssueCode
 	}
@@ -873,6 +876,23 @@ func gapActionBody(ga GapActionSpec) map[string]any {
 		body["actions"] = actions
 	}
 	return body
+}
+
+// enumerationBodies emits a declared kv.Links walk list (Contract #2 §2.5
+// `contextHint.enumerations`) as the `{hub, relation, direction}` objects both
+// engines deserialize. Written out key by key, like every other body in this
+// file, so the emitted wire names are stated here rather than inherited from a
+// struct tag.
+func enumerationBodies(ens []EnumerationSpec) []any {
+	out := make([]any, len(ens))
+	for i, en := range ens {
+		out[i] = map[string]any{
+			"hub":       en.Hub,
+			"relation":  en.Relation,
+			"direction": en.Direction,
+		}
+	}
+	return out
 }
 
 // actionCatalogEntryBody emits one Actions-catalog entry (Contract #10 §10.8
@@ -935,7 +955,7 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 // completionDomains is omitted when empty (it defaults to {subjectType}); a
 // step's guard is omitted when nil. systemOp/userTask emit `operation`;
 // externalTask emits `adapter`/`params`/`replyOp`/`instanceOp`; a systemOp
-// emits `reads`/`optionalReads` — each field is emitted only when set, so the
+// emits `reads`/`optionalReads`/`enumerations` — each field is emitted only when set, so the
 // round-tripped step matches the engine Step shape the validate() admits.
 func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 	steps := make([]any, len(p.Steps))
@@ -961,6 +981,9 @@ func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 		}
 		if len(s.OptionalReads) > 0 {
 			step["optionalReads"] = s.OptionalReads
+		}
+		if len(s.Enumerations) > 0 {
+			step["enumerations"] = enumerationBodies(s.Enumerations)
 		}
 		if len(s.Guard) > 0 {
 			step["guard"] = s.Guard

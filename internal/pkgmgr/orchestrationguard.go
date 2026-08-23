@@ -269,7 +269,7 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q is not a known action (triggerLoom | assignTask | directOp | proposedOp | surface)",
 			targetIdx, targetID, col, ga.Action)
 	}
-	return nil
+	return validateGapEnumerations(targetIdx, targetID, col, ga.Enumerations)
 }
 
 // validateLoomPatterns runs the §10.5 install-time validations on every
@@ -333,6 +333,9 @@ func (def Definition) validateLoomPatterns() error {
 					if err := validateStepReadTemplates(idx, p.PatternID, sIdx, "optionalReads", s.OptionalReads); err != nil {
 						return err
 					}
+					if err := validateStepEnumerations(idx, p.PatternID, sIdx, s.Enumerations); err != nil {
+						return err
+					}
 				}
 			case stepKindExternalTask:
 				if strings.TrimSpace(s.Adapter) == "" {
@@ -376,6 +379,66 @@ func rejectStepReads(idx int, patternID string, sIdx int, s StepSpec, because st
 		if len(f.entries) != 0 {
 			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: %s is a systemOp-only field, not permitted on a %s step (%s)",
 				idx, patternID, sIdx, f.name, s.Kind, because)
+		}
+	}
+	if len(s.Enumerations) != 0 {
+		return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: Enumerations is a systemOp-only field, not permitted on a %s step (%s)",
+			idx, patternID, sIdx, s.Kind, because)
+	}
+	return nil
+}
+
+// validateStepEnumerations checks a systemOp step's declared kv.Links walks
+// (Contract #2 §2.5 class (e)). The hub runs through the same subject-relative
+// grammar as a declared read — it is a key, and the rendered-key charset
+// argument applies to it identically — and the relation/direction pair is held
+// to the shape the Processor's envelope parse enforces, so an install never
+// admits a declaration the Processor would reject terminally on every
+// redelivery. Mirrors loom's validateEnumerations.
+func validateStepEnumerations(idx int, patternID string, sIdx int, ens []EnumerationSpec) error {
+	for i, en := range ens {
+		field := fmt.Sprintf("enumerations[%d].hub", i)
+		if err := validateStepReadTemplates(idx, patternID, sIdx, field, []string{en.Hub}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(en.Relation) == "" {
+			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: enumerations[%d] requires a Relation",
+				idx, patternID, sIdx, i)
+		}
+		if en.Direction != enumerationDirectionOut && en.Direction != enumerationDirectionIn {
+			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: enumerations[%d] Direction must be %q or %q, got %q",
+				idx, patternID, sIdx, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
+		}
+	}
+	return nil
+}
+
+// Link directions a declared enumeration may name (Contract #2 §2.5): the hub
+// is either the link's source or its target. The Processor rejects any other
+// value at envelope parse, so install holds the same two.
+const (
+	enumerationDirectionOut = "out"
+	enumerationDirectionIn  = "in"
+)
+
+// validateGapEnumerations checks a gap's declared kv.Links walks against the
+// same envelope-parse shape (hub and relation non-empty, direction out|in).
+// The hub's row.<column> template is resolved by the engine at dispatch time
+// against a row this installer cannot see, so only its presence is checkable
+// here — the same division validateGapAction already keeps for Reads.
+func validateGapEnumerations(targetIdx int, targetID, col string, ens []EnumerationSpec) error {
+	for i, en := range ens {
+		if strings.TrimSpace(en.Hub) == "" {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] requires a Hub",
+				targetIdx, targetID, col, i)
+		}
+		if strings.TrimSpace(en.Relation) == "" {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] requires a Relation",
+				targetIdx, targetID, col, i)
+		}
+		if en.Direction != enumerationDirectionOut && en.Direction != enumerationDirectionIn {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q enumerations[%d] Direction must be %q or %q, got %q",
+				targetIdx, targetID, col, i, enumerationDirectionOut, enumerationDirectionIn, en.Direction)
 		}
 	}
 	return nil

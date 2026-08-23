@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // TestLoomPatterns_ErasureSpineIsOrderedAndDeclared pins the four things about
@@ -192,3 +194,83 @@ func TestLoomPatterns_DeclaredReadsMatchWhatTheScriptsRead(t *testing.T) {
 // package rather than one synthetic case. The installer and the engine validate
 // the same grammar in lockstep, which is what keeps a pattern from installing
 // cleanly and then running dark at CDC load.
+
+// erasureSweepWalks is the class-(e) kv.Links walk set each sweep op runs, as
+// the op's own script runs it: UnbindIdentityCredentials drains `boundTo`
+// inbound then outbound, and PurgeIdentityDedupFootprint drains `indexes`
+// inbound then `duplicateOf` outbound and inbound. Stated once, so the two
+// dispatchers are compared against the ops rather than against each other —
+// two dispatchers agreeing on a wrong set is a failure this would otherwise
+// pass.
+//
+// Which arm a given commit drains depends on what is left, so each op's walk
+// set is the UNION of its arms, not whichever branch ran.
+var erasureSweepWalks = map[string][][2]string{
+	"UnbindIdentityCredentials": {
+		{"boundTo", "in"},
+		{"boundTo", "out"},
+	},
+	"PurgeIdentityDedupFootprint": {
+		{"indexes", "in"},
+		{"duplicateOf", "out"},
+		{"duplicateOf", "in"},
+	},
+}
+
+// TestDeclaredEnumerations_AgreeAtBothDispatchers pins the class-(e)
+// declarations (Contract #2 §2.5) an op carries on its envelope. Both
+// dispatchers submit the SAME two sweep ops — the Loom pattern's steps 3 and 4
+// during a live erasure, the Weaver target's two sweep gaps when the residue
+// lens finds leftovers — so an op that declares its walks under one dispatcher
+// and not the other publishes a different envelope for identical work, and
+// whichever half is missing is invisible to anyone reading the wire.
+//
+// The hub differs by dispatcher and that is the point of checking both: a step
+// names the subject through the instance-subject template grammar, a gap names
+// it through the violation row's entityKey column. Relation and direction are
+// literals and must match exactly, in order.
+func TestDeclaredEnumerations_AgreeAtBothDispatchers(t *testing.T) {
+	check := func(t *testing.T, where, operation, wantHub string, got []pkgmgr.EnumerationSpec) {
+		t.Helper()
+		want := erasureSweepWalks[operation]
+		if len(got) != len(want) {
+			t.Errorf("%s %s declares %d enumerations, want %d (%v)", where, operation, len(got), len(want), want)
+			return
+		}
+		for i, w := range want {
+			if got[i].Hub != wantHub {
+				t.Errorf("%s %s enumerations[%d].Hub = %q, want %q", where, operation, i, got[i].Hub, wantHub)
+			}
+			if got[i].Relation != w[0] || got[i].Direction != w[1] {
+				t.Errorf("%s %s enumerations[%d] = (%s, %s), want (%s, %s)",
+					where, operation, i, got[i].Relation, got[i].Direction, w[0], w[1])
+			}
+		}
+	}
+
+	seen := map[string]int{}
+	for _, s := range LoomPatterns()[0].Steps {
+		if _, sweeps := erasureSweepWalks[s.Operation]; !sweeps {
+			if len(s.Enumerations) != 0 {
+				t.Errorf("step %s declares enumerations but runs no kv.Links walk: %v", s.Operation, s.Enumerations)
+			}
+			continue
+		}
+		seen[s.Operation]++
+		check(t, "pattern step", s.Operation, "subject", s.Enumerations)
+	}
+
+	for col, ga := range WeaverTargets()[0].Gaps {
+		if _, sweeps := erasureSweepWalks[ga.Operation]; !sweeps {
+			continue
+		}
+		seen[ga.Operation]++
+		check(t, "gap "+col, ga.Operation, "row.entityKey", ga.Enumerations)
+	}
+
+	for op := range erasureSweepWalks {
+		if seen[op] != 2 {
+			t.Errorf("%s is declared at %d dispatchers, want both the pattern step and the target gap", op, seen[op])
+		}
+	}
+}

@@ -32,16 +32,18 @@ type opEnvelope struct {
 	// rather than guess, so an unpinned dispatch against it would fail closed
 	// (MissingClass) forever.
 	Class string `json:"class,omitempty"`
-	// ContextHint carries the OCC reads the dispatched op's DDL hydrates. Weaver
-	// sets it from the plan's declared read-set (the bare vertex keys the op's
-	// script validates); omitted for read-free ops.
+	// ContextHint carries the OCC reads the dispatched op's DDL hydrates plus
+	// the link walks it declares. Weaver sets it from the plan's declared
+	// read-set (the bare vertex keys the op's script validates) and declared
+	// enumerations; omitted when the plan declares neither.
 	ContextHint *contextHint `json:"contextHint,omitempty"`
 	AuthContext *authContext `json:"authContext,omitempty"`
 }
 
 type contextHint struct {
-	Reads         []string `json:"reads,omitempty"`
-	OptionalReads []string `json:"optionalReads,omitempty"`
+	Reads         []string         `json:"reads,omitempty"`
+	OptionalReads []string         `json:"optionalReads,omitempty"`
+	Enumerations  []GapEnumeration `json:"enumerations,omitempty"`
 }
 
 type authContext struct {
@@ -79,7 +81,10 @@ func newActuator(conn *substrate.Conn, lane, actor string, logger *slog.Logger) 
 // hydrates); empty for read-free ops. optionalReads is its
 // ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
 // reads, e.g. assignTask's stable task dedup key); empty when the op reads none.
-func (a *actuator) submit(ctx context.Context, requestID, operationType, class string, payload map[string]any, authTarget string, reads, optionalReads []string) error {
+// enumerations is its ContextHint.Enumerations (§2.5 class (e) — the kv.Links
+// walks the op's script runs, hubs already resolved to concrete keys); empty
+// when the op walks no links.
+func (a *actuator) submit(ctx context.Context, requestID, operationType, class string, payload map[string]any, authTarget string, reads, optionalReads []string, enumerations []GapEnumeration) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("weaver: marshal op payload: %w", err)
@@ -95,8 +100,8 @@ func (a *actuator) submit(ctx context.Context, requestID, operationType, class s
 	if class != "" {
 		env.Class = class
 	}
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &contextHint{Reads: reads, OptionalReads: optionalReads}
+	if len(reads) > 0 || len(optionalReads) > 0 || len(enumerations) > 0 {
+		env.ContextHint = &contextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: enumerations}
 	}
 	if authTarget != "" {
 		env.AuthContext = &authContext{Target: authTarget}

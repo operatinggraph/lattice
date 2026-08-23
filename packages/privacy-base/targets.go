@@ -79,14 +79,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // step-4 prefetch, nothing more — so the three DDL doc comments' "declared in
 // contextHint.optionalReads by every dispatcher" overstates what THIS
 // dispatcher does; the marker and its siblings still resolve correctly, just
-// lazily. The five kv.Links walks each op runs have NO dispatcher declaration
-// at all, and that is not a design choice available to this playbook to make
-// either way — GapActionSpec carries no Enumerations field
-// (internal/pkgmgr/definition.go), and the Weaver's own wire envelope only
-// ever carries a contextHint.reads/optionalReads pair
-// (internal/weaver/actuator.go's contextHint struct), with no third slot for
-// a bounded-enumeration declaration. A Weaver directOp cannot express one; the
-// walks are live kv.Links calls regardless of anything this file writes.
+// lazily.
+//
+// Enumerations on the two sweep gaps declare the five class-(e) kv.Links walks
+// those ops run (Contract #2 §2.5): `boundTo` inbound + outbound for
+// UnbindIdentityCredentials, and `indexes` inbound plus `duplicateOf` outbound
+// + inbound for PurgeIdentityDedupFootprint — the same five each script
+// annotates `# read-posture: (e)`, and the same five the identityErasure
+// pattern's steps 3 and 4 declare, so the op carries an identical walk set
+// whichever dispatcher submits it. The hub of every walk is `row.entityKey`,
+// the erased identity itself, resolved from the violation row exactly like the
+// Reads entry above it. The declaration is metadata: each walk stays a bounded
+// paged live kv.Links call inside the script, and the Processor validates the
+// shape and otherwise ignores it. What it buys is that a reader of the playbook
+// — and of the envelope — sees which relations these ops traverse without
+// reading the Starlark.
 //
 // No gap declares a retry cap. A maxretries_<g> row column looked like the
 // mechanism for capping a stuck sweep's re-dispatch, but the realized
@@ -127,12 +134,21 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation: "UnbindIdentityCredentials",
 					Params:    map[string]string{"subjectKey": "row.entityKey"},
 					Reads:     []string{"row.entityKey"},
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.entityKey", Relation: "boundTo", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "boundTo", Direction: "out"},
+					},
 				},
 				"missing_dedupResidue": {
 					Action:    "directOp",
 					Operation: "PurgeIdentityDedupFootprint",
 					Params:    map[string]string{"subjectKey": "row.entityKey"},
 					Reads:     []string{"row.entityKey"},
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.entityKey", Relation: "indexes", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "duplicateOf", Direction: "out"},
+						{Hub: "row.entityKey", Relation: "duplicateOf", Direction: "in"},
+					},
 				},
 				"missing_vaultDestruction": {
 					Action:        "surface",
