@@ -311,10 +311,11 @@ func sweepCredentialResidue(ctx context.Context, conn *substrate.Conn, actor str
 		// later linked to another), and both leave a live plaintext row naming an
 		// erased person. Checking the owner alone would leave half the class
 		// silently skipped by this driver and refused NotErased by the op.
-		erased, err := ownerWritePathClosed(ctx, conn, owner)
+		ownerErased, err := ownerWritePathClosed(ctx, conn, owner)
 		if err != nil {
 			return report, err
 		}
+		erased := ownerErased
 		if !erased {
 			erased, err = ownerWritePathClosed(ctx, conn, cred)
 			if err != nil {
@@ -330,7 +331,11 @@ func sweepCredentialResidue(ctx context.Context, conn *substrate.Conn, actor str
 			report.Submitted++
 			continue
 		}
-		if err := submitTombstoneOrphanedIndex(ctx, conn, actor, cred, owner, key, linkKey, report); err != nil {
+		// The owner's own answer is carried separately from the disjunction,
+		// because it is what decides whether the owner's credentialBinding
+		// array is part of this submit's declared read set — see
+		// submitTombstoneOrphanedIndex.
+		if err := submitTombstoneOrphanedIndex(ctx, conn, actor, cred, owner, key, linkKey, ownerErased, report); err != nil {
 			return report, err
 		}
 	}
@@ -383,7 +388,42 @@ func ownerWritePathClosed(ctx context.Context, conn *substrate.Conn, identityKey
 	return false, nil
 }
 
-func submitTombstoneOrphanedIndex(ctx context.Context, conn *substrate.Conn, actor, cred, owner, indexKey, linkKey string, report *credentialResidueReport) error {
+// optionalReadsFor builds the absence-tolerant half of the declared read set:
+// both endpoints' erasure-discriminator keys, the boundTo link, and — only when
+// the owner's own write path is still OPEN — the owner's credentialBinding
+// array.
+//
+// That last one is conditional, and it is the one declaration here that is not
+// merely an optimisation. credentialBinding is a SENSITIVE aspect, so step 4
+// decrypts every declared instance of it under the named owner's DEK before the
+// script runs (internal/processor/sensitive_decrypt.go). An owner erased by a
+// shredded key — the inbound residue shape, which is the population this whole
+// sweep exists for — has no usable DEK, so declaring their array would fault the
+// operation at hydrate instead of retiring the index. The script reaches that
+// read only on the outbound arm, where the owner is a live third party, so the
+// declaration is scoped to exactly the arm that performs it.
+//
+// The classification is this driver's read of the corpus a moment earlier, and
+// an owner sealed or shredded in the window between that read and hydration
+// turns this declaration into a hydration fault: loud, terminal for that one
+// row, and self-clearing on the next pass, which re-reads the owner and no
+// longer declares the key. That is the fail-closed direction — the alternative
+// is a submit that quietly decrypts an erased person's aspect.
+func optionalReadsFor(owner, cred, linkKey string, ownerErased bool) []string {
+	reads := []string{
+		owner + ".erasureRequested",
+		owner + ".piiKey",
+		cred + ".erasureRequested",
+		cred + ".piiKey",
+		linkKey,
+	}
+	if !ownerErased {
+		reads = append(reads, owner+".credentialBinding")
+	}
+	return reads
+}
+
+func submitTombstoneOrphanedIndex(ctx context.Context, conn *substrate.Conn, actor, cred, owner, indexKey, linkKey string, ownerErased bool, report *credentialResidueReport) error {
 	requestID, err := substrate.NewNanoID()
 	if err != nil {
 		return fmt.Errorf("generate requestId: %w", err)
@@ -407,24 +447,18 @@ func submitTombstoneOrphanedIndex(ctx context.Context, conn *substrate.Conn, act
 		// This op's DDL declares no derive_reads, so the submitter declares.
 		// The index vertex goes in reads, fail-closed: this driver read the key
 		// off the scan moments ago, so its absence at hydrate is a corpus
-		// changing underfoot, not a branch to tolerate. The three gate keys go
-		// in optionalReads, where absence is the ordinary case — and it is the
-		// declaration alone that is optional, not the read: the script reads all
-		// three through kv.Read, so an undeclared one falls through to a live
+		// changing underfoot, not a branch to tolerate. The gate keys go in
+		// optionalReads, where absence is the ordinary case — and it is the
+		// declaration alone that is optional, not the read: the script reads
+		// them through kv.Read, so an undeclared one falls through to a live
 		// Core KV GET rather than reading absent, and both gates refuse either
 		// way. Declaring them buys the step-4 snapshot, nothing more.
 		// Both endpoints' discriminator keys, because the op's gate is symmetric
 		// in them: the erased subject is the owner in the inbound residue shape
 		// and the credential in the outbound one.
 		ContextHint: &processor.ContextHint{
-			Reads: []string{indexKey},
-			OptionalReads: []string{
-				owner + ".erasureRequested",
-				owner + ".piiKey",
-				cred + ".erasureRequested",
-				cred + ".piiKey",
-				linkKey,
-			},
+			Reads:         []string{indexKey},
+			OptionalReads: optionalReadsFor(owner, cred, linkKey, ownerErased),
 		},
 	}
 	reply, err := submitOp(ctx, conn, env)

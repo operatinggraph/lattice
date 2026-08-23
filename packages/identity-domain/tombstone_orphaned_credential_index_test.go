@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,15 @@ const (
 	// actorKey disagrees with the key that hashes to it.
 	tombOrphanBogusCredKey = "vtx.identity.BBtmbBogusCredHJKMNP"
 	tombOrphanOtherCredKey = "vtx.identity.BBtmbthrCredHJKMNPQR"
+
+	// Filler credentials for the owner-array vectors. They exist only as
+	// entries inside a live owner's credentialBinding array — the rewrite reads
+	// the array and never dereferences an entry, so no vertex is needed behind
+	// them, and their survival is exactly what proves the filter is a filter and
+	// not a truncation.
+	tombOrphanCredAKey = "vtx.identity.BBtmbCredAHJKMNPQRST"
+	tombOrphanCredBKey = "vtx.identity.BBtmbCredBHJKMNPQRST"
+	tombOrphanCredCKey = "vtx.identity.BBtmbCredCHJKMNPQRST"
 )
 
 // tombOrphanCapDoc grants TombstoneOrphanedCredentialIndex on the DEFAULT lane
@@ -119,7 +129,7 @@ func tombOrphanBoundToKey(credentialActorKey, ownerIdentityKey string) string {
 // The gates hold with no help from this declaration: both read through kv.Read,
 // so an undeclared key falls through to a live Core KV GET rather than reading
 // absent. Declaring them only buys the step-4 snapshot.
-func tombOrphanEnv(t *testing.T, actorKey, credKey, ownerKey, reqID string) *processor.OperationEnvelope {
+func tombOrphanEnv(t *testing.T, actorKey, credKey, ownerKey, reqID string, extraOptionalReads ...string) *processor.OperationEnvelope {
 	t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"credentialActorKey": credKey,
@@ -139,15 +149,103 @@ func tombOrphanEnv(t *testing.T, actorKey, credKey, ownerKey, reqID string) *pro
 		AuthContext:   &processor.AuthContext{Target: ownerKey},
 		ContextHint: &processor.ContextHint{
 			Reads: []string{credentialIndexKey(credKey)},
-			OptionalReads: []string{
+			OptionalReads: append([]string{
 				ownerKey + ".erasureRequested",
 				ownerKey + ".piiKey",
 				credKey + ".erasureRequested",
 				credKey + ".piiKey",
 				tombOrphanBoundToKey(credKey, ownerKey),
-			},
+			}, extraOptionalReads...),
 		},
 	}
+}
+
+// submitTombOrphanDeclaringOwnerArray is the OUTBOUND dispatcher shape: the
+// driver classified the owner as live, so it also declares the owner's
+// credentialBinding array (cmd/lattice/identity/credential_residue.go's
+// optionalReadsFor). Under that declaration the array is served from the step-4
+// snapshot and the rewrite carries the snapshot's own revision, which is the
+// posture production runs; the bare submitTombOrphan above is the other
+// dispatcher shape, where the same read falls through to a live Core KV GET.
+//
+// The declaration is scoped to this arm and cannot be hoisted into
+// tombOrphanEnv: credentialBinding is sensitive, so step 4 decrypts every
+// declared instance of it under the named owner's key, and the inbound vectors
+// name an owner whose key is destroyed.
+func submitTombOrphanDeclaringOwnerArray(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, credKey, ownerKey, reqLabel string,
+	wantOutcome processor.MessageOutcome) string {
+	t.Helper()
+	reqID := testutil.GenReqID(reqLabel)
+	testutil.PublishOp(t, conn, tombOrphanEnv(t, tombOrphanActorKey, credKey, ownerKey, reqID,
+		ownerKey+".credentialBinding"))
+	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
+	return reqID
+}
+
+// seedOwnerBindingArray writes a live owner's credentialBinding aspect with the
+// given singular fallback pair and array, encrypted exactly as the Processor's
+// step-6.5 hook would have. The singular pair is passed separately from the
+// array because the two disagree in the real corpus — a pre-array record has
+// only the pair, and the promote-or-omit branch turns on whether the pair names
+// the credential being removed.
+func seedOwnerBindingArray(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	ownerKey, singularActor, singularBoundAt string, credentials []map[string]any) {
+	t.Helper()
+	data := map[string]any{}
+	if singularActor != "" {
+		data["actorKey"] = singularActor
+		data["boundAt"] = singularBoundAt
+	}
+	if credentials != nil {
+		entries := make([]any, 0, len(credentials))
+		for _, c := range credentials {
+			entries = append(entries, c)
+		}
+		data["credentials"] = entries
+	}
+	seedSensitiveAspect(t, ctx, conn, ownerKey, "credentialBinding", data)
+}
+
+// bindingEntry is the array element shape (ddls.go's credentialBinding).
+func bindingEntry(actorKey, boundAt string) map[string]any {
+	return map[string]any{"actorKey": actorKey, "boundAt": boundAt}
+}
+
+// ownerArrayActorKeys returns the owner's credentials array as the ordered list
+// of actor keys it names. Order is asserted, not just membership: the array is
+// a rewrite of an existing list, and a filter that reorders it is a different
+// operation from the one this op claims to perform.
+func ownerArrayActorKeys(t *testing.T, ctx context.Context, conn *substrate.Conn, ownerKey string) []string {
+	t.Helper()
+	data := readDecryptedAspectData(t, ctx, conn, ownerKey, "credentialBinding")
+	raw, ok := data["credentials"].([]any)
+	if !ok {
+		t.Fatalf("%s.credentialBinding has no credentials array: %+v", ownerKey, data)
+	}
+	out := make([]string, 0, len(raw))
+	for i, e := range raw {
+		m, ok := e.(map[string]any)
+		if !ok {
+			t.Fatalf("%s.credentialBinding.credentials[%d] is not an object: %+v", ownerKey, i, e)
+		}
+		k, _ := m["actorKey"].(string)
+		out = append(out, k)
+	}
+	return out
+}
+
+// aspectRevision is the only readable evidence for an aspect the test cannot
+// decrypt — an erased owner's array, whose key is destroyed. An unchanged
+// revision is the assertion that nothing wrote it; reading its body is not an
+// option, which is the whole reason the inbound arm declines to rewrite it.
+func aspectRevision(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) uint64 {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	return entry.Revision
 }
 
 // submitTombOrphanAs publishes one envelope and drives it to wantOutcome.
@@ -288,7 +386,7 @@ func TestTombstoneOrphanedCredentialIndex_BareShredResidue_Tombstoned(t *testing
 	assertDocLive(t, ctx, conn, credentialIndexKey(tombOrphanOtherCredKey),
 		"a bystander's index vertex was named by nothing in this submit and must be untouched")
 	assertDocLive(t, ctx, conn, uKey,
-		"the op writes exactly one key — the index vertex — and must not have touched the owner's own vertex")
+		"the inbound arm writes exactly one key — the index vertex — and must not have touched the erased owner's own vertex")
 }
 
 // TestTombstoneOrphanedCredentialIndex_SealedOwner_Tombstoned covers the
@@ -333,7 +431,14 @@ func TestTombstoneOrphanedCredentialIndex_SealedOwner_Tombstoned(t *testing.T) {
 // destroyed identity, naming the erased person and answering "who are they now"
 // with no decrypt. The owner here is deliberately a LIVE, unerased person and is
 // asserted so — the acceptance can only come from the credential arm of the
-// gate, and the owner's own vertex must survive untouched.
+// gate.
+//
+// And because that owner is live, retiring the index is only half of it: their
+// credentialBinding array — the sign-in-methods list the account page renders —
+// still names the erased credential, and an entry there resolves to nothing and
+// belongs to nobody. The batch rewrites it, so this asserts BOTH keys: the index
+// stops resolving, and the owner's array stops naming the erased person while
+// their own surviving credential is left exactly where it was.
 func TestTombstoneOrphanedCredentialIndex_OutboundResidue_Tombstoned(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTombOrphanEnv(t)
@@ -347,19 +452,477 @@ func TestTombstoneOrphanedCredentialIndex_OutboundResidue_Tombstoned(t *testing.
 	erasedCred, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbOutC"))
 	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
 
+	// The owner's sign-in methods: their own credential, plus the erased one.
+	// The singular fallback pair names the OWN credential, so this vector
+	// exercises the filter without the promotion branch.
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
+		[]map[string]any{
+			bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
+			bindingEntry(erasedCred, "2026-05-02T00:00:00Z"),
+		})
+
 	// The residue itself: the index at the hash of the erased subject's own key,
 	// recording them as the live owner's credential. No boundTo link exists —
 	// the pre-narrowing shred's outbound arm tombstoned it, and a hard-removed
 	// link reads absent, which the op treats as the same answer.
 	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
 
-	reqID := submitTombOrphan(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbOutDo", processor.OutcomeAccepted)
+	reqID := submitTombOrphanDeclaringOwnerArray(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbOutDo", processor.OutcomeAccepted)
 
 	assertTombstoned(t, ctx, conn, credentialIndexKey(erasedCred),
 		"the outbound residue names the erased person in the clear exactly as the inbound shape does, and must stop resolving too")
 	assertTrackerEvent(t, ctx, conn, reqID, "identity.unbound")
 	assertDocLive(t, ctx, conn, liveOwner,
-		"the op writes exactly one key — the index vertex — and the live owner's own vertex is not it")
+		"the owner's own identity vertex is not this op's to touch — only their credentialBinding aspect is")
+	assertDocLive(t, ctx, conn, liveOwner+".credentialBinding",
+		"the array is rewritten, never retired: the owner still has sign-in methods")
+
+	got := ownerArrayActorKeys(t, ctx, conn, liveOwner)
+	want := []string{tombOrphanCredAKey}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("live owner's credentials = %v, want %v — the erased credential must be gone from the "+
+			"owner's sign-in methods and their own must survive", got, want)
+	}
+	after := readDecryptedAspectData(t, ctx, conn, liveOwner, "credentialBinding")
+	if singular, _ := after["actorKey"].(string); singular != tombOrphanCredAKey {
+		t.Fatalf("live owner's singular actorKey = %q, want %q untouched — the removed credential was not the "+
+			"one the pre-array fallback named, so nothing about it should have moved", singular, tombOrphanCredAKey)
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_OutboundResidue_KeepsTheOtherCredentials
+// is the filter's own control. An owner with several sign-in methods must lose
+// exactly the erased one, and the survivors must come back in the order they
+// were in: this is a rewrite of an existing list, and a body that truncated,
+// reordered, or kept only the head would satisfy a membership-only assertion
+// while silently destroying the rest of a live person's account access.
+//
+// The erased credential sits in the MIDDLE deliberately — a filter that dropped
+// the first or last element would pass a two-element fixture by luck.
+func TestTombstoneOrphanedCredentialIndex_OutboundResidue_KeepsTheOtherCredentials(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-outbound-multi")
+
+	liveOwner, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbMultO"))
+	assertPiiKeyUnshredded(t, ctx, conn, liveOwner)
+	erasedCred, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbMultC"))
+	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
+
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
+		[]map[string]any{
+			bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
+			bindingEntry(tombOrphanCredBKey, "2026-05-02T00:00:00Z"),
+			bindingEntry(erasedCred, "2026-05-03T00:00:00Z"),
+			bindingEntry(tombOrphanCredCKey, "2026-05-04T00:00:00Z"),
+		})
+	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
+
+	submitTombOrphanDeclaringOwnerArray(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbMultDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(erasedCred),
+		"the residue row is retired on this vector exactly as on the two-credential one")
+
+	got := ownerArrayActorKeys(t, ctx, conn, liveOwner)
+	want := []string{tombOrphanCredAKey, tombOrphanCredBKey, tombOrphanCredCKey}
+	if len(got) != len(want) {
+		t.Fatalf("live owner's credentials = %v, want %v — one entry removed, three kept", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("live owner's credentials = %v, want %v (differs at index %d) — the survivors must keep "+
+				"their order; a reordering rewrite is a different operation from a filter", got, want, i)
+		}
+	}
+	after := readDecryptedAspectData(t, ctx, conn, liveOwner, "credentialBinding")
+	for _, field := range []string{"actorKey", "boundAt"} {
+		if _, present := after[field]; !present {
+			t.Fatalf("live owner's singular %s went missing — the removed credential was not the one it named, "+
+				"so the pre-array fallback must be left exactly as it was", field)
+		}
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_OutboundResidue_PromotesSingularHolder
+// covers the branch the array alone does not reach. The credentialBinding aspect
+// carries a pre-array singular actorKey/boundAt pair that readers still fall
+// back to, and when the credential being removed IS that pair, leaving it in
+// place would keep the fallback pointing at a sign-in method that no longer
+// resolves and belongs to an erased person.
+//
+// The promotion target is the first survivor, and its boundAt must travel with
+// it: a promoted actorKey carrying the erased credential's timestamp would say
+// the survivor was bound on a day it was not.
+func TestTombstoneOrphanedCredentialIndex_OutboundResidue_PromotesSingularHolder(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-outbound-promote")
+
+	liveOwner, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbPromO"))
+	assertPiiKeyUnshredded(t, ctx, conn, liveOwner)
+	erasedCred, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbPromC"))
+	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
+
+	// The singular pair names the ERASED credential — it was the owner's first.
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, erasedCred, "2026-05-01T00:00:00Z",
+		[]map[string]any{
+			bindingEntry(erasedCred, "2026-05-01T00:00:00Z"),
+			bindingEntry(tombOrphanCredBKey, "2026-05-02T00:00:00Z"),
+		})
+	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
+
+	submitTombOrphanDeclaringOwnerArray(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbPromDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(erasedCred),
+		"the residue row is retired on this vector too")
+
+	after := readDecryptedAspectData(t, ctx, conn, liveOwner, "credentialBinding")
+	if singular, _ := after["actorKey"].(string); singular != tombOrphanCredBKey {
+		t.Fatalf("live owner's singular actorKey = %q, want the promoted survivor %q — a fallback still naming "+
+			"the erased credential resolves to nothing", singular, tombOrphanCredBKey)
+	}
+	if boundAt, _ := after["boundAt"].(string); boundAt != "2026-05-02T00:00:00Z" {
+		t.Fatalf("live owner's singular boundAt = %q, want the promoted survivor's own %q — the timestamp must "+
+			"travel with the key it describes", boundAt, "2026-05-02T00:00:00Z")
+	}
+	got := ownerArrayActorKeys(t, ctx, conn, liveOwner)
+	if len(got) != 1 || got[0] != tombOrphanCredBKey {
+		t.Fatalf("live owner's credentials = %v, want [%s]", got, tombOrphanCredBKey)
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_OutboundResidue_OmitsSingularWhenNoneRemain
+// is the promotion branch with nothing to promote to, and the assertion is about
+// what is NOT written.
+//
+// The removed credential was both the array's only entry and the singular
+// fallback. Writing null there would be worse than leaving it: the aspect's
+// schema types actorKey as a string, and every fallback reader tests the field's
+// PRESENCE, so a null passes the test and hands them a non-key. Both fields are
+// omitted instead.
+//
+// This shape is reachable because this op has no last-credential guard, by
+// design — a credential belonging to an erased person must stop authenticating
+// whether or not it was the owner's last, exactly as UnbindIdentityCredentials
+// treats the same case.
+func TestTombstoneOrphanedCredentialIndex_OutboundResidue_OmitsSingularWhenNoneRemain(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-outbound-omit")
+
+	liveOwner, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbOmitO"))
+	assertPiiKeyUnshredded(t, ctx, conn, liveOwner)
+	erasedCred, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbOmitC"))
+	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
+
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, erasedCred, "2026-05-01T00:00:00Z",
+		[]map[string]any{bindingEntry(erasedCred, "2026-05-01T00:00:00Z")})
+	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
+
+	submitTombOrphanDeclaringOwnerArray(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbOmitDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(erasedCred), "the residue row is retired")
+
+	after := readDecryptedAspectData(t, ctx, conn, liveOwner, "credentialBinding")
+	for _, field := range []string{"actorKey", "boundAt"} {
+		v, present := after[field]
+		if present {
+			t.Fatalf("live owner's singular %s is present as %#v with nothing left to promote — it must be "+
+				"OMITTED, and a null in particular would satisfy every presence-testing fallback reader "+
+				"while handing them a non-key", field, v)
+		}
+	}
+	if got := ownerArrayActorKeys(t, ctx, conn, liveOwner); len(got) != 0 {
+		t.Fatalf("live owner's credentials = %v, want empty", got)
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_OutboundResidue_ArrayAlreadyClear is the
+// rewrite arm's idempotence, and it is separate from the op's own
+// CredentialIndexAlreadyClear refusal: here the INDEX is genuinely residue and
+// must be retired, while the owner's array already fails to name the erased
+// credential — an UnlinkCredential got there first, or the row was residue the
+// array never named.
+//
+// The array must then not be written at all. Re-emitting an unchanged body would
+// burn a mutation, bump the aspect's revision on every pass, and — because the
+// rewrite is revision-pinned — turn a harmless re-run into a source of conflicts
+// for every other writer of that array.
+func TestTombstoneOrphanedCredentialIndex_OutboundResidue_ArrayAlreadyClear(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-outbound-idem")
+
+	liveOwner, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbClrO"))
+	assertPiiKeyUnshredded(t, ctx, conn, liveOwner)
+	erasedCred, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbClrC"))
+	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
+
+	// The owner's array names their own credentials and nothing else.
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
+		[]map[string]any{
+			bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
+			bindingEntry(tombOrphanCredBKey, "2026-05-02T00:00:00Z"),
+		})
+	before := aspectRevision(t, ctx, conn, liveOwner+".credentialBinding")
+
+	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
+	submitTombOrphanDeclaringOwnerArray(t, ctx, conn, cp, cons, erasedCred, liveOwner, "TmbClrDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(erasedCred),
+		"the index is residue whatever the owner's array says, and retiring it is unconditional on this arm")
+	if after := aspectRevision(t, ctx, conn, liveOwner+".credentialBinding"); after != before {
+		t.Fatalf("the owner's array was rewritten (revision %d -> %d) with nothing to remove from it; "+
+			"an unchanged array must produce no mutation at all", before, after)
+	}
+	got := ownerArrayActorKeys(t, ctx, conn, liveOwner)
+	want := []string{tombOrphanCredAKey, tombOrphanCredBKey}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("live owner's credentials = %v, want %v untouched", got, want)
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_InboundResidue_OwnerArrayUntouched is the
+// OPPOSITE guarantee, and the reason the rewrite is gated on the owner rather
+// than applied wherever an array exists.
+//
+// Here the erased subject is the OWNER. Their credentialBinding array is
+// sensitive and their PII key is destroyed, so it is already erased by key
+// destruction — there is nothing to tidy and nothing that could read it. A
+// rewrite arm that fired on "the array exists" would try to decrypt it, and the
+// Vault answers ErrKeyShredded: the operation would fail outright rather than
+// retire the index, taking down the exact population this op was built for.
+//
+// The assertion is the aspect's REVISION, because its body is unreadable by
+// construction. That is the honest evidence available for a key nobody can open.
+func TestTombstoneOrphanedCredentialIndex_InboundResidue_OwnerArrayUntouched(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-inbound-array")
+
+	// A claimed identity has a real credentialBinding array naming the claiming
+	// actor, written by ClaimIdentity through the real encrypt hook.
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "TmbInArr")
+	retractBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+	before := aspectRevision(t, ctx, conn, uKey+".credentialBinding")
+	mutatePiiKey(t, ctx, conn, uKey, "piiKey", true, false)
+
+	submitTombOrphan(t, ctx, conn, cp, cons, consumerActorKey, uKey, "TmbInArrDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(consumerActorKey),
+		"the inbound residue is retired exactly as before — the owner's array plays no part in it")
+	if after := aspectRevision(t, ctx, conn, uKey+".credentialBinding"); after != before {
+		t.Fatalf("the ERASED owner's credentialBinding was written (revision %d -> %d); an erased person's "+
+			"sensitive aspect is theirs to lose to key destruction, and this op must not write to it", before, after)
+	}
+}
+
+// TestTombstoneOrphanedCredentialIndex_MarkerClosedOwner_ArrayUntouched is the
+// case that separates the arm discriminator from the precedent's.
+//
+// UnbindIdentityCredentials guards its own rewrite on the owner's piiKey being
+// shredded, which is the only closure it can meet. This op's gate is wider: an
+// owner can also be closed by a live erasureRequested marker with their key
+// still intact — sealed for erasure, array still perfectly readable and
+// writable. A rewrite guarded on shredded-ness alone would fire there.
+//
+// It must not. That owner is not a third party being tidied up after; they are a
+// subject mid-erasure, and this op holds a scope:any operator grant, so writing
+// a fresh sensitive aspect on them would drive a write straight through the gate
+// whose entire purpose is to refuse one. The array is decryptable here, so this
+// asserts the body and not merely the revision.
+func TestTombstoneOrphanedCredentialIndex_MarkerClosedOwner_ArrayUntouched(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "tomborphan-marker-array")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "TmbMkArr")
+	retractBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+
+	// The marker alone — the key is intact and asserted so, which is what makes
+	// this vector different from the shredded one and what makes a rewrite here
+	// mechanically possible rather than merely wrong.
+	assertPiiKeyUnshredded(t, ctx, conn, uKey)
+	sealForErasure(t, ctx, conn, uKey)
+
+	before := aspectRevision(t, ctx, conn, uKey+".credentialBinding")
+	submitTombOrphan(t, ctx, conn, cp, cons, consumerActorKey, uKey, "TmbMkArrDo", processor.OutcomeAccepted)
+
+	assertTombstoned(t, ctx, conn, credentialIndexKey(consumerActorKey),
+		"a live erasureRequested marker closes the write path on its own, so the index is still retired")
+	if after := aspectRevision(t, ctx, conn, uKey+".credentialBinding"); after != before {
+		t.Fatalf("a marker-sealed owner's credentialBinding was written (revision %d -> %d); the erasure "+
+			"write-path gate refuses a fresh erasable representation of a sealed subject, and this op may "+
+			"not be the one verb that walks through it", before, after)
+	}
+	if got := ownerArrayActorKeys(t, ctx, conn, uKey); len(got) != 1 || got[0] != consumerActorKey {
+		t.Fatalf("sealed owner's credentials = %v, want [%s] untouched", got, consumerActorKey)
+	}
+}
+
+// interposingValidator runs hook exactly once, on the first
+// TombstoneOrphanedCredentialIndex to reach step 6, and then delegates. Step 6
+// sits AFTER the script has read state and decided its mutations and BEFORE step
+// 8 takes its own prior-document read and commits, so a write made from the hook
+// lands in precisely the window a concurrent writer of a shared vertex occupies.
+// Nothing else reproduces that window deterministically: the two ends of it are
+// inside one synchronous commit-path call.
+//
+// Keyed on the operation type so the same pipeline can drive the fixture's own
+// create and claim ops without tripping it.
+type interposingValidator struct {
+	inner processor.Validator
+	once  sync.Once
+	hook  func()
+}
+
+func (v *interposingValidator) Validate(ctx context.Context, env *processor.OperationEnvelope,
+	result processor.ScriptResult, state processor.HydratedState) error {
+	if env.OperationType == "TombstoneOrphanedCredentialIndex" {
+		v.once.Do(v.hook)
+	}
+	return v.inner.Validate(ctx, env, result, state)
+}
+
+// newTombOrphanRacingPipeline is testutil.CapabilityPipeline with the validator
+// wrapped, so a test can commit a competing write to a key this op read. Built
+// here rather than added to the shared harness because the interposition is
+// meaningful for exactly one property in this package.
+func newTombOrphanRacingPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	durable string, hook func()) (*processor.CommitPath, jetstream.Consumer) {
+	t.Helper()
+	logger := testutil.TestLogger()
+	metrics := &processor.Metrics{}
+	cache := processor.NewDDLCache(conn, testutil.HarnessCoreBucket, logger)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("ddl cache refresh: %v", err)
+	}
+	authz, err := processor.SelectAuthorizerArgs(processor.SelectAuthorizerOpts{
+		Mode:             processor.AuthModeCapability,
+		Reader:           conn,
+		CapabilityBucket: testutil.HarnessCapBucket,
+		Logger:           logger,
+	})
+	if err != nil {
+		t.Fatalf("SelectAuthorizerArgs: %v", err)
+	}
+	v := testutil.TestVault(t)
+	hydrator := processor.NewHydratorWithCache(conn, testutil.HarnessCoreBucket, cache, logger)
+	hydrator.Vault = v
+	hydrator.PrimordialActors = testutil.PrimordialActors(t)
+	cp := processor.NewCommitPath(processor.Deps{
+		Conn:        conn,
+		CoreBucket:  testutil.HarnessCoreBucket,
+		HealthKV:    testutil.HarnessHealthBucket,
+		Authorizer:  authz,
+		Hydrator:    hydrator,
+		Executor:    processor.NewExecutor(processor.NewStarlarkRunner(0, 0), logger),
+		Validator:   &interposingValidator{inner: processor.NewValidator(cache, conn, testutil.HarnessCoreBucket, logger), hook: hook},
+		Committer:   processor.NewCommitter(conn, testutil.HarnessCoreBucket, cache, logger, time.Now),
+		Metrics:     metrics,
+		Heartbeater: processor.NewHealthHeartbeater(conn, testutil.HarnessHealthBucket, "tomborphan-"+durable, 10*time.Second, metrics, logger),
+		Logger:      logger,
+		Vault:       v,
+		DDLs:        cache,
+	})
+	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
+		StreamName:     testutil.HarnessOpsStream,
+		Durable:        durable,
+		FilterSubjects: []string{"ops.default"},
+		AckWait:        5 * time.Second,
+	}, logger)
+	if err != nil {
+		t.Fatalf("EnsureConsumer: %v", err)
+	}
+	return cp, cons
+}
+
+// TestTombstoneOrphanedCredentialIndex_OutboundResidue_ConcurrentOwnerWriteConflicts
+// is the shared-vertex property, and it is the one thing the precedent this
+// rewrite copies does not have.
+//
+// The owner's credentialBinding array has three other writers —
+// CompleteCredentialLink appends, UnlinkCredential removes, MergeIdentity unions
+// — and none of them is excluded by anything this op checks: they act on the
+// LIVE owner, whose write path is open by construction on the outbound arm. The
+// script reads the array, filters it, and hands step 8 a whole replacement body,
+// so a writer landing between the read and the commit has its entry silently
+// erased by a body that never saw it. A credential the person just linked would
+// simply cease to exist, with nothing left to notice.
+//
+// The op is submitted WITHOUT declaring the array, which is the shape where the
+// hazard is real: an undeclared key is not in the step-4 snapshot, so
+// commit_path.go's applyHydratedRevisions supplies no condition, and step 8's own
+// prior-document read happens AFTER the script decided — it would read the
+// racing writer's revision and condition on it, satisfying the CAS and
+// committing the clobber. The script's own expectedRevision, taken from the read
+// it actually filtered, is the only thing that turns that into a conflict.
+//
+// The competing write is a bare Core KV Put rather than a real
+// CompleteCredentialLink: what the CAS compares is a revision, so any writer of
+// that key reproduces it, and driving a second op through a commit path already
+// mid-commit is not something the harness can do.
+func TestTombstoneOrphanedCredentialIndex_OutboundResidue_ConcurrentOwnerWriteConflicts(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTombOrphanEnv(t)
+
+	// The competing writer, firing once, inside the window: it appends a third
+	// credential the way a CompleteCredentialLink would. The owner and credential
+	// keys are not known until the fixture ops run, so the hook closes over
+	// pointers the setup below fills in.
+	var liveOwner, erasedCred string
+	raced := make(chan struct{})
+	cp, cons := newTombOrphanRacingPipeline(t, ctx, conn, "tomborphan-race", func() {
+		seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
+			[]map[string]any{
+				bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
+				bindingEntry(erasedCred, "2026-05-02T00:00:00Z"),
+				bindingEntry(tombOrphanCredCKey, "2026-05-03T00:00:00Z"),
+			})
+		close(raced)
+	})
+
+	liveOwner, _ = createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbRaceO"))
+	assertPiiKeyUnshredded(t, ctx, conn, liveOwner)
+	erasedCred, _ = createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("TmbRaceC"))
+	mutatePiiKey(t, ctx, conn, erasedCred, "piiKey", true, false)
+
+	seedOwnerBindingArray(t, ctx, conn, liveOwner, tombOrphanCredAKey, "2026-05-01T00:00:00Z",
+		[]map[string]any{
+			bindingEntry(tombOrphanCredAKey, "2026-05-01T00:00:00Z"),
+			bindingEntry(erasedCred, "2026-05-02T00:00:00Z"),
+		})
+	seedCredentialIndexAs(t, ctx, conn, erasedCred, erasedCred, liveOwner)
+
+	env := tombOrphanEnv(t, tombOrphanActorKey, erasedCred, liveOwner, testutil.GenReqID("TmbRaceDo"))
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	<-raced
+
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a write landing on the owner's array between this op's read "+
+			"and its commit must conflict the batch, not be overwritten by a body that never saw it", outcome)
+	}
+	if reply.Error == nil || reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("rejected with %+v, want %s — the rewrite must carry the revision it read, so the CAS is "+
+			"against the state the filter was computed from and not against whatever step 8 finds later",
+			reply.Error, processor.ErrCodeRevisionConflict)
+	}
+
+	// The racing writer's entry survived, and so did the index: a conflicted
+	// batch commits nothing, which is what makes the operator's re-run correct.
+	got := ownerArrayActorKeys(t, ctx, conn, liveOwner)
+	want := []string{tombOrphanCredAKey, erasedCred, tombOrphanCredCKey}
+	if len(got) != len(want) {
+		t.Fatalf("live owner's credentials = %v, want %v — the conflicted batch must have written nothing", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("live owner's credentials = %v, want %v (differs at index %d)", got, want, i)
+		}
+	}
+	assertDocLive(t, ctx, conn, credentialIndexKey(erasedCred),
+		"the whole batch is atomic: a conflict on the owner's array must leave the index standing too, so the "+
+			"operator's re-run meets a residue that has not moved")
 }
 
 // TestTombstoneOrphanedCredentialIndex_SelfLoop_Rejected pins the script's OWN
