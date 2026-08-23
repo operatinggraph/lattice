@@ -1318,9 +1318,18 @@ func unionTemplates(a, b []string) []string {
 //
 // A duplicate operationType is UNIONED, never picked. Unlike buildByCommand's
 // ambiguity guard — which drops a candidate and thereby fails CLOSED, because
-// losing a class inference rejects the op — dropping a floor fails OPEN. The
-// union is the safe direction: it demotes every key any claimant declares
-// optional, which can only widen absence-tolerance, never harden a key back.
+// losing a class inference rejects the op — dropping a floor fails OPEN. For
+// the ENVELOPE's own declaration the union is therefore the safe direction: it
+// demotes every key any claimant declares optional, which widens
+// absence-tolerance and never hardens a key back.
+//
+// For a key a DDL's `derive_reads` produces it does more than widen. A derived
+// REQUIRED read the floor covers is refused outright (mergeDerivedReads's
+// DeriveReadsFloorContradiction), so a peer claimant's optional template
+// reaching another package's derived key faults that operation terminally.
+// Still the fail-closed direction — a derivation and a floor disagreeing about
+// one key is a contradiction, not a preference — but it is a rejection rather
+// than a softening, so the union is not purely permissive.
 //
 // Roots are visited in key order so the union's ORDER, not merely its
 // membership, is a function of the root set alone. Map iteration would leave a

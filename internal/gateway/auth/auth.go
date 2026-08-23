@@ -427,6 +427,13 @@ func (v *Verifier) Verify(tokenString string) (VerifiedActor, error) {
 		}
 		// Length-framed so no (iss', sub') != (iss, sub) can produce the same
 		// input string, even with ':' inside either value.
+		//
+		// derived-key: the actor's opaque subject — the identity of the CALLER,
+		// derived from the IdP's (iss, sub) claim pair per Contract #11 §3.2.
+		// Not a declared read and not derivable by any package: it is minted
+		// during token verification, before an envelope exists, and it is the
+		// input the whole operation plane is authorized against rather than a
+		// key any DDL could compute from a payload.
 		actorSubject = substrate.SHA256NanoID(fmt.Sprintf("idpsub:%d:%s:%s", len(iss), iss, sub))
 	case ModeNanoID:
 		if !substrate.IsValidNanoID(sub) {

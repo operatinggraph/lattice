@@ -686,6 +686,10 @@ func TestVerify_OpaqueDerivesGoldenVector(t *testing.T) {
 	const sub = "110169484474386276334"
 	const frozenActorID = "vtx.identity.1FF5tdoN7GEGfDedQZ95"
 
+	// derived-key: recomputes the opaque actor subject Verify mints, so the
+	// frozen literal below is checked against the live primitive rather than
+	// against a second hardcoded copy of itself. Not a declared read — an
+	// actor subject, derived from claims no package sees.
 	expected := IdentityKeyPrefix + substrate.SHA256NanoID(fmt.Sprintf("idpsub:%d:%s:%s", len(iss), iss, sub))
 	if expected != frozenActorID {
 		t.Fatalf("golden vector drifted: substrate.SHA256NanoID derivation = %q, contract's frozen literal = %q", expected, frozenActorID)
@@ -866,6 +870,9 @@ func TestVerify_BindingResolvesByVerifyingKid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify(opaque-kid): %v", err)
 	}
+	// derived-key: the opaque actor subject the opaque-mode kid must bind to,
+	// proving per-kid binding resolves. Not a declared read — an actor
+	// subject, derived from claims no package sees.
 	wantOpaqueSubject := substrate.SHA256NanoID(fmt.Sprintf("idpsub:%d:%s:%s", len(testIss), testIss, testSub))
 	if gotOpaque.Subject != wantOpaqueSubject {
 		t.Errorf("opaque-kid Subject = %q, want derived %q", gotOpaque.Subject, wantOpaqueSubject)

@@ -392,6 +392,11 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // reclaimed, while the canonical bytes are spared. An infra read error is
 // treated as "referenced" — never delete on uncertainty (the next pass retries).
 func (m *Manager) referencedByLiveVertex(ctx context.Context, info substrate.ObjectInfo) bool {
+	// derived-key: the content-addressed object id, a function of the stored
+	// object's own digest and nothing else. Not a declared read: the GC pass
+	// submits no operation here, it walks the object store and asks whether a
+	// live vertex names each stored blob, so there is no envelope for a
+	// package's derive_reads to contribute to.
 	oid := substrate.SHA256NanoID("object:" + info.Digest)
 	contentKey := "vtx.object." + oid + ".content"
 	entry, err := m.cfg.Conn.KVGet(ctx, m.cfg.CoreKVBucket, contentKey)

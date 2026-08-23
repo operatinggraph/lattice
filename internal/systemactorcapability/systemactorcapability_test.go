@@ -393,6 +393,9 @@ func TestSystemActorCapability_FourEnginePathsAuthorize(t *testing.T) {
 	// grant), then detach as the objmgr system actor (the gated path) ---
 	info, err := h.conn.ObjectPut(h.ctx, bootstrap.CoreObjectsBucket, "sac-store", strings.NewReader("bytes"), 1<<20)
 	require.NoError(t, err)
+	// derived-key: the content-addressed object id of the uploaded bytes, so
+	// the DetachObject leg can name the vertex AttachObject created. Not a
+	// declared read — an object id, derived from the store's own digest.
 	oid := substrate.SHA256NanoID("object:" + info.Digest)
 	ar := h.submitOpAccepted("AttachObject", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"digest": info.Digest, "size": info.Size, "contentType": "text/plain",

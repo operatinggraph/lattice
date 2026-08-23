@@ -143,6 +143,9 @@ func TestManager_Reconcile(t *testing.T) {
 	// canonical: a live vertex names exactly this storeName → kept.
 	putBytes(t, ctx, conn, "canon")
 	digCanon, _ := conn.ObjectGetInfo(ctx, "core-objects", "canon")
+	// derived-key: the content-addressed object id of the bytes just stored,
+	// so the fixture can seed the vertex the GC pass must find. Not a declared
+	// read — an object id, derived from a digest the test itself produced.
 	oidCanon := substrate.SHA256NanoID("object:" + digCanon.Digest)
 	seedVertex(t, ctx, conn, "vtx.object."+oidCanon, false, nil)
 	contentDoc := func(storeName string, deleted bool) []byte {

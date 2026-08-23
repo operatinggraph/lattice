@@ -417,8 +417,14 @@ var (
 	// yields a DIFFERENT id and cannot forge a key any script probes. Banning it
 	// would flag every Contract #4 requestId derivation in the tree, which is
 	// the annotate-the-noise failure that stops a default-deny gate being read.
-	derivedKeyCall  = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
-	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
+	derivedKeyCall = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
+	// derivedKeySymbol matches either symbol as a bare identifier, word-bounded
+	// on BOTH sides so a longer name that merely contains one
+	// (TestSHA256NanoID_Golden, NanoIDFromPCGSeed) is not a hit. Used to catch
+	// the form derivedKeyCall cannot see: taking the function as a VALUE and
+	// calling it through the binding on some other line.
+	derivedKeySymbol = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\b`)
+	derivedKeyShape  = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 
 	// grantChangePostureImport matches the import spec for the capabilityread
 	// package, capturing any local alias. A gate whose whole job is
@@ -1015,25 +1021,21 @@ func scanSource(path string, data []byte) []finding {
 	if nanoidScoped {
 		nanoidAt = annotationSpans(strings.Split(string(data), "\n"), nanoidAlphabetShape)
 	}
-	// derivedKeyScoped — G2 bans the derivation at SUBMITTER call sites, so it
-	// is scoped to everything outside internal/. internal/ is where the
-	// primitive itself lives (substrate defines it, the Processor exposes it to
-	// scripts, Loupe-adjacent managers consume it); packages/ is the DDL side,
-	// which is precisely where a derivation is supposed to happen.
 	// derivedKeyScoped — G2 bans the derivation at SUBMITTER call sites. The
-	// excluded trees are the ones that legitimately OWN the primitive:
-	// internal/substrate defines it, internal/processor exposes it to scripts,
-	// and packages/ is the DDL side, which is precisely where a derivation is
-	// supposed to happen. scripts/lint-*.go are excluded because their own
-	// self-test fixtures are string literals containing the banned call.
+	// exclusions are exactly two kinds, and no wider: the narrow ownership
+	// allowlist (derivationOwners — the trees that DEFINE or EXPOSE the
+	// primitive, each carrying its own reason) and packages/, the DDL side,
+	// which is precisely where a derivation is supposed to happen.
+	// scripts/lint-*.go are excluded because their own self-test fixtures are
+	// string literals containing the banned call.
 	//
 	// scripts/ is otherwise IN scope: seed/demo scripts submit real operations,
 	// and one of them (seed-showcase) carried a live hand-ported derivation that
-	// a blanket scripts/ exclusion hid. The internal/ exclusion is broader than
-	// this gate's purpose warrants — internal/gateway and internal/objectmanager
-	// are submitters too — and is filed as its own board row rather than widened
-	// here, since it needs annotations on legitimate sites this fire does not own.
-	derivedKeyScoped := !strings.HasPrefix(slash, "internal/") && !strings.HasPrefix(slash, "packages/") &&
+	// a blanket scripts/ exclusion hid. internal/ is in scope for the same
+	// reason: internal/gateway and internal/objectmanager are submitters, and a
+	// tree-wide boolean over internal/ amnestied them for holding the same
+	// import as the package that defines the primitive.
+	derivedKeyScoped := !derivationOwned(slash) && !strings.HasPrefix(slash, "packages/") &&
 		!strings.HasPrefix(slash, "scripts/lint-")
 	var derivedKeyLines []string
 	if derivedKeyScoped {
@@ -2144,6 +2146,54 @@ func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) 
 	}
 }
 
+// derivationOwner is one tree excluded from the G2 derived-key ban because it
+// OWNS the primitive rather than consuming it. A path alone is not an
+// exemption: each entry states why that tree is where the derivation lives.
+type derivationOwner struct {
+	prefix string
+	reason string
+}
+
+// derivationOwners — the only packages outside packages/ that may call
+// SHA256NanoID / NanoIDFromPCG without a `// derived-key:` annotation.
+//
+// Each entry names ONE package, and covers only that package's own files —
+// never its subpackages (see derivationOwned). The reasons below are
+// file-shaped for a reason: they are about derive.go and starlark_builtins.go,
+// and a subpackage of either tree is an ordinary consumer that happens to sit
+// beneath the definition. internal/processor alone has a dozen subpackages, so
+// a subtree exemption would silently amnesty far more code than any reason here
+// can account for — and several consumers (gateway, objectmanager) are
+// submitters whose derivations are exactly what G2 exists to hold to an
+// individually re-checkable reason.
+var derivationOwners = []derivationOwner{
+	{
+		prefix: "internal/substrate/",
+		reason: "defines the primitive — derive.go IS SHA256NanoID and NanoIDFromPCG, and derive_test.go is their golden-vector proof. A gate over the definition would demand the definition justify itself to itself.",
+	},
+	{
+		prefix: "internal/processor/",
+		reason: "exposes the primitive to Starlark — starlark_builtins.go wires crypto.sha256NanoID and nanoid.new onto substrate, so the package's derive_reads can compute the class-(g) keys G2 pushes derivations toward. This is the sanctioned computer of a derived read, not a submitter.",
+	},
+}
+
+// derivationOwned reports whether path is a DIRECT member of a package that
+// owns the derivation primitive: under the entry's prefix with no further "/"
+// in what remains. A subpackage (internal/processor/opwire/wire.go) is not
+// owned, and neither is a sibling whose name merely starts the same way —
+// "internal/substrateX/f.go" fails the prefix, which ends in the separator.
+func derivationOwned(path string) bool {
+	for _, o := range derivationOwners {
+		if !strings.HasPrefix(path, o.prefix) {
+			continue
+		}
+		if !strings.Contains(path[len(o.prefix):], "/") {
+			return true
+		}
+	}
+	return false
+}
+
 // checkDerivedKey is the G2 call-site ban
 // (client-ceremony-op-descriptors-design.md §6): default-deny a
 // content-addressed id derivation in a submitter, with an explicit
@@ -2172,9 +2222,24 @@ func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) 
 // _test.go files are in scope deliberately: a test is exactly where a deleted
 // re-port would be reintroduced, and an exempted test suite is a hole the
 // gate's own clean-tree claim would not survive.
+// A second form is caught alongside the call: taking either symbol as a
+// FUNCTION VALUE (`f := substrate.SHA256NanoID`, a struct-literal field, an
+// argument, a return) and calling it through that binding somewhere the call
+// pattern cannot see. It is default-denied on the same terms and takes the same
+// annotation, because the derivation still happens — one level of indirection
+// away from the reason that has to justify it.
 func checkDerivedKey(path string, ln int, lines []string) []finding {
 	line := lines[ln-1]
-	if isCommentLine(line) || !derivedKeyCall.MatchString(line) {
+	if isCommentLine(line) {
+		return nil
+	}
+	form := ""
+	switch {
+	case derivedKeyCall.MatchString(line):
+		form = "call"
+	case derivedKeyValueTake(line):
+		form = "value"
+	default:
 		return nil
 	}
 	switch derivedKeyReason(lines, ln-1) {
@@ -2183,7 +2248,63 @@ func checkDerivedKey(path string, ln int, lines []string) []finding {
 	case reasonMissing:
 		return []finding{{file: path, line: ln, msg: "derived-key: declaration carries no reason — name what this derives and why it is not a declared read the owning package should compute"}}
 	}
+	if form == "value" {
+		return []finding{{file: path, line: ln, msg: "derived-key: undeclared derivation taken as a function VALUE — binding SHA256NanoID/NanoIDFromPCG to a variable, field, argument or return moves the call to a line this gate cannot match, which is the whole reason the ban is written at the call site. Call it where the reason for it lives, or declare `// derived-key: <what it derives and why the package cannot>` here"}}
+	}
 	return []finding{{file: path, line: ln, msg: "derived-key: undeclared content-addressed id derivation in a submitter — a key derived client-side from a payload is a class-(g) declared read the owning DDL's `derive_reads` should compute (Contract #2 §2.5); a hand-ported derivation is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"}}
+}
+
+// derivedKeyValueTake reports whether line names either banned symbol WITHOUT
+// an immediate "(" — the function-value form.
+//
+// It runs over the line's code only, with string literals and any trailing
+// comment blanked (maskGoLiterals). That masking is deliberately NOT applied to
+// derivedKeyCall: a hand-ported derivation embedded in a Go string is still a
+// derivation that has to explain itself, whereas a bare symbol NAME appears in
+// ordinary prose — a t.Fatalf message saying which primitive drifted, a comment
+// naming the builtin — and flagging those would be the annotate-the-noise
+// failure that stops a default-deny gate from being read.
+func derivedKeyValueTake(line string) bool {
+	code := maskGoLiterals(line)
+	for _, m := range derivedKeySymbol.FindAllStringIndex(code, -1) {
+		if m[1] >= len(code) || code[m[1]] != '(' {
+			return true
+		}
+	}
+	return false
+}
+
+// maskGoLiterals replaces the CONTENTS of interpreted, raw and rune literals
+// with spaces and drops any trailing line comment, leaving offsets unchanged so
+// a match index still points at the original column. It reads one line in
+// isolation, so a raw string spanning lines is masked only on its opening line;
+// that is a conservative direction for a default-deny gate — an unmasked
+// continuation line can only ever produce a finding to answer, never a silent
+// pass.
+func maskGoLiterals(line string) string {
+	out := []byte(line)
+	inQuote := byte(0)
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		switch {
+		case inQuote != 0:
+			if c == '\\' && inQuote != '`' && i+1 < len(out) {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				continue
+			}
+			if c == inQuote {
+				inQuote = 0
+				continue
+			}
+			out[i] = ' '
+		case c == '"' || c == '`' || c == '\'':
+			inQuote = c
+		case c == '/' && i+1 < len(out) && out[i+1] == '/':
+			return string(out[:i])
+		}
+	}
+	return string(out)
 }
 
 type derivedKeyVerdict int
@@ -2524,8 +2645,68 @@ func selfTest() []string {
 			"\t// derived-key:\n" +
 				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n",
 			"declaration carries no reason"},
-		{"the derived-key gate is scoped off internal/", "internal/objectmanager/gc.go",
-			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
+		{"an undeclared derivation in internal/ is denied — internal/ is not exempt", "internal/objectmanager/gc.go",
+			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"an undeclared derivation in internal/gateway/ is denied", "internal/gateway/whoami.go",
+			"\tindexKey := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		// The annotation marker sits on the FIRST of three contiguous comment
+		// lines, the shape every real annotation in internal/gateway has. That
+		// is this case's unique kill: it is the only derived-key case that dies
+		// if the walk up the comment block stops short of the block's top.
+		{"a declared derivation in internal/gateway/ passes", "internal/gateway/whoami.go",
+			"\t// derived-key: the identity index key, mirroring identity-domain's\n" +
+				"\t// normalize_email, because the package's version is Starlark source\n" +
+				"\t// text with no Go entry point for the gateway to call.\n" +
+				"\tindexKey := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n", ""},
+		{"a reasonless declaration in internal/gateway/ is denied", "internal/gateway/whoami.go",
+			"\t// derived-key:\n" +
+				"\tindexKey := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
+			"declaration carries no reason"},
+		{"internal/substrate owns the primitive and is exempt", "internal/substrate/derive.go",
+			"\treturn NanoIDFromPCG(pcg, NanoIDLength)\n", ""},
+		{"internal/substrate's tests are exempt with it", "internal/substrate/derive_test.go",
+			"\tgot := SHA256NanoID(s)\n", ""},
+		{"internal/processor exposes the primitive to Starlark and is exempt", "internal/processor/starlark_builtins.go",
+			"\treturn starlarklib.String(substrate.SHA256NanoID(string(s))), nil\n", ""},
+		{"a SUBPACKAGE of an owner is NOT exempt", "internal/processor/opwire/wire.go",
+			"\tk := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"a subpackage of internal/substrate is NOT exempt either", "internal/substrate/keys/derive.go",
+			"\tk := \"vtx.identityindex.\" + SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"a subpackage of an owner may still declare its reason", "internal/processor/opwire/wire.go",
+			"\t// derived-key: a requestId echo, not a key any script reads\n" +
+				"\tk := substrate.SHA256NanoID(\"req:\" + id)\n", ""},
+		{"a package whose name merely EXTENDS an owner's is not exempt", "internal/substrateX/derive.go",
+			"\treturn NanoIDFromPCG(pcg, NanoIDLength)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"taking the derivation as a variable value is denied", "cmd/some-app/keys.go",
+			"\tvar derivFn = substrate.SHA256NanoID\n",
+			"taken as a function VALUE"},
+		{"taking it as a struct-literal field is denied", "cmd/some-app/keys.go",
+			"\tb := box{f: substrate.SHA256NanoID}\n",
+			"taken as a function VALUE"},
+		{"passing it as an argument is denied", "cmd/some-app/keys.go",
+			"\tregister(\"idx\", substrate.SHA256NanoID)\n",
+			"taken as a function VALUE"},
+		{"returning it is denied", "cmd/some-app/keys.go",
+			"\treturn substrate.NanoIDFromPCG\n",
+			"taken as a function VALUE"},
+		{"a value take may declare its reason like any other", "cmd/some-app/keys.go",
+			"\t// derived-key: object id minter handed to the store, not a declared read\n" +
+				"\tvar derivFn = substrate.SHA256NanoID\n", ""},
+		{"a value take in an owner package is exempt with it", "internal/substrate/derive.go",
+			"\tvar derivFn = SHA256NanoID\n", ""},
+		{"the symbol NAME inside a string literal is not a value take", "cmd/some-app/keys_test.go",
+			"\tt.Fatalf(\"golden vector drifted: substrate.SHA256NanoID derivation = %q\", got)\n", ""},
+		{"the symbol NAME in a trailing comment is not a value take", "cmd/some-app/keys.go",
+			"\tk := indexKey(e) // mirrors substrate.SHA256NanoID\n", ""},
+		{"an identifier ENDING in the symbol is not a value take", "cmd/some-app/keys.go",
+			"\tv := legacySHA256NanoID\n", ""},
+		{"an identifier STARTING with the symbol is not a value take", "cmd/some-app/keys.go",
+			"\tSHA256NanoIDCache = nil\n", ""},
 		{"the derived-key gate is scoped off packages/", "packages/objects-base/ddls.go",
 			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
 		{"the derived-key gate covers _test.go under cmd/", "cmd/some-app/objects_test.go",

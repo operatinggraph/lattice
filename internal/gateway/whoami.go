@@ -104,7 +104,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	resp := whoamiResponse{
 		ActorID:            actor.ActorID,
 		ResolvedActorID:    resolvedActor,
-		CredentialIndexKey: "vtx.credentialindex." + substrate.SHA256NanoID(actor.ActorID),
+		CredentialIndexKey: CredentialIndexKey(actor.ActorID),
 	}
 
 	if s.rolesAnchors != nil {
@@ -128,15 +128,67 @@ func (s *Server) probeExistingIdentityHint(ctx context.Context, actor auth.Verif
 	if s.identityIndexHint == nil || actor.VerifiedEmail == "" {
 		return false
 	}
-	normalizedEmail := strings.ToLower(strings.TrimSpace(actor.VerifiedEmail))
-	if normalizedEmail == "" {
+	indexKey, ok := EmailIdentityIndexKey(actor.VerifiedEmail)
+	if !ok {
 		return false
 	}
-	indexKey := "vtx.identityindex." + substrate.SHA256NanoID("email:"+normalizedEmail)
 	identityKey, found, err := s.identityIndexHint.Lookup(ctx, indexKey)
 	if err != nil {
 		s.logger.Warn("gateway: identity-index-hint lookup failed", "actor", actor.ActorID, "error", err)
 		return false
 	}
 	return found && identityKey != actor.ActorID
+}
+
+// CredentialIndexKey returns the credentialindex vertex key that records which
+// business identity an authenticated actor's credential is bound to. It backs
+// the `credentialIndexKey` field of GET /v1/actor, whose stated purpose — let a
+// browser declare the dedup read on ClaimIdentity / CompleteCredentialLink —
+// no longer holds: identity-domain's `derive_reads` declares that key for both
+// ops itself (packages/identity-domain/ddls.go), so no client has to.
+//
+// The actor key is already a Contract #1 key, so it is hashed as-is: no
+// normalization, matching identity-domain's credential_index_key.
+func CredentialIndexKey(actorKey string) string {
+	// derived-key: the credentialindex vertex key for an actor, the same value
+	// identity-domain's `credential_index_key(actor_key)` computes. It is not a
+	// declared read the gateway should defer to the package for, because it is
+	// not a declared read at all any more — `derive_reads` supersedes the
+	// purpose this field was added for, no caller in the tree consumes the
+	// field, and client-ceremony-op-descriptors-design.md §A2 rejects
+	// generalizing the gateway-derives direction it was the sole precedent for.
+	// What survives is a legacy field on a public wire response, kept because
+	// removing it is a wire-visible change and a separate decision, and kept
+	// honest by TestCredentialIndexKeyAgreesWithIdentityDomain
+	// (packages/identity-domain/gateway_agreement_test.go), which drives a real
+	// ceremony through the real Starlark and fails if the two stop matching.
+	return "vtx.credentialindex." + substrate.SHA256NanoID(actorKey)
+}
+
+// EmailIdentityIndexKey normalizes a verified email claim the way
+// identity-domain normalizes a contact and returns the identityindex vertex key
+// an identity carrying that email is indexed under. ok is false when the claim
+// normalizes to nothing, which is the same answer the package's normalizer
+// gives (None) and is never a key.
+//
+// The caller must only ever pass an email the AUTH PLANE verified, never
+// client-supplied input: the key is an existence oracle for whoever can choose
+// its input.
+func EmailIdentityIndexKey(rawEmail string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(rawEmail))
+	if normalized == "" {
+		return "", false
+	}
+	// derived-key: the identityindex vertex key for a normalized email, the
+	// same value identity-domain's `identity_index_key("email",
+	// normalize_email(raw))` computes (packages/identity-domain/ddls.go). The
+	// gateway cannot defer to the package: the probe is a direct P5 lens read
+	// answered inside GET /v1/actor with no operation in flight, and the
+	// package's normalizer is Starlark source text with no Go entry point to
+	// call. The normalization is duplicated here in Go, so
+	// TestEmailIdentityIndexKeyAgreesWithIdentityDomain
+	// (packages/identity-domain/gateway_agreement_test.go) drives raw inputs
+	// through the real Starlark and fails the moment either side's trimming,
+	// lowercasing or prefix changes.
+	return "vtx.identityindex." + substrate.SHA256NanoID("email:"+normalized), true
 }

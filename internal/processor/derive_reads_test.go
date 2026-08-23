@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,7 +319,7 @@ def derive_reads(op):
 func TestDeriveReads_CeilingCountsDistinctKeys(t *testing.T) {
 	t.Parallel()
 	base := declaredReads{Reads: []string{deriveTestKeyA}}
-	merged, err := mergeDerivedReads(base, derivedReads{OptionalReads: []string{deriveTestKeyA, deriveTestKeyB}}, "rid")
+	merged, err := mergeDerivedReads(base, derivedReads{OptionalReads: []string{deriveTestKeyA, deriveTestKeyB}}, nil, "rid")
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -498,5 +499,555 @@ def derive_reads(op):
 	}
 	if len(state.Context.KnownAbsent) != 0 || len(state.Context.RequiredAbsent) != 0 {
 		t.Fatalf("nothing should have been declared: %v / %v", state.Context.KnownAbsent, state.Context.RequiredAbsent)
+	}
+}
+
+// TestDeriveReads_StateAndDDLFailClosed is the determinism rule applied to the
+// two MAPPING globals, and it needs stating separately from the module stubs
+// because a mapping degrades where a module faults. An empty dict ANSWERS
+// every question the pre-pass cannot honestly answer — `state.get(k)` is None,
+// `k in state` is False, `len(state)` is 0 — so a derivation reaching for
+// hydrated state would derive a WRONG read set with nothing on the wire to say
+// so, where `kv.Read` is loud about the same reach.
+//
+// Every access form is pinned because each is a DIFFERENT interpreter path and
+// a type can close one while leaving another silent: subscript resolves
+// through Mapping.Get, membership through Container.Has (the interpreter's
+// Mapping arm for `in` discards Get's error), the accessors through
+// HasAttrs.Attr.
+func TestDeriveReads_StateAndDDLFailClosed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, expr string }{
+		{"state[k]", `state["` + deriveTestKeyA + `"]`},
+		{"state.get(k)", `state.get("` + deriveTestKeyA + `")`},
+		{"k in state", `("` + deriveTestKeyA + `" in state)`},
+		{"k not in state", `("` + deriveTestKeyA + `" not in state)`},
+		{"state.keys()", `state.keys()`},
+		{"state.items()", `state.items()`},
+		{"state.values()", `state.values()`},
+		{"ddl[k]", `ddl["identity"]`},
+		{"ddl.get(k)", `ddl.get("identity")`},
+		{"k in ddl", `("identity" in ddl)`},
+		{"ddl.keys()", `ddl.keys()`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    x = `+tc.expr+`
+    return {}
+`, newTestEnvelope(testNanoID1))
+			if err == nil {
+				t.Fatalf("%s inside derive_reads must fail closed, not answer a miss", tc.name)
+			}
+			if code := hydrationErrCode(t, err); code != "DeriveReadsFailed" {
+				t.Fatalf("code = %q, want DeriveReadsFailed", code)
+			}
+			if !strings.Contains(err.Error(), "not available inside derive_reads") {
+				t.Fatalf("the error must explain why the mapping is unavailable: %v", err)
+			}
+		})
+	}
+}
+
+// TestDeriveReads_StateAndDDLAreNotSilentlyEmptyCollections covers the two
+// surfaces the binding cannot supply its own message for: an Iterator has no
+// error to return and `len` reads a length, so both are left UNIMPLEMENTED and
+// the interpreter raises its own refusal built out of Type(). Empty-and-quiet
+// is the outcome that must not happen — a `for k in state` that yields nothing
+// derives nothing and reports nothing.
+func TestDeriveReads_StateAndDDLAreNotSilentlyEmptyCollections(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body string }{
+		{"for k in state", "    for k in state:\n        pass\n"},
+		{"for k in ddl", "    for k in ddl:\n        pass\n"},
+		{"len(state)", "    n = len(state)\n"},
+		{"len(ddl)", "    n = len(ddl)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := hydrateWithDerivation(t,
+				"\ndef derive_reads(op):\n"+tc.body+"    return {}\n",
+				newTestEnvelope(testNanoID1))
+			if err == nil {
+				t.Fatalf("%s must fail rather than treat the binding as an empty collection", tc.name)
+			}
+			if code := hydrationErrCode(t, err); code != "DeriveReadsFailed" {
+				t.Fatalf("code = %q, want DeriveReadsFailed", code)
+			}
+			// The message is the interpreter's, so the reason has to ride on
+			// the type name — that is what makes an unavailable binding
+			// distinguishable from a script bug in a production log.
+			if !strings.Contains(err.Error(), "unavailable-inside-derive_reads") {
+				t.Fatalf("the refusal must name the derivation through the type: %v", err)
+			}
+		})
+	}
+}
+
+// TestDeriveReads_MentioningStateAndDDLElsewhereStillCompilesAndRuns is the
+// other half of the binding rule, and the one that decides whether the fix is
+// shippable at all.
+//
+// The sandbox resolves globals at COMPILE time and the pre-pass shares the main
+// pass's compiled program, so a name that is merely UNBOUND in the pre-pass
+// would fail every module mentioning it — killing every operation on that DDL,
+// not just the derivation. So the names stay bound and only reaching INTO them
+// fails.
+//
+// The module-level reference is the load-bearing half and is deliberately at
+// module level: `prog.Init` runs the whole top level in BOTH passes, so a name
+// the pre-pass did not bind raises there, before any entrypoint is reached. The
+// helper functions are the other shape — a reference the pre-pass compiles and
+// never evaluates, which must stay compilable — and step 5 running the same
+// program afterwards is what shows the refusal is scoped to the pre-pass.
+func TestDeriveReads_MentioningStateAndDDLElsewhereStillCompilesAndRuns(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	seedDeriveDDL(t, ctx, conn, `
+BOUND_NAMES = [type(state), type(ddl)]
+
+def gate(key):
+    return key in state and state[key] != None
+
+def class_of(name):
+    return ddl[name].canonicalName
+
+def derive_reads(op):
+    return {"optionalReads": ["`+deriveTestKeyA+`"]}
+`)
+	h := NewHydrator(conn, testCoreBucket, testLogger())
+	state, err := h.Hydrate(ctx, newTestEnvelope(testNanoID1))
+	if err != nil {
+		t.Fatalf("a script mentioning state/ddl outside the derivation must still compile and derive: %v", err)
+	}
+	if _, ok := state.Context.KnownAbsent[deriveTestKeyA]; !ok {
+		t.Fatalf("the derived key did not join the declared set; knownAbsent=%v", state.Context.KnownAbsent)
+	}
+	// The MAIN pass runs the SAME compiled program with the real mapping bound,
+	// which is what shows the pre-pass's refusal is scoped to the pre-pass.
+	if _, err := NewStarlarkRunner(0, 0).Run(ctx, state.Context); err != nil {
+		t.Fatalf("step 5 must still execute the same program against the hydrated state: %v", err)
+	}
+}
+
+// TestDeriveReads_DerivedRequiredKeyUnderTheDescriptorFloorIsRefused closes the
+// hole the envelope arm structurally cannot see.
+//
+// applyDescriptorFloor demotes DECLARED keys, and mergeDerivedReads' "envelope's
+// disposition stands" rule keeps a derived entry from re-hardening one. A key
+// the envelope NEVER declared falls between the two: the demotion pass has no
+// subject for it and the merge has no disposition to defer to, so a derived
+// `reads` key the same package's descriptor calls absence-tolerant would land
+// fail-closed, out from under the floor every declared key is held to.
+//
+// It is REFUSED rather than demoted. The DDL's derivation and the DDL's
+// descriptor are two statements by ONE package about one key, and silently
+// picking the descriptor turns the HydrationMiss the script's author demanded
+// into a silent None — the dangerous direction
+// (descriptor-floor-template-coverage-design §8).
+func TestDeriveReads_DerivedRequiredKeyUnderTheDescriptorFloorIsRefused(t *testing.T) {
+	t.Parallel()
+	env := newTestEnvelope(testNanoID1)
+	floored := DispatchTemplates{OptionalReads: []string{deriveTestKeyA}}
+	resolver := func(templates DispatchTemplates) *descriptorFloorResolver {
+		return newDescriptorFloorResolver(templates, env, testLogger())
+	}
+
+	// The fault names the derivation but NOT the key. classifyStepError copies
+	// MissingKey into the reply's `details.missingKey` and the reply message
+	// carries err.Error(), so either one would hand the caller the package's own
+	// derivation over an input of their choosing — and class (g) exists because
+	// these are exactly the keys a submitter cannot express. The operator gets
+	// the key from the resolver's Warn instead.
+	t.Run("a derived requirement the floor covers faults, naming no key on the wire", func(t *testing.T) {
+		logger, log := capturingLogger()
+		_, err := mergeDerivedReads(declaredReads{}, derivedReads{Reads: []string{deriveTestKeyA}},
+			newDescriptorFloorResolver(floored, env, logger), testNanoID1)
+		if err == nil {
+			t.Fatalf("a derived required key the descriptor calls absence-tolerant must fault, not stand")
+		}
+		var hErr *HydrationError
+		if !errors.As(err, &hErr) {
+			t.Fatalf("want *HydrationError, got %T: %v", err, err)
+		}
+		if hErr.Code != "DeriveReadsFloorContradiction" {
+			t.Fatalf("code = %q, want DeriveReadsFloorContradiction", hErr.Code)
+		}
+		if hErr.MissingKey != "" {
+			t.Fatalf("MissingKey = %q, want empty — classifyStepError puts it in details.missingKey", hErr.MissingKey)
+		}
+		if strings.Contains(err.Error(), deriveTestKeyA) {
+			t.Fatalf("the reply carries err.Error(); it must not quote the derived key: %v", err)
+		}
+		if !strings.Contains(err.Error(), "derive_reads") {
+			t.Fatalf("the fault must blame the package's derivation, not the submitter: %v", err)
+		}
+		if !strings.Contains(log.String(), deriveTestKeyA) {
+			t.Fatalf("log = %q, want the derived key — the operator's only copy of it", log.String())
+		}
+	})
+
+	t.Run("the descriptor's own required template excludes it", func(t *testing.T) {
+		templates := DispatchTemplates{Reads: []string{deriveTestKeyA}, OptionalReads: []string{deriveTestKeyA}}
+		merged, err := mergeDerivedReads(declaredReads{}, derivedReads{Reads: []string{deriveTestKeyA}},
+			resolver(templates), testNanoID1)
+		if err != nil {
+			t.Fatalf("required-wins: a key the descriptor also declares under `reads` is not floored: %v", err)
+		}
+		if !slices.Contains(merged.Reads, deriveTestKeyA) {
+			t.Fatalf("Reads = %v, want the derived requirement admitted", merged.Reads)
+		}
+	})
+
+	t.Run("a derived OPTIONAL key contradicts nothing", func(t *testing.T) {
+		merged, err := mergeDerivedReads(declaredReads{}, derivedReads{OptionalReads: []string{deriveTestKeyA}},
+			resolver(floored), testNanoID1)
+		if err != nil {
+			t.Fatalf("the derivation agreeing with the descriptor is the ordinary case: %v", err)
+		}
+		if !slices.Contains(merged.OptionalReads, deriveTestKeyA) {
+			t.Fatalf("OptionalReads = %v, want the derived key", merged.OptionalReads)
+		}
+	})
+
+	t.Run("a key in both derived lists takes the weaker disposition", func(t *testing.T) {
+		merged, err := mergeDerivedReads(declaredReads{},
+			derivedReads{Reads: []string{deriveTestKeyA}, OptionalReads: []string{deriveTestKeyA}},
+			resolver(floored), testNanoID1)
+		if err != nil {
+			t.Fatalf("weakest-wins claims the key as optional before the floor is asked: %v", err)
+		}
+		if slices.Contains(merged.Reads, deriveTestKeyA) || !slices.Contains(merged.OptionalReads, deriveTestKeyA) {
+			t.Fatalf("got %+v, want the key optional only", merged)
+		}
+	})
+
+	t.Run("an envelope-declared key keeps the envelope's disposition", func(t *testing.T) {
+		base := declaredReads{OptionalReads: []string{deriveTestKeyA}}
+		merged, err := mergeDerivedReads(base, derivedReads{Reads: []string{deriveTestKeyA}},
+			resolver(floored), testNanoID1)
+		if err != nil {
+			t.Fatalf("the declared arm is unchanged by this refusal: %v", err)
+		}
+		if slices.Contains(merged.Reads, deriveTestKeyA) {
+			t.Fatalf("Reads = %v, want the envelope's weaker disposition to stand", merged.Reads)
+		}
+	})
+
+	t.Run("no descriptor floors nothing", func(t *testing.T) {
+		merged, err := mergeDerivedReads(declaredReads{}, derivedReads{Reads: []string{deriveTestKeyA}},
+			nil, testNanoID1)
+		if err != nil {
+			t.Fatalf("most of the corpus carries no descriptor; the rule has no subject: %v", err)
+		}
+		if !slices.Contains(merged.Reads, deriveTestKeyA) {
+			t.Fatalf("Reads = %v, want the derived requirement admitted", merged.Reads)
+		}
+	})
+}
+
+// TestDeriveReads_FloorContradictionExclusionIsNotSubmitterSteerable is the
+// refusal's integrity property, and it is inherited rather than re-derived: the
+// only thing that suppresses the refusal is resolveDescriptorRequired's
+// exclusion set, which is a function of the descriptor's own templates and the
+// step-3-authenticated identity and refuses to be built out of a
+// `{payload.<field>}` template.
+//
+// The positive control is the same descriptor with a literal required template:
+// it proves the exclusion genuinely can suppress this refusal, so the hostile
+// arm is testing the steering rather than a suppression that never worked.
+func TestDeriveReads_FloorContradictionExclusionIsNotSubmitterSteerable(t *testing.T) {
+	t.Parallel()
+	env := newTestEnvelope(testNanoID1)
+	env.Payload = json.RawMessage(`{"name":"Andrew","probe":"` + deriveTestKeyA + `"}`)
+	derived := derivedReads{Reads: []string{deriveTestKeyA}}
+
+	control := DispatchTemplates{Reads: []string{deriveTestKeyA}, OptionalReads: []string{deriveTestKeyA}}
+	if _, err := mergeDerivedReads(declaredReads{}, derived,
+		newDescriptorFloorResolver(control, env, testLogger()), testNanoID1); err != nil {
+		t.Fatalf("the descriptor's own literal required template must suppress the refusal: %v", err)
+	}
+
+	// The same descriptor, the same key, one payload field aimed at it.
+	logger, log := capturingLogger()
+	steered := DispatchTemplates{Reads: []string{"{payload.probe}"}, OptionalReads: []string{deriveTestKeyA}}
+	_, err := mergeDerivedReads(declaredReads{}, derived,
+		newDescriptorFloorResolver(steered, env, logger), testNanoID1)
+	if err == nil {
+		t.Fatalf("a payload field must not be able to buy an exclusion from the refusal")
+	}
+	if code := hydrationErrCode(t, err); code != "DeriveReadsFloorContradiction" {
+		t.Fatalf("code = %q, want DeriveReadsFloorContradiction", code)
+	}
+	if !strings.Contains(log.String(), "{payload.probe}") || !strings.Contains(log.String(), "excludes no key") {
+		t.Fatalf("log = %q, want a Warn naming the payload-derived required template it refused to honour", log.String())
+	}
+}
+
+// TestDeriveReads_DescriptorFloorReachesTheMergeThroughStep4 is the wiring
+// proof the unit tests above cannot give: step 4 must build ONE floor and hand
+// the same value to both arms. A merge that is handed nothing refuses nothing,
+// and every assertion above would still pass.
+func TestDeriveReads_DescriptorFloorReachesTheMergeThroughStep4(t *testing.T) {
+	t.Parallel()
+	hydrate := func(t *testing.T, optionalReads string) (HydratedState, error) {
+		t.Helper()
+		ctx, conn, _, _, _ := setupTestPipeline(t)
+		seedDeriveDDL(t, ctx, conn,
+			"def derive_reads(op):\n    return {\"reads\": [\""+deriveTestKeyA+"\"]}\n")
+		root := "vtx.meta." + tplID
+		seedOpMeta(t, ctx, conn, tplID, "CreateIdentity",
+			dispatchAspectLists(root, `[]`, optionalReads, false), false)
+		cache := NewDDLCache(conn, testCoreBucket, testLogger())
+		if err := cache.Refresh(ctx); err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+		return h.Hydrate(ctx, newTestEnvelope(testNanoID1))
+	}
+
+	t.Run("floored by the live descriptor", func(t *testing.T) {
+		t.Parallel()
+		_, err := hydrate(t, `["`+deriveTestKeyA+`"]`)
+		if err == nil {
+			t.Fatalf("the descriptor the cache holds must reach the merge")
+		}
+		if code := hydrationErrCode(t, err); code != "DeriveReadsFloorContradiction" {
+			t.Fatalf("code = %q, want DeriveReadsFloorContradiction", code)
+		}
+		// The reply's own shape, through the real mapping the commit path uses:
+		// neither details.missingKey nor the message may carry a key the
+		// submitter could not have expressed.
+		wireCode, details := classifyStepError(err)
+		if wireCode != ErrCodeHydrationFailed {
+			t.Fatalf("wire code = %v, want %v", wireCode, ErrCodeHydrationFailed)
+		}
+		if got := details["missingKey"]; got != "" {
+			t.Fatalf("details.missingKey = %v, want empty — the derived key must not reach the caller", got)
+		}
+		if strings.Contains(err.Error(), deriveTestKeyA) {
+			t.Fatalf("the reply message carries err.Error(); it must not quote the derived key: %v", err)
+		}
+	})
+
+	t.Run("a descriptor naming other keys floors nothing", func(t *testing.T) {
+		t.Parallel()
+		state, err := hydrate(t, `["`+deriveTestKeyB+`"]`)
+		if err != nil {
+			t.Fatalf("a floor that does not cover the derived key must not fault it: %v", err)
+		}
+		if _, absent := state.Context.RequiredAbsent[deriveTestKeyA]; !absent {
+			t.Fatalf("requiredAbsent = %v, want the derived key still fail-closed", state.Context.RequiredAbsent)
+		}
+	})
+}
+
+// TestDeriveReads_UnavailableBindingsAreFalsy pins the one surface that has no
+// error channel and therefore must not CHANGE its answer.
+//
+// Truth returns a Bool; there is no way to raise from it. So the binding has to
+// pick a silent answer, and the only safe pick is the one the empty mapping it
+// stands in for already gave: falsy. Answering truthy would silently move every
+// derivation that branches on `state` onto the other branch — an invisible
+// wrong read set, which is the failure the binding exists to prevent, not a
+// place to reintroduce it.
+func TestDeriveReads_UnavailableBindingsAreFalsy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, expr string
+		truthy     bool
+	}{
+		{"if state", "state", false},
+		{"not state", "not state", true},
+		{"bool(state)", "bool(state)", false},
+		{"if ddl", "ddl", false},
+		{"not ddl", "not ddl", true},
+		{"bool(ddl)", "bool(ddl)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    if `+tc.expr+`:
+        return {"optionalReads": ["`+deriveTestKeyA+`"]}
+    return {"optionalReads": ["`+deriveTestKeyB+`"]}
+`, newTestEnvelope(testNanoID1))
+			if err != nil {
+				t.Fatalf("truthiness must not fault — there is no error channel to fault through: %v", err)
+			}
+			want, other := deriveTestKeyB, deriveTestKeyA
+			if tc.truthy {
+				want, other = deriveTestKeyA, deriveTestKeyB
+			}
+			if _, ok := state.Context.KnownAbsent[want]; !ok {
+				t.Fatalf("%s took the wrong branch: knownAbsent=%v, want %q", tc.expr, state.Context.KnownAbsent, want)
+			}
+			if _, ok := state.Context.KnownAbsent[other]; ok {
+				t.Fatalf("%s derived %q; the binding must answer exactly as the empty mapping it replaces", tc.expr, other)
+			}
+		})
+	}
+}
+
+// TestDeriveReads_UnknownAttributeBehavesLikeNoSuchMember is the loudness
+// floor on the attribute surface, and it runs in both directions.
+//
+// Attr must answer an unlisted name with "no such member", not with a value.
+// Answering every name with a failing builtin would make `state.zzz` QUIETER
+// than it is on any other Starlark value (a loud AttributeError becomes a
+// builtin nobody called), and would break the two universe functions that
+// decide a branch: go.starlark.net's getattr reaches its default only when Attr
+// errors or returns nil, and hasattr reports whether Attr produced a value. The
+// repo's dominant idiom is `getattr(x, field, None)`, so a truthy answer for a
+// member that does not exist sends a derivation down the wrong branch with
+// nothing raised — while the four real accessors must still raise when called.
+func TestDeriveReads_UnknownAttributeBehavesLikeNoSuchMember(t *testing.T) {
+	t.Parallel()
+
+	t.Run("state.zzz is the interpreter's own AttributeError", func(t *testing.T) {
+		t.Parallel()
+		_, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    x = state.zzz
+    return {}
+`, newTestEnvelope(testNanoID1))
+		if err == nil {
+			t.Fatalf("an attribute the binding does not have must be as loud as on any other value")
+		}
+		if code := hydrationErrCode(t, err); code != "DeriveReadsFailed" {
+			t.Fatalf("code = %q, want DeriveReadsFailed", code)
+		}
+		if !strings.Contains(err.Error(), "has no .zzz field or method") {
+			t.Fatalf("want the AttributeError, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "not available inside derive_reads") {
+			t.Fatalf("an unlisted name must not resolve to the failing builtin: %v", err)
+		}
+	})
+
+	// Each case branches on the universe function's answer, so the assertion is
+	// about the value a derivation actually sees rather than about an error.
+	for _, tc := range []struct {
+		name, expr string
+		truthy     bool
+	}{
+		{"getattr default for an unknown name", `getattr(state, "zzz", None) != None`, false},
+		{"hasattr is False for an unknown name", `hasattr(state, "zzz")`, false},
+		{"hasattr is True for a real accessor", `hasattr(state, "get")`, true},
+		{"getattr resolves a real accessor", `getattr(state, "get", None) != None`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    if `+tc.expr+`:
+        return {"optionalReads": ["`+deriveTestKeyA+`"]}
+    return {"optionalReads": ["`+deriveTestKeyB+`"]}
+`, newTestEnvelope(testNanoID1))
+			if err != nil {
+				t.Fatalf("hasattr/getattr cannot raise; they must answer: %v", err)
+			}
+			want := deriveTestKeyB
+			if tc.truthy {
+				want = deriveTestKeyA
+			}
+			if _, ok := state.Context.KnownAbsent[want]; !ok {
+				t.Fatalf("%s took the wrong branch: knownAbsent=%v, want %q", tc.expr, state.Context.KnownAbsent, want)
+			}
+		})
+	}
+}
+
+// TestDeriveReads_UnavailableBindingRenderingAndHashing covers the two Value
+// methods a derivation can reach that are neither an access nor a branch.
+//
+// String is the one that matters: this value lands in script-authored error
+// text and in Go-side logs, and rendering as `{}` there asserts the very thing
+// the binding refuses to say — that the pre-pass looked and found nothing.
+// Hash keeps the binding out of a dict key, where it could otherwise be stored
+// and compared later as though it were a value.
+func TestDeriveReads_UnavailableBindingRenderingAndHashing(t *testing.T) {
+	t.Parallel()
+
+	t.Run("str() names the binding and never renders as an empty mapping", func(t *testing.T) {
+		t.Parallel()
+		_, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    fail("rendered:" + str(state))
+`, newTestEnvelope(testNanoID1))
+		if err == nil {
+			t.Fatalf("fail() must surface the rendering")
+		}
+		if !strings.Contains(err.Error(), "rendered:<state unavailable inside derive_reads>") {
+			t.Fatalf("want the binding rendered with its reason, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "rendered:{}") {
+			t.Fatalf("an empty-dict rendering is the misleading answer this binding exists to refuse: %v", err)
+		}
+	})
+
+	t.Run("the binding is not hashable", func(t *testing.T) {
+		t.Parallel()
+		_, err := hydrateWithDerivation(t, `
+def derive_reads(op):
+    d = {state: 1}
+    return {}
+`, newTestEnvelope(testNanoID1))
+		if err == nil {
+			t.Fatalf("the binding must not be storable as a dict key")
+		}
+		if !strings.Contains(err.Error(), "not hashable") {
+			t.Fatalf("want the unhashable refusal, got: %v", err)
+		}
+	})
+
+	// AttrNames is load-bearing twice over: Attr is derived from it, so a name
+	// missing here is an AttributeError rather than the fail-closed builtin, and
+	// it must track the surface the MAIN pass exposes so an accessor added to
+	// the hydrated mapping cannot land unstubbed in the pre-pass.
+	t.Run("the attribute surface tracks the hydrated mapping's", func(t *testing.T) {
+		t.Parallel()
+		want := (&stateMapValue{}).AttrNames()
+		got := failingMapping{name: "state"}.AttrNames()
+		if !slices.Equal(got, want) {
+			t.Fatalf("AttrNames = %v, want the hydrated mapping's %v", got, want)
+		}
+		for _, name := range want {
+			v, err := failingMapping{name: "state"}.Attr(name)
+			if err != nil || v == nil {
+				t.Fatalf("Attr(%q) = (%v, %v), want the fail-closed builtin", name, v, err)
+			}
+		}
+		v, err := failingMapping{name: "state"}.Attr("zzz")
+		if v != nil || err != nil {
+			t.Fatalf(`Attr("zzz") = (%v, %v), want (nil, nil) — "no such member"`, v, err)
+		}
+	})
+}
+
+// TestDeriveReads_EgressConflictOutranksTheFloorRefusal pins which of two
+// terminal faults a key that trips both reports.
+//
+// Both are fail-closed, so the choice is about what the caller is told. The
+// egress conflict names its key, and safely: that key came out of the
+// ENVELOPE's own egressReads, so the submitter already holds it. The floor
+// refusal deliberately names nothing. Reporting the egress arm first therefore
+// gives the caller the actionable fault instead of an opaque one — and hoisting
+// the floor refusal above it would silently swap a diagnosable rejection for a
+// blank one.
+func TestDeriveReads_EgressConflictOutranksTheFloorRefusal(t *testing.T) {
+	t.Parallel()
+	env := newTestEnvelope(testNanoID1)
+	base := declaredReads{EgressReads: []string{deriveTestKeyA}}
+	floored := DispatchTemplates{OptionalReads: []string{deriveTestKeyA}}
+
+	_, err := mergeDerivedReads(base, derivedReads{Reads: []string{deriveTestKeyA}},
+		newDescriptorFloorResolver(floored, env, testLogger()), testNanoID1)
+	if err == nil {
+		t.Fatalf("a key tripping both refusals must still fault")
+	}
+	if code := hydrationErrCode(t, err); code != "DeriveReadsEgressConflict" {
+		t.Fatalf("code = %q, want DeriveReadsEgressConflict — the fault whose key the submitter already declared", code)
 	}
 }

@@ -8,9 +8,10 @@
 //  1. TestDeriveReads_NormalizationVectors — each raw contact driven through a
 //     real CreateUnclaimedIdentity lands its index vertex at the key derived
 //     from the expected NORMALIZED form, across a table exercising every rule
-//     (case, whitespace collapse, phone punctuation). Plus
-//     TestDeriveReads_CredentialIndexKeyIsUnnormalized for the one derivation
-//     that deliberately does not normalize.
+//     (case, whitespace collapse, phone punctuation). The one derivation that
+//     deliberately does NOT normalize — the actor-keyed credentialindex — is
+//     pinned in gateway_agreement_test.go, where the same assertion also holds
+//     the gateway's Go copy of it to the script.
 //  2. TestCreateUnclaimed_UndeclaredSubmitter_StillDedupes — the §7 e2e: a
 //     second create sharing a contact, whose envelope declares no contextHint
 //     at all, still probes the index and emits duplicateOf instead of hard-
@@ -112,19 +113,6 @@ func TestDeriveReads_NormalizationVectors(t *testing.T) {
 					wantKey, tc.raw, tc.normalized, err)
 			}
 		})
-	}
-}
-
-// TestDeriveReads_CredentialIndexKeyIsUnnormalized pins the one derivation that
-// deliberately does NOT normalize. An actor key is already a Contract #1 key,
-// so lowercasing or trimming it would be a silent corruption rather than a
-// cleanup — and a future author extending the normalizers to "all inputs"
-// should trip this.
-func TestDeriveReads_CredentialIndexKeyIsUnnormalized(t *testing.T) {
-	t.Parallel()
-	want := "vtx.credentialindex." + substrate.SHA256NanoID(secondCredActorKey)
-	if got := credentialIndexKey(secondCredActorKey); got != want {
-		t.Fatalf("credential index key = %s, want %s", got, want)
 	}
 }
 
