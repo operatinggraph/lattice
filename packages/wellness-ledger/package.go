@@ -53,7 +53,11 @@
 //
 //   - The `wellnessClassPriceSettlement` actorAggregate lens + its Weaver
 //     playbook (targets.go): the OTHER wellness billing gap — a session
-//     carrying a priceCents (set by wellness-domain's CreateSession)
+//     carrying a priceCents (set by wellness-domain's CreateSession) —
+//     residentPriceCents instead, when the booking's own .status.rate is
+//     resident and the session declares one, else priceCents same as a
+//     standard booking (a CASE WHEN over the booking's rate, mirroring
+//     orchestration-base's unroutedTasksSpec) —
 //     converges via a directOp WellnessDebitAccount{accountKey, amountCents,
 //     priceBookingRef} once the booker's account exists, UNCONDITIONAL on
 //     attendance (a class price is owed for the seat, not for showing up).
@@ -87,7 +91,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.10",
+	Version: "0.2.11",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +

@@ -207,8 +207,8 @@ RETURN
 // no status filter here at all (the mirror omission of noShowSettlementSpec's
 // `status = 'noShow'` clause).
 //
-//   - `missing_price_charge` — the booking's session carries a priceCents > 0,
-//     the booker has a ledger account, and no wellnesstransaction
+//   - `missing_price_charge` — the booking's session carries an effective
+//     price > 0, the booker has a ledger account, and no wellnesstransaction
 //     `settlesClassPrice` this booking yet (count(tx.key) collapses the fan to
 //     a single existence check, the same objectLiveness/clauseSatisfaction
 //     idiom noShowSettlementSpec uses). Weaver dispatches
@@ -218,12 +218,22 @@ RETURN
 //     lens's count() never sees a no-show-fee transaction and vice versa), so
 //     once posted the gap converges and stays converged.
 //
+//   - `priceCents` — the EFFECTIVE price this booking owes, not the session's
+//     raw priceCents: a booking whose own .status.rate is "resident" charges
+//     the session's residentPriceCents when the session declares one, else
+//     falls back to priceCents exactly like a standard booking (verticals.md
+//     "a verified resident is charged the same class price as a walk-in" —
+//     CreateBooking stamps rate at booking time; the session's
+//     residentPriceCents is CreateSession/ReassignSession-owned, see
+//     wellness-domain/ddls.go). The CASE WHEN idiom mirrors
+//     orchestration-base's unroutedTasksSpec (lenses.go).
+//
 // `MATCH (bk:booking {key: $actorKey})` alone (no isDeleted clause) is enough
 // to exclude a cancelled/soft-deleted booking — the full engine's Core-KV
 // reads filter isDeleted per Contract #1 (executor.go), so a tombstoned
 // booking simply stops matching, mirroring noShowSettlementSpec's identical
-// MATCH. A booking whose session carries no priceCents (or 0 — a free class)
-// never violates (priceCents null/0); one whose booker has no
+// MATCH. A booking whose effective price is null/0 (no priceCents on the
+// session, or a free class) never violates; one whose booker has no
 // wellnessaccount yet never violates either (accountKey null) — same
 // non-goals as noShowSettlementSpec, not gaps this lens converges.
 // classPriceSettlementSpec is built once at package init: the retry cap
@@ -237,7 +247,7 @@ OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
 OPTIONAL MATCH (bk)<-[:settlesClassPrice]-(tx:wellnesstransaction)
 WITH
   bk.key AS entityKey,
-  se.schedule.data.priceCents AS priceCents,
+  (CASE WHEN (bk.status.data.rate = 'resident') AND (se.schedule.data.residentPriceCents <> null) THEN se.schedule.data.residentPriceCents ELSE se.schedule.data.priceCents END) AS priceCents,
   se.schedule.data.name AS sessionName,
   id.key AS identityKey,
   a.key AS accountKey,

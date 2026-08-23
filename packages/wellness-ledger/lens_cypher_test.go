@@ -30,6 +30,10 @@ package wellnessledger
 //     missing_price_charge true.
 //   - PRICED_CHARGED: session priced, account exists, a wellnesstransaction
 //     settlesClassPrice this booking — converged.
+//   - RESIDENT_RATE: a resident-rate booking on a session with
+//     residentPriceCents charges residentPriceCents, not priceCents; absent
+//     residentPriceCents it falls back to priceCents like a standard booker;
+//     a standard-rate booking is unaffected by residentPriceCents either way.
 
 import (
 	"context"
@@ -328,6 +332,60 @@ func TestWellnessClassPriceSettlement_PricedCharged_Converged(t *testing.T) {
 	v := f.projectClassPriceAt(t, "chargedpbkg")[0].Values
 	require.Equal(t, false, v["missing_price_charge"], "a wellnesstransaction settlesClassPrice this booking — converged")
 	require.Equal(t, false, v["violating"])
+}
+
+// mkResidentPricedBooking is mkPricedBooking's counterpart for the resident-rate
+// gap: the booking's .status carries rate (standard|resident) and the session
+// additionally carries the given (optional, nil to omit) residentPriceCents.
+func (f *wlFixture) mkResidentPricedBooking(t *testing.T, name string, priceCents any, residentPriceCents any, rate string) {
+	t.Helper()
+	f.vtx(t, name, "booking")
+	f.aspect(t, name, "status", "bookingStatus", map[string]any{"value": "booked", "rate": rate})
+	f.vtx(t, name+"_session", "session")
+	schedData := map[string]any{"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0}
+	if priceCents != nil {
+		schedData["priceCents"] = priceCents
+	}
+	if residentPriceCents != nil {
+		schedData["residentPriceCents"] = residentPriceCents
+	}
+	f.aspect(t, name+"_session", "schedule", "sessionSchedule", schedData)
+	f.edge(t, "forSession", name, name+"_session")
+	f.vtx(t, name+"_identity", "identity")
+	f.edge(t, "bookedBy", name, name+"_identity")
+}
+
+func TestWellnessClassPriceSettlement_ResidentRate_ChargedResidentPrice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkResidentPricedBooking(t, "residentbkg", 1500.0, 1000.0, "resident")
+
+	v := f.projectClassPriceAt(t, "residentbkg")[0].Values
+	require.Equal(t, 1000.0, v["priceCents"], "a resident booking on a session with residentPriceCents charges the resident price, not the standard priceCents")
+}
+
+func TestWellnessClassPriceSettlement_ResidentRateNoResidentPrice_FallsBackToStandard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkResidentPricedBooking(t, "residentnofallbkg", 1500.0, nil, "resident")
+
+	v := f.projectClassPriceAt(t, "residentnofallbkg")[0].Values
+	require.Equal(t, 1500.0, v["priceCents"], "no residentPriceCents on the session — a resident pays priceCents same as a standard booker")
+}
+
+func TestWellnessClassPriceSettlement_StandardRateWithResidentPrice_ChargedStandardPrice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkResidentPricedBooking(t, "standardbkg", 1500.0, 1000.0, "standard")
+
+	v := f.projectClassPriceAt(t, "standardbkg")[0].Values
+	require.Equal(t, 1500.0, v["priceCents"], "a standard booking is unaffected by a session's residentPriceCents — must not accidentally receive the discount")
 }
 
 // TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge proves
