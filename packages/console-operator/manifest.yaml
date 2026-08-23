@@ -1,12 +1,14 @@
 name: console-operator
-version: 0.6.2
+version: 0.7.0
 description: |
   Declares a scoped consoleOperator role and grants it the default-lane
   console ops (ShredIdentityKey, RevokeActor, UnrevokeActor, AttachObject,
   DetachObject) plus the ctrl.<component>.<verb> control-plane ops plus the
   allowlisted pkg-lifecycle trio (InstallPackage/UninstallPackage/
-  UpgradePackage) at the meta lane — the Loupe operator's full console
-  surface, including package lifecycle, without root. Deliberately distinct
+  UpgradePackage) at the meta lane plus the AI-authored-capabilities
+  review-console ops (RequestCapabilityAuthoring, SubmitCapabilityProposal,
+  ReviewCapabilityProposal, MarkCapabilityProposalApplied) — the Loupe
+  operator's full console surface, including package lifecycle, without root. Deliberately distinct
   from the kernel-primordial operator role so a console operator stays an
   ordinary (non-system) rbac actor, no anchor, no boot-snapshot dependency;
   the pkg-lifecycle grant is honored only because the Processor's core
@@ -113,5 +115,17 @@ declares:
       scope: any
       grantsTo: [consoleOperator]
     - operationType: UpgradePackage
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: RequestCapabilityAuthoring
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: SubmitCapabilityProposal
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: ReviewCapabilityProposal
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: MarkCapabilityProposalApplied
       scope: any
       grantsTo: [consoleOperator]

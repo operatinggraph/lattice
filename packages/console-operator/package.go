@@ -72,8 +72,8 @@ RETURN
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "console-operator",
-	Version:     "0.6.2",
-	Description: "Grants a scoped consoleOperator role the default-lane console ops + ctrl.* control-plane ops + the allowlisted pkg-lifecycle trio at meta, without root, plus its read-side wildcard grant.",
+	Version:     "0.7.0",
+	Description: "Grants a scoped consoleOperator role the default-lane console ops + ctrl.* control-plane ops + the allowlisted pkg-lifecycle trio at meta + the AI-authored-capabilities review-console ops, without root, plus its read-side wildcard grant.",
 	Depends:     []string{"rbac-domain", "identity-domain", "privacy-base", "objects-base"},
 	Permissions: Permissions(),
 	Roles: []pkgmgr.RoleSpec{

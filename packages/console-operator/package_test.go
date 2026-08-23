@@ -145,8 +145,8 @@ func TestPackage_OnlyAllowlistedPkgLifecycleOpsGranted(t *testing.T) {
 }
 
 // TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny pins the full
-// default-lane + ctrl.* permission surface and that every one grants only to
-// consoleOperator, scope any.
+// default-lane + ctrl.* + capability-review permission surface and that every
+// one grants only to consoleOperator, scope any.
 func TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny(t *testing.T) {
 	want := []string{
 		"ShredIdentityKey", "RevokeActor", "UnrevokeActor", "AttachObject", "DetachObject",
@@ -158,6 +158,8 @@ func TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny(t *testing.T) {
 		"ctrl.refractor.register", "ctrl.refractor.deregister", "ctrl.refractor.hydrate",
 		"ctrl.refractor.sessionkey", "ctrl.refractor.syncgap",
 		"InstallPackage", "UninstallPackage", "UpgradePackage",
+		"RequestCapabilityAuthoring", "SubmitCapabilityProposal",
+		"ReviewCapabilityProposal", "MarkCapabilityProposalApplied",
 	}
 	if len(Package.Permissions) != len(want) {
 		t.Fatalf("Permissions = %d, want %d", len(Package.Permissions), len(want))
@@ -211,7 +213,9 @@ func TestPackage_GrantedCtrlVerbsMatchControlauthOpTables(t *testing.T) {
 			p.OperationType == "UnrevokeActor" || p.OperationType == "AttachObject" ||
 			p.OperationType == "DetachObject" ||
 			p.OperationType == "InstallPackage" || p.OperationType == "UninstallPackage" ||
-			p.OperationType == "UpgradePackage" {
+			p.OperationType == "UpgradePackage" ||
+			p.OperationType == "RequestCapabilityAuthoring" || p.OperationType == "SubmitCapabilityProposal" ||
+			p.OperationType == "ReviewCapabilityProposal" || p.OperationType == "MarkCapabilityProposalApplied" {
 			continue
 		}
 		gotVerbs[p.OperationType] = struct{}{}
