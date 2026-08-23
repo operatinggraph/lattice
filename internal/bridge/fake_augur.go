@@ -78,9 +78,14 @@ const (
 	// targets — deliberately not the escalated candidate. A type-neutral kernel
 	// key (the bridge is type-agnostic platform code — no vertical type leaks in).
 	fakeAugurForeignEntity = "vtx.identity.someForeignActor"
-	// fakeAugurModel is the provenance model id FakeAugur stamps (the design's
-	// default reasoning model).
-	fakeAugurModel = "claude-opus-4-8"
+	// fakeAugurModel is the provenance model id FakeAugur stamps when the
+	// request carries no model override. It names the fake itself rather than a
+	// real vendor model: the value travels on the proposal, through the
+	// augur-proposals lens, to the operator deciding whether to approve, so a
+	// vendor model id here would attribute a canned proposal to a model that
+	// never ran. A reviewer must be able to tell reasoning from fixture at a
+	// glance, and the provenance field is where they look.
+	fakeAugurModel = "fake-augur: reference adapter, no model call"
 )
 
 // NewFakeAugur returns a fresh in-memory reference reasoning adapter.

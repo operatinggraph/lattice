@@ -117,10 +117,19 @@
 //     link to the resulting vtx.package.<id> vertex). Only an approved
 //     proposal may be marked applied (fail-closed, no double-apply).
 //
-// Deliberately NOT yet built (the fire's remaining checkpoints, see the design
-// doc): the real claude-opus-4-8-backed `capabilityAuthor` bridge adapter (only
-// the deterministic `FakeCapabilityAuthor` ships — the same posture Augur's own
-// adapter is still in); a Loupe UI affordance (the CLI one has shipped).
+//   - The `capabilityAuthor` bridge adapter (`bridge.NewCapabilityAuthor`):
+//     reasons over this package's capabilityAuthorContext catalog through the
+//     model-runner fleet, which holds the vendor credential. `cmd/bridge`
+//     registers it only when BRIDGE_CAPABILITY_AUTHOR=real; the ordinary
+//     unset default leaves an authoring request on the adapter-missing path
+//     (ack + a health issue). `FakeCapabilityAuthor` is a deterministic
+//     in-memory double exercised by internal/bridge's own tests, registered
+//     by no binary.
+//
+//   - Operator review surfaces for the queue above: the `lattice-pkg` CLI's
+//     review-and-apply affordance, and Loupe's AI review console
+//     (`GET /api/review/capability(/<id>)` plus its approve / apply /
+//     mark-applied endpoints, over the capabilityProposals read model).
 //
 // Install via the InstallPackage kernel op. See docs/components/_packages.md
 // and _bmad-output/implementation-artifacts/ai-authored-capabilities-design.md.

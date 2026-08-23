@@ -116,45 +116,11 @@ func run(logger *slog.Logger) error {
 	}
 	engine := bridge.NewEngine(conn, cfg)
 
-	// Register the reference adapters (the real Stripe / background-check /
-	// legal-doc integrations are Phase 3). A package's external.<adapter> events
-	// name these by the same strings. MUST run before Start: the registry has no
-	// lock-step with the dispatch path.
-	//
-	// BRIDGE_FAKE_DECLINE is a demo affordance: a comma-separated set of adapter
-	// names (or "all") whose fake returns a terminal decline for EVERY subject,
-	// so an operator can drive the declined-application experience live (e.g.
-	// `BRIDGE_FAKE_DECLINE=backgroundCheck make up-loftspace`). Empty = the normal
-	// clearing fakes. It only affects the stripe/backgroundCheck fakes; docGen's
-	// failure path is input-driven (an unsigned/keyless render request).
 	decline := parseDeclineSet(os.Getenv("BRIDGE_FAKE_DECLINE"))
-	stripe := bridge.NewFakeStripe()
-	bgCheck := bridge.NewFakeBackgroundCheck()
-	if decline["all"] || decline["stripe"] {
-		stripe.SetDeclineAll(true)
-	}
-	if decline["all"] || decline["backgroundCheck"] {
-		bgCheck.SetDeclineAll(true)
-	}
 	if len(decline) > 0 {
 		logger.Warn("bridge: fake-adapter DECLINE mode active (demo affordance)", "decline", os.Getenv("BRIDGE_FAKE_DECLINE"))
 	}
-	// docGen — the reference external legal-document vendor. Unlike the pure
-	// in-memory fakes it writes the rendered artifact's bytes to the
-	// core-objects store (the bridge account holds the $O.core-objects.>
-	// publish), capped per artifact by OBJECTS_MAX_UPLOAD_BYTES (the same knob
-	// the vertical apps' upload paths use).
-	docGen := bridge.NewFakeDocGen(conn, bootstrap.CoreObjectsBucket, uploadCapFromEnv(logger))
-	// notification — the clinic-reminders vendor (email/SMS). Fired from the
-	// existing RecordAppointmentReminder/RecordFollowUpReminder ops' own outbox,
-	// not a Loom pattern (clinic-reminders-notification-adapter-design.md).
-	notification := bridge.NewFakeNotification()
-	for name, adapter := range map[string]bridge.Adapter{
-		"stripe":          stripe,
-		"backgroundCheck": bgCheck,
-		"docGen":          docGen,
-		"notification":    notification,
-	} {
+	for name, adapter := range referenceAdapters(conn, decline, uploadCapFromEnv(logger)) {
 		if err := engine.RegisterAdapter(name, adapter); err != nil {
 			return fmt.Errorf("register adapter %q: %w", name, err)
 		}
@@ -211,6 +177,68 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("bridge exited cleanly", "instance", instance)
 	return nil
+}
+
+// referenceAdapters builds the reference-adapter set the bridge registers
+// unconditionally at startup (the real Stripe / background-check / legal-doc
+// integrations are Phase 3). A package's external.<adapter> events name these
+// by the same strings, so the returned map's keys are exactly the adapter
+// names run() must register before Start — the registry has no lock-step with
+// the dispatch path.
+//
+//   - stripe / backgroundCheck — pure in-memory fakes; decline honors
+//     BRIDGE_FAKE_DECLINE (a demo affordance: a comma-separated set of adapter
+//     names, or "all", whose fake returns a terminal decline for EVERY
+//     subject, so an operator can drive the declined-application experience
+//     live, e.g. `BRIDGE_FAKE_DECLINE=backgroundCheck make up-loftspace`).
+//
+//   - docGen — the reference external legal-document vendor. Unlike the pure
+//     in-memory fakes it writes the rendered artifact's bytes to the
+//     core-objects store (the bridge account holds the $O.core-objects.>
+//     publish), capped per artifact by uploadCap (OBJECTS_MAX_UPLOAD_BYTES,
+//     the same knob the vertical apps' upload paths use). docGen's own
+//     failure path is input-driven (an unsigned/keyless render request), not
+//     the decline set.
+//
+//   - notification — the clinic-reminders vendor (email/SMS). Fired from the
+//     existing RecordAppointmentReminder/RecordFollowUpReminder ops' own
+//     outbox, not a Loom pattern (clinic-reminders-notification-adapter-design.md).
+//
+//   - augur — the deterministic reference reasoning adapter for the Augur tier
+//     (Weaver's L3 escalation, Contract #10 §10.8): it returns a structured
+//     AugurProposal that the bridge treats as an opaque Result.Detail.
+//     Unregistered, it is not a degraded mode but an outage: an escalation
+//     dispatch raises the adapter-missing config issue, which redelivery cannot
+//     clear, so a stuck gap that reached L3 stays stuck forever.
+//
+//     It is registered unconditionally, like the fakes above, rather than
+//     env-gated like capabilityAuthor below. The gate on capabilityAuthor
+//     answers a cost question this adapter does not raise — it holds a vendor
+//     credential path and spends money per call, while FakeAugur opens no
+//     socket. What both share is that a fake's output reaches a human: an
+//     operator reads the proposal in the review console and decides whether to
+//     approve it. That is handled at the source rather than by withholding the
+//     adapter — FakeAugur stamps its own name as the proposal's provenance
+//     model, so a fixture proposal is legible as one. Nothing it produces
+//     mutates the graph on its own: every proposal lands `pending` and the
+//     autonomy dial (augur.autoApply) is parsed and validated but consumed by
+//     no dispatch path.
+func referenceAdapters(conn *substrate.Conn, decline map[string]bool, uploadCap int64) map[string]bridge.Adapter {
+	stripe := bridge.NewFakeStripe()
+	bgCheck := bridge.NewFakeBackgroundCheck()
+	if decline["all"] || decline["stripe"] {
+		stripe.SetDeclineAll(true)
+	}
+	if decline["all"] || decline["backgroundCheck"] {
+		bgCheck.SetDeclineAll(true)
+	}
+	return map[string]bridge.Adapter{
+		"stripe":          stripe,
+		"backgroundCheck": bgCheck,
+		"docGen":          bridge.NewFakeDocGen(conn, bootstrap.CoreObjectsBucket, uploadCap),
+		"notification":    bridge.NewFakeNotification(),
+		"augur":           bridge.NewFakeAugur(),
+	}
 }
 
 func envOrDefault(key, def string) string {
