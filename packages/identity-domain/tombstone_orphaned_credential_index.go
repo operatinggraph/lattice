@@ -37,6 +37,16 @@ const tombstoneOrphanedCredentialIndexDDL = "tombstoneOrphanedCredentialIndex"
 // endpoint having a closed write path is what makes the row residue. A row
 // where both endpoints are live is not residue and is refused.
 //
+// The two arms do not commit the same thing, because the owner is not the same
+// kind of party in them. In the inbound shape the owner is the erased subject
+// and the index vertex is the whole of what this op retires — their own
+// credentialBinding array is sensitive, its DEK is destroyed or about to be,
+// and key destruction erases it more completely than any filter could. In the
+// outbound shape the owner is a LIVE third party whose sign-in-methods array
+// still lists the erased credential, so the batch also rewrites that array —
+// UnbindIdentityCredentials' sweep_outbound body, applied to the one pair no
+// boundTo link survives to enumerate.
+//
 // Nothing already built can reach either shape. UnbindIdentityCredentials
 // sweeps by enumerating boundTo links, and both directions are already
 // tombstoned, so its sweep emits no mutations at all;
@@ -101,7 +111,14 @@ func TombstoneOrphanedCredentialIndexDDL() pkgmgr.DDLSpec {
 			"as the row's OWNER (identityKey), and the erased subject as the row's CREDENTIAL " +
 			"(actorKey — a merged-away identity folded into a survivor, or a Scenario-B identity later " +
 			"linked to another), because a pre-narrowing ShredIdentityKey tombstoned boundTo in both " +
-			"directions and left the index behind in both. Emits one identity.unbound so the Gateway's " +
+			"directions and left the index behind in both. In the OUTBOUND shape the owner is a live " +
+			"third party, so the same batch also rewrites their vtx.identity.<NanoID>.credentialBinding " +
+			"array to drop the erased credential (UnbindIdentityCredentials' sweep_outbound body, applied " +
+			"to the one pair no link survives to enumerate), pinned to the revision that read observed so " +
+			"a concurrent CompleteCredentialLink/UnlinkCredential/MergeIdentity conflicts rather than " +
+			"being overwritten; in the INBOUND shape the owner IS the erased subject and their array is " +
+			"deliberately left alone, since it is sensitive and its key destruction erases it outright. " +
+			"Emits one identity.unbound so the Gateway's " +
 			"credential-bindings bucket drops the row, exactly as the ordinary sweep would have for " +
 			"this pair had a link survived to enumerate. Four refusals keep it to that shape and no " +
 			"wider: NotErased (at least one endpoint's write path must be closed — a live " +
@@ -121,16 +138,17 @@ func TombstoneOrphanedCredentialIndexDDL() pkgmgr.DDLSpec {
 			`{"credentialActorKey":{"type":"string","description":"vtx.identity.<NanoID> — the CREDENTIAL whose orphaned credentialindex vertex is being retired (the index key is sha256NanoID of this key)."},` +
 			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the erased OWNER the index vertex records. Must equal the index's own data.identityKey."}},` +
 			`"required":["credentialActorKey","identityKey"]}`,
-		// The index vertex is the only key this op writes, so it is the only
-		// value the reply-constraint admits (internal/processor/commit_path.go
-		// requires a script-named primaryKey inside the operation's own write
-		// footprint). Neither payload key qualifies: the owner is an identity
-		// this op never mutates, and the credential is not a mutation key
-		// either — only the hash of it is.
+		// The index vertex is the row this verb is named for and the one key
+		// every accepted shape writes, so it is what primaryKey names. The
+		// reply-constraint admits it either way — internal/processor/
+		// commit_path.go's primaryKeyInCommit accepts any mutation key in the
+		// batch, so the outbound arm's owner-array rewrite neither displaces it
+		// nor competes with it. The credential's own key would not qualify at
+		// all: only the hash of it is ever a mutation key.
 		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.credentialindex.<hash> — the index vertex this op tombstoned."}}}`,
 		FieldDescription: map[string]string{
 			"credentialActorKey": "Full vtx.identity.<NanoID> key of the credential. Its credentialindex vertex (crypto.sha256NanoID of this key) is declared in ContextHint.Reads; the boundTo link toward identityKey is declared in optionalReads and read live. Its OWN erasureRequested marker and piiKey envelope are read too — the outbound arm of the residue, where the erased subject is the credential rather than the owner.",
-			"identityKey":        "Full vtx.identity.<NanoID> key of the OWNER the index vertex names. Both endpoints' erasureRequested markers and piiKey envelopes are declared in optionalReads and read live — an undeclared read still refuses, which is what makes the NotErased gate fail-closed. At least one of the two endpoints must read as erased.",
+			"identityKey":        "Full vtx.identity.<NanoID> key of the OWNER the index vertex names. Both endpoints' erasureRequested markers and piiKey envelopes are declared in optionalReads and read live — an undeclared read still refuses, which is what makes the NotErased gate fail-closed. At least one of the two endpoints must read as erased. When this owner's OWN write path is open — the outbound arm — their credentialBinding array is read as well, also optionalReads, and rewritten to drop the erased credential; a dispatcher declares that key only for that arm, because on a shredded owner hydrating a sensitive aspect faults the operation.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -152,7 +170,9 @@ func TombstoneOrphanedCredentialIndexDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Accepted on the same terms. The index at the hash of the ERASED subject's own key " +
 					"records them as the credential of a live owner — a merged-away identity folded into its " +
 					"survivor, or a Scenario-B identity later linked — and names them in plaintext just as the " +
-					"inbound shape does. The row is retired; the live owner's own vertex is untouched.",
+					"inbound shape does. The row is retired, and because the owner here is a live third party " +
+					"the same batch rewrites their credentialBinding array to drop the erased credential, so " +
+					"their sign-in-methods list stops naming somebody who no longer exists.",
 			},
 			{
 				Name: "TombstoneOrphanedCredentialIndex — both endpoints are live, unerased people",
@@ -196,6 +216,11 @@ func TombstoneOrphanedCredentialIndexDDL() pkgmgr.DDLSpec {
 // guard may not have. An undeclared kv.Read falls through to a live Core KV GET
 // (internal/processor/starlark_kv.go), so both gates hold with no help from any
 // submitter; declaring the keys only buys the step-4 snapshot with no round trip.
+//
+// The outbound arm's read of the owner's credentialBinding array is a third
+// kv.Read and is not a gate: it is the body of a mutation, it runs only once the
+// gates have already decided, and — unlike the two above — declaring it is not
+// free, because the aspect is sensitive. See owner_binding_rewrite.
 const tombstoneOrphanedCredentialIndexDDLScript = `
 def required_string(p, name):
     if not hasattr(p, name):
@@ -262,6 +287,99 @@ def key_shredded_closes_write_path(doc):
     if doc.data == None:
         return False
     return doc.data.get("shredded", False) == True
+
+def owner_binding_rewrite(owner_key, credential_key):
+    # The outbound arm's second mutation: the owner named by the residue row is
+    # a LIVE third party whose sign-in-methods array still lists the erased
+    # credential, and retiring the index alone leaves that entry standing --
+    # a phantom sign-in method naming somebody who no longer exists.
+    # UnbindIdentityCredentials' sweep_outbound performs this same rewrite for
+    # every pair a live boundTo link still reaches; this is that body applied to
+    # the one pair no link survives to enumerate.
+    #
+    # Reached ONLY when the owner's write path is open -- see the arm
+    # discriminator in execute for why that predicate, and why reading this key
+    # at all depends on it.
+    #
+    # read-posture: (d) declared in contextHint.optionalReads by the CLI driver
+    # (cmd/lattice/identity/credential_residue.go), which declares it for the
+    # outbound arm and only there. Absence-tolerant, and absence is an ordinary
+    # state rather than a wiring fault: an identity that never claimed through
+    # ClaimIdentity carries no array at all, and a merged-away secondary's is
+    # tombstoned.
+    binding = kv.Read(owner_key + ".credentialBinding")
+    if binding == None or binding.isDeleted or binding.data == None:
+        return None
+    existing = dict(binding.data)
+    credentials = existing.get("credentials")
+    if credentials == None or type(credentials) != type([]):
+        # The pre-array record, folded into a one-element array so the filter
+        # below has exactly one shape to work on.
+        first_actor = existing.get("actorKey")
+        if first_actor == None:
+            return None
+        credentials = [{"actorKey": first_actor, "boundAt": existing.get("boundAt")}]
+
+    remaining = []
+    removed = False
+    for c in credentials:
+        if c.get("actorKey") == credential_key:
+            removed = True
+            continue
+        remaining.append(c)
+    if not removed:
+        # Nothing of this credential in the owner's array: an UnlinkCredential
+        # already took it out, or the row was residue the array never named.
+        # The index tombstone still goes; rewriting an unchanged array would
+        # burn a mutation and give a re-driven sweep a revision to bump forever.
+        return None
+
+    # The singular actorKey/boundAt pair is the pre-array record readers still
+    # fall back to, so it must not keep naming the credential just removed.
+    # When nothing remains to promote, both fields are OMITTED rather than set
+    # to null: the aspect's schema types actorKey as a string and the fallback
+    # readers test for the field's PRESENCE, so a null would satisfy the test
+    # and hand them a non-key.
+    data = {"credentials": remaining}
+    singular_actor = existing.get("actorKey")
+    singular_bound = existing.get("boundAt")
+    if singular_actor == credential_key:
+        singular_actor = None
+        singular_bound = None
+        if len(remaining) > 0:
+            singular_actor = remaining[0]["actorKey"]
+            singular_bound = remaining[0]["boundAt"]
+    if singular_actor != None:
+        data["actorKey"] = singular_actor
+    if singular_bound != None:
+        data["boundAt"] = singular_bound
+
+    # PINNED TO THE REVISION THIS READ OBSERVED, because the array is a shared
+    # vertex with three other writers and nothing above excludes any of them:
+    # CompleteCredentialLink appends an entry, UnlinkCredential removes one, and
+    # identity-hygiene's MergeIdentity unions a whole set in. None of the three
+    # is refused by this op's guards -- they act on the LIVE owner, whose write
+    # path is open by construction on this arm.
+    #
+    # Unpinned, the update is not left unconditioned: step 8 conditions it on
+    # its own prior-document read (internal/processor/step8_commit.go's
+    # readPriorDocuments), and where a dispatcher declared the key, step 4's
+    # snapshot revision is applied instead (commit_path.go's
+    # applyHydratedRevisions). Neither substitutes for this pin. The step-8 read
+    # happens AFTER the filter above ran, so a CompleteCredentialLink landing in
+    # that window satisfies the condition and is silently overwritten by an
+    # array that never saw its append -- a credential the person just added,
+    # gone, with nothing left to notice it. And the step-4 route exists only
+    # when a submitter chose to declare the key, which is a client's read
+    # disposition, not a server policy this op may rest a shared-vertex write
+    # on. Carrying this read's own revision makes the decision and the write
+    # atomic under either dispatcher: a racing writer conflicts the whole batch,
+    # and the operator's sweep re-runs against a residue that has not moved.
+    return {"op": "update", "key": owner_key + ".credentialBinding",
+            "expectedRevision": binding.revision,
+            "document": {"class": "credentialBinding", "vertexKey": owner_key,
+                         "localName": "credentialBinding", "isDeleted": False,
+                         "data": data}}
 
 def write_path_closed(identity_key):
     # The identity DDL's dual discriminator, copied verbatim. True when EITHER
@@ -353,8 +471,10 @@ def execute(state, op):
         # exactly as the payload does, so no caller can invent a row whose
         # actorKey is some erased identity in order to reach a live person's.
         # The disjunction short-circuits, so the credential's two keys are read
-        # only when the owner's arm does not already answer.
-        if not (write_path_closed(identity_key) or write_path_closed(credential_actor_key)):
+        # only when the owner's arm does not already answer. The owner's half is
+        # kept because it is also the arm discriminator below.
+        owner_write_path_closed = write_path_closed(identity_key)
+        if not (owner_write_path_closed or write_path_closed(credential_actor_key)):
             fail("NotErased: neither " + identity_key + " nor " + credential_actor_key + " has a closed write path (no live erasureRequested marker, no shredded piiKey on either endpoint); this op retires residue an erasure left behind, and a live person's credential is removed through UnlinkCredential, by the person")
 
         # The narrowness guard. A live link means UnbindIdentityCredentials'
@@ -372,13 +492,56 @@ def execute(state, op):
         if link != None and not (hasattr(link, "isDeleted") and link.isDeleted):
             fail("StillBound: " + link_key + " is live; UnbindIdentityCredentials' sweep reaches this pair and is the correct path, not this op")
 
+        mutations = [{"op": "tombstone", "key": index_key}]
+
+        # WHICH ARM THIS IS, decided by the owner alone. The gate above passed,
+        # so at least one endpoint is erased; if the OWNER's write path is still
+        # OPEN then the erased endpoint can only be the credential, which is the
+        # outbound shape by definition -- a live third party carrying a sign-in
+        # method that belongs to somebody who no longer exists. That array is
+        # the only thing this op rewrites, and this is the only arm it rewrites
+        # on. In the inbound shape the owner IS the erased subject and their
+        # array is theirs to lose: it is sensitive, its DEK is destroyed or
+        # about to be, and key destruction erases it far more completely than a
+        # filter would.
+        #
+        # The predicate is the WHOLE write_path_closed and not just its
+        # piiKey.shredded half, and the case that separates them is an owner
+        # closed by the MARKER alone -- sealed for erasure, key not yet
+        # destroyed, array still readable and writable. That owner is not a
+        # third party this op is tidying up after; they are a subject mid-
+        # erasure, and rewriting their array would be this op, holding a
+        # scope:any operator grant, driving a fresh sensitive write straight
+        # through the gate that exists to stop exactly that ("no writer may
+        # create a fresh erasable representation of them" -- ddls.go's
+        # write_path_closed). UnbindIdentityCredentials' own inbound sweep
+        # declines the same rewrite on the same subject for the same reason.
+        #
+        # The guard is also what makes the read inside the rewrite safe at all.
+        # credentialBinding is a SENSITIVE aspect, so any read of it decrypts
+        # under the owner's DEK (internal/processor/sensitive_decrypt.go); on a
+        # shredded owner the Vault answers ErrKeyShredded and the operation
+        # fails outright instead of retiring the index. The inbound residue this
+        # op primarily exists for is precisely a shredded owner, so ordering the
+        # erasure question ahead of the array read is not defensive padding --
+        # it is the only order under which both arms work.
+        if not owner_write_path_closed:
+            rewrite = owner_binding_rewrite(identity_key, credential_actor_key)
+            if rewrite != None:
+                mutations.append(rewrite)
+
         # identity.unbound, verbatim rather than a new event type: the outcome
         # is semantically identical to what the inbound sweep would have emitted
         # for this exact pair had a link survived to enumerate, and the
         # Gateway's credential-bindings consumer already tolerates an unbound
         # for a row it never materialized.
+        #
+        # response.primaryKey stays index_key with a second mutation present:
+        # the reply-constraint admits any mutation key in the batch
+        # (internal/processor/commit_path.go's primaryKeyInCommit), and the
+        # index vertex is the row this verb is named for.
         return {
-            "mutations": [{"op": "tombstone", "key": index_key}],
+            "mutations": mutations,
             "events": [{"class": "identity.unbound", "data": {
                 "identityKey": identity_key,
                 "actorKey": credential_actor_key,
