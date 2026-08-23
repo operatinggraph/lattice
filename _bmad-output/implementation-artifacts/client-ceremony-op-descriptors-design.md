@@ -1787,3 +1787,84 @@ is what this fire had to prove; arming a real claim secret in the demo world is 
 `ReportIssue` and `CreateStudio` render as buttons rather than degraded cards because this actor's
 `{me.workplace}` anchor resolves; a role holder who works nowhere gets the existing self-anchor degrade,
 pinned by its own vector.
+
+## 19. The derived-reads plane tail — fire brief (build note, 2026-08-23)
+
+Three §12.7 residual rows close as one fire: they are one mechanism (`derive_reads` and the derived-key
+ban that exists because of it), and splitting them would re-purchase the same grounding three times.
+
+**1. Scope sentence.** Close the derived-reads plane's three open rows: (a) a derived **required** read can
+stand outside the descriptor floor the envelope's own declaration is held to; (b) `state`/`ddl` bind as
+empty dicts inside `derive_reads` where `kv`/`nanoid` are fail-closed stubs; (c) the G2 derived-key gate
+excludes `internal/` wholesale, so `internal/gateway` and `internal/objectmanager` — submitters both — are
+unguarded. **Green bar:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/processor/... ./internal/gateway/...
+./internal/objectmanager/... ./packages/identity-domain/...`, and CI green on `main`.
+
+**2. Verified touch-list** (`file:line` checked live at `353a4e2`):
+
+- `internal/processor/derive_reads.go:159-171` — `deriveReadsGlobals` binds `"state": starlarklib.NewDict(0)`
+  and `"ddl": starlarklib.NewDict(0)` beside `failingModule("kv", …)` / `failingModule("nanoid", …)`.
+- `internal/processor/derive_reads.go:179-189` — `failingModule`, the fail-closed precedent (errors on CALL).
+- `internal/processor/derive_reads.go:304-371` — `mergeDerivedReads`; `:347` is the `continue // envelope's
+  disposition stands` that already blocks re-hardening a key the envelope DECLARED. The gap is the key the
+  envelope never declared.
+- `internal/processor/step4_hydrate.go:196-213` — floor at `:205`, derivation at `:208`. The floor is
+  compiled against the envelope only, and `applyDescriptorFloor` early-returns when the envelope declares
+  no `reads`/`egressReads` at all, so at merge time there is no floor object in hand.
+- `internal/processor/descriptor_floor.go:123-190` — `applyDescriptorFloor` + its internal `floored()`
+  predicate; `:227-251` `resolveDescriptorFloor`; `:283-309` `resolveDescriptorRequired` (already hardened
+  against payload-addressable exclusions).
+- `scripts/lint-conventions.go:1036-1037` — `derivedKeyScoped`, the wholesale `internal/` exclusion; the
+  comment above it at `:1032-1035` already names this row as the reason it was not widened in that fire.
+- `scripts/lint-conventions.go:2147-2187` — `checkDerivedKey`, the ban and its `// derived-key:` escape.
+- The four `internal/` derivation sites the narrowing exposes: `internal/gateway/auth/auth.go:430`
+  (idpsub→actor subject), `internal/gateway/whoami.go:107` (credentialindex), `internal/gateway/whoami.go:135`
+  (identityindex + email normalization), `internal/objectmanager/manager.go:395` (content-addressed object id).
+
+**3. Precedents to mirror.** Fail-closed binding → `failingModule` (`derive_reads.go:179-189`); it errors on
+CALL, which is wrong for a *mapping* — `state[k]` / `state.get(k)` / `k in state` are not calls — so the
+mirror is its posture, not its type. Refusal at merge → the two existing merge refusals,
+`DeriveReadsEgressConflict` (`derive_reads.go:341`) and `DeclaredReadCeilingExceeded` (`derive_reads.go:365`),
+both `*HydrationError`, both blaming the package rather than the submitter. Gate carve-out → the narrow
+prefix allowlist in `scripts/lint-capability-kv-readers.go:114-134`, not a tree-wide boolean.
+
+**4. Increment order.**
+
+1. `state`/`ddl` fail closed inside `derive_reads`. Green: `go test ./internal/processor/ -run DeriveReads`.
+2. A derived **required** read the descriptor's floor covers is REFUSED. Green: same, plus
+   `-run 'DescriptorFloor|Hydrate'`.
+3. G2 narrowed to an ownership allowlist + the four sites annotated + self-test cases.
+   Green: `STRICT=1 go run ./scripts/lint-conventions.go`.
+4. The agreement test the narrowing exposes (see part 6). Green: the identity-domain package tests.
+
+**5. In-scope gotchas.** The `processor.md` dossier entry #10 binds increment 2 directly: *"for any
+exclusion / allow / exemption set, state in one sentence what it is a function of; if a submitter-controlled
+field appears anywhere in that derivation, the control is submitter-revocable"* — increment 2's refusal is
+excluded by `resolveDescriptorRequired`, which already refuses payload-derived templates, and the fire
+inherits that hardening rather than re-deriving it. Standing checklist #1 (new state needs a lifetime) is
+not tripped — nothing here accumulates. #3 binds every increment: each fix is proven by reverting it and
+watching its test fail. #6 (precedent may carry debt) binds increment 3: the four sites are annotated on
+their own merits, not because they are already written.
+
+**Decisions taken here, as Winston** (§0 — implementation calls, no contract change, no fork):
+
+- **Increment 2 refuses rather than demotes.** `descriptor-floor-template-coverage-design.md` §8 states the
+  direction: *"silently demoting a derived requirement is the dangerous direction for a read the DDL's own
+  author demanded fail-closed."* A derived required key that the same package's descriptor calls
+  absence-tolerant is a **package-internal contradiction**, so the operation faults closed naming the
+  derivation — the disposition of `DeriveReadsEgressConflict`, for the same reason. A submitter can steer a
+  `{payload.*}` optionalReads template into covering a derived key and so provoke this refusal; that is a
+  self-DoS on their own operation in the safe direction, never a bypass.
+- **Increment 3 annotates rather than refactors `internal/gateway`.** The two whoami sites are a genuine
+  second implementation of identity-domain's normalization, and the package's own version is Starlark source
+  text — there is no Go helper for the gateway to call and no import that would create one. The annotation
+  records what each derives; the agreement test in increment 4 is what actually keeps the two in step.
+
+**6. Adjacent finds.** Narrowing G2 exposes that nothing pins `internal/gateway`'s two index-key derivations
+against identity-domain's Starlark. Absorbed into this run's batch as increment 4 (an agreement test), not
+filed — the run fixes what it finds.
+
+**7. Non-goals.** `packages/` stays out of G2's scope (it is the DDL side, where derivation belongs). No
+change to the floor's behaviour for envelope-declared keys. No change to `derive_reads`'s signature, budget,
+or ceiling accounting. Not touched: the ★★ Refractor capability-plane wedge (needs the live wedged stack).
