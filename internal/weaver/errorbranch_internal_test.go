@@ -380,6 +380,71 @@ func TestReconcileConsumers_AddFailureRaisesIssue(t *testing.T) {
 	}
 }
 
+// TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies proves the
+// registry-removal teardown retires the same issue families Revoke does. A
+// target can leave the registry without ever being revoked — its meta-vertex or
+// spec aspect is deleted, or a spec update renames its targetId — and after that
+// handleRow returns at the unregistered-target miss, so no live path can reach a
+// clear: without this, one entry per (entity, column) stands for a target that
+// no longer exists until the process restarts. Another target's identically
+// shaped entries must survive, which is what makes it a prefix clear rather than
+// a flush.
+func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	h := newSweepHarness(t, ctx)
+	h.engine.ctx = ctx
+
+	const targetID = "fixtureRemovalTeardown"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	h.engine.reconcileConsumers()
+	if _, ok := h.engine.targets[targetID]; !ok {
+		t.Fatalf("setup: Add must succeed and populate e.targets")
+	}
+
+	entityA, entityB := testNanoID(t), testNanoID(t)
+	stranded := []string{
+		issueKeyDataEntity(targetID, entityA, "entityKey"),
+		issueKeyDataEntity(targetID, entityB, "entityKey"),
+		issueKeyGapEntity(targetID, entityA, "missing_x"),
+		issueKeyGapConfig(targetID, "missing_x"),
+		issueKeyInflightMismatch(targetID, "missing_x"),
+	}
+	// A target whose id shares the removed one's leading characters: the trailing
+	// separator in each family prefix is what keeps it out of the clear.
+	survivor := issueKeyDataEntity(targetID+"Sibling", entityA, "entityKey")
+	for _, key := range append(append([]string{}, stranded...), survivor) {
+		h.engine.issues.set(key, "warning", "Fixture", key)
+	}
+
+	// Leave the registry the non-Revoke way — the state removeVertex /
+	// removeSpec / a renamed targetId all land in before firing the reconcile
+	// callback.
+	h.engine.source.mu.Lock()
+	delete(h.engine.source.targets, targetID)
+	h.engine.source.mu.Unlock()
+	h.engine.reconcileConsumers()
+
+	if _, ok := h.engine.targets[targetID]; ok {
+		t.Fatalf("setup: the removal branch must have run and dropped e.targets[%s]", targetID)
+	}
+	for _, key := range stranded {
+		if _, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("registry removal left %q standing for a target that is no longer registered; issues = %+v",
+				key, h.engine.issues.snapshot())
+		}
+	}
+	if _, ok := issueAt(h.engine.issues, survivor); !ok {
+		t.Fatalf("removing %q retired %q, which belongs to another target", targetID, survivor)
+	}
+}
+
 // TestReconcileConsumers_RemoveFailureRaisesIssue proves a failed lane-1
 // consumer Remove (the durable's stream gone out from under it) raises a
 // ConsumerReconcileError issue and leaves e.targets untouched (the durable

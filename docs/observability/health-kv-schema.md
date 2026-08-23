@@ -879,8 +879,7 @@ decides whose close retires the issue. The key never appears on the wire — it 
 |---|---|---|
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`), `TemplateDataError` |
-| `data:<targetId>.entityKey` | the target | `RowDataError` for a violating row carrying no `entityKey` echo — see below |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo), `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
 | `inflightMismatch:<targetId>.<gapColumn>` | the lens's column declaration | `InflightActionMismatch` |
 
@@ -900,17 +899,17 @@ Most of the columns these readers surface — `violating`, `inflight_<g>`, `maxr
 entries would accumulate one per `(row, column)` for the process's lifetime. The listing cap below
 bounds the *document*, never the cache behind it.
 
-The one exception is the **missing-`entityKey` echo**, which is keyed by target and column. Not for
-want of an entity — the row *key* supplies one whatever the body omits — but because nothing on the
-live path retires this entry, so segmenting it per entity would multiply a permanently standing
-entry rather than retire any. Read it as "at least one row of this target projected without its
-`entityKey`", not as a per-row count.
+The **missing-`entityKey` echo** is keyed the same way: the entity the body omits is supplied by the
+row *key*, and the raise/clear decision is taken on every delivery that reaches reconciliation (the
+row key parses, the target is registered, the body parses) — violating or not, target disabled or
+not — so a repaired row retires its own entry. Read each entry as "this row projected without its
+`entityKey`", so N such rows are N entries.
 
 #### Teardown (`Revoke`)
 
 | Family | Retired on revoke by | Why |
 |---|---|---|
-| `gap:`, `gapConfig:`, `data:`, `inflightMismatch:` | **prefix clear** | keys carry a segment below the target, so there is no single key to name; a revoked target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
+| `gap:`, `gapConfig:`, `data:`, `inflightMismatch:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
 | `consumer:`, `timer:`, `target:<ownerVertexId>` | key clear | keyed by target alone |
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |

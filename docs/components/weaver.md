@@ -930,7 +930,7 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   (`GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError`) is identical for every row and would
   mint N copies. Splitting is where clears get stranded — one key served both scopes, so a single clear
   incidentally retired facts that now need naming. Minted: `issueKeyGap`, two concurrent erasures
-  (2026-08-23); `issueKeyData` carried the same shape one function over. Check: enumerate every raise and
+  (2026-08-23); the missing-`entityKey` data key carried the same shape one function over. Check: enumerate every raise and
   every clear, assert each raise still reaches each clear it had, and pin two entities on one column.
 - **A per-entity Health issue is unbounded, and the heartbeat is ONE KV value** — `issueCache.snapshot()`
   feeds the whole slice into `health.weaver.<instance>`, so the moment a key gains an entity segment the
@@ -946,7 +946,7 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   whatever column its caller passes, so counting the two call sites says nothing about how many latches
   exist. Six columns flowed through those two readers and one had a clear; segmenting turned four O(1)
   stuck entries into O(entities), held for process lifetime and re-sorted every heartbeat. The issue cap
-  bounds the DOCUMENT, not the cache. Minted: the `issueKeyData` split (2026-08-23) — the per-increment
+  bounds the DOCUMENT, not the cache. Minted: the `data:` key split (2026-08-23) — the per-increment
   reviews all passed; only the cumulative close pass saw it. Check: for every raise, name the clear that
   retires that exact column, and pair the retirement with the READ so it is level-driven.
 - **A redundant safety line cannot be proven by reverting it — check whether the two orders are provably
