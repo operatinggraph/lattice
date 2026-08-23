@@ -20,10 +20,11 @@
 //     with a notice rather than failing the build on git plumbing.
 //
 // A package's "content" is every file under packages/<name>/ except *_test.go
-// and *.md — the files that shape what install writes. A file whose diff only
-// rewrites Go import specifiers naming the module itself is not content: the
-// Definition it compiles to is byte-identical, so install has nothing new to
-// write. The version check reads manifest.yaml's `version:` value; package.go's
+// and *.md — the files that shape what install writes. Two kinds of Go edit are
+// not content, because the Definition they compile to is byte-identical and
+// install has nothing new to write: a diff that only rewrites import specifiers
+// naming the module itself (importOnly), and a diff that only rewrites comments
+// (commentOnlyGoChange). The version check reads manifest.yaml's `version:` value; package.go's
 // Definition.Version is pinned to it by every package's
 // TestPackage_ManifestMatchesDefinition, so one bumped value implies both.
 package main
@@ -38,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -79,6 +81,14 @@ func main() {
 			continue
 		}
 		if importOnly(rangeMode, base, head, path, modulePaths) {
+			continue
+		}
+		// A comment edit cannot alter a byte of the Definition this file
+		// compiles to, and extorting a version bump for one publishes a package
+		// revision asserting a content change that did not happen — every stack
+		// then diff-applies the package for nothing. Same exemption, and the
+		// same reason, as walkGeneratorConsumers below.
+		if strings.HasSuffix(path, ".go") && commentOnlyGoChange(rangeMode, base, head, path) {
 			continue
 		}
 		contentChanged[pkg]++
@@ -311,6 +321,13 @@ const walkGeneratorDir = "internal/pkgmgr/"
 //
 // A parse failure on either side answers false, so an unreadable revision is
 // treated as a real change and the gate stays fail-closed.
+//
+// Directive comments are the exception the AST cannot see: dropping comments
+// drops `//go:build`, `//go:embed` and `//go:generate` with them, yet each one
+// is content. A build tag decides whether the file compiles into the package at
+// all — packages/lease-signing carries four constrained files whose tag picks
+// which freshness/renewal window the installed Definition gets — so the
+// directive lines are compared separately, and any difference answers false.
 func commentOnlyGoChange(rangeMode bool, base, head, path string) bool {
 	oldRef := "HEAD"
 	if rangeMode {
@@ -339,7 +356,24 @@ func commentOnlyGoChange(rangeMode bool, base, head, path string) bool {
 	if !ok {
 		return false
 	}
-	return bytes.Equal(oldAST, newAST)
+	if !bytes.Equal(oldAST, newAST) {
+		return false
+	}
+	return slices.Equal(goDirectives(oldSrc), goDirectives(newSrc))
+}
+
+// goDirectives lists a file's `//go:` directive lines in source order. Matched
+// after trimming leading space and without asking where the directive sits: a
+// line inside a raw string literal that merely looks like one is admitted, and
+// that only ever pushes the comparison toward "this is a real change".
+func goDirectives(src []byte) []string {
+	var out []string
+	for _, ln := range strings.Split(string(src), "\n") {
+		if t := strings.TrimSpace(ln); strings.HasPrefix(t, "//go:") {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // canonicalGo renders src as source text with every comment dropped, so two
