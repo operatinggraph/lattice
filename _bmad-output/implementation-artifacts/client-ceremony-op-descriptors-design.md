@@ -1868,3 +1868,54 @@ filed — the run fixes what it finds.
 **7. Non-goals.** `packages/` stays out of G2's scope (it is the DDL side, where derivation belongs). No
 change to the floor's behaviour for envelope-declared keys. No change to `derive_reads`'s signature, budget,
 or ceiling accounting. Not touched: the ★★ Refractor capability-plane wedge (needs the live wedged stack).
+
+### 19.1 Close pass — what the item's reviews found, and where the lessons went
+
+Shipped as `44d42a7` (fire branch `7589006` + the post-review round `1da5104`). Three cold reviewers ran
+against the frozen `7589006`, none of them an implementer, on the §12.7 practice: commit first, hand all
+three the SHA, edit nothing until every one reports. All three completed.
+
+**The equivalence claim held.** A 1,440-case differential harness ran the pre-change `applyDescriptorFloor`
+beside the resolver-based one — 10 optionalReads template sets × 6 reads sets × 8 bases × 3 payloads —
+comparing returned `declaredReads` *and* log bytes. Zero divergences. Every early return, the slice-aliasing
+invariant, the merge ordering and the nil-resolver path were each attacked and held.
+
+**Classification of the findings** (per `agents/steward/SKILL.md` §4):
+
+- **Implementation-bug, Processor — 4.** `Truth()` answering True (a MAJOR *surviving mutant*: reverting it
+  failed no test, and `True` silently flipped `if state:` away from the branch an empty dict took); `Attr`
+  answering any name, making `state.zzz` quieter than before and `getattr(state,k,None)` truthy; `String()`
+  rendering as `{}`; the fault echoing a class-(g) derived key to the submitter on the wire.
+- **Convention / falsified-claim — 2.** The `failingMapping` doc block asserting that *every* way of
+  reaching in raises, when truthiness, identity comparison and `hasattr` have no error channel; and
+  `ddl_cache.go`'s union comment still claiming the union "can only widen absence-tolerance", which this
+  item made false.
+- **Gate soundness — 2.** The ownership allowlist matching subtrees where its own reasons named files
+  (`internal/processor/opwire`, `internal/substrate/keys` are real packages it was amnestying); the
+  value-take form (`f := substrate.SHA256NanoID`) evading a call-site-only pattern.
+- **Review over-reach — 0.** One finding was *sharpened* rather than accepted: the `ok=false` branch was
+  genuinely unpinned, but the reviewer's HTTP-path framing was wrong (`auth.go` trims first), so the first
+  test written for it passed with the branch deleted. It was rewritten to drive the probe directly.
+
+**Design-gap — 1, and it is the one that leaves this fire.** The contradiction *refusal* is a clause-scope
+decision this design could not take alone; §8 of the descriptor-floor design said so at the time. The
+refusal ships (the contract is silent on a key the envelope never declared, not contrary — "weakest wins"
+governs envelope-declared keys and the floor clause governs the submitter's `contextHint`), and the
+Contract #2 §2.5 edit that would close the gap explicitly is prepared as an unratified proposal for Andrew.
+
+**Two behaviours worth carrying forward, neither a defect.** The refusal is *submitter-suppressible*: an
+envelope that declares the contradicted key hits the envelope-disposition-stands skip before the floor
+check, so a package shipping a contradiction faults for well-behaved clients and succeeds for clients that
+name the key. That is contract-mandated weakest-wins in the anti-enumeration-safe direction. And a
+descriptor adopting the whole-key `{me.<type>}` optional form floors every key of that shape with no way to
+except one, because `resolveDescriptorRequired` refuses pattern-shaped required templates; only the
+`:id` fragment form ships today. Both are documented at the refusal.
+
+**Dossier routing.** `docs/components/processor.md`'s "Review keeps catching" is at its 12-entry cap, so
+this item extends an entry rather than adding a thirteenth. It is the fourth sighting of *"a gate's negative
+test must first prove its positive vector reaches the gate"* and the first in a DIFFERENT item, which is the
+condition that entry set for itself — but in a Go shape its prescribed mechanization does not reach. The
+check is sharpened where it stands: revert-proving the fix is not sufficient, because all three sightings
+here (`Truth()`, a lint self-test pinning neither word boundary, an exported branch a lower layer already
+covered) were mechanism surfaces the fix's own revert never touched. Mutate every surface the fix
+introduces and treat a surviving mutant as an unpinned behaviour.

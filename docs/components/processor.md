@@ -544,7 +544,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   set had no vector at all. Check: standing checklist #3 (revert-the-fix discipline). **Mechanize on the next
   sighting in a DIFFERENT item** (all three so far are this one): for each `fail(` reachable from a `require_*`
   helper, require the package's tests to assert that failure's own error prefix AND one accepted submit
-  through the same helper.
+  through the same helper. **Fourth sighting, and the first in a DIFFERENT item** (derived-reads plane tail,
+  `44d42a7`), in three places at once and in a Go shape the mechanization above does not reach: a
+  `failingMapping` method that could be reverted with no test failing, a lint self-test case that pinned
+  neither word boundary it named, and an exported-branch test that passed with the branch deleted because a
+  lower layer already trimmed. Sharpened check, which is what caught all three: revert-proving the FIX is
+  not sufficient — mutate every OTHER surface of the mechanism the fix introduces (each interface method,
+  each regex boundary, each guard) and treat a surviving mutant as an unpinned behaviour, not a
+  cosmetic gap.
 - **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
   declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
   `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it
