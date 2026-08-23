@@ -40,8 +40,8 @@ type CapabilityAuthorProvenance struct {
 // capability request. It is the payload a `capabilityAuthor` adapter returns,
 // carried verbatim in the bridge Dispatch's Result.Detail string (the bridge
 // treats Detail as opaque). Kind/Content is the proposed artifact itself
-// (design §3.2's deterministic-validatability spine — "lens" only in this
-// fire); Target names where it would install; Validation is the
+// (design §3.2's deterministic-validatability spine — "lens" only so far);
+// Target names where it would install; Validation is the
 // ALREADY-COMPUTED §5 verdict (see CapabilityAuthorValidation); Provenance
 // records the reasoning context. Mirrors AugurProposal's shape/role exactly.
 type CapabilityAuthorProposal struct {

@@ -109,12 +109,12 @@ type ArtifactValidationReport struct {
 
 // LensArtifactContent is the JSON shape of a "lens"-kind proposal's
 // artifact.content — the constrained subset of pkgmgr.LensSpec an AI-authored
-// lens proposal may carry in this increment: a plain nats-kv or postgres
-// projection (no actor-aggregate Output, no Protected/SecureColumns/GrantTable
-// postures — those need a richer scope-check this increment does not yet build;
-// see the design's §3.2 phase-by-kind boundary). Field names are the wire shape
-// the capabilityAuthor adapter's structured output (and the tests exercising
-// it) use.
+// lens proposal may carry: a plain nats-kv or postgres projection (no
+// actor-aggregate Output, no Protected/SecureColumns/GrantTable postures —
+// those need a richer scope-check the materializer does not build; see the
+// design's §3.2 phase-by-kind boundary). Field names are the wire shape the
+// capabilityAuthor adapter's structured output (and the tests exercising it)
+// use.
 type LensArtifactContent struct {
 	CanonicalName string `json:"canonicalName"`
 	Adapter       string `json:"adapter"`
@@ -127,7 +127,7 @@ type LensArtifactContent struct {
 // artifact.content — a single Contract #6 permission grant, mirroring
 // pkgmgr.PermissionSpec field-for-field: an operationType gated at a scope,
 // granted to one or more already-existing roles by canonical name. A "grant"
-// artifact never declares a new Role (§3.2 keeps this increment to widening an
+// artifact never declares a new Role (§3.2 keeps the grant kind to widening an
 // existing role's permissions, not minting new roles) — GrantsTo entries must
 // name a role the installer's live catalog already knows, checked at apply time
 // exactly as a hand-authored package's GrantsTo is.

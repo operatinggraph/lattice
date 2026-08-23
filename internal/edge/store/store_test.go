@@ -70,8 +70,8 @@ func TestOpen_UnwritablePathFails(t *testing.T) {
 // schema (every pre-R2 store — no schemaVersion key at all) carries entries
 // that cannot be safely diffed against a keyset frame, so Open must purge the
 // mirror + cursor rather than mixing pre-attribution entries with new ones.
-// Written directly against bbolt (bypassing store.Open) to model a store this
-// fire's migration predates — the bucket/key names mirror bolt.go's
+// Written directly against bbolt (bypassing store.Open) to model a store the
+// schema migration predates — the bucket/key names mirror bolt.go's
 // unexported constants ("val"/"meta"/"cursor") since this is an external test
 // package.
 func TestOpen_PurgesMirrorOnSchemaMismatch(t *testing.T) {

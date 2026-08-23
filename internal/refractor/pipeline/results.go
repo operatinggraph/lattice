@@ -184,8 +184,8 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 		// the duration. Narrowing this to only the actor(s) that actually
 		// own a failed result needs the same key→actor inversion §4.4's
 		// AnchorFromKey builds for the sweep — deliberately not duplicated
-		// here; this increment accepts the coarser, safe-but-costlier retry
-		// unit and names the cost rather than silently absorbing it.
+		// here; the retry stays this coarser, safe-but-costlier unit, with
+		// the cost named rather than silently absorbed.
 		//
 		// enumeratedActors is nil for the actor's own vertex re-evaluating
 		// itself — key IS the actor key there, safe now that the check

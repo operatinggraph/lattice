@@ -322,8 +322,8 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		// A non-ErrKeyNotFound fetchLiveEnvelope failure (a corrupt row, a
 		// persistent bucket error) must ALSO escalate past the retry budget —
 		// not just the absent-row arm above. An unconditional transient return
-		// for this class would Nak forever (adversarial review finding, this
-		// fire: FR29 "converge, never park" violated).
+		// for this class would Nak forever (FR29 "converge, never park" would
+		// be violated).
 		conn := egressTestConn(t)
 		provisionEnvelopeBucket(t, ctx, conn)
 		e := &Engine{conn: conn, logger: slog.Default()}

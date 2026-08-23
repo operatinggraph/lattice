@@ -268,8 +268,8 @@ func TestParseOutputDescriptor_EntryKeyColumn_AcceptAndReject(t *testing.T) {
 
 // A descriptor parsed without entryKeyColumn defaults it empty and keeps the
 // document (one-envelope-per-actor) path byte-identical — the regression pin
-// for the driver-side no-op this increment promises (EnvelopeFn is untouched;
-// perEntry emission has no driver consumer yet).
+// for the driver-side no-op (EnvelopeFn is untouched; perEntry emission has
+// no driver consumer yet).
 func TestParseOutputDescriptor_EntryKeyColumn_DefaultsEmpty(t *testing.T) {
 	d, err := ParseOutputDescriptor(validDescriptor())
 	if err != nil {

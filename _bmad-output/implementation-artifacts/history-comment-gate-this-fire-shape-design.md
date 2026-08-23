@@ -28,11 +28,50 @@ comment text only, at `1abea2d`:
 | `this fire` | 72 | 59 | **admit** — every hit narrates the authoring change |
 | `this fix` | 14 | 12 | **admit** — every hit is `before this fix` / `the bug this fix closes` shaped |
 | `this change` | 3 | 3 | **admit** — all three narrate |
+| `this increment` | 35 | — | **admit** — the same grammar under another word (§2.1) |
+| `pre-fix` | 11 | — | **admit** — a compression of the already-banned `Before the fix` (§2.1) |
 | `this run` | 25 | 12 | **reject** — dominated by runtime prose (a CLI invocation, `cmd/lattice-pkg`) |
 | `this pass` | 37 | 21 | **reject** — dominated by runtime prose (a reconcile/verify pass) |
 | `this commit` | 3 | 3 | **reject** — `commit path` / `commit step` is core Processor vocabulary, and RE2 has no lookahead to separate it; a 1-in-3 false-positive rate on a blocking gate is not worth 2 sites, which this fire repairs by hand instead |
 
-Admitted union: **89 hits across 71 files**, 8 of them non-test files under `packages/`.
+First admitted union: **89 hits across 71 files**, 8 of them non-test files under `packages/`.
+
+### 2.1 What the first sweep surfaced — the gate was line-anchored
+
+Two of the sweep builders reported the same shape independently: narration the gate had *not* flagged
+sitting three lines from narration it had. The cause is that the check matched one physical line at a time,
+and a wrapped doc comment breaks its sentences wherever the margin falls —
+
+```go
+// Mode selects the planner-extension posture (§10.8 Planner extension,
+// Fire 4): "" (absent, the default — every target installed before this
+// fire) is frozen table-only behavior, byte-identical; …
+```
+
+— so the gate reads two clean lines and lets it through (`internal/weaver/registry.go:301`). A gate that a
+line break defeats does not enforce the rule; it enforces a formatting accident. **The line-anchored pass
+is joined by a block pass**: maximal runs of comment-ONLY lines are joined and matched as one string, the
+finding reported on the line the phrase starts on. Only comment-only lines join — a run of trailing comments
+on consecutive code lines is not one sentence, and joining those would manufacture a phrase from two
+unrelated remarks.
+
+Measured alongside it, and admitted for the same reason: **`this increment`** (35 hits) is the same
+self-referential grammar with another word in it, and **`pre-fix`** (11) is a compression of the
+already-banned `Before the fix`. Both are dominated by narration in every sampled hit.
+
+Strengthening the gate surfaced a second sweep of **71 sites across 51 files**.
+
+### 2.2 Two accepted false positives
+
+Both cost a rewording, never a wrong green, and both are recorded at the phrase list so the next author who
+trips one is not left guessing:
+
+- **`fire` as a verb** — `// should this fire next` (`packages/clinic-reminders/visitseries.go`). Reworded to
+  "trigger".
+- **`change` as a verb inside a quoted question** — `// what makes "did this change" answerable at all`
+  (`cmd/refractor/taxonomy_reload.go`). Surfaced only by the block pass, which joins the quote's two halves.
+
+RE2 has no lookahead, and a special case carved into a lint gate is a worse liability than two rewordings.
 
 ## 3. Why the sweep needs a `lint-package-version` fix first
 
@@ -66,14 +105,21 @@ both revisions — which closes the same latent hole on the existing walk-genera
 3. **The sweep** — repair all 89 comments so each describes current behaviour, plus the 2 genuine `this commit`
    sites §2 rejected from the gate. Green: `STRICT=1 go run ./scripts/lint-conventions.go` → 0 issues, and
    `go run ./scripts/lint-package-version.go` clean with **no** manifest bumped.
-4. **Gates** — `go build ./...`, `make vet`, `golangci-lint run ./...`, `go run ./scripts/lint-board.go`,
+4. **Close the line-anchoring** (§2.1) — the block pass, `this increment` + `pre-fix`, and the second sweep of
+   71 sites, plus one `t.Fatalf` message carrying the same narration into test output. Same green bar.
+5. **Gates** — `go build ./...`, `make vet`, `golangci-lint run ./...`, `go run ./scripts/lint-board.go`,
    `go test ./...` with `POSTGRES_TEST_DSN` set (REMOTE.md §3).
+
+Every swept file is additionally proven **comment-only** by comparing its comment-stripped AST against `main`,
+the same technique `commentOnlyGoChange` uses — a sweep this wide cannot be eyeballed for a stray code edit.
 
 ## 5. Non-goals
 
 `the fix` (52 hits), `the old` (103), `the new` (182), `legacy` (135), `pre-existing` (91) and the rest of the
 measured tail: each is a distinct admission question with its own false-positive profile, and none is the
-self-referential shape this row names. Not screened here, not swept here.
+self-referential shape this row names. Not screened here, not swept here. Narration inside **string literals**
+is out of scope too — the gate reads comments, and the one `t.Fatalf` message found carrying it is repaired by
+hand rather than by widening the gate to Go string content.
 
 ## 6. Build note
 

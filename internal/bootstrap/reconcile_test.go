@@ -328,13 +328,13 @@ func TestReconcilePrimordial_DoesNotReviveADeletedDDL(t *testing.T) {
 
 // TestReconcilePrimordial_DoesNotWriteAnOrphan is Inc 1's whole write-side
 // claim under test: a bucket holding a retired kernel entity is a candidate
-// KernelOrphans reports, but ReconcilePrimordial — report-only this
-// increment — must leave it untouched: no create, no update, and its
-// revision must not move. This is also the only test that actually runs the
-// Warn branch over plan.orphanedEntities/plan.orphanedAspects; deleting
-// either loop must not turn this test red on its own (it asserts on
-// ReconcileResult and the stored revision, not on log output), but it does
-// prove the loop executes against a real orphan without panicking or writing.
+// KernelOrphans reports, but ReconcilePrimordial — report-only — must leave
+// it untouched: no create, no update, and its revision must not move. This
+// is also the only test that actually runs the Warn branch over
+// plan.orphanedEntities/plan.orphanedAspects; deleting either loop must not
+// turn this test red on its own (it asserts on ReconcileResult and the
+// stored revision, not on log output), but it does prove the loop executes
+// against a real orphan without panicking or writing.
 func TestReconcilePrimordial_DoesNotWriteAnOrphan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

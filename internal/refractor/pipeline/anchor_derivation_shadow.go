@@ -42,8 +42,8 @@ const defaultDerivationShadowSampling = 8
 // derivationShadowSummaryEvery emits the running tally to the log every N
 // sampled events. Without it the shadow is unobservable in production: the
 // per-event line is DEBUG (which no deployed component prints) and the counters
-// live in memory behind an accessor nothing calls — so the measurement that is
-// this increment's whole justification would never reach an operator. The
+// live in memory behind an accessor nothing calls — so the measurement that
+// justifies the shadow's cost would never reach an operator. The
 // summary is INFO, per lens, and cheap at this interval.
 const derivationShadowSummaryEvery = 50
 

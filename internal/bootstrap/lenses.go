@@ -188,7 +188,7 @@ RETURN
 // base lens references no package vocabulary, exactly as the write-path base
 // capability lens does.
 //
-// Scope note (D1.1): this increment projects the self anchor for every actor.
+// Scope note (D1.1): the self anchor is projected for every actor.
 // The primordial root-read scope for the identities holding the primordial
 // `operator` role (the read analog of the write base's scope:"any" grant —
 // the privileged all-access anchor)

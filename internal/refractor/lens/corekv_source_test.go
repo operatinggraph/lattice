@@ -450,9 +450,9 @@ func TestCoreKVSource_SkipsEventStreamSpec(t *testing.T) {
 // same stream/instance — proving each boot gets a never-before-seen
 // per-boot durable (lensSourceDurablePrefix + nonce) rather than resuming a
 // shared durable's ack floor, which would replay nothing once the first
-// boot had already acked every message. Fails pre-fix (second source's
-// loadCB never fires — the live P0 incident in miniature); passes with
-// Fire A.
+// boot had already acked every message. A boot that resumes a shared
+// durable's ack floor instead of getting its own fails here (second
+// source's loadCB never fires — the live P0 incident in miniature).
 func TestCoreKVSource_ReplaysOnRestart(t *testing.T) {
 	s := natsfixture.StartServer(t)
 
@@ -524,7 +524,7 @@ func TestCoreKVSource_ReplaysOnRestart(t *testing.T) {
 }
 
 // TestCoreKVSource_MigratesFromLegacyFixedDurable proves a boot succeeds
-// (full replay, all lenses load) even when the pre-fix fixed-name durable
+// (full replay, all lenses load) even when a legacy fixed-name durable
 // ("refractor-lens-source", no instance/nonce segment) already exists on the
 // stream — the migration path needs no separate step because
 // lensSourceDurablePrefix's prune call also matches the bare legacy name.
@@ -566,7 +566,7 @@ func TestCoreKVSource_MigratesFromLegacyFixedDurable(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
 
-	// Simulate the pre-fix binary: a durable named exactly
+	// Simulate a legacy binary: a durable named exactly
 	// "refractor-lens-source" (the bare legacy fixed name), already caught
 	// up to the stream tip — the exact state that froze the live registry.
 	legacyCtx, cancelLegacy := context.WithCancel(ctx)

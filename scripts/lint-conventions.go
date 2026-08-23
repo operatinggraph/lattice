@@ -239,9 +239,18 @@ var (
 	// invocation, a reconcile pass); and "this commit" (3), where "commit path"
 	// and "commit step" are core Processor vocabulary and RE2 has no lookahead to
 	// separate them, so one false positive in three is not worth two sites.
-	// Sentence-initial capitalisation is matched: the tree carries none today, and
-	// a gate one shift key evades is not a gate.
-	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b|[Tt]his (?:fire|fix|change)\b`
+	// "this increment" (35) and "pre-fix" (11) are the same grammar under other
+	// words and are admitted with them. Sentence-initial capitalisation is
+	// matched: the tree carries none today, and a gate one shift key evades is
+	// not a gate.
+	//
+	// Two false-positive shapes are known and accepted, both costing a reword
+	// rather than a wrong green: "fire" used as a VERB after "this" ("should this
+	// fire next" — say "trigger"), and "change" as a verb inside a quoted
+	// question ("did this change" — name the question instead). RE2 has no
+	// lookahead, and a special case in a lint gate is a worse liability than two
+	// rewordings.
+	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b|[Tt]his (?:fire|fix|change|increment)\b|[Pp]re-fix\b`
 	// historyComment flags a comment carrying one of those phrases. The
 	// changelog-tag shape stays anchored to a comment's lead, unlike the rest: a
 	// whole-tree measurement unanchored produced 86 hits, nearly all a
@@ -249,6 +258,9 @@ var (
 	// rather than a narrated change. Every other phrase matches anywhere on the
 	// line, so a clause buried mid-sentence is not invisible to the gate.
 	historyComment = regexp.MustCompile(`//[ \t]*Story [0-9]|` + "//" + `.*\b(` + historyPhrases + `)`)
+	// historyPhraseOnly matches the same phrases against comment TEXT that has
+	// already had its `//` markers stripped — the joined-block form below.
+	historyPhraseOnly = regexp.MustCompile(`\b(` + historyPhrases + `)`)
 	// reviewFindingLabel anchors a bare parenthesized reviewer-finding label
 	// trailing a comment — the shape a review-fix round leaves behind when a
 	// fix note ends "... (A2)" instead of being cleaned up into a
@@ -751,6 +763,59 @@ func isCommentLine(line string) bool {
 	return strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//")
 }
 
+// historyBlockHits reports the line each change-narration phrase STARTS on,
+// matched over a whole comment block rather than one physical line.
+//
+// A wrapped doc comment breaks its sentences at whatever column the margin
+// falls on, so a line-anchored match reads "…the default — every target
+// installed before this" and "fire) is frozen table-only behavior…" as two
+// clean lines and lets the narration straight through. Joining the block first
+// is what makes the phrase visible; the line-anchored pass still runs beside
+// this one, because it is the pass that sees a trailing comment on a code line.
+//
+// Only comment-ONLY lines join. A run of trailing comments on consecutive code
+// lines is not one sentence, and joining those would manufacture a phrase out
+// of two unrelated remarks.
+func historyBlockHits(lines []string) map[int]bool {
+	hits := map[int]bool{}
+	for i := 0; i < len(lines); i++ {
+		if !isGoCommentLine(lines[i]) {
+			continue
+		}
+		var segs []string
+		var at []int
+		for ; i < len(lines) && isGoCommentLine(lines[i]); i++ {
+			segs = append(segs, goCommentBody(lines[i]))
+			at = append(at, i+1)
+		}
+		joined := strings.Join(segs, " ")
+		for _, loc := range historyPhraseOnly.FindAllStringIndex(joined, -1) {
+			off := 0
+			for k, s := range segs {
+				// The +1 is the separator this join inserted; a match landing
+				// on it belongs to the segment that follows.
+				if off+len(s) > loc[0] {
+					hits[at[k]] = true
+					break
+				}
+				off += len(s) + 1
+			}
+		}
+	}
+	return hits
+}
+
+// isGoCommentLine reports whether a line is nothing but a Go line comment.
+func isGoCommentLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "//")
+}
+
+// goCommentBody strips a comment-only line's `//` marker and surrounding space,
+// leaving the prose the block walk joins.
+func goCommentBody(line string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "//"))
+}
+
 // indentWidth counts a line's leading whitespace characters (a tab counts as
 // one, matching exemptionHelpers) — consistent within a file, which is all the
 // block walk compares.
@@ -1099,6 +1164,10 @@ func scanSource(path string, data []byte) []finding {
 	// `"Was:"` among the cell shapes it fails). Same exemption idiom, and the same
 	// reason, as derivedKeyScoped/grantChangeScoped above.
 	historyScoped := !strings.HasPrefix(slash, "scripts/lint-")
+	var historyBlock map[int]bool
+	if historyScoped {
+		historyBlock = historyBlockHits(strings.Split(string(data), "\n"))
+	}
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
@@ -1121,7 +1190,7 @@ func scanSource(path string, data []byte) []finding {
 		case !isCommentLine(line) && strings.TrimSpace(line) != "":
 			transientRefusalDeclared = false
 		}
-		if historyScoped && historyComment.MatchString(line) {
+		if historyScoped && (historyComment.MatchString(line) || historyBlock[ln]) {
 			out = append(out, finding{file: path, line: ln, msg: "history/changelog comment — git blame + the commit message are the record"})
 		}
 		if reviewFindingLabel.MatchString(line) {
@@ -3096,8 +3165,29 @@ func selfTest() []string {
 			"\t// a candidate this pass must leave entirely alone.\n", ""},
 		{"this commit path is Processor vocabulary, not narration", "internal/processor/commit_path.go",
 			"\t// a collision this commit path does not already treat as benign.\n", ""},
+		{"narration anchored on this increment is denied", "internal/weaver/evaluator.go",
+			"\t// through unevaluated: this increment builds no evaluator.\n", "history/changelog comment"},
+		{"pre-fix narration is denied", "internal/weaver/evaluator.go",
+			"\t// Sanity: the pre-fix mapping must get this WRONG.\n", "history/changelog comment"},
 		{"a lint script quoting the banned shape is exempt", "scripts/lint-board.go",
 			"\t// fails a cell carrying `Was:` or narrating this fire.\n", ""},
+		// The line-anchored pass cannot see a phrase a wrapped doc comment
+		// splits across the margin; the block pass is what closes that.
+		{"a phrase split across two comment lines is denied", "internal/weaver/registry.go",
+			"// \"\" (absent, the default — every target installed before this\n" +
+				"// fire) is frozen table-only behavior, byte-identical.\n",
+			"history/changelog comment"},
+		{"a phrase split across a comment line break is reported on its own line", "internal/weaver/registry.go",
+			"// The planner-extension posture is frozen table-only for a target\n" +
+				"// that declares no Mode, byte-identical to every target before this\n" +
+				"// fire, and always valid.\n",
+			"history/changelog comment"},
+		{"two unrelated trailing comments are not joined into a phrase", "internal/weaver/registry.go",
+			"\tx := 1 // nothing to see in this\n" +
+				"\ty := 2 // fire the retry and move on\n", ""},
+		{"a clean wrapped comment block passes", "internal/weaver/registry.go",
+			"// The planner-extension posture is frozen table-only for a target\n" +
+				"// that declares no Mode, and is always valid.\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {

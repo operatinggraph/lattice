@@ -745,15 +745,15 @@ func TestBackingStreamSideChannel(t *testing.T) {
 	}
 }
 
-// TestCoreEventsSideChannel: core-events is a plain stream outside the
-// PlatformBuckets() registry, so protectedStreamDenies never ran over it
-// before this test's fix — any $JS.API.> holder could purge the stream or
-// administer a protected consumer's durable (board item: "[natsperm]
-// $JS.API.> lets any component delete a durable or purge core-events").
-// Registry-driven per TestRegistryDrivenStreamAdminSideChannel's precedent
-// (not the hand-picked-component-subset shape this test used before this
-// fire): every non-bootstrap component (nonBootstrapComponentNames()) is
-// exercised, not a fixed sample. Two denial classes per protected consumer:
+// TestCoreEventsSideChannel guards the side channel where core-events, a
+// plain stream outside the PlatformBuckets() registry, sits beyond
+// protectedStreamDenies' reach: without this test, any $JS.API.> holder
+// could purge the stream or administer a protected consumer's durable
+// (board item: "[natsperm] $JS.API.> lets any component delete a durable or
+// purge core-events"). Registry-driven per
+// TestRegistryDrivenStreamAdminSideChannel's precedent: every non-bootstrap
+// component (nonBootstrapComponentNames()) is exercised, not a fixed
+// sample. Two denial classes per protected consumer:
 // DELETE/RESET/PAUSE denied to every component including the owner (nobody
 // administers their own durable — the Chronicler precedent), and
 // CREATE/DURABLE.CREATE/MSG.NEXT denied to every component EXCEPT the

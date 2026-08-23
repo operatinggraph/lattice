@@ -40,8 +40,8 @@ func TestMountPattern(t *testing.T) {
 }
 
 // TestMountPattern_NoStripPrefixIs404 documents (and pins) the exact failure
-// this package's own FS() doc comment warns against — proof the bug this
-// fire fixed was real, not a hypothetical.
+// this package's own FS() doc comment warns against — proof the bug is
+// real, not a hypothetical.
 func TestMountPattern_NoStripPrefixIs404(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/shared/", http.FileServer(FS())) // deliberately the broken mount

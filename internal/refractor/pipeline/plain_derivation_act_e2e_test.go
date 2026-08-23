@@ -75,10 +75,10 @@ RETURN pr.key AS key, id.data.name AS holderName
 // from `a`, so an event on the vertex playing that role is the shape that
 // exposes the gap: seedAnchorFor sees the event vertex's own type
 // (identity) IS the anchor label and seeds it, but the engine can only ever
-// narrow the ANCHOR pattern position (`b`) — so before this increment, an
-// event on the vertex playing `a` asked "does this vertex, as `b`, have an
-// outgoing duplicateOf edge", found none, and the row keyed on `b` never
-// learned `a`'s new value at all.
+// narrow the ANCHOR pattern position (`b`) — so an event on the vertex
+// playing `a` asks "does this vertex, as `b`, have an outgoing
+// duplicateOf edge", finds none, and the row keyed on `b` never learns
+// `a`'s new value at all.
 const plainActDuplicateSpec = `
 MATCH (b:identity)-[:duplicateOf]->(a:identity)
 RETURN b.key AS key, a.key AS dupOf, a.data.name AS dupName

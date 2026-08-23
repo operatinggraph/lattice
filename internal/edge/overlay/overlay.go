@@ -1,7 +1,7 @@
 // Package overlay is the Edge node's optimistic local-apply layer
-// (edge-lattice-full-design.md §3.4, the "Edge Processor" — pure-A: this
-// increment shows the caller-supplied intended value directly, with no
-// local Starlark prediction; the A′ predictive path is gated on the edge
+// (edge-lattice-full-design.md §3.4, the "Edge Processor" — pure-A: it
+// shows the caller-supplied intended value directly, with no local
+// Starlark prediction; the A′ predictive path is gated on the edge
 // Starlark sandbox and not built here). Apply installs the value a
 // locally-triggered mutation intends for a key, visible immediately through
 // Read at zero latency; the overlay is retired the instant ANY fresher
