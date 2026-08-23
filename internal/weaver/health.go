@@ -19,6 +19,24 @@ const healthVersion = "0.1.0"
 // defaultHeartbeatEvery is the Contract #5 §5.6 / NFR-O1 heartbeat cadence floor.
 const defaultHeartbeatEvery = 10 * time.Second
 
+// maxHeartbeatIssues caps how many issue entries one heartbeat document lists.
+//
+// The whole document is a single Health-KV value, and two of the issue classes
+// Weaver raises are per-ENTITY: a `surface` gap standing open (one per
+// violating subject — every unrouted task past its expiresAt, every erasure
+// stuck mid-flight) and GapBudgetExhausted. Both are unbounded in entity count,
+// so an unbounded issues[] would grow the value without limit. The listing is
+// bounded instead; the aggregate status is computed over EVERY open issue
+// before the cut, so truncation never makes the heartbeat read healthier than
+// it is, and the truncation entry names the total so a bounded list is never
+// readable as the whole set (internal/pkgmgr's sampleWithOverflow rule, applied
+// to entries rather than to a message's key sample).
+const maxHeartbeatIssues = 50
+
+// issuesTruncatedCode is the synthetic entry appended in place of the issues a
+// heartbeat did not list.
+const issuesTruncatedCode = "IssuesTruncated"
+
 // weaverHealthDoc is the Contract #5 §5.2 heartbeat document Weaver writes to
 // health.weaver.<instance>. Same shape as the Processor/Refractor/Loom docs;
 // component is "weaver".
@@ -264,7 +282,11 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 	// surfaces honestly instead of false-healthy. The "starting" and "shutdown"
 	// lifecycle phases are reported verbatim (a draining/initializing component
 	// isn't "degraded").
+	//
+	// Computed over the FULL issue set, before the listing is bounded: an issue
+	// too far down the list to be named still decides the reported status.
 	status = aggregateStatus(status, issues)
+	issues = boundIssues(issues, maxHeartbeatIssues)
 
 	doc := weaverHealthDoc{
 		Key:         h.key(),
@@ -357,6 +379,74 @@ func (h *heartbeater) flagEffectMismatches(ctx context.Context, metrics map[stri
 		}
 	}
 	metrics["effectMismatches"] = len(mismatches)
+}
+
+// boundIssues lists at most limit entries of an already deterministically
+// ordered issue set and appends ONE synthetic entry standing for the rest, so a
+// bounded list is never readable as the whole set. Returns issues unchanged
+// when it already fits (and when limit is non-positive — a disabled cap).
+//
+// The synthetic entry describes the issues it replaces: its severity is theirs
+// (an `error` hiding in the unlisted tail must not present as a warning), its
+// since is the oldest of theirs, and its message carries both the unlisted
+// count and the true total. It never substitutes for the status computation —
+// callers aggregate over the full set first.
+func boundIssues(issues []healthIssue, limit int) []healthIssue {
+	if limit <= 0 || len(issues) <= limit {
+		return issues
+	}
+	omitted := issues[limit:]
+	out := make([]healthIssue, 0, limit+1)
+	out = append(out, issues[:limit]...)
+	out = append(out, healthIssue{
+		Severity: worstSeverity(omitted),
+		Code:     issuesTruncatedCode,
+		Message: strconv.Itoa(len(omitted)) + " further open issues are not listed in this heartbeat (" +
+			strconv.Itoa(len(issues)) + " open in total, " + strconv.Itoa(limit) + " listed)",
+		Since: oldestSince(omitted),
+	})
+	return out
+}
+
+// worstSeverity collapses an issue set to the single severity that describes it,
+// on the same two-way split aggregateStatus applies to the whole document: any
+// "error" ⇒ "error", anything else (including a severity string this build does
+// not recognise, which aggregateStatus already reads as at-least-degraded) ⇒
+// "warning". Empty for an empty set.
+func worstSeverity(issues []healthIssue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	for _, is := range issues {
+		if is.Severity == "error" {
+			return "error"
+		}
+	}
+	return "warning"
+}
+
+// oldestSince returns the earliest first-arose stamp in the set (Contract #5
+// §5.5). RFC3339Nano trims trailing zeros in the fractional part, so the stamps
+// are compared as instants, not as strings; a set whose stamps are all
+// unparseable falls back to the first entry's stamp verbatim rather than
+// inventing one.
+func oldestSince(issues []healthIssue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	since := issues[0].Since
+	var oldest time.Time
+	found := false
+	for _, is := range issues {
+		t, err := time.Parse(time.RFC3339Nano, is.Since)
+		if err != nil {
+			continue
+		}
+		if !found || t.Before(oldest) {
+			oldest, found, since = t, true, is.Since
+		}
+	}
+	return since
 }
 
 // aggregateStatus reconciles the reported lifecycle status with the open issue

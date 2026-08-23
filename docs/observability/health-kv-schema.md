@@ -847,7 +847,7 @@ never installed, which is the monitoring equivalent of reporting healthy.
   "component": "weaver",
   "instance": "<instance>",
   "version": "0.1.0",
-  "status": "starting | healthy | shutdown",
+  "status": "starting | healthy | degraded | unhealthy | shutdown",
   "heartbeatAt": "<RFC3339>",
   "startedAt": "<RFC3339>",
   "uptime": "<ISO-8601-duration>",
@@ -862,12 +862,51 @@ never installed, which is the monitoring equivalent of reporting healthy.
     "timersScheduled": <int>,
     "timersFired": <int>
   },
-  "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>"}]
+  "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>", "since": "<RFC3339>"}]
 }
 ```
 
 `metrics` keys are present only when their subsystem has data (e.g. `marksInFlight` is omitted if
 the scan failed; `timers*` only when the temporal lane is wired).
+
+#### Issue scope: per-entity vs per-target
+
+Weaver's issue latches are keyed internally by what the raised fact is ABOUT, and the scope
+decides whose close retires the issue. The key never appears on the wire — it decides how many
+`issues[]` entries a condition produces and when each one clears.
+
+| Key shape | Scope | Codes |
+|---|---|---|
+| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
+| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
+| `data:<targetId>.<column>` | one row's data | `RowDataError`, `TemplateDataError` |
+| `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
+| `inflightMismatch:<targetId>.<gapColumn>` | the lens's column declaration | `InflightActionMismatch` |
+
+A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
+`(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
+a document, and each entry's `message` names its `entity <entityId>`. Each retires on its own
+subject's close, so one subject's remediation landing never clears the issue raised for a subject
+still stuck. A config fact is identical for every row of the target and only a package re-author
+can fix it, so it is raised once per `(target, gap)` however many rows are violating.
+
+#### `IssuesTruncated`
+
+The per-entity classes are unbounded in entity count, so a heartbeat lists at most **50** issues.
+When more are open, the 50 listed are the head of the deterministic key order and one extra
+synthetic entry closes the list:
+
+```json
+{"severity": "warning | error", "code": "IssuesTruncated",
+ "message": "<n> further open issues are not listed in this heartbeat (<total> open in total, 50 listed)",
+ "since": "<RFC3339 — the oldest unlisted issue's first-arose stamp>"}
+```
+
+Its `severity` is the worst among the issues it stands for, so an `error` in the unlisted tail is
+never presented as a warning. `status` is aggregated over **every** open issue before the listing
+is bounded (§5.3's issues-empty-iff-healthy invariant holds against the full set, not the listed
+one): a truncated document can report `unhealthy` with no `error` entry visible in `issues[]`, and
+`IssuesTruncated` is where that error is accounted for.
 
 ### `health.loom.<instance>` — Loom heartbeat
 

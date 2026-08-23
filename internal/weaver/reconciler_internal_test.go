@@ -2106,8 +2106,8 @@ func TestSweep_GapClosedMarkRetiresStandingIssue(t *testing.T) {
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
 	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
-	h.engine.issues.set(issueKeyGap(targetID, "missing_x"), "warning", "GapBudgetExhausted",
-		"target "+targetID+": row column missing_x has exhausted the engine's default retry budget")
+	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, "missing_x"), "warning", "GapBudgetExhausted",
+		"target "+targetID+" entity "+entityID+": row column missing_x has exhausted the engine's default retry budget")
 	// No weaver-targets row seeded: the row-gone branch is the close.
 
 	h.pass(ctx)

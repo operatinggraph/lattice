@@ -190,21 +190,24 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// skipped (FR29 discipline).
 		esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col)
 		if !escalated {
-			e.alert(issueKeyGap(targetID, col), "error", "GapWithoutPlaybook",
+			e.alert(issueKeyGapConfig(targetID, col), "error", "GapWithoutPlaybook",
 				"target "+targetID+": row column "+col+" is true but the playbook defines no gaps entry for it")
 			return substrate.Ack
 		}
 		// The augur policy now covers this gap — clear any GapWithoutPlaybook
 		// alert raised before the policy was added, and dispatch the reasoning
 		// episode through the normal lane-1 path (anti-storm mark + OCC + reclaim).
-		e.issues.clear(issueKeyGap(targetID, col))
+		e.issues.clear(issueKeyGapConfig(targetID, col))
 		ga = esc
 	}
 
 	if ga.Action == actionSurface {
 		// FR29: surface-only, never dispatch. No mark, no OCC, no episode —
-		// just a Health-KV issue for as long as the gap stays open (cleared by
-		// clearClosedMarks below when the row stops naming this column).
+		// just a Health-KV issue for as long as THIS entity's gap stays open
+		// (cleared by clearClosedMarks below when this row stops naming the
+		// column). The issue states a fact about one row, so it is keyed per
+		// (target, entity, gap): N subjects violating the same column
+		// concurrently raise and retire N independent issues.
 		sev := ga.IssueSeverity
 		if sev == "" {
 			sev = "warning"
@@ -213,8 +216,8 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		if code == "" {
 			code = "Surface"
 		}
-		e.issues.set(issueKeyGap(targetID, col), sev, code,
-			"target "+targetID+": row column "+col+" is true")
+		e.issues.set(issueKeyGapEntity(targetID, entityID, col), sev, code,
+			"target "+targetID+" entity "+entityID+": row column "+col+" is true")
 		return substrate.Ack
 	}
 
@@ -328,10 +331,10 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 // Either way the marker is ignored (treated as absent), but the two failure
 // modes are surfaced differently. A PERMANENT mismatch — an action or an
 // indexed pattern that can never be external-dispatch — is an `error` Health
-// issue on its own key (issueKeyInflightMismatch, never issueKeyGap: planGap's
-// success path unconditionally clears issueKeyGap on every clean dispatch,
-// which a reclaim always attempts right after this check, so sharing that key
-// would wipe the alert before the same pass ends); it self-clears once
+// issue on its own key (issueKeyInflightMismatch, never one of the gap keys:
+// planGap's success path unconditionally clears both of those on every clean
+// dispatch, which a reclaim always attempts right after this check, so sharing
+// either would wipe the alert before the same pass ends); it self-clears once
 // staleMark next runs clean for this gap, e.g. after a package fix removes the
 // column or retargets the action. A TRANSIENT one — the referenced pattern's
 // spec has not replayed into the registry yet — is only logged: every Weaver
@@ -449,7 +452,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 	if perr != nil && perr.unplannable {
 		entityKey, _ := row["entityKey"].(string)
 		if esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col); escalated {
-			e.issues.clear(issueKeyGap(targetID, col))
+			e.issues.clear(issueKeyGapConfig(targetID, col))
 			resolved, actionRef, perr = esc, esc.Action, nil
 		}
 	}
@@ -465,7 +468,13 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		}
 		var pl *plan
 		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
-			e.issues.clear(issueKeyGap(targetID, col))
+			// A plan built and about to fire disproves BOTH standing facts: the
+			// playbook resolves (the config issue), and this entity's gap has an
+			// attempt left after all (its GapBudgetExhausted, which a raised
+			// maxretries_<g> or an escalation can make stale without the gap ever
+			// having closed).
+			e.issues.clear(issueKeyGapConfig(targetID, col))
+			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
 			e.issues.clear(issueKeyData(targetID, col))
 			return pl, actionRef, substrate.Ack
 		}
@@ -479,7 +488,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// successful plan.
 		e.logger.Warn("weaver: gap dispatch deferred; nak with delay for redelivery",
 			"targetId", targetID, "entityId", entityID, "gap", col, "reason", perr.msg)
-		e.issues.set(issueKeyGap(targetID, col), "warning", "UnresolvedReference",
+		e.issues.set(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
 			"target "+targetID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
@@ -488,7 +497,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		e.issues.set(issueKeyData(targetID, col), "warning", "TemplateDataError", msg)
 		return nil, "", substrate.Ack
 	default:
-		e.alert(issueKeyGap(targetID, col), "error", "PlaybookConfigError",
+		e.alert(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.Ack
 	}
@@ -741,12 +750,16 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		if row != nil && e.boolColumn(targetID, row, col) {
 			continue
 		}
-		// A closed gap retires its standing issue (GapBudgetExhausted, or a
-		// surface alert) along with its bookkeeping: the issue is keyed per
-		// (target, gap), and a row that stopped reporting the column closed
-		// it — a retraction tombstone included, whose body carries no gap
-		// columns at all. Idempotent when none stands.
-		e.issues.clear(issueKeyGap(targetID, col))
+		// A closed gap retires the standing issues at this column along with its
+		// bookkeeping — a row that stopped reporting the column closed it, a
+		// retraction tombstone included (its body carries no gap columns at
+		// all). Both scopes retire here, and the config one is not incidental:
+		// this is the ONLY clear site a GapWithoutPlaybook / UnresolvedReference
+		// / PlaybookConfigError can reach when the column simply stops being
+		// reported, since every other config clear requires the config to have
+		// been FIXED. Idempotent when neither stands.
+		e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
+		e.issues.clear(issueKeyGapConfig(targetID, col))
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column.
@@ -1036,11 +1049,14 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 			g, _ := strings.CutPrefix(gapColumn, gapColumnPrefix)
 			budget = fmt.Sprintf("the engine's default retry budget (%d; no maxretries_%s declared)", defaultDirectOpRetryBudget, g)
 		}
-		e.alert(issueKeyGap(targetID, gapColumn), "warning", "GapBudgetExhausted",
-			"target "+targetID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
+		// One row's spent budget, not the target's: the count this exhausted is
+		// per (target, entity, gap) in weaver-state, so the issue is keyed the
+		// same way and another entity's gap closing never retires it.
+		e.alert(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", "GapBudgetExhausted",
+			"target "+targetID+" entity "+entityID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
 		return substrate.Ack
 	}
-	e.issues.clear(issueKeyGap(targetID, gapColumn))
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
 
 	// The exhausted gap's OWN mark, if one survives, occupies the SAME
 	// <targetId>.<entityId>.<gapColumn> key the escalation's fresh CAS-create
@@ -1149,7 +1165,26 @@ func (e *Engine) alert(key, severity, code, message string) {
 	e.issues.set(key, severity, code, message)
 }
 
-func issueKeyGap(targetID, col string) string  { return "gap:" + targetID + "." + col }
+// issueKeyGapEntity keys a Health issue whose raised fact is about ONE ROW: a
+// `surface` gap standing open for this entity, or this entity's gap having
+// spent its retry budget. Two entities violating the same (target, gap)
+// concurrently are two independent facts, each raised and retired on its own
+// subject's timeline, so the key carries the entity segment — mirroring
+// issueKeyEffect's three-segment shape.
+func issueKeyGapEntity(targetID, entityID, col string) string {
+	return "gap:" + targetID + "." + entityID + "." + col
+}
+
+// issueKeyGapConfig keys a Health issue whose raised fact is about the PLAYBOOK
+// or the DEPLOYMENT — a missing gaps entry, an unresolvable reference, an
+// un-dispatchable action. Such a fact is identical for every row of the target
+// and only a package re-author can fix it, so it is raised once per
+// (target, gap): segmenting it by entity would mint one duplicate config alert
+// per violating row.
+func issueKeyGapConfig(targetID, col string) string {
+	return "gapConfig:" + targetID + "." + col
+}
+
 func issueKeyData(targetID, col string) string { return "data:" + targetID + "." + col }
 func issueKeyInflightMismatch(targetID, col string) string {
 	return "inflightMismatch:" + targetID + "." + col

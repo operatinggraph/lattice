@@ -242,6 +242,16 @@ func TestHandleRow_UnresolvedReference(t *testing.T) {
 	}
 }
 
+// issueAt returns the active issue held at an exact issueCache key. Keyed
+// lookup, not code lookup: the per-entity issue classes raise the SAME code for
+// every subject, so only the key tells one subject's issue from another's.
+func issueAt(c *issueCache, key string) (healthIssue, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	is, ok := c.issues[key]
+	return is, ok
+}
+
 // issueSeverity returns the severity of the issue with the given code, or "" if
 // no such issue is active.
 func issueSeverity(issues []healthIssue, code string) string {
@@ -837,6 +847,58 @@ func TestHandleRow_LiveEscalationMarkNotTornDownAndRefired(t *testing.T) {
 	}
 }
 
+// TestHandleRow_ExhaustedEscalationRetiresThisEntitysIssue pins the clear that
+// pairs with the GapBudgetExhausted raise: once an augur policy takes the
+// exhausted gap, the standing issue raised for THIS subject (before the policy
+// existed) retires — at the entity key its raise used, so the escalation of one
+// subject's gap never retires another's. Observed on its own: the live
+// escalation mark returns before any plan is built, so the fresh-plan clear
+// (which retires both scopes) never runs here.
+func TestHandleRow_ExhaustedEscalationRetiresThisEntitysIssue(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureExhaustedAugurRetire"
+	id := testNanoID(t)
+	spec := targetSpecFixture(targetID) // declares gaps.missing_a -> directOp FixA
+	spec["augur"] = map[string]any{"escalate": []any{"exhausted"}}
+	h.engine.source.handle(vertexEvent(t, id, weaverTargetClass))
+	h.engine.source.handle(specEvent(t, id, spec))
+
+	entityID := testNanoID(t)
+	entityKey := "vtx.leaseApp." + entityID
+	const budget = 2
+	for i := 0; i < budget; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_a"); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+	if _, _, _, err := h.engine.marks.create(ctx, targetID, entityID, "missing_a", entityKey, actionDirectOp); err != nil {
+		t.Fatalf("seed live escalation mark: %v", err)
+	}
+	// Raised on an earlier pass, before the package added the augur policy.
+	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, "missing_a"), "warning", "GapBudgetExhausted",
+		"target "+targetID+" entity "+entityID+": row column missing_a has exhausted its declared retry budget")
+
+	row := map[string]any{
+		"entityKey": entityKey, "violating": true, "missing_a": true,
+		"inflight_a": false, "maxretries_a": budget,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
+		t.Fatalf("decision = %v, want Ack", dec)
+	}
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_a")); ok {
+		t.Fatalf("the escalation covers this subject's exhausted gap; its issue must retire, issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
 // TestHandleRow_ExhaustedGapWithoutAugurRaisesHealthIssue proves the §10.8
 // "never a silent park" promise when no augur policy escalates "exhausted":
 // no op fires, and a standing GapBudgetExhausted issue is raised — the
@@ -1143,8 +1205,8 @@ func TestHandleRow_RetractionTombstoneRetiresExhaustedIssue(t *testing.T) {
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
 	})
 	entityID := testNanoID(t)
-	h.engine.issues.set(issueKeyGap(targetID, "missing_x"), "warning", "GapBudgetExhausted",
-		"target "+targetID+": row column missing_x has exhausted the engine's default retry budget")
+	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, "missing_x"), "warning", "GapBudgetExhausted",
+		"target "+targetID+" entity "+entityID+": row column missing_x has exhausted the engine's default retry budget")
 
 	tombstone := map[string]any{"isDeleted": true}
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, tombstone, 1, 1)); dec != substrate.Ack {
@@ -1152,5 +1214,370 @@ func TestHandleRow_RetractionTombstoneRetiresExhaustedIssue(t *testing.T) {
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
 		t.Fatal("a retraction tombstone closes the gap; its standing GapBudgetExhausted issue must retire with it")
+	}
+}
+
+// TestHandleRow_SurfaceGapIssueIsPerEntity proves a `surface` gap's Health
+// issue states a fact about ONE ROW: two subjects violating the same
+// (target, gap) concurrently raise two independent issues, and the one whose
+// gap closes first retires ONLY its own. A target-scoped key made the two
+// subjects share a single latch, so whichever half landed first cleared the
+// issue standing for the subject still stuck — the wrong per-subject answer,
+// and silently so.
+func TestHandleRow_SurfaceGapIssueIsPerEntity(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "unroutedTasks"
+	const col = "missing_claim"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			col: {Action: actionSurface, IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
+		},
+	})
+	stuck, cleared := testNanoID(t), testNanoID(t)
+	open := func(entityID string) map[string]any {
+		return map[string]any{"entityKey": "vtx.task." + entityID, "violating": true, col: true}
+	}
+	for i, entityID := range []string{stuck, cleared} {
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open(entityID), uint64(i+1), 1)); dec != substrate.Ack {
+			t.Fatalf("surface gap dispatch must Ack, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+	if n := len(h.engine.issues.snapshot()); n != 2 {
+		t.Fatalf("two subjects violating the same gap must raise two issues, got %d: %+v", n, h.engine.issues.snapshot())
+	}
+
+	// The second subject's halves land: its gap closes.
+	closed := map[string]any{"entityKey": "vtx.task." + cleared, "violating": false, col: false}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, cleared, closed, 3, 1)); dec != substrate.Ack {
+		t.Fatalf("gap-close row must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, cleared, col)); ok {
+		t.Fatal("the closed subject's own issue must retire")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, stuck, col)); !ok {
+		t.Fatalf("the STILL-STUCK subject's issue must survive another subject's close; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
+// TestHandleRow_ExhaustedGapIssueIsPerEntity proves the same for the other
+// per-row fact Weaver raises at a gap: the retry budget is counted per
+// (target, entity, gap) in weaver-state, so the GapBudgetExhausted issue that
+// reports it is keyed the same way — one subject exhausting its budget and the
+// other closing its gap are independent events.
+func TestHandleRow_ExhaustedGapIssueIsPerEntity(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureExhaustPerEntity"
+	const col = "missing_x"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	stuck, cleared := testNanoID(t), testNanoID(t)
+	for _, entityID := range []string{stuck, cleared} {
+		for i := 0; i < budget; i++ {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+				t.Fatalf("seed dispatch-count: %v", err)
+			}
+		}
+		row := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true,
+			"inflight_x": false, "maxretries_x": budget,
+		}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 9, 1)); dec != substrate.Ack {
+			t.Fatalf("exhausted gap must Ack, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+	for _, entityID := range []string{stuck, cleared} {
+		if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
+			t.Fatalf("entity %s must carry its own GapBudgetExhausted issue; issues = %+v",
+				entityID, h.engine.issues.snapshot())
+		}
+	}
+
+	closed := map[string]any{"entityKey": "vtx.leaseApp." + cleared, "violating": false, col: false}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, cleared, closed, 10, 1)); dec != substrate.Ack {
+		t.Fatalf("gap-close row must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, cleared, col)); ok {
+		t.Fatal("the closed subject's own GapBudgetExhausted must retire")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, stuck, col)); !ok {
+		t.Fatalf("the still-exhausted subject's issue must survive another subject's close; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
+// TestClearClosedMarks_RetiresBothIssueScopes is the leak guard on the split.
+// A config fact (GapWithoutPlaybook here) is target-scoped, and every OTHER
+// clear site for it requires the config to have been FIXED — so a column that
+// simply stops being reported would strand it forever if clearClosedMarks
+// retired only the entity-scoped key. Both scopes retire on the close.
+func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureBothScopes"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_claim": {Action: actionSurface, IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
+		},
+	})
+	entityID := testNanoID(t)
+	// missing_orphan has no gaps entry at all: the config dead-end.
+	open := map[string]any{
+		"entityKey": "vtx.task." + entityID, "violating": true,
+		"missing_claim": true, "missing_orphan": true,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("dispatch must Ack, got %v", dec)
+	}
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); !ok {
+		t.Fatalf("expected a target-scoped GapWithoutPlaybook issue, issues = %+v", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); !ok {
+		t.Fatalf("expected an entity-scoped surface issue, issues = %+v", h.engine.issues.snapshot())
+	}
+
+	closed := map[string]any{
+		"entityKey": "vtx.task." + entityID, "violating": false,
+		"missing_claim": false, "missing_orphan": false,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("gap-close row must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); ok {
+		t.Fatal("a column that stopped being reported must retire its target-scoped config issue too")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
+		t.Fatal("the entity-scoped surface issue must retire on the close")
+	}
+}
+
+// TestHandleRow_ConfigIssuesAreTargetScoped is the other half of the scope
+// rule. An unresolvable reference and an un-dispatchable action are facts about
+// the PLAYBOOK: identical for every row of the target, fixable only by a
+// package re-author. Two subjects hitting the same one raise ONE issue, not one
+// per subject — segmenting these by entity would mint N duplicate config alerts
+// the moment N rows violated.
+func TestHandleRow_ConfigIssuesAreTargetScoped(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureConfigScope"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// An uninstalled pattern (transient) and a candidates-only gap on a
+			// non-planned target (an unknown action "") — the two config raises.
+			"missing_y": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"},
+			"missing_z": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "SendReminder"}}},
+		},
+	})
+	first, second := testNanoID(t), testNanoID(t)
+	for i, entityID := range []string{first, second} {
+		row := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true,
+			"missing_y": true, "missing_z": true,
+		}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, uint64(i+1), 1)); dec != substrate.NakWithDelay {
+			t.Fatalf("an unresolved reference must NakWithDelay, got %v", dec)
+		}
+	}
+	h.requireNoOp(t)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_y")); !ok {
+		t.Fatalf("UnresolvedReference must be raised target-scoped, issues = %+v", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
+		t.Fatalf("PlaybookConfigError must be raised target-scoped, issues = %+v", h.engine.issues.snapshot())
+	}
+	if n := len(h.engine.issues.snapshot()); n != 2 {
+		t.Fatalf("two subjects hitting two config faults must raise 2 issues, got %d: %+v",
+			n, h.engine.issues.snapshot())
+	}
+}
+
+// TestHandleRow_FreshPlanRetiresStaleExhaustedIssue proves the successful-plan
+// clear retires the ENTITY-scoped budget issue too, not just the target-scoped
+// config ones. A raised maxretries_<g> makes a standing GapBudgetExhausted
+// false without the gap ever closing, so a plan built and about to fire is the
+// only site that observes it — the gap-close clears never run.
+func TestHandleRow_FreshPlanRetiresStaleExhaustedIssue(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureBudgetRaised"
+	const col = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	entityKey := "vtx.leaseApp." + entityID
+	for i := 0; i < 2; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+	spent := map[string]any{
+		"entityKey": entityKey, "violating": true, col: true,
+		"inflight_x": false, "maxretries_x": 2,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, spent, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("exhausted gap must Ack, got %v", dec)
+	}
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
+		t.Fatalf("expected a standing GapBudgetExhausted, issues = %+v", h.engine.issues.snapshot())
+	}
+
+	// The lens raises the cap: the budget is no longer spent, the gap is still
+	// open, and the next delivery dispatches.
+	raised := map[string]any{
+		"entityKey": entityKey, "violating": true, col: true,
+		"inflight_x": false, "maxretries_x": 5,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, raised, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the re-budgeted gap must dispatch and Ack, got %v", dec)
+	}
+	h.nextOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, col)); ok {
+		t.Fatalf("a fresh dispatch disproves GapBudgetExhausted; it must not stand, issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
+// TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook proves the config latch's
+// other clear site keeps its scope: an alert raised before the augur policy was
+// added retires once the policy covers the dead-end (the raise at the no-
+// playbook branch and this clear are one latch, and both are target-scoped),
+// while this subject's own entity-scoped issue is untouched — a policy addition
+// says nothing about any one row.
+//
+// The target declares an admission rate the escalated dispatch cannot draw a
+// token from, so the deferral stops the pass before a plan is built: this
+// clear is observed on its own, not shadowed by the fresh-plan clear.
+func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureNoPlaybookAugur"
+	const col = "missing_unknown"
+	vtx := testNanoID(t)
+	spec := targetSpecFixture(targetID) // declares gaps.missing_a only
+	spec["admission"] = map[string]any{"globalRate": 0.5}
+	h.engine.source.handle(vertexEvent(t, vtx, weaverTargetClass))
+	h.engine.source.handle(specEvent(t, vtx, spec))
+
+	entityID := testNanoID(t)
+	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a gap with no playbook entry must Ack, got %v", dec)
+	}
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); !ok {
+		t.Fatalf("expected a target-scoped GapWithoutPlaybook, issues = %+v", h.engine.issues.snapshot())
+	}
+	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, col), "warning", "GapBudgetExhausted", "this subject's own fact")
+
+	// The package adds the augur policy: the dead-end is covered from here on.
+	spec["augur"] = map[string]any{"escalate": []any{"unplannable"}}
+	h.engine.source.handle(specEvent(t, vtx, spec))
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.NakWithDelay {
+		t.Fatalf("the escalated dead-end must defer on admission, got %v", dec)
+	}
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); ok {
+		t.Fatalf("an augur policy covering the gap must retire its GapWithoutPlaybook alert, issues = %+v",
+			h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
+		t.Fatalf("a policy addition must not retire this subject's own issue, issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
+// TestPlanGap_UnplannableEscalationRetiresConfigIssue pins the scope of the
+// third config clear: an augur escalation that resolves an unplannable plan
+// says the playbook dead-end is covered, so it retires the TARGET-scoped issue
+// and leaves this subject's own untouched. The declared admission rate holds
+// the pass at the deferral, so the fresh-plan clear (which retires both scopes)
+// never runs and this clear is observed on its own.
+func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
+	t.Parallel()
+	const targetID = "fixtureUnplannableEscalate"
+	const col = "missing_x"
+	s, _ := registerAugurTarget(t, targetID, map[string]any{"escalate": []any{"unplannable"}})
+	e := &Engine{
+		source:      s,
+		issues:      newIssueCache(),
+		admission:   newAdmissionScheduler(),
+		contraction: newContractionStats(),
+		logger:      discardLogger(),
+	}
+	target := &Target{
+		TargetID:  targetID,
+		Mode:      targetModePlanned,
+		Augur:     mustTarget(t, s, targetID).Augur,
+		Admission: &AdmissionPolicy{GlobalRate: 0.5},
+	}
+	entityID := testNanoID(t)
+	e.issues.set(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError", "the pin has vanished")
+	e.issues.set(issueKeyGapEntity(targetID, entityID, col), "warning", "GapBudgetExhausted", "budget spent")
+
+	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID}
+	// A pin the catalog no longer names is the unplannable-flagged error.
+	if pl, _, dec := e.planGap(context.Background(), target, targetID, entityID, col,
+		goalGapFixture(t), row, 42, "aGhostLeg"); pl != nil || dec != substrate.NakWithDelay {
+		t.Fatalf("the escalated gap must escalate then defer on admission, got plan=%v decision %v", pl != nil, dec)
+	}
+	if _, ok := issueAt(e.issues, issueKeyGapConfig(targetID, col)); ok {
+		t.Fatalf("the augur escalation covers the dead-end; its config issue must retire, issues = %+v",
+			e.issues.snapshot())
+	}
+	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
+		t.Fatalf("the escalation says nothing about this subject's budget; its issue must stand, issues = %+v",
+			e.issues.snapshot())
 	}
 }
