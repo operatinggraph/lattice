@@ -447,10 +447,17 @@ jobs:
         # JetStream file state — Postgres integration tests are the exception,
         # sharing the service container above (unique per-test table/role names
         # keep them -p-parallel-safe, per their own doc comments).
+        # -skip TestRefractor_E2E_P99: that test asserts an absolute wall-clock
+        # latency budget (NFR-P3, 500ms); run inside this -p 4 batch it shares
+        # the runner's CPU with up to three other packages (weaver, cafe-domain,
+        # privacy-base and friends routinely land in the same slot) and the
+        # measurement reads contention, not regression — CI run 31288862556
+        # timed out mid-assertion when the NATS connection it was measuring
+        # against got starved and closed. It runs alone in the step below.
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
-          go test -count=1 -p 4 -timeout 10m
+          go test -count=1 -p 4 -timeout 10m -skip '^TestRefractor_E2E_P99$'
           ./cmd/gateway/... ./cmd/loupe/... ./cmd/wellness-app/...
           ./internal/bootstrap/... ./internal/chronicler/...
           ./internal/identityceremony/... ./internal/objectmanager/...
@@ -460,6 +467,12 @@ jobs:
           ./packages/orchestration-base/... ./packages/privacy-operator-grant/...
           ./packages/rbac-domain/... ./packages/semantic-contracts/...
           ./packages/wellness-reminders/...
+
+      - name: Run Refractor E2E p99 latency gate alone (NFR-P3, isolated from -p4 contention)
+        # Job steps run sequentially, so this has the runner to itself: the
+        # 500ms p99 budget above measures real projection latency instead of
+        # whatever else -p 4 happened to be scheduling that run.
+        run: go test -count=1 -timeout 2m -run '^TestRefractor_E2E_P99$' ./internal/refractor/...
 
   unit-2:
     runs-on: ubuntu-latest
