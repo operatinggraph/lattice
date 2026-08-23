@@ -316,6 +316,7 @@ func main() {
 			})
 	}
 	fmt.Printf("==> session:         %s (%s, capacity 12)\n", sessionKey, sessionStart.Format(time.RFC3339))
+	reapVerifyLitter(ctx, conn, adminKey)
 
 	fmt.Println()
 	fmt.Println("==> classic vertical demo data seeded.")
@@ -467,6 +468,116 @@ func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, k
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate studio: %s (%s)\n", key, aspect.Data.Name)
 	}
+}
+
+// isVerifyLitterName reports whether a display name follows this codebase's
+// established ad hoc verify-fire naming convention ("PO Discovery Studio",
+// "Steward Verify Studio", "Recurrence Verify Flow", …) rather than one of
+// the seed scripts' own checked-in canonical names — none of which contain
+// "Verify" or "Discovery" (grepped live: "Classic Demo Studio", "Riverside
+// Movement Studio", "Vinyasa Flow", "Evening Flow with Sam").
+func isVerifyLitterName(name string) bool {
+	return strings.Contains(name, "Verify") || strings.Contains(name, "Discovery")
+}
+
+// reapVerifyLitter tombstones every session and studio a live-stack sweep
+// identifies as verify-fire litter (verticals.md "the unauthenticated class
+// schedule advertises agent-verify artifacts": ad hoc verify-*.go/PO-discovery
+// runs across the codebase mint demo-visible studios/sessions and never reap
+// them, so /api/studios + /api/sessions permanently render the litter). A
+// studio is litter by its OWN name (isVerifyLitterName); a session is litter
+// by its own name OR by running at a litter studio — the latter matters
+// because TombstoneStudio deliberately doesn't cascade onto its sessions (own
+// DDL doc), so a name-only session filter tombstones the studio out from
+// under a plainly-named session ("Vinyasa Flow") and stranded it with
+// missingStudio=true instead of removing it (caught live: an earlier version
+// of this function did exactly that to 5 sessions before this fire landed).
+// Every session is reaped before its studio, releasing held slot claims and
+// — via wellnessOrphanedBookingSettlement, already-live Weaver convergence —
+// any booking still anchored to it.
+func reapVerifyLitter(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	studioKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.studio.")
+	must(err, "list vtx.studio. keys")
+	litterStudios := map[string]string{}
+	for _, key := range studioKeys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) {
+			continue
+		}
+		if name, ok := readAspectName(ctx, conn, key+".profile"); ok && isVerifyLitterName(name) {
+			litterStudios[key] = name
+		}
+	}
+
+	sessionKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.session.")
+	must(err, "list vtx.session. keys")
+	for _, key := range sessionKeys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) {
+			continue
+		}
+		name, ok := readAspectName(ctx, conn, key+".schedule")
+		if !ok {
+			continue
+		}
+		studioKey, foundStudio := findSessionStudio(ctx, conn, key)
+		if !foundStudio {
+			continue
+		}
+		_, atLitterStudio := litterStudios[studioKey]
+		if !isVerifyLitterName(name) && !atLitterStudio {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneSession", "session",
+			map[string]any{"sessionKey": key, "studio": studioKey},
+			&processor.ContextHint{Reads: []string{key, studioKey}})
+		fmt.Printf("==> reaped verify-litter session: %s (%s)\n", key, name)
+	}
+
+	studioKeysSorted := make([]string, 0, len(litterStudios))
+	for key := range litterStudios {
+		studioKeysSorted = append(studioKeysSorted, key)
+	}
+	sort.Strings(studioKeysSorted)
+	for _, key := range studioKeysSorted {
+		submitOp(ctx, conn, adminKey, "TombstoneStudio", "studio",
+			map[string]any{"studioKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped verify-litter studio: %s (%s)\n", key, litterStudios[key])
+	}
+}
+
+// findSessionStudio returns the studio key a session's live atStudio link
+// names, mirroring findManagingLandlord's prefix-scan shape (the link's own
+// studio suffix isn't known up front, so it can't be constructed directly).
+func findSessionStudio(ctx context.Context, conn *substrate.Conn, sessionKey string) (string, bool) {
+	prefix := "lnk." + strings.TrimPrefix(sessionKey, "vtx.") + ".atStudio.studio."
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, prefix)
+	must(err, "list "+prefix+" keys")
+	for _, key := range keys {
+		if alive(ctx, conn, key) {
+			return "vtx.studio." + strings.TrimPrefix(key, prefix), true
+		}
+	}
+	return "", false
+}
+
+// readAspectName reads a {isDeleted, data:{name}} aspect and returns its name
+// when the aspect is alive — shared by reapVerifyLitter for both the studio
+// .profile and session .schedule aspect shapes, which both carry a name field.
+func readAspectName(ctx context.Context, conn *substrate.Conn, aspectKey string) (string, bool) {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, aspectKey)
+	if err != nil {
+		return "", false
+	}
+	var aspect struct {
+		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+		return "", false
+	}
+	return aspect.Data.Name, true
 }
 
 // findManagingLandlord returns the identity key of any live landlord already
