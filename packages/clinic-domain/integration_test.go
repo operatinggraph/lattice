@@ -54,7 +54,7 @@ const (
 
 // clinicOps are the ops the staff actor needs.
 var clinicOps = []string{
-	"CreatePatient", "TombstonePatient",
+	"CreatePatient", "TombstonePatient", "BackfillPatientRegistration",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
@@ -1558,6 +1558,53 @@ func TestClinic_TombstonePatient(t *testing.T) {
 
 	if pdoc := clReadDoc(t, ctx, conn, patientKey); pdoc["isDeleted"] != true {
 		t.Fatalf("patient isDeleted = %v after tombstone, want true", pdoc["isDeleted"])
+	}
+}
+
+// TestClinic_BackfillPatientRegistration proves the one-time repair for a
+// patient minted before registeredAt became an always-present .demographics
+// field (2026-08-08, 7eb4c72f): it upserts registeredAt while preserving
+// fullName, and no-ops cleanly once registeredAt is already set — mirroring
+// the live defect (verticals.md "worksAt front-desk staffer's patient-context
+// switcher is empty") where such a patient is silently excluded from every
+// clinicPatientsRead roster row, including the WildcardAnchor holder's.
+func TestClinic_BackfillPatientRegistration(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "backfill-registration")
+
+	patientKey := "vtx.patient.CLpreaugustHJKMNPQRS"
+	clSeedVertex(t, ctx, conn, patientKey, "patient", false)
+	demoKey := patientKey + ".demographics"
+	doc := map[string]any{"class": "patientDemographics", "isDeleted": false,
+		"data": map[string]any{"fullName": "Priya Chandra"}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, demoKey, b); err != nil {
+		t.Fatalf("seed pre-2026-08-08 demographics: %v", err)
+	}
+
+	clSubmit(t, ctx, conn, cp, cons, "backfillreg0001", "BackfillPatientRegistration", "patient",
+		`{"patient":"`+patientKey+`"}`, []string{patientKey, demoKey}, processor.OutcomeAccepted)
+
+	demo := clReadDoc(t, ctx, conn, demoKey)
+	dd, _ := demo["data"].(map[string]any)
+	if dd["fullName"] != "Priya Chandra" {
+		t.Fatalf("backfill must preserve fullName, got %v", dd["fullName"])
+	}
+	registeredAt, _ := dd["registeredAt"].(string)
+	if registeredAt == "" {
+		t.Fatalf("backfill must set registeredAt, got %v", dd["registeredAt"])
+	}
+
+	// Re-submitting once registeredAt is already set must no-op cleanly
+	// (never reject, never overwrite the now-canonical timestamp) — mirrors
+	// BackfillAppointmentSite's own already-present no-op.
+	clSubmit(t, ctx, conn, cp, cons, "backfillreg0002", "BackfillPatientRegistration", "patient",
+		`{"patient":"`+patientKey+`"}`, []string{patientKey, demoKey}, processor.OutcomeAccepted)
+	demo2 := clReadDoc(t, ctx, conn, demoKey)
+	dd2, _ := demo2["data"].(map[string]any)
+	if dd2["registeredAt"] != registeredAt {
+		t.Fatalf("a second backfill must no-op, registeredAt changed from %v to %v", registeredAt, dd2["registeredAt"])
 	}
 }
 

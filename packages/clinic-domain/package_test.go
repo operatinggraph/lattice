@@ -48,7 +48,7 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	vertexCmds := map[string][]string{
-		"patient":              {"CreatePatient", "TombstonePatient"},
+		"patient":              {"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
 		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
@@ -80,7 +80,7 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	aspectWriters := map[string][]string{
-		"patientDemographics":       {"CreatePatient"},
+		"patientDemographics":       {"CreatePatient", "BackfillPatientRegistration"},
 		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
@@ -272,6 +272,9 @@ func TestPackage_Permissions(t *testing.T) {
 		// Weaver-only site backfill (this package's own clinicSiteBackfill
 		// target's only caller) — operator authority, the MarkPastDueNoShow idiom.
 		"BackfillAppointmentSite": operatorOnly(),
+		// One-time manual repair for a pre-2026-08-08 patient missing
+		// registeredAt — operator authority, never a person-facing action.
+		"BackfillPatientRegistration": operatorOnly(),
 	}
 	wantCount := 0
 	for _, grants := range wantPerms {

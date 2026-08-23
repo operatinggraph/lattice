@@ -128,7 +128,7 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     patientVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreatePatient", "TombstonePatient"},
+		PermittedCommands: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration"},
 		Description: "Clinic patient DDL. Vertex shape: vtx.patient.<NanoID>, class=patient, root data = {} " +
 			"(minimal, D5 — the data lives in the .demographics aspect + the optional identifiedBy link). " +
 			"CreatePatient mints the patient + writes the .demographics aspect {fullName (required)} atomically; " +
@@ -137,13 +137,17 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 			"a CreateOnly vtx.identity.<identityId>.patientClaim guard aspect — a second, DIFFERENT patient passing " +
 			"the same identityKey is rejected (IdentityAlreadyClaimed). TombstonePatient soft-deletes one. The " +
 			".demographics aspect is NON-sensitive (it attaches to a patient, not an identity); real contact PII " +
-			"lives on the linked identity, the Vault plane's unit.",
+			"lives on the linked identity, the Vault plane's unit. BackfillPatientRegistration is an operator-only, " +
+			"manual, one-time repair for a patient minted before registeredAt became an always-present field " +
+			"(2026-08-08, 7eb4c72f): it upserts registeredAt onto an existing .demographics aspect that lacks it, " +
+			"preserving fullName, and no-ops cleanly if registeredAt is already set.",
 		Script: patientDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string","description":"The patient's full name (CreatePatient; required)."},` +
 			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's sensitive contact (CreatePatient; optional, validated alive + class=identity; wires the identifiedBy link)."},` +
 			`"patientId":{"type":"string","description":"Optional bare NanoID for the new patient vertex (CreatePatient); absent → minted."},` +
-			`"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (TombstonePatient; required, validated alive)."}},` +
+			`"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (TombstonePatient; required, validated alive)."},` +
+			`"patient":{"type":"string","description":"vtx.patient.<NanoID> of an existing patient (BackfillPatientRegistration; required, validated alive)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.patient.<NanoID> the operation wrote."}}}`,
@@ -152,6 +156,7 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 			"identityKey": "Full vtx.identity.<NanoID> key of a pre-minted identity to link (CreatePatient; optional). Must be alive + class=identity; wires the identifiedBy link and claims a CreateOnly patientClaim guard aspect on the identity (rejected if another patient already claimed it). Absent → the patient has no linked identity.",
 			"patientId":   "Optional bare NanoID (no dots / key segments) for the new patient vertex (vtx.patient.<patientId>). Absent → minted with nanoid.new().",
 			"patientKey":  "Full vtx.patient.<NanoID> key of an existing patient vertex to tombstone (TombstonePatient).",
+			"patient":     "Full vtx.patient.<NanoID> key of an existing patient vertex to backfill (BackfillPatientRegistration; required, validated alive).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -172,6 +177,12 @@ func patientVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:            "TombstonePatient — remove a patient",
 				Payload:         map[string]any{"patientKey": "vtx.patient.<NanoID>"},
 				ExpectedOutcome: "Soft-deletes the patient vertex. Returns primaryKey. Rejects an absent / already-dead patient.",
+			},
+			{
+				Name:    "BackfillPatientRegistration — repair a pre-2026-08-08 patient missing registeredAt",
+				Payload: map[string]any{"patient": "vtx.patient.<NanoID>"},
+				ExpectedOutcome: "Upserts .demographics with registeredAt set (preserving fullName if present); " +
+					"no-ops if registeredAt is already set. Operator-only.",
 			},
 		},
 	}
@@ -658,7 +669,7 @@ func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     demographicsAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreatePatient"},
+		PermittedCommands: []string{"CreatePatient", "BackfillPatientRegistration"},
 		Description: "Patient demographics aspect (clinic). Stored as vtx.patient.<NanoID>.demographics (class " +
 			"patientDemographics) = {registeredAt, fullName?}. NON-sensitive (it attaches to a patient, not an " +
 			"identity) and carries no contact PII — that lives on the identity CreatePatient's optional identityKey " +
@@ -668,9 +679,10 @@ func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 			"identify their retained clinical record (retention-class-key-custody-design.md §8.7, fork F3(b)). A " +
 			"patient with no identity has no key to shred, so no erasure promise their plaintext name could " +
 			"defeat. registeredAt is always present and identifies nobody, which is why the clinicPatients / " +
-			"clinicPatientsRead ghost-vertex filters test it rather than the name. Written ONLY by CreatePatient " +
-			"(whose patient vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler.",
+			"clinicPatientsRead ghost-vertex filters test it rather than the name. Written by CreatePatient " +
+			"(whose patient vertexType DDL owns the script), and upserted by BackfillPatientRegistration for a " +
+			"patient minted before registeredAt became always-present (2026-08-08, 7eb4c72f); this aspect-type " +
+			"DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"registeredAt":{"type":"string","description":"When the patient was registered (RFC3339, canonical UTC, = op.submittedAt). Always present; identifies nobody; the lenses' presence filter reads it."},` +
@@ -1277,6 +1289,54 @@ def execute(state, op):
             fail("UnknownPatient: " + pkey)
         mutations = [make_tombstone(pkey)]
         events = [{"class": "clinic.patientTombstoned", "data": {"patientKey": pkey}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": pkey}}
+
+    if ot == "BackfillPatientRegistration":
+        # A one-time historical-data repair, operator-only and manual — unlike
+        # BackfillAppointmentSite's Weaver-auto-remediation twin, this gap
+        # cannot recur: registeredAt became an ALWAYS-present field on
+        # .demographics only as of the 2026-08-08 CreatePatient change
+        # (7eb4c72f); every patient minted since already carries it. A
+        # patient minted BEFORE that change carries no registeredAt and is
+        # silently excluded from clinicPatientsRead / clinicPatientReadGrants'
+        # presence filter forever — roster-empty for every actor, including
+        # the WildcardAnchor holder, not only a workplace-anchored one
+        # (verticals.md "worksAt front-desk staffer's patient-context
+        # switcher is empty"). A standing auto-remediation loop would be the
+        # wrong shape for a defect that only ever affects pre-existing rows.
+        pkey = required_string(p, "patient")
+        parts_of(pkey, "patient", "patient")
+        if not vertex_alive(state, pkey):
+            fail("UnknownPatient: " + pkey)
+        # Operator-only is enforced at the grant plane (GrantsTo: ["operator"]
+        # in permissions.go), mirroring BindProviderIdentity — this script has
+        # no in-script role-walk helper of its own to duplicate.
+        # read-posture: (a) declared in contextHint.reads by the operator
+        # tool's own dispatcher — this is the read that decides whether the
+        # op is a no-op, never just an error-message pick.
+        demo_key = pkey + ".demographics"
+        if demo_key not in state:
+            fail("MissingDemographics: " + pkey + " has no .demographics aspect to backfill")
+        demo = state[demo_key]
+        if demo == None or (hasattr(demo, "isDeleted") and demo.isDeleted):
+            fail("MissingDemographics: " + pkey + " has no .demographics aspect to backfill")
+        if demo.data.get("registeredAt") != None:
+            # Already backfilled (or never needed it) — no-op cleanly rather
+            # than reject, mirroring BackfillAppointmentSite's own
+            # already-present no-op. No primaryKey: an empty write footprint
+            # has nothing for the reply-constraint to validate it against.
+            return {"mutations": [], "events": [], "response": {}}
+        # Rebuilt from the two fields .demographics can ever carry (mirrors
+        # CreatePatient's own literal construction above) rather than copying
+        # demo.data wholesale — safer than relying on a dict-copy builtin this
+        # engine's own precedent never exercises.
+        merged = {"registeredAt": time.rfc3339_utc(op.submittedAt)}
+        existing_full_name = demo.data.get("fullName")
+        if existing_full_name != None:
+            merged["fullName"] = existing_full_name
+        mutations = [make_aspect_upsert(pkey, "demographics", "patientDemographics", merged)]
+        events = [{"class": "clinic.patientRegistrationBackfilled", "data": {"patientKey": pkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": pkey}}
 

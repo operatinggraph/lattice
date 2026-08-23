@@ -235,3 +235,112 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		}
 	})
 }
+
+// TestStaffPatientsReadBoundary_WorkplaceAnchorSeesSharedBuildingOnly proves
+// the front-desk half of clinicPatientsReadSpec's authz_anchors end to end:
+// a worksAt-anchored front-desk actor (service-location's staffReadGrants,
+// grant_source cap-read.staff — never the reserved WildcardAnchor) must see a
+// patient whose authz_anchors carries the SAME building their care touches,
+// and must NOT see a patient anchored to a different building. package.go
+// (clinic-domain) and clinicPatientsReadSpec's own doc comment both claim
+// this path already works ("patient-self-plus-workplace-plus-staff-wildcard"
+// — commit f4e90653); this is the RLS boundary test that was missing to back
+// that claim (verticals.md "worksAt front-desk staffer's patient-context
+// switcher is empty despite clinic-wide appointment access").
+func TestStaffPatientsReadBoundary_WorkplaceAnchorSeesSharedBuildingOnly(t *testing.T) {
+	dsn := skipIfNoPostgresRLS(t)
+	ctx := context.Background()
+
+	owner := poolInSchema(t, dsn, "")
+	defer owner.Close()
+
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := owner.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("exec %q: %v", sql, err)
+		}
+	}
+
+	exec("DROP SCHEMA IF EXISTS " + clinicRLSTestSchema + " CASCADE")
+	exec("CREATE SCHEMA " + clinicRLSTestSchema)
+	t.Cleanup(func() {
+		_, _ = owner.Exec(ctx, "DROP SCHEMA IF EXISTS "+clinicRLSTestSchema+" CASCADE")
+		_, _ = owner.Exec(ctx, "DROP OWNED BY "+clinicRLSTestRole+" CASCADE")
+		_, _ = owner.Exec(ctx, "DROP ROLE IF EXISTS "+clinicRLSTestRole)
+	})
+
+	for _, stmt := range adapter.BuildGrantTableDDL() {
+		exec(stmt)
+	}
+	ddl, err := adapter.BuildProtectedTableDDL("read_clinic_patients", []string{"patient_id"}, []adapter.ColumnDef{
+		{Name: "entity_key", Type: "text"},
+		{Name: "patient_key", Type: "text"},
+		{Name: "name", Type: "text"},
+		{Name: "unlinked_name", Type: "text"},
+		{Name: "identity_key", Type: "text"},
+		{Name: "email", Type: "text"},
+		{Name: "phone", Type: "text"},
+	})
+	if err != nil {
+		t.Fatalf("build protected DDL: %v", err)
+	}
+	for _, stmt := range ddl {
+		exec(stmt)
+	}
+
+	_, _ = owner.Exec(ctx, "DROP OWNED BY "+clinicRLSTestRole+" CASCADE")
+	_, _ = owner.Exec(ctx, "DROP ROLE IF EXISTS "+clinicRLSTestRole)
+	exec("CREATE ROLE " + clinicRLSTestRole + " NOSUPERUSER NOLOGIN")
+	exec("GRANT USAGE ON SCHEMA " + clinicRLSTestSchema + " TO " + clinicRLSTestRole)
+	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".read_clinic_patients TO " + clinicRLSTestRole)
+	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".actor_read_grants TO " + clinicRLSTestRole)
+
+	const (
+		patientRiverside = "vtx.patient.CCCCCCCCCCCCCCCCCCCC"
+		riverside        = "RRRRRRRRRRRRRRRRRRRR"
+		patientDowntown  = "vtx.patient.DDDDDDDDDDDDDDDDDDDD"
+		downtown         = "TTTTTTTTTTTTTTTTTTTT"
+		frontDeskAtRiver = "FFFFFFFFFFFFFFFFFFFF"
+	)
+
+	// Patient C's care touches Riverside (a provider practicesAt Riverside for
+	// an appointment of theirs); patient D's touches Downtown only — mirrors
+	// clinicPatientsReadSpec's own authz_anchors shape: [patient's own NanoID]
+	// + [the practicesAt building of every provider it has an appointment
+	// with].
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
+	      VALUES ('pat-C', '` + patientRiverside + `', '` + patientRiverside + `', 'Cara Ibarra', '{CCCCCCCCCCCCCCCCCCCC,` + riverside + `}', 1)`)
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
+	      VALUES ('pat-D', '` + patientDowntown + `', '` + patientDowntown + `', 'Dana Osei', '{DDDDDDDDDDDDDDDDDDDD,` + downtown + `}', 1)`)
+
+	// The front-desk actor holds ONLY a per-building cap-read.staff grant
+	// (service-location's staffReadGrants shape) for Riverside — never the
+	// WildcardAnchor and never a per-patient self-grant.
+	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
+	      VALUES ($1, $2, 'cap-read.staff', 1, false)`, frontDeskAtRiver, riverside)
+
+	reader := poolInSchema(t, dsn, clinicRLSTestRole)
+	defer reader.Close()
+
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
+
+	get := func(t *testing.T, c *http.Cookie) (int, []protectedPatientRow) {
+		t.Helper()
+		rec := sessionGET(s, s.handleStaffPatients, "/api/staff/patients", c)
+		var resp struct {
+			Patients []protectedPatientRow `json:"patients"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec.Code, resp.Patients
+	}
+
+	t.Run("a worksAt-anchored front-desk actor sees the patient sharing its building, not the one at another building", func(t *testing.T) {
+		code, rows := get(t, cookieFor(frontDeskAtRiver))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if len(rows) != 1 || rows[0].PatientKey != patientRiverside {
+			t.Fatalf("front-desk actor worksAt Riverside must see exactly patient C (Riverside), got %+v", rows)
+		}
+	})
+}

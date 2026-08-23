@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.34.4
+version: 0.34.5
 depends:
   - location-domain
 description: |
@@ -202,6 +202,9 @@ declares:
       scope: any
       grantsTo: [operator, frontOfHouse]
     - operationType: TombstonePatient
+      scope: any
+      grantsTo: [operator]
+    - operationType: BackfillPatientRegistration
       scope: any
       grantsTo: [operator]
     - operationType: CreateProvider

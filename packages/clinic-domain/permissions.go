@@ -81,6 +81,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		mk("TombstonePatient"),
+		{
+			OperationType: "BackfillPatientRegistration",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to backfill registeredAt onto a patient minted before it became an always-present .demographics field (2026-08-08, 7eb4c72f) — a one-time manual repair, never a person-facing registration action.",
+			GrantsTo:      []string{"operator"},
+		},
 		mk("CreateProvider"),
 		mk("TombstoneProvider"),
 		mk("SetProviderProfile"),
