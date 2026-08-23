@@ -58,6 +58,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   OUTCOME it promises, through the projection or consumer that delivers it, not to the existence of its
   first step; and a remedy printed for every caller must be qualified per caller — name the states it is
   false in (a reserved operationType, a declared `Lanes`, the package that grants the remedy verbs itself).
+  **Third sighting (permission reconciler, 2026-08-23): THREE of one gate's four printed remedies were
+  false, and reading the code is what produced them — only a reviewer who RAN each remedy against a live
+  stack found it.** A bootstrap reconcile retains a tombstoned non-`vtx.meta.*` key, a same-version install
+  is skipped outright, and the upgrade a remedy promised would revive a revoked grant is precisely the path
+  that stopped reviving it. Check tightened: a remedy ships only after it has been EXECUTED against the
+  state that prints it, and the before/after of the condition recorded — a remedy traced on paper is a
+  hypothesis, not a check.
   Third sighting (§31): the unattested-erasure refusal printed a correct flag, correctly spelled, with the
   package name ahead of it — and Go's `flag` stops at the first positional, so the one string a refused
   operator pastes exited 2 on a usage error. Every reviewer who *read* it passed it; all three who *ran*
@@ -107,16 +114,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `internal/pkgmgr` runs `DIFF_BASE=<CI's base> go run ./scripts/lint-package-version.go` AFTER committing.
   A bump the gate asks for is cheap even when the generated artifact is provably unchanged; prove the
   byte-identity if it matters, then bump anyway (2026-08-23).
-- **A guard written over what a mechanism EMITS tests emission, not the intent it stands for** — the
-  capability removal guard refused on a tombstone in the delta, while the property it existed to protect
-  was that a partial Definition never narrows what a package declares. The two came apart in every shape
-  that drops a key without retiring an entity: a dropped retention-class holder is preserved rather than
-  tombstoned, a dropped key already absent from KV emits nothing — and both still rewrote `declaredKeys`,
-  blanked the manifest body and reported success, because the in-place branch takes all of it from the
-  Definition it is handed. The ratified state table had three wrong verdicts for the same reason. Minted:
-  capability-apply removal refusal, all three cold reviews independently. Check: state the property in
-  terms of the DECLARED set (`old \ new`), not the emitted mutations, and write the state table over the
-  states the entry point can reach — not only the ones the mechanism under the guard can produce.
 - **An accessor that returns a struct of slices is a write handle, not a copy** — `MaterializedDefinition()`
   was unexported-field-plus-getter precisely so the applied artifact would be the reviewed artifact, and it
   handed back the plan's own backing arrays: a caller could rewrite the reviewed lens body and have the
@@ -142,7 +139,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   and the guard over one committed KV state per lens shape and fails on any unexplained disagreement —
   a new spec shape is a new row. Elsewhere the check stands: the brief names the consumer's full exclusion
   set, the guard carries one vector per condition, and a deliberately uncovered condition is a named
-  narrowing with its direction (under- vs over-reporting) stated in the code.
+  narrowing with its direction (under- vs over-reporting) stated in the code. **Sixth sighting (permission
+  reconciler, 2026-08-23), the unusable-input shape again and now the ENTRY point rather than a guard:** a
+  typed `json.Unmarshal` into a struct of `string` fields `continue`d on error, so a vertex written with one
+  unread field as a number entered no class and produced no finding — the gate opted out of by a type — while
+  the same function hard-failed on the identical failure four lines away. It also mis-diagnosed: a declared
+  key present but unreadable reported as "no live vertex". Mandated test shape, now general: any typed
+  decoder standing in front of a looser reader carries a present-but-UNDECODABLE vector, not just an absent
+  one, and asserts the decoder's verdict is no wider than the reader's. Also fold in the retired sibling
+  lesson: state the property over the DECLARED set (`old \\ new`), never over the mutations the mechanism
+  emits, and write the state table over the states the entry point can reach.
 - **A field validated after normalization must be MATCHED after the same normalization — but folding a
   DESTRUCTIVE resolver's match set is the wrong cure.** `Lens` was `TrimSpace`-checked for emptiness and
   resolved raw, so a declaration with a trailing space was refused with a remedy identical to the line
@@ -159,6 +165,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   analyzed. Minted: grant-provenance §12 (un-tombstone prerequisite), caught by cold adversarial review.
   Check: none yet (key the guard on the anchor-type prefix, e.g. `metaVertexPrefix`, never on
   tombstone-state alone).
+- **A check whose DECLARED side is read from the same store the writer controls is an echo, not a check** —
+  the permission reconciler compared live `vtx.permission.*` against each package's `declaredKeys`, and both
+  halves are Core KV written by one actor in one operation, so an attacker-authored manifest declaring an
+  attacker-authored permission reconciled perfectly clean while reading as a security gate. The tell is that
+  no input to the comparison comes from outside the system under audit. Minted: the live-vs-declared
+  permission reconciler, cold security review (2026-08-23). Check: anchor the declared side in something the
+  writer cannot author — for a package that is `internal/pkgregistry`'s compiled `Definition` (note it cannot
+  be imported from `internal/pkgmgr`: every `packages/*` imports pkgmgr, so the anchor lives in the calling
+  script) — and where no anchor exists, say so as a named residual at the point the code drops the data,
+  never as a silent narrowing behind a passing gate.
 - **One fact computed twice, owned by nobody, is a divergence waiting to be exploited — and one helper
   answering two different questions is the same defect** — `patternVarNames` served both the accumulator
   check (which must see every name a clause RESOLVES) and the cross-walk disjointness rule (which must see

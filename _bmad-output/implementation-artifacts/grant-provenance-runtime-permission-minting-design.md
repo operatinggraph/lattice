@@ -1187,9 +1187,19 @@ every kernel permission as undeclared drift. Every live permission vertex is cla
 - **unstamped** — no `origin`, not kernel. A pre-stamp package install; healable
   (`step8_commit.go:765`), remedy is an upgrade of the declaring package. Reported, not failed.
 
-Drift the gate FAILS on: `undeclared` (package-origin, no declaring manifest — the row's ask) ·
-`keyMismatch` (a body claiming a declaration its key does not derive) · `missing` (declared, not live —
-also the §5.1 non-durable-revoke case) · `kernelMissing`.
+Drift the gate FAILS on: `undeclared` (a live vertex attributable to no installed package's `declaredKeys`)
+· `keyMismatch` (a body claiming a declaration its key does not derive) · `missing` (a `declaredKeys` entry
+backed by **no document at all**) · `kernelMissing` · `undecodable` (a `vtx.permission.*` root that could
+not be read).
+
+**Amended 2026-08-23, at build:** this section originally read `missing` as covering "also the §5.1
+non-durable-revoke case", and adjudicated `unstamped` as a notice unconditionally. Both are struck.
+§5.1's non-durability was itself superseded by §12 (`0bb6daea`): `upgrade.go`'s revocations-respected path
+means a deliberately revoked package permission stays revoked, so reporting it as drift was a permanent
+false positive on a correct end state — a declared key whose document is present and tombstoned is now a
+**notice**. And an absent or unrecognized `origin` is a notice only where the key is in some package's
+`declaredKeys` (the shape a genuine pre-stamp install has); otherwise it is drift, because the cheapest
+forgery was the one that omitted the stamp.
 
 ### 11.4 Increment order
 
@@ -1230,3 +1240,52 @@ also the §5.1 non-durable-revoke case) · `kernelMissing`.
 The reconciler **reads**; it never repairs. No new op, no KV write, no change to any authorization path,
 no change to the installer's own gates. It does not reconcile roles, `grantedBy` links, or DDL/lens
 entities — permission vertices only.
+
+### 11.8 Close (2026-08-23) — shipped, and the accounting
+
+**Shipped.** `9470ab24` (reconciler + `PermissionID` export + gate + Makefile target + CI step),
+`dbe783f0` (the `edge-manifest` bump `lint-package-version`'s generator-driven path demanded — the one
+package declaring `ReadGrantDomains`), `3fa2e1fa` (the cold-review round), merged `9718dac7`.
+
+**Verified live, not only by tests.** The container has no shared stack, so one was built natively per
+`agents/steward/REMOTE.md` §3 — NATS under the repo's own `deploy/nats-server.conf` (so the `lattice`
+user's real Core-KV read permissions were exercised), native Postgres, bootstrap, Refractor, Processor at
+`LATTICE_AUTH_MODE=capability`. `make verify-kernel` clean. The gate PASSes on the bare kernel (six kernel
+permissions, no packages) and on five installed packages, with **zero notices — which is itself the
+registry anchor's positive vector**, since a package the compiled registry cannot resolve emits one. Its
+negative vector was proven by perturbing the expected set in a throwaway copy of the script: drift fired
+for every package and the gate exited 1. A cold reviewer independently installed the full fourteen-package
+`stack-gates` corpus through the real Processor and also got 0 drift / 0 notices.
+
+**What the three cold reviews changed.** Two found the same fail-open independently (an undecodable
+envelope silently dropped — the gate opted out of by writing one unread field as a number). One executed
+the printed remedies and falsified three of four. One mutation-tested and found the
+`declaredBy`-names-no-installed-package arm had no vector at all: both arms emitted identical fields and
+differed only in prose. All are closed in `3fa2e1fa`.
+
+**Accounting — every discovery resolved to a fix or to one of the two outs.**
+
+| Discovery | Resolution |
+|---|---|
+| Undecodable envelope dropped; a declared-but-unreadable key mis-diagnosed as `missing` | fixed — `undecodable` drift class |
+| Unstamped/unrecognized `origin` fail-open | fixed — notice only at a declared key, drift otherwise |
+| `missing` a permanent false positive on a respected revocation | fixed — tombstoned-and-declared is a notice |
+| Three printed remedies that return success and change nothing | fixed |
+| Declared side read from the store the writer controls | fixed — registry anchor in the script |
+| Two `undeclared` arms distinguished only by prose; surviving mutant | fixed — machine-readable reason + a vector each |
+| Unchunked multi-get; third copy of the manifest listing; overstated CI comment; step placement | fixed |
+| `grantedBy` links carry no provenance, so a forged grant edge reconciles clean | **out (2): needs a designer pass** — filed `📐 no-pattern: provenance on a grantedBy link` |
+| A package-plane actor forging a package-origin permission | **out (1): standing Andrew shelving** — the existing ★★★ `[bootstrap]` row; the registry anchor narrows it for registry-known packages, and §11.7 says where it does not |
+
+**Two review claims REJECTED, recorded so neither is re-derived.** (a) *"The `edge-manifest` bump was
+unnecessary — `lint-package-version` only considers files under `packages/`."* False: its
+`generatorDriven` path fires on "a package declares `ReadGrantDomains` AND `internal/pkgmgr/` changed",
+and the gate demanded exactly this bump when run with CI's real `DIFF_BASE`. (b) *"Add a kernel-body
+consistency check to the reconciler."* Declined: `verify-kernel` already asserts kernel content matches
+the running binary, and an expectation table of kernel operationTypes inside `pkgmgr` would duplicate
+`internal/bootstrap`'s seed — the dossier's one-fact-computed-twice defect.
+
+**Lessons routed** to `docs/components/pkgmgr.md`: a new entry (a check whose declared side is read from
+the store the writer controls is an echo), a third sighting on the false-remedy entry (tightened to
+"execute the remedy, don't trace it"), and a sixth sighting on the decode-looseness entry (mandating a
+present-but-undecodable vector for any typed decoder in front of a looser reader).
