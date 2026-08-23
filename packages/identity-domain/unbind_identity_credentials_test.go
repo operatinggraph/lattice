@@ -105,11 +105,8 @@ func newUnbindPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // The subject's own credentialBinding is deliberately absent from the set and
 // must stay absent: it is sensitive, and by the time this op runs the
 // subject's DEK is shredded, so declaring it would fault the op in hydrate.
-func submitUnbindAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
-	cp *processor.CommitPath, cons jetstream.Consumer, actorKey, subjectKey, reqLabel string, wantOutcome processor.MessageOutcome) string {
-	t.Helper()
-	reqID := testutil.GenReqID(reqLabel)
-	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+func unbindEnv(actorKey, subjectKey, reqID string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneSystem,
 		OperationType: "UnbindIdentityCredentials",
@@ -125,7 +122,14 @@ func submitUnbindAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 				{Hub: subjectKey, Relation: "boundTo", Direction: "out"},
 			},
 		},
-	})
+	}
+}
+
+func submitUnbindAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, actorKey, subjectKey, reqLabel string, wantOutcome processor.MessageOutcome) string {
+	t.Helper()
+	reqID := testutil.GenReqID(reqLabel)
+	testutil.PublishOp(t, conn, unbindEnv(actorKey, subjectKey, reqID))
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
 	return reqID
 }
@@ -518,6 +522,171 @@ func TestUnbindIdentityCredentials_OutboundSweep_RewritesOwnerArray(t *testing.T
 		t.Fatalf("W's singular actorKey still names the erased subject %q — the pre-array fallback readers "+
 			"use must not keep pointing at a credential that no longer resolves", subjectKey)
 	}
+}
+
+// TestUnbindIdentityCredentials_OutboundSweep_ManyOwnersInOneCommit is the
+// falsifier for the one way a revision pin could break a bounded sweep: if a
+// single commit could hold two updates to the SAME owner aspect, the second
+// would carry a revision the first invalidated and the batch would conflict with
+// itself on every well-connected subject.
+//
+// It cannot. sweep_outbound derives owner_key from lk.targetVertex, which the
+// Processor parses out of the link KEY (internal/processor/starlark_kv.go), and
+// for one subject each distinct boundTo key names a distinct owner — so N
+// outbound links are N different owners and N pins that cannot collide. This
+// asserts that as behaviour rather than as an argument: one pass, several
+// owners, every array rewritten in the same commit.
+func TestUnbindIdentityCredentials_OutboundSweep_ManyOwnersInOneCommit(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupUnbindEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "unbind-many-default")
+	sysCP, sysCons := newUnbindPipeline(t, ctx, conn, "unbind-many-system")
+
+	// The subject is a credential of several owners at once — a merged-away
+	// identity folded into more than one survivor's sign-in methods.
+	subjectKey, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("UnbManyS"))
+	subjectID := subjectKey[len("vtx.identity."):]
+
+	owners := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		ownerKey, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("UnbManyO"+string(rune('A'+i))))
+		owners = append(owners, ownerKey)
+		// Each owner's array names one credential of their own plus the
+		// subject, so a rewrite that dropped the wrong entry is visible.
+		seedSensitiveAspect(t, ctx, conn, ownerKey, "credentialBinding", map[string]any{
+			"actorKey": consumerActorKey,
+			"boundAt":  "2026-05-01T00:00:00Z",
+			"credentials": []any{
+				map[string]any{"actorKey": consumerActorKey, "boundAt": "2026-05-01T00:00:00Z"},
+				map[string]any{"actorKey": subjectKey, "boundAt": "2026-05-02T00:00:00Z"},
+			},
+		})
+		testutil.SeedLink(t, ctx, conn,
+			"lnk.identity."+subjectID+".boundTo.identity."+ownerKey[len("vtx.identity."):],
+			"boundTo", subjectKey, ownerKey)
+	}
+	if got := liveBoundToCount(t, ctx, conn, subjectKey, "out"); got != len(owners) {
+		t.Fatalf("fixture: subject's outbound links = %d, want %d", got, len(owners))
+	}
+
+	sealForErasure(t, ctx, conn, subjectKey)
+	submitUnbind(t, ctx, conn, sysCP, sysCons, subjectKey, "UnbManyDo", processor.OutcomeAccepted)
+
+	if got := liveBoundToCount(t, ctx, conn, subjectKey, "out"); got != 0 {
+		t.Fatalf("live outbound links = %d, want 0 — one commit must clear all of them", got)
+	}
+	for i, ownerKey := range owners {
+		after := readDecryptedAspectData(t, ctx, conn, ownerKey, "credentialBinding")
+		creds, _ := after["credentials"].([]any)
+		if len(creds) != 1 {
+			t.Fatalf("owner %d (%s) credentials len = %d, want 1: %+v", i, ownerKey, len(creds), creds)
+		}
+		m, _ := creds[0].(map[string]any)
+		if got, _ := m["actorKey"].(string); got != consumerActorKey {
+			t.Fatalf("owner %d (%s) remaining credential = %q, want their own %q — every owner in the page "+
+				"must lose the erased subject and keep the rest", i, ownerKey, got, consumerActorKey)
+		}
+	}
+}
+
+// TestUnbindIdentityCredentials_OutboundSweep_ConcurrentOwnerWriteConflicts is
+// the shared-vertex property of the outbound arm's rewrite.
+//
+// The owner W is a LIVE third party — that is the whole reason this arm rewrites
+// at all — so every ordinary writer of their credentialBinding array is still
+// active on them. This op's only precondition is about the SUBJECT's erasure,
+// and here the subject is W's credential, not W, so nothing it checks excludes a
+// CompleteCredentialLink, an UnlinkCredential, or a MergeIdentity landing on W's
+// array while the sweep runs.
+//
+// The rewrite is a whole-body replacement computed from a live read. Without the
+// revision pin the commit is conditioned on step 8's OWN prior-document read,
+// taken after the filter ran, so a write landing in that window satisfies the
+// condition and is overwritten by a body that never saw it: a credential W just
+// linked would simply cease to exist, with nothing left to notice. Pinned, the
+// batch conflicts and the erasure target re-dispatches against an unmoved
+// residue.
+//
+// The competing write is a direct Core KV re-encrypt of W's array rather than a
+// real CompleteCredentialLink: what the CAS compares is a revision, so any
+// writer of that key reproduces it, and driving a second op through a commit
+// path already mid-commit is not something the harness can do.
+func TestUnbindIdentityCredentials_OutboundSweep_ConcurrentOwnerWriteConflicts(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupUnbindEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "unbind-race-default")
+
+	// Same fixture as _OutboundSweep_RewritesOwnerArray: W is an ordinary
+	// claimed identity and the subject is a second identity linked as W's
+	// SECOND credential, which is what makes the subject the SOURCE of a boundTo
+	// link and puts it in W's array.
+	wKey := claimFreshIdentity(t, ctx, conn, cp, cons, "UnbRaceW")
+	subjectKey, _ := createIdentityAndGetKeys(t, ctx, conn, cp, cons, testutil.GenReqID("UnbRaceS"))
+	seedIdentityCapDoc(t, ctx, conn, subjectKey, "CompleteCredentialLink")
+	linkSecondCredential(t, ctx, conn, cp, cons, wKey, subjectKey, "UnbRaceLink", "link-secret-unb-race")
+	sealForErasure(t, ctx, conn, subjectKey)
+
+	// The competing writer, firing once, inside the window: it appends a third
+	// credential to W's array exactly as a CompleteCredentialLink would, keeping
+	// W's real singular fallback pair.
+	raced := make(chan struct{})
+	raceCP, raceCons := newRacingPipeline(t, ctx, conn, racingPipelineConfig{
+		Durable:       "unbind-race-system",
+		FilterSubject: "ops.system",
+		OperationType: "UnbindIdentityCredentials",
+	}, func() {
+		data := readDecryptedAspectData(t, ctx, conn, wKey, "credentialBinding")
+		creds, _ := data["credentials"].([]any)
+		data["credentials"] = append(creds, map[string]any{
+			"actorKey": thirdCredActorKey,
+			"boundAt":  "2026-08-07T11:59:00Z",
+		})
+		seedSensitiveAspect(t, ctx, conn, wKey, "credentialBinding", data)
+		close(raced)
+	})
+
+	env := unbindEnv(unbindActorKey, subjectKey, testutil.GenReqID("UnbRaceDo"))
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, raceCP, raceCons, env)
+	<-raced
+
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a write landing on the owner's array between this sweep's "+
+			"read and its commit must conflict the batch, not be overwritten by a body that never saw it", outcome)
+	}
+	if reply.Error == nil || reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("rejected with %+v, want %s — the owner rewrite must carry the revision it read, so the CAS "+
+			"is against the state the filter was computed from and not against whatever step 8 finds later",
+			reply.Error, processor.ErrCodeRevisionConflict)
+	}
+
+	// The racing writer's entry survived and the subject is still in the array:
+	// a conflicted batch commits nothing, which is what makes the erasure
+	// target's re-dispatch correct rather than merely eventual.
+	after := readDecryptedAspectData(t, ctx, conn, wKey, "credentialBinding")
+	creds, _ := after["credentials"].([]any)
+	got := make([]string, 0, len(creds))
+	for _, c := range creds {
+		m, _ := c.(map[string]any)
+		k, _ := m["actorKey"].(string)
+		got = append(got, k)
+	}
+	want := []string{consumerActorKey, subjectKey, thirdCredActorKey}
+	if len(got) != len(want) {
+		t.Fatalf("W's credentials = %v, want %v — the conflicted batch must have written nothing", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("W's credentials = %v, want %v (differs at index %d)", got, want, i)
+		}
+	}
+
+	// The whole batch is atomic, so the link and the subject's own index are
+	// still standing for the next pass to sweep.
+	if n := liveBoundToCount(t, ctx, conn, subjectKey, "out"); n != 1 {
+		t.Fatalf("subject's live outbound links = %d, want 1 — a conflict must leave the residue unmoved", n)
+	}
+	assertDocLive(t, ctx, conn, credentialIndexKey(subjectKey),
+		"a conflict on the owner's array must roll back the credentialindex tombstone too")
 }
 
 // TestUnbindIdentityCredentials_EmitsSweepPassEventOnEveryCommit pins the

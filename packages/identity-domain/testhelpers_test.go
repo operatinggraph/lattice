@@ -16,8 +16,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -483,4 +486,96 @@ func seedSpentClaimKeyAspect(t *testing.T, ctx context.Context, conn *substrate.
 	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
 		t.Fatalf("tombstone %s: %v", key, err)
 	}
+}
+
+// racingPipelineConfig names the one operation a racing pipeline interposes on
+// and the lane it consumes, so the same pipeline can drive a test's fixture ops
+// without tripping the hook.
+type racingPipelineConfig struct {
+	Durable       string
+	FilterSubject string
+	OperationType string
+}
+
+// interposingValidator runs hook exactly once, on the first operation of the
+// named type to reach step 6, and then delegates. Step 6 sits AFTER the script
+// has read state and decided its mutations and BEFORE step 8 takes its own
+// prior-document read and commits, so a write made from the hook lands in
+// precisely the window a concurrent writer of a shared vertex occupies. Nothing
+// else reproduces that window deterministically: the two ends of it are inside
+// one synchronous commit-path call.
+//
+// This is what makes a revision pin testable. A mutation carrying the revision
+// its own read observed must reject here; one relying on step 8's later
+// prior-document read commits and silently overwrites the racing writer.
+type interposingValidator struct {
+	inner  processor.Validator
+	opType string
+	once   sync.Once
+	hook   func()
+}
+
+func (v *interposingValidator) Validate(ctx context.Context, env *processor.OperationEnvelope,
+	result processor.ScriptResult, state processor.HydratedState) error {
+	if env.OperationType == v.opType {
+		v.once.Do(v.hook)
+	}
+	return v.inner.Validate(ctx, env, result, state)
+}
+
+// newRacingPipeline is testutil.CapabilityPipeline with the validator wrapped,
+// so a test can commit a competing write to a key the operation under test
+// already read. Built here rather than added to the shared harness because the
+// interposition is meaningful for exactly this package's shared-vertex writes.
+func newRacingPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cfg racingPipelineConfig, hook func()) (*processor.CommitPath, jetstream.Consumer) {
+	t.Helper()
+	logger := testutil.TestLogger()
+	metrics := &processor.Metrics{}
+	cache := processor.NewDDLCache(conn, testutil.HarnessCoreBucket, logger)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("ddl cache refresh: %v", err)
+	}
+	authz, err := processor.SelectAuthorizerArgs(processor.SelectAuthorizerOpts{
+		Mode:             processor.AuthModeCapability,
+		Reader:           conn,
+		CapabilityBucket: testutil.HarnessCapBucket,
+		Logger:           logger,
+	})
+	if err != nil {
+		t.Fatalf("SelectAuthorizerArgs: %v", err)
+	}
+	v := testutil.TestVault(t)
+	hydrator := processor.NewHydratorWithCache(conn, testutil.HarnessCoreBucket, cache, logger)
+	hydrator.Vault = v
+	hydrator.PrimordialActors = testutil.PrimordialActors(t)
+	cp := processor.NewCommitPath(processor.Deps{
+		Conn:       conn,
+		CoreBucket: testutil.HarnessCoreBucket,
+		HealthKV:   testutil.HarnessHealthBucket,
+		Authorizer: authz,
+		Hydrator:   hydrator,
+		Executor:   processor.NewExecutor(processor.NewStarlarkRunner(0, 0), logger),
+		Validator: &interposingValidator{
+			inner:  processor.NewValidator(cache, conn, testutil.HarnessCoreBucket, logger),
+			opType: cfg.OperationType,
+			hook:   hook,
+		},
+		Committer:   processor.NewCommitter(conn, testutil.HarnessCoreBucket, cache, logger, time.Now),
+		Metrics:     metrics,
+		Heartbeater: processor.NewHealthHeartbeater(conn, testutil.HarnessHealthBucket, "racing-"+cfg.Durable, 10*time.Second, metrics, logger),
+		Logger:      logger,
+		Vault:       v,
+		DDLs:        cache,
+	})
+	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
+		StreamName:     testutil.HarnessOpsStream,
+		Durable:        cfg.Durable,
+		FilterSubjects: []string{cfg.FilterSubject},
+		AckWait:        5 * time.Second,
+	}, logger)
+	if err != nil {
+		t.Fatalf("EnsureConsumer: %v", err)
+	}
+	return cp, cons
 }

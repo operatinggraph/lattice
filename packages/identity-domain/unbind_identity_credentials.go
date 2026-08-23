@@ -77,7 +77,9 @@ func UnbindIdentityCredentialsDDL() pkgmgr.DDLSpec {
 			"not a way to strip a person's sign-in methods. Does not rewrite the subject's own " +
 			"credentialBinding array: that aspect is sensitive and the subject's DEK is shredded " +
 			"by the time this runs, so it is already erased by key destruction; the owner's array " +
-			"IS rewritten on the outbound direction, where the owner's key is alive.",
+			"IS rewritten on the outbound direction, where the owner's key is alive, pinned to the " +
+			"revision that read observed so a concurrent CompleteCredentialLink/UnlinkCredential/" +
+			"MergeIdentity conflicts the batch rather than losing its write to a whole-body replacement.",
 		Script: unbindIdentityCredentialsDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"subjectKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose credential bindings are being swept. Named subjectKey because Loom's systemOp step and Weaver's directOp both dispatch on that field."}},` +
@@ -333,7 +335,37 @@ def owner_binding_rewrite(owner_key, credential_key):
     if singular_bound != None:
         data["boundAt"] = singular_bound
 
+    # PINNED TO THE REVISION THIS READ OBSERVED. The owner is a LIVE third
+    # party -- that is the whole reason this arm rewrites at all -- so every
+    # ordinary writer of their array is still active on them: CompleteCredentialLink
+    # appends an entry, UnlinkCredential removes one, identity-hygiene's
+    # MergeIdentity unions a whole set in. None of the three is excluded by
+    # anything this op checks, because this op's only precondition is about the
+    # SUBJECT's erasure, and the subject is the credential here, not the owner.
+    #
+    # Unpinned, the update is not left unconditioned: step 8 conditions it on
+    # its own prior-document read (internal/processor/step8_commit.go's
+    # readPriorDocuments), since the key is data-derived off the enumeration and
+    # so is never in the step-4 snapshot for commit_path.go's
+    # applyHydratedRevisions to condition from. But that read happens AFTER the
+    # filter above ran, so a CompleteCredentialLink landing in the window
+    # satisfies the condition and is overwritten by a whole-body replacement
+    # that never saw its append -- a credential the person just linked, gone,
+    # with nothing left to notice it. Carrying this read's own revision makes
+    # the decision and the write atomic: a racing writer conflicts the batch.
+    #
+    # The batch cannot conflict with ITSELF. sweep_outbound derives owner_key
+    # from lk.targetVertex, which the Processor parses out of the link KEY
+    # (internal/processor/starlark_kv.go), and for one subject each distinct
+    # boundTo key names a distinct owner -- so a commit holds at most one update
+    # per owner, never two on the same aspect.
+    #
+    # A conflict costs a pass, not convergence: nothing commits, the links stay
+    # live, and the erasure target re-dispatches against a residue that has not
+    # moved. That is this op's posture everywhere else too, and it is the right
+    # trade against silently destroying a live person's sign-in method.
     return {"op": "update", "key": owner_key + ".credentialBinding",
+            "expectedRevision": binding.revision,
             "document": {"class": "credentialBinding", "vertexKey": owner_key,
                          "localName": "credentialBinding", "isDeleted": False,
                          "data": data}}
