@@ -259,18 +259,29 @@ type parsedWalk struct {
 // Cross-walk rules (beyond per-walk grammar, §3.1's "one lens still projects
 // one entity kind"): every walk must resolve to the same AnchorType/
 // AnchorVar — the tail RETURNs one anchor, so a lens declaring two would be
-// ambiguous about which one — and no walk may bind any OTHER variable an
-// earlier walk in the same lens already bound. The shared AnchorVar itself is
-// exempt from that second check — every walk binds it by construction, and
-// composeDataLensSpec scopes each walk's copy to a walk-local name before
-// coalescing them back to it (the multi-path anchor composition). Any other
-// name collision isn't a grammar nicety: composeDataLensSpec concatenates
-// every walk's OPTIONAL MATCH clauses into ONE cypher query, and Cypher
-// treats a variable reused across MATCH clauses as a join constraint (the
-// second occurrence must match the SAME bound node) — a name collision
-// between two independently-authored walks would silently turn "anchor
-// reachable via either path" into "anchor reachable only where both paths
-// land on one vertex."
+// ambiguous about which one — and no walk may BIND any OTHER variable an
+// earlier walk in the same lens already bound. The shared AnchorVar is exempt
+// from that second rule: every walk binds it by construction, and it is the
+// one name both compiled artifacts are built around.
+//
+// Disjointness is what keeps the multi-walk output shape decidable. A lens
+// with N walks compiles to N INDEPENDENT queries (composeDataLensSpec), each
+// carrying the same hand-authored tail, and Refractor classifies every RETURN
+// column as anchor-derived (every branch computes it from the shared
+// actor/anchor and must agree) or owned by exactly one walk —
+// full.ClassifyBranchReturnColumns, which derives the shared-variable set as
+// the INTERSECTION of the branches' bound variables. That intersection is
+// exactly the actor plus the AnchorVar only while no two walks bind another
+// name in common; one that did would enter it, and a tail column reading it
+// would be classified anchor-derived while each branch in fact computed a
+// different value from its own binding. Refusing here names the offending walk
+// and variable, which a classification over compiled branches cannot.
+//
+// Only BINDINGS count, which is why this reads patternVarNames rather than
+// patternScopeNames: a property map's values REFERENCE variables without
+// binding any, and the classifier's own bound-variable scan likewise reads
+// node and relationship variables only — so a name one walk references and
+// another binds is not a collision in either compiled artifact.
 func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWalk, error) {
 	name := l.CanonicalName
 	if l.Adapter != "nats-subject" || !l.Personal {
@@ -303,7 +314,8 @@ func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWa
 		// N+1 of the SAME walk — exactly how a chain is meant to read) must
 		// not trip the cross-walk check below just because it recurs. The
 		// shared AnchorVar is excluded too — every walk binds it by
-		// construction, and composeDataLensSpec composes it, not this guard.
+		// construction, and both compiled artifacts are built around it
+		// rather than kept apart from it by this guard.
 		own := map[string]bool{}
 		for _, v := range patternVarNames(pw.clauses) {
 			if v != anchorWalkActorVar && v != anchorVar {
@@ -314,9 +326,10 @@ func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWa
 			if boundElsewhere[v] {
 				return nil, fmt.Errorf(
 					"pkgmgr: lens %q: Walks[%d] binds variable %q, already bound by an earlier "+
-						"walk in this lens — every walk's OPTIONAL MATCH concatenates verbatim "+
-						"into the data lens's one prelude, so a shared name silently joins the "+
-						"two paths instead of finding either independently; rename it",
+						"walk in this lens — a name two walks both bind joins the intersection "+
+						"Refractor reads as the branches' shared scope, so a tail column naming "+
+						"it merges as if every branch agreed on one value while each computes "+
+						"its own; rename it",
 					name, wi, v)
 			}
 			boundElsewhere[v] = true
@@ -579,18 +592,20 @@ func grantSliceVar(wi int) string {
 // rather than letting the producer bind a slice list as if it were a node.
 const grantSliceVarPrefix = "grantSlice"
 
-// validateGrantSliceVarNames refuses a domain whose member walks bind a
-// variable named like a generated accumulator.
+// validateGrantSliceVarNames refuses a domain whose member walks use a variable
+// named like a generated accumulator — bound by a pattern or referenced from a
+// property-map value, since the emitted cypher resolves both in the one scope
+// the accumulator already occupies.
 func validateGrantSliceVarNames(domain string, walks []*parsedWalk) error {
 	reserved := make(map[string]bool, len(walks))
 	for wi := range walks {
 		reserved[grantSliceVar(wi)] = true
 	}
 	for _, pw := range walks {
-		for _, v := range patternVarNames(pw.clauses) {
+		for _, v := range patternScopeNames(pw.clauses) {
 			if reserved[v] {
 				return fmt.Errorf(
-					"pkgmgr: ReadGrantDomain %q: lens %q binds variable %q, which is the name the "+
+					"pkgmgr: ReadGrantDomain %q: lens %q uses variable %q, which is the name the "+
 						"generated producer gives one of its own per-walk grant-slice accumulators — "+
 						"the staging WITH would join the walk's pattern against the accumulated list "+
 						"instead of binding it fresh; rename the walk variable",
@@ -615,7 +630,9 @@ func collectBranch(anchorType, anchorVar string, relNames []string) string {
 		anchorType, anchorVar, strings.Join(quoted, ", "))
 }
 
-// patternVarNames lists every variable the given clauses bind, in order.
+// patternVarNames lists every variable the given clauses BIND, in order — the
+// question the cross-walk disjointness rule asks, and the same set Refractor's
+// branch classifier derives its shared scope from.
 func patternVarNames(clauses []*linearPattern) []string {
 	var out []string
 	for _, lp := range clauses {
@@ -623,6 +640,25 @@ func patternVarNames(clauses []*linearPattern) []string {
 			out = append(out, v.name)
 		}
 		for _, v := range lp.relVars {
+			out = append(out, v.name)
+		}
+	}
+	return out
+}
+
+// patternScopeNames lists every name the given clauses RESOLVE: the variables
+// they bind, plus the ones their property-map values reference.
+//
+// The wider set answers a different question from patternVarNames', and only
+// one caller asks it — validateGrantSliceVarNames, which matches against the
+// fixed `grantSlice<N>` list the producer generates. A reference resolves in
+// the same scope a binding does, so either kind of occurrence collides with an
+// accumulator; nothing else may read this set to decide whether two walks
+// clash, because a reference is not a binding.
+func patternScopeNames(clauses []*linearPattern) []string {
+	out := patternVarNames(clauses)
+	for _, lp := range clauses {
+		for _, v := range lp.propVars {
 			out = append(out, v.name)
 		}
 	}
@@ -644,6 +680,13 @@ type linearPattern struct {
 	src      string
 	nodeVars []patternVar
 	relVars  []patternVar
+	// propVars are the variables a node property map's values REFERENCE.
+	// They are held apart from nodeVars/relVars because they bind nothing:
+	// connectivity, the anchor's label, and cross-walk disjointness are all
+	// questions about what a clause BINDS. A reference only has to resolve —
+	// which it does in the same scope a binding lives in, so it can still
+	// collide with a name the producer generates there.
+	propVars []patternVar
 	labels   map[string]string
 	relTypes []string
 }
@@ -665,6 +708,7 @@ func (lp *linearPattern) render(rename map[string]string) string {
 	}
 	add(lp.nodeVars)
 	add(lp.relVars)
+	add(lp.propVars)
 	if len(spans) == 0 {
 		return lp.src
 	}
@@ -800,23 +844,28 @@ func (p *patScanner) node(lp *linearPattern) error {
 				"audit field, which an abstract label would make false for every concrete anchor it binds",
 			where, p.i)
 	}
+	// A property map binds nothing itself, but the variables its VALUES
+	// reference are part of the clause's name surface — the emitted cypher
+	// resolves them in the same scope as the pattern's own variables, so a
+	// value naming a generated grant-slice accumulator collides exactly as a
+	// node variable of that name would. They are recorded here, at the one
+	// place the map's extent is known.
+	//
+	// propMapEnd finds that extent, rather than a brace count written out
+	// here, so that the boundary the PARSER consumes and the boundary the
+	// EXTRACTOR reads are one answer from one scanner. Two scanners that must
+	// agree eventually will not: a brace count blind to quoting closes the map
+	// at a `}` inside a string value, and everything after it — including a
+	// second `slice: grantSlice0` entry — is then re-read as further pattern
+	// text the extractor was never handed.
 	if p.peek() == '{' {
-		depth := 0
-		for !p.eof() {
-			switch p.src[p.i] {
-			case '{':
-				depth++
-			case '}':
-				depth--
-			}
-			p.i++
-			if depth == 0 {
-				break
-			}
-		}
-		if depth != 0 {
+		open := p.i
+		end := propMapEnd(p.src, open, len(p.src))
+		if end >= len(p.src) {
 			return fmt.Errorf("unterminated property map in node pattern")
 		}
+		lp.propVars = append(lp.propVars, propMapVars(p.src, open+1, end)...)
+		p.i = end + 1
 	}
 	p.skipSpace()
 	if p.peek() != ')' {
@@ -834,6 +883,161 @@ func (p *patScanner) node(lp *linearPattern) error {
 	return nil
 }
 
+// propMapVars returns the variables a property map's VALUES reference, as spans
+// into src — the map's body, between its outermost braces, being src[from:to].
+//
+// Only values are read, and that asymmetry is the whole point. A map entry is
+// `<property>: <expr>`: the property name lives in the vertex's own namespace,
+// never the pattern's, so a node carrying a property named like a generated
+// grant-slice accumulator is unremarkable — collecting keys would refuse a
+// perfectly valid package at install time, and this gate fails a build closed.
+// The value is where cypher resolves a variable, so the value is the surface a
+// collision can actually happen on.
+func propMapVars(src string, from, to int) []patternVar {
+	var out []patternVar
+	for i := from; i < to; {
+		// The key runs to its ':'. Text before a ',' with no ':' at all is not
+		// a property entry, and reading it as a value would collect a name
+		// from a position where cypher resolves none.
+		for i < to && src[i] != ':' && src[i] != ',' {
+			i++
+		}
+		if i >= to {
+			break
+		}
+		if src[i] == ',' {
+			i++
+			continue
+		}
+		i++
+		start := i
+		// The value runs to the next entry separator: a comma at the body's
+		// own nesting level, outside any quoted string.
+		depth := 0
+		for i < to {
+			c := src[i]
+			if c == '\'' || c == '"' {
+				i = skipQuoted(src, i, to)
+				continue
+			}
+			if c == ',' && depth == 0 {
+				break
+			}
+			switch c {
+			case '(', '[', '{':
+				depth++
+			case ')', ']', '}':
+				depth--
+			}
+			i++
+		}
+		out = append(out, propValueVars(src, start, i)...)
+		if i < to {
+			i++
+		}
+	}
+	return out
+}
+
+// propValueVars collects the variable references in one property VALUE
+// expression, src[from:to].
+//
+// A name counts only where cypher would resolve it as a variable: a bare
+// identifier, or the root of a dotted path. A quoted string's contents, the
+// name of a `$parameter`, the property name after a `.`, the keys of a nested
+// map, and a function's own name each live in some other namespace and can
+// never bind or join against an accumulator — reading any of them as a
+// reference would refuse a valid package.
+//
+// It does collect a bare keyword (`null`, `true`) as if it were a name, and
+// splits a non-ASCII name into its ASCII runs. Both are inert because of where
+// the result goes: patternScopeNames feeds one comparison, against the fixed
+// `grantSlice<N>` accumulator list, which no keyword and no fragment matches.
+// Anything reading these names to decide whether two walks clash would make a
+// meal of both, which is why nothing does.
+func propValueVars(src string, from, to int) []patternVar {
+	var out []patternVar
+	for i := from; i < to; {
+		c := src[i]
+		switch {
+		case c == '\'' || c == '"':
+			i = skipQuoted(src, i, to)
+		case c == '$':
+			i++
+			for i < to && isIdentByte(src[i]) {
+				i++
+			}
+		case c == '.':
+			i++
+			for i < to && isIdentByte(src[i]) {
+				i++
+			}
+		case c == '{':
+			end := propMapEnd(src, i, to)
+			out = append(out, propMapVars(src, i+1, end)...)
+			i = end + 1
+		case isIdentStart(c):
+			s := i
+			for i < to && isIdentByte(src[i]) {
+				i++
+			}
+			j := i
+			for j < to && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r') {
+				j++
+			}
+			if j < to && src[j] == '(' {
+				// The identifier names a function; its arguments are
+				// expressions in their own right and keep being scanned.
+				i = j + 1
+				continue
+			}
+			out = append(out, patternVar{name: src[s:i], start: s, end: i})
+		default:
+			i++
+		}
+	}
+	return out
+}
+
+// propMapEnd returns the index of the '}' closing the map opening at src[open],
+// or to when no close is found within src[:to].
+func propMapEnd(src string, open, to int) int {
+	depth := 0
+	for i := open; i < to; {
+		c := src[i]
+		if c == '\'' || c == '"' {
+			i = skipQuoted(src, i, to)
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return to
+}
+
+// skipQuoted returns the index just past the string literal opening at src[at],
+// or to when the literal is unterminated within src[:to].
+func skipQuoted(src string, at, to int) int {
+	q := src[at]
+	for i := at + 1; i < to; i++ {
+		switch src[i] {
+		case '\\':
+			i++
+		case q:
+			return i + 1
+		}
+	}
+	return to
+}
+
 // rel parses `-[ [var] :type [*range] ]->` in either direction.
 //
 // The relation type is REQUIRED and may name exactly one relation: an untyped
@@ -841,6 +1045,14 @@ func (p *patScanner) node(lp *linearPattern) error {
 // alternation (`[:a|:b]`) would reach two — in both cases the walk grants more
 // than it says, and the derived `via` audit array would misreport what it
 // traversed. A hop this grammar cannot name, it does not admit.
+//
+// A relationship property map is likewise inadmissible: the scan to `]` refuses
+// a `{` outright, so a hop cannot carry the value expressions a node's property
+// map can, and there is no relationship-side counterpart to the node's
+// propVars. Should the map ever be admitted here, its values must be recorded
+// the same way a node's are — they would resolve in the same scope, and an
+// unrecorded reference to a generated grant-slice accumulator is exactly the
+// silent join validateGrantSliceVarNames exists to refuse.
 func (p *patScanner) rel(lp *linearPattern) error {
 	leftArrow := false
 	switch {

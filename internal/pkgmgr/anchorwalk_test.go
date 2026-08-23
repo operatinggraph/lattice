@@ -704,3 +704,273 @@ func TestParseLinearPattern_SigilRefusalHasAPositiveVector(t *testing.T) {
 		}
 	}
 }
+
+// --- property-map value variables -----------------------------------------
+
+// propMapWalkDefinition is one lens, one walk, whose single chain clause is the
+// caller's — the smallest fixture that puts a node property map in front of the
+// full expansion, reserving exactly `grantSlice0`.
+func propMapWalkDefinition(clause string) Definition {
+	return Definition{
+		Name: "fixture", Version: "1.0.0",
+		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
+		Lenses: []LensSpec{personalLens("a", oneWalk(AnchorWalk{
+			GrantDomain: "fx", AnchorType: "booking", AnchorVar: "bk",
+			Chain: []string{clause},
+		}), "\nRETURN bk.key AS anchor\n")},
+	}
+}
+
+// A node's property map binds nothing, but its VALUES resolve in the same scope
+// the generated producer stages its accumulators in: `{slice: grantSlice0}`
+// would be read against the accumulated grant list rather than as the author's
+// own name, exactly as a node variable of that name would be. Every shape a
+// value can carry the reference in — bare, nested in a map, inside a list, as a
+// function argument — reaches the same scope, so each is refused.
+func TestExpandReadGrantWalks_RejectsAnAccumulatorNamedInANodePropertyMap(t *testing.T) {
+	for _, clause := range []string{
+		"(identity)<-[:bookedBy]-(bk:booking {slice: grantSlice0})",
+		"(identity)<-[:bookedBy]-(bk:booking {meta: {slice: grantSlice0}})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: [grantSlice0]})",
+		"(identity)<-[:bookedBy]-(bk:booking {n: size(grantSlice0)})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: grantSlice0.entries})",
+	} {
+		_, err := propMapWalkDefinition(clause).ExpandReadGrantWalks()
+		if err == nil {
+			t.Errorf("%q must be refused — its property map names a generated grant-slice accumulator", clause)
+			continue
+		}
+		if !strings.Contains(err.Error(), "accumulator") {
+			t.Errorf("%q: error %q does not name the accumulator collision", clause, err.Error())
+		}
+	}
+}
+
+// The false-refusal guard, which matters more than the refusal above: this gate
+// fails a package build CLOSED, so every name that merely LOOKS like the
+// accumulator without resolving to it must still install. A property KEY is a
+// name in the vertex's own namespace, a quoted value is data, a `$parameter` is
+// supplied by the caller, the name after a `.` is a property of the value on its
+// left, and a nested map's keys are keys like any other map's — none of them can
+// join against the producer's accumulator, so none of them may refuse a build.
+func TestExpandReadGrantWalks_AcceptsPropertyMapsThatOnlyLookLikeAnAccumulator(t *testing.T) {
+	for _, clause := range []string{
+		"(identity)<-[:bookedBy]-(bk:booking {grantSlice0: 1})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: 'grantSlice0'})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: \"grantSlice0\"})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: $grantSlice0})",
+		"(identity)<-[:bookedBy]-(bk:booking {slice: identity.grantSlice0})",
+		"(identity)<-[:bookedBy]-(bk:booking {meta: {grantSlice0: 1}})",
+		"(identity)<-[:bookedBy]-(bk:booking {note: 'a,grantSlice0'})",
+		"(identity)<-[:bookedBy]-(bk:booking {status: 'active', tenant: identity.tenant})",
+		"(identity)<-[:bookedBy]-(bk:booking {})",
+		"(identity)<-[:bookedBy]-(bk:booking)",
+	} {
+		if _, err := propMapWalkDefinition(clause).ExpandReadGrantWalks(); err != nil {
+			t.Errorf("%q must install — nothing in it resolves to the producer's accumulator: %v", clause, err)
+		}
+	}
+}
+
+// The extraction itself, pinned at the parser rather than through the whole
+// expansion: only value positions yield a name, and a dotted path yields its
+// ROOT — the variable the engine resolves — not the property hanging off it.
+func TestParseLinearPattern_RecordsPropertyMapValueVariables(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{"(identity)<-[:bookedBy]-(bk:booking {slice: other})", "other"},
+		{"(identity)<-[:bookedBy]-(bk:booking {slice: other.entries})", "other"},
+		{"(identity)<-[:bookedBy]-(bk:booking {a: [x, y]})", "x,y"},
+		{"(identity)<-[:bookedBy]-(bk:booking {a: {b: x}})", "x"},
+		{"(identity)<-[:bookedBy]-(bk:booking {a: coalesce(x, 'y')})", "x"},
+		{"(identity)<-[:bookedBy]-(bk:booking {x: 1, y: 'x'})", ""},
+		{"(identity)<-[:bookedBy]-(bk:booking {key: $actorKey})", ""},
+		{"(identity)<-[:bookedBy]-(bk:booking {})", ""},
+	} {
+		lp, err := parseLinearPattern(tc.src)
+		if err != nil {
+			t.Errorf("%q must parse: %v", tc.src, err)
+			continue
+		}
+		var got []string
+		for _, v := range lp.propVars {
+			got = append(got, v.name)
+		}
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%q: propVars = %q, want %q", tc.src, strings.Join(got, ","), tc.want)
+		}
+	}
+}
+
+// A property-map value variable is renamed by span like any other, so a rename
+// that reaches the clause cannot leave a reference pointing at the old name
+// while its binding moves.
+func TestParseLinearPattern_RenamesPropertyMapValueVariables(t *testing.T) {
+	lp, err := parseLinearPattern("(work)<-[:bookedBy]-(bk:booking {owner: work, note: 'work'})")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := lp.render(map[string]string{"work": "work_w3"})
+	want := "(work_w3)<-[:bookedBy]-(bk:booking {owner: work_w3, note: 'work'})"
+	if got != want {
+		t.Errorf("render = %q, want %q", got, want)
+	}
+}
+
+// The relationship half of the same hazard is closed by the hop grammar itself
+// rather than by recording anything: a hop admits no property map at all, so it
+// carries no value expression that could name an accumulator. This pins that
+// closure, because a hop that quietly started accepting `{...}` would re-open
+// exactly what the node side records its way out of.
+func TestParseLinearPattern_RefusesARelationshipPropertyMap(t *testing.T) {
+	for _, src := range []string{
+		"(identity)<-[r:bookedBy {slice: grantSlice0}]-(bk:booking)",
+		"(identity)<-[{slice: grantSlice0}]-(bk:booking)",
+	} {
+		if _, err := parseLinearPattern(src); err == nil {
+			t.Errorf("%q must not parse — a chain hop admits no property map", src)
+		}
+	}
+}
+
+// A brace inside a quoted property value is part of the string, and the map
+// ends at the brace that closes it — the parser and the extractor read that
+// boundary with the same scanner, so the entries after such a string are inside
+// the map for BOTH of them. The last two rows are the shape that matters: a
+// quoted brace does not end the map early, so a `slice: grantSlice0` entry
+// behind one is still seen.
+func TestParseLinearPattern_QuotedBracesStayInsideTheirPropertyValue(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{"(identity)<-[:bookedBy]-(bk:booking {note: 'x}y'})", ""},
+		{"(identity)<-[:bookedBy]-(bk:booking {note: 'x{y'})", ""},
+		{"(identity)<-[:bookedBy]-(bk:booking {note: 'x}y', slice: grantSlice0})", "grantSlice0"},
+		{"(identity)<-[:bookedBy]-(bk:booking {note: 'x{y', slice: grantSlice0})", "grantSlice0"},
+	} {
+		lp, err := parseLinearPattern(tc.src)
+		if err != nil {
+			t.Errorf("%q must parse — a quoted brace is string content, not the map's edge: %v", tc.src, err)
+			continue
+		}
+		var got []string
+		for _, v := range lp.propVars {
+			got = append(got, v.name)
+		}
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%q: propVars = %q, want %q", tc.src, strings.Join(got, ","), tc.want)
+		}
+	}
+}
+
+// A map with no closing brace at all is still unterminated, and named as such
+// rather than run off the end of the clause.
+func TestParseLinearPattern_RefusesAnUnterminatedPropertyMap(t *testing.T) {
+	for _, src := range []string{
+		"(identity)<-[:bookedBy]-(bk:booking {a: 1",
+		"(identity)<-[:bookedBy]-(bk:booking {a: 'x)",
+	} {
+		_, err := parseLinearPattern(src)
+		if err == nil {
+			t.Errorf("%q must not parse", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unterminated property map") {
+			t.Errorf("%q: error %q must report the unterminated map", src, err.Error())
+		}
+	}
+}
+
+// The smuggling clause: a property value whose string content is written to
+// close the map, re-open a relationship and a second node, so that a scan
+// reading the map's edge differently from the parser hands the extractor the
+// truncated body `a: 'x` and never sees the `slice: grantSlice0` entry — while
+// the emitted producer carries that entry verbatim, and the engine reads it
+// back as a reference to the accumulator. One scanner for the boundary is what
+// closes this: the whole thing is one property map, the entry is inside it, and
+// the build is refused.
+func TestExpandReadGrantWalks_RefusesAnAccumulatorSmuggledBehindAQuotedBrace(t *testing.T) {
+	clause := "(identity)<-[:bookedBy]-(bk:booking {a: 'x})<-[:r ', slice: grantSlice0, b: ']-(q {z: 1'})"
+	_, err := propMapWalkDefinition(clause).ExpandReadGrantWalks()
+	if err == nil {
+		t.Fatal("expected refusal — the clause's property map names a generated grant-slice accumulator")
+	}
+	if !strings.Contains(err.Error(), "accumulator") {
+		t.Errorf("error %q does not name the accumulator collision", err.Error())
+	}
+}
+
+// --- property-map references are not bindings ------------------------------
+
+// The cross-walk disjointness rule asks what a walk BINDS. Sibling walks in one
+// lens routinely carry the same property predicate — `{cancelled: false}` on
+// both of two paths to the same booking is ordinary authoring — and a keyword
+// in a value position is not a name anyone can rename. Feeding property-map
+// references into that rule would refuse such a lens at install time, naming a
+// token that is not a variable at all.
+func TestExpandReadGrantWalks_SiblingWalksMaySharePropertyPredicates(t *testing.T) {
+	for _, prop := range []string{"{cancelled: false}", "{archived: null}", "{active: true}"} {
+		def := Definition{
+			Name: "fixture", Version: "1.0.0",
+			ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
+			Lenses: []LensSpec{personalLens("a", []AnchorWalk{
+				{
+					GrantDomain: "fx", AnchorType: "booking", AnchorVar: "bk",
+					Chain: []string{"(identity)-[:worksAt]->(p1)<-[:heldAt]-(bk:booking " + prop + ")"},
+				},
+				{
+					GrantDomain: "fx", AnchorType: "booking", AnchorVar: "bk",
+					Chain: []string{"(identity)-[:livesAt]->(p2)<-[:heldAt]-(bk:booking " + prop + ")"},
+				},
+			}, "\nRETURN bk.key AS anchor\n")},
+		}
+		if _, err := def.ExpandReadGrantWalks(); err != nil {
+			t.Errorf("two walks may both carry %s — a value keyword is not a variable either walk binds: %v", prop, err)
+		}
+	}
+}
+
+// The same rule, at its other edge: one walk REFERENCES in a property map a
+// name a sibling walk BINDS. That is not the collision the rule guards, and
+// both compiled artifacts show why — the data lens emits one query per walk, so
+// the reference resolves (to null) inside its own branch and never reaches the
+// sibling's binding, and the producer stages each walk behind a `WITH` that
+// projects only the actor and the accumulated slices, so the sibling's binding
+// is already gone by the time the referencing walk's clauses run.
+func TestExpandReadGrantWalks_APropertyReferenceIsNotACrossWalkBinding(t *testing.T) {
+	def := Definition{
+		Name: "fixture", Version: "1.0.0",
+		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
+		Lenses: []LensSpec{personalLens("a", []AnchorWalk{
+			{
+				GrantDomain: "fx", AnchorType: "booking", AnchorVar: "bk",
+				Chain: []string{"(identity)-[:worksAt]->(p1)<-[:heldAt]-(bk:booking {room: p2})"},
+			},
+			{
+				GrantDomain: "fx", AnchorType: "booking", AnchorVar: "bk",
+				Chain: []string{"(identity)-[:livesAt]->(p2)<-[:heldAt]-(bk:booking)"},
+			},
+		}, "\nRETURN bk.key AS anchor\n")},
+	}
+	exp, err := def.ExpandReadGrantWalks()
+	if err != nil {
+		t.Fatalf("a reference is not a binding, so the two walks do not collide: %v", err)
+	}
+	if len(exp.Lenses[0].SpecBranches) != 2 {
+		t.Fatalf("a two-walk lens compiles to one query per walk, got %d branches", len(exp.Lenses[0].SpecBranches))
+	}
+	if strings.Contains(exp.Lenses[0].SpecBranches[0], "(p2)") {
+		t.Errorf("walk 0's branch must not carry walk 1's binding of p2:%s", exp.Lenses[0].SpecBranches[0])
+	}
+	producer := exp.Lenses[1].Spec
+	stage0End := strings.Index(producer, "AS grantSlice0")
+	if stage0End < 0 {
+		t.Fatalf("producer has no staged slice for walk 0:%s", producer)
+	}
+	if strings.Contains(producer[:stage0End], "(p2)") {
+		t.Errorf("walk 1's binding of p2 must not appear before walk 0's stage closes:%s", producer)
+	}
+}
