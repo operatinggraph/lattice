@@ -933,6 +933,9 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 		}
 		body["reads"] = reads
 	}
+	if len(e.Enumerations) > 0 {
+		body["enumerations"] = enumerationBodies(e.Enumerations)
+	}
 	if len(e.Pre) > 0 {
 		body["pre"] = e.Pre
 	}
@@ -955,8 +958,9 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 // completionDomains is omitted when empty (it defaults to {subjectType}); a
 // step's guard is omitted when nil. systemOp/userTask emit `operation`;
 // externalTask emits `adapter`/`params`/`replyOp`/`instanceOp`; a systemOp
-// emits `reads`/`optionalReads`/`enumerations` — each field is emitted only when set, so the
-// round-tripped step matches the engine Step shape the validate() admits.
+// emits `reads`/`optionalReads`/`enumerations` — each field is emitted only
+// when set, so the round-tripped step matches the engine Step shape the
+// validate() admits.
 func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 	steps := make([]any, len(p.Steps))
 	for i, s := range p.Steps {

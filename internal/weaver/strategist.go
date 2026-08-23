@@ -404,15 +404,16 @@ func (e *Engine) resolvePlannedAction(ctx context.Context, target *Target, targe
 // GapAction").
 func candidateGapAction(c GapCandidate) GapAction {
 	return GapAction{
-		Action:    c.Action,
-		Pattern:   c.Pattern,
-		Subject:   c.Subject,
-		Adapter:   c.Adapter,
-		Operation: c.Operation,
-		Assignee:  c.Assignee,
-		Target:    c.Target,
-		Params:    c.Params,
-		Reads:     c.Reads,
+		Action:       c.Action,
+		Pattern:      c.Pattern,
+		Subject:      c.Subject,
+		Adapter:      c.Adapter,
+		Operation:    c.Operation,
+		Assignee:     c.Assignee,
+		Target:       c.Target,
+		Params:       c.Params,
+		Reads:        c.Reads,
+		Enumerations: c.Enumerations,
 	}
 }
 
@@ -422,15 +423,16 @@ func candidateGapAction(c GapCandidate) GapAction {
 // action-contract shape as GapCandidate").
 func catalogEntryGapAction(entry ActionCatalogEntry) GapAction {
 	return GapAction{
-		Action:    entry.Action,
-		Pattern:   entry.Pattern,
-		Subject:   entry.Subject,
-		Adapter:   entry.Adapter,
-		Operation: entry.Operation,
-		Assignee:  entry.Assignee,
-		Target:    entry.Target,
-		Params:    entry.Params,
-		Reads:     entry.Reads,
+		Action:       entry.Action,
+		Pattern:      entry.Pattern,
+		Subject:      entry.Subject,
+		Adapter:      entry.Adapter,
+		Operation:    entry.Operation,
+		Assignee:     entry.Assignee,
+		Target:       entry.Target,
+		Params:       entry.Params,
+		Reads:        entry.Reads,
+		Enumerations: entry.Enumerations,
 	}
 }
 

@@ -1182,28 +1182,37 @@ func TestWeaverE2E_TemporalMissedWhileDown(t *testing.T) {
 // gapActionFixtureBody renders one pkgmgr.GapActionSpec into the lowerCamelCase
 // JSON shape the Weaver registry parses (mirrors the unexported
 // pkgmgr.gapActionBody the real installer emits) — read live off the package's
-// own WeaverTargets() so this fixture can never drift from what installs.
-func gapActionFixtureBody(action, operation, target string, params map[string]string, reads []string) map[string]any {
-	body := map[string]any{"action": action}
-	if operation != "" {
-		body["operation"] = operation
+// own WeaverTargets() so this fixture can never drift from what installs. It
+// takes the whole spec rather than a field list so that adding a field to the
+// dispatch surface is a compile-visible edit here, not a silent omission.
+func gapActionFixtureBody(ga pkgmgr.GapActionSpec) map[string]any {
+	body := map[string]any{"action": ga.Action}
+	if ga.Operation != "" {
+		body["operation"] = ga.Operation
 	}
-	if target != "" {
-		body["target"] = target
+	if ga.Target != "" {
+		body["target"] = ga.Target
 	}
-	if len(params) > 0 {
-		p := make(map[string]any, len(params))
-		for k, v := range params {
+	if len(ga.Params) > 0 {
+		p := make(map[string]any, len(ga.Params))
+		for k, v := range ga.Params {
 			p[k] = v
 		}
 		body["params"] = p
 	}
-	if len(reads) > 0 {
-		r := make([]any, len(reads))
-		for i, v := range reads {
+	if len(ga.Reads) > 0 {
+		r := make([]any, len(ga.Reads))
+		for i, v := range ga.Reads {
 			r[i] = v
 		}
 		body["reads"] = r
+	}
+	if len(ga.Enumerations) > 0 {
+		e := make([]any, len(ga.Enumerations))
+		for i, en := range ga.Enumerations {
+			e[i] = map[string]any{"hub": en.Hub, "relation": en.Relation, "direction": en.Direction}
+		}
+		body["enumerations"] = e
 	}
 	return body
 }
@@ -1254,7 +1263,7 @@ func TestWeaverE2E_SemanticContracts_MissingCharge_PayloadCarriesAccountKey(t *t
 		"targetId": target.TargetID,
 		"lensRef":  mustNanoID(t),
 		"gaps": map[string]any{
-			"missing_charge": gapActionFixtureBody(ga.Action, ga.Operation, ga.Target, ga.Params, ga.Reads),
+			"missing_charge": gapActionFixtureBody(ga),
 		},
 	})
 

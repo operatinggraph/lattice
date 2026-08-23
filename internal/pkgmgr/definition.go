@@ -493,9 +493,14 @@ type ActionCatalogEntrySpec struct {
 	Target    string
 	Params    map[string]string
 	Reads     []string
-	Pre       json.RawMessage
-	Effects   []json.RawMessage
-	Cost      int
+	// Enumerations are the entry's declared kv.Links walks, same grammar and
+	// same purpose as GapActionSpec.Enumerations: a chosen entry dispatches
+	// through the engine's ordinary action contract, so a walk it cannot
+	// declare here is a walk silently dropped from the envelope.
+	Enumerations []EnumerationSpec
+	Pre          json.RawMessage
+	Effects      []json.RawMessage
+	Cost         int
 }
 
 // LoomPatternSpec is one meta.loomPattern meta-vertex a package declares

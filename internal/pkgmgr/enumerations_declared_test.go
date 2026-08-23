@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,9 +21,15 @@ import (
 func TestEmittedBodies_CarryDeclaredEnumerations(t *testing.T) {
 	t.Parallel()
 
-	wantWire := []any{
+	// Each surface's hub grammar is its own: a loom step templates against the
+	// instance subject, a weaver gap against the violation row's columns.
+	wantStepWire := []any{
 		map[string]any{"hub": "subject", "relation": "boundTo", "direction": "in"},
 		map[string]any{"hub": "subject", "relation": "boundTo", "direction": "out"},
+	}
+	wantGapWire := []any{
+		map[string]any{"hub": "row.entityKey", "relation": "boundTo", "direction": "in"},
+		map[string]any{"hub": "row.entityKey", "relation": "boundTo", "direction": "out"},
 	}
 
 	t.Run("loom step", func(t *testing.T) {
@@ -46,7 +54,7 @@ func TestEmittedBodies_CarryDeclaredEnumerations(t *testing.T) {
 		require.Len(t, steps, 2)
 
 		declaring := steps[0].(map[string]any)
-		require.Equal(t, wantWire, declaring["enumerations"])
+		require.Equal(t, wantStepWire, declaring["enumerations"])
 
 		walkFree := steps[1].(map[string]any)
 		require.NotContains(t, walkFree, "enumerations", "a step declaring no walks must not emit the key")
@@ -54,16 +62,19 @@ func TestEmittedBodies_CarryDeclaredEnumerations(t *testing.T) {
 
 	t.Run("weaver gap", func(t *testing.T) {
 		t.Parallel()
+		// A gap's hub is a row.<column> template, never the loom step's
+		// `subject` token — the two surfaces resolve through different
+		// resolvers, and this is the example an author copies.
 		body := gapActionBody(GapActionSpec{
 			Action:    "directOp",
 			Operation: "UnbindIdentityCredentials",
 			Reads:     []string{"row.entityKey"},
 			Enumerations: []EnumerationSpec{
-				{Hub: "subject", Relation: "boundTo", Direction: "in"},
-				{Hub: "subject", Relation: "boundTo", Direction: "out"},
+				{Hub: "row.entityKey", Relation: "boundTo", Direction: "in"},
+				{Hub: "row.entityKey", Relation: "boundTo", Direction: "out"},
 			},
 		})
-		require.Equal(t, wantWire, body["enumerations"])
+		require.Equal(t, wantGapWire, body["enumerations"])
 
 		walkFree := gapActionBody(GapActionSpec{Action: "directOp", Operation: "SealResidue"})
 		require.NotContains(t, walkFree, "enumerations", "a gap declaring no walks must not emit the key")
@@ -200,4 +211,47 @@ func TestGapActionArtifact_EnumerationsMaterializeAndValidate(t *testing.T) {
 		[]EnumerationSpec{{Hub: "row.entityKey", Relation: "boundTo", Direction: "in"}},
 		ga.Enumerations)
 	require.NoError(t, def.validateAll())
+}
+
+// TestEnumerationDirections_MatchTheEnvelopeVocabulary pins pkgmgr's restated
+// direction constants against the authority that actually adjudicates them:
+// opwire's envelope parse. The constants are restated rather than imported
+// because the installer links no envelope parser, and a restated constant that drifts is silent — a direction this
+// package admits and the Processor refuses produces an envelope rejected
+// TERMINALLY, on a mark that is already written, so the gap or step
+// re-dispatches the identical dead requestId forever.
+//
+// Comparing against the parser rather than against a copied string literal is
+// the point: a literal here would drift in lockstep with a typo.
+func TestEnumerationDirections_MatchTheEnvelopeVocabulary(t *testing.T) {
+	t.Parallel()
+
+	parseWithDirection := func(direction string) error {
+		env := map[string]any{
+			"requestId": "AAAAAAAAAAAAAAAAAAAA", "lane": "system",
+			"operationType": "Sweep", "actor": "vtx.identity.AAAAAAAAAAAAAAAAAAAA",
+			"submittedAt": "2026-08-23T00:00:00Z", "payload": map[string]any{},
+			"contextHint": map[string]any{"enumerations": []any{map[string]any{
+				"hub": "vtx.identity.AAAAAAAAAAAAAAAAAAAA", "relation": "boundTo", "direction": direction,
+			}}},
+		}
+		body, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, perr := opwire.ParseEnvelope(body)
+		return perr
+	}
+
+	for _, direction := range []string{enumerationDirectionOut, enumerationDirectionIn} {
+		if err := parseWithDirection(direction); err != nil {
+			t.Errorf("%s restates %q as a direction but opwire's envelope parse refuses it: %v",
+				"pkgmgr", direction, err)
+		}
+	}
+	// The negative vector, so the positive one above is not vacuously green on a
+	// parser that accepts anything.
+	if err := parseWithDirection("both"); err == nil {
+		t.Error("opwire's envelope parse accepted direction \"both\" — this test proves nothing if every value passes")
+	}
 }

@@ -415,7 +415,8 @@ func validateStepEnumerations(idx int, patternID string, sIdx int, ens []Enumera
 
 // Link directions a declared enumeration may name (Contract #2 §2.5): the hub
 // is either the link's source or its target. The Processor rejects any other
-// value at envelope parse, so install holds the same two.
+// value at envelope parse, so install holds the same two; the pair is pinned
+// against that parser by TestEnumerationDirections_MatchTheEnvelopeVocabulary.
 const (
 	enumerationDirectionOut = "out"
 	enumerationDirectionIn  = "in"

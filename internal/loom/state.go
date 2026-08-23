@@ -111,10 +111,9 @@ type outboxRecord struct {
 	// §2.5 class (e) — declared kv.Links link walks): the step's declared
 	// enumerations with each Hub already resolved to a concrete vertex key.
 	// The relay copies it onto the op envelope as metadata; nothing hydrates
-	// from it (the walk runs live and paged inside the script). Additive +
-	// backward-compatible: an older persisted record with no Enumerations
-	// field decodes to nil → an envelope declaring no walks, exactly as
-	// before.
+	// from it (the walk runs live and paged inside the script). An older
+	// persisted record with no Enumerations field decodes to nil, which is an
+	// envelope declaring no walks.
 	Enumerations []Enumeration `json:"enumerations,omitempty"`
 	// EgressReads is the dispatched op's ContextHint.EgressReads (Contract #2
 	// §2.5 class (f), sensitive-param-egress design §3.4): an externalTask

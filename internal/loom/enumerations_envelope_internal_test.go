@@ -55,6 +55,9 @@ func TestSystemOpEnumerations_ReachEnvelope(t *testing.T) {
 		instanceID string
 		step       Step
 		want       []Enumeration
+		// wantReadFree marks the step that declares walks and NOTHING else, so
+		// the published contextHint can only exist because of the walks.
+		wantReadFree bool
 	}{
 		{
 			name:       "declared walks resolve and reach the envelope",
@@ -77,6 +80,29 @@ func TestSystemOpEnumerations_ReachEnvelope(t *testing.T) {
 			instanceID: "inst-no-walks",
 			step:       Step{Kind: StepKindSystemOp, Operation: "ShredIdentityKey", Reads: []string{"subject"}},
 			want:       nil,
+		},
+		{
+			// The case that exercises the relay's ContextHint guard on the
+			// enumerations disjunct ALONE. Every other step in this table, and
+			// every step shipped in the corpus, also declares Reads — so with
+			// only those, the guard would attach a contextHint for the reads
+			// and carry the walks along for free, and reverting the disjunct
+			// would change nothing anywhere. An op that walks links without
+			// hydrating any key is the shape that proves the disjunct is load
+			// bearing: without it the envelope carries NO contextHint at all
+			// and the declaration is dropped on the floor.
+			name:       "walks alone attach the contextHint",
+			instanceID: "inst-walks-only",
+			step: Step{
+				Kind: StepKindSystemOp, Operation: "SweepWithoutHydrating",
+				Enumerations: []Enumeration{
+					{Hub: subjectToken, Relation: "duplicateOf", Direction: "out"},
+				},
+			},
+			want: []Enumeration{
+				{Hub: subjectKey, Relation: "duplicateOf", Direction: "out"},
+			},
+			wantReadFree: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,15 +139,22 @@ func TestSystemOpEnumerations_ReachEnvelope(t *testing.T) {
 				} `json:"contextHint"`
 			}
 			require.NoError(t, json.Unmarshal(msg.Data, &env))
-			require.NotNil(t, env.ContextHint, "a step declaring reads must publish a contextHint")
+			require.NotNil(t, env.ContextHint, "the step declares a contextHint's worth of context")
 			require.Equal(t, tc.want, env.ContextHint.Enumerations)
 
+			var raw map[string]any
+			require.NoError(t, json.Unmarshal(msg.Data, &raw))
+			hint, _ := raw["contextHint"].(map[string]any)
+
 			if tc.want == nil {
-				var raw map[string]any
-				require.NoError(t, json.Unmarshal(msg.Data, &raw))
-				hint, _ := raw["contextHint"].(map[string]any)
 				_, present := hint["enumerations"]
 				require.False(t, present, "a walk-free step must publish no enumerations key at all")
+			}
+			if tc.wantReadFree {
+				require.NotContains(t, hint, "reads",
+					"this step declares no reads — the contextHint on the wire is the enumerations disjunct's doing, nothing else's")
+				require.NotContains(t, hint, "optionalReads")
+				require.Contains(t, hint, "enumerations")
 			}
 		})
 	}
