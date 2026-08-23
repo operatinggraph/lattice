@@ -2,10 +2,17 @@ package weaver
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // aggregateStatus must reconcile the lifecycle status with the open issue set
@@ -198,6 +205,148 @@ func TestFlagEffectMismatches_SetThenClearOnRecovery(t *testing.T) {
 	}
 	if _, ok := effectIssue(h.issues.snapshot()); ok {
 		t.Fatalf("LensEffectMismatch issue not cleared after recovery; snapshot=%+v", h.issues.snapshot())
+	}
+}
+
+// boundIssues caps how many entries one heartbeat document lists — the two
+// per-entity issue classes (a `surface` gap, GapBudgetExhausted) are unbounded
+// in entity count, and the whole document is a single Health-KV value. The
+// bounded list must never read as the whole set: the synthetic entry names the
+// unlisted count and the true total, and carries the worst severity among the
+// issues it stands for, so an error hiding in the tail is not silently
+// downgraded to a warning.
+func TestBoundIssues(t *testing.T) {
+	t.Parallel()
+	mk := func(n int, sev string) []healthIssue {
+		out := make([]healthIssue, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, healthIssue{Severity: sev, Code: "C" + strconv.Itoa(i), Since: "2026-08-23T10:00:0" + strconv.Itoa(i%10) + "Z"})
+		}
+		return out
+	}
+
+	t.Run("under the cap is untouched", func(t *testing.T) {
+		in := mk(3, "warning")
+		got := boundIssues(in, 5)
+		if len(got) != 3 || hasIssueCode(got, issuesTruncatedCode) {
+			t.Fatalf("a fitting list must pass through verbatim, got %+v", got)
+		}
+	})
+
+	t.Run("exactly at the cap is untouched", func(t *testing.T) {
+		got := boundIssues(mk(5, "warning"), 5)
+		if len(got) != 5 || hasIssueCode(got, issuesTruncatedCode) {
+			t.Fatalf("a list exactly at the cap must not truncate, got %+v", got)
+		}
+	})
+
+	t.Run("over the cap lists N plus one synthetic entry", func(t *testing.T) {
+		got := boundIssues(mk(12, "warning"), 5)
+		if len(got) != 6 {
+			t.Fatalf("len = %d, want the cap (5) + 1 synthetic entry", len(got))
+		}
+		last := got[len(got)-1]
+		if last.Code != issuesTruncatedCode {
+			t.Fatalf("last entry = %+v, want the %s marker", last, issuesTruncatedCode)
+		}
+		if !strings.Contains(last.Message, "7 further") || !strings.Contains(last.Message, "12 open in total") {
+			t.Fatalf("truncation message must name the unlisted count and the total, got %q", last.Message)
+		}
+		if last.Severity != "warning" {
+			t.Fatalf("truncation severity = %q, want warning", last.Severity)
+		}
+		if last.Since != "2026-08-23T10:00:00Z" {
+			t.Fatalf("truncation since = %q, want the oldest unlisted stamp", last.Since)
+		}
+		for i, is := range got[:5] {
+			if is.Code != "C"+strconv.Itoa(i) {
+				t.Fatalf("listed entry %d = %+v, want the head of the deterministic order", i, is)
+			}
+		}
+	})
+
+	t.Run("an error in the unlisted tail keeps the marker at error", func(t *testing.T) {
+		in := mk(12, "warning")
+		in[11].Severity = "error"
+		got := boundIssues(in, 5)
+		if sev := got[len(got)-1].Severity; sev != "error" {
+			t.Fatalf("truncation severity = %q, want error (one is hiding in the tail)", sev)
+		}
+	})
+
+	t.Run("a non-positive cap disables truncation", func(t *testing.T) {
+		if got := boundIssues(mk(12, "warning"), 0); len(got) != 12 {
+			t.Fatalf("cap 0 must disable the bound, got %d entries", len(got))
+		}
+	})
+}
+
+// The heartbeat's status is aggregated over EVERY open issue and only then is
+// the listing bounded, so an error too far down the list to be named still
+// drives status:"unhealthy". Truncating first would let a document report
+// "degraded" while an unhealthy condition stood open — exactly the false-clean
+// heartbeat Contract #5 §5.3 forbids.
+func TestEmit_TruncatesListingButNotStatus(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const healthBucket = "health-kv"
+	if _, err := m.conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: healthBucket}); err != nil {
+		t.Fatalf("create %s: %v", healthBucket, err)
+	}
+	cache := newIssueCache()
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	h := &heartbeater{
+		conn:                  m.conn,
+		bucket:                healthBucket,
+		instance:              "unit-" + testNanoID(t),
+		startedAt:             time.Now(),
+		interval:              time.Second,
+		states:                healthkv.NewConsumerStateCache(),
+		issues:                cache,
+		source:                newTargetSource(nil, "core-kv", "test", cache, logger),
+		marks:                 m,
+		effectMismatchAlerted: make(map[string]struct{}),
+		consumerPausedSince:   make(map[string]string),
+		logger:                logger,
+	}
+
+	// One warning per subject, plus a single error whose key sorts LAST — well
+	// past the cap, so only the pre-truncation aggregation can see it.
+	const total = maxHeartbeatIssues + 10
+	for i := 0; i < total-1; i++ {
+		cache.set(fmt.Sprintf("gap:t.%020d.missing_claim", i), "warning", "UnroutedTasks", "row column missing_claim is true")
+	}
+	cache.set("zzz:last", "error", "PlaybookConfigError", "the playbook does not resolve")
+
+	h.emit(ctx, "healthy")
+
+	entry, err := h.conn.KVGet(ctx, healthBucket, h.key())
+	if err != nil {
+		t.Fatalf("read heartbeat: %v", err)
+	}
+	var doc struct {
+		Status string        `json:"status"`
+		Issues []healthIssue `json:"issues"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal heartbeat: %v", err)
+	}
+	if len(doc.Issues) != maxHeartbeatIssues+1 {
+		t.Fatalf("listed %d issues, want the cap (%d) + 1 synthetic entry", len(doc.Issues), maxHeartbeatIssues)
+	}
+	last := doc.Issues[len(doc.Issues)-1]
+	if last.Code != issuesTruncatedCode || last.Severity != "error" {
+		t.Fatalf("truncation entry = %+v, want %s at error severity", last, issuesTruncatedCode)
+	}
+	if !strings.Contains(last.Message, strconv.Itoa(total)+" open in total") {
+		t.Fatalf("truncation message must name the true total (%d), got %q", total, last.Message)
+	}
+	if doc.Status != "unhealthy" {
+		t.Fatalf("status = %q, want unhealthy: the error is open even though it is not listed", doc.Status)
 	}
 }
 

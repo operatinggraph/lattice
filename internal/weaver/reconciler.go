@@ -756,11 +756,13 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
 		}
-		// The gap's standing issue (GapBudgetExhausted, or a surface alert)
-		// retires with the close: the issue is keyed per (target, gap), and
-		// for a row that has gone quiet this leg is the only one that will
-		// ever observe the close. Idempotent when none stands.
-		e.issues.clear(issueKeyGap(targetID, gapColumn))
+		// This entity's standing GapBudgetExhausted retires with the close: the
+		// issue is keyed per (target, entity, gap), and this leg is whichever
+		// one observed the close first. Only the entity scope retires here — a
+		// mark close says nothing about the playbook, and lane-1's own delivery
+		// of the closed (or deleted) row is what retires the target-scoped
+		// config issues. Idempotent when none stands.
+		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
 	}
