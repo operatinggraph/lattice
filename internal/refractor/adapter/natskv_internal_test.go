@@ -258,7 +258,8 @@ func TestGuardedUpsert_DeclinedAtTiedWatermarkIsReported(t *testing.T) {
 	outcome, err := a.upsert(context.Background(), map[string]any{"key": "k1"}, map[string]any{"v": "fresh"}, 9)
 
 	require.NoError(t, err)
-	assert.True(t, outcome.Wrote, "the guarded path must keep reporting Wrote — writeResults' audit skip reads it")
+	assert.True(t, outcome.Wrote, "the guarded path must keep reporting Wrote — maintaining the watermark is its job on every call")
+	assert.False(t, outcome.Committed, "nothing reached the store, so nothing committed")
 	assert.True(t, outcome.DeclinedByWatermark, "a tied watermark declined the write and must say so")
 	assert.Zero(t, store.writeAttempt, "the declined branch reaches neither Create nor Update")
 }
@@ -274,6 +275,7 @@ func TestGuardedUpsert_CommittedBelowWatermarkIsNotDeclined(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, outcome.Wrote)
+	assert.True(t, outcome.Committed, "a token above the stored watermark commits")
 	assert.False(t, outcome.DeclinedByWatermark, "a token above the stored watermark commits")
 	assert.Equal(t, 1, store.writeAttempt)
 }
@@ -323,4 +325,25 @@ func TestGuardedWrite_SequenceLessDropIsNotAWatermarkDecline(t *testing.T) {
 	assert.Equal(t, guardDroppedNoToken, out.verdict,
 		"a sequence-less drop is its own condition — neither a commit nor a watermark decline")
 	assert.Zero(t, store.writeAttempt)
+}
+
+// TestGuardedUpsert_SequenceLessDropCommitsNothing is the reason the outcome
+// carries Committed as a positive field rather than leaving callers to subtract
+// DeclinedByWatermark from Wrote. This branch stores nothing and is NOT a
+// watermark decline, so that subtraction reports it as a write that happened —
+// and the pipeline's audit gate, reading it, would append an entry whose
+// outputRowHash describes a row no target holds.
+func TestGuardedUpsert_SequenceLessDropCommitsNothing(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9,"v":"stale"}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	outcome, err := a.upsert(context.Background(), map[string]any{"key": "k1"}, map[string]any{"v": "fresh"}, 0)
+
+	require.NoError(t, err)
+	assert.False(t, outcome.Committed, "a write with no ordering token stored nothing")
+	assert.False(t, outcome.DeclinedByWatermark,
+		"no stored watermark was ever consulted, so this is not a watermark decline")
+	assert.True(t, outcome.Wrote,
+		"Wrote keeps its guarded-path meaning, which is exactly why it cannot gate the audit alone")
+	assert.Zero(t, store.writeAttempt, "the drop reaches neither Create nor Update")
 }

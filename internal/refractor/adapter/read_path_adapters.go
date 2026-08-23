@@ -30,9 +30,11 @@ type GrantWriterAdapter struct {
 }
 
 var (
-	_ Adapter    = (*GrantWriterAdapter)(nil)
-	_ KeyLister  = (*GrantWriterAdapter)(nil)
-	_ SeqGuarded = (*GrantWriterAdapter)(nil)
+	_ Adapter         = (*GrantWriterAdapter)(nil)
+	_ KeyLister       = (*GrantWriterAdapter)(nil)
+	_ SeqGuarded      = (*GrantWriterAdapter)(nil)
+	_ OutcomeUpserter = (*GrantWriterAdapter)(nil)
+	_ OutcomeDeleter  = (*GrantWriterAdapter)(nil)
 )
 
 // Guarded reports the §6.14 monotonic guard, which this adapter carries
@@ -117,6 +119,57 @@ func (g *GrantWriterAdapter) Upsert(ctx context.Context, keys map[string]any, _ 
 	return g.w.UpsertGrant(ctx, actor, anchor, source, projectionSeq)
 }
 
+// UpsertWithOutcome is Upsert plus whether the grant row actually changed
+// (adapter.OutcomeUpserter). This adapter is guarded unconditionally (see
+// Guarded), so without it every grant the §6.14 monotonic guard declined would
+// reach the pipeline's audit gate as a write that happened — and this target is
+// the read-grant table itself, where the entry would assert that an anchor
+// became readable when it did not.
+//
+// Key stays empty and Transition TransitionNone for the same reasons the base
+// Postgres adapter leaves them: a grant row has no single rendered key string,
+// and this path never reads the stored row's liveness back.
+func (g *GrantWriterAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, _ map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
+	actor, anchor, source, err := grantKeyFields(keys)
+	if err != nil {
+		return UpsertOutcome{}, err
+	}
+	if err := g.checkSource(source); err != nil {
+		return UpsertOutcome{}, err
+	}
+	committed, err := g.w.UpsertGrantWithOutcome(ctx, actor, anchor, source, projectionSeq)
+	if err != nil {
+		return UpsertOutcome{}, err
+	}
+	return grantUpsertOutcome(committed), nil
+}
+
+// grantUpsertOutcome and grantDeleteOutcome map a grant statement's "did a row
+// change" answer onto the two outcome shapes.
+//
+// They are named rather than inlined at each call because the two directions
+// have to stay in step and are otherwise ten lines apart: this pair IS the
+// place a reader checks that a declined retraction reports exactly as little as
+// a declined grant, and the place a test can check it without a database.
+//
+// Both statements are guarded unconditionally, so a row count of zero always
+// means the monotonic guard declined — there is no unguarded arm here that
+// could touch no row for some other reason.
+func grantUpsertOutcome(committed bool) UpsertOutcome {
+	return UpsertOutcome{
+		Wrote:               committed,
+		Committed:           committed,
+		DeclinedByWatermark: !committed,
+	}
+}
+
+func grantDeleteOutcome(committed bool) DeleteOutcome {
+	return DeleteOutcome{
+		Wrote:               committed,
+		DeclinedByWatermark: !committed,
+	}
+}
+
 // Delete tombstones a grant (seq-guarded), so a stale replay cannot resurrect it.
 func (g *GrantWriterAdapter) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
 	actor, anchor, source, err := grantKeyFields(keys)
@@ -127,6 +180,35 @@ func (g *GrantWriterAdapter) Delete(ctx context.Context, keys map[string]any, pr
 		return err
 	}
 	return g.w.RevokeGrant(ctx, actor, anchor, source, projectionSeq)
+}
+
+// DeleteWithOutcome is Delete plus whether the tombstone actually landed
+// (adapter.OutcomeDeleter).
+//
+// This is the over-grant direction and the reason the pair exists at all. The
+// guard declines a revocation by writing nothing and returning nil, so a caller
+// reading only the error books a withdrawal that did not happen — on the table
+// every protected read consults, which means the platform believes a capability
+// is gone while the RLS policy keeps honouring it.
+//
+// Wrote follows the row count, which on this statement is unambiguous: the
+// INSERT arm plants a tombstone whenever the row is absent, so only the
+// monotonic WHERE clause can leave zero rows behind (see
+// PostgresGrantWriter.RevokeGrantWithOutcome). Key and Transition stay empty for
+// the reasons UpsertWithOutcome gives above.
+func (g *GrantWriterAdapter) DeleteWithOutcome(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
+	actor, anchor, source, err := grantKeyFields(keys)
+	if err != nil {
+		return DeleteOutcome{}, err
+	}
+	if err := g.checkSource(source); err != nil {
+		return DeleteOutcome{}, err
+	}
+	committed, err := g.w.RevokeGrantWithOutcome(ctx, actor, anchor, source, projectionSeq)
+	if err != nil {
+		return DeleteOutcome{}, err
+	}
+	return grantDeleteOutcome(committed), nil
 }
 
 // ListKeys returns every live grant this lens owns — the rows carrying its
@@ -177,10 +259,12 @@ type ProtectedAdapter struct {
 }
 
 var (
-	_ Adapter    = (*ProtectedAdapter)(nil)
-	_ Truncater  = (*ProtectedAdapter)(nil)
-	_ KeyLister  = (*ProtectedAdapter)(nil)
-	_ SeqGuarded = (*ProtectedAdapter)(nil)
+	_ Adapter         = (*ProtectedAdapter)(nil)
+	_ Truncater       = (*ProtectedAdapter)(nil)
+	_ KeyLister       = (*ProtectedAdapter)(nil)
+	_ SeqGuarded      = (*ProtectedAdapter)(nil)
+	_ OutcomeUpserter = (*ProtectedAdapter)(nil)
+	_ OutcomeDeleter  = (*ProtectedAdapter)(nil)
 )
 
 // NewProtectedAdapter wraps a non-nil PostgresAdapter. arrayCols names the row
@@ -259,9 +343,43 @@ func (p *ProtectedAdapter) Upsert(ctx context.Context, keys map[string]any, row 
 	return p.inner.Upsert(ctx, keys, encoded, projectionSeq)
 }
 
+// UpsertWithOutcome encodes the declared array columns then delegates to the
+// base adapter, reporting what it reports (adapter.OutcomeUpserter).
+//
+// Spelling it out is load-bearing, exactly as ListKeys below is: the inner
+// adapter is a NAMED FIELD, not embedded, so a wrapper satisfies only the
+// optional interfaces it re-declares. writeResults prefers UpsertWithOutcome
+// and falls back to treating a plain Upsert as always written — so without this
+// method every protected lens, which is to say every lens carrying the §6.14
+// monotonic guard, would audit each write the guard declined as one that
+// landed. The encoding is the whole of this wrapper's job and it happens before
+// the delegation, so the outcome describes the same single statement the base
+// adapter would have run on its own.
+func (p *ProtectedAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
+	encoded, err := p.encodeArrays(row)
+	if err != nil {
+		return UpsertOutcome{}, err
+	}
+	return p.inner.UpsertWithOutcome(ctx, keys, encoded, projectionSeq)
+}
+
 // Delete delegates to the base adapter (the key columns are never arrays).
 func (p *ProtectedAdapter) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
 	return p.inner.Delete(ctx, keys, projectionSeq)
+}
+
+// DeleteWithOutcome delegates to the base adapter and reports what it reports
+// (adapter.OutcomeDeleter).
+//
+// Re-declaring it is what makes it reachable: the inner adapter is a named
+// field, so a wrapper carries only the optional interfaces it names itself.
+// Without this method writeResults treats every retraction here as landed, and
+// a protected adapter is guarded by construction — so a delete the ordering
+// guard refused would be audited as a withdrawal and would tick the read
+// model's freshness clock. The lenses that retract most are the DiffRetraction
+// ones, whose whole job is removing rows a fresh projection no longer produces.
+func (p *ProtectedAdapter) DeleteWithOutcome(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
+	return p.inner.DeleteWithOutcome(ctx, keys, projectionSeq)
 }
 
 // Probe verifies the protected table's out-of-band security posture (FORCE ROW

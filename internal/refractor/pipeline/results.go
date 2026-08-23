@@ -41,9 +41,10 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	// it reports write outcomes cannot change across this call's loop.
 	outcomeAdpt, reportsOutcome := adpt.(adapter.OutcomeUpserter)
 	// The retraction direction needs its own outcome channel, and needs it for
-	// two independent reasons. The audit skip below reads `wrote`, and a plain
-	// Delete discards whether the guard actually committed — so a retraction
-	// the ordering guard DECLINED was still audited as a write that happened.
+	// two independent reasons. The audit skip below reads `committed`, and a
+	// plain Delete discards whether the guard actually committed — so a
+	// retraction the ordering guard DECLINED was still audited as a write that
+	// happened.
 	// And the D1 grant-change edge's revocation half is derived from the
 	// delete's transition, which the plain call throws away with everything
 	// else: without this the edge would ship a working grant-lands trigger and
@@ -61,21 +62,28 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	}
 	for _, result := range results {
 		var writeErr error
-		wrote := true
+		committed := true
 		writtenKey := ""
 		transition := adapter.TransitionNone
 		if result.Delete {
 			if reportsDeleteOutcome {
 				var outcome adapter.DeleteOutcome
 				outcome, writeErr = deleteOutcomeAdpt.DeleteWithOutcome(ctx, result.Keys, result.ProjectionSeq)
-				wrote, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
+				committed, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
 			} else {
 				writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
 			}
 		} else if reportsOutcome {
 			var outcome adapter.UpsertOutcome
 			outcome, writeErr = outcomeAdpt.UpsertWithOutcome(ctx, result.Keys, result.Row, result.ProjectionSeq)
-			wrote, writtenKey, transition = outcome.Wrote, outcome.Key, outcome.Transition
+			// Committed, not Wrote. A guarded adapter reports Wrote on every call
+			// because maintaining the projectionSeq watermark is its job whatever
+			// the row says, and it has more than one way to end up storing nothing
+			// — a stale-or-equal watermark, and a write with no ordering token at
+			// all. Committed states positively that a row landed, which is the
+			// only claim an audit entry's outputRowHash can honestly stand behind
+			// and the only event the read-model's freshness clock marks.
+			committed, writtenKey, transition = outcome.Committed, outcome.Key, outcome.Transition
 		} else {
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 		}
@@ -131,9 +139,14 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 			return substrate.Nak, nil
 		}
 
-		p.recordProjected()
 		p.notifyGrantChange(writtenKey, transition)
-		if wrote {
+		if committed {
+			// The read model's freshness clock and its forensic trail both mark
+			// the same event — a row landing in the target — so a write that
+			// stored nothing marks neither. An operator reading lastProjectedAt
+			// off a lens whose every write the guard is declining would otherwise
+			// see a clock ticking over a target that has not changed in hours.
+			p.recordProjected()
 			p.writeAudit(ctx, key, result)
 		}
 	}
@@ -204,8 +217,45 @@ func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate
 	return substrate.Ack, nil
 }
 
+// replayWrite applies one captured EvalResult through the current adapter and
+// reports whether a row actually landed, using the outcome-reporting call
+// whenever the adapter offers one — the same preference, and the same
+// treatment of an adapter that offers none, as writeResults' own write step.
+//
+// A retry replays the ORIGINAL projectionSeq, so a guarded target legitimately
+// declines it once a later real reprojection has moved the watermark past it.
+// That is the retry doing its job (the fresher row is already there), not a
+// failure, so it returns cleanly and the entry retires — but nothing landed, so
+// there is nothing to audit either.
+func (p *Pipeline) replayWrite(ctx context.Context, result ruleengine.EvalResult) (committed bool, err error) {
+	a := p.currentAdapter()
+	if result.Delete {
+		if od, ok := a.(adapter.OutcomeDeleter); ok {
+			outcome, derr := od.DeleteWithOutcome(ctx, result.Keys, result.ProjectionSeq)
+			return outcome.Wrote, derr
+		}
+		if derr := a.Delete(ctx, result.Keys, result.ProjectionSeq); derr != nil {
+			return false, derr
+		}
+		return true, nil
+	}
+	if ou, ok := a.(adapter.OutcomeUpserter); ok {
+		outcome, uerr := ou.UpsertWithOutcome(ctx, result.Keys, result.Row, result.ProjectionSeq)
+		return outcome.Committed, uerr
+	}
+	if uerr := a.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq); uerr != nil {
+		return false, uerr
+	}
+	return true, nil
+}
+
 // enqueueRetry constructs and enqueues a RetryEntry for a transient write
 // failure, mirroring the inline retry-enqueue path in processMsg.
+//
+// A retried write that lands is a committed target write whose audit entry and
+// freshness stamp writeResults never got to make, so this path makes them —
+// under the same committed-only gate, since both describe a row that is
+// actually stored, whichever path stored it.
 func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result ruleengine.EvalResult) {
 	capturedResult := result
 	capturedReporter := p.reporter
@@ -222,11 +272,15 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result ruleengine
 		RawPayload:   rawPayload,
 		RuleSequence: capturedSeq,
 		WriteFn: func(rctx context.Context) error {
-			a := p.currentAdapter()
-			if capturedResult.Delete {
-				return a.Delete(rctx, capturedResult.Keys, capturedResult.ProjectionSeq)
+			committed, err := p.replayWrite(rctx, capturedResult)
+			if err != nil {
+				return err
 			}
-			return a.Upsert(rctx, capturedResult.Keys, capturedResult.Row, capturedResult.ProjectionSeq)
+			if committed {
+				p.recordProjected()
+				p.writeAudit(rctx, key, capturedResult)
+			}
+			return nil
 		},
 		Attempt:     0,
 		MaxAttempts: p.retryMaxAttempts,

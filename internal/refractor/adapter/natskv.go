@@ -171,10 +171,12 @@ func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map
 	return err
 }
 
-// UpsertWithOutcome is Upsert plus a report of whether the call actually
-// wrote (adapter.OutcomeUpserter) — the pipeline's write-audit step
-// (writeResults) type-asserts for this so an unchanged row skips WriteAudit
-// too, since an unchanged row is not a new audit fact.
+// UpsertWithOutcome is Upsert plus a report of what the call did to the target
+// (adapter.OutcomeUpserter). The pipeline's write-audit step (writeResults)
+// type-asserts for this and audits only UpsertOutcome.Committed, which excludes
+// all three of this adapter's ways of storing nothing: an unguarded row skipped
+// as byte-identical, a guarded write the watermark declined, and a guarded write
+// dropped for want of an ordering token. None of them is a new audit fact.
 func (a *NatsKVAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
 	return a.upsert(ctx, keys, row, projectionSeq)
 }
@@ -200,8 +202,14 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 		if err != nil {
 			return UpsertOutcome{}, err
 		}
+		// Committed is read off the verdict positively, so both of this path's
+		// ways of storing nothing — a stale-or-equal watermark, and the
+		// sequence-less fail-closed drop — are excluded by construction rather
+		// than by a caller subtracting each of them from Wrote and having to
+		// know how many there are.
 		return UpsertOutcome{
 			Wrote:               true,
+			Committed:           out.verdict == guardCommitted,
 			DeclinedByWatermark: out.verdict == guardDeclinedByWatermark,
 			Key:                 key,
 			Transition:          out.transition,
@@ -223,12 +231,12 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 	// it falls through to the unconditional Put — the same behavior this
 	// method had before it compared anything.
 	if current, getErr := a.kv.Get(ctx, key); getErr == nil && bytes.Equal(current.Value, data) {
-		return UpsertOutcome{Wrote: false, Key: key}, nil
+		return UpsertOutcome{Wrote: false, Committed: false, Key: key}, nil
 	}
 	if _, err := a.kv.Put(ctx, key, data); err != nil {
 		return UpsertOutcome{}, fmt.Errorf("natskv upsert: put %s: %w", key, err)
 	}
-	return UpsertOutcome{Wrote: true, Key: key}, nil
+	return UpsertOutcome{Wrote: true, Committed: true, Key: key}, nil
 }
 
 // Delete projects a Core KV deletion into the target KV bucket. The behavior is

@@ -339,6 +339,16 @@ func (w *PostgresGrantWriter) Provision(ctx context.Context) error {
 // one. A previously-tombstoned row is revived (is_deleted ← false) only by a
 // strictly-newer seq.
 func (w *PostgresGrantWriter) UpsertGrant(ctx context.Context, actorID, anchorID, grantSource string, projectionSeq uint64) error {
+	_, err := w.UpsertGrantWithOutcome(ctx, actorID, anchorID, grantSource, projectionSeq)
+	return err
+}
+
+// UpsertGrantWithOutcome is UpsertGrant plus whether the grant row actually
+// changed: false when the monotonic guard declined, which the statement signals
+// by matching no row and returning no error. A caller reading only the error
+// cannot tell that apart from a grant that landed, and on this table the
+// difference is a live read grant existing or not.
+func (w *PostgresGrantWriter) UpsertGrantWithOutcome(ctx context.Context, actorID, anchorID, grantSource string, projectionSeq uint64) (committed bool, err error) {
 	ctx, cancel := w.withTimeout(ctx)
 	defer cancel()
 	const q = `INSERT INTO ` + `"` + GrantTable + `"` + ` (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -346,11 +356,11 @@ VALUES ($1, $2, $3, $4, false)
 ON CONFLICT (actor_id, anchor_id, grant_source)
 DO UPDATE SET projection_seq = EXCLUDED.projection_seq, is_deleted = false
 WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
-	_, err := w.pool.Exec(ctx, q, actorID, anchorID, grantSource, int64(projectionSeq))
+	tag, err := w.pool.Exec(ctx, q, actorID, anchorID, grantSource, int64(projectionSeq))
 	if err != nil {
-		return fmt.Errorf("grant writer: upsert: %w", err)
+		return false, fmt.Errorf("grant writer: upsert: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // RevokeGrant tombstones a grant (is_deleted ← true) under the same monotonic
@@ -360,6 +370,23 @@ WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
 // that was never granted inserts a tombstone at the revoke seq (so an
 // out-of-order stale upsert that arrives afterward is still guarded).
 func (w *PostgresGrantWriter) RevokeGrant(ctx context.Context, actorID, anchorID, grantSource string, projectionSeq uint64) error {
+	_, err := w.RevokeGrantWithOutcome(ctx, actorID, anchorID, grantSource, projectionSeq)
+	return err
+}
+
+// RevokeGrantWithOutcome is RevokeGrant plus whether the tombstone actually
+// landed. This is the direction where a silent no-op OVER-GRANTS: a revocation
+// reported as done, on a row that is still live, tells the platform a capability
+// was withdrawn when the RLS policy will keep honouring it.
+//
+// A zero row count means the guard declined, and can mean nothing else. The
+// statement's INSERT arm fires whenever the (actor_id, anchor_id, grant_source)
+// row is absent — that is what plants the guarding tombstone RevokeGrant's own
+// contract promises — so "already gone" costs a row too, and never lands here.
+// The only path that touches no row is the ON CONFLICT WHERE clause failing,
+// which is the monotonic comparison itself. The absent-key ambiguity a hard
+// DELETE would carry does not arise, because nothing here deletes.
+func (w *PostgresGrantWriter) RevokeGrantWithOutcome(ctx context.Context, actorID, anchorID, grantSource string, projectionSeq uint64) (committed bool, err error) {
 	ctx, cancel := w.withTimeout(ctx)
 	defer cancel()
 	const q = `INSERT INTO ` + `"` + GrantTable + `"` + ` (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -367,11 +394,11 @@ VALUES ($1, $2, $3, $4, true)
 ON CONFLICT (actor_id, anchor_id, grant_source)
 DO UPDATE SET projection_seq = EXCLUDED.projection_seq, is_deleted = true
 WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
-	_, err := w.pool.Exec(ctx, q, actorID, anchorID, grantSource, int64(projectionSeq))
+	tag, err := w.pool.Exec(ctx, q, actorID, anchorID, grantSource, int64(projectionSeq))
 	if err != nil {
-		return fmt.Errorf("grant writer: revoke: %w", err)
+		return false, fmt.Errorf("grant writer: revoke: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // RevokeAllGrantsForActor tombstones every actor_read_grants row for
@@ -393,18 +420,36 @@ WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
 // guarded — best-effort, consistent with keyshredded's own package-level
 // framing (belt-and-suspenders in Phase A, not a permanent guarantee).
 func (w *PostgresGrantWriter) RevokeAllGrantsForActor(ctx context.Context, actorID string, projectionSeq uint64) error {
+	_, err := w.RevokeAllGrantsForActorWithOutcome(ctx, actorID, projectionSeq)
+	return err
+}
+
+// RevokeAllGrantsForActorWithOutcome is RevokeAllGrantsForActor plus the number
+// of rows it tombstoned.
+//
+// The count is reported, not a committed/declined verdict, because a plain
+// UPDATE cannot separate the two: zero rows means either the actor held no
+// grants (nothing to withdraw) or every row it held is already at or above the
+// token (all declined). Claiming one reading would be a guess, and on this table
+// the wrong guess is silence about grants that survived a shred.
+//
+// The distinction is not load-bearing for the caller this exists for.
+// keyshredded's Manager passes math.MaxInt64 as the token, and no stored
+// projection_seq can equal or exceed that, so under the shred the guard cannot
+// decline and a zero count means the actor genuinely held no rows.
+func (w *PostgresGrantWriter) RevokeAllGrantsForActorWithOutcome(ctx context.Context, actorID string, projectionSeq uint64) (revoked int64, err error) {
 	if actorID == "" {
-		return fmt.Errorf("grant writer: revoke all: actorID must not be empty")
+		return 0, fmt.Errorf("grant writer: revoke all: actorID must not be empty")
 	}
 	ctx, cancel := w.withTimeout(ctx)
 	defer cancel()
 	const q = `UPDATE ` + `"` + GrantTable + `"` + ` SET projection_seq = $2, is_deleted = true
 WHERE actor_id = $1 AND projection_seq < $2`
-	_, err := w.pool.Exec(ctx, q, actorID, int64(projectionSeq))
+	tag, err := w.pool.Exec(ctx, q, actorID, int64(projectionSeq))
 	if err != nil {
-		return fmt.Errorf("grant writer: revoke all: %w", err)
+		return 0, fmt.Errorf("grant writer: revoke all: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // ListGrantsBySource returns the live (non-tombstoned) grants carrying

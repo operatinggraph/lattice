@@ -11,11 +11,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Compile-time check that PostgresAdapter satisfies Adapter, Truncater and KeyLister.
+// Compile-time check that PostgresAdapter satisfies Adapter, Truncater,
+// KeyLister, SeqGuarded, OutcomeUpserter and OutcomeDeleter.
 var _ Adapter = (*PostgresAdapter)(nil)
 var _ Truncater = (*PostgresAdapter)(nil)
 var _ KeyLister = (*PostgresAdapter)(nil)
 var _ SeqGuarded = (*PostgresAdapter)(nil)
+var _ OutcomeUpserter = (*PostgresAdapter)(nil)
+var _ OutcomeDeleter = (*PostgresAdapter)(nil)
 
 // PostgresAdapter writes materialized rows to a Postgres table.
 // It uses a shared pgxpool.Pool (owned by PoolManager) so connection count
@@ -271,19 +274,73 @@ func coerceForPgx(v any) any {
 // Contract #6 §6.2 documents. A guarded adapter (NewProtectedAdapter) instead
 // conditions the write on projectionSeq per buildUpsertSQL.
 func (a *PostgresAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) error {
+	_, err := a.upsert(ctx, keys, row, projectionSeq)
+	return err
+}
+
+// UpsertWithOutcome is Upsert plus a report of whether a row actually landed
+// (adapter.OutcomeUpserter), which on this target is the difference between a
+// guarded write that took effect and one the monotonic guard declined.
+//
+// A guarded upsert here is `INSERT … ON CONFLICT DO UPDATE … WHERE
+// EXCLUDED.projection_seq > <table>.projection_seq` (buildUpsertSQL). When the
+// stored seq is equal or higher the statement matches no row, updates nothing,
+// and returns no error — indistinguishable, to a caller reading only the error,
+// from a write that landed. The pipeline's audit gate and the reconciler both
+// have to tell those apart, so the row count the statement already reports is
+// surfaced instead of discarded.
+func (a *PostgresAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
+	return a.upsert(ctx, keys, row, projectionSeq)
+}
+
+// upsert is the shared implementation behind Upsert and UpsertWithOutcome.
+func (a *PostgresAdapter) upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
 	ctx, cancel := a.withTimeout(ctx)
 	defer cancel()
 
 	sqlStr, args, err := a.buildUpsertSQL(keys, row, projectionSeq)
 	if err != nil {
-		return err
+		return UpsertOutcome{}, err
 	}
 	for i, v := range args {
 		args[i] = coerceForPgx(v)
 	}
 
-	_, err = a.pool.Exec(ctx, sqlStr, args...)
-	return err
+	tag, err := a.pool.Exec(ctx, sqlStr, args...)
+	if err != nil {
+		return UpsertOutcome{}, err
+	}
+	return a.upsertOutcome(tag.RowsAffected()), nil
+}
+
+// upsertOutcome maps the row count one upsert statement reported onto the
+// outcome the pipeline reads.
+//
+// Wrote coincides with Committed on this target, unlike NatsKVAdapter's guarded
+// path: there the guard's decline still rewrites the watermark, so a write
+// genuinely happens on every call; here the decline is the ON CONFLICT WHERE
+// clause matching no row, so nothing is written at all and claiming otherwise
+// would be a fabrication.
+//
+// Zero rows under the guard means the watermark declined, and only that: the
+// statement inserts when the key is absent and updates when it is present, so
+// the sole way to touch no row is the WHERE clause — which is the watermark
+// comparison itself. Unguarded, zero rows is the `DO NOTHING` arm buildUpsertSQL
+// emits for a key-columns-only table, where the row is already there and no
+// column exists to change.
+//
+// Key is left empty: a Postgres row has no single rendered key string for a
+// caller to route on, and UpsertOutcome.Key exists to hand back exactly the
+// string the adapter wrote. Transition stays TransitionNone for the same reason
+// the unguarded NATS-KV path leaves it there — this path never reads the stored
+// row's liveness back, so it has no evidence either way.
+func (a *PostgresAdapter) upsertOutcome(rowsAffected int64) UpsertOutcome {
+	committed := rowsAffected > 0
+	return UpsertOutcome{
+		Wrote:               committed,
+		Committed:           committed,
+		DeclinedByWatermark: a.guarded && !committed,
+	}
 }
 
 // buildListKeysSQL constructs the key-only SELECT for ListKeys: the key
@@ -427,17 +484,77 @@ func (a *PostgresAdapter) buildDeleteSQL(keys map[string]any, projectionSeq uint
 // lens keeps the unconditional last-writer-wins behavior Contract #6 §6.2
 // documents.
 func (a *PostgresAdapter) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
+	_, err := a.deleteRow(ctx, keys, projectionSeq)
+	return err
+}
+
+// DeleteWithOutcome is Delete plus a report of whether the retraction actually
+// landed (adapter.OutcomeDeleter) — the retraction sibling of
+// UpsertWithOutcome, and the more dangerous direction of the pair. A guarded
+// delete declines by matching no row and returning nil, so a caller reading
+// only the error records a withdrawal that left the row exactly where it was.
+func (a *PostgresAdapter) DeleteWithOutcome(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
+	return a.deleteRow(ctx, keys, projectionSeq)
+}
+
+// deleteRow is the shared implementation behind Delete and DeleteWithOutcome.
+func (a *PostgresAdapter) deleteRow(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
 	ctx, cancel := a.withTimeout(ctx)
 	defer cancel()
 
 	sqlStr, args, err := a.buildDeleteSQL(keys, projectionSeq)
 	if err != nil {
-		return err
+		return DeleteOutcome{}, err
 	}
 	for i, v := range args {
 		args[i] = coerceForPgx(v)
 	}
 
-	_, err = a.pool.Exec(ctx, sqlStr, args...)
-	return err
+	tag, err := a.pool.Exec(ctx, sqlStr, args...)
+	if err != nil {
+		return DeleteOutcome{}, err
+	}
+	return a.deleteOutcome(tag.RowsAffected()), nil
+}
+
+// deleteOutcome maps the row count one retraction statement reported onto the
+// outcome its caller reads. buildDeleteSQL emits three different statements, a
+// zero row count means something different under each, and the upsert
+// direction's reading does not carry over — so each is settled on its own.
+//
+// Wrote is the same answer under all three, and it is exact: a statement that
+// touched no row retracted nothing. An absent key retracts nothing, a declined
+// guard retracts nothing, and a matched row is the only way anything is
+// withdrawn. NatsKVAdapter reports its own absent-key hard delete the same way,
+// for the reason stated there — a caller must not book a repair for a row that
+// was never present.
+//
+// DeclinedByWatermark is where the three diverge:
+//
+//   - Unguarded hard (DELETE FROM … WHERE <keys>): zero rows means the key was
+//     already absent, which is idempotent success and not a watermark decline —
+//     no watermark is consulted at all. False.
+//   - Unguarded soft (UPDATE … SET is_deleted=true WHERE <keys>): no guard
+//     either, so also false. A tombstone written over an existing tombstone
+//     still matches its key and counts as a row, matching the NATS-KV soft path.
+//   - Guarded (UPDATE … WHERE <keys> AND projection_seq < $N): zero rows is
+//     genuinely ambiguous. The row may be absent, or present at a watermark
+//     equal to or above the token. A plain UPDATE cannot separate them, and
+//     there is no INSERT arm to make absence cost a row the way the grant
+//     table's ON CONFLICT form does.
+//
+// The guarded case is resolved one-sidedly toward reporting the decline, which
+// is a choice rather than a reading. Claiming a decline for an already-absent
+// row raises a visible false alarm about a retraction that had nothing left to
+// do; claiming no decline for a real one lets a caller record a withdrawal that
+// did not happen, on tables whose rows carry read permissions. One error
+// direction is noise an operator can see; the other is a silent over-grant.
+// transitionFrom's unparseable-body branch in natskv.go resolves its own
+// ambiguity one-sidedly for the same reason.
+func (a *PostgresAdapter) deleteOutcome(rowsAffected int64) DeleteOutcome {
+	wrote := rowsAffected > 0
+	return DeleteOutcome{
+		Wrote:               wrote,
+		DeclinedByWatermark: a.guarded && !wrote,
+	}
 }

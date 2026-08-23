@@ -36,8 +36,20 @@ const AuditStreamName = "REFRACTOR_AUDIT"
 // CleanupLegacyAuditStreams deletes every stream still matching it.
 const auditStreamLegacyPrefix = "AUDIT_"
 
-// AuditEntry is the JSON payload appended to lattice.refractor.audit.<lensId> on each
-// successful write. All field names are camelCase per FR21 convention.
+// AuditEntry is the JSON payload appended to lattice.refractor.audit.<lensId>
+// for each row a lens COMMITS to its target along the CDC write path — the
+// pipeline's own write step and the retry queue that finishes what that step
+// could not. All field names are camelCase per FR21 convention.
+//
+// Committed is the whole of the entry's claim: outputRowHash describes a row the
+// target is holding, so a write that stored nothing appends nothing. A guarded
+// write the ordering guard declined, one dropped for want of an ordering token,
+// and an unguarded row skipped as byte-identical all pass through unrecorded.
+//
+// The trail covers that path, not every mutation the target ever sees.
+// Reconciliation — the convergence sweep and the operator reproject RPC — writes
+// through its own machinery and accounts for what it healed as verdicts on the
+// lens's health entry rather than as entries here.
 type AuditEntry struct {
 	EntityID      string `json:"entityId"`
 	Operation     string `json:"operation"`     // "upsert" | "delete"

@@ -489,7 +489,28 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 					"stored watermark >= reconciliation token; "+divergedAs.String()+" unrepairable")
 				continue
 			}
-			out.Wrote = outcome.Wrote
+			if !outcome.Committed {
+				// The guard's other way of storing nothing: a write carrying no
+				// ordering token at all, dropped fail-closed before any stored
+				// watermark is consulted. It earns its own verdict reason
+				// because it is a separate fault with a separate fix — a
+				// watermark conflict clears itself once this pipeline's token
+				// advances past the stored one, whereas a missing token means
+				// the caller had none to offer and every pass will keep failing
+				// identically until it does.
+				//
+				// Reading Wrote here instead would book a repair that stored
+				// nothing, and on this path that is a phantom heal on an
+				// authorization surface: the sweep tells the capability plane's
+				// health a divergent grant row was fixed while it sits exactly
+				// as it was.
+				fold.add(VerdictBlocked,
+					"reconciliation write carried no ordering token; "+divergedAs.String()+" unrepairable")
+				continue
+			}
+			// Every non-committing outcome has already continued out above, so
+			// what reaches here landed.
+			out.Wrote = true
 			p.notifyGrantChange(outcome.Key, outcome.Transition)
 			fold.add(writeVerdict(canRead))
 			continue

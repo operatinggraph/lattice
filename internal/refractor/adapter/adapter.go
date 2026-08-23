@@ -173,18 +173,44 @@ const (
 // UpsertOutcome reports what one OutcomeUpserter.UpsertWithOutcome call
 // actually did to the target store.
 type UpsertOutcome struct {
-	// Wrote is true when the call performed a real write (a Put, or — for a
-	// guarded adapter — the guardedWrite CAS path, which always reports true
-	// regardless of its own internal watermark no-op branches). False only
-	// when an unguarded write was skipped because the marshaled row was
-	// already byte-identical to what's currently stored.
+	// Wrote is true when the call performed a real write, in whatever sense the
+	// target makes of that. NatsKVAdapter's guarded path reports it on every
+	// call, its own watermark no-op branches included, because maintaining the
+	// watermark IS the write it performs; its unguarded path reports false only
+	// for a row skipped as byte-identical to what is already stored. A target
+	// whose guard declines by touching no row at all — the Postgres
+	// `ON CONFLICT … WHERE` form — has no such standing write to report, so
+	// there this coincides with Committed.
+	//
+	// That meaning is therefore adapter-defined. A caller asking the portable
+	// question — did a row land — reads Committed instead.
 	Wrote bool
+	// Committed is true when a row actually landed in the target: the create or
+	// update ran and the store now holds what this call projected. Every way of
+	// writing nothing reports false — a guarded write the watermark declined, a
+	// guarded write dropped for want of an ordering token, an unguarded write
+	// skipped as content-identical, and any error exit.
+	//
+	// It is the positive form of that question, and positive is the only sound
+	// form: the guarded path can end three ways (committed, watermark-declined,
+	// dropped for a missing token), so subtracting the known declines from Wrote
+	// silently admits whichever way of writing nothing the subtraction forgot.
+	// DeleteOutcome.Wrote already carries exactly this meaning for the retraction
+	// direction; this is its upsert sibling, kept as a separate field there
+	// because Wrote answers a different question the guarded path needs.
+	//
+	// This is the field the pipeline's audit gate reads (writeResults): an audit
+	// entry carries the outputRowHash of a row it asserts is stored, which only a
+	// committed write puts there.
+	Committed bool
 	// DeclinedByWatermark is true when a guarded write was dropped because the
 	// stored projectionSeq was equal to or higher than this call's token
 	// (Contract #6 §6.2). It is orthogonal to Wrote, which keeps reporting
 	// true on that branch: advancing — or deliberately holding — the watermark
-	// is the guarded path's job on every call, and writeResults' audit skip
-	// reads Wrote to decide whether a new audit fact exists.
+	// is the guarded path's job on every call.
+	//
+	// It names WHY a write did not commit, where Committed only says that it
+	// did not — the distinction a caller acts on rather than merely reports.
 	//
 	// It exists for the caller that must know the difference: a reconciler
 	// holding read-back evidence that the row diverges learns here that its
@@ -216,11 +242,11 @@ type UpsertOutcome struct {
 // (the target bucket's watchers re-notifying) whenever it fires.
 //
 // The pipeline's write-audit step (writeResults) type-asserts for this and
-// skips WriteAudit when Wrote is false: an unchanged row is not a new audit
-// fact. An adapter that does not implement it — or a Delete, which this
-// interface deliberately does not cover — is always treated as having
-// written, the historical behavior every caller already gets from plain
-// Upsert.
+// publishes an audit entry only for UpsertOutcome.Committed: an entry carries
+// the outputRowHash of a row it asserts is stored, and only a committed write
+// puts one there. An adapter that does not implement it — or a Delete, which
+// this interface deliberately does not cover — is always treated as having
+// written, the historical behavior every caller already gets from plain Upsert.
 //
 // This is a sibling method rather than a stateful "last write" flag read back
 // off the adapter after the fact: NatsKVAdapter is shared between the
@@ -257,11 +283,11 @@ type DeleteOutcome struct {
 	//
 	// This is deliberately STRICTER than UpsertOutcome.Wrote, which stays true
 	// through the guarded path's own no-op branches because advancing the
-	// watermark is that path's job on every call and writeResults' audit skip
-	// reads it. A retraction has no such second job: if the row is still there,
-	// nothing happened. The two therefore must not be wired to a shared
-	// consumer without deciding which rule that consumer wants — use
-	// DeclinedByWatermark, which means the same thing on both.
+	// watermark is that path's job on every call. A retraction has no such
+	// second job: if the row is still there, nothing happened. UpsertOutcome
+	// carries this same strict meaning as its own Committed field, and that is
+	// the pairing a consumer wanting "did a row change" reads on both sides —
+	// never this against the upsert direction's Wrote.
 	Wrote bool
 	// DeclinedByWatermark is true when a guarded retraction was dropped
 	// because the stored projectionSeq was equal to or higher than this call's

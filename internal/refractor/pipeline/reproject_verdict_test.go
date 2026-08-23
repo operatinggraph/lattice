@@ -23,11 +23,25 @@ type outcomeAdapter struct {
 	recordingAdapter
 	declineUpsert bool
 	declineDelete bool
+	// dropUpsertNoToken reports the guard's OTHER no-commit exit: a write with
+	// no ordering token, dropped before any stored watermark was consulted, so
+	// it is not a watermark decline. adapter.NatsKVAdapter reports exactly this
+	// shape — Wrote true, Committed false, DeclinedByWatermark false.
+	dropUpsertNoToken bool
 }
 
 func (a *outcomeAdapter) upsertOnce(keys, row map[string]any, seq uint64) adapter.UpsertOutcome {
 	a.upserts = append(a.upserts, recordedWrite{keys: keys, row: row, seq: seq})
-	return adapter.UpsertOutcome{Wrote: true, DeclinedByWatermark: a.declineUpsert}
+	// Wrote stays true through every guarded no-commit branch, mirroring the
+	// real guarded adapter: maintaining the watermark is its job on every call.
+	// A double that tied Wrote to the outcome would be a fixture no caller can
+	// go wrong against, and the branch under test is exactly the one a caller
+	// gets wrong by reading Wrote.
+	return adapter.UpsertOutcome{
+		Wrote:               true,
+		Committed:           !a.declineUpsert && !a.dropUpsertNoToken,
+		DeclinedByWatermark: a.declineUpsert,
+	}
 }
 
 func (a *outcomeAdapter) deleteOnce(keys map[string]any, seq uint64) adapter.DeleteOutcome {
@@ -421,6 +435,61 @@ func TestReprojection_BlockedDistinguishesProvenanceFromContent(t *testing.T) {
 			require.Len(t, adpt.upserts, 1, "the write is still attempted")
 		})
 	}
+}
+
+// TestReprojection_TokenlessDropIsBlockedNotHealed covers the guard's second
+// no-commit exit: a write dropped for want of an ordering token, which is not a
+// watermark decline and so passes the branch above.
+//
+// The reconciler reads Committed rather than Wrote for this reason. Wrote stays
+// true through every guarded no-commit branch — maintaining the watermark is
+// that path's job on every call — so a reconciler reading it books a repair
+// that stored nothing, on the surface where that reads as a divergent grant row
+// having been fixed while it sits exactly as it was.
+//
+// No shipped adapter pairing reaches this through Reproject today, and the test
+// says so rather than implying coverage it does not have: the token-less drop
+// belongs to adapter.NatsKVAdapter, which also implements adapter.RowReader, so
+// a seq-0 reconciliation against it is refused by the ErrNoOrderingToken check
+// upstream (reproject.go, inside the canRead block) before any write is
+// attempted. The Postgres family, which is what makes canRead false, declines
+// by watermark instead and never reports this shape. The branch is therefore
+// correct-by-construction rather than currently-exercised, and it is pinned at
+// the level that does reach it — the outcome an adapter reports.
+func TestReprojection_TokenlessDropIsBlockedNotHealed(t *testing.T) {
+	storedRow := map[string]any{
+		"key":                    "cap.identity.x",
+		"roles":                  []any{"admin"},
+		"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
+	}
+	adpt := &outcomeAdapter{
+		recordingAdapter:  recordingAdapter{stored: storedRow, present: true},
+		dropUpsertNoToken: true,
+	}
+	p := newOutcomePipeline(t, adpt)
+	p.recordAppliedSeq(4242)
+	writeLiveAnchor(t, p, reprojectActor)
+	useAnchorRule(t, p)
+	p.SetEnvelopeFn(func(row, keys, params map[string]any) (map[string]any, map[string]any, error) {
+		return map[string]any{
+			"key":                    "cap.identity.x",
+			"roles":                  []any{},
+			"projectedFromRevisions": map[string]any{"vtx.identity.x": float64(7)},
+		}, map[string]any{"key": "cap.identity.x"}, nil
+	})
+
+	res, err := p.Reproject(context.Background(), reprojectActor)
+	require.NoError(t, err)
+
+	require.Equal(t, VerdictBlocked, res.Verdict,
+		"a write that stored nothing repaired nothing, whatever Wrote says")
+	require.False(t, res.Wrote, "nothing landed, so nothing may be booked as repaired")
+	require.False(t, res.Converged)
+	require.Contains(t, res.VerdictReason, "no ordering token",
+		"the reason must name the missing token, not a watermark conflict — different fault, different fix")
+	require.NotContains(t, res.VerdictReason, "stored watermark",
+		"reusing the watermark wording would misreport the cause")
+	require.Len(t, adpt.upserts, 1, "the write is still attempted")
 }
 
 // TestReproject_ZeroRowsWithoutRetractionTransportIsUnverified is the

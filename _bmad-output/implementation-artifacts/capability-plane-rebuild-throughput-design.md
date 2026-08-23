@@ -89,6 +89,36 @@ In `writeResults`, gate the audit publish on the write having actually committed
 Proof is a unit test, not the live inference above: a guarded adapter whose write is declined by the
 watermark must publish **no** audit entry, while an identical accepted write must publish exactly one.
 
+### 4.1 The reconciler's committed reading is a forward guard, not a live change
+
+`reproject.go`'s write step reads the same committed signal, and refuses to book a repair for a write that
+stored nothing — a watermark decline, or a write dropped for want of an ordering token, each with its own
+verdict reason. On its own that would be a live sharpening of sweep verdicts. It is not, and the record
+should not imply otherwise: **no shipped lens routes a Postgres-family adapter into that code.**
+
+Two independent gates, either sufficient:
+
+- **The convergence sweep never enrols one.** `projection/driver.go` refuses any adapter that is not an
+  `adapter.PrefixKeyLister`, and `NatsKVAdapter` is the only implementor in the tree. Without a sweep plan,
+  `LensRepairBlocked` / `CapabilityRepairBlocked` are unreachable for every Postgres, Protected and
+  GrantWriter lens.
+- **`Reproject` refuses a plain lens.** It returns `ErrNotActorAggregate` without an envelope fn, and those
+  are installed only through `InstallActorAggregate`, gated on `projectionKind: actorAggregate`
+  (`projection/plan.go`). Every `actorAggregate` lens in the tree targets `nats-kv`;
+  `landlordLeaseApplicationsRead` declares no `projectionKind` at all — its own comment calls it a plain
+  projection.
+
+The guard is correct by construction and stays: it is one conditional on a path a future guarded-Postgres
+actor-aggregate lens would otherwise take silently. `reproject_verdict_test.go` pins it at the level that
+does reach it, the outcome an adapter reports, and says the same thing about reachability.
+
+What IS live for these lenses is the write path in §4: `writeResults` now audits and stamps the freshness
+clock only for a row that landed, in both directions — a guarded Postgres upsert the watermark declines,
+and a guarded Postgres retraction it declines, each stop appending. `clinicPatientsRead` and
+`landlordLeaseApplicationsRead` are `Protected` + `DiffRetraction`, so retractions are ordinary traffic for
+them, and a redelivered batch replays at the same stream sequence — which the guard declines by design and
+the trail was recording as a fresh withdrawal.
+
 ## 5. Explicit non-goals
 
 - **Not narrowing the broad consumer filter.** It is a fail-closed consequence of non-exhaustive label
