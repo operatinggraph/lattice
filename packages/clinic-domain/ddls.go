@@ -36,14 +36,15 @@ const (
 	providerVertexDDL    = "provider"
 	appointmentVertexDDL = "appointment"
 
-	demographicsAspectDDL  = "patientDemographics"
-	profileAspectDDL       = "providerProfile"
-	scheduleAspectDDL      = "appointmentSchedule"
-	statusAspectDDL        = "appointmentStatus"
-	hoursAspectDDL         = "providerHours"
-	timeOffAspectDDL       = "providerTimeOff"
-	encounterAspectDDL     = "appointmentEncounter"
-	documentationAspectDDL = "appointmentDocumentation"
+	demographicsAspectDDL   = "patientDemographics"
+	profileAspectDDL        = "providerProfile"
+	scheduleAspectDDL       = "appointmentSchedule"
+	statusAspectDDL         = "appointmentStatus"
+	hoursAspectDDL          = "providerHours"
+	timeOffAspectDDL        = "providerTimeOff"
+	encounterAspectDDL      = "appointmentEncounter"
+	documentationAspectDDL  = "appointmentDocumentation"
+	siteAssignmentAspectDDL = "appointmentSiteAssignment"
 
 	providerSlotClaimAspectDDL = "providerSlotClaim"
 	patientSlotClaimAspectDDL  = "patientSlotClaim"
@@ -115,6 +116,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		patientSlotClaimAspectTypeDDL(),
 		encounterAspectTypeDDL(),
 		documentationAspectTypeDDL(),
+		siteAssignmentAspectTypeDDL(),
 		identityPatientClaimAspectTypeDDL(),
 		clinicSiteProfileAspectTypeDDL(),
 		providerIdentityClaimAspectTypeDDL(),
@@ -405,7 +407,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     appointmentVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
 			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
@@ -479,7 +481,19 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"site auto-fill applies (cmd/clinic-app/web/app.js). Such an appointment stays missing_site forever, which " +
 			"is harmless — the gap is idempotently re-dispatched and cleanly no-ops every time, exactly the " +
 			"non-convergence posture cafe-domain's own BackfillTabStaleAt/missing_staleat gap relies on for a case that " +
-			"can never resolve on its own.",
+			"can never resolve on its own. SetAppointmentSite{appointmentKey, site} is the human-facing manual " +
+			"counterpart, letting a person CHOOSE among a provider's live sites when BackfillAppointmentSite's " +
+			"exactly-one-site rule can't (two-or-more sites) — it is not a way to invent a practicesAt " +
+			"relationship that doesn't exist: a provider at ZERO sites, or now tombstoned, still needs " +
+			"AssignProviderSite run first, since site is HARD-validated exactly like CreateAppointment's site " +
+			"branch (require_site_membership: alive + a vtx.building.<NanoID> key AND the appointment's own " +
+			"provider practicesAt it). Confinement mirrors RescheduleAppointment (operator / workplace / the " +
+			"appointment's own bound provider), not BackfillAppointmentSite (which has no human caller to " +
+			"confine). A no-op if the appointment already carries a live atSite link — reassigning an already-set " +
+			"site is out of scope. Writes the same atSite link mutation as BackfillAppointmentSite, plus a " +
+			"CreateOnly .siteAssignment guard aspect in the same atomic batch (siteAssignmentAspectTypeDDL) so two " +
+			"concurrent callers choosing different sites for the same appointment can't both commit — the " +
+			"loser's whole batch rejects.",
 		Script: appointmentDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patient":{"type":"string","description":"vtx.patient.<NanoID> the appointment is for (CreateAppointment / RescheduleAppointment; required; on create validated alive + class=patient, on reschedule/terminal-SetAppointmentStatus/TombstoneAppointment it must be the appointment's actual patient, validated via the forPatient link)."},` +
@@ -488,9 +502,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"endsAt":{"type":"string","description":"Appointment end, RFC3339 (CreateAppointment / RescheduleAppointment; required). Caller supplies canonical UTC, aligned to the 15-minute grid; span capped at 96 cells / 24h (AppointmentTooLong)."},` +
 			`"reason":{"type":"string","description":"Visit reason / chief complaint (CreateAppointment / RescheduleAppointment; optional — on RescheduleAppointment an omitted reason clears it)."},` +
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the patient claims residency under (CreateAppointment; optional). Checked against the lease's applicationFor link matching the patient's identifiedBy identity — a mismatch falls through with no residentVisit link, never a hard failure."},` +
-			`"site":{"type":"string","description":"Optional vtx.building.<NanoID> clinic site the appointment is booked at (CreateAppointment). When supplied, validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
+			`"site":{"type":"string","description":"vtx.building.<NanoID> clinic site the appointment is booked at. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries one). When supplied, validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
-			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
+			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set)."},` +
 			`"note":{"type":"string","description":"Optional audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
 			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account."},` +
@@ -509,9 +523,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"endsAt":            "Appointment end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment / RescheduleAppointment; required). Must align to the 15-minute grid; span capped at 96 cells / 24h (AppointmentTooLong).",
 			"reason":            "Optional visit reason / chief complaint. Stored on the .schedule aspect when present (CreateAppointment / RescheduleAppointment; on RescheduleAppointment an omitted reason clears it).",
 			"leaseAppKey":       "Optional full vtx.leaseapp.<NanoID> key the patient claims residency under (CreateAppointment). Verified via the lease's applicationFor link matching the patient's own identifiedBy identity before writing a residentVisit link (appointment→leaseapp); a mismatch or absent lease silently omits the link.",
-			"site":              "Optional full vtx.building.<NanoID> clinic site key (CreateAppointment). Validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building); omitted → no site recorded.",
+			"site":              "Full vtx.building.<NanoID> clinic site key. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries a live one). Validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building).",
 			"appointmentId":     "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
-			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient.",
 			"note":              "Optional audit note recorded with a SetAppointmentStatus transition (e.g. a cancel / no-show reason). Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge.",
@@ -600,6 +614,18 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"returns primaryKey as that LINK key (the op's only mutation, the AssignProviderSite convention); " +
 					"when zero or two-or-more come back, no-ops cleanly rather than guess. Submitted under Weaver's " +
 					"service-actor authority only (clinicSiteBackfill target); no human/consumer caller.",
+			},
+			{
+				Name:    "SetAppointmentSite — a staffer supplies the site BackfillAppointmentSite couldn't resolve",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "site": "vtx.building.<NanoID>"},
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment, and (for a non-operator caller) " +
+					"that the actor worksAt one of the appointment's own sites OR is the appointment's own bound provider. " +
+					"No-ops cleanly if the appointment already carries a live atSite link — reassigning an already-set " +
+					"site is out of scope. Otherwise validates site alive + a vtx.building.<NanoID> key AND the " +
+					"appointment's own provider practicesAt it (ProviderNotAtSite if not), writes the atSite link (the " +
+					"same mutation BackfillAppointmentSite/CreateAppointment's site branch write), and returns primaryKey " +
+					"as that LINK key. Submitted by the operator, front-of-house staff, or the appointment's own bound " +
+					"provider.",
 			},
 			{
 				Name: "RecordEncounter — document a completed visit",
@@ -1017,6 +1043,53 @@ func documentationAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "appointment documentation aspect",
 				Payload:         map[string]any{"documentedAt": "2026-07-01T15:30:00Z", "followUpRequested": false},
 				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.documentation; written by RecordEncounter. Read by clinicAppointments and followUpReminders.",
+			},
+		},
+	}
+}
+
+// siteAssignmentAspectTypeDDL declares the .siteAssignment aspect (class
+// appointmentSiteAssignment) — a pure existence marker, no relationship field
+// (mirrors providerSlotClaim's own doc comment), written ONLY by
+// SetAppointmentSite alongside its atSite link. Unlike CreateAppointment's and
+// BackfillAppointmentSite's own site-writing branches — each naturally
+// serialized (CreateAppointment's site arrives with the vertex itself, before
+// any caller could name the not-yet-existing appointmentKey; BackfillAppointmentSite
+// dispatches once per Weaver gap row) — SetAppointmentSite's site is
+// caller-CHOSEN, so two concurrent callers picking DIFFERENT sites for the
+// same still-site-less appointment would both pass the "no live atSite link
+// yet" read and both commit a DIFFERENT, non-colliding atSite link key
+// (lnk.appointment.<a>.atSite.building.<site>) — the target segment differs,
+// so CreateOnly on the link key alone cannot be the lock. This aspect's key
+// is target-INDEPENDENT (fixed per appointment), so CreateOnly on IT is: the
+// loser's whole batch (link + this aspect, one atomic commit) rejects at
+// commit, exactly the claim_cell double-book lock applied to a
+// single-winner-not-a-cell resource. Declaration-only; NON-sensitive.
+func siteAssignmentAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     siteAssignmentAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetAppointmentSite"},
+		Description: "Appointment site-assignment guard aspect (clinic). Stored as " +
+			"vtx.appointment.<NanoID>.siteAssignment (class appointmentSiteAssignment) = {} — a pure existence " +
+			"marker, no relationship field (the atSite LINK is the actual site relationship; this aspect exists " +
+			"only to serialize concurrent writers). Written by SetAppointmentSite (CreateOnly) in the SAME atomic " +
+			"batch as the atSite link it accompanies: two concurrent SetAppointmentSite calls choosing DIFFERENT " +
+			"sites for the same still-site-less appointment both see no live atSite link and both attempt to " +
+			"commit, but this aspect's key is the SAME for both (unlike the atSite link's, which varies by chosen " +
+			"site) — CreateOnly commits it exactly once, and the loser's whole batch (including its atSite link) " +
+			"rejects. Never tombstoned or rewritten once created. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The lock is the KEY (fixed per appointment), never a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "appointment site-assignment guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.siteAssignment; written once by SetAppointmentSite, alongside the atSite link, to serialize concurrent callers.",
 			},
 		},
 	}
@@ -2937,6 +3010,77 @@ def execute(state, op):
         # reply constraint (commit_path.go) accepts a mutation's own key or its
         # 3-segment vertex root, and this op's only mutation is a link, which
         # has no vertex root of its own.
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": at_site_lnk}}
+
+    if ot == "SetAppointmentSite":
+        # The STAFF/provider manual counterpart to BackfillAppointmentSite's
+        # auto-remediation. It closes the "2+ sites" ambiguity directly (a
+        # human picks the right one); a provider at ZERO sites or now
+        # tombstoned still needs AssignProviderSite run first (this op's own
+        # require_site_membership below hard-requires a live practicesAt
+        # link, same as CreateAppointment's site branch) — it is a manual
+        # override for CHOOSING among a provider's live sites, not a way to
+        # invent a practicesAt relationship that doesn't exist. Confinement
+        # mirrors RescheduleAppointment exactly (operator / workplace / the
+        # appointment's own bound provider), not BackfillAppointmentSite
+        # (Weaver-dispatched-only, no human caller to confine).
+        appt_key = required_string(p, "appointmentKey")
+        _, appt_id = parts_of(appt_key, "appointmentKey", "appointment")
+        if not vertex_alive(state, appt_key):
+            fail("UnknownAppointment: " + appt_key)
+        cls = class_of(state, appt_key)
+        if cls != "appointment":
+            fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+
+        provider = appointment_provider(appt_id)
+
+        # workplace-exempt: (no-validated-path) SetAppointmentSite grants no
+        # scope=self and mints no task (operator/frontOfHouse/provider "any"
+        # grant only), so op.authTargetValidated is never legitimately true
+        # here and only an operator reaches the exemption — identical
+        # reasoning to BackfillAppointmentSite's own standing confinement,
+        # RescheduleAppointment's block above being the scope=self exception.
+        if not workplace_exempt():
+            if not actor_bound_to_appointment_provider(op.actor, provider):
+                require_workplace(appointment_sites(appt_id), "cannot set site on appointment " + appt_key)
+
+        # Already has a live atSite link — reassignment is out of scope (the
+        # gap this closes is "27 appointments carry NO site", never "the site
+        # is wrong"); no-op cleanly rather than reject, mirroring
+        # BackfillAppointmentSite's own already-present no-op.
+        # read-posture: (e) relation=atSite epoch=none -- an appointment
+        # carries at most one atSite link (CreateAppointment/
+        # BackfillAppointmentSite/this op each write it at most once), so this
+        # is a single bounded enumeration off the appointment key already
+        # proven alive above, never a keyspace scan.
+        apage, _ = kv.Links(appt_key, "atSite", "out")
+        for lk in apage:
+            if not lk.isDeleted:
+                return {"mutations": [], "events": [], "response": {}}
+
+        if provider == None:
+            fail("MissingBinding: appointment " + appt_key + " has no bound provider; cannot set site")
+        site_key = required_string(p, "site")
+        require_site_membership(site_key, provider)
+        _, site_id = parts_of(site_key, "site", "building")
+        at_site_lnk = "lnk.appointment." + appt_id + ".atSite.building." + site_id
+        # Two concurrent SetAppointmentSite calls choosing DIFFERENT sites for
+        # the same still-site-less appointment both pass the no-live-atSite
+        # check above and would both commit a DIFFERENT, non-colliding link
+        # key (the target segment varies with the chosen site) — CreateOnly
+        # on the link alone cannot be the lock. siteAssignmentAspectTypeDDL's
+        # .siteAssignment aspect exists exactly for this: its key is the SAME
+        # regardless of chosen site, so CreateOnly on it, in the SAME atomic
+        # batch as the link, makes the loser's whole commit reject.
+        mutations = [
+            make_link(at_site_lnk, appt_key, site_key, "atSite", "atSite", {}),
+            make_aspect(appt_key, "siteAssignment", "appointmentSiteAssignment", {}),
+        ]
+        events = [{"class": "clinic.appointmentSiteSet", "data": {"appointmentKey": appt_key, "site": site_key}}]
+        # primaryKey names the LINK key itself, mirroring BackfillAppointmentSite:
+        # the write-footprint reply constraint accepts a mutation's own key or
+        # its 3-segment vertex root, and the link has no vertex root of its own.
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": at_site_lnk}}
 

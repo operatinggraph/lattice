@@ -115,6 +115,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
 		},
 		{
+			OperationType: "SetAppointmentSite",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit SetAppointmentSite operations, and a bound provider the right to set the site on THEIR OWN appointments (mirrors RescheduleAppointment's standing guard exactly: a non-operator, non-workplace caller is confined to appointments withProvider the provider it is identifiedBy-bound to). No consumer/patient scope — the clinic site is a staff/provider correction, not a patient-editable field.",
+			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
+		},
+		{
 			OperationType: "RescheduleAppointment",
 			Scope:         "self",
 			Note:          "Grants a consumer the right to reschedule THEIR OWN appointment (the appointment's forPatient must be a patient linked, via identifiedBy, to the caller's own identity).",

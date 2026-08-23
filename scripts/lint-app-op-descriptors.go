@@ -215,8 +215,11 @@ var appOpDebt = map[string]string{
 // feeds. This ceiling is a floor on hand-wiring this scan can see, not a
 // census of every possible hand-wired op.
 var appOpCeilings = map[string]int{
-	"cmd/cafe-app":      6,
-	"cmd/clinic-app":    14,
+	"cmd/cafe-app": 6,
+	// 15: SetAppointmentSite (verticals.md "27 already-booked appointments
+	// still carry no site") — a new staff-hand-wired op, same shape as its
+	// 14 predecessors; no op-catalog rendering exists for this app yet.
+	"cmd/clinic-app":    15,
 	"cmd/loftspace-app": 20,
 	"cmd/wellness-app":  12,
 }

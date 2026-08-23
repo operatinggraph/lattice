@@ -237,6 +237,30 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 		},
 		{
+			OperationType: "SetAppointmentSite",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set appointment site",
+				Description: "Set the clinic site for your appointment.",
+				Icon:        "map-pin",
+				Tone:        "primary",
+				SubmitLabel: "Set site",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
+				`"site":{"type":"string","title":"Site","x-entityRef":"building","description":"vtx.building.<NanoID> clinic site this appointment is at."}},` +
+				`"required":["appointmentKey","site"]}`,
+			FieldDescriptions: map[string]string{
+				"appointmentKey": "The appointment being set — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
+				"site":           "The clinic site this appointment is at. Must be a site you (the appointment's provider) practicesAt. No-op if the appointment already has a site.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "appointment",
+				AuthContext: "standing",
+				TargetField: "appointmentKey",
+				TargetType:  "appointment",
+			},
+		},
+		{
 			OperationType: "CreatePatient",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Register patient",

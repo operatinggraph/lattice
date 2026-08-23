@@ -3867,6 +3867,19 @@ function renderApptCard(a, opts) {
     reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf, onDone }));
     btns.append(reschedule);
 
+    // Missing-site correction (SetAppointmentSite) — staff/bound-provider only,
+    // never the patient self-service view (asSelf), mirroring the
+    // "Document visit" gating below. Only offered when the appointment carries
+    // no site at all; the op has no reassignment path, so once set this never
+    // reappears.
+    if (!opts.asSelf && !a.siteKey) {
+      const setSite = document.createElement("button");
+      setSite.className = "ghost";
+      setSite.textContent = "Set site";
+      setSite.addEventListener("click", () => openSetSite(a, onDone));
+      btns.append(setSite);
+    }
+
     const cancel = document.createElement("button");
     cancel.className = "ghost danger";
     cancel.textContent = "Cancel";
@@ -4126,6 +4139,83 @@ async function submitReschedule(ev) {
     onDone();
   } catch (e) {
     toast("Could not reschedule: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// ---- Set appointment site (SetAppointmentSite — fills a missing site; a
+// staffer or the appointment's own bound provider only). The picker offers
+// only the sites this appointment's OWN provider practicesAt — hard-validated
+// server-side either way (require_site_membership), same shape as the Book
+// form's site filter. No reassignment: the op no-ops on an appointment that
+// already carries a site, so the "Set site" button only ever appears when
+// a.siteName is absent. ----
+
+function openSetSite(a, onDone) {
+  state.settingSite = a;
+  state.settingSiteOnDone = onDone || loadAppts;
+  const who = a.providerName || shortKey(a.providerKey);
+  $("#set-site-context").textContent = `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
+  const sites = state.providerSites.filter((ps) => ps.providerKey === a.providerKey);
+  const sel = $("#ss-site");
+  sel.innerHTML = "";
+  for (const ps of sites) {
+    const o = document.createElement("option");
+    o.value = ps.siteKey;
+    o.textContent = ps.siteName || "(unnamed site)";
+    sel.append(o);
+  }
+  $("#ss-no-site-hint").hidden = sites.length > 0;
+  $("#set-site-submit").disabled = sites.length === 0;
+  $("#set-site-overlay").hidden = false;
+  if (sites.length > 0) sel.focus();
+}
+
+function closeSetSite() {
+  $("#set-site-overlay").hidden = true;
+  state.settingSite = null;
+  state.settingSiteOnDone = null;
+}
+
+async function submitSetSite(ev) {
+  ev.preventDefault();
+  const a = state.settingSite;
+  if (!a) {
+    closeSetSite();
+    return;
+  }
+  const site = $("#ss-site").value;
+  if (!site) {
+    toast("Pick a site.", "err");
+    return;
+  }
+  const onDone = state.settingSiteOnDone || loadAppts; // captured before closeSetSite() clears it
+
+  const submit = $("#set-site-submit");
+  submit.disabled = true;
+  try {
+    // read-posture (d): both require_site_membership reads are declared
+    // optionalReads, mirroring submitBook's own site-membership declaration —
+    // the site is a hard requirement once supplied, but the READ of it is
+    // still on-demand, never a required contextHint.reads entry.
+    const reply = await submitOp(
+      "SetAppointmentSite",
+      "appointment",
+      { appointmentKey: a.appointmentKey, site },
+      [a.appointmentKey],
+      { optionalReads: [site, practicesAtLinkKey(a.providerKey, site)] },
+    );
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not set site — " + friendlyBookingRejection(msg), "err");
+      return;
+    }
+    closeSetSite();
+    toast("Site set.", "ok");
+    onDone();
+  } catch (e) {
+    toast("Could not set site: " + e.message, "err");
   } finally {
     submit.disabled = false;
   }
@@ -4550,6 +4640,12 @@ function init() {
   $("#rs-startsAt").addEventListener("change", () => {
     applyGridSnapToField("#rs-startsAt", "#rs-grid-snap-note");
   });
+
+  $("#set-site-cancel").addEventListener("click", closeSetSite);
+  $("#set-site-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#set-site-overlay")) closeSetSite();
+  });
+  $("#set-site-form").addEventListener("submit", submitSetSite);
 
   $("#encounter-cancel").addEventListener("click", closeEncounter);
   $("#encounter-overlay").addEventListener("click", (e) => {

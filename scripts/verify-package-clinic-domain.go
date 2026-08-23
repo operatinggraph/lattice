@@ -62,7 +62,7 @@ const (
 var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
-	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
 }
 
@@ -98,6 +98,7 @@ var clinicOpGrants = map[string][]permGrant{
 	"CreateAppointment":     {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
 	"RescheduleAppointment": {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
 	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
+	"SetAppointmentSite":    {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
 	"RecordEncounter":       {{"any", "operator"}, {"any", "provider"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
 	"SetSiteProfile":        {{"any", "operator"}},
@@ -179,7 +180,7 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"}},
-		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
+		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
@@ -190,6 +191,7 @@ func main() {
 		{canonical: "patientSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},
 		{canonical: "appointmentEncounter", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
 		{canonical: "appointmentDocumentation", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
+		{canonical: "appointmentSiteAssignment", class: "meta.ddl.aspectType", ops: []string{"SetAppointmentSite"}},
 		{canonical: "clinicSite", class: "meta.ddl.vertexType", ops: []string{"SetSiteProfile"}},
 		{canonical: "clinicSiteAssignment", class: "meta.ddl.vertexType", ops: []string{"AssignProviderSite", "RemoveProviderSite"}},
 		{canonical: "clinicSiteProfile", class: "meta.ddl.aspectType", ops: []string{"SetSiteProfile"}},

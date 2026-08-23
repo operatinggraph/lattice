@@ -24,10 +24,11 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the nineteen DDLs: five vertexType owners (patient,
-// provider, appointment, clinicSite, clinicSiteAssignment) and fourteen
+// TestPackage_DDLs pins the twenty DDLs: five vertexType owners (patient,
+// provider, appointment, clinicSite, clinicSiteAssignment) and fifteen
 // aspectType step-6 gates (ten attach to patient/provider/appointment
-// vertices; identityPatientClaim and identityProviderClaim attach onto an
+// vertices; appointmentSiteAssignment is the SetAppointmentSite concurrency
+// guard aspect; identityPatientClaim and identityProviderClaim attach onto an
 // identity-domain vertex, the clinic-reminders idiom; clinicSiteProfile
 // attaches onto a location-domain building, the loftspace-domain
 // aspect-contribution idiom; providerIdentityClaim attaches onto the
@@ -37,8 +38,8 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // see TestPackage_EncounterAspectIsSensitiveAndCustodied — the one deliberate
 // exception this loop excludes and tests separately.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 19 {
-		t.Fatalf("expected 19 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 20 {
+		t.Fatalf("expected 20 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -49,7 +50,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
-		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
@@ -79,19 +80,20 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	aspectWriters := map[string][]string{
-		"patientDemographics":      {"CreatePatient"},
-		"providerProfile":          {"CreateProvider", "SetProviderProfile"},
-		"appointmentSchedule":      {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":        {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
-		"providerHours":            {"SetProviderHours"},
-		"providerTimeOff":          {"SetProviderTimeOff"},
-		"providerSlotClaim":        {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
-		"patientSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
-		"appointmentDocumentation": {"RecordEncounter"},
-		"identityPatientClaim":     {"CreatePatient"},
-		"clinicSiteProfile":        {"SetSiteProfile"},
-		"providerIdentityClaim":    {"BindProviderIdentity"},
-		"identityProviderClaim":    {"BindProviderIdentity"},
+		"patientDemographics":       {"CreatePatient"},
+		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
+		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
+		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
+		"providerHours":             {"SetProviderHours"},
+		"providerTimeOff":           {"SetProviderTimeOff"},
+		"providerSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"patientSlotClaim":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"appointmentDocumentation":  {"RecordEncounter"},
+		"appointmentSiteAssignment": {"SetAppointmentSite"},
+		"identityPatientClaim":      {"CreatePatient"},
+		"clinicSiteProfile":         {"SetSiteProfile"},
+		"providerIdentityClaim":     {"BindProviderIdentity"},
+		"identityProviderClaim":     {"BindProviderIdentity"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -256,8 +258,12 @@ func TestPackage_Permissions(t *testing.T) {
 		"CreateAppointment":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse"}}, {scope: "self", grantsTo: []string{"consumer"}}},
 		// The staff-widened front-desk ops — now also widened to the bound provider.
 		"RescheduleAppointment": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		"SetAppointmentStatus":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		"RecordEncounter":       op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
+		// The manual counterpart to BackfillAppointmentSite's auto-remediation
+		// — same staff-widened + bound-provider shape as RescheduleAppointment,
+		// no consumer self-scope (the clinic site is not patient-editable).
+		"SetAppointmentSite":   op("operator", "frontOfHouse", "provider"),
+		"SetAppointmentStatus": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
+		"RecordEncounter":      op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
 		"SetSiteProfile": operatorOnly(), "AssignProviderSite": operatorOnly(), "RemoveProviderSite": operatorOnly(),
 		"BindProviderIdentity": {{scope: "any", grantsTo: []string{"operator"}}},
 		// Weaver-only auto no-show (clinic-reminders' pastDueAppointments target's
@@ -428,8 +434,8 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.WeaverTargets); got != 1 {
 		t.Fatalf("expected 1 weaverTarget, got %d", got)
 	}
-	if got := len(Package.OpMetas); got != 12 {
-		t.Errorf("OpMetas: got %d, want 12", got)
+	if got := len(Package.OpMetas); got != 13 {
+		t.Errorf("OpMetas: got %d, want 13", got)
 	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)

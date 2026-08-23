@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.34.3
+version: 0.34.4
 depends:
   - location-domain
 description: |
@@ -135,6 +135,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: appointmentDocumentation
       class: meta.ddl.aspectType
+    - canonicalName: appointmentSiteAssignment
+      class: meta.ddl.aspectType
     - canonicalName: identityPatientClaim
       class: meta.ddl.aspectType
     - canonicalName: clinicSiteProfile
@@ -226,6 +228,9 @@ declares:
     - operationType: RescheduleAppointment
       scope: any
       grantsTo: [operator, frontOfHouse, provider]
+    - operationType: SetAppointmentSite
+      scope: any
+      grantsTo: [operator, frontOfHouse, provider]
     - operationType: RescheduleAppointment
       scope: self
       grantsTo: [consumer]
@@ -269,6 +274,7 @@ declares:
     - operationType: SetProviderHours
     - operationType: SetProviderTimeOff
     - operationType: RecordEncounter
+    - operationType: SetAppointmentSite
     - operationType: CreatePatient
     - operationType: CreateProvider
     - operationType: SetProviderProfile
