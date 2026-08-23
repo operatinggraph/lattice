@@ -3867,25 +3867,32 @@ function renderApptCard(a, opts) {
     reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf, onDone }));
     btns.append(reschedule);
 
-    // Missing-site correction (SetAppointmentSite) — staff/bound-provider only,
-    // never the patient self-service view (asSelf), mirroring the
-    // "Document visit" gating below. Only offered when the appointment carries
-    // no site at all; the op has no reassignment path, so once set this never
-    // reappears.
-    if (!opts.asSelf && !a.siteKey) {
-      const setSite = document.createElement("button");
-      setSite.className = "ghost";
-      setSite.textContent = "Set site";
-      setSite.addEventListener("click", () => openSetSite(a, onDone));
-      btns.append(setSite);
-    }
-
     const cancel = document.createElement("button");
     cancel.className = "ghost danger";
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => setStatus(a, "cancelled", onDone, { asSelf: opts.asSelf }));
     btns.append(cancel);
 
+    actions.append(btns);
+  }
+
+  // Missing-site correction (SetAppointmentSite) — staff/bound-provider only,
+  // never the patient self-service view (asSelf). Deliberately NOT gated on
+  // ACTIVE_STATUSES (unlike Reschedule/Cancel above): a site is a location
+  // FACT independent of scheduling state, and the live corpus this closes
+  // (verticals.md "27 already-booked appointments still carry no site") is
+  // entirely noShow/completed by the time staff get to it — every one of
+  // those appointments already happened. Only offered when the appointment
+  // carries no site at all; the op has no reassignment path, so once set
+  // this never reappears.
+  if (opts.cancelable && !opts.asSelf && !a.siteKey) {
+    const btns = document.createElement("span");
+    btns.className = "card-btns";
+    const setSite = document.createElement("button");
+    setSite.className = "ghost";
+    setSite.textContent = "Set site";
+    setSite.addEventListener("click", () => openSetSite(a, onDone));
+    btns.append(setSite);
     actions.append(btns);
   }
 
