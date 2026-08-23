@@ -345,8 +345,9 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, rs ruleState, msg subst
 // dispositionEvalErr maps an evaluate-stage error to a Decision (+ error for the
 // pause path), mirroring the inline ack/nak discipline the pre-supervisor
 // pipeline applied: Infra/Structural leave the message pending (return the error
-// so the supervisor pauses); Terminal publishes a DLQ entry and acks; Transient
-// naks for redelivery.
+// so the supervisor pauses); PrivacyCritical likewise, for the stricter reason
+// argued at its arm; Terminal publishes a DLQ entry and acks; Transient naks for
+// redelivery.
 //
 // A footprint-validation drift (failure.ErrEvalDrift, evaluation-consistency-
 // design.md §4.3) is Transient like any other, but a bare Nak would only
@@ -365,6 +366,37 @@ func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message
 	cat := failure.Classify(err)
 	if cat == failure.CatInfra || cat == failure.CatStructural {
 		// Do NOT dispose — leave pending for redelivery when the pipeline resumes.
+		return substrate.Nak, err
+	}
+	if cat == failure.CatPrivacyCritical {
+		// Same shape as Infra/Structural above — Nak with the error intact — but
+		// for a different reason, so it gets its own arm rather than being folded
+		// into that condition. Infra/Structural leave the message pending because
+		// the work is expected to succeed once the store or the schema is fixed;
+		// this one leaves it pending because the ONLY safe disposition of a
+		// possible confidentiality breach is "nothing moves until an operator
+		// looks" (docs/components/refractor-failure-tiers.md: the lens "is paused
+		// immediately, alerted, and never auto-retried").
+		//
+		// Unreachable through this handler today: a shredded identity's row that
+		// cannot be nullified is raised via failure.PrivacyCritical inside
+		// keyshredded and routed through control.PauseRule, never through an
+		// evaluate-stage return value. The arm exists so that a future change
+		// which DOES route such an error here cannot land on the wrong path
+		// silently — it is a fail-safe, not a live route.
+		//
+		// The error must be non-nil: pipeline.go wires spec.Classify =
+		// classifyForSupervisor, which only ever sees a non-nil handler error, so
+		// returning nil here would make the category invisible to the supervisor
+		// and leave the message redelivering with no backoff, no pause, and no
+		// alert — an un-observed hot loop over a live breach. Returned non-nil, it
+		// reaches classifyForSupervisor's CatPrivacyCritical arm and gets
+		// ClassTerminal's immediate, probe-proof pause.
+		//
+		// Not the Terminal disposition below either: publishing a DLQ entry and
+		// Acking disposes of the message and lets the lane keep projecting, which
+		// is exactly the "silently left in place while the pipeline keeps running"
+		// outcome the tier is defined to prevent.
 		return substrate.Nak, err
 	}
 	if cat == failure.CatTerminal {

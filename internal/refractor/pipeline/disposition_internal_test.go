@@ -22,9 +22,10 @@ import (
 
 var errDispositionBoom = errors.New("disposition: synthetic failure")
 
-// TestDispositionEvalErr_FourTiers table-drives the four failure.Category →
-// (Decision, error) mappings dispositionEvalErr implements. The three
-// non-terminal rows need no NATS connection — retryConn/reporter stay nil.
+// TestDispositionEvalErr_FourTiers table-drives every failure.Category →
+// (Decision, error) mapping dispositionEvalErr implements except the Terminal
+// one, which needs a DLQ stream and so lives in its own test below. These rows
+// need no NATS connection — retryConn/reporter stay nil.
 func TestDispositionEvalErr_FourTiers(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -41,6 +42,12 @@ func TestDispositionEvalErr_FourTiers(t *testing.T) {
 		{
 			name:       "structural classifies Nak + non-nil err (supervisor pauses, no DLQ)",
 			err:        failure.Structural(errDispositionBoom),
+			wantDec:    substrate.Nak,
+			wantErrNil: false,
+		},
+		{
+			name:       "privacy-critical classifies Nak + non-nil err (supervisor pauses and alerts, never auto-retried, no DLQ)",
+			err:        failure.PrivacyCritical(errDispositionBoom),
 			wantDec:    substrate.Nak,
 			wantErrNil: false,
 		},

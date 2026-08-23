@@ -212,8 +212,8 @@ func classifyForSupervisor(err error) substrate.FailureClass {
 		// default and get ClassTransient — an infinite auto-redelivery loop,
 		// the literal opposite of "never auto-retry".
 		//
-		// ClassTerminal, not ClassStructural or ClassInfra: this fire adds
-		// probe-driven auto-recovery to a structural pause whenever
+		// ClassTerminal, not ClassStructural or ClassInfra: a structural pause
+		// carries probe-driven auto-recovery whenever
 		// ConsumerSpec.StructuralProbe is set, which cmd/refractor/main.go
 		// does for exactly the Protected/GrantTable postgres lenses — the same
 		// lenses a nullification failure would occur on. VerifyProtectedTable/
