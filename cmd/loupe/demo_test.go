@@ -43,8 +43,8 @@ func TestDemoWriteDeniedByMethodNotPath(t *testing.T) {
 		}
 	}
 
-	// The point of the method rule: a route this fire has never heard of is
-	// denied too. A path allowlist would fail OPEN here.
+	// The point of the method rule: an unregistered route is denied too.
+	// A path allowlist would fail OPEN here.
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
 		if !demoWriteDenied(m, "/api/some/future/write") {
 			t.Errorf("demoWriteDenied(%s, /api/some/future/write) = false, want true (fail-closed for unknown routes)", m)

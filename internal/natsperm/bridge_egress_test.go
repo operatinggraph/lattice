@@ -140,9 +140,9 @@ func TestBridgeCoreKVReadIsolation(t *testing.T) {
 }
 
 // TestBridgeCoreKVReadIsolation_DirectGetBareSubject proves the bare-subject
-// half of the read-deny (adversarial review finding, this fire): NATS' `>`
-// wildcard requires at least one token AFTER the prefix it matches, so a deny
-// on "$JS.API.DIRECT.GET.KV_core-kv.>" alone does NOT cover the BARE subject
+// half of the read-deny: NATS' `>` wildcard requires at least one token
+// AFTER the prefix it matches, so a deny on
+// "$JS.API.DIRECT.GET.KV_core-kv.>" alone does NOT cover the BARE subject
 // "$JS.API.DIRECT.GET.KV_core-kv" — the exact subject nats.go's
 // direct-get-by-sequence (KeyValue.GetRevision) publishes to with no
 // subject-suffix. Without this literal deny, a bridge could sequence-walk the

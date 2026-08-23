@@ -54,8 +54,9 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // links) is erased by the identityErasure Loom pattern's steps 3 and 4 —
 // UnbindIdentityCredentials (identity-domain) and PurgeIdentityDedupFootprint
 // (privacy-base) — both paged from a live erasureRequested marker rather than
-// enumerated in this commit. A subject taken through that pattern is fully
-// erased; a direct ShredIdentityKey submit shreds only the key.
+// enumerated by ShredIdentityKey's own write. A subject taken through that
+// pattern is fully erased; a direct ShredIdentityKey submit shreds only the
+// key.
 //
 // The DDL also admits RecordShredFinalization{identityKey, step} — the
 // Fire-4b durable progress record the two async shred listeners submit under

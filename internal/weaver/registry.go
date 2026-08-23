@@ -54,7 +54,7 @@ const (
 
 // Planner-extension target modes (Contract #10 §10.8 "Planner extension",
 // Fire 4): absent (empty string) is the default — frozen table-only
-// behavior, byte-identical to every target installed before this fire.
+// behavior, byte-identical to a target declaring no Mode.
 // "shadow" computes the planner's pick for each gap declaring candidates and
 // compares it against the table's actual dispatch (never dispatching it);
 // "planned" dispatches the planner's pick for real — Fire 5 for a

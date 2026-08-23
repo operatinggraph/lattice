@@ -188,10 +188,11 @@ func revocationWriteFailed(hb *Heartbeater, logger *slog.Logger, verb, actor str
 // it ClassInfra (the prior blanket behavior) would pause the entire
 // materializer and leave the poison message pending, so on resume/probe it
 // redelivers and re-triggers the same pause: an infinite pause/probe/
-// redeliver spin functionally equivalent to the bug this fix closes.
-// ClassTerminal lets the Term decision actually apply, disposing the one bad
-// message while every other event keeps flowing. Any other error (e.g. the
-// bucket unreachable) still classifies ClassInfra, preserving the existing
+// redeliver spin, since the poison message can never be dispatched
+// successfully. ClassTerminal lets the Term decision actually apply,
+// disposing the one bad message while every other event keeps flowing.
+// Any other error (e.g. the bucket unreachable) still classifies
+// ClassInfra, preserving the existing
 // pause+probe behavior for genuine infra faults.
 func classifyRevocationError(err error) substrate.FailureClass {
 	if substrate.IsInvalidKeyError(err) {

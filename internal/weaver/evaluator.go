@@ -527,9 +527,9 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 // dispatch, called from BOTH fresh-dispatch seams planGap serves (lane-1's
 // dispatchGap and the reconciler's reclaim) — mirroring bumpEffectDispatch/
 // bumpOscillation's "same two seams" precedent, so a declared budget paces
-// reclaim re-fires exactly like fresh episodes. target.Admission == nil (every
-// target before this fire) short-circuits true without reading the row's
-// priority column — byte-identical dispatch. id is the mark-key shape
+// reclaim re-fires exactly like fresh episodes. target.Admission == nil (a
+// target with no policy configured) short-circuits true without reading the
+// row's priority column — byte-identical dispatch. id is the mark-key shape
 // (<targetId>.<entityId>.<gapColumn>), a stable identity for this gap's
 // pending-admission entry across redeliveries.
 func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter string, row map[string]any) bool {
@@ -544,16 +544,16 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 // fireEpisode is the lane-1 dispatch core: CAS-create the mark on absence
 // (the dispatch OCC) and fire the episode op. rec/markRev/found/stale are the
 // caller's own already-read mark snapshot (dispatchGap reads it once, up
-// front, so the Fire 5 candidate-pin resolution and this fire decision never
-// see two different mark states). redelivered selects the genuinely-in-flight
-// disposition — false drops (the anti-storm gate: another episode is in
-// flight), true re-publishes the SAME episode requestId (idempotent at the
-// Contract #4 tracker). stale (staleMark) reclaims the mark in place instead —
-// see that branch. The reconciler sweep's OWN reclaim does not pass through
-// here for its lease-expiry case: it replaces the expired mark in place under
-// a revision condition and fires directly, independently. action is recorded
-// on the mark (the §10.3 value shape) so a later reclaim can re-dispatch the
-// right episode.
+// front, so the Fire 5 candidate-pin resolution and the fire decision made
+// here never see two different mark states). redelivered selects the
+// genuinely-in-flight disposition — false drops (the anti-storm gate:
+// another episode is in flight), true re-publishes the SAME episode
+// requestId (idempotent at the Contract #4 tracker). stale (staleMark)
+// reclaims the mark in place instead — see that branch. The reconciler
+// sweep's OWN reclaim does not pass through here for its lease-expiry case:
+// it replaces the expired mark in place under a revision condition and
+// fires directly, independently. action is recorded on the mark (the §10.3
+// value shape) so a later reclaim can re-dispatch the right episode.
 func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey, col, action string,
 	pl *plan, redelivered bool, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
 

@@ -473,7 +473,7 @@ func TestCapAdv_RuntimeMintedReservedGrant_PackageGrantStillWins(t *testing.T) {
 // they already hold. Holding it means being able to rewrite any permission
 // vertex's body — including stripping `origin` off a package's reserved grant,
 // silently downgrading it to unstamped → runtime → refused, and thereby
-// disarming the very reservation this fire builds.
+// disarming the very reservation the write-once guarantee depends on.
 //
 // So the write-once precondition the whole design rests on is only real if the
 // runtime channel is closed too. This drives the actual two-op mint through the

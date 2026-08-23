@@ -353,7 +353,7 @@ func analyseGroupingClause(c Clause, items []ProjectionItem, key, det map[string
 // which is exactly how a redundancy claim becomes an over-merge: the next
 // clause reads it as determined, drops it from the key, and merges groups the
 // executor keeps apart. Every path that reaches here is argued to keep the two
-// sets disjoint — and "by construction" is what this fire already found to be
+// sets disjoint — and "by construction" is a claim already found to be
 // construction-dependent once, on the duplicate-alias path above. So a
 // violation collapses to the safe state, where nothing is determined and the
 // next clause can claim no redundancy at all, instead of proceeding on a

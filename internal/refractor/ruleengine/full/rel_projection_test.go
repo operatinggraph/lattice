@@ -531,7 +531,7 @@ func TestRelProjection_BothEndpointsBoundFansOutPerLink(t *testing.T) {
 	// links are the same one expansion of the same pair. It is taken on the
 	// OPTIONAL form, because the REQUIRED anonymous clause introduces no new
 	// variable at all and applyMatch drops every row of it — a separate,
-	// still-open defect this change narrows the surface of without resolving.
+	// still-open defect narrowed here, not resolved.
 	anonymous := parseExec(t,
 		`MATCH (i:identity {key: $i})
 		 MATCH (b:role {key: $r})

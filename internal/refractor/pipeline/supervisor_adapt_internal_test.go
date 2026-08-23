@@ -250,8 +250,8 @@ func TestHealthSink_SetActive_RebuildCompletesDuringWrite(t *testing.T) {
 // ClassTransient (an infinite auto-redeliver loop — the opposite of "never
 // auto-retry", docs/components/refractor-failure-tiers.md), and it must not
 // map to ClassStructural or ClassInfra either, since both carry probe-driven
-// auto-recovery machinery this fire adds/relies on and neither probe verifies
-// that a privacy-critical condition was actually remediated.
+// auto-recovery machinery, and neither probe verifies that a
+// privacy-critical condition was actually remediated.
 func TestClassifyForSupervisor_CatPrivacyCritical_MapsToTerminal(t *testing.T) {
 	err := failure.PrivacyCritical(errors.New("could not nullify shredded row"))
 	require.Equal(t, failure.CatPrivacyCritical, failure.Classify(err), "sanity: PrivacyCritical must classify CatPrivacyCritical")

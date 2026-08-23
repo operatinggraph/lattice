@@ -621,9 +621,9 @@ func TestHandleBookings_NoSession_Is401(t *testing.T) {
 	}
 }
 
-// The exact vector this fire closed: /api/bookings?bookerKey=<anyone> used to
-// hand any caller any resident's whole class history. The parameter is no
-// longer read, and this pins that — a future author reintroducing one has a
+// The vector this closes: /api/bookings?bookerKey=<anyone> must not hand
+// any caller any resident's whole class history. The parameter is not
+// read, and this pins that — a future author reintroducing one has a
 // failing test rather than a silent regression.
 func TestHandleBookings_BookerKeyParamIsIgnored(t *testing.T) {
 	s, cookieFor := devSessionServer(t)

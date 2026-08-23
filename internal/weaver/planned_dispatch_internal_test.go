@@ -177,7 +177,7 @@ func TestPlannedMode_FreshDispatchPicksRankedCandidate(t *testing.T) {
 // TestPlannedMode_AbsentModeByteIdentical proves a candidates-only gap on a
 // target whose Mode is NOT "planned" (absent or shadow) hits the exact
 // pre-Fire-5 config-error path — dispatch never routes through candidate
-// selection for these modes, so every target installed before this fire is
+// selection for these modes, so a target with Mode absent or shadow stays
 // untouched.
 func TestPlannedMode_AbsentModeByteIdentical(t *testing.T) {
 	t.Parallel()

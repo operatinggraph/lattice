@@ -11,7 +11,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - RequestCapabilityAuthoring — a human operator submits this. The design's
 //     standing posture narrows this to a distinct `identity.ai.*` agent's own
 //     grant once that agent identity is seeded (Architecture Item 4) —
-//     granting to `operator` here is an interim widening this fire accepts (a
+//     granting to `operator` here is an accepted interim widening (a
 //     human requesting authoring is itself a legitimate, human-in-the-loop-safe
 //     action; it is the AI's narrower grant that remains to be seeded).
 //   - CreateAuthoringClaim — Loom's relay actor (operator-equivalent), the same

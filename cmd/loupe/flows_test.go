@@ -90,7 +90,7 @@ func TestComputeFlows(t *testing.T) {
 		if got := byID["orphan00000000000"].Liveness; got != livenessOrphaned {
 			t.Errorf("Loom has no record of this instance: liveness = %q, want %q", got, livenessOrphaned)
 		}
-		// The defect this fire exists for: the id IS in Loom's list, so a
+		// The defect this asserts against: the id IS in Loom's list, so a
 		// membership-only badge called this live while Loom called it done.
 		if got := byID["stale00000000000"].Liveness; got != livenessStaleHistory {
 			t.Errorf("Loom considers this instance finished: liveness = %q, want %q", got, livenessStaleHistory)

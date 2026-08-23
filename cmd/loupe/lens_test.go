@@ -523,7 +523,7 @@ func TestLensRows_ScopesToOwnPrefixAndFlagsTombstones(t *testing.T) {
 	put(bucket, "myLens.actor1", []byte(`{"key":"myLens.actor1","actor":"vtx.identity.actor1","projectionSeq":3,"widget":"live"}`))
 	put(bucket, "myLens.actor2", []byte(`{"isDeleted":true,"projectedAt":"2026-07-30T00:00:00Z","projectionSeq":7}`))
 	// A sibling lens's row sharing the SAME bucket — must never appear in
-	// myLens's Contents listing (the defect this fire fixes).
+	// myLens's Contents listing (cross-lens bucket bleed).
 	put(bucket, "siblingLens.actor9", []byte(`{"key":"siblingLens.actor9","actor":"vtx.identity.actor9","projectionSeq":1}`))
 
 	put(bootstrap.CoreKVBucket, "vtx.meta.L1.spec", specEnv(map[string]any{

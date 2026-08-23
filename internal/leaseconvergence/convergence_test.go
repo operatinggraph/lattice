@@ -519,7 +519,7 @@ func (h *harness) assertEagerReopenCycle(appKey, appID, applicantID string, cycl
 
 	// The window lapses → fired subject → Weaver submits MarkExpired → the generic
 	// freshnessMarker DDL COMMITS the marker aspect (an unconditioned update,
-	// bumping its revision + writing this fire's later expiredAt) → Refractor
+	// bumping its revision + writing a later expiredAt) → Refractor
 	// reprojects with a fresh $now → the lapsed validUntil makes missing_bgcheck
 	// re-open → Weaver re-dispatches the bgcheck externalTask → the live bridge
 	// re-completes it. The @at fires one freshness window after the prior converge,

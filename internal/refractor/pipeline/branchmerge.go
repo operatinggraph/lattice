@@ -20,10 +20,10 @@ import (
 // primary enforcement point.
 //
 // This call site is what makes ClassifyBranchReturnColumns' classification
-// runtime load-bearing: a ColumnWalkOwned verdict now decides whether a
+// runtime load-bearing: a ColumnWalkOwned verdict decides whether a
 // disagreement is resolved deterministically (mergeRowGroup) instead of
-// refused. Before this fire the same classification was install-time-only
-// (corekv_source.go), where a wrong verdict could only make the install gate
+// refused. Elsewhere, the same classification runs install-time-only
+// (corekv_source.go), where a wrong verdict can only make the install gate
 // too permissive or too strict — never change what a running lens projects.
 // The classifier's own known blind spots (it reads only branch 0's RETURN
 // expressions to derive every branch's alias-to-ownership mapping, and a

@@ -499,11 +499,11 @@ func TestCompleteCredentialLink_ScenarioB_CreatesAspect(t *testing.T) {
 // "LinkKeyInvalid" code, which would need its own frozen Contract #2 §2.6
 // entry) — every failure reason surfaces only via the
 // claim-attempts.<outcome> Health KV counter, never in the caller-visible
-// reply. This pins the wiring: before this fix, a "LinkKeyInvalid: "-
-// prefixed fail() message fell through classifyScriptError's generic branch
-// unreclassified, so the outcome-specific detail (here "invalid-key") leaked
-// into the caller-visible reply's error.details.message instead of being
-// stripped and routed to Health KV.
+// reply. This pins the wiring: a "LinkKeyInvalid: "-prefixed fail()
+// message must not fall through classifyScriptError's generic branch
+// unreclassified — the outcome-specific detail (here "invalid-key") must be
+// stripped and routed to Health KV, never leaked into the caller-visible
+// reply's error.details.message.
 func TestCompleteCredentialLink_GenericError_NoEnumeration(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)

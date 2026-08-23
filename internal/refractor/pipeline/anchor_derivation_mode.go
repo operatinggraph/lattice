@@ -99,9 +99,9 @@ func (p *Pipeline) derivationMode() DerivationMode {
 	return DefaultAnchorDerivationMode()
 }
 
-// builtinDerivationMode is `act`: this fire's whole content is that the
-// derivation has earned the decision, and a built-in default of `shadow` would
-// ship the cost of the flip with none of its benefit.
+// builtinDerivationMode is `act`: the derivation has earned the decision, and
+// a built-in default of `shadow` would ship the cost of the flip with none of
+// its benefit.
 const builtinDerivationMode = DerivationModeAct
 
 // affectedAnchors returns the anchor keys one CDC event must reproject, and is

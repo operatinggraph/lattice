@@ -155,9 +155,8 @@ func TestVerifyKernel_DetectsStaleContent(t *testing.T) {
 
 	// A stale script is present with a valid envelope — every presence/shape
 	// assertion above this passes it clean. Only content comparison against
-	// what this binary builds can see it, which is the gap this fire closes:
-	// `make up`'s reuse short-circuit calls VerifyKernel and must stop
-	// treating a kernel like this as fresh.
+	// what this binary builds can see it: `make up`'s reuse short-circuit
+	// calls VerifyKernel and must not treat a kernel like this as fresh.
 	key := substrate.AspectKey(bootstrap.UpgradePackageDDLKey, "script")
 	staleVal, err := bootstrap.MakeAspectEnvelope(key, bootstrap.UpgradePackageDDLKey, "script", "script",
 		map[string]any{"source": "def execute(state, op):\n    fail(\"an older binary\")\n"})

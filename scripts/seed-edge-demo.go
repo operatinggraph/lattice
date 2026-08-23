@@ -19,7 +19,7 @@
 // (service_instance_test.go's TestCreateServiceTemplate_FamilyOutOfEnum_
 // Rejected proves a third family, e.g. "inspection", is rejected) —
 // widening it to a literal "laundry" family is a service-domain schema
-// change out of this fire's scope (edge-showcase-app-design.md §7 Fire 1
+// change out of scope here (edge-showcase-app-design.md §7 Fire 1
 // scopes to the manifest package + vocabulary + the install chain + the
 // seed, not a service-domain DDL edit). This seed instead uses the real
 // `backgroundCheck` family and brands the template's display metadata

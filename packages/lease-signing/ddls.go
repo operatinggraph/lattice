@@ -315,8 +315,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 // aspect carries ONLY the applicant's own raw financials + the guarantor's
 // relationship/income (which describe the applicant's qualification story,
 // not a third party's identity), and NO shipped lens reads it — the retained
-// fields are captured + custodied, not yet decrypted back to any reader in
-// this fire.
+// fields are captured + custodied, not yet decrypted back to any reader.
 func profileAspectDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "applicantProfile",

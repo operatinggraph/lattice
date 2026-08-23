@@ -45,9 +45,9 @@
 //     account on first use); missing_charge → directOp(DebitAccount)
 //     (cafe-ledger, posts the settled total with a tabRef back-link).
 //
-// cafe-ledger's DebitAccount is extended (this fire) with an optional
-// tabRef: when present it writes the lnk.cafetransaction.settles.tab audit
-// link the cafeTabSettlement lens's missing_charge gate reads — the
+// cafe-ledger's DebitAccount accepts an optional tabRef: when present it
+// writes the lnk.cafetransaction.settles.tab audit link the
+// cafeTabSettlement lens's missing_charge gate reads — the
 // semantic-contracts clauseRef precedent, additive and byte-for-byte
 // unaffected for a plain human-submitted DebitAccount.
 //

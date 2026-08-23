@@ -586,14 +586,12 @@ func TestPlainDerivationAct_UnenrolledLensStillRescans_E2E(t *testing.T) {
 // asserted. evaluateSeededMultiPosition's declined answer is the NARROW
 // single-seed call (executeFullForActor with the event vertex as the seed)
 // — NOT the unseeded whole-corpus rescan evaluatePlainNeighbourEvent's own
-// declined path uses — because a seeded event's shipped answer, before this
-// increment existed at all, was already that narrow call: an operator
-// running `off` mode, or any lens without a fresh licence, must pay exactly
-// what it paid before this fire, never a rescan it never asked for (a real
-// per-event cost regression on any high-volume identity-typed lens, found
-// during this fire's own adversarial review — see the design doc's build
-// note). The correction is licensed-`act`-only; its own twin test below
-// proves that half.
+// declined path uses — because a seeded event's shipped answer is already
+// that narrow call: an operator running `off` mode, or any lens without a
+// fresh licence, must pay exactly that narrow-call cost, never a rescan it
+// never asked for (a real per-event cost regression on any high-volume
+// identity-typed lens — see the design doc's build note). The correction is
+// licensed-`act`-only; its own twin test below proves that half.
 func TestPlainDerivationSeeded_MultiPositionUnlicensedKeepsTodaysNarrowSeed_E2E(t *testing.T) {
 	env := startPipelineEnv(t)
 
@@ -627,11 +625,11 @@ func TestPlainDerivationSeeded_MultiPositionUnlicensedKeepsTodaysNarrowSeed_E2E(
 	// The fence: a BRAND NEW pair, created after the rename event above. Its
 	// own initial population goes through the LINK arm's normal endpoint
 	// evaluation (evalPlainLinkReprojection), which narrows correctly on the
-	// b-position endpoint regardless of this fire's fix — so waiting for it
-	// proves every prior event on this single in-order consumer, the rename
-	// included, has already been fully applied. A poll on bKey's OWN value
-	// could not serve as this fence: under the declined path it is
-	// EXPECTED never to move, which is exactly what is under test.
+	// b-position endpoint independent of the declined-path correction above
+	// — so waiting for it proves every prior event on this single in-order
+	// consumer, the rename included, has already been fully applied. A poll
+	// on bKey's OWN value could not serve as this fence: under the declined
+	// path it is EXPECTED never to move, which is exactly what is under test.
 	fenceB, fenceA := narrowedID(t, "SmpFenceB"), narrowedID(t, "SmpFenceA")
 	fenceBKey := substrate.VertexKey("identity", fenceB)
 	putIdentity(t, env, fenceBKey, "fence-b", "active", "2026-01-03T00:00:00Z")

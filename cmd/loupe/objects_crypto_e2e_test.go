@@ -27,9 +27,9 @@ import (
 // route is real (object-store-crypto-shred-design.md §3.4). Upload is
 // deliberately NOT exercised here — handleSensitiveObjectUpload submits a
 // real AttachObject op through the Processor, which this fixture has no fake
-// responder for (deferred to Fire 4, per the Fire 2 checkpoint); this fire
-// seeds the post-upload state directly, the same way vaultDecryptFixture's
-// putSensitiveAspect seeds a post-commit aspect.
+// responder for (deferred to Fire 4, per the Fire 2 checkpoint); this
+// fixture seeds the post-upload state directly, the same way
+// vaultDecryptFixture's putSensitiveAspect seeds a post-commit aspect.
 func sensitiveObjectFixture(t *testing.T) (hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn) {
 	t.Helper()
 	ns := natsfixture.StartServer(t)

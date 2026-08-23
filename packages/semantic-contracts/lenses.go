@@ -106,10 +106,10 @@ func Lenses() []pkgmgr.LensSpec {
 // requestedRent column would underbill by 100x.
 //
 // A lease with no requestedRent (an application that skipped moveInDate, or
-// predates this fire) never projects a row — it simply never violates,
-// exactly like clauseSatisfaction's own "no missing_account gap" precedents
-// (clinic-ledger/cafe-domain) degrade when a prerequisite fact is absent,
-// rather than dispatching a malformed op.
+// one created before requestedRent was captured) never projects a row — it
+// simply never violates, exactly like clauseSatisfaction's own "no
+// missing_account gap" precedents (clinic-ledger/cafe-domain) degrade when a
+// prerequisite fact is absent, rather than dispatching a malformed op.
 const leaseRentSettlementSpec = `MATCH (l:leaseapp {key: $actorKey})
 OPTIONAL MATCH (l)<-[:governs]-(c:clause)
 WITH
@@ -171,7 +171,7 @@ RETURN
 // a WHERE-filtered match is the deferred negative/filter-retraction primitive
 // (Fires 1+2 shipped the plain-lens retraction transport 2026-07-02, but
 // wiring it into actorAggregate lenses like this one is a later target-diff
-// increment, not this fire — see the design's R3 v1 constraint). A oneTime
+// increment — see the design's R3 v1 constraint). A oneTime
 // clause instead relies purely on the upsert-safe signal — once the
 // authorizing transaction exists, the gap flips false and STAYS false (the
 // row lingers non-violating, which is harmless).

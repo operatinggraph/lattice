@@ -626,8 +626,8 @@ func TestBuildInstallBatch_SensitiveAspectEmittedOnlyWhenTrue(t *testing.T) {
 // catalog-materialization seam: an op-meta vertex whose operationType carries
 // a DDL Effects declaration gets a sibling `.effects` aspect carrying those
 // guards verbatim; an op-meta vertex for an operationType with no Effects
-// entry emits no such aspect (opt-in, byte-identical to every install before
-// this fire).
+// entry emits no such aspect (opt-in, byte-identical to an install that
+// declares no Effects).
 func TestBuildInstallBatch_EffectsAspectEmittedOnlyWhenDeclared(t *testing.T) {
 	ddl := minimalDDL("leaseapp", "meta.ddl.vertexType", false)
 	ddl.PermittedCommands = []string{"SignLease", "CreateLeaseApplication"}

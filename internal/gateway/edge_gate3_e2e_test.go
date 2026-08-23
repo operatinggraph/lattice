@@ -22,10 +22,10 @@ import (
 // "a revoked JWT (D1 revocation) cannot submit an intent". Fire 3 of
 // per-identity-nats-subscribe-acl-design.md already proved live NATS
 // subscription revocation against the real dev stack
-// (scripts/verify-edge-revocation-e2e.go); that script cannot cover
-// submission because, until this fire, internal/edge/agent submitted
-// directly to core-operations, bypassing the Gateway (and its
-// Authenticator) entirely. This is the submission-side proof: a real
+// (scripts/verify-edge-revocation-e2e.go); that script covers subscription
+// only, not submission: internal/edge/agent submits through the Gateway
+// (and its Authenticator), so the submission path needs its own proof.
+// This is the submission-side proof: a real
 // gateway.Server, wrapping a real auth.Authenticator (the identical
 // production Verify+revocation-check path), fronting an actual
 // internal/edge/agent.Agent configured with a GatewaySubmitter — not a

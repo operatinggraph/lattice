@@ -766,9 +766,9 @@ func TestObject_SensitiveAttach_GoverningIdentityMeta_Rejected(t *testing.T) {
 }
 
 // TestObject_SensitiveAttach_DedupKeepsFirstEnvelope proves the live→dedup
-// branch's existing behavior (unchanged by this fire, extended coherently to
-// sensitive objects): a SECOND owner attaching to the same (governingIdentity,
-// digest) — an identity-salted dedup, mirroring TestObject_Lifecycle's
+// branch's existing behavior, extended coherently to sensitive objects: a
+// SECOND owner attaching to the same (governingIdentity, digest) — an
+// identity-salted dedup, mirroring TestObject_Lifecycle's
 // cross-owner dedup step — does NOT overwrite .content.encryption with the
 // new call's envelope, exactly mirroring how storeName also stays pinned to
 // the first upload. The first envelope is the one that decrypts the bytes

@@ -541,8 +541,8 @@ func scopedGrantPool(t *testing.T, dsn string) *pgxpool.Pool {
 // under `go test -p 4` other packages (e.g. ruleengine/full's
 // capability_read_grants_lens_contract_test.go) hit the same DSN concurrently,
 // and on a dev/demo DSN a live Refractor grant lens writes through the real
-// table — either would take a 42P10 (now structural, by this fire's own (e))
-// during the window the constraint is dropped.
+// table — either would take a 42P10 (a structural collision with §4.2(e)'s
+// own check) during the window the constraint is dropped.
 //
 // The table is built WITH its PRIMARY KEY first and proven to pass — the
 // positive vector for this fixture's own plumbing — before the constraint is

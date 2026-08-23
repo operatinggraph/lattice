@@ -187,17 +187,17 @@ func (f *plainDiffFixture) requireUnionEqualsUnseeded(t *testing.T, eventKey, ev
 		"the union of the seeded per-anchor evaluations must equal the unseeded evaluation's rows for those anchors — this is what makes Increment 4's eventual substitution sound")
 }
 
-// TestPlainDerivation_Differential_ClinicProvidersShape is the fire's own
+// TestPlainDerivation_Differential_ClinicProvidersShape is this test file's
 // named payoff, run as a superset proof: on the identifiedBy link and on a
 // bare neighbour vertex event, the derived set must cover every provider
 // whose row actually changed. Every mutation below keeps the real
 // clinicProviders domain's implicit 1:1 provider-identifiedBy cardinality —
 // no provider ever gains a SECOND identifiedBy edge — because
-// dedupeKeyFor's identity is the target Keys alone (pre-existing, unchanged
-// by this fire): two rows sharing one provider's key but different identity
-// content is a shape the real lens's own domain model never produces, and
-// exercising it here would test dedupeKeyFor's cardinality assumption rather
-// than this fire's own soundness property.
+// dedupeKeyFor's identity is the target Keys alone: two rows sharing one
+// provider's key but different identity content is a shape the real lens's
+// own domain model never produces, and exercising it here would test
+// dedupeKeyFor's cardinality assumption rather than this test's own
+// soundness property.
 func TestPlainDerivation_Differential_ClinicProvidersShape(t *testing.T) {
 	f := newPlainDiffFixture(t, providerSpec, "provider")
 	ctx := context.Background()

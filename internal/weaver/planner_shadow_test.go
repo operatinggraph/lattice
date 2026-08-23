@@ -148,7 +148,7 @@ func TestShadowCompare_AgreeAndDiverge(t *testing.T) {
 
 // TestShadowCompare_NoopCases proves shadowCompare never records anything for
 // a non-shadow-mode target or a gap with no candidates — the plumbing must
-// stay inert for every target installed before this fire (mode absent).
+// stay inert for a target whose mode is absent.
 func TestShadowCompare_NoopCases(t *testing.T) {
 	t.Parallel()
 	e := shadowTestEngine(t)

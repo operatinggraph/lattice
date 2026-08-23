@@ -403,8 +403,8 @@ func legacyConcreteLocationPackage() pkgmgr.Definition {
 	}
 }
 
-// TestUpgrade_ConcreteLocationToAbstract drives the transition this fire
-// actually ships on every already-installed cell: the 0.2.x CONCRETE `location`
+// TestUpgrade_ConcreteLocationToAbstract drives the transition every
+// already-installed cell goes through: the 0.2.x CONCRETE `location`
 // DDL upgraded in place to the four-meta abstract form.
 //
 // The destination differs from a fresh install in a way no other test reaches,

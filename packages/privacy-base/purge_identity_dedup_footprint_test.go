@@ -443,8 +443,8 @@ func repointIndexVertex(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // Every other confinement test here rests on the enumeration's key filter: the
 // sweep only ever names vertices reached through the subject's own links, so
 // nobody else's footprint is in range. That argument holds only while an
-// enumerated link and its vertex agree about who owns it, and this fire's
-// CreateUnclaimedIdentity repoint is the first writer that can break that
+// enumerated link and its vertex agree about who owns it, and
+// CreateUnclaimedIdentity's repoint is the first writer that can break that
 // agreement mid-sweep. A document-less tombstone carries no content assertion,
 // so without the ownership gate the sweep destroys the vertex the NEW owner
 // legitimately holds, and the live link it left behind lets a later registrant

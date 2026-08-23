@@ -10,8 +10,8 @@ package full
 // grouping_corpus_census_test.go now makes impossible to repeat: privacy-base's
 // erasure-residue lens chains five aggregating clauses carrying int64 counts,
 // and cafe-domain's tab-settlement lens is a multi-`WITH` the analysis refuses.
-// Neither had a test, so this fire would have changed the first one's grouping
-// key with nothing watching.
+// Neither had a test, so a change to the first one's grouping key could land
+// with nothing watching.
 
 import (
 	"testing"

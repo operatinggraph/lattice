@@ -13,9 +13,9 @@ import (
 // TestExecuteFullForActor_MultiBranch_UnionsAnchorsAcrossWalks is the §12
 // repro (refractor-shared-keyspace-arbitration-design.md §13.6's acceptance
 // test): one actor, walk 0 reaching 2 real anchors, walk 1 reaching 1 real
-// anchor on a DIFFERENT anchor. Before this fire's composition primitive, a
-// single coalesced query silently truncated the anchor set to whichever
-// branch happened first (§12's defect); this asserts the UNION of all three
+// anchor on a DIFFERENT anchor. Without the composition primitive here, a
+// single coalesced query silently truncates the anchor set to whichever
+// branch happens first (§12's defect); this asserts the UNION of all three
 // anchors projects.
 func TestExecuteFullForActor_MultiBranch_UnionsAnchorsAcrossWalks(t *testing.T) {
 	if testing.Short() {
@@ -146,15 +146,14 @@ func TestUseFullEngineBranches_DowngradeToSingleBranchClearsMultiWalkState(t *te
 // is the edgeCatalog live repro (2026-07-29T05:51:52, filed to lattice.md):
 // a multi-hat actor holding 2 roles that each `grantedBy` a DIFFERENT
 // permission for the SAME op makes that role-walk's own cypher execution
-// yield 2 rows for one op anchor with 2 different `viaRole` values — before
-// this fire, mergeRowGroup treated that as a cross-walk disagreement and
-// refused the whole row. viaRole is ColumnWalkOwned (only the role-walk
-// branch ever binds `role`), so the merge must now resolve it deterministically
-// instead of erroring. Also pins the pre-existing behavior for the two other
-// shapes a real multi-walk lens produces: a walk-owned column merges fine
-// across branches when only one role reaches a dual-reachable op (existing
-// nil-vs-non-nil case), and an anchor-only column (title) still requires
-// agreement.
+// yield 2 rows for one op anchor with 2 different `viaRole` values. viaRole
+// is ColumnWalkOwned (only the role-walk branch ever binds `role`), so the
+// merge must resolve it deterministically instead of treating it as a
+// cross-walk disagreement and refusing the whole row. Also pins the behavior
+// for the two other shapes a real multi-walk lens produces: a walk-owned
+// column merges fine across branches when only one role reaches a
+// dual-reachable op (existing nil-vs-non-nil case), and an anchor-only
+// column (title) still requires agreement.
 func TestExecuteFullForActor_MultiBranch_WalkOwnedFanOutResolvesDeterministically(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")

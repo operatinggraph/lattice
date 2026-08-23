@@ -229,7 +229,19 @@ var (
 	// tree first, and one whose hits are dominated by legitimate prose is
 	// rejected rather than gated. "used to" (96 hits) and "no longer" (255) were
 	// rejected on exactly that test.
-	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b`
+	//
+	// The list covers two grammars. The first narrates a named PRIOR state in the
+	// past tense. The second anchors on the change being authored right now —
+	// "this fire" (72 hits), "this fix" (14), "this change" (3) — which fails the
+	// rule for the reason the rule exists: a reader who has no idea a change ever
+	// happened cannot resolve the referent. Measured alongside them and rejected:
+	// "this run" (25) and "this pass" (37), both dominated by runtime prose (a CLI
+	// invocation, a reconcile pass); and "this commit" (3), where "commit path"
+	// and "commit step" are core Processor vocabulary and RE2 has no lookahead to
+	// separate them, so one false positive in three is not worth two sites.
+	// Sentence-initial capitalisation is matched: the tree carries none today, and
+	// a gate one shift key evades is not a gate.
+	historyPhrases = `Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b|Before (?:the|this) (?:fix|change|patch|rewrite|gate)\b|[Tt]his (?:fire|fix|change)\b`
 	// historyComment flags a comment carrying one of those phrases. The
 	// changelog-tag shape stays anchored to a comment's lead, unlike the rest: a
 	// whole-tree measurement unanchored produced 86 hits, nearly all a
@@ -3065,6 +3077,27 @@ func selfTest() []string {
 				"\t\t_ = entry\n" +
 				"\t}\n" +
 				"}\n", ""},
+		// The change-narration grammar that anchors on the authoring change.
+		// Each rejected candidate carries the legitimate shape it was rejected
+		// FOR, so a later widening cannot quietly re-admit it.
+		{"narration anchored on this fire is denied", "internal/weaver/evaluator.go",
+			"// The gap this fire closes: a retired column left its row error standing.\n", "history/changelog comment"},
+		{"narration anchored on this fix is denied", "internal/weaver/evaluator.go",
+			"\t// before this fix the handler trusted the caller's key.\n", "history/changelog comment"},
+		{"narration anchored on this change is denied", "internal/weaver/evaluator.go",
+			"\t// the OTHER surface this change adds is the admission block.\n", "history/changelog comment"},
+		{"sentence-initial capitalisation does not evade the gate", "internal/weaver/evaluator.go",
+			"// This fire ships the per-entity key.\n", "history/changelog comment"},
+		{"a plural verb is not the noun phrase", "internal/edge/sync/sync.go",
+			"\t// — so this fires when the SYNC stream retains nothing at all.\n", ""},
+		{"this run describes an invocation, not a change", "cmd/lattice-pkg/main.go",
+			"\t// invisible before this run touched anything — pre-existing residue.\n", ""},
+		{"this pass describes a traversal, not a change", "internal/bootstrap/reconcile.go",
+			"\t// a candidate this pass must leave entirely alone.\n", ""},
+		{"this commit path is Processor vocabulary, not narration", "internal/processor/commit_path.go",
+			"\t// a collision this commit path does not already treat as benign.\n", ""},
+		{"a lint script quoting the banned shape is exempt", "scripts/lint-board.go",
+			"\t// fails a cell carrying `Was:` or narrating this fire.\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -3082,7 +3115,8 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "actor-guard:") &&
 				!strings.HasPrefix(fd.msg, "capability-apply:") &&
 				!strings.HasPrefix(fd.msg, "refusal-sentinel:") &&
-				!strings.HasPrefix(fd.msg, "kv-batch:") {
+				!strings.HasPrefix(fd.msg, "kv-batch:") &&
+				!strings.HasPrefix(fd.msg, "history/changelog") {
 				continue
 			}
 			hits++

@@ -905,16 +905,16 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 // series_status is the raw three-state read a client renders directly
 // (mirroring clinic-domain's own appointmentStatus idiom) rather than the
 // fused `active` boolean visitSeriesDueSpec still carries for Weaver's own
-// convergence question ("should this fire next"), a different question this
-// read model does not need to answer: a series that reached its natural end
-// (never paused, but its next occurrence would fall past activeUntil) is
-// "ended", not the same state as one a human explicitly paused — collapsing
-// them left a naturally-ended series showing a Resume button that submitted
-// and changed nothing observable (verticals.md). Precedence is sequential,
-// not layered: a series paused before it ran out still reads "paused" even
-// if activeUntil has since passed, because "ended" only ever tests the NOT
-// PAUSED branch — matching the intent "did this run its course on its own",
-// not "is today past the cutoff".
+// convergence question ("should this trigger next"), a different question
+// this read model does not need to answer: a series that reached its
+// natural end (never paused, but its next occurrence would fall past
+// activeUntil) is "ended", not the same state as one a human explicitly
+// paused — collapsing them left a naturally-ended series showing a Resume
+// button that submitted and changed nothing observable (verticals.md).
+// Precedence is sequential, not layered: a series paused before it ran out
+// still reads "paused" even if activeUntil has since passed, because
+// "ended" only ever tests the NOT PAUSED branch — matching the intent "did
+// this run its course on its own", not "is today past the cutoff".
 const visitSeriesReadSpec = `MATCH (s:visitseries)
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)

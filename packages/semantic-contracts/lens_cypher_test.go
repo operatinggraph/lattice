@@ -130,7 +130,7 @@ func TestClauseSatisfaction_Uncharged(t *testing.T) {
 // whose .terms aspect has no `conditioned` key at all (Fire V1's exact
 // shape): missing_charge must still gate purely on chargeCount, the same as
 // an explicitly-unconditioned (conditioned:false) clause. Regression test for
-// a real bug this fire's review caught: `conditioned = false` treats a null
+// a real bug caught in review: `conditioned = false` treats a null
 // `conditioned` as NOT matching (nil never equals false), which silently
 // suppressed the charge for every legacy clause forever; the fix compares
 // `conditioned <> true` instead.

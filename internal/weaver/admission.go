@@ -33,7 +33,7 @@ const admissionPendingCap = 10_000
 
 // AdmissionPolicy is a target's optional `admission` block (Contract #10 §10.8
 // Planner extension, Fire 8): declared dispatch-pacing budgets. Absent (the
-// default on every target before this fire) is unbounded — byte-identical to
+// default on a target with none configured) is unbounded — byte-identical to
 // every dispatch decision before Fire 8. Config + optional package data, never
 // consulted for correctness (the §10.3 mark CAS-create remains the sole
 // anti-storm/idempotency gate) — admission control only paces WHEN a plan

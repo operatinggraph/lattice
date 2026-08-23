@@ -541,9 +541,9 @@ func Lenses() []pkgmgr.LensSpec {
 			// Rows stay unchanged (the row shape is identical to
 			// staffReadGrants' {actor_id, anchor_id, grant_source} triple);
 			// clinicProviderReadGrants (the entity-as-actor producer) remains
-			// for nothing new — there is no caller today minting a JWT
-			// subject directly on a provider's own bare NanoID, and retiring
-			// it is out of this fire's scope.
+			// unused for anything new — there is no caller today minting a
+			// JWT subject directly on a provider's own bare NanoID, so it is
+			// left unretired.
 			//
 			// Deliberately UNANCHORED (no $actorKey) — DiffRetraction compares
 			// this query's full result set against the target's live key set,

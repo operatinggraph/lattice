@@ -113,7 +113,8 @@ type ArtifactValidationReport struct {
 // projection (no actor-aggregate Output, no Protected/SecureColumns/GrantTable
 // postures — those need a richer scope-check this increment does not yet build;
 // see the design's §3.2 phase-by-kind boundary). Field names are the wire shape
-// the capabilityAuthor adapter's structured output (and this fire's tests) use.
+// the capabilityAuthor adapter's structured output (and the tests exercising
+// it) use.
 type LensArtifactContent struct {
 	CanonicalName string `json:"canonicalName"`
 	Adapter       string `json:"adapter"`

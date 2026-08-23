@@ -27,7 +27,7 @@
 // Does NOT re-test the control plane (lattice.ctrl.>) — that surface was
 // already lifted and proven by control-plane-capability-authz-design.md
 // Fire 1a-2 (CLOSED); this script only proves the NEW surfaces items 5-6 (B)
-// and item 3 (C, this fire) add. Does NOT exercise Loupe's own
+// and item 3 (C) add. Does NOT exercise Loupe's own
 // /api/packages/* HTTP handlers — mechanism C retired their root-admin front
 // gate (cmd/loupe/pkg.go), so authorization for that surface is entirely the
 // Processor-side proof this script drives.

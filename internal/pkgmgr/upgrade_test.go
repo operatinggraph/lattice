@@ -211,11 +211,11 @@ func TestUpgrade_RespectsOutOfBandRevocation(t *testing.T) {
 // TestUpgrade_RevocationGuardExcludesDefinitions proves the guard is scoped to
 // grant/role topology only: a package-declared vtx.meta.* definition (a lens)
 // that is tombstoned out-of-band while it still survives across versions is
-// REVIVED by the next upgrade, same as before this fix. That pre-existing
-// revive-via-reapply behavior for definitions is unchanged and out of this
-// design's ratified scope (see diffManifest's surviving-key branch) — only
-// grant/role topology (what RevokePermission/TombstonePermission/
-// TombstoneRole target) respects an out-of-band tombstone.
+// REVIVED by the next upgrade — the pre-existing revive-via-reapply behavior
+// for definitions, out of this design's ratified scope (see diffManifest's
+// surviving-key branch) — only grant/role topology (what
+// RevokePermission/TombstonePermission/TombstoneRole target) respects an
+// out-of-band tombstone.
 func TestUpgrade_RevocationGuardExcludesDefinitions(t *testing.T) {
 	ctx, conn, inst := newInstallerHarness(t)
 

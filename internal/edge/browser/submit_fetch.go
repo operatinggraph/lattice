@@ -20,7 +20,7 @@ import (
 // — and it drags crypto/tls in with it, though the browser terminates TLS
 // itself and the wasm code never sees a certificate. Linking that whole stack
 // into the artifact only to have it call back out to fetch roughly doubles the
-// gzipped size (measured this fire: ~1.4 MB → ~3.0 MB gz, past the FORK-W
+// gzipped size (measured at ~1.4 MB → ~3.0 MB gz, past the FORK-W
 // tripwire), and every byte of it is dead: net/http is reachable in the js
 // engine graph ONLY through GatewaySubmitter. Talking to fetch directly is
 // both smaller and the more honest realization of the design's "GatewaySubmitter

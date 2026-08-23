@@ -250,8 +250,9 @@ func seedApprovedWeaverTargetInto(t *testing.T, ctx context.Context, conn *subst
 // TestCapabilityApplyPlan_AuthoredDirectOpEscalation_Rejected is the headline
 // containment: an approved authored target whose directOp gap names a protected
 // operation (AssignRole) is refused at the plan builder — the escalation path
-// this fire's apply-side opened. The package it installs is benign
-// (ai-target-*, not protected), so only the dispatch-scope gate can catch it.
+// an authored apply-side target opens if left unchecked. The package it
+// installs is benign (ai-target-*, not protected), so only the dispatch-scope
+// gate can catch it.
 func TestCapabilityApplyPlan_AuthoredDirectOpEscalation_Rejected(t *testing.T) {
 	ctx, conn := newCapabilityApplyHarness(t)
 	seedProtectedPackageDeclaringOps(t, ctx, conn, "rbac-domain",

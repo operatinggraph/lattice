@@ -272,8 +272,8 @@ func TestCompleteCredentialLink_UndeclaredSubmitter_StillGuards(t *testing.T) {
 //
 // derive_reads supplies that key, so the tombstone is now visible and the
 // CAS-guarded revive branch — which the multi-credential design wrote for
-// exactly this case — is reachable. That is the intended behaviour, and it was
-// unreachable before this commit.
+// exactly this case — is reachable. That is the intended behaviour, and
+// this test pins it as reachable.
 func TestClaimIdentity_RebindsAfterUnlink(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)

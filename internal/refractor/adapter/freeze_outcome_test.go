@@ -88,9 +88,9 @@ func TestGuardedWrite_PostTruncateStrayWriteDoesNotFreezeReplay(t *testing.T) {
 	})
 
 	t.Run("a retraction is declined the same way — the over-grant direction", func(t *testing.T) {
-		// The half the previous attempt at this fix missed. A revocation
-		// dropped at a tied watermark leaves the grant live while Deleted and
-		// Wrote both report it retracted.
+		// The retraction direction: a revocation dropped at a tied watermark
+		// leaves the grant live while Deleted and Wrote both report it
+		// retracted.
 		outcome, err := a.DeleteWithOutcome(ctx, keys, head+1)
 		require.NoError(t, err)
 		require.True(t, outcome.DeclinedByWatermark, "a tie declines the retraction")

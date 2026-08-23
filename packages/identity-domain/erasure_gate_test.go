@@ -302,7 +302,7 @@ func TestErasureGate_Reconcile_UnknownIdentityIsNotBound(t *testing.T) {
 }
 
 // TestErasureGate_CreateUnclaimedIdentity_SkipsSealedIncumbent is §6's fifth
-// row, and the one an earlier draft of this fire argued away. A live contact
+// row, and the one an earlier draft argued away. A live contact
 // index hit is what turns a new registration into a duplicateOf naming the
 // incumbent — a link key plus its match criteria, in plaintext. If that
 // incumbent is sealed, the link is a BRAND-NEW correlation to a person who

@@ -464,7 +464,7 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 // grepped — none of which reap themselves). Allowlist by key, not
 // isVerifyLitterName's name marker: "Grid Snap Test Patient" and "Retention
 // Proof" contain neither "Verify" nor "Discovery", so a name sweep silently
-// strands them (caught live, this fire) — the only two patient identities
+// strands them (caught live) — the only two patient identities
 // any checked-in seed script pins are patientID (this file) and
 // rileyPatientID (seed-showcase.go), so anything else alive is litter by
 // construction, not by guessing a broader name pattern.
@@ -581,9 +581,9 @@ func isVerifyLitterName(name string) bool {
 // by its own name OR by running at a litter studio — the latter matters
 // because TombstoneStudio deliberately doesn't cascade onto its sessions (own
 // DDL doc), so a name-only session filter tombstones the studio out from
-// under a plainly-named session ("Vinyasa Flow") and stranded it with
-// missingStudio=true instead of removing it (caught live: an earlier version
-// of this function did exactly that to 5 sessions before this fire landed).
+// under a plainly-named session ("Vinyasa Flow") and strands it with
+// missingStudio=true instead of removing it (observed live: a name-only
+// filter stranded 5 sessions this way).
 // Every session is reaped before its studio, releasing held slot claims and
 // — via wellnessOrphanedBookingSettlement, already-live Weaver convergence —
 // any booking still anchored to it.

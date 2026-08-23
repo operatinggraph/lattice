@@ -705,7 +705,7 @@ func TestManager_Handle(t *testing.T) {
 // triggered. A stale marker below the just-armed target must NOT fire
 // OnHydrationComplete (the boot-gate release); the marker at or above the
 // target must, and a later marker after the gate has already cleared (a live
-// tail from another device's hydrate) must fire same as before this fix.
+// tail from another device's hydrate) must also fire, unaffected by the gate.
 func TestManager_Handle_HydrationCompleteGateIgnoresStaleReplayedMarker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

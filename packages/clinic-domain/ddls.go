@@ -97,8 +97,8 @@ const (
 // identity, is what makes the second claim collide. No backfill for
 // pre-existing patients (Vault's full-stack-reset delivery boundary covers
 // the migration). Display of the linked contact rides a later Secure-Lens
-// protected model (Fire 5 of the Vault crypto-shredding design); this fire
-// only wires the link.
+// protected model (Fire 5 of the Vault crypto-shredding design); only the
+// link is wired here.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		patientVertexTypeDDL(),

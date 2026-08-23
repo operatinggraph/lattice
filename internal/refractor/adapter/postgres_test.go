@@ -825,8 +825,8 @@ func TestPostgresAdapter_Delete_Soft_Integration(t *testing.T) {
 }
 
 // TestPostgresAdapter_GuardedDelete_PreventsStaleReplayResurrection is the
-// Contract #6 §6.14 proof this fire closes: a guarded (protected read-model)
-// table's Delete must retain the projection_seq watermark, so a stale replay
+// Contract #6 §6.14 proof that a guarded (protected read-model) table's
+// Delete must retain the projection_seq watermark, so a stale replay
 // arriving after the delete cannot resurrect the row. A hard DELETE would
 // instead discard the watermark, letting the stale INSERT's ON CONFLICT guard
 // find no row to compare against and succeed unconditionally.

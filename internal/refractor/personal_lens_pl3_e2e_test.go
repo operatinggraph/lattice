@@ -11,7 +11,7 @@
 // Vector 4 (a stale lower-projectionSeq replay must not resurrect a revoked
 // grant) is D1's PRODUCER-side write-ordering guarantee (§6.2/§6.8's
 // projectionSeq monotonic guard on the write into "cap-read.*"), not
-// something this fire's CONSUMER code (a plain KV Get per call, no local
+// something the CONSUMER code here (a plain KV Get per call, no local
 // ordering state) can introduce risk into or usefully re-verify — it is
 // covered by D1's own write-path tests. Vector 5 (shredded identity) is
 // explicitly deferred to PL.5 (gated on Vault Phase A, §3.6/§7).

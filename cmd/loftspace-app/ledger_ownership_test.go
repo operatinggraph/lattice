@@ -9,13 +9,13 @@ import (
 )
 
 // The reconnaissance-surface proof for GET /api/ledger (handleLedger /
-// leaseVisibleToActor): before this fix the handler trusted the leaseAppKey
-// query param unchecked — no authenticateRead call at all — so a signed-in
-// resident could read another lease's balance/accountKey by guessing its key
+// leaseVisibleToActor): the handler must not trust the leaseAppKey query
+// param unchecked — skipping the authenticateRead call would let a signed-in
+// resident read another lease's balance/accountKey by guessing its key
 // (filed in verticals.md as "App-server GET endpoints apply no per-lease/
 // patient ownership filter"). one_bill.go's handleOneBillStatement already
-// closed the same class of leak for the combined statement via
-// queryApplications; this proves the ledger now applies the equivalent gate
+// closes the same class of leak for the combined statement via
+// queryApplications; this proves the ledger applies the equivalent gate
 // for BOTH parties who legitimately view a lease's ledger — the tenant
 // (queryApplicationByKey) and the managing landlord
 // (queryLandlordApplications), mirroring renderLedgerPanel's two callers in

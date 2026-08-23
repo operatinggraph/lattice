@@ -278,9 +278,9 @@ func (a *partialFailAdapter) upsertRecording(ctx context.Context, keys, row map[
 	return a.NatsKVAdapter.UpsertWithOutcome(ctx, keys, row, seq)
 }
 
-// TestReproject_PartialFailure_AttemptsAllAndJoinsErrors proves the §4.3 fix
-// this fire's adversarial review surfaced: a perEntry actor's reproject must
-// attempt every result even after one fails, not abort at the first error.
+// TestReproject_PartialFailure_AttemptsAllAndJoinsErrors proves the §4.3
+// invariant: a perEntry actor's reproject must attempt every result even
+// after one fails, not abort at the first error.
 // Without this, a deterministically-failing sibling anchor would
 // permanently block a transiently-failing one from ever healing — the
 // retry unit is "the actor", so one bad anchor must not poison the rest.
@@ -336,9 +336,9 @@ func TestReproject_PartialFailure_AttemptsAllAndJoinsErrors(t *testing.T) {
 }
 
 // TestWriteResults_PerEntryLens_TransientFailure_NoActorEnumerator_RefusesClosed
-// proves the structural refusal this fire's adversarial review added: a
-// perEntry lens (multiEnvelopeFn set) with no paired ActorEnumerator must
-// never fall back to guessing that the triggering `key` is an actor key.
+// proves the structural refusal: a perEntry lens (multiEnvelopeFn set) with
+// no paired ActorEnumerator must never fall back to guessing that the
+// triggering `key` is an actor key.
 // InstallActorAggregate always pairs the two, so this is defense-in-depth —
 // but the alternative (silently reprojecting the wrong entity, or a
 // non-actor key that evaluates to zero rows and reads as a clean heal) is

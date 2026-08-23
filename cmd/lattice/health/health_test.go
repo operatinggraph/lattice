@@ -227,11 +227,11 @@ func TestHealthSummary_Rollup_StaleYellow(t *testing.T) {
 // TestHealthSummary_Rollup_StaleLensRow is the regression test for
 // lens-registry-restart-integrity-design.md §4 Fire B step 3: a per-lens
 // reporter entry an unregistered pipeline stopped updating freezes
-// status="active"/consumerLag=0 forever — exactly what looked "green" before
-// this fix (Freshness rendered "-", no age evaluated at all). A frozen entry
-// past staleThreshold must now read Status "stale" and a non-"-" Freshness,
-// escalating the rollup, even though its own status/consumerLag fields still
-// claim "active".
+// status="active"/consumerLag=0 forever — without age evaluation this looks
+// "green" indefinitely (Freshness rendered "-", no age evaluated at all). A
+// frozen entry past staleThreshold must read Status "stale" and a non-"-"
+// Freshness, escalating the rollup, even though its own status/consumerLag
+// fields still claim "active".
 func TestHealthSummary_Rollup_StaleLensRow(t *testing.T) {
 	lensID := "StaleLensRowTestId1"
 	staleLastUpdated := time.Now().UTC().Add(-14 * time.Hour).Format(time.RFC3339)

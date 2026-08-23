@@ -566,10 +566,10 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			// target, and is this design's ratified scope
 			// (grant-provenance-runtime-permission-minting-design.md §5.2, §12).
 			// vtx.meta.* definitions are deliberately left on the pre-existing
-			// body-diff revive path below: that behavior predates this fix, is
-			// unanalyzed by this design (reactivation semantics and the opMeta
-			// retirement guard both assume a definition stays revivable via
-			// reapply), and extending the guard to it would be undesigned scope
+			// body-diff revive path below: that behavior is unanalyzed by this
+			// design (reactivation semantics and the opMeta retirement guard
+			// both assume a definition stays revivable via reapply), and
+			// extending the guard to it would be undesigned scope
 			// creep — internal/bootstrap/reconcile.go:76-97 draws an analogous
 			// definition-vs-topology boundary in a sibling mechanism (though
 			// there every tombstone is respected unconditionally, definitions

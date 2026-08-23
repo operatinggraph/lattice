@@ -4,7 +4,7 @@ package pipeline
 // actor-aware fan-out arms acting on the pattern-directed derivation instead of
 // the ActorEnumerator BFS, and the two conjuncts that decide where they may.
 //
-// §9's e2e (a), tightened to what this fire makes true: AssignRole on actor U
+// §9's e2e (a), tightened to what the flip makes true: AssignRole on actor U
 // projects U's grant and leaves every co-holder's row UNTOUCHED. Before the flip
 // the co-holders were reprojected on every grant — identically, so nothing
 // observable was wrong, which is exactly why the cost was invisible. The
@@ -174,7 +174,7 @@ func TestFlip_LinkGrant_ReprojectsOnlyTheGrantee(t *testing.T) {
 
 // TestFlip_ShadowModeKeepsTheBFSBreadth is the control. The same fixture and the
 // same event under `shadow` writes every co-holder, which is what the arms did
-// before this fire. Without it, the assertion above could be satisfied by a
+// before the flip. Without it, the assertion above could be satisfied by a
 // fixture whose graph simply had no co-holders to reach.
 func TestFlip_ShadowModeKeepsTheBFSBreadth(t *testing.T) {
 	f := newCoHolderFixture(t)

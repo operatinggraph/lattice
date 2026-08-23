@@ -98,8 +98,9 @@ func protectedStreamDenies(stream string) []string {
 // deliberately excludes non-security core-events consumers with the
 // identical mechanical exposure (bridge-external, the object-store
 // byte-janitor/cascade, chronicler's history projector, every loom/weaver
-// per-domain consumer) — those are reliability/data-integrity concerns, not
-// this fire's security-boundary scope; filed separately. Every name below
+// per-domain consumer) — those are reliability/data-integrity concerns,
+// outside the security-boundary scope this registry pins; tracked on the
+// board. Every name below
 // is verified wired with its package default in production (cmd/processor,
 // cmd/refractor, cmd/gateway pass no override), so nothing legitimate runs
 // under a name outside this list.
@@ -517,7 +518,7 @@ var Matrix = []Component{
 		// scoped precisely: these denies close the core-KV read side channel;
 		// core-EVENTS reads remain open (protectedStreamDenies does not deny
 		// MSG.GET/DIRECT.GET on the core-events stream — a pre-existing posture,
-		// not this change's concern), so this is not a claim that all Core state
+		// out of this matrix's scope), so this is not a claim that all Core state
 		// is unreadable, only that the core-KV bucket is
 		// (TestCapabilityAuthorCatalogAccess pins the capability-author-context
 		// direction).

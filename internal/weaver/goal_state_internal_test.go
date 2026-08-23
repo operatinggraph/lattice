@@ -196,7 +196,7 @@ func TestRowState_AspectColumns_RecognizesGoalAlreadyMet(t *testing.T) {
 	// unable to see the aspect-qualified fact under the row's untagged root
 	// key, it synthesizes a spurious SignLease plan for an application that
 	// needs no remediation. This proves the test actually exercises the
-	// bug this fix targets, not something that behaved correctly anyway.
+	// root/aspect key mismatch, not something that behaved correctly anyway.
 	unbridged := rowState(row, nil)
 	spurious, err := planner.Synthesize(goalGuard, unbridged, catalog, 5)
 	if err != nil {

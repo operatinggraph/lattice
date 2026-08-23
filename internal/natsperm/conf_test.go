@@ -456,7 +456,7 @@ func TestLensTargetWriteIsolation(t *testing.T) {
 // own connection in cmd/processor/main.go) both submit RecordShredFinalization
 // to ops.system — a JetStream publish through the core-operations stream, so a
 // transport denial surfaces as a store-ack timeout exactly like a denied
-// KVPut. Neither grant existed before this fix (refractor-publish-acl-gap).
+// KVPut. Both grants close the refractor-publish-acl-gap.
 // chronicler is the pinned negative: its own matrix comment declares it
 // "submits no ops" (P2 — a pure read-model materializer).
 func TestOpsSystemPublishAccess(t *testing.T) {
@@ -505,9 +505,9 @@ var verticalAppNames = []string{"clinic-app", "cafe-app", "loftspace-app", "well
 // TestPersonalSyncPublishAccess: refractor's nats_subject Personal Lens
 // adapter (internal/refractor/adapter/natssubject.go) publishes delta
 // envelopes to lattice.sync.user.<actor> — latent (no lens installs one yet)
-// but transport-reachable in code, and denied before this fix
-// (refractor-publish-acl-gap). Only Refractor's Personal Lens pipeline ever
-// publishes here.
+// but transport-reachable in code, and granted only to refractor, closing
+// the refractor-publish-acl-gap. Only Refractor's Personal Lens pipeline
+// ever publishes here.
 func TestPersonalSyncPublishAccess(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
@@ -1641,9 +1641,9 @@ func TestRegistryDrivenStreamAdminSideChannel(t *testing.T) {
 
 // TestRefractorPrivateBucketsWriteAccess: refractor's two platform-private
 // stores (refractor-adjacency, personal-lens-interest) are owner-derived
-// grants, not covered by any hand-authored positive pin before this fire —
-// proves the registry's Allow() derivation actually grants them, not just
-// the pre-existing $KV.> catch-all.
+// grants, not covered by any hand-authored positive pin — proves the
+// registry's Allow() derivation actually grants them, not just the
+// pre-existing $KV.> catch-all.
 func TestRefractorPrivateBucketsWriteAccess(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
