@@ -583,6 +583,96 @@ test("a money field submits cents, and a non-numeric value throws rather than se
   assert.throws(() => handle.submit(), /valid number/);
 });
 
+// ---- dispatch.classChoices — no single static class (Fire: CreateLocation) ----
+
+test("a row with classChoices and no class renders the choice select and is not refused", () => {
+  const schema = { type: "object", properties: { name: { type: "string" } }, required: [] };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: {
+      classChoices: ["unit", "building", "property"],
+      authContext: "standing",
+      reads: [],
+      optionalReads: [],
+    },
+  });
+  const mount = new FakeElement("div");
+
+  assert.equal(canRender(row), true, "classChoices alone satisfies the class-resolution requirement");
+
+  const handle = renderOpForm(row, {}, mount);
+  assert.ok(handle, "classChoices with no dispatch.class must still render");
+
+  const choiceControl = controlByName(mount, "__classChoice");
+  assert.ok(choiceControl, "the synthetic class-choice select must render");
+  assert.equal(choiceControl.tagName, "select");
+  assert.equal(mount.children[0].children[1], choiceControl,
+    "the class-choice field renders AHEAD of the schema-driven fields");
+  assert.ok(controlByName(mount, "name"), "the ordinary schema field still renders alongside it");
+});
+
+test("submit() sends the picked classChoice as the envelope's class, and never renders it into payload", () => {
+  const schema = { type: "object", properties: { name: { type: "string" } }, required: [] };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: {
+      classChoices: ["unit", "building", "property"],
+      authContext: "standing",
+      reads: [],
+      optionalReads: [],
+    },
+  });
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {}, mount);
+
+  controlByName(mount, "__classChoice").value = "building";
+  controlByName(mount, "name").value = "West Tower";
+  const envelope = handle.submit();
+  assert.equal(envelope.class, "building");
+  assert.equal("__classChoice" in envelope.payload, false,
+    "the synthetic class-choice control is never a schema field, so it never lands in payload");
+  assert.equal(envelope.payload.name, "West Tower");
+});
+
+test("submit() throws when no classChoice was picked, exactly like any other required field", () => {
+  const schema = { type: "object", properties: {}, required: [] };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: {
+      classChoices: ["unit", "building", "property"],
+      authContext: "standing",
+      reads: [],
+      optionalReads: [],
+    },
+  });
+  const handle = renderOpForm(row, {}, new FakeElement("div"));
+  assert.throws(() => handle.submit(), /Type is required/);
+});
+
+// Regression pin for the normalizeCatalogRow refusal change: a row with
+// NEITHER class NOR classChoices must still be refused exactly as before —
+// loosening the line-253 check to accommodate classChoices must not also
+// loosen it for the genuinely classless case.
+test("a row with neither dispatch.class nor dispatch.classChoices is still refused", () => {
+  const schema = { type: "object", properties: {}, required: [] };
+  const ctx = {};
+
+  const neitherNoKey = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { authContext: "standing", reads: [], optionalReads: [] },
+  });
+  assert.equal(renderOpForm(neitherNoKey, ctx, new FakeElement("div")), null);
+  assert.equal(canRender(neitherNoKey), false);
+
+  const emptyChoices = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { classChoices: [], authContext: "standing", reads: [], optionalReads: [] },
+  });
+  assert.equal(renderOpForm(emptyChoices, ctx, new FakeElement("div")), null,
+    "an empty classChoices array is not a real choice set");
+  assert.equal(canRender(emptyChoices), false);
+});
+
 // ---- targetField / context.me read fallbacks (mirrors cmd/facet/web/app.js
 // :2790-2804 — a script gating on its own target or the caller's own hub can
 // need either key in `state` even when the owning package's Dispatch forgot

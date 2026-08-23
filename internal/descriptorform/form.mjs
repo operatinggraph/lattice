@@ -11,8 +11,15 @@
 //
 // `catalogRow` is the raw `/api/op-catalog` row shape: `operationType`,
 // `presentation`, `inputSchema` (a JSON string), `fieldDescriptions`,
-// `dispatch.{class,authContext,targetField,targetType,contextParams,reads,
-// optionalReads,visibleWhen}`, `sensitive`.
+// `dispatch.{class,classChoices,authContext,targetField,targetType,
+// contextParams,reads,optionalReads,visibleWhen}`, `sensitive`.
+//
+// `dispatch.classChoices` is the mutually-exclusive alternative to a static
+// `dispatch.class`: an op legitimately declared on more than one DDL (a
+// create that may target any of several leaf types) names its candidates
+// here instead, and this module renders one extra `<select>` ahead of the
+// schema-driven fields so the caller picks which DDL the submission targets
+// — the picked value is what `submit()` sends as the envelope's `class`.
 //
 // `context` is `{ target, me, taskKey, workplace, row, prefill, selfVoice }`
 // — `target` is the resolved subject key the caller already knows (a task's
@@ -233,24 +240,64 @@ function buildField(name, schema, isRequired, help, prefill, sensitive) {
   return { name, label, required: isRequired, container, read };
 }
 
+// buildClassChoiceField renders the class-choice `<select>` for an op whose
+// dispatch declares `classChoices` instead of a single static `class` — the
+// caller must pick which of the N legitimate DDLs this submission targets,
+// because no single class pins the dispatched op's DDL (Contract #2 §2.1
+// MissingClass). Mirrors buildField's `enum` branch (option-building +
+// titleCase labelling), but is not schema-driven: there is no property in
+// `inputSchema` for it, so it renders from `dispatch.classChoices` directly
+// and is excluded from the submitted payload — its resolved value travels as
+// the envelope's own `class` field instead (see submit() below).
+function buildClassChoiceField(choices, prefillVal) {
+  const id = nextFieldID();
+  const container = document.createElement("div");
+  container.className = "field";
+  const labelEl = document.createElement("label");
+  labelEl.setAttribute("for", id);
+  labelEl.textContent = "Type *";
+  container.appendChild(labelEl);
+
+  const control = document.createElement("select");
+  control.id = id;
+  control.name = "__classChoice";
+  control.required = true;
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "Choose…";
+  control.appendChild(blank);
+  for (const opt of choices) {
+    const optionEl = document.createElement("option");
+    optionEl.value = opt;
+    optionEl.textContent = titleCase(opt);
+    if (opt === prefillVal) optionEl.selected = true;
+    control.appendChild(optionEl);
+  }
+  container.appendChild(control);
+
+  return { container, read: () => (control.value === "" ? undefined : control.value) };
+}
+
 // normalizeCatalogRow turns one raw `/api/op-catalog` row into the shape this
 // module renders from, refusing (returning `null`) rather than
-// half-rendering: no inputSchema means there is nothing to render, no
-// dispatch class means the envelope could not be assembled even if a form
-// appeared (`targetField` itself is optional — see the free-choice/no-target
-// note above), a declared `visibleWhen` this module ships no evaluator for
-// is treated as unmet (no state, no offer — the honest answer to a condition
-// a client cannot decide, loftspace `catalogDescriptor`'s own rule), and
-// `authContext:"service"` has no source in this module's context shape
-// (`{ target, me, taskKey, workplace, row, prefill, selfVoice }` carries no
-// service key) — refusing it here means a caller never gets a handle back
-// for it, rather than one whose submit() always fails at the Processor.
-// canRender (below) is this same refusal, exposed for a caller deciding
-// whether to enable an offer before it has a mount to render into.
+// half-rendering: no inputSchema means there is nothing to render, neither a
+// dispatch class nor a non-empty classChoices means the envelope could not be
+// assembled even if a form appeared (`targetField` itself is optional — see
+// the free-choice/no-target note above; classChoices is this same
+// class-resolution question answered by a caller pick instead of a package
+// literal — see buildClassChoiceField), a declared `visibleWhen` this module
+// ships no evaluator for is treated as unmet (no state, no offer — the honest
+// answer to a condition a client cannot decide, loftspace `catalogDescriptor`'s
+// own rule), and `authContext:"service"` has no source in this module's
+// context shape (`{ target, me, taskKey, workplace, row, prefill, selfVoice }`
+// carries no service key) — refusing it here means a caller never gets a
+// handle back for it, rather than one whose submit() always fails at the
+// Processor. canRender (below) is this same refusal, exposed for a caller
+// deciding whether to enable an offer before it has a mount to render into.
 function normalizeCatalogRow(row) {
   if (!row || !row.inputSchema || !row.dispatch) return null;
   const dispatch = row.dispatch;
-  if (!dispatch.class) return null;
+  if (!dispatch.class && !(dispatch.classChoices && dispatch.classChoices.length)) return null;
   if (dispatch.visibleWhen) return null;
   if (dispatch.authContext === "service") return null;
   let schema;
@@ -449,7 +496,16 @@ export function renderOpForm(catalogRow, context, mount) {
   const fields = fieldNames.map((name) =>
     buildField(name, props[name] || {}, required.has(name), fieldDescriptions[name], context.prefill, !!catalogRow.sensitive));
 
+  // A classChoices op has no static dispatch.class to send, so the caller's
+  // pick stands in for it — rendered ahead of the schema-driven fields since
+  // it decides WHICH DDL those fields describe. normalizeCatalogRow already
+  // guaranteed at least one of dispatch.class / dispatch.classChoices is set.
+  const classChoiceField = (!dispatch.class && dispatch.classChoices && dispatch.classChoices.length)
+    ? buildClassChoiceField(dispatch.classChoices, context.prefill && context.prefill.__classChoice)
+    : null;
+
   mount.innerHTML = "";
+  if (classChoiceField) mount.appendChild(classChoiceField.container);
   for (const f of fields) mount.appendChild(f.container);
 
   return {
@@ -531,9 +587,21 @@ export function renderOpForm(catalogRow, context, mount) {
       }
       if (context.me && !reads.includes(context.me)) reads.push(context.me);
 
+      // A classChoices op sends the caller's picked DDL as `class` in place
+      // of a static one — required exactly like any other required field
+      // (readClassChoice throws rather than returning undefined and
+      // submitting a classless envelope the Processor would reject with
+      // MissingClass), and excluded from `payload` since it names the
+      // envelope's own class field, not a schema property.
+      const readClassChoice = () => {
+        const value = classChoiceField.read();
+        if (value === undefined) throw new Error("Type is required.");
+        return value;
+      };
+
       return {
         operationType,
-        class: dispatch.class,
+        class: dispatch.class || readClassChoice(),
         payload,
         reads,
         optionalReads,

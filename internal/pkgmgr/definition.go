@@ -752,6 +752,12 @@ type OpPresentationSpec struct {
 type OpDispatchSpec struct {
 	Class string
 
+	// ClassChoices names the DDLs this op is legitimately declared on when no
+	// single Class pins the dispatched op's DDL — a client must let the caller
+	// pick one of these canonical names and submit it as the envelope's class
+	// field. Mutually exclusive with Class: an op sets exactly one of the two.
+	ClassChoices []string
+
 	// AuthContext is "self" | "service" | "task" | "standing".
 	//
 	// The first three name which of the wire envelope's authContext fields the

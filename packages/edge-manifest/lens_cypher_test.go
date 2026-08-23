@@ -595,6 +595,7 @@ func emOpCatalogWorld(t *testing.T) *emFixture {
 	})
 	f.aspect(t, "fullOp", "dispatch", "dispatch", map[string]any{
 		"class":         "workOrder",
+		"classChoices":  []any{"x", "y"},
 		"authContext":   "task",
 		"targetField":   "workOrderKey",
 		"targetType":    "workorder",
@@ -680,6 +681,7 @@ func TestOpCatalog_FullVocabularyOpProjectsEveryColumn(t *testing.T) {
 
 	require.Equal(t, "workOrder", row["dispatchClass"],
 		"an envelope with no class is unconditionally rejected — this column is not decoration")
+	require.Equal(t, []any{"x", "y"}, row["dispatchClassChoices"])
 	require.Equal(t, "task", row["dispatchAuthContext"])
 	require.Equal(t, "workOrderKey", row["dispatchTargetField"])
 	require.Equal(t, "workorder", row["dispatchTargetType"])

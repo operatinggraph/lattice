@@ -32,6 +32,7 @@ type opCatalogProjection struct {
 	FieldDescriptions map[string]string `json:"fieldDescriptions"`
 
 	DispatchClass         string   `json:"dispatchClass"`
+	DispatchClassChoices  []string `json:"dispatchClassChoices"`
 	DispatchAuthContext   string   `json:"dispatchAuthContext"`
 	DispatchTargetField   string   `json:"dispatchTargetField"`
 	DispatchTargetType    string   `json:"dispatchTargetType"`
@@ -90,6 +91,7 @@ type opDescriptor struct {
 
 type opDispatch struct {
 	Class         string            `json:"class,omitempty"`
+	ClassChoices  []string          `json:"classChoices,omitempty"`
 	AuthContext   string            `json:"authContext,omitempty"`
 	TargetField   string            `json:"targetField,omitempty"`
 	TargetType    string            `json:"targetType,omitempty"`
@@ -154,11 +156,13 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 	// is what withholds the op. Dropping the whole dispatch object because no
 	// other field was set would restore the fail-open this column exists to
 	// close.
-	if p.DispatchClass != "" || p.DispatchAuthContext != "" || p.DispatchTargetField != "" ||
+	if p.DispatchClass != "" || len(p.DispatchClassChoices) > 0 || p.DispatchAuthContext != "" ||
+		p.DispatchTargetField != "" ||
 		p.DispatchTargetType != "" || len(p.DispatchContextParams) > 0 || len(p.DispatchReads) > 0 ||
 		len(p.DispatchOptionalReads) > 0 || p.DispatchVisibleWhen != nil {
 		d.Dispatch = &opDispatch{
 			Class:         p.DispatchClass,
+			ClassChoices:  p.DispatchClassChoices,
 			AuthContext:   p.DispatchAuthContext,
 			TargetField:   p.DispatchTargetField,
 			TargetType:    p.DispatchTargetType,

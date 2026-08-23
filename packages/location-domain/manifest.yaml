@@ -1,5 +1,5 @@
 name: location-domain
-version: 0.3.2
+version: 0.4.0
 description: |
   Spatial base domain — the place graph. Declares the ABSTRACT `location` type
   and its three CONCRETE leaves unit/building/property (Contract #6 §6.9), each
@@ -42,3 +42,5 @@ declares:
     - operationType: SetLocationPresentation
       scope: any
       grantsTo: [operator]
+  opMetas:
+    - operationType: CreateLocation

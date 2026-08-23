@@ -28,7 +28,9 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // every concrete leaf admits, the five operator-scoped permission grants, and
 // — the load-bearing scope assertion — that the package declares ZERO lenses /
 // roles / weaver / loom (it is a topology-only base domain; the read-path /
-// auth plane is SL.2).
+// auth plane is SL.2) and exactly the ONE op-meta (CreateLocation) the
+// CreateLocation ClassChoices fire adds — the descriptor-vocabulary layer, not
+// a read path or an auth grant, so it does not widen this scope assertion.
 func TestPackage_DDLAndOps(t *testing.T) {
 	if got := len(Package.DDLs); got != 4 {
 		t.Fatalf("expected 4 DDLs (abstract location + 3 concrete leaves), got %d", got)
@@ -113,8 +115,10 @@ func TestPackage_DDLAndOps(t *testing.T) {
 		}
 	}
 
-	// Topology-only base domain: no lens, role, weaver target, loom pattern,
-	// or op-meta (SL.2's service-location owns the lens + the read path).
+	// Topology-only base domain: no lens, role, weaver target, or loom
+	// pattern (SL.2's service-location owns the lens + the read path) — but
+	// exactly one op-meta, CreateLocation, the descriptor-vocabulary metadata
+	// the ClassChoices fire adds (packages/location-domain/opmetas.go).
 	if got := len(Package.Lenses); got != 0 {
 		t.Fatalf("expected 0 lenses, got %d", got)
 	}
@@ -127,8 +131,11 @@ func TestPackage_DDLAndOps(t *testing.T) {
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
 	}
-	if got := len(Package.OpMetas); got != 0 {
-		t.Fatalf("expected 0 opMetas, got %d", got)
+	if got := len(Package.OpMetas); got != 1 {
+		t.Fatalf("expected 1 opMeta (CreateLocation), got %d", got)
+	}
+	if Package.OpMetas[0].OperationType != "CreateLocation" {
+		t.Fatalf("the one opMeta must be CreateLocation, got %q", Package.OpMetas[0].OperationType)
 	}
 	if len(Package.Depends) != 0 {
 		t.Fatalf("expected no dependencies, got %v", Package.Depends)

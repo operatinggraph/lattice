@@ -675,6 +675,13 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 	if d.Class != "" {
 		body["class"] = d.Class
 	}
+	if len(d.ClassChoices) > 0 {
+		choices := make([]any, len(d.ClassChoices))
+		for i, c := range d.ClassChoices {
+			choices[i] = c
+		}
+		body["classChoices"] = choices
+	}
 	if d.AuthContext != "" {
 		body["authContext"] = d.AuthContext
 	}

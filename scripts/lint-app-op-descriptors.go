@@ -160,9 +160,8 @@ func registeredOps() map[string]*opStatus {
 // shipped staff FORM is proof a person triggers the op, and the staff-worlds
 // catalog (edgeCatalog's held-role walk) cannot render what nothing describes.
 var appOpDebt = map[string]string{
-	"AttachObject":   "objects-base",    // inputs are the byte-plane upload response (digest/size/contentType), producible by no template
-	"CreateLocation": "location-domain", // one op on THREE leaf DDLs — a single static Dispatch.Class cannot express the class choice
-	"DetachObject":   "objects-base",    // oid names an entity no owner-anchored lens projects; the fix is a read surface, not a marker
+	"AttachObject": "objects-base", // inputs are the byte-plane upload response (digest/size/contentType), producible by no template
+	"DetachObject": "objects-base", // oid names an entity no owner-anchored lens projects; the fix is a read surface, not a marker
 }
 
 // appOpCeilings is the number of DISTINCT hardcoded operationType literals each
