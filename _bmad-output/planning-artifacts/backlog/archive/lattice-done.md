@@ -1,5 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-21 · `f793bc55` · [Pkgmgr] manifest-oracle coverage CLOSED — secure-column history fail-closed on drop/rename + 2 review-executed bypasses; manifest retentionClasses; reserved RLS names on plain Columns/IntoKey
+- 2026-08-21 · `8f49c13b` · [Pkgmgr/Weaver/Loupe] weaverTarget `.description` aspect end-to-end — installer emission, Studio field + intent, roster render, 25-target backfill + lint gate; live diff-apply verified. CI green
+- 2026-08-21 · `a0bc24e` · [Refractor] two miscompiled clause shapes CLOSED — `*` projection bodies + required MATCH binding nothing new refused at parse; corpus census green, 2 pins moved not loosened
+- 2026-08-21 · `ad18c5a5` · [privacy-base] pre-narrowing shred residue CLOSED — TombstoneOrphanedCredentialIndex + CLI sweep, both directions; 3-layer review found+fixed outbound gap + robustness bugs; owner-array hygiene follow-on filed
+- 2026-08-21 · `f60565cf` · [Tooling] lint-doc-orphan gate — twice-seen orphaned-doc class mechanized; 9 genuine orphans found + repaired; lint-package-version narrowed to ignore comment-only pkgmgr edits
+- 2026-08-21 · `603eae2c` · [Refractor] behavior-frozen consolidation CLOSED, whole scope — `pipeline.go` 3932→1326 + `executor.go` 2426→1407 over 6 increments, plus the test-fixture fold; no successor row
+- 2026-08-21 · `a7c94ef` · [CI] lease-convergence's async trio parallelized as its own group — convergence job's pole; same 14 tests, no gate weakened
+- 2026-08-21 · `fc49b7c` · [CI] `internal/natsperm` given its own `-parallel` budget — the unit-4 pole; same 1501 vectors, no gate weakened
+- 2026-08-16 · (verification, no SHA) · [privacy-base] merge-concurrent-erasure-step-1 row REMOVED — already closed by `a0d762f3`'s dual-condition `write_path_closed` gate
+- 2026-08-16 · `71cb8136` · [Pkgmgr] secureColumns holderTypes narrowing CLOSED — union-at-write-site both diffManifest branches; review found+fixed an unsound revive-branch exclusion; 2 adjacent hazards filed
+- 2026-08-15 · `717312ca` · [Perf] Lattice-slice enumeration-corpus KVGetMulti sweep CLOSED — 9 pkgmgr/weaver/loom/refractor-health sites batched; 2 deferred as their own rows; Loupe/Verticals shares are those streams' pick
 - 2026-08-15 · `c51746ec` · [Pkgmgr] AI-capability apply platform-package guard CLOSED — review found+fixed a real bypass: both Loupe apply/mark-applied handlers routed around the plan builder's deny-list; normalization gap filed separately
 - 2026-08-15 · `b4eb8fb2` · [Tooling] gofmt CI gate CLOSED — 37 files formatted; dangling ratified §19 contract edit also committed this fire (`0e84769e`)
 - 2026-08-15 · `70bec5e6` · [bootstrap] package-manifest ownership scoping CLOSED — review found+fixed a self-forged-manifest bypass; §8(a)/§15 stay open, narrowed not closed
