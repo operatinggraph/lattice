@@ -84,14 +84,20 @@
 //     submitter / the human reviewer — the same operator-equivalent idiom
 //     augur's + lease-signing's capture pairs use).
 //
-//   - Two P5 read-model lenses (the operator/reasoning-model query surface,
+//   - Three P5 read-model lenses (the operator/reasoning-model query surface,
 //     lattice-architecture.md P5): `capabilityProposals` (flat, one row per
-//     proposal — the review surface Loupe renders) and
-//     `capabilityAuthorContext` (a flat scan of every installed
-//     `vtx.meta.*` DDL/lens/target/pattern, the same installed-DDL
-//     self-description catalog `cmd/loupe/ops.go`'s buildOpGroups computes by
-//     scanning Core KV directly — this lens is the non-Loupe equivalent so
-//     the bridge/reasoning adapter never needs Core KV access).
+//     proposal — the review surface Loupe renders), `capabilityAuthorContext`
+//     (a flat scan of every installed `vtx.meta.*` DDL/lens/target/pattern, the
+//     same installed-DDL self-description catalog `cmd/loupe/ops.go`'s
+//     buildOpGroups computes by scanning Core KV directly — this lens is the
+//     non-Loupe equivalent so the bridge/reasoning adapter never needs Core KV
+//     access), and `capabilityAuthorPackages` (a flat scan of every installed
+//     package's manifest — name, version, description, depends, declaredKeys —
+//     sharing the context
+//     bucket on a disjoint `vtx.package.*` key space, the surface that answers
+//     "which package declared this meta key, at what version", the reverse
+//     index `cmd/loupe/lens.go`'s buildLensPackageIndex computes from its own
+//     Core KV scan).
 //
 //   - ReviewCapabilityProposal (design §3.3) — the human verdict op: a
 //     capability-authorized operator flips a PENDING proposal to approved or
@@ -125,8 +131,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.10.0",
-	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds, and the async DispatchOp + catalog widening for the real model-backed adapter (natural-language-weaver-targets-design.md): the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/RecordAuthoringDispatch/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses (the latter now also projecting the full `.spec` aspect body so a reasoning model sees existing lens/weaverTarget bodies, not just self-description). SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart. RecordAuthoringDispatch is the externalTask dispatchOp CreateAuthoringClaim's emitted event now names, so the bridge's async Pending/poll path is dispatchable for this adapter.",
+	Version:       "0.12.0",
+	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, Fire 2 review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern artifact kinds, Fire 4 Starlark-bearing vertexTypeDDL/opMeta artifact kinds, and the async DispatchOp + catalog widening for the real model-backed adapter (natural-language-weaver-targets-design.md): the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/RecordAuthoringDispatch/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens/grant/weaverTarget/loomPattern/vertexTypeDDL/opMeta kinds, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext/capabilityAuthorPackages review + catalog + manifest lenses (the catalog one also projecting the full `.spec` aspect body so a reasoning model sees existing lens/weaverTarget bodies, not just self-description; the manifest one projecting each installed package's name/version/description/depends/declaredKeys so a Core-KV-denied reader can resolve which package owns a meta key and what an in-place upgrade of it would blank). SubmitCapabilityProposal opens a second, human authoring lane into the same review queue — an operator submits an artifact they composed themselves in one op, with no authoring-claim indirection, and a declared provenance.source ('ai' | 'operator') tells the two apart. RecordAuthoringDispatch is the externalTask dispatchOp CreateAuthoringClaim's emitted event now names, so the bridge's async Pending/poll path is dispatchable for this adapter.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),
 	Permissions:   Permissions(),

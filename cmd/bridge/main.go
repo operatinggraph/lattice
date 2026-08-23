@@ -168,17 +168,19 @@ func run(logger *slog.Logger) error {
 	// health issue), which is a visible config gap rather than a fake
 	// fabricating proposals in production.
 	//
-	// Both the validator and the catalog bucket name are resolved here rather
-	// than inside internal/bridge: this is the composition root, so it is the
-	// one place allowed to depend on the installer and on package data. The
-	// bucket name comes from the owning package's own exported constant, so a
-	// rename there cannot leave the adapter reading a bucket nobody projects.
+	// The validator, the protected-package predicate and the catalog bucket name
+	// are resolved here rather than inside internal/bridge: this is the
+	// composition root, so it is the one place allowed to depend on the installer
+	// and on package data. The bucket name comes from the owning package's own
+	// exported constant, so a rename there cannot leave the adapter reading a
+	// bucket nobody projects.
 	if os.Getenv("BRIDGE_CAPABILITY_AUTHOR") == "real" {
 		author, err := bridge.NewCapabilityAuthor(
 			wire.NewClient(conn.NATS()),
 			conn,
 			capabilityauthor.CapabilityAuthorContextBucket,
 			capabilityArtifactVerdict,
+			pkgmgr.PlatformProtectedPackage,
 		)
 		if err != nil {
 			return fmt.Errorf("build capabilityAuthor adapter: %w", err)

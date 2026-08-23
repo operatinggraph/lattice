@@ -22,6 +22,7 @@ import {
   mapLayout, entityBadges, rosterNote,
   gapStateLine, markLine, artifactLine,
   checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel,
+  editAffordance,
 } from "../logic/weaver.js";
 import { enterAuthor } from "./weaverauthor.js";
 
@@ -187,6 +188,9 @@ function targetHeader(d) {
 
   if (d.description) head.appendChild(el("div", "weaver-target-desc muted small", d.description));
 
+  const edit = editAffordance(d);
+  if (edit) head.appendChild(editRow(edit));
+
   if (d.admission || d.augur) {
     const policy = el("div", "weaver-policy small");
     if (d.admission) policy.appendChild(policyBox("admission", d.admission));
@@ -194,6 +198,31 @@ function targetHeader(d) {
     head.appendChild(policy);
   }
   return head;
+}
+
+// editRow renders "Edit with AI" — the entry into the Describe panel in edit
+// mode (natural-language-target-edit-design.md §3.4). It is NOT demo-hidden:
+// the panel it opens is itself visible in the demo, where Submit answers the
+// server's 403 in words.
+//
+// The disabled case keeps the button on screen and prints its reason beside it,
+// because the reason is the useful part — it is the apply refusal this target
+// would earn, said before anyone spends a model call on it.
+function editRow(edit) {
+  const row = el("div", "weaver-edit-row");
+  if (edit.enabled) {
+    const link = el("a", "weaver-edit-link", "Edit with AI");
+    link.href = edit.href;
+    link.title = edit.title;
+    row.appendChild(link);
+    return row;
+  }
+  const btn = el("button", "weaver-edit-link", "Edit with AI");
+  btn.disabled = true;
+  btn.title = edit.title;
+  row.appendChild(btn);
+  row.appendChild(el("span", "muted small", edit.reason));
+  return row;
 }
 
 function policyBox(name, body) {

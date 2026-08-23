@@ -91,8 +91,8 @@ type plainScanRootVerdict struct {
 }
 
 // scanRootCorpusVerdicts pins today's verdict for every plain lens the
-// installed corpus ships — 60 of them, matching corpusAnchorIndexVerdicts'
-// own 54-anchored / 60-plain split (anchor_hopindex_corpus_census_test.go
+// installed corpus ships — 61 of them, matching corpusAnchorIndexVerdicts'
+// own anchored/plain split (anchor_hopindex_corpus_census_test.go
 // §2's "confirmed" row). Measured live, not copied from the design doc's own
 // prose numbers: TestScanRootCorpusCensus_PinnedVerdicts is what keeps this
 // table honest against the shipped corpus, the same way
@@ -111,6 +111,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootVarLengthHop},
 	"cafeLedgerHistory":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"capabilityAuthorContext":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	"capabilityAuthorPackages":       {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"capabilityProposals":            {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"capabilityReadGrants":           {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"capabilityReadWildcardGrants":   {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},

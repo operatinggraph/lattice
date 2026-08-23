@@ -28,14 +28,16 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_ReviewAndCatalogLenses pins the Fire-1-checkpoint read-model
-// pair added alongside the escalation dispatch: capabilityProposals (flat
-// operator review, not protected, not a weaver-target convergence lens) and
-// capabilityAuthorContext (flat installed-DDL self-description catalog).
+// TestPackage_ReviewAndCatalogLenses pins the P5 read models that ride
+// alongside the escalation dispatch: capabilityProposals (flat operator
+// review, not protected, not a weaver-target convergence lens),
+// capabilityAuthorContext (flat installed-DDL self-description catalog) and
+// capabilityAuthorPackages (flat installed-manifest scan sharing the catalog
+// bucket on a disjoint key space).
 func TestPackage_ReviewAndCatalogLenses(t *testing.T) {
 	lenses := capabilityauthor.Lenses()
-	if len(lenses) != 3 {
-		t.Fatalf("want exactly 3 lenses (capabilityAuthorPending + capabilityProposals + capabilityAuthorContext), got %d", len(lenses))
+	if len(lenses) != 4 {
+		t.Fatalf("want exactly 4 lenses (capabilityAuthorPending + capabilityProposals + capabilityAuthorContext + capabilityAuthorPackages), got %d", len(lenses))
 	}
 
 	review := lenses[1]
@@ -72,7 +74,30 @@ func TestPackage_ReviewAndCatalogLenses(t *testing.T) {
 		t.Errorf("CapabilityAuthorContextBucket = %q, want capability-author-context", capabilityauthor.CapabilityAuthorContextBucket)
 	}
 
-	if got := len(capabilityauthor.Package.Lenses); got != 3 {
-		t.Fatalf("Package.Lenses count = %d, want 3", got)
+	// The manifest scan shares the catalog's bucket. Two lenses, one bucket is
+	// safe only while BOTH stay plain projections: an Output descriptor or a
+	// ProjectionKind would make this one guarded, and a guarded lens's rebuild
+	// truncates its whole (here: shared) bucket, taking the catalog's rows with
+	// it (internal/refractor/projection/driver.go RequiresGuard,
+	// internal/refractor/pipeline Pipeline.RebuildTruncateIsScoped).
+	packages := lenses[3]
+	if packages.CanonicalName != "capabilityAuthorPackages" {
+		t.Errorf("lenses[3].CanonicalName = %q, want capabilityAuthorPackages", packages.CanonicalName)
+	}
+	if packages.Adapter != "nats-kv" || packages.Bucket != capabilityauthor.CapabilityAuthorContextBucket || packages.Engine != "full" {
+		t.Errorf("packages lens adapter/bucket/engine = %q/%q/%q, want nats-kv/%q/full", packages.Adapter, packages.Bucket, packages.Engine, capabilityauthor.CapabilityAuthorContextBucket)
+	}
+	if packages.Protected {
+		t.Error("capabilityAuthorPackages must NOT be protected (installed-package metadata, not PII)")
+	}
+	if packages.ProjectionKind != "" || packages.Output != nil {
+		t.Error("capabilityAuthorPackages is a flat scan sharing a bucket — an Output descriptor would make it guarded and truncate the catalog lens's rows on rebuild")
+	}
+	if catalog.ProjectionKind != "" || catalog.Output != nil {
+		t.Error("capabilityAuthorContext shares its bucket with capabilityAuthorPackages — it must stay a plain, unguarded projection")
+	}
+
+	if got := len(capabilityauthor.Package.Lenses); got != 4 {
+		t.Fatalf("Package.Lenses count = %d, want 4", got)
 	}
 }

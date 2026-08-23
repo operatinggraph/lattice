@@ -1,5 +1,5 @@
 name: capability-author
-version: 0.10.0
+version: 0.12.0
 description: |
   AI-authored capabilities — Fire 1 capture + escalation dispatch + review lenses, Fire 2
   review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern
@@ -28,7 +28,11 @@ description: |
   returns Pending — a create-only pending marker on the claim vertex, mirroring
   lease-signing's RecordServiceDispatch. capabilityAuthorContext additionally
   projects the full `.spec` aspect body (existing lens/weaverTarget bodies), not
-  just self-description.
+  just self-description. capabilityAuthorPackages projects every installed
+  package's manifest (name, version, description, depends, declaredKeys) into that
+  same bucket, the P5 surface a Core-KV-denied reader resolves meta-key OWNERSHIP
+  through — which package declared a target, at what version, what else it
+  declares, and what an in-place upgrade of it would blank.
 depends:
   - orchestration-base
 declares:
@@ -51,6 +55,10 @@ declares:
       bucket: capability-proposals
       engine: full
     - canonicalName: capabilityAuthorContext
+      adapter: nats-kv
+      bucket: capability-author-context
+      engine: full
+    - canonicalName: capabilityAuthorPackages
       adapter: nats-kv
       bucket: capability-author-context
       engine: full

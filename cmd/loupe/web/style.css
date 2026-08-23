@@ -1294,6 +1294,22 @@ a.pulse-derived-text:hover { color: var(--text); }
    blemish, not a hole. */
 body.demo-mode [data-demo-hide] { display: none !important; }
 
+/* An affordance left visible answers 403 instead, and that refusal is the
+   posture working, not a fault — so it reads in the banner's own vocabulary
+   rather than as red error text. Same shape as /login's disclaimer, which is
+   scoped to that page's inline stylesheet and so cannot be shared. */
+.demo-notice {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--yellow);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.demo-notice strong { display: block; color: var(--yellow); margin-bottom: 2px; }
+.demo-notice span { color: var(--text-dim); }
+
 /* ---------------------------------------------------------------------------
    Weaver Target Studio — Observe (#/weaver). The roster/map/drill share one
    badge vocabulary (.wchip), scoped rather than global so it cannot collide
@@ -1325,6 +1341,12 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .weaver-link { color: var(--accent); }
 
 .weaver-detail-head { margin-bottom: 14px; }
+/* "Edit with AI" sits under the description it would rewrite. When the console
+   has ruled the edit out, the reason sits beside the disabled control — the
+   row exists to carry that sentence as much as to carry the link. */
+.weaver-edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.weaver-edit-link { font-size: 11px; }
+a.weaver-edit-link { color: var(--accent); }
 .weaver-panel { margin-top: 18px; }
 .weaver-panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); margin: 0 0 6px; }
 
@@ -1370,3 +1392,13 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .author-actions .op-field { flex: 1 1 260px; }
 .author-validation-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .author-trial-steps .weaver-issue:last-child { border-bottom: none; }
+
+/* Edit mode: the installed target a Describe request is a change TO. Boxed so
+   it reads as the subject of the sentence below it, not as more prose. */
+.author-edit-subject {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.author-edit-subject .weaver-card-head { margin-bottom: 4px; }

@@ -24,29 +24,44 @@ import {
   scaffoldLensSpec, validationBadge, exportBundle, exportFilename, buildAuthoringRequest,
 } from "../logic/weaverauthor.js";
 import { checksSummary, interferenceHeadline, opCoverageNote } from "../logic/weaver.js";
+import { refusalNotice } from "./demo.js";
 
 let draft = emptyDraft();
 let lastCheck = null;
 let proposeResults = null;
 let describeText = "";
 let describeResult = null;
+let describeRefusal = null;
+let editSubject = null;
 let authorError = null;
 
-// enterAuthor resets the local draft and, when the route carries
-// ?proposal=<id> ("Load into Author", design §3.4), fetches that capability
-// proposal and hydrates the draft from its artifact — the inverse of Propose.
-// A proposal that fails to load, or does not hydrate (wrong kind, unparseable
-// content), leaves an empty draft plus an error line rather than a half-drawn
-// form.
+// enterAuthor resets the local draft and reads the route's one optional
+// parameter:
+//
+//   ?proposal=<id>  "Load into Author" (design §3.4) — fetch that capability
+//                   proposal and hydrate the draft from its artifact, the
+//                   inverse of Propose.
+//   ?edit=<targetId> the Describe panel aimed at an INSTALLED target
+//                   (natural-language-target-edit-design.md §3.4) — the
+//                   sentence typed there is a change to that target, relayed
+//                   as its meta key in contextRef.
+//
+// Either fetch failing leaves an empty draft plus an error line rather than a
+// half-drawn form.
 async function enterAuthor(route) {
   draft = emptyDraft();
   lastCheck = null;
   proposeResults = null;
   describeText = "";
   describeResult = null;
+  describeRefusal = null;
+  editSubject = null;
   authorError = null;
 
-  const proposalId = route && route.params && route.params.proposal;
+  const params = (route && route.params) || {};
+  if (params.edit) { await enterEdit(params.edit); return; }
+
+  const proposalId = params.proposal;
   if (!proposalId) { render(); return; }
 
   const box = $("#weaver-author");
@@ -67,6 +82,36 @@ async function enterAuthor(route) {
     return;
   }
   draft = hydrated;
+  render();
+}
+
+// enterEdit re-reads the target map document rather than trusting what the link
+// carried, so the panel's subject, the description it shows, and the
+// editability verdict all come from the server at the moment the operator
+// arrives — a target whose package gained a second artifact since the map was
+// drawn says so here instead of on a proposal nobody can apply.
+async function enterEdit(targetId) {
+  const box = $("#weaver-author");
+  box.innerHTML = "";
+  box.appendChild(el("div", "muted", "loading " + targetId + "…"));
+
+  const body = await api("/api/weaver/target/" + encodeURIComponent(targetId));
+  if (body.error) {
+    authorError = "could not load target " + targetId + ": " + body.error;
+    render();
+    return;
+  }
+  const ec = body.editContext || {};
+  editSubject = {
+    targetId: body.targetId || targetId,
+    metaKey: ec.metaKey || body.metaKey || "",
+    description: body.description || "",
+    editable: !!ec.editable && !!ec.metaKey,
+    reason: ec.reason || "",
+  };
+  if (!editSubject.editable && !editSubject.reason) {
+    editSubject.reason = "this target resolves to no meta-vertex, so there is nothing an edit could name";
+  }
   render();
 }
 
@@ -92,23 +137,40 @@ function render() {
 // Author page: a plain-language request that relays RequestCapabilityAuthoring
 // through POST /api/weaver/author/request — an AI draft lands on the review
 // queue asynchronously, distinct from this page's own hand-authored Propose
-// flow below.
+// flow below. With an edit subject the same panel writes a CHANGE to an
+// installed target instead of a new one, by naming that target's meta key in
+// contextRef.
+//
+// Submit is deliberately NOT demo-hidden. The demo posture refuses the POST by
+// its method rule with or without a marker, so hiding it would only cost a
+// visitor the chance to see what this console does — and doDescribeSubmit
+// renders the refusal as the standing rule it is.
 function describeBox() {
   const box = el("div", "weaver-panel author-describe");
-  box.appendChild(el("h3", null, "Describe"));
-  box.appendChild(el("p", "muted small",
-    "Describe what the Weaver should keep true — an AI draft will land in the review queue"));
+  box.appendChild(el("h3", null, editSubject ? "Describe a change" : "Describe"));
+  if (editSubject) {
+    box.appendChild(editSubjectBox(editSubject));
+  } else {
+    box.appendChild(el("p", "muted small",
+      "Describe what the Weaver should keep true — an AI draft will land in the review queue"));
+  }
 
   const textarea = document.createElement("textarea");
   textarea.rows = 3;
   textarea.value = describeText;
+  if (editSubject) textarea.placeholder = "e.g. give it 48 hours instead of 24";
   box.appendChild(textarea);
 
-  const submitBtn = demoHide(el("button", null, "Submit"));
-  submitBtn.disabled = !buildAuthoringRequest(textarea.value, "");
+  const submitBtn = el("button", null, "Submit");
+  const refused = !!(editSubject && !editSubject.editable);
+  if (refused) submitBtn.title = editSubject.reason;
+  const syncSubmit = () => {
+    submitBtn.disabled = refused || !buildAuthoringRequest(describeText, describeContextRef());
+  };
+  syncSubmit();
   textarea.addEventListener("input", () => {
     describeText = textarea.value;
-    submitBtn.disabled = !buildAuthoringRequest(describeText, "");
+    syncSubmit();
   });
   submitBtn.addEventListener("click", doDescribeSubmit);
   box.appendChild(submitBtn);
@@ -117,19 +179,63 @@ function describeBox() {
   status.id = "weaver-describe-status";
   box.appendChild(status);
 
+  if (describeRefusal) box.appendChild(refusalBox(describeRefusal));
   if (describeResult) box.appendChild(describeResultBox(describeResult));
   return box;
 }
 
+// describeContextRef is what the request is scoped to: the edited target's meta
+// key, or "" for a from-scratch describe. It is the one field that turns an
+// authoring request into an edit request, end to end.
+function describeContextRef() {
+  return (editSubject && editSubject.metaKey) || "";
+}
+
+// editSubjectBox names what a change is being written against, verbatim: the
+// target, and the description installed on it right now. The reasoning loop is
+// handed the same two things, so an operator can see exactly what their
+// sentence is a change TO — and, when the console has already ruled the edit
+// out, why it is not one.
+function editSubjectBox(s) {
+  const box = el("div", "author-edit-subject");
+  const head = el("div", "weaver-card-head");
+  head.appendChild(el("span", "weaver-target-name", s.targetId));
+  const back = el("a", "weaver-link", "back to the target map");
+  back.href = "#/weaver/" + encodeURIComponent(s.targetId);
+  head.appendChild(back);
+  box.appendChild(head);
+  box.appendChild(el("div", "muted small",
+    s.description || "(this target carries no description)"));
+  if (!s.editable) box.appendChild(el("div", "weaver-issue bad", s.reason));
+  return box;
+}
+
+// refusalBox renders a server refusal that is a standing rule rather than a
+// fault — the demo posture's 403 — in the banner's own vocabulary instead of
+// the red error line an unexpected failure earns.
+function refusalBox(notice) {
+  const box = el("div", "demo-notice");
+  box.appendChild(el("strong", null, notice.title));
+  box.appendChild(el("span", null, notice.text));
+  return box;
+}
+
 async function doDescribeSubmit() {
-  const payload = buildAuthoringRequest(describeText, "");
+  const payload = buildAuthoringRequest(describeText, describeContextRef());
   if (!payload) return;
+  describeRefusal = null;
   setStatus("weaver-describe-status", "submitting…");
   const body = await api("/api/weaver/author/request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  const refusal = refusalNotice(body);
+  if (refusal) {
+    describeRefusal = refusal;
+    render();
+    return;
+  }
   if (body.error) { setStatus("weaver-describe-status", body.error, true); return; }
   if (body.reply && body.reply.status === "rejected") {
     const reason = (body.reply.error && (body.reply.error.message || body.reply.error.code)) || "rejected";

@@ -14,7 +14,7 @@ import { renderDoc, keyLinkEl } from "../render.js";
 import {
   kindGlyph, reviewStateClass, confidenceBand, hasConfidenceScore, agoFrom,
   proposalRows, proposalDisplayState, augurProposalRows, augurDisplayState,
-  applyOutcome, opRejected, errorText, sourceLabel,
+  applyOutcome, opRejected, errorText, sourceLabel, installTargetLabel,
 } from "../logic/review.js";
 
 const TABS = ["capability", "augur"];
@@ -127,10 +127,7 @@ function capabilityQueueCard(row) {
   if (row.kind) {
     meta.appendChild(el("span", "review-glyph", (kindGlyph[row.kind] || "") + " " + row.kind));
   }
-  if (row.targetPackageName) {
-    meta.appendChild(el("span", null, row.targetMode + " " + row.targetPackageName +
-      (row.targetNewVersion ? "@" + row.targetNewVersion : "")));
-  }
+  if (row.installLabel) meta.appendChild(el("span", null, row.installLabel));
   if (hasConfidenceScore(row.confidence)) {
     const band = confidenceBand(row.confidence);
     meta.appendChild(el("span", "confidence-band " + band, "conf " + row.confidence.toFixed(2)));
@@ -258,9 +255,10 @@ function artifactSection(p) {
   }
   const meta = el("div", "review-card-meta");
   meta.appendChild(el("span", "review-glyph", (kindGlyph[p.kind] || "") + " " + p.kind));
-  meta.appendChild(el("span", null, (p.targetMode || "?") +
-    (p.targetPackageName ? " " + p.targetPackageName : "") +
-    (p.targetNewVersion ? "@" + p.targetNewVersion : "")));
+  // What approving this would do to the installed corpus. An upgradeExisting
+  // proposal changes an artifact already in place, which reads nothing like a
+  // fresh install and must not be approved as one.
+  meta.appendChild(el("span", null, installTargetLabel(p) || (p.targetMode || "?")));
   box.appendChild(meta);
   box.appendChild(prettyContent(p.content));
   return box;
@@ -430,8 +428,8 @@ function applyRow(p, raw) {
   const row = el("div", "lens-ctlrow");
   let deadEnd = false;
   const apply = demoHide(el("button", null, "Apply now"));
-  apply.title = "installs the approved artifact (" + (p.targetMode || "install") +
-    (p.targetPackageName ? " " + p.targetPackageName : "") + ") and closes the proposal";
+  apply.title = "installs the approved artifact (" +
+    (installTargetLabel(p) || p.targetMode || "install") + ") and closes the proposal";
   const recover = demoHide(el("button", "ghost-btn", "Mark applied (recover)"));
   recover.title = "closes a proposal whose package install already committed but whose closing op did not; " +
     "verifies that package is installed at this proposal's target version before submitting";

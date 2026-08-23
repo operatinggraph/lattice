@@ -18,6 +18,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"cafeTabSettlement":                 {"g3/o3!multiplicity-sensitive-aggregator g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 3},
 	"capability":                        {"g0/o0!no-aggregating-item", 0, 0},
 	"capabilityAuthorContext":           {"g0/o0!no-aggregating-item", 0, 0},
+	"capabilityAuthorPackages":          {"g0/o0!no-aggregating-item", 0, 0},
 	"capabilityAuthorPending":           {"g0/o0!no-aggregating-item", 0, 0},
 	"capabilityEphemeral":               {"g3/o9[op,task,tgt;op2,report,task2,tgt2;op3,role,task3,tgt3]", 3, 3},
 	"capabilityProposals":               {"g0/o0!no-aggregating-item", 0, 0},

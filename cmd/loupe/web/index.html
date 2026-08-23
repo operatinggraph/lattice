@@ -202,7 +202,10 @@
       <div class="panel-controls">
         <button id="weaver-reload">Refresh</button>
         <a href="#/weaver/verify">Verify</a>
-        <a href="#/weaver/author" data-demo-hide>Author</a>
+        <!-- Unmarked on purpose: the Author page is the console's most legible
+             surface, and everything on it that writes is either marked there or
+             refused by the server's method rule. -->
+        <a href="#/weaver/author">Author</a>
         <span class="muted" id="weaver-status-msg"></span>
       </div>
       <div id="weaver-list" class="visible">

@@ -74,6 +74,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"cafeTabSettlement":                 {"key(entityKey itemsMemo l lines openedAt settledAt status totalCents) p!l p!txCount", 0},
 	"capability":                        {"p", 0},
 	"capabilityAuthorContext":           {"p", 0},
+	"capabilityAuthorPackages":          {"p", 0},
 	"capabilityAuthorPending":           {"p", 0},
 	"capabilityEphemeral":               {"key(actorKey)", 0},
 	"capabilityProposals":               {"p", 0},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -221,6 +222,15 @@ func seedLensSpec(t *testing.T, ctx context.Context, conn *substrate.Conn, targe
 // protected-PACKAGE guard passes and the dispatch-scope gate is what decides).
 func seedApprovedWeaverTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalID string, content WeaverTargetArtifactContent) string {
 	t.Helper()
+	return seedApprovedWeaverTargetInto(t, ctx, conn, proposalID, content,
+		map[string]any{"packageName": "ai-target-escalation", "mode": "newPackage"})
+}
+
+// seedApprovedWeaverTargetInto is seedApprovedWeaverTarget with the whole
+// .target body supplied, for a case whose subject is the install MODE rather
+// than the artifact.
+func seedApprovedWeaverTargetInto(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalID string, content WeaverTargetArtifactContent, target map[string]any) string {
+	t.Helper()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	body, err := json.Marshal(content)
 	if err != nil {
@@ -229,7 +239,7 @@ func seedApprovedWeaverTarget(t *testing.T, ctx context.Context, conn *substrate
 	aspects := map[string]map[string]any{
 		proposalKey + ".review":   {"state": "approved"},
 		proposalKey + ".artifact": {"kind": "weaverTarget", "content": string(body)},
-		proposalKey + ".target":   {"packageName": "ai-target-escalation", "mode": "newPackage"},
+		proposalKey + ".target":   target,
 	}
 	for key, data := range aspects {
 		putEnvelope(t, ctx, conn, key, map[string]any{"isDeleted": false, "data": data})
@@ -266,6 +276,122 @@ func TestCapabilityApplyPlan_AuthoredDirectOpEscalation_Rejected(t *testing.T) {
 				t.Fatalf("error = %v, want a platform-protected refusal naming %q", err, op)
 			}
 		})
+	}
+}
+
+// TestCapabilityMaterializedWeaverTarget_DeclaresFourKeys pins the key shape a
+// single-weaverTarget package installs with — the premise the whole
+// edit-an-installed-target path rests on.
+//
+// internal/bridge's capabilityAuthor adapter admits an edit only when the
+// owning package's declaredKeys are covered by the Definition ONE weaver
+// target materialises, and it computes that from this exact list: the meta
+// root, its `.spec`, its `.description` (emitted only when non-empty), and the
+// package vertex — whose id is derived from the package NAME, so every apply of
+// the package re-emits it rather than removing it. The `.manifest` aspect is
+// deliberately absent: build.go snapshots declaredKeys before writing it.
+//
+// A fifth key appearing here would make every console-authored target
+// un-editable (the bridge refuses what it cannot cover) and a key disappearing
+// would make an edit's apply refuse for a reason the operator was never shown.
+// Either is a change worth seeing, so it is pinned rather than derived twice.
+func TestCapabilityMaterializedWeaverTarget_DeclaresFourKeys(t *testing.T) {
+	const packageName = "weaver-target-coverage-7f2a"
+	def, err := DefinitionForCapabilityArtifact("weaverTarget", json.RawMessage(
+		`{"targetId":"coveragePin","lensRef":"AbCdEfGhJkLmNpQrStUv","description":"pinned",`+
+			`"gaps":{"missing_x":{"action":"directOp","operation":"SendReminder"}}}`), packageName, "0.1.0")
+	if err != nil {
+		t.Fatalf("DefinitionForCapabilityArtifact: %v", err)
+	}
+
+	pkgKey := PackageVertexPrefix + entityNanoID(packageName, "package")
+	metaKey := metaVertexPrefix + entityNanoID(packageName, "weaverTarget:coveragePin")
+	ops, _, err := (&Installer{}).buildInstallBatch(def, pkgKey, nil, nil, nil, nil,
+		[]string{entityNanoID(packageName, "weaverTarget:coveragePin")}, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildInstallBatch: %v", err)
+	}
+
+	var declared []string
+	for _, op := range ops {
+		if op.Key != pkgKey+".manifest" {
+			continue
+		}
+		data, ok := op.Document["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("manifest document has no data object: %+v", op.Document)
+		}
+		raw, ok := data["declaredKeys"].([]string)
+		if !ok {
+			t.Fatalf("manifest declaredKeys is %T, want []string", data["declaredKeys"])
+		}
+		declared = raw
+	}
+	if declared == nil {
+		t.Fatal("the install batch wrote no package manifest aspect")
+	}
+
+	want := []string{metaKey, metaKey + ".spec", metaKey + ".description", pkgKey}
+	if !slices.Equal(declared, want) {
+		t.Fatalf("declaredKeys = %v,\nwant %v — internal/bridge's edit-coverage test admits exactly this set", declared, want)
+	}
+}
+
+// TestCapabilityApplyPlan_UpgradeExisting_DispatchScopeStillBites proves the
+// dispatch-side privilege gate is MODE-AGNOSTIC: it runs after the newPackage /
+// upgradeExisting switch, on the Definition either mode materialises, so an
+// EDIT of an installed target can no more dispatch a platform-protected
+// operation than a freshly authored one.
+//
+// The whole fixture is built so that only that gate can be what refuses: the
+// package is installed, not platform-protected, and its version preconditions
+// (baseVersion equal to installed, newVersion moved) all pass. The admitted
+// twin — the same edit with a business op — is what proves it.
+func TestCapabilityApplyPlan_UpgradeExisting_DispatchScopeStillBites(t *testing.T) {
+	ctx, conn := newCapabilityApplyHarness(t)
+	seedProtectedPackageDeclaringOps(t, ctx, conn, "rbac-domain", []string{"AssignRole"})
+
+	const packageName = "weaver-target-escalate-7f2a"
+	const installedVersion = "0.3.4"
+	seedInstalledManifest(t, ctx, conn, packageName, installedVersion)
+
+	editTarget := func() map[string]any {
+		return map[string]any{
+			"packageName": packageName,
+			"mode":        "upgradeExisting",
+			"baseVersion": installedVersion,
+			"newVersion":  "0.3.5",
+		}
+	}
+
+	escalating := WeaverTargetArtifactContent{
+		TargetID: "escalate",
+		LensRef:  "someLensRefNanoId345",
+		Gaps: map[string]GapActionArtifact{
+			"missing_grant": {Action: "directOp", Operation: "AssignRole",
+				Params: map[string]string{"actorKey": "vtx.identity.attacker", "roleKey": "vtx.role.operator"}},
+		},
+	}
+	proposalKey := seedApprovedWeaverTargetInto(t, ctx, conn, "CAEditScopeHJKMNPQR1", escalating, editTarget())
+	plan, err := CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err == nil {
+		t.Fatalf("an upgradeExisting directOp on AssignRole returned plan %+v, want a protected-dispatch refusal", plan)
+	}
+	if !strings.Contains(err.Error(), "platform-protected") || !strings.Contains(err.Error(), "AssignRole") {
+		t.Fatalf("error = %v, want a platform-protected refusal naming AssignRole", err)
+	}
+
+	benign := escalating
+	benign.Gaps = map[string]GapActionArtifact{
+		"missing_reminder": {Action: "directOp", Operation: "SendReminder"},
+	}
+	okKey := seedApprovedWeaverTargetInto(t, ctx, conn, "CAEditScopeHJKMNPQR2", benign, editTarget())
+	okPlan, err := CapabilityApplyPlanForProposal(ctx, conn, okKey)
+	if err != nil {
+		t.Fatalf("an upgradeExisting edit dispatching a business op must build a plan, got %v", err)
+	}
+	if okPlan.mode != "upgradeExisting" {
+		t.Fatalf("plan.mode = %q, want upgradeExisting", okPlan.mode)
 	}
 }
 

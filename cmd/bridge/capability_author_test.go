@@ -90,7 +90,7 @@ func authorFixture(t *testing.T) (*bridge.CapabilityAuthor, *fixtureRunner, *sub
 	}
 
 	runner := &fixtureRunner{}
-	adapter, err := bridge.NewCapabilityAuthor(runner, conn, testCatalogBucket, capabilityArtifactVerdict)
+	adapter, err := bridge.NewCapabilityAuthor(runner, conn, testCatalogBucket, capabilityArtifactVerdict, pkgmgr.PlatformProtectedPackage)
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
 	}

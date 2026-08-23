@@ -103,6 +103,43 @@ function agoFrom(iso, nowMs) {
   return d + "d ago";
 }
 
+// artifactTargetId reads the targetId out of a weaverTarget artifact's content
+// (a JSON string per the DDL), or "" when the content is absent or does not
+// parse — an AI-authored artifact is not guaranteed well-formed at record time,
+// the same allowance views/review.js's prettyContent makes.
+function artifactTargetId(content) {
+  if (!content) return "";
+  try {
+    var parsed = JSON.parse(content);
+    return (parsed && typeof parsed.targetId === "string") ? parsed.targetId : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// installTargetLabel says what approving a proposal would DO, in one line.
+//
+// An upgradeExisting proposal changes an artifact that is already installed, in
+// place — a different act from installing a new one, and a reviewer who reads
+// it as a fresh install approves something they were not shown. So the edit
+// shape is spelled out: which target, in which package, across which versions.
+// A newPackage proposal keeps the mode-and-name line it has always had.
+//
+// Absent versions render "?" rather than being dropped: an upgrade whose base
+// or target version is missing is refused at apply, and a label that quietly
+// omitted them would read like a well-formed edit.
+function installTargetLabel(row) {
+  var r = row || {};
+  var pkg = r.targetPackageName || "";
+  if (!pkg) return "";
+  if (r.targetMode !== "upgradeExisting") {
+    return (r.targetMode || "?") + " " + pkg + (r.targetNewVersion ? "@" + r.targetNewVersion : "");
+  }
+  var targetId = artifactTargetId(r.content);
+  var subject = targetId ? "edits " + targetId + " in " + pkg : "edits " + pkg;
+  return subject + " " + (r.targetBaseVersion || "?") + " → " + (r.targetNewVersion || "?");
+}
+
 // proposalRows shapes the server's raw capability-proposals rows into the
 // queue's view model and sorts them: actionable (pending) rows first, then
 // newest reasonedAt first (ISO-8601 strings compare lexically), then
@@ -116,7 +153,9 @@ function proposalRows(list) {
       kind: r.kind || "",
       targetMode: r.targetMode || "",
       targetPackageName: r.targetPackageName || "",
+      targetBaseVersion: r.targetBaseVersion || "",
       targetNewVersion: r.targetNewVersion || "",
+      installLabel: installTargetLabel(r),
       confidence: r.confidence,
       model: r.model || "",
       reasonedAt: r.reasonedAt || "",
@@ -250,4 +289,4 @@ function opRejected(reply) {
   return !!(reply && reply.status === "rejected");
 }
 
-export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, sourceLabel, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };
+export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, sourceLabel, agoFrom, artifactTargetId, installTargetLabel, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };

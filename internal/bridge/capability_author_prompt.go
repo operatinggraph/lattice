@@ -17,7 +17,7 @@ import (
 // into every proposal's promptHash, so a template edit is visible as a changed
 // hash even when the intent and the catalog are unchanged — the difference
 // between "the operator asked something else" and "we ask differently now".
-const promptTemplateVersion = "capability-author/v1"
+const promptTemplateVersion = "capability-author/v2"
 
 // capabilityAuthorToolName is the single tool the model is forced to answer
 // through. Its input schema IS this adapter's output contract.
@@ -79,8 +79,17 @@ validated and then reviewed by a human before it can take effect.`
 // the target must be authored within. When the catalog was capped to fit the
 // payload wall it says so, so the model treats an absent entry as "not shown",
 // not "does not exist".
-func authoringPrompt(intent, catalog string, truncated bool) string {
+//
+// A non-nil edit turns the turn into an EDIT of an installed target: the
+// preamble goes first, because it changes what the whole rest of the turn is
+// for — the intent stops being "author something that makes this true" and
+// becomes "change this target so that it is".
+func authoringPrompt(intent, catalog string, truncated bool, edit *editSubject) string {
 	var b strings.Builder
+	if edit != nil {
+		b.WriteString(editPreamble(*edit))
+		b.WriteString("\n\n")
+	}
 	b.WriteString("Operator intent:\n")
 	b.WriteString(intent)
 	b.WriteString("\n\nInstalled catalog (JSON):\n")
@@ -88,7 +97,57 @@ func authoringPrompt(intent, catalog string, truncated bool) string {
 	if truncated {
 		b.WriteString("\n\nNote: the catalog was truncated to fit a size limit — some installed entries are not shown. Bind only to a lens that IS shown here; if none fits, propose the lens in your rationale.")
 	}
+	if edit != nil {
+		b.WriteString("\n\nEmit the edited target: the same target, changed only where the intent asks.")
+		return b.String()
+	}
 	b.WriteString("\n\nAuthor one weaver target that makes that intent true.")
+	return b.String()
+}
+
+// editPreamble frames one edit turn: the installed target verbatim, the lens it
+// is bound to under the name the model must answer with, then the four rules an
+// edit is bound by. Each rule restates something the adapter deterministically
+// refuses — E1/E2 are apply-time removal triggers (internal/pkgmgr/apply.go's
+// coverage guard), E4 is the re-binding no key-set check could ever see, and E3
+// is what keeps a narrow intent from silently becoming a rewrite the operator
+// never asked for — so a compliant answer applies and a non-compliant one is
+// told which rule it broke.
+//
+// The lens is stated by CANONICAL NAME rather than left to the spec's own
+// lensRef, which stores the installed NanoID. The rules only admit a
+// canonicalName (rule 2), and nothing resolves a NanoID back for the model — so
+// printing the spec alone would leave it to either echo a value that resolves to
+// nothing or guess a name, and a plausible wrong guess re-points the target at
+// another lens's rows.
+//
+// The spec rides uncapped, unlike the catalog: it is ONE artifact whose size an
+// install already accepted, not the unbounded row set maxCatalogBytes exists to
+// bound, and the catalog cap leaves the payload wall most of its headroom. A
+// pathological spec that did cross the wall would be rejected by the runner as
+// a malformed request — terminal and visible, the one failure class this
+// adapter's budget guards against.
+func editPreamble(s editSubject) string {
+	description := s.description
+	if description == "" {
+		description = "(none — this target has never carried one)"
+	}
+	var b strings.Builder
+	b.WriteString("You are EDITING a weaver target that is ALREADY INSTALLED, not authoring a new one.\n\nThe target as it stands today (JSON):\n")
+	b.Write(s.spec)
+	b.WriteString("\n\nIts lensRef above is the installed lens's internal id. That lens's canonicalName — the\nonly form you may answer with — is: ")
+	b.WriteString(s.lensCanonicalName)
+	b.WriteString("\n\nIts current description:\n")
+	b.WriteString(description)
+	b.WriteString("\n\nFour rules bind an edit, on top of the authoring rules above:\n" +
+		"E1. content.targetId stays EXACTLY \"" + s.targetID + "\". The target's storage key is derived\n" +
+		"    from that id, so renaming it is a removal plus an add, and the apply refuses removals.\n" +
+		"E2. content.description stays non-empty, rewritten to describe the target's NEW behaviour.\n" +
+		"    An empty description un-declares an installed key, which the apply also refuses.\n" +
+		"E3. Change only what the intent asks for. Every other gap, action, param and read stays\n" +
+		"    byte-identical to the target above — you are editing it, not re-authoring it.\n" +
+		"E4. content.lensRef stays \"" + s.lensCanonicalName + "\". An edit changes what the target does\n" +
+		"    about its rows, never which lens those rows come from.")
 	return b.String()
 }
 
@@ -222,6 +281,24 @@ type catalogRow struct {
 	FieldDescriptions json.RawMessage `json:"fieldDescriptions"`
 }
 
+// packageRow is one row of the capabilityAuthorPackages lens read model —
+// field names mirror that lens's RETURN aliases verbatim
+// (packages/capability-author/lenses.go). DeclaredKeys is every Core KV key the
+// package's install wrote, and it is the ONLY record of which package owns a
+// given meta: no declaredBy link or aspect exists on a meta vertex.
+//
+// Description and Depends are carried for one reason: an edit's apply rewrites
+// the manifest aspect from the proposed Definition, which has no field for
+// either, so a package recording them cannot be edited without losing them.
+type packageRow struct {
+	Key          string   `json:"key"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Description  string   `json:"description"`
+	Depends      []string `json:"depends"`
+	DeclaredKeys []string `json:"declaredKeys"`
+}
+
 // catalogArtifact is one installed lens / weaver target / loom pattern as the
 // author sees it: what it is called, what it is for, and its body.
 type catalogArtifact struct {
@@ -268,24 +345,61 @@ const (
 	metaClassLoomPattern  = "meta.loomPattern"
 )
 
-// readCatalog reads the capability-author catalog read model and renders the
-// slice of it an author needs, capped to fit the payload wall.
+// catalogRead is one pass over the capability-author read-model bucket, in the
+// four shapes its readers need: the grouped prompt view, the lens
+// canonicalName→NanoID index a filed lensRef resolves through, the installed
+// weaver targets keyed by meta key (the edit path's subject lookup), and the
+// installed package manifests (the edit path's ownership lookup). One read
+// answers all four, because they must agree: an edit resolved against one
+// snapshot and prompted from another could name a package that no longer owns
+// the target it is editing.
+// malformedPackages holds the keys of package rows that did not decode. They
+// are kept rather than merely skipped because ownership is a NEGATIVE claim: a
+// dropped manifest row makes "no package declares this key" unprovable, and
+// reporting it as "kernel- or bootstrap-seeded" would be a confident answer
+// derived from a list known to be incomplete — the posture
+// internal/pkgmgr/apply.go's declarationMalformed guard takes for the same
+// reason.
+type catalogRead struct {
+	view              catalogView
+	lensIndex         map[string]string
+	targets           map[string]catalogRow
+	packages          []packageRow
+	malformedPackages []string
+}
+
+// lensCanonicalName inverts the lens index: from the NanoID an installed target
+// stores as its lensRef back to the catalog name that resolves to it.
 //
-// This is a lens-target read, not a Core KV read: the catalog is the
-// capabilityAuthorContext lens's own projection, which is exactly the surface
-// this adapter is allowed to reason over.
-//
-// It fails when there is no lens to bind to — an unreadable bucket, an empty
-// one, or a projection with no lens rows. That is the "capability-author not
-// provisioned" condition, and Execute turns it into a terminal, visible failure:
-// redelivery cannot fix it, and a target must bind to an existing lens.
-func (a *CapabilityAuthor) readCatalog(ctx context.Context) (catalogSnapshot, error) {
-	view, _, err := a.readCatalogRows(ctx)
-	if err != nil {
-		return catalogSnapshot{}, err
+// The edit path needs the inverse direction because the two ends speak
+// different forms — the model may only name a lens by canonicalName (rule 2,
+// and assembleTargetContent resolves nothing else), while what is installed is
+// the NanoID. Handing the model the raw id asks a question its own rules forbid
+// answering. Installed meta keys are unique, so no two canonicalNames share an
+// id and the walk is deterministic despite the map order.
+func (r catalogRead) lensCanonicalName(lensRef string) (string, bool) {
+	if lensRef == "" {
+		return "", false
 	}
+	for canonical, id := range r.lensIndex {
+		if id == lensRef {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+// snapshot renders the prompt slice of the catalog, capped to fit the payload
+// wall, plus its digest.
+//
+// It fails when there is no lens to bind to — an empty bucket, or a projection
+// with no lens rows. That is the "capability-author not provisioned" condition,
+// and Execute turns it into a terminal, visible failure: redelivery cannot fix
+// it, and a target must bind to an existing lens.
+func (r catalogRead) snapshot(bucket string) (catalogSnapshot, error) {
+	view := r.view
 	if len(view.Lenses) == 0 {
-		return catalogSnapshot{}, fmt.Errorf("capabilityAuthor: catalog bucket %s exposes no lens to bind a target to — the capabilityAuthorContext lens has not projected", a.contextBucket)
+		return catalogSnapshot{}, fmt.Errorf("capabilityAuthor: catalog bucket %s exposes no lens to bind a target to — the capabilityAuthorContext lens has not projected", bucket)
 	}
 	truncated := capCatalogView(&view)
 	view.Truncated = truncated
@@ -297,6 +411,20 @@ func (a *CapabilityAuthor) readCatalog(ctx context.Context) (catalogSnapshot, er
 	return catalogSnapshot{serialized: string(body), hash: hex.EncodeToString(sum[:]), truncated: truncated}, nil
 }
 
+// readCatalog reads the capability-author catalog read model and renders the
+// slice of it an author needs, capped to fit the payload wall.
+//
+// This is a lens-target read, not a Core KV read: the catalog is the
+// capabilityAuthorContext lens's own projection, which is exactly the surface
+// this adapter is allowed to reason over.
+func (a *CapabilityAuthor) readCatalog(ctx context.Context) (catalogSnapshot, error) {
+	rows, err := a.readCatalogRows(ctx)
+	if err != nil {
+		return catalogSnapshot{}, err
+	}
+	return rows.snapshot(a.contextBucket)
+}
+
 // lensIndex resolves the canonicalName→NanoID map of every installed lens, for
 // binding a target's authored lensRef. It reads the FULL catalog (never the
 // capped prompt view — the model can only name a lens it was shown, so the index
@@ -304,55 +432,72 @@ func (a *CapabilityAuthor) readCatalog(ctx context.Context) (catalogSnapshot, er
 // resolves nothing, and the draft records invalid. Only a real read failure is
 // an error, and it is transient (the poll re-arms; CallDeadline backstops).
 func (a *CapabilityAuthor) lensIndex(ctx context.Context) (map[string]string, error) {
-	_, index, err := a.readCatalogRows(ctx)
-	return index, err
+	rows, err := a.readCatalogRows(ctx)
+	return rows.lensIndex, err
 }
 
-// readCatalogRows lists and reads the catalog bucket once and returns both the
-// grouped view and the lens canonicalName→NanoID index built from the same
-// rows. Keys are read sorted, so both outputs are byte-stable regardless of the
-// order the underlying batch read returned. An error is only a transport
-// failure — emptiness is not an error here (each caller decides what an empty
-// catalog means).
-func (a *CapabilityAuthor) readCatalogRows(ctx context.Context) (catalogView, map[string]string, error) {
+// readCatalogRows lists and reads the catalog bucket once and builds every
+// projection of it a caller needs. Keys are read sorted, so the outputs are
+// byte-stable regardless of the order the underlying batch read returned. An
+// error is only a transport failure — emptiness is not an error here (each
+// caller decides what an empty catalog means).
+//
+// The bucket carries two lenses' rows on disjoint key spaces
+// (packages/capability-author/lenses.go): `vtx.meta.*` from
+// capabilityAuthorContext and `vtx.package.*` from capabilityAuthorPackages.
+// One listing therefore covers both, and the row builder tells them apart by
+// key prefix.
+func (a *CapabilityAuthor) readCatalogRows(ctx context.Context) (catalogRead, error) {
 	keys, err := a.conn.KVListKeys(ctx, a.contextBucket)
 	if err != nil {
-		return catalogView{}, nil, fmt.Errorf("capabilityAuthor: list catalog bucket %s: %w", a.contextBucket, err)
+		return catalogRead{}, fmt.Errorf("capabilityAuthor: list catalog bucket %s: %w", a.contextBucket, err)
 	}
 	sort.Strings(keys)
 	entries, err := a.conn.KVGetMulti(ctx, a.contextBucket, keys)
 	if err != nil {
-		return catalogView{}, nil, fmt.Errorf("capabilityAuthor: read catalog bucket %s: %w", a.contextBucket, err)
+		return catalogRead{}, fmt.Errorf("capabilityAuthor: read catalog bucket %s: %w", a.contextBucket, err)
 	}
-	view, index := buildCatalogView(keys, func(key string) []byte {
+	return buildCatalogRead(keys, func(key string) []byte {
 		if e, ok := entries[key]; ok && e != nil {
 			return e.Value
 		}
 		return nil
-	})
-	return view, index, nil
+	}), nil
 }
 
-// buildCatalogView filters and groups the catalog rows named by keys, reading
-// each row's bytes through value, and returns the prompt view plus the lens
-// canonicalName→NanoID index. Keys are walked in the caller's order, so a sorted
+// buildCatalogRead filters and groups the rows named by keys, reading each
+// row's bytes through value. Keys are walked in the caller's order, so a sorted
 // key list yields a byte-stable view regardless of how the underlying read
-// returned the rows. A row that does not decode, carries no key, or is neither
-// an op self-description nor a spec-bearing artifact is skipped: the catalog is
-// a prompt, and a poison row should cost the author nothing. Every lens spec is
-// sanitised before it enters the view — the DSN and RLS posture never reach the
-// vendor.
-func buildCatalogView(keys []string, value func(string) []byte) (catalogView, map[string]string) {
-	view := catalogView{
-		Lenses:        []catalogArtifact{},
-		WeaverTargets: []catalogArtifact{},
-		LoomPatterns:  []catalogArtifact{},
-		Operations:    []catalogOperation{},
+// returned the rows. A META row that does not decode, carries no key, or is
+// neither an op self-description nor a spec-bearing artifact is skipped: the
+// catalog is a prompt, and a poison row should cost the author nothing. A
+// PACKAGE row that does not decode is recorded instead of skipped, because the
+// ownership question it answers is a negative one (see catalogRead). Every lens
+// spec is sanitised before it enters the view — the DSN and RLS posture never
+// reach the vendor.
+func buildCatalogRead(keys []string, value func(string) []byte) catalogRead {
+	out := catalogRead{
+		view: catalogView{
+			Lenses:        []catalogArtifact{},
+			WeaverTargets: []catalogArtifact{},
+			LoomPatterns:  []catalogArtifact{},
+			Operations:    []catalogOperation{},
+		},
+		lensIndex: map[string]string{},
+		targets:   map[string]catalogRow{},
 	}
-	index := map[string]string{}
 	for _, key := range keys {
 		raw := value(key)
 		if len(raw) == 0 {
+			continue
+		}
+		if strings.HasPrefix(key, packageKeyPrefix) {
+			var pkg packageRow
+			if json.Unmarshal(raw, &pkg) != nil || pkg.Key == "" {
+				out.malformedPackages = append(out.malformedPackages, key)
+				continue
+			}
+			out.packages = append(out.packages, pkg)
 			continue
 		}
 		var row catalogRow
@@ -360,7 +505,7 @@ func buildCatalogView(keys []string, value func(string) []byte) (catalogView, ma
 			continue
 		}
 		if len(row.PermittedCommands) > 0 {
-			view.Operations = append(view.Operations, catalogOperation{
+			out.view.Operations = append(out.view.Operations, catalogOperation{
 				CanonicalName:     row.CanonicalName,
 				Description:       row.Description,
 				PermittedCommands: row.PermittedCommands,
@@ -379,28 +524,40 @@ func buildCatalogView(keys []string, value func(string) []byte) (catalogView, ma
 		}
 		switch row.Class {
 		case metaClassLens:
-			view.Lenses = append(view.Lenses, artifact)
+			out.view.Lenses = append(out.view.Lenses, artifact)
 			// Index by canonicalName, keeping the first (installed canonicalNames
 			// are unique; first-wins is deterministic under the sorted walk).
 			// Only a real NanoID enters the map, so a resolved lensRef is always
 			// install-legal.
 			if id := strings.TrimPrefix(row.Key, metaKeyPrefix); id != row.Key && substrate.IsValidNanoID(id) {
-				if _, seen := index[row.CanonicalName]; !seen && row.CanonicalName != "" {
-					index[row.CanonicalName] = id
+				if _, seen := out.lensIndex[row.CanonicalName]; !seen && row.CanonicalName != "" {
+					out.lensIndex[row.CanonicalName] = id
 				}
 			}
 		case metaClassWeaverTarget:
-			view.WeaverTargets = append(view.WeaverTargets, artifact)
+			out.view.WeaverTargets = append(out.view.WeaverTargets, artifact)
+			// Keyed by the meta key, which is what an edit request names and
+			// what a package's declaredKeys list claims. First-wins under the
+			// sorted walk; installed meta keys are unique, so the tie never
+			// arises outside a corrupted projection.
+			if _, seen := out.targets[row.Key]; !seen {
+				out.targets[row.Key] = row
+			}
 		case metaClassLoomPattern:
-			view.LoomPatterns = append(view.LoomPatterns, artifact)
+			out.view.LoomPatterns = append(out.view.LoomPatterns, artifact)
 		}
 	}
-	return view, index
+	return out
 }
 
 // metaKeyPrefix is the Contract #1 meta-vertex key prefix; the bare NanoID after
 // it is the id the Weaver control surface resolves a lensRef to.
 const metaKeyPrefix = "vtx.meta."
+
+// packageKeyPrefix is the Contract #1 package-vertex key prefix — the segment
+// that tells a capabilityAuthorPackages row from a capabilityAuthorContext one
+// in the bucket the two lenses share.
+const packageKeyPrefix = "vtx.package."
 
 // sensitiveLensTargetConfigKeys are the lens targetConfig subfields that must
 // never reach the vendor: the Postgres DSN (a live credential) and the

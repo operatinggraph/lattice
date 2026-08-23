@@ -187,6 +187,12 @@ type weaverTargetDetail struct {
 	// V2 (install-verdict surfacing) findings over this one target — never a
 	// stored verdict. See weaververify.go.
 	Checks []weaverCheck `json:"checks"`
+
+	// EditContext says whether this target can be re-described in natural
+	// language, and why not when it cannot. Absent only when the id resolves to
+	// no meta-vertex at all, since there is then nothing an edit could name.
+	// See weaverauthor.go.
+	EditContext *weaverEditContext `json:"editContext,omitempty"`
 }
 
 // weaverIssue is one Weaver heartbeat issue attributed to a target or entity.
@@ -1555,6 +1561,10 @@ func (s *server) weaverTargetMap(w http.ResponseWriter, r *http.Request, targetI
 			"target "+targetID+" not found (not registered, no meta-vertex, no rows, no control marker)")
 		return
 	}
+	// After the 404, because the verdict is the most expensive thing this
+	// handler reads — a second Core KV listing plus a manifest scan — and a
+	// response that is never sent has no use for it.
+	detail.EditContext = readWeaverEditContext(ctx, conn, metaKey, readers.coreGet)
 	s.writeJSON(w, http.StatusOK, detail)
 }
 

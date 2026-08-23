@@ -400,4 +400,36 @@ function rejectedIssueLabel(iss) {
   return "vtx.meta." + (i.metaId || "?") + " — not currently registered under any targetId";
 }
 
-export { fitLabel, contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine, checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel };
+// editAffordance shapes the target map's editContext into the "Edit with AI"
+// control: whether it is live, where it goes, and the sentence to show beside
+// it. Null only when the document carries no editContext at all — an id that
+// resolves to no meta-vertex, where there is nothing an edit could name.
+//
+// A target the console cannot edit still renders the control, disabled with its
+// reason on screen. The reason is the whole point: it states the apply-time
+// refusal before a model call is spent on a proposal that could never land, and
+// an affordance that quietly disappears leaves an operator to guess at a rule
+// nobody told them about.
+//
+// An ENABLED control is the server's editContext saying it found nothing in the
+// way, which is not the same as the platform agreeing — that verdict is taken
+// again on submit, from a different read. So the live title says the platform
+// decides rather than promising the draft.
+function editAffordance(d) {
+  var ec = d && d.editContext;
+  if (!ec) return null;
+  var targetId = (d && d.targetId) || "";
+  if (ec.editable) {
+    return {
+      enabled: true,
+      href: "#/weaver/author?edit=" + encodeURIComponent(targetId),
+      title: "describe a change to " + targetId + " in plain language — the platform decides on submit, " +
+        "and an accepted request lands an AI draft in the review queue",
+      reason: "",
+    };
+  }
+  var reason = ec.reason || "this target cannot be re-described from the console";
+  return { enabled: false, href: "", title: reason, reason: reason };
+}
+
+export { fitLabel, contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine, checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel, editAffordance };

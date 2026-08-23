@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -52,13 +53,33 @@ func stripExport(t *testing.T, name, src string) string {
 // logicVM evaluates web/js/logic/<name> in a fresh runtime.
 func logicVM(t *testing.T, name string) *goja.Runtime {
 	t.Helper()
-	src, err := fs.ReadFile(webFS, "web/js/logic/"+name)
-	if err != nil {
-		t.Fatalf("read embedded logic/%s: %v", name, err)
-	}
+	return webModuleVM(t, "web/js/logic/"+name)
+}
+
+// webModuleVM evaluates one or more embedded web modules into a SINGLE runtime,
+// in the order given, under the same strip-export transform the logic tier uses.
+//
+// It reaches beyond web/js/logic/ so that a module the logic tier cannot hold is
+// still drivable: api.js is DOM-adjacent (fetch, location) but its top level is
+// declarations only, so it evaluates here once the caller stubs the globals its
+// functions touch. Loading a caller alongside its callee is what lets a test
+// assert a CHAIN — the shipped api.js feeding the shipped logic module — rather
+// than each link's behaviour in isolation.
+//
+// The transform's rules still apply to every file: an import line fails loudly
+// instead of being silently dropped, which is what keeps a concatenated runtime
+// from being a different program than the browser runs.
+func webModuleVM(t *testing.T, paths ...string) *goja.Runtime {
+	t.Helper()
 	vm := goja.New()
-	if _, err := vm.RunString(stripExport(t, name, string(src))); err != nil {
-		t.Fatalf("goja eval logic/%s (ES6-conservative gate): %v", name, err)
+	for _, p := range paths {
+		src, err := fs.ReadFile(webFS, p)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", p, err)
+		}
+		if _, err := vm.RunString(stripExport(t, path.Base(p), string(src))); err != nil {
+			t.Fatalf("goja eval %s (ES6-conservative gate): %v", p, err)
+		}
 	}
 	return vm
 }

@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -81,18 +82,20 @@ func applyEnv(reqID, proposalID, packageKey, installRequestID string) *processor
 // never needed to apply anything), so this variant is local to the apply tests
 // rather than widening every existing recordEnv call site. The whole target is
 // a parameter because a case's subject may be a target FIELD (baseVersion,
-// newVersion) rather than the mode/packageName pair.
-func recordEnvForApplyTarget(t *testing.T, reqID, handle string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
+// newVersion) rather than the mode/packageName pair; the kind is one because an
+// EDIT proposal carries a weaverTarget where every other case here carries a
+// lens.
+func recordEnvForApplyTarget(t *testing.T, reqID, handle, kind string, target map[string]any, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
-	report, err := pkgmgr.ValidateCapabilityArtifact("lens", content, fullCypherParser{}, nil, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}
 	if !report.Valid {
-		t.Fatalf("expected a valid lens artifact, got errors: %v", report.Errors)
+		t.Fatalf("expected a valid %s artifact, got errors: %v", kind, report.Errors)
 	}
 	result := map[string]any{
-		"kind":       "lens",
+		"kind":       kind,
 		"content":    string(content),
 		"target":     target,
 		"rationale":  "reasoned capability authoring proposal",
@@ -260,7 +263,7 @@ func drivePendingProposalForApply(t *testing.T, ctx context.Context, conn *subst
 // explicit target.mode, for the cases where the mode itself is under test.
 func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle, packageName, mode string) string {
 	t.Helper()
-	return drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, tag, proposalID, handle,
+	return drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, tag, proposalID, handle, "lens",
 		map[string]any{"mode": mode, "packageName": packageName}, validLensContent(t, "applyLens"+tag))
 }
 
@@ -268,7 +271,7 @@ func drivePendingProposalForApplyMode(t *testing.T, ctx context.Context, conn *s
 // the whole target object and the artifact content supplied — the shape a case
 // needs when it asserts over a target FIELD, or when two proposals must carry
 // the SAME artifact (a refusal and the remedy it names).
-func drivePendingProposalForApplyTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle string, target map[string]any, content json.RawMessage) string {
+func drivePendingProposalForApplyTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, proposalID, handle, kind string, target map[string]any, content json.RawMessage) string {
 	t.Helper()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	req := requestEnv(testutil.GenReqID("CAReq"+tag), proposalID, "a lens listing active providers")
@@ -279,7 +282,7 @@ func drivePendingProposalForApplyTarget(t *testing.T, ctx context.Context, conn 
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	rec := recordEnvForApplyTarget(t, testutil.GenReqID("CARec"+tag), handle, target, content, 0.86)
+	rec := recordEnvForApplyTarget(t, testutil.GenReqID("CARec"+tag), handle, kind, target, content, 0.86)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -628,7 +631,7 @@ func TestCapAuthor_Apply_UpgradeExisting_WithoutCoverage_RefusedAndRemedyApplies
 	declared := declaredKeysOf(t, ctx, conn, capUpgradeTargetName)
 	artifact := validLensContent(t, "capUpgradeRemedyLens")
 
-	pk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "shrink", capIDApplyShrink, capHandleApplyShrink,
+	pk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "shrink", capIDApplyShrink, capHandleApplyShrink, "lens",
 		map[string]any{
 			"mode":        "upgradeExisting",
 			"packageName": capUpgradeTargetName,
@@ -665,7 +668,7 @@ func TestCapAuthor_Apply_UpgradeExisting_WithoutCoverage_RefusedAndRemedyApplies
 	}
 
 	// The remedy the refusal prints: the same artifact, as its own package.
-	remedyPk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "remedy", capIDApplyRemedy, capHandleApplyRemedy,
+	remedyPk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "remedy", capIDApplyRemedy, capHandleApplyRemedy, "lens",
 		map[string]any{"mode": "newPackage", "packageName": "capauthor-remedy-pkg"}, artifact)
 	driveReview(t, ctx, conn, cp, cons, "remedy", capIDApplyRemedy, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
 
@@ -684,4 +687,187 @@ func TestCapAuthor_Apply_UpgradeExisting_WithoutCoverage_RefusedAndRemedyApplies
 	if del, _ := readDoc(t, ctx, conn, lensKey)["isDeleted"].(bool); del {
 		t.Fatalf("%s must be live — the remedy is only a remedy if the artifact lands", lensKey)
 	}
+}
+
+// The EDIT round trip (natural-language-target-edit-design.md §6.3). Every
+// other case in this file applies a proposal that MINTS a package; this one is
+// the first that changes one already installed, and `upgradeExisting` had never
+// been produced by anything before the bridge's edit path — the mode was
+// validated end-to-end but never exercised end-to-end.
+
+const (
+	capEditLensPkgName = "capauthor-edit-lens"
+	capEditLensName    = "capEditColdOnboarding"
+	capEditPkgName     = "weaver-target-cold-nudge-7f2a"
+	capEditTargetID    = "capEditColdNudge"
+	capIDApplyEdit     = "CAApprvEditHJKMNPQRS"
+	capHandleApplyEdit = "CAHNDApEditHJKMNPQRS"
+)
+
+// capEditLensPackage is the lens the edited target binds to. It lives in its
+// own package because the target's package must hold NOTHING but that target —
+// a Definition materialized from a capability proposal describes exactly one
+// weaver target, and anything else in the same package would be a key the
+// upgrade does not describe.
+func capEditLensPackage() pkgmgr.Definition {
+	return pkgmgr.Definition{
+		Name:    capEditLensPkgName,
+		Version: "0.1.0",
+		Lenses: []pkgmgr.LensSpec{{
+			CanonicalName: capEditLensName,
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        "capauthor-edit-cold",
+			Engine:        "full",
+			Spec:          "MATCH (i:identity) RETURN i.key AS key, true AS missing_reminder",
+		}},
+	}
+}
+
+// capEditTargetPackage is the console-minted shape an edit is admissible
+// against: one weaver target, no description, no depends — exactly what
+// CapabilityApplyPlanForProposal's Definition can re-describe whole.
+func capEditTargetPackage(lensRef string) pkgmgr.Definition {
+	return pkgmgr.Definition{
+		Name:    capEditPkgName,
+		Version: "0.1.0",
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{{
+			TargetID:    capEditTargetID,
+			LensRef:     lensRef,
+			Description: "Cold onboardings raise a health issue after 24 hours.",
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_reminder": {Action: "surface", IssueCode: "coldOnboarding", IssueSeverity: "warning"},
+			},
+		}},
+	}
+}
+
+// TestCapAuthor_Apply_EditExistingTarget_UpgradesInPlace is the proof that the
+// edit mode works at all: a real single-artifact weaver-target package,
+// installed, then upgraded in place by an approved EDIT proposal running the
+// unmodified F-004 apply.
+//
+// The four assertions are the four ways an in-place apply can be wrong while
+// still returning success: it tombstones something the proposal did not
+// describe (old \ new ≠ ∅), it narrows the declaration, it does not actually
+// change the artifact, or it leaves the package on its old version. A test
+// asserting only that Apply returned nil would pass for all four.
+func TestCapAuthor_Apply_EditExistingTarget_UpgradesInPlace(t *testing.T) {
+	ctx, conn := setupCapAuthorEnv(t)
+	installPkg(t, ctx, conn, capEditLensPackage())
+	lensRef := pkgmgr.LensID(capEditLensPkgName, capEditLensName)
+	installPkg(t, ctx, conn, capEditTargetPackage(lensRef))
+	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-apply-edit")
+
+	declaredBefore := declaredKeysOf(t, ctx, conn, capEditPkgName)
+	targetKey := "vtx.meta." + substrate.PackageEntityNanoID(capEditPkgName, "weaverTarget:"+capEditTargetID)
+	specBefore := aspectData(t, ctx, conn, targetKey+".spec")
+
+	// The edit: same targetId, same lensRef, a changed remediation and a
+	// rewritten description — the shape the bridge's edit path files.
+	edited, err := json.Marshal(pkgmgr.WeaverTargetArtifactContent{
+		TargetID: capEditTargetID,
+		LensRef:  lensRef,
+		Gaps: map[string]pkgmgr.GapActionArtifact{
+			"missing_reminder": {Action: "surface", IssueCode: "coldOnboardingUrgent", IssueSeverity: "error"},
+		},
+		Description: "Cold onboardings raise a health issue after 48 hours.",
+	})
+	if err != nil {
+		t.Fatalf("marshal edited target: %v", err)
+	}
+
+	pk := drivePendingProposalForApplyTarget(t, ctx, conn, cp, cons, "edit", capIDApplyEdit, capHandleApplyEdit, "weaverTarget",
+		map[string]any{
+			"mode":        "upgradeExisting",
+			"packageName": capEditPkgName,
+			"baseVersion": "0.1.0",
+			"newVersion":  "0.1.1",
+		}, edited)
+	driveReview(t, ctx, conn, cp, cons, "edit", capIDApplyEdit, "approve", map[string]any{"state": "valid"}, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("precondition: review.state = %q, want approved", got)
+	}
+
+	res := applyRealPackage(t, ctx, conn, pk)
+	if res.Action != "upgrade" {
+		t.Fatalf("ApplyResult.Action = %q, want upgrade — an edit changes the package it names, it does not mint one", res.Action)
+	}
+	if res.Tombstoned != 0 {
+		t.Fatalf("ApplyResult.Tombstoned = %d, want 0 — an edit describes the whole package, so old \\ new is empty", res.Tombstoned)
+	}
+	if res.FromVersion != "0.1.0" || res.ToVersion != "0.1.1" {
+		t.Fatalf("version moved %q → %q, want 0.1.0 → 0.1.1", res.FromVersion, res.ToVersion)
+	}
+
+	// Nothing the package declared before the edit is tombstoned after it. This
+	// is the assertion the whole editable/not-editable boundary exists to keep
+	// true: an upgrade that did not describe one of these keys would have
+	// retired it.
+	for _, k := range declaredBefore {
+		if del, _ := readDoc(t, ctx, conn, k)["isDeleted"].(bool); del {
+			t.Errorf("%s was tombstoned by an in-place edit — old \\ new must be empty", k)
+		}
+	}
+
+	// The declaration is unchanged: an edit that quietly narrowed declaredKeys
+	// would leave the dropped keys live but unowned, which no later apply could
+	// clean up.
+	declaredAfter := declaredKeysOf(t, ctx, conn, capEditPkgName)
+	if !sameKeySet(declaredBefore, declaredAfter) {
+		t.Errorf("declaredKeys changed across the edit:\n before %v\n after  %v", declaredBefore, declaredAfter)
+	}
+
+	// The artifact actually changed — an apply that committed nothing would
+	// satisfy every assertion above.
+	specAfter := aspectData(t, ctx, conn, targetKey+".spec")
+	if fmt.Sprint(specBefore) == fmt.Sprint(specAfter) {
+		t.Fatalf("the target's .spec body is unchanged after the edit: %v", specAfter)
+	}
+	gaps, _ := specAfter["gaps"].(map[string]any)
+	gap, _ := gaps["missing_reminder"].(map[string]any)
+	if got, _ := gap["issueCode"].(string); got != "coldOnboardingUrgent" {
+		t.Errorf("installed gap issueCode = %q, want the edited coldOnboardingUrgent", got)
+	}
+	if got, _ := specAfter["lensRef"].(string); got != lensRef {
+		t.Errorf("installed lensRef = %q, want the unchanged %q", got, lensRef)
+	}
+	if got := aspectValue(t, ctx, conn, targetKey+".description", "text"); got != "Cold onboardings raise a health issue after 48 hours." {
+		t.Errorf("installed description = %q, want the edited prose", got)
+	}
+
+	// The proposal's own lifecycle closes exactly as a fresh install's does.
+	installRequestID := "upgrade:" + res.PackageName + "@" + res.ToVersion
+	driveApply(t, ctx, conn, cp, cons, "edit", capIDApplyEdit, res.PackageKey, installRequestID, processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "applied" {
+		t.Fatalf("review.state = %q, want applied", got)
+	}
+}
+
+// aspectValue returns one field of an aspect document's `data` object.
+func aspectValue(t *testing.T, ctx context.Context, conn *substrate.Conn, key, field string) string {
+	t.Helper()
+	v, _ := aspectData(t, ctx, conn, key)[field].(string)
+	return v
+}
+
+// sameKeySet compares two declared-key lists as sets — install order is not
+// part of the declaration.
+func sameKeySet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, k := range a {
+		seen[k]++
+	}
+	for _, k := range b {
+		seen[k]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }

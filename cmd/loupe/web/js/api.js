@@ -38,6 +38,13 @@ function pretty(v) {
 // every /api/* route is behind the same gate, so this is the one place that
 // needs to notice and send the operator back to /login rather than let each
 // caller render a stray "operator login required" error inline.
+//
+// A failed response also carries its status back as `httpStatus`, because some
+// refusals are not the same KIND of thing as an error and a caller that only
+// sees the message cannot tell them apart — the demo posture's 403 is a
+// standing rule about this deployment, not a fault to render in red. It is
+// stamped only on non-2xx bodies and under a name no handler emits, so no
+// successful payload's own fields (several carry a `status`) are shadowed.
 async function api(path, opts) {
   try {
     const res = await fetch(path, opts);
@@ -49,6 +56,7 @@ async function api(path, opts) {
     let body;
     try { body = text ? JSON.parse(text) : {}; }
     catch (_) { body = { error: "non-JSON response: " + text.slice(0, 200) }; }
+    if (!res.ok && body && typeof body === "object") body.httpStatus = res.status;
     return body;
   } catch (e) {
     return { error: "request failed: " + e.message };

@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -32,9 +35,12 @@ import (
 // carrying no read/write of Loupe's own state, but propose DOES submit a
 // platform-mutating op (SubmitCapabilityProposal) through the Gateway, so —
 // unlike Check — it needs the console-wide requireOperator gate to have
-// resolved a real operator token; demoReadOnly's method default-deny still
-// blocks it under the demo posture, and the client additionally hides the
-// button via the same data-demo-hide convention as Check/Export.
+// resolved a real operator token. demoReadOnly's method default-deny is what
+// refuses it under the demo posture, for propose and for the Describe request
+// below alike; the client's data-demo-hide markers only decide which of those
+// refusals a visitor is invited to trigger. Propose and Run checks carry the
+// marker; Describe's Submit deliberately does not, so a demo visitor can walk
+// the authoring path and read the 403 the server answers with.
 
 // weaverAuthorCheckRequest is POST /api/weaver/author/check's body: the
 // target draft content always, plus the paired violation-lens content (§6
@@ -490,6 +496,174 @@ func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
 		results = append(results, res)
 	}
 	s.writeJSON(w, http.StatusOK, weaverAuthorProposeResponse{Results: results})
+}
+
+// weaverEditContext answers, for one installed weaver target, whether the
+// Describe panel may re-author it in place (natural-language-target-edit-
+// design.md §3.4). It rides the target map document so the console can explain
+// itself before a model call is spent.
+//
+// An edit is relayed as a `contextRef` and comes back as an `upgradeExisting`
+// proposal over the target's OWN package, whose Definition describes exactly
+// one weaverTarget. internal/pkgmgr's coverage refusal rejects any apply whose
+// Definition stops describing a key the installed package declares, so an edit
+// can only ever land when the owning package declares nothing beyond this one
+// target — true of the per-proposal packages the console mints, never true of a
+// multi-artifact domain package. Deciding it here turns that apply-time refusal
+// into an actionable sentence on the page.
+//
+// The verdict is ADVISORY. It says what this console found in the manifests it
+// could read; the platform decides again when the sentence is actually
+// submitted — internal/bridge's capabilityAuthor adapter resolves the same
+// ownership from its own read-model — and its answer is the one that binds. So
+// every string below states an observation, never a promise about the outcome.
+type weaverEditContext struct {
+	MetaKey        string `json:"metaKey"`
+	PackageName    string `json:"packageName,omitempty"`
+	PackageVersion string `json:"packageVersion,omitempty"`
+	Editable       bool   `json:"editable"`
+	// Reason carries the sentence behind editable=false, and is always set when
+	// it is false: an affordance that silently vanishes teaches an operator
+	// nothing about why.
+	Reason string `json:"reason,omitempty"`
+}
+
+// weaverTargetOwnedKeys are the Core KV keys a weaverTarget artifact installs:
+// the meta-vertex, its `.spec` body, and the sibling `.description` aspect
+// emitted alongside when the author wrote prose (internal/pkgmgr/build.go's
+// WeaverTargets loop).
+func weaverTargetOwnedKeys(metaKey string) map[string]bool {
+	return map[string]bool{
+		metaKey:                  true,
+		metaKey + ".spec":        true,
+		metaKey + ".description": true,
+	}
+}
+
+// declaredArtifactRoot reduces a declared key to the entity it belongs to, so
+// a count of "other artifacts" counts entities rather than the aspects hanging
+// off them. A link and a vertex root are already their own entity.
+func declaredArtifactRoot(key string) string {
+	if classifyKey(key) != classAspect {
+		return key
+	}
+	if i := strings.LastIndex(key, "."); i > 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// buildWeaverEditContext decides a target's editability from the installed
+// package manifests. pkgKeys is a `vtx.package.` subtree listing of Core KV,
+// which Loupe reads directly as the console inspector.
+//
+// Ownership is discoverable only by scanning declaredKeys — no link or aspect
+// records which package declared a meta-vertex. findOwningPackage already runs
+// exactly that scan for the lens page and is key-generic, so it resolves a
+// weaverTarget meta unchanged; the owner's own declared-key list is then read
+// back from the single manifest it named rather than rescanning all of them.
+//
+// The subset test excludes the package's own root vertex: build.go snapshots
+// declaredKeys after adding it, so EVERY package declares it, and an upgrade
+// re-declares the identical key (the id is derived from the package name), so
+// it is never a key an edit would drop.
+func buildWeaverEditContext(metaKey string, pkgKeys []string, get kvGetter) *weaverEditContext {
+	if metaKey == "" {
+		return nil
+	}
+	ec := &weaverEditContext{MetaKey: metaKey}
+	owner := findOwningPackage(pkgKeys, get, strings.TrimPrefix(metaKey, "vtx.meta."))
+	if owner == nil {
+		// Stated as the scan's own result, not as a conclusion about the target's
+		// provenance: findOwningPackage skips a manifest it cannot decode, so
+		// "nothing claims it" and "the one thing that claims it did not read" end
+		// up in this same branch. Kernel/bootstrap seeding is the ordinary cause
+		// and worth naming; it is not something this read establishes.
+		ec.Reason = "no readable package manifest declares " + metaKey + " — an edit upgrades the package that " +
+			"declares its target, so a kernel- or bootstrap-seeded target is changed in code instead"
+		return ec
+	}
+	ec.PackageName = owner.Name
+	ec.PackageVersion = owner.Version
+	// An upgrade has to name the package it upgrades and the version it was
+	// authored against, so a manifest carrying neither can never be one's
+	// subject. The capabilityAuthor adapter refuses on exactly this footing, and
+	// it refuses only after the operator has typed their sentence and spent the
+	// round trip.
+	if ec.PackageName == "" || strings.TrimSpace(ec.PackageVersion) == "" {
+		ec.Reason = "the package declaring " + metaKey + " records no name and version in its manifest, so an " +
+			"upgrade could not say what it upgrades or what it was authored against"
+		return ec
+	}
+
+	declared := dataStrings(metaData(get, owner.Key+".manifest"), "declaredKeys")
+	// findOwningPackage resolved this owner BY FINDING metaKey in this same
+	// list, so a re-read that no longer contains it is a read that did not land
+	// — an unreadable, tombstoned or mid-change manifest — never a package that
+	// declares nothing else. An empty list would otherwise sail through the
+	// subset test below and grant the edit: concluding coverage from a list
+	// known to be incomplete is the one thing a coverage test must not do,
+	// which is why internal/pkgmgr/apply.go refuses on the same footing.
+	if !slices.Contains(declared, metaKey) {
+		ec.Reason = "package " + ec.PackageName + "'s declared-key list could not be read whole, so whether this " +
+			"target shares its package with other artifacts is unknown"
+		return ec
+	}
+
+	owned := weaverTargetOwnedKeys(metaKey)
+	otherArtifacts := map[string]bool{}
+	for _, dk := range declared {
+		if dk == owner.Key || owned[dk] {
+			continue
+		}
+		otherArtifacts[declaredArtifactRoot(dk)] = true
+	}
+	if n := len(otherArtifacts); n > 0 {
+		artifacts := strconv.Itoa(n) + " other artifacts"
+		if n == 1 {
+			artifacts = "1 other artifact"
+		}
+		ec.Reason = "this target is declared by package " + ec.PackageName + ", which also declares " + artifacts +
+			" — an AI edit applies as a whole-package upgrade, and an apply may not remove what its " +
+			"proposal does not describe. Change this target in code, or describe a new one."
+		return ec
+	}
+	ec.Editable = true
+	return ec
+}
+
+// readWeaverEditContext lists the package subtree the verdict needs and hands
+// it to buildWeaverEditContext. The listing is scoped to `vtx.package.` for the
+// same reason the lens detail handler scopes its own: manifests are all this
+// reads, and an unscoped whole-corpus listing would spend the request budget
+// before the map is assembled.
+//
+// A listing failure yields an editContext carrying the read error rather than
+// no editContext at all — the console then says the verdict is unknown, which
+// is the honest state, instead of leaving the page with no explanation for a
+// missing affordance. The rest of the target map reads fine without it, so it
+// does not fail the request the way the map's own listings do.
+//
+// This is the heaviest read in the target-detail handler — a second listing plus
+// one manifest GET per installed package until the owner is found — which is why
+// its caller runs it last, and why it keeps findOwningPackage's early exit
+// instead of the whole-corpus reverse index the system map builds
+// (buildLensPackageIndex): that index reads EVERY manifest with no early exit,
+// and it still could not answer the coverage question below, which needs the
+// owner's own declared-key list read back.
+func readWeaverEditContext(ctx context.Context, conn *substrate.Conn, metaKey string, get kvGetter) *weaverEditContext {
+	if metaKey == "" {
+		return nil
+	}
+	pkgKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.package.")
+	if err != nil {
+		return &weaverEditContext{
+			MetaKey: metaKey,
+			Reason: "could not read the installed package manifests (" + err.Error() +
+				"), so whether this target can be re-described is unknown",
+		}
+	}
+	return buildWeaverEditContext(metaKey, pkgKeys, get)
 }
 
 // weaverAuthorRequestBody is POST /api/weaver/author/request's body — the

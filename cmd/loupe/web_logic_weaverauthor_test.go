@@ -542,3 +542,242 @@ func TestWeaverAuthorBuildAuthoringRequest(t *testing.T) {
 		}
 	}
 }
+
+// --- editing an installed target (natural-language-target-edit-design.md) ---
+
+// An upgrade's newVersion must MOVE — capabilityapply.go refuses one equal to
+// the installed version, so that "the package is live at newVersion" can only
+// mean the apply committed. Versions are compared as strings there and never
+// ordered, so what this owes is determinism and difference, not semver.
+func TestWeaverAuthorBumpPatchVersion(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	for _, tc := range []struct{ in, want string }{
+		{"0.1.0", "0.1.1"},
+		{"1.2.9", "1.2.10"},
+		{"  0.1.0  ", "0.1.1"},
+		{"1.0", "1.1"},
+		{"7", "8"},
+		// A scheme this console does not know is extended, not reinterpreted.
+		{"1.0.0-rc1", "1.0.0-rc1.1"},
+		// Nothing installed to move from: the apply refuses a blank baseVersion
+		// with its own message, which is better than a fabricated one here.
+		{"", ""},
+	} {
+		if got := call(t, vm, "bumpPatchVersion", tc.in); got != tc.want {
+			t.Errorf("bumpPatchVersion(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+		if tc.in != "" && call(t, vm, "bumpPatchVersion", tc.in) == tc.in {
+			t.Errorf("bumpPatchVersion(%q) did not move the version", tc.in)
+		}
+	}
+}
+
+// With an edit context the target artifact proposes an in-place upgrade of the
+// package it already lives in. Minting a fresh package instead would install a
+// SECOND target claiming the same targetId beside the one being edited.
+func TestWeaverAuthorBuildApplyTargetEditKeepsUpgradeShape(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	edit := map[string]any{"packageName": "weaver-target-leasecomplete-k3f9", "baseVersion": "0.1.0", "newVersion": ""}
+
+	got := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "abc123", edit).(map[string]any)
+	if got["mode"] != "upgradeExisting" {
+		t.Errorf("mode = %v, want upgradeExisting", got["mode"])
+	}
+	if got["packageName"] != "weaver-target-leasecomplete-k3f9" {
+		t.Errorf("packageName = %v, want the installed package verbatim", got["packageName"])
+	}
+	if got["baseVersion"] != "0.1.0" {
+		t.Errorf("baseVersion = %v, want the version the edit was authored against — the apply refuses a blank one", got["baseVersion"])
+	}
+	if got["newVersion"] != "0.1.1" {
+		t.Errorf("newVersion = %v, want a moved version", got["newVersion"])
+	}
+
+	// The freshness token drives the NEW-package name only. An edit that
+	// re-derived its package per click would aim each propose at a different
+	// (uninstalled) package and be refused.
+	again := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "zzz999", edit).(map[string]any)
+	if again["packageName"] != got["packageName"] || again["newVersion"] != got["newVersion"] {
+		t.Errorf("a second click derived %+v, want the same upgrade coordinates as %+v", again, got)
+	}
+
+	// A recorded newVersion (a proposal loaded back into the form) is kept
+	// rather than re-derived: it is what that proposal's apply was checked for.
+	recorded := map[string]any{"packageName": "weaver-target-x-1", "baseVersion": "1.3.0", "newVersion": "2.0.0"}
+	if got := call(t, vm, "buildApplyTarget", "weaverTarget", "x", "abc", recorded).(map[string]any); got["newVersion"] != "2.0.0" {
+		t.Errorf("newVersion = %v, want the proposal's own 2.0.0", got["newVersion"])
+	}
+
+	// A lens co-authored during an edit is new work of its own — the edited
+	// target's package is not somewhere it belongs, and an upgrade describing
+	// only a lens would drop the target that package declares.
+	lens := call(t, vm, "buildApplyTarget", "lens", "leaseComplete", "abc123", edit).(map[string]any)
+	if lens["mode"] != "newPackage" {
+		t.Errorf("lens mode = %v, want newPackage even under an edit", lens["mode"])
+	}
+	if !containsSub(lens["packageName"].(string), "weaver-lens-") {
+		t.Errorf("lens packageName = %v, want its own weaver-lens- package", lens["packageName"])
+	}
+}
+
+// No edit context, and the from-scratch shape is exactly what it was — an
+// absent, null, or package-less edit all fall through to newPackage.
+func TestWeaverAuthorBuildApplyTargetWithoutEditIsUnchanged(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	want := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "abc123").(map[string]any)
+	if want["mode"] != "newPackage" || want["newVersion"] != "0.1.0" {
+		t.Fatalf("baseline = %+v, want the newPackage shape", want)
+	}
+	for _, edit := range []any{
+		nil,
+		map[string]any{},
+		map[string]any{"baseVersion": "0.1.0"}, // coordinates with no package to name
+	} {
+		got := call(t, vm, "buildApplyTarget", "weaverTarget", "leaseComplete", "abc123", edit).(map[string]any)
+		if got["mode"] != want["mode"] || got["packageName"] != want["packageName"] || got["newVersion"] != want["newVersion"] {
+			t.Errorf("buildApplyTarget(..., %v) = %+v, want the unchanged newPackage shape %+v", edit, got, want)
+		}
+		if _, has := got["baseVersion"]; has {
+			t.Errorf("newPackage target = %+v, want no baseVersion key", got)
+		}
+	}
+}
+
+// An edit proposal loaded back into the form must RE-propose as the same
+// in-place upgrade. Dropping the coordinates would mint a second package
+// holding a duplicate of an already-installed target, from an operator who only
+// meant to reword the AI's draft.
+func TestWeaverAuthorHydratedEditReproposesAsAnUpgrade(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	row := map[string]any{
+		"kind":              "weaverTarget",
+		"content":           `{"targetId":"leaseComplete","lensRef":"leaseViolations","description":"Every tab settles in 48h.","gaps":{}}`,
+		"rationale":         "the operator asked for 48 hours",
+		"targetMode":        "upgradeExisting",
+		"targetPackageName": "weaver-target-leasecomplete-k3f9",
+		"targetBaseVersion": "0.1.0",
+		"targetNewVersion":  "0.1.1",
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+	edit, _ := draft["edit"].(map[string]any)
+	if edit == nil {
+		t.Fatal("a hydrated upgradeExisting proposal carries no edit coordinates")
+	}
+	if edit["packageName"] != "weaver-target-leasecomplete-k3f9" || edit["baseVersion"] != "0.1.0" || edit["newVersion"] != "0.1.1" {
+		t.Errorf("edit = %+v, want the proposal's own recorded coordinates", edit)
+	}
+	if edit["targetId"] != "leaseComplete" {
+		t.Errorf("edit targetId = %v, want the identity the upgrade is over", edit["targetId"])
+	}
+
+	bundle := call(t, vm, "exportBundle", draft, nil, "r", "fresh1").(map[string]any)
+	artifacts := bundle["artifacts"].([]any)
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %d, want 1 (the hydrated draft binds an installed lens)", len(artifacts))
+	}
+	target := artifacts[0].(map[string]any)["target"].(map[string]any)
+	if target["mode"] != "upgradeExisting" || target["packageName"] != "weaver-target-leasecomplete-k3f9" {
+		t.Errorf("re-proposed target = %+v, want the same in-place upgrade", target)
+	}
+}
+
+// The human re-propose lane's identity guard. Load-into-Author on an edit
+// proposal, retype the targetId, Propose: the artifact would upgrade the
+// original package with a Definition describing a DIFFERENT target key, and the
+// apply refuses it as a removal. That refusal is terminal here — this lane has
+// no correction pass — so Propose must not offer the submission at all.
+func TestWeaverAuthorProposeBlockersRefuseARenamedEdit(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	passing := map[string]any{
+		"targetValidation": map[string]any{"valid": true, "errors": []any{}},
+		"lensValidation":   map[string]any{"valid": true, "errors": []any{}},
+	}
+	row := map[string]any{
+		"kind":              "weaverTarget",
+		"content":           `{"targetId":"leaseComplete","lensRef":"leaseViolations","description":"Every tab settles in 48h.","gaps":{}}`,
+		"targetMode":        "upgradeExisting",
+		"targetPackageName": "weaver-target-leasecomplete-k3f9",
+		"targetBaseVersion": "0.1.0",
+		"targetNewVersion":  "0.1.1",
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+
+	// Untouched, it proposes: the guard must not block the ordinary reword this
+	// whole round trip exists for.
+	if got := call(t, vm, "proposeBlockers", draft, passing).([]any); len(got) != 0 {
+		t.Fatalf("proposeBlockers(hydrated edit) = %v, want none", got)
+	}
+
+	for _, renamed := range []string{"leaseSettled", "", "  "} {
+		draft["targetId"] = renamed
+		got := call(t, vm, "proposeBlockers", draft, passing).([]any)
+		if len(got) != 1 || !containsSub(got[0].(string), "leaseComplete") {
+			t.Errorf("proposeBlockers(targetId=%q) = %v, want one blocker naming the installed id", renamed, got)
+		}
+	}
+
+	// Whitespace around the same id is the same id, not a rename.
+	draft["targetId"] = " leaseComplete "
+	if got := call(t, vm, "proposeBlockers", draft, passing).([]any); len(got) != 0 {
+		t.Errorf("proposeBlockers(padded id) = %v, want none", got)
+	}
+
+	// A from-scratch draft has no id to keep, so the guard stays out of its way.
+	fresh := map[string]any{"targetId": "anythingAtAll", "description": "Every tab settles.", "gaps": map[string]any{}}
+	if got := call(t, vm, "proposeBlockers", fresh, passing).([]any); len(got) != 0 {
+		t.Errorf("proposeBlockers(new draft) = %v, want none", got)
+	}
+}
+
+// A newPackage proposal loaded back into the form stays a new package — the
+// hydrate path must not turn every re-propose into an upgrade.
+func TestWeaverAuthorHydratedNewPackageProposalCarriesNoEdit(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	row := map[string]any{
+		"kind":              "weaverTarget",
+		"content":           `{"targetId":"leaseComplete","lensRef":"leaseViolations","gaps":{}}`,
+		"targetMode":        "newPackage",
+		"targetPackageName": "weaver-target-leasecomplete-aaa",
+		"targetNewVersion":  "0.1.0",
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+	if draft["edit"] != nil {
+		t.Errorf("edit = %+v, want null for a newPackage proposal", draft["edit"])
+	}
+	// An upgradeExisting row naming no package is coordinates the apply would
+	// refuse — carrying half a set is worse than carrying none.
+	partial := map[string]any{"kind": "weaverTarget", "content": `{"targetId":"t","gaps":{}}`, "targetMode": "upgradeExisting"}
+	if got := call(t, vm, "hydrateFromProposal", partial).(map[string]any); got["edit"] != nil {
+		t.Errorf("edit = %+v, want null when the proposal names no package", got["edit"])
+	}
+}
+
+// A co-authored draft under an edit: the target upgrades in place, the new lens
+// still lands as its own package. One call derives both.
+func TestWeaverAuthorExportBundleEditKeepsTheLensNew(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	draft := map[string]any{
+		"targetId":    "leaseComplete",
+		"description": "Every tab settles.",
+		"lensRef":     "leaseViolations",
+		"gaps":        map[string]any{},
+		"lens":        map[string]any{"canonicalName": "leaseViolations", "adapter": "nats-kv", "bucket": "weaver-targets", "spec": "MATCH (n) RETURN n.key AS key"},
+		"edit":        map[string]any{"packageName": "weaver-target-leasecomplete-k3f9", "baseVersion": "0.1.0"},
+	}
+	bundle := call(t, vm, "exportBundle", draft, nil, "r", "fresh2").(map[string]any)
+	artifacts := bundle["artifacts"].([]any)
+	if len(artifacts) != 2 {
+		t.Fatalf("artifacts = %d, want 2 (target + co-authored lens)", len(artifacts))
+	}
+	target := artifacts[0].(map[string]any)["target"].(map[string]any)
+	lens := artifacts[1].(map[string]any)["target"].(map[string]any)
+	if target["mode"] != "upgradeExisting" {
+		t.Errorf("target mode = %v, want upgradeExisting", target["mode"])
+	}
+	if lens["mode"] != "newPackage" {
+		t.Errorf("lens mode = %v, want newPackage", lens["mode"])
+	}
+	if lens["packageName"] == target["packageName"] {
+		t.Errorf("lens and target both name %v — the lens's apply would collide with the edit", lens["packageName"])
+	}
+}

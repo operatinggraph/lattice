@@ -372,3 +372,94 @@ func TestOpRejected(t *testing.T) {
 		t.Errorf("absent reply = %v, want false (a reply the console never got is not a rejection)", got)
 	}
 }
+
+// A reviewer must never be asked to approve an in-place change to an installed
+// artifact under a label that reads like a fresh install. The two acts differ,
+// and only one of them can overwrite something that is already there.
+func TestInstallTargetLabel(t *testing.T) {
+	vm := logicVM(t, "review.js")
+
+	edit := call(t, vm, "installTargetLabel", map[string]any{
+		"targetMode":        "upgradeExisting",
+		"targetPackageName": "weaver-target-leasecomplete-k3f9",
+		"targetBaseVersion": "0.1.0",
+		"targetNewVersion":  "0.1.1",
+		"content":           `{"targetId":"leaseComplete","lensRef":"leaseViolations","gaps":{}}`,
+	}).(string)
+	for _, want := range []string{"edits", "leaseComplete", "weaver-target-leasecomplete-k3f9", "0.1.0", "0.1.1"} {
+		if !containsSub(edit, want) {
+			t.Errorf("label %q does not name %q", edit, want)
+		}
+	}
+
+	// The artifact content is the only place the targetId lives — an unparsable
+	// one still yields a label naming the package and the versions, never a
+	// half-built sentence with an empty subject.
+	noID := call(t, vm, "installTargetLabel", map[string]any{
+		"targetMode": "upgradeExisting", "targetPackageName": "weaver-target-x-1",
+		"targetBaseVersion": "0.1.0", "targetNewVersion": "0.1.1", "content": "{not json",
+	}).(string)
+	if containsSub(noID, "undefined") || !containsSub(noID, "edits weaver-target-x-1") {
+		t.Errorf("label = %q, want a package-only edit sentence", noID)
+	}
+
+	// An upgrade missing a version is refused at apply. The label shows the gap
+	// rather than dropping it and reading like a well-formed edit.
+	gap := call(t, vm, "installTargetLabel", map[string]any{
+		"targetMode": "upgradeExisting", "targetPackageName": "p", "content": "",
+	}).(string)
+	if !containsSub(gap, "?") {
+		t.Errorf("label = %q, want the missing versions visible", gap)
+	}
+
+	// The from-scratch line is unchanged.
+	fresh := call(t, vm, "installTargetLabel", map[string]any{
+		"targetMode": "newPackage", "targetPackageName": "weaver-target-x-abc", "targetNewVersion": "0.1.0",
+	}).(string)
+	if fresh != "newPackage weaver-target-x-abc@0.1.0" {
+		t.Errorf("label = %q, want the newPackage line unchanged", fresh)
+	}
+
+	// A row with no target yet (reasoning still in flight) labels nothing,
+	// which is what lets the card omit the line entirely.
+	for _, row := range []any{nil, map[string]any{}, map[string]any{"targetMode": "newPackage"}} {
+		if got := call(t, vm, "installTargetLabel", row); got != "" {
+			t.Errorf("installTargetLabel(%v) = %q, want empty", row, got)
+		}
+	}
+}
+
+func TestArtifactTargetId(t *testing.T) {
+	vm := logicVM(t, "review.js")
+	if got := call(t, vm, "artifactTargetId", `{"targetId":"leaseComplete"}`); got != "leaseComplete" {
+		t.Errorf("artifactTargetId = %v, want leaseComplete", got)
+	}
+	// An AI-authored artifact is not guaranteed well-formed at record time, and
+	// a non-string targetId is not a targetId.
+	for _, content := range []any{nil, "", "{not json", "[]", `{"targetId":42}`, `{"canonicalName":"x"}`} {
+		if got := call(t, vm, "artifactTargetId", content); got != "" {
+			t.Errorf("artifactTargetId(%v) = %v, want empty", content, got)
+		}
+	}
+}
+
+// The queue card reads its label off the shaped row, so proposalRows has to
+// carry it (and the baseVersion it is built from) rather than leaving the view
+// to re-derive them.
+func TestProposalRowsCarryTheInstallLabel(t *testing.T) {
+	vm := logicVM(t, "review.js")
+	rows := call(t, vm, "proposalRows", []any{map[string]any{
+		"key": "vtx.capabilityproposal.p1", "proposalId": "p1", "kind": "weaverTarget",
+		"targetMode": "upgradeExisting", "targetPackageName": "weaver-target-leasecomplete-k3f9",
+		"targetBaseVersion": "0.1.0", "targetNewVersion": "0.1.1",
+		"content": `{"targetId":"leaseComplete"}`,
+	}}).([]any)
+	row := rows[0].(map[string]any)
+	if row["targetBaseVersion"] != "0.1.0" {
+		t.Errorf("targetBaseVersion = %v, want it carried onto the row", row["targetBaseVersion"])
+	}
+	label, _ := row["installLabel"].(string)
+	if !containsSub(label, "edits leaseComplete") {
+		t.Errorf("installLabel = %q, want the edit spelled out on the queue card", label)
+	}
+}

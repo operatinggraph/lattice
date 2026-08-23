@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +41,14 @@ const CapabilityAuthorKind = "weaverTarget"
 // name already installed), never platform-protected (the deny-list is a fixed
 // set of known names, none under this prefix), and re-derivable so a redelivery
 // files the identical target.
+// The install target every AI-authored proposal files, in the two shapes the
+// apply path accepts. An authoring request mints its own fresh package
+// (newPackage); an EDIT of an installed target upgrades the package that owns
+// it in place (upgradeExisting), which is why an edit is admissible only where
+// that one target IS the whole package — see resolveEditSubject.
 const (
 	capabilityAuthorTargetMode = "newPackage"
+	capabilityEditTargetMode   = "upgradeExisting"
 	authoredPackagePrefix      = "ai-target-"
 	authoredPackageVersion     = "0.1.0"
 )
@@ -87,6 +95,17 @@ const (
 // malformed result would.
 type ArtifactValidator func(kind string, content []byte) (state string, report string)
 
+// ProtectedPackagePredicate reports whether a package name is on the platform's
+// protected deny-list — the packages no AI-authored proposal may install into or
+// upgrade, whatever else about it checks out.
+//
+// It is injected for the same reason ArtifactValidator is: internal/bridge stays
+// free of internal/pkgmgr, and the composition root (cmd/bridge) wires the real
+// pkgmgr.PlatformProtectedPackage. The adapter consults it while scoping an
+// edit, so a protected owner is refused before a vendor call rather than at the
+// apply the operator reaches after reviewing the proposal.
+type ProtectedPackagePredicate func(name string) bool
+
 // ModelDispatcher submits one generation request to the model-runner fleet and
 // returns the runner's immediate ack. *wire.Client is the production
 // implementation; the interface exists so the adapter's tests drive the
@@ -115,6 +134,7 @@ type CapabilityAuthor struct {
 	conn          *substrate.Conn
 	contextBucket string
 	validate      ArtifactValidator
+	protected     ProtectedPackagePredicate
 	now           func() time.Time
 
 	mu       sync.Mutex
@@ -138,6 +158,22 @@ type CapabilityAuthor struct {
 // first turn, the rejected draft and the validator's report, all of which are
 // re-derivable at any later Poll. Only its hash is kept, because the draft it
 // produced is what gets recorded.
+//
+// edit is the one field that outlives settle alongside the hashes, because it
+// is what the FILED proposal is shaped by: without it a resolved edit would be
+// re-filed as a fresh package on a redelivered fired-poll. It is nil for an
+// ordinary authoring request, and nil for an episode this process did not
+// assemble — a bridge that restarted mid-request cannot know an edit was asked
+// for, so it files the fresh-package target a cold author files.
+//
+// That degradation is bounded on both sides. It runs toward the LESS privileged
+// shape (a new package the operator reviews, never an unannounced in-place
+// upgrade); the window is narrow, because a redelivered event re-runs Execute,
+// which resolves the edit again; and if such a proposal were approved and
+// applied, the second target carries the edited target's targetId, which the
+// Weaver's registry refuses to register twice (internal/weaver/registry.go's
+// uniqueness check names the meta that holds it). The installed target keeps
+// running and the duplicate announces itself.
 type authoringEpisode struct {
 	intent      string
 	model       string
@@ -146,6 +182,7 @@ type authoringEpisode struct {
 	promptHash  string
 	catalogHash string
 	repairHash  string
+	edit        *editSubject
 	settled     bool
 }
 
@@ -164,10 +201,12 @@ func WithCapabilityAuthorClock(now func() time.Time) CapabilityAuthorOption {
 
 // NewCapabilityAuthor builds the adapter over a model-runner dispatcher, the
 // substrate connection it reads both KV surfaces through, the capability-author
-// catalog bucket, and the deterministic artifact validator. A missing
-// dependency is a wiring bug in the composition root, surfaced here rather than
-// nil-panicking on the first authoring request.
-func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBucket string, validate ArtifactValidator, opts ...CapabilityAuthorOption) (*CapabilityAuthor, error) {
+// catalog bucket, the deterministic artifact validator, and the
+// platform-protected-package predicate. A missing dependency is a wiring bug in
+// the composition root, surfaced here rather than nil-panicking on the first
+// authoring request — and for the predicate a nil would be worse than a panic,
+// since "nothing is protected" is the fail-open answer.
+func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBucket string, validate ArtifactValidator, protected ProtectedPackagePredicate, opts ...CapabilityAuthorOption) (*CapabilityAuthor, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("bridge: capabilityAuthor: model dispatcher is required")
 	}
@@ -180,11 +219,15 @@ func NewCapabilityAuthor(runner ModelDispatcher, conn *substrate.Conn, contextBu
 	if validate == nil {
 		return nil, fmt.Errorf("bridge: capabilityAuthor: artifact validator is required (the model's own verdict is never trusted)")
 	}
+	if protected == nil {
+		return nil, fmt.Errorf("bridge: capabilityAuthor: platform-protected-package predicate is required (a nil one would make every protected package editable)")
+	}
 	a := &CapabilityAuthor{
 		runner:        runner,
 		conn:          conn,
 		contextBucket: contextBucket,
 		validate:      validate,
+		protected:     protected,
 		now:           time.Now,
 		episodes:      make(map[string]*authoringEpisode),
 	}
@@ -233,18 +276,37 @@ func (a *CapabilityAuthor) Execute(ctx context.Context, req Request) (Dispatch, 
 	// request invisibly forever. Fail terminally and visibly instead. A busy or
 	// unreachable RUNNER stays transient below — that self-resolves when the
 	// fleet returns, and the JetStream event preserves the work.
-	catalog, err := a.readCatalog(ctx)
+	rows, err := a.readCatalogRows(ctx)
 	if err != nil {
-		return terminalFailure("capabilityAuthor: authoring context unavailable (" + err.Error() +
-			") — check that capability-author is installed (make install-ai) and its context lens is projecting"), nil
+		return terminalFailure(unprovisionedDetail(err)), nil
+	}
+	catalog, err := rows.snapshot(a.contextBucket)
+	if err != nil {
+		return terminalFailure(unprovisionedDetail(err)), nil
+	}
+
+	// contextRef scopes the request to an installed target: this is an EDIT, not
+	// an authoring. Every way that scoping can fail is definitive — a key that
+	// names nothing, a target no package declares, a package an edit-shaped
+	// upgrade could not cover — so each is a terminal refusal HERE, before a
+	// vendor call is spent, rather than an apply-time rejection of a proposal
+	// the operator has already reviewed.
+	var edit *editSubject
+	if contextRef := strings.TrimSpace(req.Params["contextRef"]); contextRef != "" {
+		subject, refusal := resolveEditSubject(rows, contextRef, a.protected)
+		if refusal != "" {
+			return terminalFailure(refusal), nil
+		}
+		edit = subject
 	}
 
 	ep := &authoringEpisode{
 		intent:      intent,
 		model:       req.Params["model"],
 		system:      capabilityAuthorSystemPrompt,
-		prompt:      authoringPrompt(intent, catalog.serialized, catalog.truncated),
+		prompt:      authoringPrompt(intent, catalog.serialized, catalog.truncated, edit),
 		catalogHash: catalog.hash,
+		edit:        edit,
 	}
 	ep.promptHash = promptDigest(ep.system, ep.prompt)
 
@@ -466,17 +528,15 @@ func (a *CapabilityAuthor) afterVendorFailure(ctx context.Context, ref, repair s
 // valid or invalid: the reasoning ran to an answer, and the record path stores
 // an invalid artifact as a visible, auditable proposal rather than discarding it.
 //
-// handle is the claim handle (the Poll ref): it names the fresh package the
-// target installs into, so a redelivery files the identical, appliable target.
+// handle is the claim handle (the Poll ref): for an authoring request it names
+// the fresh package the target installs into, and for an edit it is the key
+// under which this process holds the resolved subject — so a redelivery files
+// the identical, appliable target either way.
 func (a *CapabilityAuthor) file(handle string, d authoredDraft, model, promptHash, catalogHash string) (Dispatch, error) {
 	proposal := CapabilityAuthorProposal{
-		Kind:    CapabilityAuthorKind,
-		Content: string(d.content),
-		Target: CapabilityAuthorTarget{
-			Mode:        capabilityAuthorTargetMode,
-			PackageName: authoredPackageName(handle),
-			NewVersion:  authoredPackageVersion,
-		},
+		Kind:       CapabilityAuthorKind,
+		Content:    string(d.content),
+		Target:     a.targetFor(handle),
 		Rationale:  d.rationale,
 		Confidence: d.confidence,
 		Validation: CapabilityAuthorValidation{State: d.state, Report: d.report},
@@ -495,11 +555,404 @@ func (a *CapabilityAuthor) file(handle string, d authoredDraft, model, promptHas
 	return Dispatch{Disposition: Resolved, Result: Result{Status: OutcomeCompleted, Detail: detail}}, nil
 }
 
+// targetFor names where a filed proposal installs. An edit this process
+// resolved upgrades the package that owns the edited target; everything else —
+// an ordinary authoring request, and an episode this process never assembled —
+// mints its own fresh package.
+func (a *CapabilityAuthor) targetFor(handle string) CapabilityAuthorTarget {
+	if ep := a.episode(handle); ep != nil && ep.edit != nil {
+		return CapabilityAuthorTarget{
+			Mode:        capabilityEditTargetMode,
+			PackageName: ep.edit.packageName,
+			BaseVersion: ep.edit.baseVersion,
+			NewVersion:  ep.edit.newVersion,
+		}
+	}
+	return CapabilityAuthorTarget{
+		Mode:        capabilityAuthorTargetMode,
+		PackageName: authoredPackageName(handle),
+		NewVersion:  authoredPackageVersion,
+	}
+}
+
 // authoredPackageName derives the fresh package name an authoring request's
 // target installs into. Unique per handle (so newPackage never collides), and
 // never platform-protected (the prefix is under no protected name).
 func authoredPackageName(handle string) string {
 	return authoredPackagePrefix + handle
+}
+
+// unprovisionedDetail renders the "capability-author not provisioned" terminal
+// failure — an unreadable catalog bucket, or one with no lens to bind to.
+func unprovisionedDetail(err error) string {
+	return "capabilityAuthor: authoring context unavailable (" + err.Error() +
+		") — check that capability-author is installed (make install-ai) and its context lens is projecting"
+}
+
+// --- edit mode --------------------------------------------------------------
+
+// editSubject is the installed weaver target ONE authoring request is scoped
+// to, resolved before a model call is spent. Its parts answer the five things
+// an in-place edit has to get right: what is being edited (targetID / spec /
+// description), which lens it stays bound to, which package an upgrade must
+// name, which version it must be authored against, and which version it moves
+// to.
+//
+// hasDescription is NOT "description is non-empty": it records whether the
+// owning package DECLARES the `<metaKey>.description` key, which is what makes
+// blanking the description a removal. A target installed without a description
+// has no such key to lose.
+//
+// lensRef is the installed binding as it is stored — a NanoID — and
+// lensCanonicalName is the catalog name that resolves to it. Both are carried
+// because the two ends of the edit speak different forms: the prompt states the
+// canonicalName (the only form the model may answer with), and the check
+// compares the model's answer AFTER resolution against the NanoID that is
+// actually installed.
+type editSubject struct {
+	targetID          string
+	spec              json.RawMessage
+	description       string
+	hasDescription    bool
+	lensRef           string
+	lensCanonicalName string
+	packageName       string
+	baseVersion       string
+	newVersion        string
+}
+
+// resolveEditSubject scopes one authoring request to the installed target
+// contextRef names. A non-empty second return is a REFUSAL — a definitive
+// reason this target cannot be edited, in the operator's terms. Exactly one of
+// the two returns is ever set.
+//
+// Everything it needs is in the read the prompt is assembled from: the target
+// row from capabilityAuthorContext, the ownership claim from
+// capabilityAuthorPackages. One snapshot answers both, so an edit can never be
+// resolved against a package that no longer owns the target it prompts with.
+func resolveEditSubject(read catalogRead, contextRef string, protected ProtectedPackagePredicate) (*editSubject, string) {
+	row, ok := read.targets[contextRef]
+	if !ok {
+		return nil, "capabilityAuthor: " + contextRef + " names no installed weaver target — an edit must be scoped to the vtx.meta.<id> key of a target the authoring catalog projects"
+	}
+	targetID := targetIDOf(row.Spec)
+	if targetID == "" {
+		return nil, "capabilityAuthor: the installed target " + contextRef +
+			" carries no targetId in its spec, so an edit cannot preserve its identity"
+	}
+	if lost := unexpressibleSpecState(row.Spec); len(lost) > 0 {
+		return nil, fmt.Sprintf("capabilityAuthor: the installed target %s declares %s, which a capability proposal has no field for; an edit re-describes the whole target, so those would be written away without the apply seeing a single key change. Edit %s in code.",
+			targetID, strings.Join(lost, ", "), targetID)
+	}
+	lensRef := lensRefOf(row.Spec)
+	if lensRef == "" {
+		return nil, "capabilityAuthor: the installed target " + targetID +
+			" is bound to no lens, and every proposed target must name one — so an edit could only bind it, never preserve it. Edit it in code."
+	}
+	lensCanonicalName, named := read.lensCanonicalName(lensRef)
+	if !named {
+		return nil, "capabilityAuthor: the installed target " + targetID + " is bound to lens " + lensRef +
+			", which the authoring catalog does not project — an edit names its lens by canonicalName, and there is no name to state or to answer with. Check that the lens is still installed and its projection current."
+	}
+	owner, owned := owningPackage(read.packages, contextRef)
+	if !owned {
+		if len(read.malformedPackages) > 0 {
+			return nil, fmt.Sprintf("capabilityAuthor: no readable package declares %s, but %d installed manifest row(s) could not be read (first: %s) — ownership cannot be judged against a declaration list that is not whole, so this is 'unknown owner', not 'no owner'. Fix the package projection and retry.",
+				contextRef, len(read.malformedPackages), read.malformedPackages[0])
+		}
+		return nil, "capabilityAuthor: no installed package declares " + contextRef +
+			" — it is kernel- or bootstrap-seeded, and only a package's own declaration can be upgraded. Edit it in code, or Describe a new target."
+	}
+	if owner.Name == "" || strings.TrimSpace(owner.Version) == "" {
+		return nil, "capabilityAuthor: the package declaring " + contextRef +
+			" records no name and version in its manifest, so an upgrade could not say what it upgrades or what it was authored against"
+	}
+	if protected(owner.Name) {
+		return nil, "capabilityAuthor: target " + targetID + " is owned by " + owner.Name +
+			", a platform-protected package no AI-authored proposal may upgrade. Edit it in code."
+	}
+	declaresDescription, undescribed := editCoverage(owner, contextRef)
+	if len(undescribed) > 0 {
+		return nil, fmt.Sprintf("capabilityAuthor: target %s is owned by package %q, which also declares %d other artifact(s); a capability apply describes exactly one weaver target, and it may not remove what it does not describe. Edit %s in code, or Describe a new target.",
+			targetID, owner.Name, otherArtifacts(undescribed), owner.Name)
+	}
+	if lost := unexpressibleManifestState(owner); len(lost) > 0 {
+		return nil, fmt.Sprintf("capabilityAuthor: package %q records %s in its manifest, and an edit rewrites that manifest from the proposed Definition, which has no field to put it back — it would be blanked. Edit %s in code.",
+			owner.Name, strings.Join(lost, " and "), owner.Name)
+	}
+	return &editSubject{
+		targetID:          targetID,
+		spec:              sanitizeLensSpec(row.Spec),
+		description:       row.Description,
+		hasDescription:    declaresDescription,
+		lensRef:           lensRef,
+		lensCanonicalName: lensCanonicalName,
+		packageName:       owner.Name,
+		baseVersion:       strings.TrimSpace(owner.Version),
+		newVersion:        nextVersion(owner.Version),
+	}, ""
+}
+
+// editableSpecKeys / editableGapKeys are the weaverTarget spec keys an edit can
+// carry back out: exactly what assembleTargetContent emits, at the top level and
+// inside one gap body. They are stated here rather than inferred so the
+// expressible surface is one list a reader can check against the assembler —
+// TestEditableSpecKeys_MirrorTheAssembler pins the two together.
+//
+// The narrowing runs in two steps and this is the narrower of them:
+// pkgmgr.WeaverTargetArtifactContent already drops the spec's `augur` / `mode` /
+// `admission` blocks and a gap's `class`, and this adapter's own model shape
+// then also drops a gap's `enumerations` and the planner's `goal` / `goalColumns`
+// / `actions`.
+var (
+	editableSpecKeys = map[string]bool{"targetId": true, "lensRef": true, "gaps": true}
+
+	editableGapKeys = map[string]bool{
+		"action": true, "pattern": true, "subject": true, "adapter": true,
+		"operation": true, "assignee": true, "target": true, "params": true,
+		"reads": true, "issueCode": true, "issueSeverity": true,
+	}
+)
+
+// unexpressibleSpecState names the parts of an installed target's spec an edit
+// could not put back, in the field names an operator reads in the spec itself.
+//
+// It exists because the edit path's other guards cannot see this class at all.
+// An edit that silently drops `augur` still declares exactly the same three
+// Core KV keys, so editCoverage measures no difference and the apply's coverage
+// guard has nothing to refuse — the block is simply gone from the reinstalled
+// body. The check is a whitelist rather than a list of known-lossy fields, so a
+// spec key added upstream is refused until this adapter can carry it.
+func unexpressibleSpecState(spec json.RawMessage) []string {
+	var body map[string]json.RawMessage
+	if json.Unmarshal(spec, &body) != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var lost []string
+	note := func(field string) {
+		if !seen[field] {
+			seen[field] = true
+			lost = append(lost, field)
+		}
+	}
+	for key := range body {
+		if !editableSpecKeys[key] {
+			note(key)
+		}
+	}
+	if raw, ok := body["gaps"]; ok {
+		var gaps map[string]map[string]json.RawMessage
+		if json.Unmarshal(raw, &gaps) != nil {
+			// A gap set this adapter cannot read whole is one it cannot claim to
+			// re-describe either; fail closed rather than assume the parts it
+			// could not parse hold nothing.
+			note("gaps")
+		}
+		for _, gap := range gaps {
+			for key := range gap {
+				if !editableGapKeys[key] {
+					note("gaps." + key)
+				}
+			}
+		}
+	}
+	sort.Strings(lost)
+	return lost
+}
+
+// unexpressibleManifestState names the manifest fields an edit's apply would
+// blank. internal/pkgmgr/build.go writes the manifest aspect from the SUBMITTED
+// Definition's description/depends, and a capability proposal materialises a
+// Definition carrying neither — so an edit of a target inside a package that
+// records either would quietly drop it, and no key changes, so nothing refuses.
+func unexpressibleManifestState(owner packageRow) []string {
+	var lost []string
+	if strings.TrimSpace(owner.Description) != "" {
+		lost = append(lost, "a description")
+	}
+	if len(trimmedNonEmpty(owner.Depends)) > 0 {
+		lost = append(lost, "package dependencies")
+	}
+	return lost
+}
+
+// editCoverage measures one package against the Definition an edit of metaKey
+// would produce: which of its declared keys that Definition would NOT describe,
+// and whether it declares the target's `.description` key.
+//
+// A capability proposal materialises a Definition holding exactly ONE
+// weaverTarget (internal/pkgmgr/capabilitymaterializer.go), and Apply refuses
+// an upgrade that leaves any declared key undescribed
+// (internal/pkgmgr/apply.go's coverage guard, which ApplyCapabilityPlan turns
+// on unconditionally). So the four keys such a Definition covers are the
+// target's meta root, its `.spec`, its optional `.description`, and the package
+// vertex itself — the last being derived from the package NAME
+// (internal/pkgmgr/installer.go) and so re-emitted unchanged by every apply of
+// that package, never a removal. Anything else the package declares is a
+// second artifact, and the edit is refused before a model call rather than at
+// apply.
+func editCoverage(owner packageRow, metaKey string) (declaresDescription bool, undescribed []string) {
+	for _, dk := range owner.DeclaredKeys {
+		switch dk {
+		case owner.Key, metaKey, metaKey + ".spec":
+		case metaKey + ".description":
+			declaresDescription = true
+		default:
+			undescribed = append(undescribed, dk)
+		}
+	}
+	return declaresDescription, undescribed
+}
+
+// otherArtifacts folds a list of declared keys onto the entities they belong
+// to, so a target counted as three keys (root, spec, description) counts as one
+// artifact in a refusal an operator reads.
+func otherArtifacts(keys []string) int {
+	roots := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		roots[entityRoot(k)] = struct{}{}
+	}
+	return len(roots)
+}
+
+// entityRoot is the vertex an aspect key hangs off — the first three segments
+// of a Contract #1 `vtx.<type>.<id>[.<localName>]` key. Anything not
+// vertex-shaped (a link key, say) is its own root.
+func entityRoot(key string) string {
+	if !strings.HasPrefix(key, vertexKeyPrefix) {
+		return key
+	}
+	parts := strings.SplitN(key, ".", 4)
+	if len(parts) < 3 {
+		return key
+	}
+	return parts[0] + "." + parts[1] + "." + parts[2]
+}
+
+// vertexKeyPrefix is the Contract #1 vertex-key namespace, the discriminator
+// between a vertex/aspect key and a link key.
+const vertexKeyPrefix = "vtx."
+
+// owningPackage finds the installed package that declared metaKey — the only
+// record of ownership there is, since no declaredBy link or aspect exists on a
+// meta vertex. Packages are walked in the order the catalog read produced them
+// (sorted by key), so a pathological double claim resolves first-claim-wins,
+// deterministically, exactly as cmd/loupe's own reverse index does.
+func owningPackage(packages []packageRow, metaKey string) (packageRow, bool) {
+	for _, p := range packages {
+		for _, dk := range p.DeclaredKeys {
+			if dk == metaKey {
+				return p, true
+			}
+		}
+	}
+	return packageRow{}, false
+}
+
+// targetIDOf reads an installed weaver target's identity out of its spec body.
+// A weaverTarget meta carries NO `.canonicalName` aspect — build.go emits only
+// the vertex, the `.spec` aspect and an optional `.description` — so
+// `spec.targetId` IS the identity, the same place
+// internal/pkgmgr/authored_dispatch_scope.go reads a loom pattern's patternId.
+func targetIDOf(spec json.RawMessage) string {
+	var body struct {
+		TargetID string `json:"targetId"`
+	}
+	if json.Unmarshal(spec, &body) != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.TargetID)
+}
+
+// lensRefOf reads an installed weaver target's lens binding out of its spec
+// body. It is stored as the lens's NanoID — internal/pkgmgr/build.go resolves
+// the authored canonicalName at install — which is why an edit has to translate
+// in both directions: the model is told the canonicalName, and its answer is
+// compared back against this.
+func lensRefOf(spec json.RawMessage) string {
+	var body struct {
+		LensRef string `json:"lensRef"`
+	}
+	if json.Unmarshal(spec, &body) != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.LensRef)
+}
+
+// nextVersion is the version an edit moves its package to. The apply seam
+// requires only that it DIFFER from the installed version
+// (internal/pkgmgr/capabilityapply.go), so the rule is the smallest step that
+// reads as one: bump the trailing numeric segment of a dotted version
+// (0.1.0 → 0.1.1, 1.4 → 1.5).
+//
+// A version whose last segment is not a plain number carries a scheme this
+// adapter has no business guessing at, so it gains a ".1" segment instead
+// (2026-08-22 → 2026-08-22.1, 1.0.0-rc2 → 1.0.0-rc2.1). Trailing separators are
+// folded into that segment rather than doubled ("1.0." → "1.0.1"). Both branches
+// are pure functions of the installed version, so a redelivery derives the
+// identical target, and both are guaranteed to differ from what is installed.
+func nextVersion(version string) string {
+	v := strings.TrimSpace(version)
+	if idx := strings.LastIndexByte(v, '.'); idx >= 0 {
+		if n, err := strconv.ParseUint(v[idx+1:], 10, 32); err == nil {
+			return v[:idx+1] + strconv.FormatUint(n+1, 10)
+		}
+	}
+	return strings.TrimRight(v, ".") + ".1"
+}
+
+// editProblems is the identity check an edited draft must pass before it is
+// recorded. None of the three conditions is style.
+//
+//   - The target's Core KV key is derived from its targetId
+//     (internal/pkgmgr/installer.go's entityNanoID), so a rename is a removal
+//     plus an add, not a rename — and Apply refuses a removal an edit's
+//     Definition does not describe.
+//   - The `.description` aspect is emitted only when non-empty
+//     (internal/pkgmgr/build.go), so blanking it un-declares a key the
+//     installed package holds — the same removal. Checked only when the
+//     package actually declares that key, since a target installed without a
+//     description has none to lose.
+//   - The lens binding decides which rows the target converges, and re-pointing
+//     it is the one wrong answer nothing else catches: the key set is
+//     unchanged, so the apply is happy, and a plausible-but-wrong lens name
+//     resolves cleanly and records "valid" while the target quietly starts
+//     firing on a different population. An edit changes what a target DOES
+//     about its rows, never which rows they are. The comparison is against the
+//     RESOLVED ref — the NanoID that would actually install — so a
+//     canonicalName that resolves elsewhere cannot pass by spelling.
+//
+// A problem here lands in the draft's report, which is exactly what the
+// correction pass carries back to the model; a draft that still violates it
+// after that pass is recorded invalid, visibly, with the reason.
+func editProblems(s editSubject, c modelTargetContent, resolvedLensRef string) []string {
+	var problems []string
+	if id := strings.TrimSpace(c.TargetID); id != s.targetID {
+		problems = append(problems, fmt.Sprintf(
+			"the edit renamed targetId %q to %q — an edit must keep the target's id exactly as installed, because the key is derived from it and a rename would remove the target being edited",
+			s.targetID, id))
+	}
+	if s.hasDescription && distill(c.Description) == "" {
+		problems = append(problems, fmt.Sprintf(
+			"the edit left the description empty — package %q declares a description for %s, and dropping it would remove that key; describe the target's new behaviour in one or two sentences",
+			s.packageName, s.targetID))
+	}
+	if resolvedLensRef != s.lensRef {
+		problems = append(problems, fmt.Sprintf(
+			"the edit re-bound %s from lens %q to %s — an edit changes what a target does about its rows, never which lens those rows come from; set lensRef back to %q",
+			s.targetID, s.lensCanonicalName, namedLens(c.LensRef), s.lensCanonicalName))
+	}
+	return problems
+}
+
+// namedLens renders the model's lens choice for a report, distinguishing "it
+// named a different lens" from "it named none at all".
+func namedLens(lensRef string) string {
+	if named := strings.TrimSpace(lensRef); named != "" {
+		return strconv.Quote(named)
+	}
+	return "no lens at all"
 }
 
 // capIntent bounds the operator intent so the assembled request stays under the
@@ -735,15 +1188,26 @@ func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, lensInd
 		problems = append(problems, fmt.Sprintf("the model answered with kind %q; this adapter authors only %q", art.Kind, CapabilityAuthorKind))
 	}
 
+	// An EDIT gets no stand-in description. The operator's intent is a change
+	// request ("make it fire on 48 hours"), not a statement of what the target
+	// keeps true, and the installed description describes the behaviour the edit
+	// is replacing — substituting either would hand the reviewer a description
+	// the model never wrote and quietly satisfy the check below. An omission is
+	// caught instead, and spends the correction pass.
 	fallback := ""
-	if ep != nil {
-		fallback = distill(ep.intent)
+	if ep == nil || ep.edit == nil {
+		if ep != nil {
+			fallback = distill(ep.intent)
+		}
+		if fallback == "" {
+			fallback = distill(art.Rationale)
+		}
 	}
-	if fallback == "" {
-		fallback = distill(art.Rationale)
-	}
-	content, assemblyProblems := assembleTargetContent(art.Content, fallback, lensIndex)
+	content, lensRef, assemblyProblems := assembleTargetContent(art.Content, fallback, lensIndex)
 	problems = append(problems, assemblyProblems...)
+	if ep != nil && ep.edit != nil {
+		problems = append(problems, editProblems(*ep.edit, art.Content, lensRef)...)
+	}
 
 	state, report := a.validate(CapabilityAuthorKind, content)
 	if report != "" {
@@ -771,11 +1235,16 @@ func (a *CapabilityAuthor) assess(res wire.Result, ep *authoringEpisode, lensInd
 // object, each gap's param list becomes an object, and every field the model
 // left blank is omitted so an empty string never reads as an authored value.
 //
+// The resolved lensRef is returned alongside the bytes, because it is what an
+// EDIT is judged against: the model answers in canonicalNames and the installed
+// binding is a NanoID, so only the resolved form can say whether the edit kept
+// the target on its own lens (editProblems).
+//
 // The returned problems are defects that would make the assembled artifact
 // misrepresent the answer or fail at install: an unresolvable lens, a gap with
 // no column, a duplicate column, a nameless param. The offending entry is
 // dropped rather than guessed at, and the draft records invalid.
-func assembleTargetContent(c modelTargetContent, fallbackDescription string, lensIndex map[string]string) ([]byte, []string) {
+func assembleTargetContent(c modelTargetContent, fallbackDescription string, lensIndex map[string]string) ([]byte, string, []string) {
 	var problems []string
 
 	// The model names a lens by its catalog canonicalName; the artifact must
@@ -854,9 +1323,9 @@ func assembleTargetContent(c modelTargetContent, fallbackDescription string, len
 	// judged are one string, stable across re-files.
 	body, err := json.Marshal(content)
 	if err != nil {
-		return []byte("{}"), append(problems, "the proposed target could not be encoded: "+err.Error())
+		return []byte("{}"), lensRef, append(problems, "the proposed target could not be encoded: "+err.Error())
 	}
-	return body, problems
+	return body, lensRef, problems
 }
 
 // assembleParams folds a gap's param list into the artifact's param object.

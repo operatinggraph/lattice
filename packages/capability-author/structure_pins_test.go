@@ -20,7 +20,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 4; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 3; got != want {
+	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 7; got != want {
@@ -50,7 +50,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, got, want)
 		}
 	}
-	for i, want := range []string{"capabilityAuthorPending", "capabilityProposals", "capabilityAuthorContext"} {
+	for i, want := range []string{"capabilityAuthorPending", "capabilityProposals", "capabilityAuthorContext", "capabilityAuthorPackages"} {
 		if i >= len(Package.Lenses) {
 			break
 		}

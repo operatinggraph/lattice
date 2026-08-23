@@ -509,3 +509,62 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// "Edit with AI" is rendered from the server's editContext verdict, and a
+// target the console cannot edit keeps the control with its reason on screen.
+// The reason IS the value: it states the apply-time refusal this target would
+// earn, before anyone spends a model call on a proposal that could never land.
+func TestWeaverEditAffordance(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+
+	editable := call(t, vm, "editAffordance", map[string]any{
+		"targetId":    "leaseComplete",
+		"editContext": map[string]any{"metaKey": "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "editable": true, "packageName": "weaver-target-leasecomplete-k3f9", "packageVersion": "0.1.0"},
+	}).(map[string]any)
+	if editable["enabled"] != true {
+		t.Errorf("enabled = %v, want true", editable["enabled"])
+	}
+	if editable["href"] != "#/weaver/author?edit=leaseComplete" {
+		t.Errorf("href = %v, want the Describe panel aimed at this target", editable["href"])
+	}
+	if editable["reason"] != "" {
+		t.Errorf("reason = %v, want none on an editable target", editable["reason"])
+	}
+	// The console's verdict is advisory — the platform resolves ownership again
+	// on submit, from its own read — so the live control must not promise the
+	// draft it cannot guarantee.
+	if title, _ := editable["title"].(string); !containsSub(title, "decides on submit") {
+		t.Errorf("title = %q, want the enabled control saying the platform decides rather than promising the outcome", title)
+	}
+
+	refused := call(t, vm, "editAffordance", map[string]any{
+		"targetId":    "leaseComplete",
+		"editContext": map[string]any{"metaKey": "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "editable": false, "reason": "this target is declared by package cafe-domain, which also declares 4 other artifacts"},
+	}).(map[string]any)
+	if refused["enabled"] != false {
+		t.Errorf("enabled = %v, want false", refused["enabled"])
+	}
+	if !containsSub(refused["reason"].(string), "cafe-domain") {
+		t.Errorf("reason = %v, want the server's own sentence carried through verbatim", refused["reason"])
+	}
+	if refused["href"] != "" {
+		t.Errorf("href = %v, want none — a disabled control leads nowhere", refused["href"])
+	}
+
+	// A refusal with no reason still says something. A blank tooltip on a
+	// disabled button is the exact failure this affordance exists to avoid.
+	blank := call(t, vm, "editAffordance", map[string]any{
+		"targetId": "t", "editContext": map[string]any{"editable": false},
+	}).(map[string]any)
+	if blank["reason"] == "" || blank["title"] == "" {
+		t.Errorf("affordance = %+v, want a fallback sentence", blank)
+	}
+
+	// No editContext at all: the id resolved to no meta-vertex, so there is
+	// nothing an edit could name and no control to render.
+	for _, d := range []any{nil, map[string]any{"targetId": "t"}, map[string]any{"targetId": "t", "editContext": nil}} {
+		if got := call(t, vm, "editAffordance", d); got != nil {
+			t.Errorf("editAffordance(%v) = %v, want null", d, got)
+		}
+	}
+}

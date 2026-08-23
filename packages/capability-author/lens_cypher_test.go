@@ -1,11 +1,11 @@
 package capabilityauthor
 
-// Rule-engine proof of the two Fire-1-checkpoint P5 read-model lenses added
-// alongside the escalation dispatch: capabilityProposals (the operator review
-// surface) and capabilityAuthorContext (the installed-DDL self-description
-// catalog). Drives the lens specs through the `full` rule engine directly
-// against an embedded NATS Core KV, the same harness clinic-domain /
-// lease-signing / objects-base use for their lens cypher tests.
+// Rule-engine proof of this package's P5 read-model lenses: capabilityProposals
+// (the operator review surface), capabilityAuthorContext (the installed-DDL
+// self-description catalog) and capabilityAuthorPackages (the installed-manifest
+// scan). Drives the lens specs through the `full` rule engine directly against
+// an embedded NATS Core KV, the same harness clinic-domain / lease-signing /
+// objects-base use for their lens cypher tests.
 //
 // What these prove that the structural TestPackage_* tests cannot:
 //   - capabilityProposals is one row per capabilityproposal vertex, every
@@ -15,6 +15,9 @@ package capabilityauthor
 //     key TYPE segment, not the root `class` field — a DDL meta (class
 //     meta.ddl.vertexType) and a non-DDL meta (class meta.lens) BOTH appear,
 //     with the non-DDL row's self-description columns null.
+//   - capabilityAuthorPackages projects declaredKeys as a LIST the reader can
+//     scan for ownership, and a package whose manifest aspect is absent
+//     projects null columns rather than dropping out.
 
 import (
 	"context"
@@ -292,4 +295,72 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	require.Nil(t, lensRow["inputSchema"], "non-DDL meta has no inputSchema aspect → null")
 	require.Equal(t, map[string]any{"cypherRule": "MATCH (p:provider) RETURN p.key AS key", "engine": "full"}, lensRow["spec"],
 		"the full .spec aspect body projects verbatim (Increment 4 — the widening this test proves)")
+}
+
+// TestCapabilityAuthorPackages_ManifestProjects proves the ownership surface a
+// Core-KV-denied reader resolves "which package declared this meta key" from.
+//
+// declaredKeys must arrive as a LIST — it is scanned for a meta key, so a
+// column that flattened to a string or dropped would silently make every target
+// look unowned (i.e. kernel-seeded) and refuse every edit. The manifest-less
+// package pins the null-safe arm: an install caught mid-batch leaves a package
+// vertex with no .manifest aspect, and that must project as a row claiming
+// nothing rather than erroring the whole projection out.
+func TestCapabilityAuthorPackages_ManifestProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := lenstest.KVs(t)
+
+	targetKey := "vtx.meta." + lenstest.NanoID("weaver-target-cold-nudge")
+	ownerKey := "vtx.package." + lenstest.NanoID("weaver-target-cold-nudge-pkg")
+	putVertex(t, coreKV, ownerKey, "package")
+	putAspect(t, coreKV, ownerKey, "manifest", "manifest", map[string]any{
+		"name":         "weaver-target-coldNudge-7f2a",
+		"version":      "0.1.0",
+		"description":  "",
+		"depends":      []any{},
+		"declaredKeys": []any{targetKey, targetKey + ".spec", targetKey + ".description", ownerKey},
+	})
+
+	repoKey := "vtx.package." + lenstest.NanoID("clinic-reminders-pkg")
+	putVertex(t, coreKV, repoKey, "package")
+	putAspect(t, coreKV, repoKey, "manifest", "manifest", map[string]any{
+		"name":         "clinic-reminders",
+		"version":      "1.2.0",
+		"description":  "Reminders for the clinic's appointments.",
+		"depends":      []any{"orchestration-base"},
+		"declaredKeys": []any{repoKey},
+	})
+
+	bareKey := "vtx.package." + lenstest.NanoID("half-installed-package")
+	putVertex(t, coreKV, bareKey, "package")
+
+	rows := projectCapAuthor(t, adjKV, coreKV, capabilityAuthorPackagesSpec)
+	require.Len(t, rows, 3)
+
+	owner := rowByCapAuthorKey(rows, ownerKey)
+	require.NotNil(t, owner)
+	require.Equal(t, "weaver-target-coldNudge-7f2a", owner["name"])
+	require.Equal(t, "0.1.0", owner["version"])
+	require.Equal(t, []any{targetKey, targetKey + ".spec", targetKey + ".description", ownerKey}, owner["declaredKeys"],
+		"declaredKeys is scanned for a meta key — it must project as the list build.go wrote, not a flattened value")
+	require.Equal(t, "", owner["description"])
+	require.Equal(t, []any{}, owner["depends"],
+		"a console-minted package records neither, which is exactly what makes it editable in place")
+
+	// A repo package records both, and an in-place upgrade from a capability
+	// proposal would blank them — a reader has to see them to refuse.
+	repo := rowByCapAuthorKey(rows, repoKey)
+	require.NotNil(t, repo)
+	require.Equal(t, "Reminders for the clinic's appointments.", repo["description"])
+	require.Equal(t, []any{"orchestration-base"}, repo["depends"],
+		"depends is compared for emptiness, so it must project as the list build.go wrote")
+
+	bare := rowByCapAuthorKey(rows, bareKey)
+	require.NotNil(t, bare, "a package whose manifest aspect is absent still projects a row")
+	require.Nil(t, bare["name"])
+	require.Nil(t, bare["declaredKeys"], "no manifest → no declaration → the package claims no key")
+	require.Nil(t, bare["description"])
+	require.Nil(t, bare["depends"])
 }

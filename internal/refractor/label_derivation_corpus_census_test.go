@@ -140,6 +140,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"cafeTabSettlement":              {narrow, "cafetransaction leaseapp tab", modeRelation},
 	"capability":                     {narrow, "identity role", modeRelation},
 	"capabilityAuthorContext":        {narrow, "meta", modeRelation},
+	"capabilityAuthorPackages":       {narrow, "package", modeRelation},
 	"capabilityAuthorPending":        {narrow, "capabilityproposal", modeRelation},
 	"capabilityProposals":            {narrow, "capabilityproposal", modeRelation},
 	"capabilityRead":                 {narrow, "identity", modeRelation},

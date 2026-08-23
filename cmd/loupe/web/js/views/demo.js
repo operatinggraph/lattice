@@ -9,9 +9,14 @@
 // never consults the posture. The one case that needs the value is the
 // control-plane op buttons, where only the ops the server classifies as
 // inspect-only stay visible (controlOpHidden).
+//
+// Some affordances stay visible on purpose and answer 403 — the Describe
+// panel's Submit, so a visitor can walk the authoring path and see what it
+// costs. refusalNotice is how those panels render that answer as the standing
+// rule it is rather than as a fault.
 
 import { $, api, el } from "../api.js";
-import { demoBanner, demoPostureOn, demoControlOpHidden } from "../logic/demo.js";
+import { demoBanner, demoPostureOn, demoControlOpHidden, demoRefusalNotice } from "../logic/demo.js";
 
 // The last /api/demo payload. Null until init resolves, which main.js awaits
 // before routing — so no view renders against an unknown posture.
@@ -39,4 +44,10 @@ function controlOpHidden(comp, op) {
   return demoControlOpHidden(payload, comp, op);
 }
 
-export { init, controlOpHidden };
+// refusalNotice shapes a 403'd write's response into {title, text} for a panel
+// to render, or null when the response is not a refusal.
+function refusalNotice(body) {
+  return demoRefusalNotice(payload, body);
+}
+
+export { init, controlOpHidden, refusalNotice };

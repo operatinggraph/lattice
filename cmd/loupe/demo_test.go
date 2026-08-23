@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -331,5 +332,171 @@ func TestDemoPayloadCarriesReadOnlyOps(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"weaver":[]`) {
 		t.Errorf("body = %s, want weaver serialized as [] — a component with no "+
 			"inspect-only ops still gets a list", rec.Body.String())
+	}
+}
+
+// demoHideMarker is the attribute api.js's demoHide() sets and style.css's
+// shell rule keys off. A view module never writes it itself.
+const demoHideMarker = "data-demo-hide"
+
+var (
+	// A three-argument el(tag, cls, text) call — the only form that carries a
+	// button's visible label. cls is `null` or a class string.
+	elButtonCall = regexp.MustCompile(`\bel\(\s*"([a-z0-9]+)"\s*,\s*(?:null|"[^"]*")\s*,\s*"([^"]*)"\s*\)`)
+	// The same call bound to a local name, which is what a later demoHide(name)
+	// refers to.
+	elButtonBinding = regexp.MustCompile(`(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:demoHide\(\s*)?` +
+		`el\(\s*"([a-z0-9]+)"\s*,\s*(?:null|"[^"]*")\s*,\s*"([^"]*)"\s*\)`)
+)
+
+// demoAffordances reports which button labels a view module builds and which of
+// them it marks demo-hidden, resolving each demoHide() argument through the
+// module's LOCAL BINDINGS rather than matching one spelling of the call.
+//
+// `demoHide(el("button", null, "X"))` and a `const b = el("button", null, "X")`
+// marked by a later `demoHide(b)` are the same fact about the shipped page. An
+// assertion that recognizes only the first says nothing the day someone splits
+// the line, which is exactly when a control meant to stay visible gets hidden
+// without anyone noticing.
+func demoAffordances(src string) (declared, hidden map[string]bool) {
+	declared = map[string]bool{}
+	for _, m := range elButtonCall.FindAllStringSubmatch(src, -1) {
+		if m[1] == "button" {
+			declared[m[2]] = true
+		}
+	}
+	byName := map[string]string{}
+	for _, m := range elButtonBinding.FindAllStringSubmatch(src, -1) {
+		if m[2] == "button" {
+			byName[m[1]] = m[3]
+		}
+	}
+	hidden = map[string]bool{}
+	for _, arg := range callArguments(src, "demoHide") {
+		arg = strings.TrimSpace(arg)
+		if strings.HasPrefix(arg, "el(") {
+			if m := elButtonCall.FindStringSubmatch(arg); m != nil && m[1] == "button" {
+				hidden[m[2]] = true
+			}
+			continue
+		}
+		if label, ok := byName[arg]; ok {
+			hidden[label] = true
+		}
+	}
+	return declared, hidden
+}
+
+// callArguments returns the argument text of every fn(...) call in src, matched
+// on balanced parentheses so a nested call is returned whole. Parentheses inside
+// a string literal are balanced within it and so do not disturb the depth count.
+func callArguments(src, fn string) []string {
+	var out []string
+	needle := fn + "("
+	for i := 0; ; {
+		j := strings.Index(src[i:], needle)
+		if j < 0 {
+			return out
+		}
+		start := i + j + len(needle)
+		depth, k := 1, start
+		for ; k < len(src) && depth > 0; k++ {
+			switch src[k] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+		}
+		if depth == 0 {
+			out = append(out, src[start:k-1])
+		}
+		i = start
+	}
+}
+
+// The authoring path is SHOWN in the demo and REFUSED by the server. Both
+// halves have to hold, and they are independent: suppression has only ever been
+// cosmetic (api.js — "demoWriteDenied is enforcement"), so leaving an affordance
+// up is a product decision about what a visitor gets to see, honest exactly as
+// long as the server still says no. Nothing else in the suite pins an
+// affordance's VISIBILITY, so a later fire re-adding the marker as tidiness
+// would otherwise pass unnoticed.
+func TestDemoShowsAuthoringPathAndStillRefusesTheWrite(t *testing.T) {
+	// Half one — the shipped assets put the two affordances on screen.
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	page := string(index)
+	if !strings.Contains(page, `<a href="#/weaver/author">Author</a>`) {
+		t.Error("the Author nav link is not present unmarked — a demo visitor cannot reach the authoring page")
+	}
+	if strings.Contains(page, `href="#/weaver/author" data-demo-hide`) {
+		t.Error("the Author nav link carries data-demo-hide again; the demo is meant to show this path")
+	}
+
+	view, err := webFS.ReadFile("web/js/views/weaverauthor.js")
+	if err != nil {
+		t.Fatalf("read views/weaverauthor.js: %v", err)
+	}
+	src := string(view)
+
+	// The analyzer's own positive vector, first: both spellings of one fact must
+	// resolve, or every "is not hidden" assertion below is a negative test with
+	// nothing showing it can see a hidden button at all.
+	if _, probe := demoAffordances(`const a = el("button", null, "Inline");
+		demoHide(el("button", null, "Inline"));
+		const b = el("button", "ghost-btn", "Bound");
+		demoHide(b);
+		const c = el("button", null, "Visible");`); !probe["Inline"] || !probe["Bound"] || probe["Visible"] {
+		t.Fatalf("demoAffordances resolves %v on its own probe, want Inline and Bound hidden and Visible not", probe)
+	}
+
+	declared, hidden := demoAffordances(src)
+	if !declared["Submit"] {
+		t.Fatal("the Describe panel's Submit button is gone; the rest of this test asserts nothing")
+	}
+	if hidden["Submit"] {
+		t.Error("the Describe Submit is demo-hidden again; it is meant to be visible and answer the server's 403")
+	}
+	// The split is deliberate, not an oversight: the buttons that were never
+	// part of this posture stay marked.
+	for _, marked := range []string{"Run checks", "Propose"} {
+		if !hidden[marked] {
+			t.Errorf("expected the %q button to stay demo-hidden", marked)
+		}
+	}
+	// demoHide() is the only sanctioned way to set the marker, which is what
+	// makes the resolution above complete. A view writing the attribute itself
+	// would hide a control this test cannot see.
+	if strings.Contains(src, demoHideMarker) {
+		t.Errorf("views/weaverauthor.js sets %s directly; the marker belongs to api.js's demoHide()", demoHideMarker)
+	}
+
+	// Half two — the POST those affordances lead to is refused, with the demo's
+	// own message. The path is resolved through registerRoutes first: the method
+	// rule denies UNKNOWN routes too, so a typo here would otherwise pass by
+	// falling through to that default-deny while pinning nothing.
+	const authorRequestPath = "/api/weaver/author/request"
+	mux := http.NewServeMux()
+	(&server{}).registerRoutes(mux)
+	if _, pattern := mux.Handler(httptest.NewRequest(http.MethodPost, authorRequestPath, nil)); pattern != authorRequestPath {
+		t.Fatalf("%s routes to pattern %q — the denial below would be about a route that does not exist", authorRequestPath, pattern)
+	}
+
+	reached := false
+	demo := &server{demoMode: true}
+	rec := httptest.NewRecorder()
+	demo.demoReadOnly(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })).
+		ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authorRequestPath, nil))
+	if reached {
+		t.Error("the authoring request reached its handler in demo mode")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST %s in demo mode = %d, want 403 — visible is not permitted", authorRequestPath, rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), demoDenialMessage) {
+		t.Errorf("denial body = %q, want the demo's own message so the panel can render it verbatim", rec.Body.String())
 	}
 }

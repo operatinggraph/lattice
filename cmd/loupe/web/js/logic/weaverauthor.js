@@ -10,9 +10,16 @@
 // textarea/ input strings the operator types; buildTargetContent parses them
 // into the artifact's params/reads shape at build time, so the draft's OWN
 // shape can stay simple strings throughout editing.
+//
+// A draft that re-describes an INSTALLED target also carries `edit:
+// {packageName, baseVersion, newVersion?, targetId}` — the coordinates that make
+// its propose an in-place upgrade of that target's own package rather than a
+// fresh install alongside it, plus the identity that upgrade is over. A
+// from-scratch draft leaves it null, and the two functions that read it
+// (buildApplyTarget, proposeBlockers) fall through to their plain behaviour.
 
 function emptyDraft() {
-  return { targetId: "", description: "", lensRef: "", gaps: {}, lens: emptyLens(), rationale: "" };
+  return { targetId: "", description: "", lensRef: "", gaps: {}, lens: emptyLens(), rationale: "", edit: null };
 }
 
 function emptyGap() {
@@ -131,7 +138,42 @@ function hydrateFromProposal(row) {
   draft.gaps = gaps;
   draft.lens = emptyLens();
   draft.rationale = row.rationale || "";
+  // An edit proposal loaded back into the form must re-propose as the SAME
+  // in-place upgrade it was. Dropping these coordinates would mint a second
+  // package holding a duplicate of a target that is already installed — two
+  // vertices claiming one targetId, from an operator who only meant to adjust
+  // the AI's wording.
+  draft.edit = proposalEditContext(row, draft.targetId);
   return draft;
+}
+
+// proposalEditContext reads an upgradeExisting proposal's recorded target
+// coordinates. Null for a newPackage proposal, and for an upgrade that names no
+// package — coordinates the apply seam would refuse anyway, so carrying a
+// half-set is worse than carrying none.
+//
+// baseVersion is the proposal's OWN — the version its artifact was authored
+// against, not whatever is installed right now. That is the point of the field:
+// if the package has moved since, the apply refuses this proposal as stale
+// (capabilityapply.go's checkUpgradeExistingVersions) instead of overwriting
+// whatever changed, and re-stamping it with the live version here would be the
+// console silently making that refusal impossible.
+//
+// targetId is the identity the upgrade is OVER, taken from the artifact being
+// loaded. The coordinates are meaningless without it: an upgrade's Definition
+// has to keep describing the target its package declares, and the target's Core
+// KV key is derived from that id, so a re-proposed draft that changed the id
+// describes a different target and the apply refuses the whole thing as a
+// removal. proposeBlockers is what stops the draft before it becomes that
+// proposal.
+function proposalEditContext(row, targetId) {
+  if (!row || row.targetMode !== "upgradeExisting" || !row.targetPackageName) return null;
+  return {
+    packageName: row.targetPackageName,
+    baseVersion: row.targetBaseVersion || "",
+    newVersion: row.targetNewVersion || "",
+    targetId: (targetId || "").trim(),
+  };
 }
 
 // draftHasLens reports whether the operator is authoring a NEW paired lens
@@ -158,6 +200,13 @@ function draftHasLens(draft) {
 // buildLensContent's empty spec would otherwise read "lens is not valid"
 // forever, permanently disabling Propose for exactly the draft this fire
 // exists to unblock.
+//
+// A draft carrying edit coordinates has a third: its targetId must still be the
+// one being upgraded. The target's Core KV key is derived from the id, so a
+// renamed id is a removal plus an add, and an upgrade whose Definition no longer
+// describes the key its package declares is refused at apply. That refusal is
+// terminal on THIS lane — a hand-edited re-propose gets no correction pass — so
+// the rename has to be caught while the operator is still looking at the form.
 function proposeBlockers(draft, checkResult) {
   const out = [];
   const r = checkResult;
@@ -166,6 +215,11 @@ function proposeBlockers(draft, checkResult) {
   else {
     if (!(r.targetValidation && r.targetValidation.valid)) out.push("target artifact is not valid");
     if (hasLens && !(r.lensValidation && r.lensValidation.valid)) out.push("lens artifact is not valid");
+  }
+  const edit = (draft && draft.edit) || null;
+  if (edit && ((draft.targetId || "").trim() !== (edit.targetId || ""))) {
+    out.push("restore the target id this edit upgrades (" + (edit.targetId || "") + ") — the target's key is " +
+      "derived from it, so a renamed edit removes the target it was meant to change");
   }
   if (!((draft && draft.description) || "").trim()) out.push("describe what this target ensures");
   return out;
@@ -235,26 +289,69 @@ function validationBadge(report) {
 // exactly that name out from under the second).
 const applyPackagePrefix = { weaverTarget: "weaver-target", lens: "weaver-lens" };
 
-// buildApplyTarget builds the {mode, packageName, newVersion} a Studio
-// artifact proposes for internal/pkgmgr/capabilityapply.go's apply step
-// (Studio apply-path fix — cold review of NL-2's "Load into Author" feature,
-// which depends on apply actually working): always mode "newPackage" (the
-// Studio never targets an existing package for upgrade — that is a
-// different, not-yet-built operator workflow), with a packageName derived
-// from the draft's targetId plus a caller-supplied freshness token, so
-// re-proposing the SAME targetId (e.g. an edited re-propose after "Load into
-// Author") never collides with a package name a PRIOR apply already
-// installed — newPackage fails closed against an already-installed name
-// (capabilityapply.go:186-189), and packageName is never shown to the
-// operator, so there is no readability cost to making it fresh every time.
+// bumpPatchVersion moves a version forward by one patch. An upgrade's
+// newVersion must DIFFER from the installed version — capabilityapply.go
+// refuses an equal one, so that "the package is live at newVersion" can only
+// mean this apply committed — and one patch is the smallest move that claims
+// nothing else about the change. The apply seam compares versions as strings
+// and never orders them, so the only requirements are determinism and
+// difference. A trailing segment that is not a number gets ".1" appended
+// rather than a fabricated reading of a scheme this console does not know.
+function bumpPatchVersion(v) {
+  const s = (v || "").trim();
+  if (!s) return "";
+  const parts = s.split(".");
+  const last = parts[parts.length - 1];
+  if (/^[0-9]+$/.test(last)) {
+    parts[parts.length - 1] = String(parseInt(last, 10) + 1);
+    return parts.join(".");
+  }
+  return s + ".1";
+}
+
+// buildApplyTarget builds the target descriptor a Studio artifact proposes for
+// internal/pkgmgr/capabilityapply.go's apply step (Studio apply-path fix — cold
+// review of NL-2's "Load into Author" feature, which depends on apply actually
+// working). Two shapes, decided by whether the draft re-describes an installed
+// target:
+//
+// Without an edit context: mode "newPackage", with a packageName derived from
+// the draft's targetId plus a caller-supplied freshness token, so re-proposing
+// the SAME targetId (e.g. an edited re-propose after "Load into Author") never
+// collides with a package name a PRIOR apply already installed — newPackage
+// fails closed against an already-installed name (capabilityapply.go:186-189),
+// and packageName is never shown to the operator, so there is no readability
+// cost to making it fresh every time.
+//
+// With one: mode "upgradeExisting" over that target's own package, carrying the
+// baseVersion the draft was authored against and a moved newVersion. Minting a
+// fresh package here instead would install a SECOND target claiming the same
+// targetId beside the one the operator meant to change.
+//
+// The edit context binds the weaverTarget artifact only. A lens authored in the
+// same draft is new work of its own and still lands as its own new package —
+// the edited target's package is not something it belongs in, and an upgrade
+// describing only a lens would drop the target the package declares.
 //
 // fresh is never generated in here — the view supplies a real unique token
 // per propose/export click — so this stays pure and deterministic for goja.
 // The "weaver-target-"/"weaver-lens-" prefix can never collide with a
 // PlatformProtectedPackage name (none of the twelve share it,
 // capabilityapply.go's platformProtectedPackages), so that refusal can never
-// fire here by construction — not merely by convention.
-function buildApplyTarget(kind, targetId, fresh) {
+// fire here by construction — not merely by convention. An edit inherits the
+// same property from the other side: the package it names is one already
+// installed AND already found to declare nothing but this target, which no
+// protected package is.
+function buildApplyTarget(kind, targetId, fresh, edit) {
+  if (kind === "weaverTarget" && edit && edit.packageName) {
+    const baseVersion = edit.baseVersion || "";
+    return {
+      mode: "upgradeExisting",
+      packageName: edit.packageName,
+      baseVersion: baseVersion,
+      newVersion: edit.newVersion || bumpPatchVersion(baseVersion),
+    };
+  }
   const prefix = applyPackagePrefix[kind] || "weaver-artifact";
   const slug = (targetId || "draft").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "draft";
   const token = (fresh || "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 12) || "0";
@@ -274,15 +371,18 @@ function buildApplyTarget(kind, targetId, fresh) {
 // just be a second doomed-to-be-invalid proposal nobody asked for. The
 // existing two-artifact {target+lens} shape is preserved unchanged for the
 // co-authoring case. fresh is threaded into buildApplyTarget for both
-// artifacts so a single call derives a consistent, collision-avoiding pair.
+// artifacts so a single call derives a consistent, collision-avoiding pair, and
+// the draft's edit context alongside it — buildApplyTarget applies it to the
+// target only, so a co-authored lens keeps its own new package.
 function exportBundle(draft, checkResult, rationale, fresh) {
   const targetContent = buildTargetContent(draft);
   const tv = (checkResult && checkResult.targetValidation) || { valid: false, errors: [] };
+  const edit = (draft && draft.edit) || null;
   const artifacts = [
     {
       kind: "weaverTarget",
       content: JSON.stringify(targetContent),
-      target: buildApplyTarget("weaverTarget", draft.targetId, fresh),
+      target: buildApplyTarget("weaverTarget", draft.targetId, fresh, edit),
       rationale: rationale || "",
       validation: { state: tv.valid ? "valid" : "invalid", report: (tv.errors || []).join("; ") },
     },
@@ -293,7 +393,7 @@ function exportBundle(draft, checkResult, rationale, fresh) {
     artifacts.push({
       kind: "lens",
       content: JSON.stringify(lensContent),
-      target: buildApplyTarget("lens", draft.targetId, fresh),
+      target: buildApplyTarget("lens", draft.targetId, fresh, edit),
       rationale: rationale || "",
       validation: { state: lv.valid ? "valid" : "invalid", report: (lv.errors || []).join("; ") },
     });
@@ -321,4 +421,4 @@ function buildAuthoringRequest(text, contextRef) {
   return payload;
 }
 
-export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, hydrateFromProposal, draftHasLens, proposeBlockers, scaffoldLensSpec, validationBadge, buildApplyTarget, exportBundle, exportFilename, buildAuthoringRequest };
+export { emptyDraft, emptyGap, emptyLens, parseParamsText, paramsToText, parseReadsText, readsToText, buildTargetContent, buildLensContent, hydrateFromProposal, proposalEditContext, draftHasLens, proposeBlockers, scaffoldLensSpec, validationBadge, bumpPatchVersion, buildApplyTarget, exportBundle, exportFilename, buildAuthoringRequest };

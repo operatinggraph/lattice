@@ -55,6 +55,26 @@ const CapabilityAuthorContextBucket = "capability-author-context"
 // window onto Weaver/bridge-authored orchestration state, not
 // business/PII data.
 //
+// capabilityAuthorPackages is a FLAT scan of every installed package's
+// manifest, projected into the SAME bucket as capabilityAuthorContext. Two
+// lenses, one bucket, disjoint key spaces (`vtx.package.*` here,
+// `vtx.meta.*` there) — the packages/one-bill posture, where four plain
+// lenses share one-bill-history and collision-freedom rests on the vertex-type
+// key segment alone. Both are plain projections: no ProjectionKind, no Output
+// descriptor and no DiffRetraction, which is what keeps them unguarded and
+// so never bucket-wide truncated (internal/refractor/projection/driver.go's
+// RequiresGuard, and Pipeline.RebuildTruncateIsScoped, which refuses an
+// unscoped rebuild in a shared bucket).
+//
+// It exists because package OWNERSHIP of a meta key is discoverable ONLY by
+// scanning `vtx.package.*.manifest.declaredKeys` — no `declaredBy` link or
+// aspect exists on a meta — and the bridge is denied Core KV, so it cannot
+// scan. cmd/loupe computes the same reverse index off its own Core KV scan
+// (P5's sole inspector exception); this lens is the non-Loupe equivalent, the
+// surface the capabilityAuthor adapter reads to answer "which package owns the
+// target I am being asked to edit, at what version, and what else does that
+// package declare".
+//
 // capabilityAuthorContext is a FLAT, platform-wide scan of every
 // `vtx.meta.<NanoID>` vertex (label `meta` — the key TYPE segment every
 // DDL/lens/weaverTarget/loomPattern meta-vertex shares regardless of its own
@@ -104,6 +124,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        CapabilityAuthorContextBucket,
 			Engine:        "full",
 			Spec:          capabilityAuthorContextSpec,
+		},
+		{
+			CanonicalName: "capabilityAuthorPackages",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        CapabilityAuthorContextBucket,
+			Engine:        "full",
+			Spec:          capabilityAuthorPackagesSpec,
 		},
 	}
 }
@@ -188,4 +216,30 @@ RETURN
   m.outputSchema.data.schema AS outputSchema,
   m.fieldDescription.data.fieldDescriptions AS fieldDescriptions,
   m.examples.data.examples AS examples
+`
+
+// capabilityAuthorPackagesSpec projects one row per installed package vertex,
+// keyed by the package's own key. The manifest fields a reader needs to resolve
+// ownership are read straight off the `.manifest` aspect
+// internal/pkgmgr/build.go writes at install: `name` and `version` identify the
+// package an upgrade must name and the version it must be authored against, and
+// `declaredKeys` is the full list of Core KV keys that install wrote — the only
+// place a meta's owning package is recorded. A package vertex whose manifest
+// aspect is absent (an install caught mid-batch) projects null columns rather
+// than dropping out, so a reader sees the package exists and simply cannot
+// claim any key.
+//
+// `description` and `depends` ride along for the opposite reason: not to resolve
+// an upgrade but to REFUSE one. build.go rewrites the whole manifest aspect from
+// the submitted Definition, and a Definition materialized from a capability
+// proposal carries neither field — so a reader proposing an in-place upgrade has
+// to see them to know it would blank them.
+const capabilityAuthorPackagesSpec = `MATCH (p:package)
+RETURN
+  p.key AS key,
+  p.manifest.data.name AS name,
+  p.manifest.data.version AS version,
+  p.manifest.data.description AS description,
+  p.manifest.data.depends AS depends,
+  p.manifest.data.declaredKeys AS declaredKeys
 `

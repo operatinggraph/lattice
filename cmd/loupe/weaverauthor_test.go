@@ -718,3 +718,224 @@ func TestWeaverAuthorPropose_CoAuthoredBundleNeedsNoConn(t *testing.T) {
 		}
 	}
 }
+
+// --- editContext: whether a target can be re-described in natural language ---
+//
+// The verdict pre-empts internal/pkgmgr's coverage refusal, which rejects an
+// apply whose Definition stops describing a key the installed package declares.
+// A capability proposal materialises exactly one weaverTarget, so an edit can
+// only ever land on a package that declares nothing else.
+
+// declaredKeys ALWAYS carries the package's own root vertex: build.go adds it
+// before snapshotting the list, and never the manifest aspect. An upgrade
+// re-declares that same key (its id is derived from the package name), so it is
+// not something an edit drops — and a subset test that counted it would call
+// every package multi-artifact and refuse every edit there is.
+func packageManifestEnv(name, version string, declared ...string) []byte {
+	keys := make([]any, len(declared))
+	for i, d := range declared {
+		keys[i] = d
+	}
+	return specEnv(map[string]any{"name": name, "version": version, "declaredKeys": keys})
+}
+
+func TestWeaverEditContext_SingleArtifactPackageIsEditable(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tAAAAAAAAAAAAAAAAAAA"
+	envs := map[string][]byte{
+		"vtx.package.PC1.manifest": packageManifestEnv("weaver-target-leasecomplete-k3f9", "0.1.0",
+			metaKey, metaKey+".spec", metaKey+".description", "vtx.package.PC1"),
+	}
+	get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+	keys := []string{"vtx.package.PC1", "vtx.package.PC1.manifest"}
+
+	ec := buildWeaverEditContext(metaKey, keys, get)
+	if ec == nil {
+		t.Fatal("editContext is nil for a target with a resolvable owner")
+	}
+	if !ec.Editable {
+		t.Fatalf("editable = false for a console-authored single-artifact package; reason = %q", ec.Reason)
+	}
+	if ec.Reason != "" {
+		t.Errorf("an editable target carries reason %q, want none", ec.Reason)
+	}
+	if ec.MetaKey != metaKey || ec.PackageName != "weaver-target-leasecomplete-k3f9" || ec.PackageVersion != "0.1.0" {
+		t.Errorf("editContext = %+v, want the owning package named at its installed version", ec)
+	}
+}
+
+// A target authored with no prose declares no `.description` (build.go emits it
+// only when non-empty). The coverage test is a SUBSET test, so the absent key
+// must not read as a package declaring something else.
+func TestWeaverEditContext_EditableWithoutADescriptionAspect(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tBBBBBBBBBBBBBBBBBBB"
+	envs := map[string][]byte{
+		"vtx.package.PC2.manifest": packageManifestEnv("weaver-target-quiet-9x2z", "0.2.0",
+			"vtx.package.PC2", metaKey, metaKey+".spec"),
+	}
+	get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+
+	ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PC2.manifest"}, get)
+	if ec == nil || !ec.Editable {
+		t.Fatalf("editContext = %+v, want editable — a described-less target's package still declares only it", ec)
+	}
+}
+
+// An upgrade names the package it upgrades and the version it was authored
+// against, so a manifest carrying neither can never be one's subject. The
+// capabilityAuthor adapter refuses on the same footing — after the operator has
+// typed their sentence — so a console verdict that stayed permissive here would
+// walk them into a refusal it could already see coming.
+func TestWeaverEditContext_NamelessOrVersionlessOwnerIsNotEditable(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tHHHHHHHHHHHHHHHHHHH"
+	for _, tc := range []struct{ name, pkgName, version string }{
+		{"no name", "", "0.1.0"},
+		{"no version", "weaver-target-nameless-k3f9", ""},
+		{"blank version", "weaver-target-nameless-k3f9", "   "},
+		{"neither", "", ""},
+	} {
+		envs := map[string][]byte{
+			"vtx.package.PH1.manifest": packageManifestEnv(tc.pkgName, tc.version,
+				"vtx.package.PH1", metaKey, metaKey+".spec"),
+		}
+		get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+
+		ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PH1.manifest"}, get)
+		if ec == nil {
+			t.Fatalf("%s: editContext is nil", tc.name)
+		}
+		if ec.Editable {
+			t.Errorf("%s: editable = true for an owner an upgrade could not name", tc.name)
+		}
+		if !strings.Contains(ec.Reason, "name and version") {
+			t.Errorf("%s: reason %q does not say what the manifest is missing", tc.name, ec.Reason)
+		}
+	}
+}
+
+// The domain case, and the one that matters: cafe-domain declares its target
+// alongside lenses, roles and ops. An edit's Definition describes the target
+// alone, so the apply would refuse — this says so first, and says which package
+// and how much else it holds.
+func TestWeaverEditContext_MultiArtifactOwnerRefusesWithReason(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tCCCCCCCCCCCCCCCCCCC"
+	envs := map[string][]byte{
+		"vtx.package.PD1.manifest": packageManifestEnv("cafe-domain", "1.3.0",
+			"vtx.package.PD1",
+			metaKey, metaKey+".spec", metaKey+".description",
+			// One lens (root + two aspects — one artifact) and one role.
+			"vtx.meta.LAAAAAAAAAAAAAAAAAAA", "vtx.meta.LAAAAAAAAAAAAAAAAAAA.spec",
+			"vtx.meta.LAAAAAAAAAAAAAAAAAAA.canonicalName",
+			"vtx.role.RAAAAAAAAAAAAAAAAAAA"),
+	}
+	get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+
+	ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PD1.manifest"}, get)
+	if ec == nil {
+		t.Fatal("editContext is nil for a domain-owned target")
+	}
+	if ec.Editable {
+		t.Fatal("editable = true for a target sharing its package with other artifacts — the apply would refuse it")
+	}
+	if ec.PackageName != "cafe-domain" || ec.PackageVersion != "1.3.0" {
+		t.Errorf("editContext = %+v, want the owning package still named on the refusal", ec)
+	}
+	// The reason has to be actionable: which package, how much else is in it,
+	// and what to do instead.
+	for _, want := range []string{"cafe-domain", "2 other artifacts", "in code"} {
+		if !strings.Contains(ec.Reason, want) {
+			t.Errorf("reason %q does not mention %q", ec.Reason, want)
+		}
+	}
+}
+
+// No manifest claims the target, so there is no package for an upgrade to name.
+// The reason names kernel/bootstrap seeding as the ordinary cause without
+// asserting it: an undecodable manifest lands in this same branch, and the scan
+// cannot tell the two apart.
+func TestWeaverEditContext_NoOwningPackageIsNotEditable(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tDDDDDDDDDDDDDDDDDDD"
+	envs := map[string][]byte{
+		"vtx.package.PE1.manifest": packageManifestEnv("clinic-domain", "1.0.0",
+			"vtx.package.PE1", "vtx.meta.tEEEEEEEEEEEEEEEEEEE"),
+	}
+	get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+
+	ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PE1.manifest"}, get)
+	if ec == nil {
+		t.Fatal("editContext is nil for an unclaimed target — the console still needs the reason")
+	}
+	if ec.Editable {
+		t.Fatal("editable = true for a target no package declares; there is no package for an upgrade to name")
+	}
+	if ec.PackageName != "" || ec.PackageVersion != "" {
+		t.Errorf("editContext = %+v, want no package attributed", ec)
+	}
+	for _, want := range []string{metaKey, "bootstrap"} {
+		if !strings.Contains(ec.Reason, want) {
+			t.Errorf("reason %q does not mention %q", ec.Reason, want)
+		}
+	}
+}
+
+// An id resolving to no meta-vertex (rows or a stale __control marker alone)
+// has nothing an edit could name, so the document carries no editContext at all
+// — the one case where the affordance is legitimately absent rather than
+// disabled-with-a-reason.
+func TestWeaverEditContext_AbsentWithoutAMetaVertex(t *testing.T) {
+	t.Parallel()
+	get := func(string) ([]byte, bool) { return nil, false }
+	if ec := buildWeaverEditContext("", nil, get); ec != nil {
+		t.Errorf("editContext = %+v for a target with no meta-vertex, want nil", ec)
+	}
+}
+
+// A manifest that cannot be read is not evidence that the package declares
+// nothing else. findOwningPackage skips it, so the target resolves to no owner
+// at all — refused on that footing, never editable by default.
+func TestWeaverEditContext_UnreadableManifestNeverGrantsAnEdit(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tFFFFFFFFFFFFFFFFFFF"
+	get := func(string) ([]byte, bool) { return []byte("{not json"), true }
+	ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PF1.manifest"}, get)
+	if ec == nil || ec.Editable {
+		t.Fatalf("editContext = %+v, want a non-editable verdict when no manifest can be read", ec)
+	}
+}
+
+// The fail-open shape a coverage test must not have: a manifest that resolved
+// the owner but whose declared-key list does not read back is NOT evidence that
+// the package declares nothing else. An empty list would otherwise satisfy the
+// subset test and grant the edit.
+func TestWeaverEditContext_UnreadableDeclaredKeysIsUnknownNotEditable(t *testing.T) {
+	t.Parallel()
+	const metaKey = "vtx.meta.tGGGGGGGGGGGGGGGGGGG"
+	full := packageManifestEnv("weaver-target-x-1", "0.1.0", "vtx.package.PG1", metaKey, metaKey+".spec")
+	// The owner resolves off the first read; the second one does not land.
+	reads := 0
+	get := func(k string) ([]byte, bool) {
+		if k != "vtx.package.PG1.manifest" {
+			return nil, false
+		}
+		reads++
+		if reads == 1 {
+			return full, true
+		}
+		return nil, false
+	}
+
+	ec := buildWeaverEditContext(metaKey, []string{"vtx.package.PG1.manifest"}, get)
+	if ec == nil {
+		t.Fatal("editContext is nil")
+	}
+	if ec.Editable {
+		t.Fatal("editable = true from a declared-key list that could not be read — an empty list is not an empty package")
+	}
+	if !strings.Contains(ec.Reason, "unknown") {
+		t.Errorf("reason = %q, want it to say the verdict is unknown rather than assert a package shape", ec.Reason)
+	}
+}
