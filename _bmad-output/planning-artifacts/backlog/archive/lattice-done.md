@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-21 · `ceb47fb` · [CI] whole-tree gofmt gate — every `scripts/*.go` is `//go:build ignore`, so golangci-lint's gofmt linter never loaded that tree; the step also fails on an unparseable file
+- 2026-08-21 · `833a7427` · [Pkgmgr] byte-exact packageName CLOSED — near-miss refuses loudly; review refuted folding the resolver (deny-list vs destructive-resolver polarity) and the shared proposal_string strip
 - 2026-08-21 · `f793bc55` · [Pkgmgr] manifest-oracle coverage CLOSED — secure-column history fail-closed on drop/rename + 2 review-executed bypasses; manifest retentionClasses; reserved RLS names on plain Columns/IntoKey
 - 2026-08-21 · `8f49c13b` · [Pkgmgr/Weaver/Loupe] weaverTarget `.description` aspect end-to-end — installer emission, Studio field + intent, roster render, 25-target backfill + lint gate; live diff-apply verified. CI green
 - 2026-08-21 · `a0bc24e` · [Refractor] two miscompiled clause shapes CLOSED — `*` projection bodies + required MATCH binding nothing new refused at parse; corpus census green, 2 pins moved not loosened
