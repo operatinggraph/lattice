@@ -192,6 +192,82 @@ by Gate 2 (`nfr_r1_test.go`).
 
 ---
 
+## NFR-S6 anti-enumeration: the wire shape AND the clock
+
+`ClaimIdentity` and `CompleteCredentialLink` answer a caller who holds no valid
+secret. Both take a target key straight from the payload, both are granted to
+every consumer, and neither is rate-limited — so *anything* that varies with the
+target's state is an identity-existence oracle. Contract #9 states the
+requirement without qualification: **"All failure modes collapse to the generic
+`ClaimKeyInvalid` reply code (NFR-S6 anti-enumeration); specific outcomes surface
+only via Health KV."** That is two obligations, not one.
+
+The operation set is declared in `internal/processor/claim_reply_floor.go`
+(`nfrS6Operations`) and is keyed on **operationType**, never on the error code a
+particular failure happened to produce.
+
+### 1. One wire shape
+
+Every rejection of these operations answers `ClaimKeyInvalid`, nil details, and
+one fixed message — including failures the script never reached, such as a step-4
+hydrate or decrypt fault on the operation's own declared keys. The step name and
+the underlying error text are withheld too: the step alone separates a fault from
+a refusal, and a hydrate fault's text quotes the very key the caller was probing.
+The real code, message and details go to the Processor log; the specific outcome
+goes to `health.processor.<instance>.claim-attempts.<outcome>`, with
+`internal-fault` covering the faults the script never reached.
+
+### 2. One release lattice
+
+Identical replies are still separable if they arrive at different times. Measured
+at n=3000/cause, the three `ClaimIdentity` rejection causes differ by 0.3–0.7 ms
+of mean service time — absent-target hydrates three missing keys; already-claimed
+skips the envelope read and AEAD decrypt via `decryptSensitiveDoc`'s `IsDeleted`
+arm; wrong-key pays both — a bias that is monotone, invariant to load, and worth
+roughly 12 requests to extract.
+
+So the reply is released on a **lattice of fixed offsets from message receipt**:
+`receipt + ceil(elapsed/Q)*Q`, with `Q = DefaultClaimRejectionFloor` (50 ms,
+sized against loaded p99 ≈ 17 ms, not against service time).
+
+Three properties carry the mechanism, and each exists because the obvious
+alternative fails:
+
+- **Anchored at receipt**, captured at the top of `dispatch` before any
+  state-dependent work. Anchoring at the rejection would yield `Q + work` and
+  leave the per-cause gap fully intact.
+- **Quantized, not floored.** A floor answers `max(receipt+Q, done)`, so any
+  request whose work outruns `Q` is answered at its own service time. That is one
+  request away: `opwire.MaxDeclaredReads` permits 1000 declared reads, the
+  Gateway copies `contextHint` into the envelope verbatim, step 3 never inspects
+  it, and every declared read resolves inside the window — so a caller pads until
+  it escapes the floor and reads the raw timing back. Under quantization there is
+  no escape hatch; a padded request simply answers one quantum later.
+- **Off the pump worker.** A lane has 2–4 workers, so parking the wait there
+  would cap the whole lane — every operation on it — at `workers × (1s/Q)` ops/s,
+  with the attacker choosing how much of that budget to burn. The wait runs on
+  its own goroutine, bounded at 1024 concurrent deferrals; **at the bound the
+  reply is dropped, never answered early**, because an early answer restores the
+  signal exactly when an attacker is generating the load they are measuring.
+
+### Deferred-reply state
+
+| Stage | What exists |
+|---|---|
+| Created | On rejection: the marshalled reply bytes, its reply subject, and the release deadline, captured synchronously off the pump worker's stack frame. |
+| Carried | In the waiting goroutine only. Nothing durable, nothing in KV, nothing replayed — a reply was never durable (`replyTo`'s contract is that the commit is already durable and a lost reply is observability-only), so deferring widens an already-lossy window rather than creating a new durability class. |
+| Flushed at shutdown | `CommitPath.DrainClaimReplies(budget)`, called by `cmd/processor` after `sup.Stop()` and before the NATS connection closes. Bounded (10×Q): a non-durable reply must not hold a shutdown open. Replies still deferred when the budget expires are lost, and the expiry is logged. |
+
+### Operator signals
+
+| Heartbeat counter | Meaning |
+|---|---|
+| `claim_floor_applied_total` | Rejections handed to the quantizer. |
+| `claim_floor_late_total` | Released in a quantum **beyond the first** — the work outran `Q`. The one to alert on: it is both the padding-probe signature and a degraded-read-path signal, and the only way to know the invariant is currently holding. A steady zero means every rejection lands on the first boundary. |
+| `claim_floor_dropped_total` | Refused at the 1024 bound; those callers time out. |
+
+---
+
 ## Capability change operations (FR53)
 
 ### `.compensation` aspect as the FR53 contract surface
@@ -480,6 +556,7 @@ required by the `vertex_alive` liveness check), so the root document — and its
 | `SandboxViolation` / `ScriptError` | Step 5 | Reply with `ScriptFailed` code; term |
 | `ScriptTimeout` | Step 5 | Reply with `ScriptFailed` code; term |
 | `HydrationError` | Step 4 | Reply with `HydrationFailed` code; term |
+| Any rejection of an NFR-S6 operation | Steps 4–8 | Reply collapses to `ClaimKeyInvalid` with nil details, released on the receipt-anchored lattice; real cause to the log + Health KV (see *NFR-S6 anti-enumeration* above) |
 | `AuthDenied` | Step 3 | Reply with `AuthDenied` / `LaneUnauthorized` / `AuthContextMismatch` code; term; ack (no retry — this is a final decision) |
 | `AuthInfrastructureFailure` | Step 3 | `InternalError` reply; nak (retryable) |
 | `PublicationError` | Outbox publish | Nak; outbox consumer redelivers and republishes the persisted EventList (at-least-once) |
