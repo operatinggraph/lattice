@@ -1805,6 +1805,12 @@ what happens when that bound is hit. On the last one the fail-safe direction is 
 times out) rather than answer early — answering early restores the timing signal at exactly the moment an
 attacker is generating load, which is when they are measuring.
 
+> **SUPERSEDED 2026-08-24 by §19.8 — do not build against the paragraph below.** Its headline ("the
+> predicted signal is not there"), its inverted-direction finding, and its "the floor constant cannot be
+> derived from a measured gap, because there isn't one" conclusion are all **artifacts of n=40**. Re-measured
+> at n=3000/cause the signal is present, monotone in the predicted direction, and survives concurrent load.
+> The table below is kept because §19.8 is a correction *of* it, not because any of it still stands.
+
 **MEASURED 2026-08-24 — and the predicted signal is not there.** Rather than hand the build an unmeasured
 premise, this fire measured all three causes end to end on `packages/identity-domain`'s harness (a real
 `TestVault` is wired, so the wrong-key arm genuinely does the envelope `KVGet` + AEAD decrypt), n=40 each,
@@ -1836,6 +1842,84 @@ the three — it answers "does this identity exist at all" — but whether it is
 **unmeasured**; a KV miss still costs its round-trip. `packages/identity-domain`'s embedded-NATS harness can
 measure all three directly. Do that first: a floor chosen against the decrypt asymmetry alone would be sized
 wrong if the absent arm is the outlier.
+
+### 19.8 The re-measure — the signal IS there, it survives load, and the absent arm is the outlier
+
+§19.5 asked the build to start by re-measuring under a concurrent submitter before choosing a mechanism, and
+raised the absent-target arm as an unmeasured third class. Both are now done, with the instrument committed
+(`packages/identity-domain/claim_timing_probe_test.go`, inert unless `LATTICE_CLAIM_TIMING_PROBE` is set).
+
+**What was wrong with the n=40 measurement.** Nothing about its method — only its power. A ~0.35 ms effect
+against a ~1 ms per-sample spread needs a few hundred samples before a difference of means separates from
+zero; at n=40 the standard error on the difference is roughly the size of the effect, so the comparison could
+not have detected the gap even if it were twice as large. Comparing **p50s** made it worse: the p50 is not the
+statistic a bias-below-the-noise attack uses. The "direction inverted" reading was noise being read as signal.
+
+**The re-measure.** Same three causes, same harness and real `TestVault`, n=**3000** per cause per cell,
+causes interleaved round-robin so every cause meets identical load, timed publish→reply, 95% percentile
+bootstrap (5000 resamples) on the pairwise difference of **means**.
+
+| arm | cause | mean | p50 | p90 |
+|---|---|---|---|---|
+| sequential (1 sub / 1 worker) | absent-target | 2.2172 ms | 2.1568 | 2.7135 |
+| | already-claimed | 2.4901 ms | 2.4398 | 3.0709 |
+| | wrong-key | 2.8546 ms | 2.8027 | 3.5047 |
+| concurrent (8 sub / 2 workers) | absent-target | 9.2429 ms | 8.8185 | 11.4842 |
+| | already-claimed | 9.6204 ms | 9.1946 | 11.8671 |
+| | wrong-key | 9.9415 ms | 9.4775 | 12.1995 |
+
+Pairwise difference of means, 95% CI — **every cell excludes zero**:
+
+| pair | sequential | concurrent |
+|---|---|---|
+| already-claimed − wrong-key | −0.3646 [−0.3962, −0.3331] | −0.3212 [−0.4369, −0.2069] |
+| absent-target − wrong-key | −0.6374 [−0.6754, −0.5957] | −0.6987 [−0.8131, −0.5877] |
+| absent-target − already-claimed | −0.2728 [−0.3105, −0.2297] | −0.3775 [−0.4856, −0.2665] |
+
+**Three findings.**
+
+1. **The direction §19.5 originally stated is correct** — already-claimed IS faster than wrong-key, by ~0.35 ms,
+   and the ordering is monotone `absent < already-claimed < wrong-key`, matching the work each path does:
+   absent hydrates three missing keys; already-claimed hydrates three present keys but `decryptSensitiveDoc`'s
+   `IsDeleted` arm skips `readPiiKeyEnvelope` + `Vault.Decrypt`; wrong-key pays both.
+2. **The bias is invariant to load.** Concurrency inflates the mean ~4× and widens the spread, but moves the
+   per-cause difference hardly at all. That is the signature of an additive service-time difference inside a
+   symmetric queue, and it is the answer to the question §19.5 actually asked: **concurrency does not mask it.**
+3. **The absent-target arm is the outlier, at roughly 2× the decrypt gap** — exactly the case §19.5 flagged
+   ("a floor chosen against the decrypt asymmetry alone would be sized wrong if the absent arm is the
+   outlier"). It is also the highest-value oracle: it answers *does this identity exist at all*.
+
+**A confound ruled out rather than assumed away.** Every rejection also pays a synchronous per-cause Health-KV
+read-modify-write before the reply (`commit_path.go`'s `handleStubFailure` calls `RecordClaimAttempt`, then
+`replyTo`; `health_alerts.go:181-214` is a `KVGet` + `KVPutWithTTL`, both inline). Since its key is per-cause,
+a measured gap could have been emitter key contention rather than the decrypt asymmetry. Measured both ways:
+the emitter adds a near-constant **~0.35 ms to all three causes** and leaves the gaps intact (emitter-off
+sequential: −0.3632 / −0.6698 / −0.3066). So the separation is the hydration asymmetry. The emitter is not the
+oracle — but it does put two KV round trips on the caller's critical path for every claim, which is its own
+(non-security) finding.
+
+**Exploit cost, derived from the measured standard errors** — samples per class for a 2σ separation:
+
+| question | sequential | under load |
+|---|---|---|
+| "does this identity exist?" | **~12** | ~81 |
+| "is it already claimed?" | ~23 | ~400 |
+
+That is tens to a few hundred requests per bit on a `scope: self` endpoint granted to every consumer — cheap
+enough to enumerate with. It is **not** the "many requests per bit" §19.5 estimated, and the ★ rating on the
+board was premised on that estimate.
+
+**Verdict: the row is BUILD, not close.** §19.5 offered closing it as not-exploitable-as-specified if the gap
+stayed under the noise; it does not. The mechanism §19.5 names (deferred reply off the pump worker, the
+`AuthTraceEmitter.Emit` shape) stands, and it now has a measured gap to be sized against.
+
+**What the measurement adds to the floor's design, and the build must not miss.** A fixed floor *D* only
+masks the causes while *D* exceeds actual latency. Under the concurrent arm the mean is already ~9.5 ms and
+p90 ~12 ms, so a floor sized against the ~2.9 ms sequential worst case would be exceeded by every cause under
+ordinary load and the full gap would reappear — and an attacker can *create* that load. This is a sharper form
+of the hazard §19.5 already names for the pending-reply bound: the attacker does not need to reach the bound,
+only to push service time past *D*. So the floor constant must be sized against **loaded** tail latency, not
+service time, which materially raises its availability cost and is the first thing the build has to resolve.
 
 ### 19.6 CHECKPOINT (2026-08-10) — what Increment 4 landed, and what remains
 
