@@ -166,9 +166,17 @@ the MUST under either reading.
 three erasure residue gaps ship the exact uncapped-external `inflight_<g>` pattern it forbids — falsifying
 `reconciler.go`'s "no shipped package does this". The two are one root: **an `inflight_<g>` /
 `maxretries_<g>` companion-pair validator, and the `privacy-base` declaration it must first be reconciled
-against.** Whether `privacy-base` should carry a cap (escalate a stuck erasure after N), drop the
-meaningless const-false marker (letting the `directOp` default budget apply), or is deliberately
-retry-forever is a package/compliance call that the validator's shape depends on. Install-time gap-spec
+against.** The consequence, traced and confirmed by the cold review: because `gapSuppressed` declines
+the engine's `defaultDirectOpRetryBudget` for any row that *declares* `inflight_<g>`
+(`evaluator.go:1027`), a **constant-false** marker suppresses nothing while switching OFF the
+`directOp` safety net — so those three erasure gaps have no cap, and `escalateExhaustedGap` can never
+fire for them: §10.8's "budget exhaustion... never a silent park" promise is unreachable on the erasure
+residue sweeps, which re-dispatch indefinitely (backoff-paced by `uncappedExternal`, never escalated).
+That is almost certainly not what the package intended. Whether the fix is a cap (escalate a stuck
+erasure after N), dropping the inert marker (letting the `directOp` default budget apply), or a
+deliberate retry-forever is a package/compliance call — the erasure path's fail-loud-vs-keep-trying
+tradeoff — and the validator's shape depends on it, which is why this fire does not decide it
+unattended. Install-time gap-spec
 validation has a precedent in `internal/pkgmgr`, so the mechanism is a steward `📋`, not a designer pass —
 but the `privacy-base` decision is its prerequisite. Filed as one row on `lattice.md`.
 
