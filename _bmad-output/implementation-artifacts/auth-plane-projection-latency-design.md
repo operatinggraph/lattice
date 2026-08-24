@@ -2533,3 +2533,115 @@ anything that can read the `health-kv` bucket. That is the pre-existing NFR-S6 d
 contract says specific outcomes surface there), reachable only by a platform component and not by the
 `scope: self` consumer this item is about — noted so a future reader does not mistake it for a
 regression introduced here.
+
+---
+
+## 20. §19.10's residual — NFR-S6 declared-read closure: fire brief (build note, 2026-08-24)
+
+Phase 0 of the fire that closes §19.10's named residual. Two read-only scouts re-verified every citation
+live; every `file:line` below was opened this fire.
+
+### 1. Scope sentence (verbatim from the board row + §19.10)
+
+> Full closure requires bounding the work a submitter may place inside the window — a **closed declared-read
+> set** for an NFR-S6 operation, i.e. Contract #2 §2.5 refusing an out-of-set declared read instead of
+> demoting it.
+
+Green bar: an envelope for an NFR-S6 operation whose `contextHint` names anything the operation's own
+descriptor does not is **refused before hydration**, under the existing collapsed + quantized rejection
+posture; the four shipped dispatchers still submit and still succeed.
+
+### 2. Verified touch-list
+
+| # | Site | What changes |
+|---|---|---|
+| 1 | `internal/processor/descriptor_floor.go:212-228` (`descriptorFloorResolver`) | new `admits(key)` arm — the descriptor's `Reads` ∪ `OptionalReads` compiled to **concrete keys only**, memoized beside `floor`/`required` |
+| 2 | `internal/processor/descriptor_floor.go` (new func) | `refuseUndeclaredContextHint(env, resolver)` — the NFR-S6 closure |
+| 3 | `internal/processor/step4_hydrate.go:207-215` | call site, after `applyDescriptorFloor`, **before** `deriveReads` and before `KVGetMulti` |
+| 4 | `internal/processor/claim_reply_floor.go:63-73` | `isNFRS6Operation` is the predicate; unchanged, consulted from the new site |
+| 5 | `internal/identityceremony/contexthint.go:17-27` | package doc's "the envelope surface stays open until…" paragraph is falsified by this fire — rewrite in the same commit |
+| 6 | `docs/components/processor.md` (declared-read posture + dossier) | record the closure; dossier entry 1 gets its follow-on |
+| 7 | `docs/contracts/02-operation-envelope.md:~168` | **PROPOSAL BRANCH ONLY** — the clause after "the descriptor's disposition is a floor the envelope cannot raise" |
+
+Facts the fire stands on, each checked live:
+
+- `nfrS6Operations = {ClaimIdentity, CompleteCredentialLink}` — `claim_reply_floor.go:63-66`.
+- Both descriptors declare `Dispatch.OptionalReads` only, all `{payload.targetIdentityKey}`-rooted and all
+  server-resolvable: 3 templates for `ClaimIdentity` (`packages/identity-domain/opmetas.go:285-289`), 4 for
+  `CompleteCredentialLink` (`:493-498`). Neither declares `Dispatch.Reads`.
+- `OpDispatchSpec` has **no** `EgressReads` and **no** `Enumerations` field (`internal/pkgmgr/definition.go:752-815`),
+  so a descriptor cannot name either — the admitted set for both classes is empty by construction.
+- The four shipped dispatchers build their hint from `internal/identityceremony/contexthint.go:59-99`, which
+  emits exactly the descriptor's key set: 3 optionalReads for the claim, 4 for the link, no reads, no
+  egressReads, no enumerations. **The positive vector passes unchanged** — this is the standing checklist's
+  item 3, and dossier entry 3 records this exact gate failing it five times.
+- A step-4 `*HydrationError` on an NFR-S6 op already routes `handleStubFailure` (`commit_path.go:1021-1040`)
+  → `replyRejection` (`:1124-1139`) → generic `ClaimKeyInvalid`, nil details, quantized from receipt. The
+  refusal therefore inherits the collapse; it does **not** need a new reply posture and must not invent one.
+
+### 3. Precedents to mirror
+
+- **Refuse-as-HydrationError, key to the log and not to the caller:** `derive_reads.go:554-559`
+  (`DeriveReadsFloorContradiction`) + `descriptor_floor.go:275-278` (`warnContradiction`). Same shape: a
+  typed hydration fault carrying no key, and one `Warn` that is the operator's only copy of it.
+- **A pattern contributes nothing:** `resolveDescriptorRequired`'s pattern rule (`descriptor_floor.go:388-393`).
+  A `{me.<type>}` template compiles to `vtx.<type>.<any NanoID>`, which would admit an unbounded key set and
+  give the padding channel straight back. Concrete keys only.
+- **Deferred + memoized resolution:** `descriptorFloorResolver.resolve()` (`:249-268`).
+- **The template compiler itself is reused verbatim:** `compileDescriptorTemplate` (`:530-536`).
+
+### 4. Increment order
+
+One increment. `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go test ./internal/processor/... ./internal/identityceremony/... ./internal/bypass/... ./packages/identity-domain/...` ·
+full `go test ./... -p 4` **with `POSTGRES_TEST_DSN` set** (REMOTE.md §3 — without it the suite is falsely green).
+
+### 5. In-scope gotchas
+
+- **`submitterDerived` must NOT be excluded here.** `resolveDescriptorRequired` refuses a
+  `{payload.<field>}` template because an *exclusion from the floor* the submitter can address is a bypass
+  (`descriptor_floor.go:349-357`). The admitted set is the opposite polarity: **both** NFR-S6 descriptors are
+  entirely `{payload.targetIdentityKey}`-rooted, so inheriting that exclusion would empty the set and refuse
+  every legitimate claim. Sound because the guard's subject here is the **count**, which comes from the
+  descriptor alone; a submitter steers *which* key is admitted, never *how many*. This is dossier entry 11's
+  class — state the reasoning at the site, do not let it read as an oversight.
+- **Fail-closed on no descriptor.** An NFR-S6 op with no `Dispatch` block admits nothing, so any declared key
+  is refused. Visible over-deny, never silent over-admit (dossier entry 12's direction).
+- **Uncompilable template ⇒ no contribution.** An envelope omitting `targetIdentityKey` compiles no template,
+  admits nothing, and is refused — which is where it was heading anyway (`InputSchema` requires the field).
+- **Enumerations are metadata and not themselves a padding vector** (Contract #2 §2.5 class (e); the
+  Processor validates their shape at parse and otherwise ignores them). They are refused because the rule is
+  *closed*, not because they cost — say so, do not claim a cost that is not there.
+- **Duplicates survive membership closure.** `MaxDeclaredReads` still admits 1000 repetitions of an in-set
+  key; each costs one map lookup and `distinctKeys` collapses them before any KV work. Microseconds against a
+  50 ms quantum — bounded, and stated rather than silently assumed.
+- **Order at the call site.** The check runs against `env.ContextHint` — the submitter's own declaration —
+  after the resolver exists, before `deriveReads`. Derived keys are DDL-authored, not submitter-priced, and
+  are **out of scope of the closure**; putting the check after the merge would refuse the DDL's own
+  `credentialindex` probe.
+- **`internal/identityceremony`'s package doc becomes false the moment this lands** (its §17-27 paragraph
+  says the envelope surface stays open pending a §2.5 amendment). Rewrite it in the same commit — the design
+  doc body-stays-true rule, applied to a package doc that is the same kind of standing instruction.
+
+**Standing checklist, the items this fire trips:** #2 (every census is a premise — the 3/4 template counts
+and the four-dispatcher claim were re-run live above), #3 (positive vector first: the shipped dispatchers'
+envelopes must be asserted admitted **before** any refusal is asserted), #6 (precedent carries debt —
+`resolveDescriptorRequired` is the right shape for pattern-handling and the wrong one for `submitterDerived`).
+
+**Processor dossier entries this fire copies in:** (1) *a mechanism whose margin the SUBMITTER prices is not
+a margin* — this fire is that entry's follow-on; (3) *a gate's negative test must first prove its positive
+vector reaches the gate*, fifth sighting on this very gate; (11) *a guard whose SUBJECT is computed from
+submitter-supplied input is not a guard*; (12) *"degrade instead of refuse" is fail-open*.
+
+### 6. Adjacent finds
+
+None new. The fire's own out — the Contract #2 §2.5 text — is an **L3 propose**: the edit lands as a commit
+on its own proposal branch (`agents/steward/REMOTE.md` §2), never on `main`, and the board row carries the
+pointer.
+
+### 7. Non-goals
+
+Not touched: the quantum's value or the release mechanism (`claim_reply_floor.go`); the Health-KV per-cause
+counters (§19.10's other open item, explicitly not this one's); `MaxDeclaredReads` for any non-NFR-S6
+operation; `InitiateCredentialLink`, which is not in the NFR-S6 set; the descriptor floor's demotion
+behaviour for every other operation, which is unchanged.
