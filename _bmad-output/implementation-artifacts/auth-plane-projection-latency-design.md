@@ -1763,16 +1763,17 @@ that lands, this is a dispatcher-hygiene fix plus a filed contract gap, and the 
 > `hand-rolled-reads-*` arms; `TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate`). **The STRUCTURAL
 > half of NFR-S6 is closed and pinned.** What remains open is the timing half alone, below.
 
-**Residual — the timing oracle, which this fire does NOT close.** The tombstoned path returns at
-`sensitive_decrypt.go:190`, before `readPiiKeyEnvelope`'s `KVGet` (`:224`) and the AEAD decrypt (`:228`), and the
-script then exits at `wrong-state` (`ddls.go:1423`) rather than running on to `:1472`. So already-claimed is
+**Residual — the timing oracle, which this fire does NOT close.** The tombstoned path returns from
+`decryptSensitiveDoc`'s `doc.IsDeleted` arm (`sensitive_decrypt.go`), before `readPiiKeyEnvelope`'s `KVGet` and
+the AEAD decrypt further down the same function, and the script then exits at `wrong-state` (`ddls.go`'s
+`current_state == "claimed"` branch) rather than running on to the secret comparison. So already-claimed is
 measurably faster than wrong-key by one KV round-trip plus a decrypt. The wire shape is identical; the latency is
 not. This design's own standard makes that a real finding — `ddls.go:1489` rejects an alternative gate placement
 partly because it would hand a caller holding no valid secret "a measurably shorter path". Equalizing it is a
 constant-time-rejection mechanism with no ratified pattern to extend, so it is filed for a designer pass rather
 than improvised here.
 
-**Grounded 2026-08-24 — why the obvious mechanism is not the mechanism.** The board had carried this as a ready
+**Grounded 2026-08-24 — why the naive floor is not the mechanism, and what is.** The board had carried this as a ready
 item sized XS–S behind the sketch "a fixed floor on the rejection paths". Grounding it before building falsified
 the sketch, so it is recorded here rather than re-derived:
 
@@ -1786,16 +1787,30 @@ the sketch, so it is recorded here rather than re-derived:
   granted to every consumer, so the attacker chooses how much of that budget to burn. A naive in-handler sleep
   buys the timing property with a lane-wide availability regression, which is a worse trade than the oracle.
 
-So a sound fix has to either move the wait **off** the pump worker (a deferred reply — new state whose lifetime
-across crash/replay/shutdown must be specified, exactly the class this component's dossier keeps catching) or put
-the floor at the **Gateway**, which is a trust-boundary placement question rather than an in-component one.
-Either is a design, which is why this stays a designer item; the sizing is not XS–S.
+So the wait has to move **off** the pump worker. **That is a steward build, not a designer item — the precedent
+is in this same package** (cold review, 2026-08-24, correcting this section's first draft, which had called it
+patternless and routed it away):
 
-**One thing the designer pass must settle rather than inherit:** this section's census is two timing classes
+- **`AuthTraceEmitter.Emit` (`internal/processor/step3_auth_trace.go`) is the shape.** It captures everything it
+  needs synchronously off the stack frame, launches a goroutine with its own timeout, does the I/O there, and
+  logs failures. No durable state, no shutdown drain.
+- **A deferred reply adds no new durability class**, because the reply was never durable: `replyTo`'s own
+  contract (`commit_path.go`) is "the commit is already durable, so failure to reply is observability-only".
+  The first draft's objection — new state whose crash/replay lifetime must be specified — does not survive that
+  contract. Deferring widens an already-lossy window; it does not create one.
+
+**The decisions the build owns** (implementation calls, per the steward's decide-don't-defer rule):
+the floor constant, measured from message receipt in `dispatch`; a bound on concurrent pending replies; and
+what happens when that bound is hit. On the last one the fail-safe direction is **drop the reply** (the caller
+times out) rather than answer early — answering early restores the timing signal at exactly the moment an
+attacker is generating load, which is when they are measuring.
+
+**One thing the build must measure rather than inherit:** this section's census is two timing classes
 (already-claimed vs wrong-key). The *absent-target* arm is a plausible third and is the highest-value oracle of
 the three — it answers "does this identity exist at all" — but whether it is separable in the time domain is
-**unmeasured**; a KV miss still costs its round-trip. Measure it before choosing a mechanism, because a fix
-scoped to the decrypt asymmetry alone would leave the more valuable question open.
+**unmeasured**; a KV miss still costs its round-trip. `packages/identity-domain`'s embedded-NATS harness can
+measure all three directly. Do that first: a floor chosen against the decrypt asymmetry alone would be sized
+wrong if the absent arm is the outlier.
 
 ### 19.6 CHECKPOINT (2026-08-10) — what Increment 4 landed, and what remains
 

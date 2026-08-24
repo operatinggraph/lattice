@@ -530,13 +530,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   from the request body verbatim, step 3 never inspects it, and a key in both lists keeps fail-closed `reads`,
   so converting an op's dispatchers to `optionalReads` stops OUR callers tripping a `HydrationMiss` existence
   oracle without closing it for anyone else. Minted: auth-plane 4d (three dispatchers converted, oracle then
-  reproduced on the wire as an ordinary consumer). **Both drift halves are now gated** for the NFR-S6 ops
-  (`packages/identity-domain/claim_test.go`): the hostile envelope's `reads` is DERIVED from the descriptor,
-  so it cannot omit a floored key, and `nfrS6FlooredKeys` pins the declared set independently, so the
-  descriptor cannot narrow silently — one mechanism alone does neither, because a derived probe moves in
-  lockstep with the declaration it is checking. Check: a NEW op joining the generic-refusal set still needs
-  its own hostile test and its own pin entry — the gate covers the two ops that `fail("ClaimKeyInvalid: ")`,
-  and nothing forces a third to enrol. The
+  reproduced on the wire as an ordinary consumer). Check: any claim that an op's rejections are
+  indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped builder — and the
+  probe must reach the SCRIPT-side surface, not just the declared one, since the miss faults only when the
+  script touches the key. Gated for the two NFR-S6 ops in `packages/identity-domain/{claim,credential_link}_test.go`
+  (probe derived from the descriptor + the declared set pinned independently). The
   enforcement point is a descriptor-pinned disposition (Contract #2 §2.5), which the Processor applies as a
   floor over every envelope for the operationType.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
