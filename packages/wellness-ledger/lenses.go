@@ -120,7 +120,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: ClassPriceSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price"},
+				BodyColumns:      []string{"violating", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price_charge"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -237,7 +237,7 @@ RETURN
 // wellnessaccount yet never violates either (accountKey null) — same
 // non-goals as noShowSettlementSpec, not gaps this lens converges.
 // classPriceSettlementSpec is built once at package init: the retry cap
-// (maxPriceChargeRetries) bakes into the constant maxretries_price column,
+// (maxPriceChargeRetries) bakes into the constant maxretries_price_charge column,
 // the same §10.2 "the policy lives in the cypher" convention
 // noShowSettlementSpec follows. The cypher carries no literal '%'.
 var classPriceSettlementSpec = fmt.Sprintf(`MATCH (bk:booking {key: $actorKey})
@@ -262,7 +262,7 @@ RETURN
   sessionName,
   ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_price_charge,
   ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
-  %d AS maxretries_price
+  %d AS maxretries_price_charge
 `, maxPriceChargeRetries)
 
 // refundSettlementSpec is the one-row-per-wellnessrefund convergence cypher

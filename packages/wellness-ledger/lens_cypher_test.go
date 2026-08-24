@@ -315,7 +315,7 @@ func TestWellnessClassPriceSettlement_PricedWithAccountNoCharge_MissingPriceChar
 	require.Equal(t, "Vinyasa Flow", v["sessionName"])
 	require.Equal(t, true, v["missing_price_charge"], "no wellnesstransaction settlesClassPrice this booking yet — violating")
 	require.Equal(t, true, v["violating"])
-	requireIntColumn(t, v, "maxretries_price", maxPriceChargeRetries)
+	requireIntColumn(t, v, "maxretries_price_charge", maxPriceChargeRetries)
 }
 
 func TestWellnessClassPriceSettlement_PricedCharged_Converged(t *testing.T) {

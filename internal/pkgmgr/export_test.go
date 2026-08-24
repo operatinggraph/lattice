@@ -105,3 +105,23 @@ func PermTagForTest(operationType, scope string) string {
 // pkgmgr, so `package pkgmgr` importing it back would cycle. Test-only; not
 // part of the public API.
 func LensNeedsCapCheckForTest(facts SpecLabels) bool { return lensNeedsCapCheck(facts) }
+
+// ValidateWeaverTargetsForTest exposes the §10.8 install-time weaver-target
+// validations — including the Contract #10 §10.3 companion-pair gate — to the
+// external pkgmgr_test package. It exists so a test can run the gate against
+// every SHIPPED package's real Definition, which the internal test package
+// cannot reach: every package under packages/ imports pkgmgr, so
+// `package pkgmgr` importing pkgregistry back would cycle. Test-only; not part
+// of the public API.
+func ValidateWeaverTargetsForTest(def Definition) error {
+	// Production never validates a raw Definition: Install/Upgrade/Apply expand
+	// the read-grant walks first and validate the expansion (installer.go,
+	// upgrade.go, validateAll). Expanding here keeps a corpus sweep measuring
+	// what an install would actually see, rather than a shape that happens to
+	// be equivalent today.
+	expanded, err := def.ExpandReadGrantWalks()
+	if err != nil {
+		return err
+	}
+	return expanded.validateWeaverTargets()
+}

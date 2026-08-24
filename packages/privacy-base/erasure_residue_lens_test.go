@@ -482,27 +482,45 @@ func TestErasureResidueLens_AnchorsOnTheMarkerOnly(t *testing.T) {
 
 // ------------------------------------------- the Weaver's dispatch contract
 
-// TestErasureResidueLens_DeclaresUncappedSweepGaps pins the columns §7.2
-// depends on. A directOp gap declaring NEITHER maxretries_<g> NOR inflight_<g>
-// falls to the engine's default retry budget (weaver/evaluator.go
-// gapSuppressed), which would suppress a PAGED sweep partway through and strand
-// the erasure. Declaring inflight_<g> as a constant false — each sweep is a
-// synchronous commit with no in-flight window — is what makes the re-dispatch
-// uncapped. Termination comes from the sweep strictly decreasing the count and
-// §6 keeping the set closed, not from a budget.
-func TestErasureResidueLens_DeclaresUncappedSweepGaps(t *testing.T) {
+// TestErasureResidueLens_DeclaresPagedSweepRetryCaps pins the dispatch-bounding
+// columns §7.2 depends on. All three dispatched gaps are directOp, which the
+// engine classifies as external outright, so §10.3 leaves the declared
+// maxretries_<g> column as their ONLY bound — and the bound has to be sized to
+// the op behind it. The engine's default budget of 3 is too small for either
+// sweep: both page one bounded slice of residue per commit and re-open, so a
+// wide subject legitimately needs many more than three dispatches to drain, and
+// a budget of 3 would suppress the sweep partway through and strand the
+// erasure. The caps here are sized to each op's own reach instead
+// (retry_budget.go, and retry_budget_pin_test.go re-derives them from those
+// ops' own sources), which is what keeps §10.8's promise reachable: a sweep
+// that has genuinely stopped draining stops LOUDLY, as a GapBudgetExhausted
+// standing issue, rather than re-dispatching unseen forever.
+//
+// inflight_<g> must stay absent. It is the wrong instrument for that job: it
+// suppresses a dispatch while a remediation is genuinely in flight, and each of
+// these ops is one synchronous commit with no such window — so as a constant
+// false it would suppress nothing while making gapSuppressed
+// (weaver/evaluator.go) decline the budget, leaving the gap with no bound of
+// any kind. An absent column reads to exactly the same false through
+// boolColumn, without the claim.
+func TestErasureResidueLens_DeclaresPagedSweepRetryCaps(t *testing.T) {
 	f := newResidueFixture(t)
 	key := f.residueSubject(t, "residueDispatch", fanOut{boundIn: 1, indexes: 1})
 
 	row := f.project(t, key)[key]
-	for _, col := range []string{"inflight_credentialResidue", "inflight_dedupResidue", "inflight_erasureSeal"} {
+	for col, want := range map[string]int{
+		"maxretries_credentialResidue": maxCredentialResidueRetries,
+		"maxretries_dedupResidue":      maxDedupResidueRetries,
+		"maxretries_erasureSeal":       maxErasureSealRetries,
+	} {
 		v, ok := row[col]
-		require.True(t, ok, "%s must be DECLARED — its absence is what triggers the default retry budget", col)
-		require.Equal(t, false, v, "a synchronous sweep has no in-flight window")
+		require.Truef(t, ok, "%s must be DECLARED — an external gap's cap is its only bound", col)
+		require.EqualValuesf(t, want, v, "%s must project the cap sized to its own op", col)
 	}
-	for _, col := range []string{"maxretries_credentialResidue", "maxretries_dedupResidue", "maxretries_erasureSeal"} {
+	for _, col := range []string{"inflight_credentialResidue", "inflight_dedupResidue", "inflight_erasureSeal"} {
 		_, ok := row[col]
-		require.False(t, ok, "%s must NOT be declared — a paged sweep needs uncapped re-dispatch", col)
+		require.Falsef(t, ok, "%s must NOT be declared — a synchronous commit has no in-flight window to suppress on, "+
+			"and the marker would decline the retry budget", col)
 	}
 }
 
@@ -575,16 +593,31 @@ func TestErasureResidueLens_IsShapedAsAConvergenceLens(t *testing.T) {
 			"an actorAggregate convergence lens must project %s", projected)
 	}
 
-	// Every gap §7.2's table names, plus violating, must survive into the row
-	// body — a gap column the descriptor drops is a gap the Weaver never sees.
+	// Every gap §7.2's table names, plus violating and each dispatched gap's
+	// retry cap, must survive into the row body — a gap column the descriptor
+	// drops is a gap the Weaver never sees, and a cap it drops is a cap that
+	// never bounds anything: the Weaver reads the BODY, so a maxretries_<g>
+	// projected by the cypher but absent from BodyColumns reads as uncapped.
 	for _, col := range []string{
 		"violating", "entityKey",
 		"missing_credentialResidue", "missing_dedupResidue",
 		"missing_vaultDestruction", "missing_projectionNullify", "missing_erasureSeal",
-		"inflight_credentialResidue", "inflight_dedupResidue", "inflight_erasureSeal",
+		"maxretries_credentialResidue", "maxretries_dedupResidue", "maxretries_erasureSeal",
 	} {
 		require.Containsf(t, spec.Output.BodyColumns, col,
 			"BodyColumns must carry %s — §7.2's gap table dispatches on it", col)
+	}
+
+	// And the suppression marker must be absent from the BODY, not merely from
+	// the cypher. Weaver's staleMark tests DECLAREDNESS, so a body column the
+	// cypher never aliases is not inert — it lands as a declared, nil-valued
+	// inflight_<g>, which is the uncapped-external shape the caps above exist
+	// to keep this target out of.
+	for _, col := range []string{
+		"inflight_credentialResidue", "inflight_dedupResidue", "inflight_erasureSeal",
+	} {
+		require.NotContainsf(t, spec.Output.BodyColumns, col,
+			"BodyColumns must NOT carry %s — declaring the marker declines the retry budget", col)
 	}
 }
 

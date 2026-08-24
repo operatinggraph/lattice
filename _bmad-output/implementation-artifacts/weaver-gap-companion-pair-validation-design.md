@@ -69,55 +69,112 @@ in doing so traded a budget that was merely **too small** for **no budget at all
 
 The three gaps **drop `inflight_<g>`** and **declare `maxretries_<g>`**.
 
-Dropping the marker is behaviour-identical on every path that reads it: `boolColumn` reads an absent
-column to the same `false` the constant projected, so `gapSuppressed`'s inflight term
-(`evaluator.go:1022`) and `staleMark`'s verdict (`evaluator.go:363-380`) are unchanged. What changes is
-only that the row stops *claiming* an in-flight window it never has — a synchronous commit has none —
-and stops using that claim to decline a budget.
+Dropping the marker is inert for these three gaps, but **not** for the reason a first reading suggests,
+and the difference is worth stating because it is where this could have gone wrong.
 
-**The cap is derived from the op's own reach, not invented.** Each sweep pass reads at most
-`MAX_LINK_PAGES × LINK_PAGE_LIMIT = 64 × 256 = 16 384` links and tombstones at most `SWEEP_LIMIT = 64`
-live ones, so draining the widest fan-out a single pass can even *reach* takes `16384 / 64 = 256`
-dispatches. **`maxretries_credentialResidue` and `maxretries_dedupResidue` are 256**: beyond that the op
-has itself run out of reach (its own documented stall, `purge_identity_dedup_footprint.go:253,274`), so
-256 is the point past which more dispatches cannot be progress. A real person's credential and dedup
-fan-out is single- or double-digit; the cap is ~3 orders of magnitude above any plausible subject and
-will only ever be reached by a sweep that is not draining.
+`gapSuppressed`'s inflight term (`evaluator.go:1022`) does read absent and `false` alike, via
+`boolColumn`. **`staleMark` does not** (`evaluator.go:366-368`): it tests *declaredness* first and
+returns `false` outright for an undeclared column, where a declared-`false` marker on an external gap
+returns `true`. So dropping the column flips `confirmedConcluded` from `true` to `false` for these gaps.
+Three terms consume it, and each is inert here:
 
-**`maxretries_erasureSeal` is 16.** The terminal gap does not page — it opens only once the other four
-close, and its op re-verifies five arms and writes one attestation inside a single commit
-(`targets.go:44-49`). It needs slack only for a concurrent write that legitimately re-opens residue
-after the seal opened, not for paging, so a cap three orders of magnitude smaller alerts far sooner on a
-seal that keeps failing. 16 is a judgement, stated as one: large enough that a racing writer cannot
-exhaust it, small enough that a genuinely stuck seal surfaces in the same operational session.
+- `collapseOnlyReclaim` (`reconciler.go:53-56`) excludes `actionDirectOp` outright, so `collapseOnly` is
+  `false` under either value — these gaps are never backed off on that term.
+- `uncappedExternal` (`reconciler.go:558`) needs `confirmedConcluded && !hasUsableRetryCap`. Both
+  conjuncts flip against each other here and the term settles `false` either way once the cap lands —
+  which also returns `markTTL` to its default backstop, correct now that no backoff window has to be
+  outlived.
+- The **`claimId` choice** (`reconciler.go:636-644`) is the one that would have mattered, and it does not
+  reach a `directOp`. A fresh-vs-preserved `claimId` is load-bearing only where it seeds a stable
+  artifact identity — `deriveStableInstanceID` for `triggerLoom`, `deriveStableTaskID` for `assignTask`
+  (`strategist.go:185,240`). `directOp`'s plan takes `payload: func(string) map[string]any { return
+  params }` (`strategist.go:307`) and leaves `plan.requestID` nil, so the Contract #4 idempotency key is
+  `deriveEpisodeRequestID(targetID, entityID, col, markRevision)` (`evaluator.go:715`) — **mark-revision
+  scoped, not `claimId` scoped**. The reclaim's in-place `replace` mints a new revision, so every reclaim
+  is a genuinely new op regardless. A paged sweep keeps re-dispatching real work, which is the whole
+  requirement.
+
+- **Lane-1's stale reclaim** (`evaluator.go:329`) is a **fourth** consumer, in the other dispatch leg,
+  and it is the one this design's first cut missed outright. `stale := found && !leaseLive(...) &&
+  e.staleMark(...)` gates `fireEpisode`'s `found && stale` branch (`evaluator.go:565-616`): with the
+  marker declared, a CDC delivery onto an expired mark reclaimed it in lane-1; without it, a first
+  delivery is the anti-storm drop and a redelivery re-fires on the unchanged `markRev`, which the
+  Contract #4 tracker collapses. **So lane-1 now contributes no re-dispatch for these gaps and recovery
+  rests entirely on the sweep.** Accepted, not overlooked: the sweep's 1-minute cadence
+  (`reconciler.go:21`) already drives every page, and losing lane-1's reclaim is offset by the
+  `uncappedExternal` backoff no longer pacing these gaps — the two removals roughly cancel at a
+  per-page cadence of about one mark lease.
+
+What changes, then, is only that the row stops *claiming* an in-flight window it never has — a
+synchronous commit has none — and stops using that claim to decline a budget.
+
+**The cap is derived from the sweeps' own reach, summed over the arms the gap covers.** Each op sweeps
+**one arm per commit**, in a fixed order, and each arm carries its own read window: a pass reads at most
+`MAX_PAGES × PAGE_LIMIT = 64 × 256 = 16 384` links and tombstones at most `SWEEP_LIMIT = 64` live ones.
+A drained arm does **not** fail — `collect_live_sweep` returns `[]` on cursor exhaustion and the op moves
+to the next arm — so dispatches past a single arm's ceiling are still progress, and the bound is
+`Σ_arms(MAX_PAGES × PAGE_LIMIT) / SWEEP_LIMIT`:
+
+- `missing_credentialResidue` — `UnbindIdentityCredentials`, **2 arms** (`boundTo` in, then out;
+  `packages/identity-domain/unbind_identity_credentials.go:399,404`) → **512**.
+- `missing_dedupResidue` — `PurgeIdentityDedupFootprint`, **3 arms** (`indexes` in, `duplicateOf` out,
+  `duplicateOf` in; `packages/privacy-base/purge_identity_dedup_footprint.go:403,408,410`) → **768**.
+
+A real person's credential and dedup fan-out is single- or double-digit; these caps stand orders of
+magnitude above any plausible subject and are reachable only by a sweep that is not draining.
+
+**`maxretries_erasureSeal` is 768, matching the widest sibling.** The terminal gap does not page — one
+verify plus one attestation per commit (`targets.go:44-49`) — so it has no reach of its own to derive
+from, and the sizing is a judgement stated as one. It is deliberately **not** small: because exhaustion
+is not self-clearing (§3.3), a short fuse would permanently park a live erasure over a merely transient
+cause. Sizing every gap in the target alike means none parks while another could still be converging.
 
 **What the caps restore.** `escalateExhaustedGap` becomes reachable, so the §10.8 promise holds: a stuck
 erasure now stops **loudly** — `GapBudgetExhausted` (warning, entity-scoped, `evaluator.go:1104`), or an
 Augur `exhausted` escalation where a target configures one — instead of grinding on unseen. The
-erasure's incompleteness stays independently visible in the residue lens's `violating` and in the two
-`surface` gaps regardless, so the loud stop adds an alert without removing a signal.
+erasure's incompleteness stays visible in the residue lens's `violating` column. It is **not** covered by
+the target's two `surface` gaps: `missing_vaultDestruction` and `missing_projectionNullify` are different
+conditions, both closed in every stranding scenario, so once a residue gap exhausts, `GapBudgetExhausted`
+is the only *active* signal — `violating` is a KV column with no alerting path.
 
 **A side effect, named:** with a usable cap declared, `hasUsableRetryCap` is true, so `uncappedExternal`
 (`reconciler.go:554`) is false for these gaps and the exponential reclaim backoff no longer paces them.
 That is the intended direction — the pacing was the stopgap that comment calls "until then" — and a
 paging sweep reclaiming at mark-lease expiry is the sweep doing its work, not churn.
 
-### 3.2 The validator refuses only what it can decide statically: `directOp` and `proposedOp`
+### 3.2 The validator refuses only `directOp` — the one action where the harm is real and static
 
 The gate: **for a gap whose action is statically external-class, a declared `inflight_<g>` requires a
-declared `maxretries_<g>`.** Declaration is read from the feeding lens's `Output.BodyColumns` — the row
-body is what the engine reads, so a column absent from `BodyColumns` is a column the Weaver never sees.
+declared `maxretries_<g>`.** Declaration is read from the **union of the feeding lens's
+`Output.BodyColumns` and `Output.StaticEmptyColumns`** — the projection driver writes body columns and
+then `envelope[col] = []any{}` for every static-empty one (`internal/refractor/projection/driver.go:70-73,
+127-130`), and Weaver unmarshals that envelope verbatim, so both lists reach the row. `BodyColumns` alone
+is *not* the authority: a marker declared only in `StaticEmptyColumns` still makes `gapSuppressed`'s
+`_, declaresInflight := row[...]` true. Reading the cypher instead would be unsound in the other
+direction — an alias no descriptor lists never reaches the row at all.
 
-**Why only two of the five actions.** The validator must agree with the engine's classifier
-(`externalDispatchGap`, `evaluator.go:406-429`) or it is worse than no gate:
+**Why one action of the five.** The validator must agree with the engine's classifier
+(`externalDispatchGap`, `evaluator.go:406-429`) or it is worse than no gate — but agreement is necessary,
+not sufficient:
 
-| action | classifier | statically decidable? |
-|---|---|---|
-| `directOp` | external outright (`:407`) | **yes** |
-| `proposedOp` | external outright (`:407`) | **yes** |
-| `triggerLoom` | external **iff** the pattern's every step is non-parking (`externalEligibleSteps`) | **no** |
-| `assignTask` | never external (`:426`) | n/a — nothing to check |
-| `surface` | never external (`:426`) | n/a — dispatches nothing |
+| action | classifier | statically decidable? | in the gate |
+|---|---|---|---|
+| `directOp` | external outright (`:407`) | **yes** | **yes** |
+| `proposedOp` | external outright (`:407`) | yes | **no — see below** |
+| `triggerLoom` | external **iff** the pattern's every step is non-parking (`externalEligibleSteps`) | **no** | no |
+| `assignTask` | never external (`:426`) | n/a — nothing to check | no |
+| `surface` | never external (`:426`) | n/a — dispatches nothing | no |
+
+**`proposedOp` is statically decidable and still excluded**, because refusing it would refuse the
+better-behaved of two identical outcomes. `gapSuppressed`'s default-budget fallback is `directOp`-only
+(`evaluator.go:1032-1041`), so a `proposedOp` gap is equally uncapped whether it declares the marker or
+neither companion — and the shipped `augur` target (`packages/augur/targets.go:21`) is the admitted half
+of that pair. The engine also contradicts itself here: `externalDispatchGap` calls `proposedOp` external
+while `collapseOnlyReclaim` (`reconciler.go:53-55`) puts it in the collapse-only set. A gate inheriting
+one of two disagreeing sites is inheriting the disagreement, so the gate stays where the harm is
+unambiguous. The pin test therefore asserts *containment* — `directOp` is in the engine's unconditional
+clause, the gate's set is a subset of it, and every excluded member carries a recorded reason — so a new
+external action added to the engine fails the pin until someone decides whether §10.3 bites for it.
 
 `triggerLoom` is out of scope deliberately, on two independent grounds: its pattern reference may be a
 `row.<col>` template that only a row resolves (`:410`), and even a literal reference needs the pattern's
@@ -143,10 +200,42 @@ batch (a NanoID pointing at an already-installed lens from another package) and 
 `Output` are both skipped — a gate cannot validate a declaration it cannot see, and refusing on absence
 would fail every cross-package target.
 
-### 3.3 Blast radius — verified, not estimated
+### 3.3 Exhaustion is a park — the cost, accepted rather than denied
+
+The `targets.go` text this fire rewrote argued *against* declaring a cap, and its mechanism claim was
+correct and remains correct: `escalateExhaustedGap` "never touches this gap's own mark"
+(`evaluator.go:1093-1095`), so after exhaustion the mark TTL-expires, the sweep — which enumerates
+**marks**, not rows (`reconciler.go:58-67`) — loses the entity, the lens projects no `freshUntil` so no
+timer re-delivers the row, and nothing writes the subject (that is what "stuck" means) so no CDC delivery
+arrives either. Meanwhile the `__count` key persists and clears only on gap-close, which the suppression
+itself prevents. The loop is self-sealing, and because the standing issue lives in the in-process
+`issueCache` (`health.go:82-95`), a Weaver restart after exhaustion leaves no alert, no dispatch, and a
+still-suppressed gap.
+
+**That argument is answered, not deleted.** It is a reason to size the caps so that reaching one means
+*definitively not draining* — which §3.1 does, at orders of magnitude above any plausible subject — not a
+reason to prefer the prior state, where a stuck erasure re-dispatched forever and §10.8's escalation was
+structurally **unreachable**. A bounded park that alerts once beats an unbounded grind that never alerts.
+The operator recovery is real and now documented rather than folklore: clear
+`<targetId>.<entityId>.<gapColumn>.__count` in `weaver-state` once the cause is fixed.
+
+**What is genuinely missing is engine-level and filed, not papered over:** a durable, re-armable
+representation of an exhausted gap, with a defined un-park path. That is a pre-existing property of
+`GapBudgetExhausted` for every capped gap in every package — this fire does not introduce it, it puts a
+compliance path behind it — and it has no ratified pattern to extend, so it is filed on `lattice.md` as
+the one designer-pass row this item produces. **Not** an Augur `exhausted` block, which was considered
+and rejected: escalation *clears* the standing issue before dispatching `CreateAugurReasoningClaim`, an op
+only the `augur` package's DDL admits, so in a deployment without that package it would trade a warning
+for a failed dispatch and couple a compliance package to another package's installation.
+
+### 3.4 Blast radius — verified, not estimated
 
 A census of every `inflight_`/`maxretries_` declaration in the repo (three scouts, re-verified against
-the files) puts exactly five shipped `inflight_<g>` declarations on the board:
+the files) puts **six** shipped `inflight_*` body columns on the board — but only five of them are
+companions. lease-signing also declares `inflight_docGen` (`lenses.go:51`), which pairs with no
+`missing_docGen` gap: the doc-generation gaps are `missing_leaseDoc` (`triggerLoom`) and
+`missing_leaseDocAttach` (`directOp`, no marker). A column with no gap of the same name is not a
+companion and the gate never reaches it. The five that are:
 
 | package · lens | gap | action | `inflight_` | `maxretries_` | gate verdict |
 |---|---|---|---|---|---|
@@ -240,3 +329,51 @@ boundary* of the new gate (§3.2), not a discovery: the engine already fails saf
 no row.
 
 **7. Non-goals.** §5 above.
+
+---
+
+## 7. Close — what the reviews found, classified
+
+Three cold reviewers (gate false-refusal · runtime behaviour · test integrity), none of them an
+implementer. **No blocking finding.** The gate survived 25 of 30 mutations on the first pass; both
+mandated test shapes — the `validateAll`-driving member test and the `go/ast` cross-package constant pin
+— were independently confirmed real and loud. What the reviews did break was **this design**, not the
+code built from it. Classified per component:
+
+**Design gaps (all mine, all fixed in the same fire):**
+
+- *A derived constant derived from one iteration of a loop.* The caps came from a single arm's read reach
+  and under-sized `credentialResidue` 2× and `dedupResidue` 3× (§3.1). The op yields to the next arm on a
+  drained cursor rather than failing, so the original "a 257th dispatch cannot be progress" was false.
+- *A consumer set asserted complete without grepping for it.* `staleMark`'s declaredness test has a fourth
+  consumer in lane-1 (§3.1), missed entirely; the first cut also cited `boolColumn` for an inertness that
+  `boolColumn` does not provide.
+- *A declaration surface named by the design rather than derived from the writer.* `Output.BodyColumns` is
+  not the row body — `StaticEmptyColumns` reaches it too, and a marker declared there slipped the gate
+  completely (§3.2).
+- *A gate inheriting one side of an engine disagreement.* `proposedOp` was included because
+  `externalDispatchGap` calls it external, while `collapseOnlyReclaim` classes it collapse-only and the
+  default-budget fallback never applies to it — so the refusal would have hit the better-behaved of two
+  identical shapes (§3.2).
+- *A cost deleted instead of answered.* The prior `targets.go` paragraph arguing against a cap was correct
+  about its mechanism; §3.3 now answers it and names the operator recovery.
+
+**Test-integrity gaps (fixed):** the cap values were asserted against themselves — a reviewer set the
+sweep cap to 7 and to 999 with the whole suite green — now pinned against the Starlark page constants they
+derive from, with the arm count counted from the source; four tests dereferenced a possibly-nil error, so
+any regression that disarmed the gate panicked and masked the rest of the binary; and the commonest
+*accept* case had no fixture, so inverting the gate into an install-blocking false refusal survived green.
+
+**Implementation bugs: none.** Both builders' code was sound; every MAJOR traced to a ratified claim here.
+
+**Discovery, fixed this run (§4's "what a fire discovers, this run fixes"):** `wellness-ledger` projected
+`maxretries_price` for gap `missing_price_charge` — the engine derives the name from the gap key, found
+nothing, and silently fell back to the default budget of 3, which happened to equal the intended cap. Dead
+since it shipped; corrected, with the class routed to the `_packages` dossier.
+
+**Filed:** one row, the §4 out-#2 designer pass named in §3.3. No residual rows, no deferral labels.
+
+**Lessons routed:** three entries to `docs/components/_packages.md` — the dead companion column, the
+per-arm cap derivation, and absence-vs-declared-false. `weaver.md` (12) and `pkgmgr.md` (13) are at and
+over the 12-entry cap, so their share of this fire's lessons lives in the gate's own comments and here
+rather than displacing an entry that still earns its slot.

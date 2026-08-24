@@ -13,7 +13,7 @@ const maxChargeRetries = 3
 // maxPriceChargeRetries caps how many times Weaver auto-dispatches
 // WellnessDebitAccount for one priced booking's class-price charge before it stops
 // and leaves the gap violating for operator attention (Contract #10 §10.3):
-// the lens projects it as the constant maxretries_price column on every
+// the lens projects it as the constant maxretries_price_charge column on every
 // wellnessClassPriceSettlement row, and Weaver bounds its per-(target,
 // entity, gap) dispatch-count in weaver-state against this cap (the same
 // budget-per-target idiom maxChargeRetries above establishes). The count is

@@ -1,6 +1,10 @@
 package privacybase
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // ShredStatusBucket is the package-owned NATS-KV read model the shredStatus
 // lens projects into — the P5 query surface for "which identities are
@@ -114,7 +118,7 @@ func Lenses() []pkgmgr.LensSpec {
 					"missing_credentialResidue", "missing_dedupResidue",
 					"missing_vaultDestruction", "missing_projectionNullify",
 					"missing_erasureSeal",
-					"inflight_credentialResidue", "inflight_dedupResidue", "inflight_erasureSeal",
+					"maxretries_credentialResidue", "maxretries_dedupResidue", "maxretries_erasureSeal",
 					"boundInResidue", "boundOutResidue",
 					"indexResidue", "duplicateOutResidue", "duplicateInResidue",
 					"requestedAt", "requestedForShreddedAt", "shreddedAt", "sealedAt", "sealedForShreddedAt",
@@ -318,7 +322,14 @@ RETURN
 // `.erasure` aspect does not exist until the seal op is built — it projects
 // null, so missing_erasureSeal reads true, which is correct: an erasure with no
 // attestation is not complete.
-const identityErasureResidueSpec = `MATCH (i:identity {key: $actorKey})
+//
+// EVERY DISPATCHED GAP CARRIES ITS RETRY CAP. The three directOp gaps are
+// external-class, so §10.3 makes the declared maxretries_<g> column their only
+// bound; each is a compile-time constant baked in at package init
+// (retry_budget.go derives the three values from the arms their ops sweep), the
+// §10.2 "the policy lives in the cypher" convention lease-signing's
+// leaseApplicationCompleteSpec established. The cypher carries no literal '%'.
+var identityErasureResidueSpec = fmt.Sprintf(`MATCH (i:identity {key: $actorKey})
 WHERE i.erasureRequested.data.requestedAt <> null
 OPTIONAL MATCH (i)<-[:boundTo]-(c)
 WITH i, count(DISTINCT c.key) AS boundInResidue
@@ -360,9 +371,9 @@ RETURN
     AND (i.piiKey.data.shreddedAt <> null)
     AND (i.erasure.data.sealedForShreddedAt <> i.piiKey.data.shreddedAt)
   ) AS missing_erasureSeal,
-  false AS inflight_credentialResidue,
-  false AS inflight_dedupResidue,
-  false AS inflight_erasureSeal,
+  %[1]d AS maxretries_credentialResidue,
+  %[2]d AS maxretries_dedupResidue,
+  %[3]d AS maxretries_erasureSeal,
   (
     (boundInResidue > 0) OR (boundOutResidue > 0)
     OR (indexResidue > 0) OR (duplicateOutResidue > 0) OR (duplicateInResidue > 0)
@@ -370,4 +381,4 @@ RETURN
     OR (i.piiKey.data.projectionsNullified <> true)
     OR ((i.piiKey.data.shreddedAt <> null)
         AND (i.erasure.data.sealedForShreddedAt <> i.piiKey.data.shreddedAt))
-  ) AS violating`
+  ) AS violating`, maxCredentialResidueRetries, maxDedupResidueRetries, maxErasureSealRetries)

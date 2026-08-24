@@ -521,6 +521,26 @@ mechanizes it (name the gate, strike the entry).
   fail closed and loudly. Minted: `TombstoneOrphanedCredentialIndex`'s owner-array rewrite (2026-08-23) —
   nine tests fell to the unconditional declaration. Check: for any `optionalReads` naming a `Sensitive:
   true` aspect, ask which arm reaches it with the holder's key already destroyed.
+- **An engine-recognized companion column whose name does not match its gap is silently dead** — the engine
+  derives the name from the gap key (`missing_<g>` → `maxretries_<g>`/`inflight_<g>`), finds nothing, and
+  falls back to its default; no gate, test or projection notices, and the package's own doc keeps claiming
+  the column works. Minted: `wellness-ledger` projected `maxretries_price` for gap `missing_price_charge`
+  (2026-08-24) — dead since it shipped, harmless only because the default budget happened to equal the
+  intended cap. Check: build the column name from the gap key in code, never spell it by hand; a column
+  with no gap of the same name is dead unless a named non-Weaver reader consumes it.
+- **A cap derived from a paged sweep must be summed over every ARM the gap covers, not one arm's reach** —
+  a sweep that drains one relation per commit, in fixed order, needs `Σ_arms(pages × pageLimit) / perCommit`
+  dispatches; a drained arm returns empty and yields to the next rather than failing, so dispatches past
+  one arm's ceiling are still progress. Minted: the erasure residue caps (2026-08-24) were derived from a
+  single arm and under-sized 2× and 3×. Check: count the sweep's `collect_*` call sites, and pin the
+  constant against the script's own page constants rather than asserting it equals itself.
+- **A column's ABSENCE and its declared FALSE value are different inputs wherever a reader tests
+  declaredness** — `boolColumn` reads both to `false`, but a reader doing `if _, declared := row[col]`
+  branches on the key's presence, so dropping a constant-`false` projection is a behaviour change, not a
+  cleanup. Minted: retiring the erasure lens's `inflight_<g>` markers (2026-08-24) flipped `staleMark` for
+  three gaps; the design cited `boolColumn` and missed two consumers, one of them in the other dispatch
+  leg. Check: before dropping a projected column, grep every reader for a presence test on that key, not
+  just a value read.
 
 ## Related contracts
 

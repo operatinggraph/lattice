@@ -18,7 +18,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     PurgeIdentityDedupFootprint (this package). Both sweep one bounded page
 //     of their respective residue per commit and re-open until the lens's
 //     boundIn/boundOut/index/duplicateOut/duplicateIn counts reach zero
-//     (lenses.go's identityErasureResidueSpec doc, "FIVE FAN-OUT ARMS").
+//     (lenses.go's identityErasureResidueSpec doc, "FIVE FAN-OUT ARMS"). Each
+//     drains one ARM per commit, which is what sizes their retry caps — see the
+//     cap block below.
 //   - missing_vaultDestruction, missing_projectionNullify → surface, IssueSeverity
 //     "warning". Both are the two ASYNC halves of ShredIdentityKey's
 //     crypto-shred: the privacy-worker's Vault.ShredKey destruction and the
@@ -45,7 +47,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     package), the terminal gap: it opens only once the other four are
 //     closed (the lens orders it last), re-verifies all five residue arms and
 //     both async halves inside its own commit, and writes the completion
-//     attestation only if every one is clear.
+//     attestation only if every one is clear. One commit, no paging — so its
+//     cap is a judgement rather than a derivation (the cap block below).
 //
 // No gap sets Class. Each of the three dispatched operationTypes is admitted
 // by exactly one installed vertexType DDL today (targets_test.go's
@@ -101,31 +104,60 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // envelope — sees which relations these ops traverse without reading the
 // Starlark.
 //
-// No gap declares a retry cap. A maxretries_<g> row column looked like the
-// mechanism for capping a stuck sweep's re-dispatch, but the realized
-// re-dispatch rate is roughly one attempt per 30-minute mark lease
-// (internal/weaver/reconciler.go, evaluator.go's fireEpisode anti-storm drop
-// on a live-leased mark) — at that pacing a cap sized to the sweep's own
-// reachable ceiling is reached only after weeks, making it inert for the two
-// sweep gaps, while a small cap sized to be reachable (the seal gap) turns a
-// stuck-but-recoverable episode into a permanently parked one:
-// escalateExhaustedGap alerts and returns without touching the mark
-// (evaluator.go), so the mark TTL-expires, the reconciler stops re-arming it,
-// and gapSuppressed keeps suppressing on the dispatch-count key forever. The
-// obligation increment 5's residual 1 named (a bound on stuck re-dispatch) is
-// real; maxretries_<g> is not a mechanism that discharges it at this
-// re-dispatch cadence, so this playbook does not declare one.
+// EACH OF THE THREE directOp GAPS IS RETRY-CAPPED, and the cap is what makes a
+// stuck erasure stop loudly. A directOp gap is external-class outright
+// (internal/weaver/evaluator.go's externalDispatchGap), so Contract #10 §10.3
+// leaves the declared maxretries_<g> column as its only bound: the lens
+// projects one per gap (lenses.go's identityErasureResidueSpec; the values and
+// their derivation live in retry_budget.go), the Weaver counts dispatches per
+// (target, entity, gap) in weaver-state, and reaching the cap raises the §10.8
+// GapBudgetExhausted standing issue instead of re-dispatching forever.
 //
-// That residual's other option — routing the loud stop to a surface gap — is
-// not available either, and for a reason that outlives the pacing: a surface
-// gap fires on a missing_<g> column, and no column the lens can compute is
-// true exactly when a sweep is stuck. A hard-failing sweep commits nothing, so
-// it leaves every residue count at the value it already had; "stuck" is
-// "this count stopped decreasing", which is a statement about history, and the
-// row carries none. Expressing it needs either a per-entity attempt record or
-// an elapsed-time predicate against the shred stamp, and neither exists on
-// this row today. Until one does, a stuck sweep is visible as a residue count
-// that stays put, not as a signal that announces itself.
+// The two sweep gaps are capped at the summed reach of every arm their op
+// sweeps (maxCredentialResidueRetries, maxDedupResidueRetries), so a cap binds
+// only once every arm has run out of reach; the terminal seal, which does not
+// page, matches the widest sibling (maxErasureSealRetries) so no gap on this
+// target parks while another could still legitimately be converging. Neither
+// gap needs a cap to TERMINATE — a draining sweep strictly decreases its count
+// and §6 keeps the set closed — so a cap is purely the bound on a sweep that
+// has stopped making progress.
+//
+// EXHAUSTION IS A PARK, AND THAT COST IS ACCEPTED HERE, NOT DENIED. It is
+// self-sealing: escalateExhaustedGap alerts and returns without touching the
+// mark, so the mark TTL-expires, the reconciler stops re-arming it, and because
+// nothing dispatches after that, the residue never shrinks, the gap never
+// closes, and the dispatch-count that would be deleted on close never is. The
+// budget is what the caps above buy that against: sized to the ops' own reach,
+// reaching one means the sweep is definitively not draining — the state in
+// which continuing to re-dispatch was never going to erase anyone, and the
+// alternative to a park is a stuck erasure grinding on forever with §10.8's
+// escalation structurally unreachable and no operator ever told. An operator
+// recovers a park by hand: clearing the weaver-state key
+// <targetId>.<entityId>.<gapColumn>.__count restarts the budget, and is the
+// right move once the cause (an unreachable-residue ceiling, a Vault or
+// projection lag, a failing seal) is actually fixed.
+//
+// A budget spans the gap's whole open episode, not one cycle. A re-shred that
+// lands while the seal gap is still open and unattested only changes the value
+// the seal diffs against, so the column stays true throughout and the second
+// cycle inherits the first's spent budget; a residue class that CLOSES and
+// later re-opens starts a fresh one, because closing is what deletes the count.
+//
+// The loud stop is an alert on top of a signal that is already there, never a
+// replacement for it: the erasure's incompleteness stays independently visible
+// in the lens's residue counts and `violating`, and in the two surface gaps,
+// whatever the budget does. That matters because no column the lens can compute
+// is true exactly when a sweep is STUCK — a hard-failing sweep commits nothing,
+// so it leaves every residue count at the value it already had, and "this count
+// stopped decreasing" is a statement about history the row carries none of. The
+// dispatch-count the budget bounds is the one place that history is kept, which
+// is why the cap, and not a sixth surface gap, is what announces a stall.
+//
+// No gap declares inflight_<g>. That column suppresses a dispatch while a
+// remediation is genuinely in flight, and each of these three ops is a single
+// synchronous commit with no such window — declaring it would suppress nothing
+// while opting the gap out of the budget above (evaluator.go's gapSuppressed
+// declines the engine default for any row that declares the marker).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{

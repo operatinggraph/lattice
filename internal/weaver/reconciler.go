@@ -543,14 +543,18 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// gapSuppressed explicitly declines to substitute the engine's default budget
 	// for a row that declares inflight_<g> (its own pacing is not this engine's
 	// to second-guess), so the gap would re-dispatch a fresh external call every
-	// mark-lease expiry, forever. privacy-base's three identityErasureComplete
-	// residue gaps do exactly this — directOp (external-classed) gaps declaring a
-	// constant-false inflight_<g> with no maxretries_<g> — so this pacing is
-	// load-bearing, not hypothetical. Install-time validation of the companion
-	// pair is the real fix (filed: lattice.md, the inflight_<g> companion-pair
-	// validator + the privacy-base declaration it reconciles against); until then,
-	// pace it. Still unbounded in count, but no longer unbounded AND unpaced, and
-	// the hold is visible on the sweepReclaimsSuppressed metric.
+	// mark-lease expiry, forever.
+	//
+	// pkgmgr's validateWeaverTargets refuses that pair at install, but only where
+	// the gap's class is decidable from the playbook alone (directOp/proposedOp),
+	// and only over DECLARATIONS. This runs over VALUES, on the three shapes the
+	// install gate structurally cannot reach: a lens that declares maxretries_<g>
+	// in its BodyColumns and projects null or a non-positive integer into the row;
+	// a triggerLoom gap whose external class only externalDispatchGap's pattern
+	// probe can decide, and only at dispatch time; and a target whose LensRef
+	// resolves outside the installing batch, whose columns the gate never saw.
+	// Unbounded in count, but never unbounded AND unpaced, and the hold is visible
+	// on the sweepReclaimsSuppressed metric.
 	uncappedExternal := confirmedConcluded && !e.hasUsableRetryCap(targetID, entityID, row, gapColumn)
 
 	if collapseOnly || uncappedExternal {

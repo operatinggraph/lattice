@@ -516,10 +516,18 @@ RETURN
   (vaultKeyDestroyed <> true)        AS missing_vaultDestruction,
   (projectionsNullified <> true)     AS missing_projectionNullify,
   (sealedForShreddedAt <> requestedForShreddedAt) AS missing_erasureSeal,
-  false AS inflight_credentialResidue,
-  false AS inflight_dedupResidue,
+  256 AS maxretries_credentialResidue,
+  256 AS maxretries_dedupResidue,
   ... AS violating
 ```
+
+> **AMENDED 2026-08-24 — the sketch above projected `false AS inflight_<g>` for the residue gaps.**
+> A constant-false marker suppresses nothing while making `gapSuppressed` decline the engine's default
+> `directOp` retry budget, so those gaps ended up with no cap at all and `GapBudgetExhausted` structurally
+> unreachable — Contract #10's "a loud stop, never a silent park" could not hold on this path. The shipped
+> lens declares `maxretries_<g>` sized to the sweep's own reach instead, and declares no marker; the
+> companion pair is now install-gated. See
+> [weaver-gap-companion-pair-validation-design.md](weaver-gap-companion-pair-validation-design.md) §3.1.
 
 Shape grounded in `packages/objects-base/lenses.go:99-113` (the shipped `OPTIONAL MATCH` +
 `count(x.key)` residue idiom, #37) and `packages/lease-signing/lenses.go:646-647` (multi-count

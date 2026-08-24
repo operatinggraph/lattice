@@ -3,6 +3,7 @@ package pkgmgr
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -19,6 +20,17 @@ var singleTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // each column is `missing_<gap>` (it becomes the third segment of the
 // <targetId>.<entityId>.<gapColumn> mark key the engine writes).
 const gapColumnPrefix = "missing_"
+
+// Gap-companion column prefixes (Contract #10 §10.3). For gap column
+// `missing_<g>` a lens may project `inflight_<g>` (a remediation is legitimately
+// in flight) and `maxretries_<g>` (the gap's retry cap). Re-stated here so the
+// installer enforces the §10.3 companion-pair rule without importing
+// internal/weaver (the installer must not depend on an engine); pinned against
+// the engine's own constants by TestGapCompanionPrefixes_MatchWeaverVocabulary.
+const (
+	inflightColumnPrefix   = "inflight_"
+	maxretriesColumnPrefix = "maxretries_"
+)
 
 // reservedGapParam is the engine-owned playbook param a package may not set:
 // the engine writes the OCC revision-condition under this key, so a package
@@ -62,6 +74,40 @@ const (
 	actionSurface = "surface"
 )
 
+// staticallyExternalGapActions holds the §10.8 actions for which Contract #10
+// §10.3's companion-pair rule is BOTH statically decidable and materially
+// different from declaring nothing at all. It is a strict subset of the actions
+// internal/weaver's externalDispatchGap classifies external-class outright, and
+// each exclusion is a distinct reason:
+//
+//   - `directOp` is in. The engine's own gapSuppressed falls back to
+//     defaultDirectOpRetryBudget for exactly one action — directOp — and only
+//     while the row declares no inflight_<g>. So on a directOp gap the marker is
+//     what DECLINES that default, and declaring it without a cap is strictly
+//     worse than declaring neither: it converts a bounded gap into an unbounded
+//     one. That is the harm §10.3 names, and it is decidable from the playbook.
+//   - `proposedOp` is out, though the classifier does decide it external
+//     outright. The default-budget fallback does not apply to it, so "neither
+//     companion" and "inflight_<g> only" leave a proposedOp gap in the SAME
+//     uncapped state — refusing the second while admitting the first would
+//     refuse the better-documented of two identical outcomes (packages/augur's
+//     shipped augurDispatch target occupies the admitted one). Its reclaim is
+//     also collapse-paced, not fresh-attempt (the engine's collapseOnlyReclaim
+//     lists it), so the §10.3 rationale does not reach it either.
+//   - `triggerLoom` is out because its class is read from the referenced
+//     pattern's own step kinds, and that reference may itself be a row.<column>
+//     template only a live row resolves. The engine classifies an unresolvable
+//     or unindexed pattern as NOT external (the fail-safe direction), so an
+//     installer guessing the other way would produce a false refusal.
+//   - `assignTask` and `surface` never make an external call at all.
+//
+// Re-stated rather than imported for the same reason as the action constants
+// above; the membership and the subset relation are pinned against the engine's
+// classifier by TestStaticallyExternalGapActions_MatchWeaverClassifier.
+var staticallyExternalGapActions = map[string]bool{
+	actionDirectOp: true,
+}
+
 // Augur escalation triggers (Contract #10 §10.8 "Augur escalation"). Re-stated
 // here so the installer validates a target's optional `augur.escalate` set
 // without importing internal/weaver, mirroring the engine's validateAugurPolicy.
@@ -96,7 +142,13 @@ func (def Definition) validateWeaverTargets() error {
 		if err := validateTargetMode(idx, t.TargetID, t.Mode); err != nil {
 			return err
 		}
-		for col, ga := range t.Gaps {
+		// Gaps is a Go map, whose range order is randomized per run. Two
+		// offending gaps on one target would otherwise surface a different
+		// refusal each time the author re-ran the install — the same authoring
+		// bug reported under two different names. Sorted iteration makes the
+		// gate's verdict reproducible.
+		for _, col := range sortedGapColumns(t.Gaps) {
+			ga := t.Gaps[col]
 			if !strings.HasPrefix(col, gapColumnPrefix) || col == gapColumnPrefix {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q does not match the missing_<gap> column convention",
 					idx, t.TargetID, col)
@@ -128,6 +180,9 @@ func (def Definition) validateWeaverTargets() error {
 			if err := validateGapPlannerFields(idx, t.TargetID, col, ga); err != nil {
 				return err
 			}
+			if err := def.validateGapCompanionPair(idx, t, col, ga); err != nil {
+				return err
+			}
 		}
 		if err := def.validateAugurSpec(idx, t.TargetID, t.Augur); err != nil {
 			return err
@@ -137,6 +192,117 @@ func (def Definition) validateWeaverTargets() error {
 		}
 	}
 	return nil
+}
+
+// sortedGapColumns returns a target's gaps keys in a stable order, so a
+// validation refusal over a multi-gap target names the same gap on every run.
+func sortedGapColumns(gaps map[string]GapActionSpec) []string {
+	cols := make([]string, 0, len(gaps))
+	for col := range gaps {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+	return cols
+}
+
+// validateGapCompanionPair enforces Contract #10 §10.3 — "a gap that declares
+// `inflight_<g>` MUST declare `maxretries_<g>`" — for the gaps whose class is
+// decidable from the playbook alone (staticallyExternalGapActions, today
+// directOp only).
+//
+// The harm it prevents is concrete. The engine's gapSuppressed falls back to its
+// default directOp retry budget only while the row declares NO inflight_<g>: a
+// lens that declares the marker has taken over pacing that gap, and the engine
+// stops second-guessing it. Declaring the marker without a cap therefore leaves
+// the gap with no bound of any kind — the dispatch-count can never reach a cap,
+// so §10.8's `GapBudgetExhausted` (the loud stop that tells an operator a
+// remediation is not converging) is structurally unreachable and the gap
+// re-dispatches indefinitely, paced only by backoff and visible only as a
+// counter. A gap that declares neither companion keeps the engine default and is
+// bounded; declaring only the marker is strictly worse than declaring nothing.
+//
+// Declaration is read from the union of the feeding lens's Output.BodyColumns
+// and Output.StaticEmptyColumns, because BOTH land in the row body the engine
+// reads: Refractor's projection driver writes every BodyColumn into the envelope
+// and then writes each StaticEmptyColumn as an empty array, and Weaver
+// deserializes that envelope verbatim. A marker in StaticEmptyColumns is
+// therefore a PRESENT inflight_<g> key at runtime, which is exactly what
+// declines the engine's default budget — reading BodyColumns alone would let
+// that shape through the gate untouched. The lens is resolved from the target's
+// LensRef by canonicalName, mirroring resolveLensRef (build.go).
+//
+// Two absences are skipped rather than refused, deliberately. A LensRef that
+// names no lens in this batch (an already-installed lens from another package,
+// referenced by NanoID) and a lens with no Output descriptor (not an
+// actor-aggregate) both leave the declaration outside what this installer can
+// see, and a gate cannot validate what it cannot read — refusing on absence
+// would fail every cross-package target. The runtime `uncappedExternal` backoff
+// remains the backstop for everything static validation cannot reach: this gate
+// reads DECLARATIONS, while the engine's gapSuppressed reads VALUES, and a lens
+// may declare `maxretries_<g>` and still project null or zero into the row.
+//
+// col has already been checked to carry the gapColumnPrefix by the caller's
+// loop, so the trimmed remainder is the gap name `<g>`.
+func (def Definition) validateGapCompanionPair(targetIdx int, t WeaverTargetSpec, col string, ga GapActionSpec) error {
+	if !staticallyExternalGapActions[ga.Action] {
+		return nil
+	}
+	lens := def.lensByCanonicalName(t.LensRef)
+	if lens == nil || lens.Output == nil {
+		return nil
+	}
+	gap := strings.TrimPrefix(col, gapColumnPrefix)
+	inflightCol, maxretriesCol := inflightColumnPrefix+gap, maxretriesColumnPrefix+gap
+	declared := declaredRowBodyColumns(lens.Output)
+	inflightIn, declaresInflight := declared[inflightCol]
+	if _, declaresCap := declared[maxretriesCol]; !declaresInflight || declaresCap {
+		return nil
+	}
+	return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: lens %q declares row-body column %q (in %s) but no %q — action %q is external-class, and Contract #10 §10.3 requires the companion pair there: the declared marker takes the gap off the engine's default retry budget, so without a cap the dispatch count can never reach one, §10.8's GapBudgetExhausted can never fire, and the gap re-dispatches indefinitely with nothing telling an operator it is not converging. Declare %q in the lens's Output.BodyColumns, sized to what draining this gap can legitimately take (a StaticEmptyColumns entry projects an empty array, which the engine reads as no usable cap at all). Dropping %q instead is also a legal fix, but only because that hands the gap back to the engine's default retry budget — a real bound, not a way past this check",
+		targetIdx, t.TargetID, col, lens.CanonicalName, inflightCol, inflightIn, maxretriesCol, ga.Action, maxretriesCol, inflightCol)
+}
+
+// declaredRowBodyColumns returns every column an actor-aggregate lens's Output
+// descriptor puts into the projected row body, mapped to the descriptor field
+// that declares it (so a refusal can point the author at the right list).
+// Refractor's projection driver materializes BodyColumns and StaticEmptyColumns
+// into the same envelope, so both are columns the Weaver sees; a name in both
+// lists is attributed to BodyColumns, which is the one carrying a real value.
+func declaredRowBodyColumns(out *OutputDescriptorSpec) map[string]string {
+	declared := make(map[string]string, len(out.BodyColumns)+len(out.StaticEmptyColumns))
+	for _, c := range out.StaticEmptyColumns {
+		declared[c] = "Output.StaticEmptyColumns"
+	}
+	for _, c := range out.BodyColumns {
+		declared[c] = "Output.BodyColumns"
+	}
+	return declared
+}
+
+// lensByCanonicalName resolves a WeaverTarget's LensRef to the lens this batch
+// declares under that canonicalName, mirroring resolveLensRef's (build.go)
+// canonicalName lookup — including its LAST-wins tie-break, since resolveLensRef
+// reads a canonicalName→id map the batch build overwrites per duplicate. A
+// Definition declaring one canonicalName twice is refused outright by
+// validateCanonicalNameUniqueness, but that check runs after this one, so
+// agreeing with the installer here keeps this gate from masking the real error
+// with a refusal about a lens the install would never have bound.
+//
+// It returns nil when the ref names no lens here — an empty ref, or a NanoID
+// naming a lens an already-installed package owns — which is the resolution this
+// installer genuinely cannot see through, not an error: resolveLensRef returns
+// early on an empty ref and passes a valid NanoID through verbatim.
+func (def Definition) lensByCanonicalName(lensRef string) *LensSpec {
+	if lensRef == "" {
+		return nil
+	}
+	var found *LensSpec
+	for i := range def.Lenses {
+		if def.Lenses[i].CanonicalName == lensRef {
+			found = &def.Lenses[i]
+		}
+	}
+	return found
 }
 
 // validateAugurSpec runs the §10.8 "Augur escalation" install-time validations
