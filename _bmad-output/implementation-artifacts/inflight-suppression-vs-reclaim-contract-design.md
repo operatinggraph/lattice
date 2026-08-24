@@ -1,6 +1,6 @@
 # `inflight_<g>` — one contract for suppression and for reclaim
 
-**Status:** ✅ Winston-ratified — build-ready (2026-08-24). Every open question here is
+**Status:** ✅ SHIPPED `3a35bde` (2026-08-24) — Winston-ratified, implementation-level throughout. Every open question here is
 implementation-level: the engine change makes the code's *diagnosis* match the frozen contract it
 already obeys. The one *textual* ambiguity in §10.3 is prepared separately as an L3 contract proposal
 (§6) that main does not depend on. No architectural fork.
@@ -235,3 +235,39 @@ itself (shipped, correct — only its *alert* is removed). Any package edit, `pr
 (filed). A new runtime enforcement of §10.3's MUST (filed — would fire on `privacy-base` today). The
 `LensEffectMismatch` row's live confirmation, which needs a running stack this container lacks.
 </content>
+
+---
+
+## 9. Shipped (build note, 2026-08-24, `3a35bde`)
+
+Built as designed, three increments, no deviations from §5. `staleMark`'s verdict and `gapSuppressed`'s
+two-leg suppression are byte-for-byte unchanged; only the raise, its key helper
+(`issueKeyInflightMismatch`), its prefix constant, and its `issueKeyTargetPrefixes` entry are gone. The
+removed `e.issues.clear` on the external arm was dead the moment the raise went — no writer remains for
+that family, and `issueCache` is process-local, so a pre-deploy entry vanishes on restart.
+
+**Proofs.** Each deletion revert-proven: re-adding a raise in the non-external branch reds five subtests
+of `TestStaleMark_ExternalDispatchClassifier` plus `TestStaleMark_ClassifierFollowsRegistryReplay`, so the
+new no-issue assertions pin the deletion rather than passing vacuously. `TestSweep_InflightMarkerPreservesClaimIdForUserTaskGap`
+holds the load-bearing guarantee (`claimId` verbatim) beside its mirror
+`TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId` (external path still mints fresh), so the
+claimId behavior is pinned on both sides, not just the absent alert. Gates: `go build ./...`, `make vet`,
+`golangci-lint`, `go test ./internal/weaver/...`, `make test-lease-convergence` (all three
+`TestAsyncConvergence_*`), `lint-conventions`, `lint-board`.
+
+**Cold adversarial review — clean.** Six attack lines, all SAFE: the verdict is unchanged for every input
+class on both legs; `gapSuppressed` is independent and class-agnostic (`evaluator.go:1022`, reached at
+`evaluator.go:142` / `reconciler.go:488` *before* `staleMark`); no dangling reference to the deleted
+symbols in non-test code; the shared-cache assertions are stricter, not weaker; the `privacy-base`
+trace confirmed (directOp ⇒ external, `hasUsableRetryCap` false ⇒ `uncappedExternal`, pacing path) with
+**no runtime change** — those gaps take the external arm, where only the dead clear was removed.
+
+**Review classification (the item's whole diff).** One class, design-gap: *a Health issue whose subject is
+a contract-legal declaration*. Routed to `docs/components/weaver.md`'s dossier (12th entry). Not yet a
+second sighting, so no lint gate is minted — the check named in the entry is the reviewer's question.
+
+**MERGED ≠ RUNNING.** This container has no live stack (`agents/steward/REMOTE.md` §3), so the standing
+`InflightActionMismatch` entries on Andrew's Weaver drain when that binary is rebuilt from `main` and
+cycled — `bin/weaver` and `bin/lattice` both link `internal/weaver`. Until then the fix is merged and
+CI-green but not observed live; the `verticals.md` `LensEffectMismatch` row's confirmation waits on the
+same cycle.
