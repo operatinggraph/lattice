@@ -665,22 +665,29 @@ verify-conformance:
 	go test ./internal/processor -run TestConformance -count=1
 
 ## build — Compile all binaries under cmd/.
+## The cmd/ binaries are built as ONE `go build` invocation naming all their
+## packages, with -o pointing at the bin/ directory: go names each resulting
+## executable after its package's own directory (identical output to the
+## previous per-binary `-o bin/<name>` calls), but lets go build's internal
+## worker pool compile+link them concurrently instead of paying 12 rounds of
+## serial process-startup + package-graph-load + link overhead.
 build:
 	@echo "==> Building all binaries..."
 	go build ./...
 	mkdir -p bin
-	go build -o bin/bootstrap ./cmd/bootstrap
-	go build -o bin/refractor ./cmd/refractor
-	go build -o bin/processor ./cmd/processor
-	go build -o bin/lattice ./cmd/lattice
-	go build -o bin/lattice-pkg ./cmd/lattice-pkg
-	go build -o bin/loom ./cmd/loom
-	go build -o bin/weaver ./cmd/weaver
-	go build -o bin/bridge ./cmd/bridge
-	go build -o bin/object-store-manager ./cmd/object-store-manager
-	go build -o bin/loupe ./cmd/loupe
-	go build -o bin/gateway ./cmd/gateway
-	go build -o bin/chronicler ./cmd/chronicler
+	go build -o bin/ \
+		./cmd/bootstrap \
+		./cmd/refractor \
+		./cmd/processor \
+		./cmd/lattice \
+		./cmd/lattice-pkg \
+		./cmd/loom \
+		./cmd/weaver \
+		./cmd/bridge \
+		./cmd/object-store-manager \
+		./cmd/loupe \
+		./cmd/gateway \
+		./cmd/chronicler
 
 ## test-cli — Run the lattice CLI unit + E2E tests.
 test-cli:
