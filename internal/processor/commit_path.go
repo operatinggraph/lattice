@@ -55,6 +55,16 @@ type Deps struct {
 	// MaxCommitAttempts bounds the Processor-internal retry on a retryable
 	// revision conflict (re-hydrate → re-execute → re-commit). 0 → default (3).
 	MaxCommitAttempts int
+	// ClaimRejectionFloor is the minimum interval between a ClaimIdentity
+	// operation's receipt in dispatch and the publication of its
+	// ClaimKeyInvalid rejection reply — the mechanism that equalizes the three
+	// rejection causes' otherwise measurably different service times (NFR-S6's
+	// timing half; see claim_reply_floor.go).
+	//
+	// 0 → DefaultClaimRejectionFloor. A NEGATIVE value disables the floor
+	// entirely, which is the posture a timing measurement needs in order to
+	// observe the raw per-cause gap; production leaves this zero.
+	ClaimRejectionFloor time.Duration
 	// CommitRetryBackoff returns the pause before retry attempt n (1-based: n=1 is
 	// the first retry). Capped well under the lane deadline. Nil → a small
 	// linear default; tests set it to a zero function for determinism.
@@ -73,6 +83,9 @@ type Deps struct {
 // CommitPath drives the full commit path (steps 1-9 + the 6.5 encryption pass) for a single envelope.
 type CommitPath struct {
 	deps Deps
+	// claimFloor releases ClaimIdentity ClaimKeyInvalid rejections at a fixed
+	// offset from message receipt, off the lane's pump worker.
+	claimFloor *claimReplyFloor
 }
 
 // NewCommitPath constructs the driver. Required fields must be non-nil;
@@ -111,7 +124,13 @@ func NewCommitPath(deps Deps) *CommitPath {
 	if deps.CommitRetryBackoff == nil {
 		deps.CommitRetryBackoff = defaultCommitRetryBackoff
 	}
-	return &CommitPath{deps: deps}
+	if deps.ClaimRejectionFloor == 0 {
+		deps.ClaimRejectionFloor = DefaultClaimRejectionFloor
+	}
+	return &CommitPath{
+		deps:       deps,
+		claimFloor: newClaimReplyFloor(deps.ClaimRejectionFloor, deps.Logger),
+	}
 }
 
 // defaultMaxCommitAttempts bounds the §3.2-OCC internal retry: the first attempt
@@ -184,6 +203,18 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 // disposition belongs to the caller (the supervisor, or HandleMessage's
 // jetstream adapter).
 func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (MessageOutcome, substrate.Decision) {
+	// The anchor for the ClaimIdentity rejection floor (claim_reply_floor.go),
+	// taken before any work at all — in particular before anything whose
+	// duration depends on the claimed target's state. A floor measured from
+	// anywhere later would be floor + variable-work and would preserve the very
+	// per-cause difference it exists to erase.
+	//
+	// A real clock, not deps.Clock: deps.Clock is the injectable wall clock for
+	// tracker timestamps and reply CommittedAt, and a fixture that freezes or
+	// offsets it must not silently disable a security mechanism. time.Now also
+	// carries a monotonic reading, so the elapsed computation cannot be moved
+	// by a wall-clock step.
+	receipt := time.Now()
 	cp.deps.Metrics.OpsConsumed.Add(1)
 
 	// --- Step 1: consume + parse envelope. ---
@@ -281,7 +312,7 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 
 	// --- Steps 4-8: hydrate → execute → validate → commit, with a bounded
 	// internal retry on a §3.2-OCC revision conflict. ---
-	return cp.commitPipeline(ctx, msg, env, resolvedPermission, dedup.TombstonedRevision)
+	return cp.commitPipeline(ctx, msg, env, resolvedPermission, dedup.TombstonedRevision, receipt)
 }
 
 // commitPipeline runs steps 4-8 for one authorized operation and publishes the
@@ -308,7 +339,11 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 // tracker still occupying this requestId's subject (nil in the normal
 // no-residue case); it conditions the step-8 tracker write in place of
 // create-only (Tracker.SupersedesRevision).
-func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission, trackerSupersedes *uint64) (MessageOutcome, substrate.Decision) {
+//
+// receipt is the dispatch-time arrival instant, threaded through so a floored
+// rejection reply is released relative to arrival rather than to the moment the
+// rejection was reached (claim_reply_floor.go).
+func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission, trackerSupersedes *uint64, receipt time.Time) (MessageOutcome, substrate.Decision) {
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			// A lane deadline already hit before we even re-enter — surface
@@ -337,7 +372,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Hydrator != nil {
 			state, err = cp.deps.Hydrator.Hydrate(ctx, env)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "hydrate", err)
+				return cp.handleStubFailure(ctx, msg, env, "hydrate", err, receipt)
 			}
 		}
 		// --- Step 5: execute. ---
@@ -345,7 +380,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Executor != nil {
 			result, err = cp.deps.Executor.Execute(ctx, env, state)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "execute", err)
+				return cp.handleStubFailure(ctx, msg, env, "execute", err, receipt)
 			}
 		}
 		// --- Step 6: validate. ---
@@ -367,7 +402,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 						}))
 					return OutcomeRejected, substrate.Term
 				}
-				return cp.handleStubFailure(ctx, msg, env, "validate", err)
+				return cp.handleStubFailure(ctx, msg, env, "validate", err, receipt)
 			}
 		}
 
@@ -380,7 +415,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Vault != nil && cp.deps.DDLs != nil {
 			encrypted, minted, err := cp.encryptSensitiveMutations(ctx, result.Mutations, state)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "encrypt", err)
+				return cp.handleStubFailure(ctx, msg, env, "encrypt", err, receipt)
 			}
 			result.Mutations = encrypted
 			mintedPiiKey = minted
@@ -963,7 +998,17 @@ func resolvedPermissionProjectedAt(rp *ResolvedPermission) string {
 	return rp.ProjectedAt
 }
 
-func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Message, env *OperationEnvelope, step string, err error) (MessageOutcome, substrate.Decision) {
+// handleStubFailure rejects an operation a step-4/5/6/6.5 stage failed.
+//
+// receipt is the dispatch-time arrival instant. A ClaimKeyInvalid rejection —
+// every ClaimIdentity rejection cause reaches this function under that one code
+// — is released relative to it rather than published inline, so the causes'
+// differing service times are not readable from the reply's timing
+// (claim_reply_floor.go). Every other rejection class here reflects properties
+// of the attacker's own request (a malformed payload, a script fault), not the
+// target's state, so it carries no identity information and stays on the fast
+// path.
+func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Message, env *OperationEnvelope, step string, err error, receipt time.Time) (MessageOutcome, substrate.Decision) {
 	cp.deps.Metrics.OpsRejected.Add(1)
 	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "error", err)
@@ -971,15 +1016,19 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Messa
 	// Emit specific ClaimKeyInvalid outcome to Health KV (NFR-S6 anti-enumeration:
 	// the reply carries only the generic code with no detail).
 	var sErr *ScriptError
-	if errors.As(err, &sErr) && sErr.Code == "ClaimKeyInvalid" {
-		if cp.deps.ClaimEmitter != nil {
-			cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, sErr.Detail)
-		}
+	claimKeyInvalid := errors.As(err, &sErr) && sErr.Code == "ClaimKeyInvalid"
+	if claimKeyInvalid && cp.deps.ClaimEmitter != nil {
+		cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, sErr.Detail)
 	}
 
 	code, details := classifyStepError(err)
-	cp.replyTo(msg, BuildRejectedReply(env.RequestID, code,
-		fmt.Sprintf("step %s failed: %s", step, err.Error()), details))
+	reply := BuildRejectedReply(env.RequestID, code,
+		fmt.Sprintf("step %s failed: %s", step, err.Error()), details)
+	if claimKeyInvalid {
+		cp.replyToNoEarlierThan(msg, reply, receipt)
+	} else {
+		cp.replyTo(msg, reply)
+	}
 	return OutcomeRejected, substrate.Term
 }
 
@@ -1048,6 +1097,24 @@ func (cp *CommitPath) replyTo(msg substrate.Message, reply OperationReply) {
 	if err := cp.deps.Conn.NATS().Publish(subject, b); err != nil {
 		cp.deps.Logger.Warn("reply publish failed", "subject", subject, "error", err)
 	}
+}
+
+// replyToNoEarlierThan marshals the reply on the caller's goroutine and hands it
+// to the ClaimIdentity rejection floor, which publishes it once
+// receipt + Deps.ClaimRejectionFloor has elapsed. Like replyTo, a reply that
+// never lands is observability-only — the commit path's durable work is already
+// finished by the time either is called.
+func (cp *CommitPath) replyToNoEarlierThan(msg substrate.Message, reply OperationReply, receipt time.Time) {
+	subject := replySubjectFromMessage(msg)
+	if subject == "" {
+		return
+	}
+	b, err := MarshalReply(reply)
+	if err != nil {
+		cp.deps.Logger.Warn("reply marshal failed", "error", err)
+		return
+	}
+	cp.claimFloor.publishNoEarlierThan(cp.deps.Conn.NATS(), subject, b, receipt)
 }
 
 func (cp *CommitPath) maybeReplyMalformed(msg substrate.Message, requestID, reason string) {

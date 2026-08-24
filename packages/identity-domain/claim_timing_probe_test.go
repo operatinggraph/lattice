@@ -65,6 +65,16 @@
 //	LATTICE_PROBE_SAMPLES     samples PER CAUSE, per emitter arm (default 900)
 //	LATTICE_PROBE_EMITTER     "on" | "off" | "both" (default "both") — which
 //	                          ClaimEmitter wiring(s) to measure
+//	LATTICE_PROBE_FLOOR       "off" (default) | "on" — whether the ClaimIdentity
+//	                          rejection reply floor
+//	                          (internal/processor/claim_reply_floor.go) is
+//	                          engaged. OFF is the default because this
+//	                          instrument's job is to expose the RAW per-cause
+//	                          service-time gap; with the floor on, the gap it
+//	                          would otherwise report is the very thing the floor
+//	                          erases. Run it "on" to confirm the erasure: the
+//	                          three causes' means collapse together and the
+//	                          pairwise CIs stop excluding zero.
 package identitydomain_test
 
 import (
@@ -110,6 +120,18 @@ const probeFetchWait = 500 * time.Millisecond
 // so at most SUBMITTERS requests are ever in flight) and backlog against a
 // small worker pool can add real queueing delay on top of service time.
 const probeReplyWait = 30 * time.Second
+
+// probeRunBudget bounds the whole instrument's own context.
+//
+// testutil.SetupPackageTestEnv hands back a 90-second context — a sane ceiling
+// for an ordinary package test, and far too short for this one: a run is
+// SAMPLES * 3 operations, and with the ClaimIdentity rejection floor engaged
+// each of those costs at least processor.DefaultClaimRejectionFloor, so even a
+// modest run outlives 90s and every subsequent JetStream publish fails with
+// "context deadline exceeded" rather than producing a sample. The probe
+// therefore runs on its own budget and leaves the real ceiling where the
+// operator sets it, on `go test -timeout`.
+const probeRunBudget = 2 * time.Hour
 
 // probeBootstrapIterations is the resample count for the mean-difference
 // confidence intervals in Phase C.
@@ -157,14 +179,20 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	submitters := probeIntEnv(t, "LATTICE_PROBE_SUBMITTERS", 8)
 	samplesPerCause := probeIntEnv(t, "LATTICE_PROBE_SAMPLES", 900)
 	arms := probeEmitterArms(t, "LATTICE_PROBE_EMITTER")
+	floor := probeFloorSetting(t, "LATTICE_PROBE_FLOOR")
 
-	ctx, conn := setupTestEnv(t)
+	// The harness seeds under its own bounded context and is done with it by the
+	// time it returns; everything this instrument drives runs on probeRunBudget
+	// instead (see the constant).
+	_, conn := setupTestEnv(t)
+	ctx, cancelRun := context.WithTimeout(context.Background(), probeRunBudget)
+	t.Cleanup(cancelRun)
 
 	// The emitter-ON pipeline is built first: Phase A's branch proof reads
 	// Health KV counters that only exist when a ClaimEmitter is wired, and the
 	// wrong-key fixture's own setup (a real CreateUnclaimedIdentity op) needs
 	// some working pipeline to drive it through, so this one does double duty.
-	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true, probeSubjectOn)
+	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true, probeSubjectOn, floor)
 
 	// ---- fixtures — the deployed shapes, not a synthetic shortcut ----
 
@@ -235,17 +263,21 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	var consOff jetstream.Consumer
 	for _, withEmitter := range arms {
 		if !withEmitter {
-			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false, probeSubjectOff)
+			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false, probeSubjectOff, floor)
 			break
 		}
 	}
 
+	floorLabel := "floor=off"
+	if floor == 0 {
+		floorLabel = fmt.Sprintf("floor=on(%s)", processor.DefaultClaimRejectionFloor)
+	}
 	for _, withEmitter := range arms {
-		label := "emitter=on"
+		label := "emitter=on " + floorLabel
 		cp, cons := cpOn, consOn
 		subject := probeSubjectOn
 		if !withEmitter {
-			label = "emitter=off"
+			label = "emitter=off " + floorLabel
 			cp, cons = cpOff, consOff
 			subject = probeSubjectOff
 		}
@@ -298,6 +330,28 @@ func probeEmitterArms(t *testing.T, name string) []bool {
 	}
 }
 
+// probeFloorSetting resolves LATTICE_PROBE_FLOOR to the
+// processor.Deps.ClaimRejectionFloor value the probe's pipelines are built
+// with: "off" (the default) yields the negative disable sentinel, "on" yields
+// zero, which NewCommitPath resolves to processor.DefaultClaimRejectionFloor.
+//
+// Defaulting to OFF is what makes the instrument measure what it claims to:
+// the floor's whole purpose is to make the three causes' completion times
+// indistinguishable, so a probe run with it engaged reports the floor's
+// effectiveness, not the underlying service-time gap.
+func probeFloorSetting(t *testing.T, name string) time.Duration {
+	t.Helper()
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
+	case "", "off":
+		return -1
+	case "on":
+		return 0
+	default:
+		t.Fatalf("%s=%q: want one of on|off", name, v)
+		return 0
+	}
+}
+
 // probeNanoID generates a fresh 20-char NanoID on the main test goroutine,
 // failing the test on entropy-source error.
 func probeNanoID(t *testing.T) string {
@@ -315,10 +369,18 @@ func probeNanoID(t *testing.T) string {
 // commit_path.go's handleStubFailure only calls it when non-nil, so leaving
 // cfg.ClaimEmitter unset is a genuine emitter-off path — no separate
 // CommitPath wiring is needed to isolate the two arms.
-func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool, filterSubject string) (*processor.CommitPath, jetstream.Consumer, string) {
+//
+// floor is threaded straight to processor.Deps.ClaimRejectionFloor: negative
+// disables the rejection reply floor, zero takes its production default.
+func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool, filterSubject string, floor time.Duration) (*processor.CommitPath, jetstream.Consumer, string) {
 	t.Helper()
 	instance := claimInstance + "-" + durable
-	cfg := testutil.PipelineConfig{Durable: durable, Instance: instance, FilterSubjects: []string{filterSubject}}
+	cfg := testutil.PipelineConfig{
+		Durable:             durable,
+		Instance:            instance,
+		FilterSubjects:      []string{filterSubject},
+		ClaimRejectionFloor: floor,
+	}
 	if withEmitter {
 		cfg.ClaimEmitter = processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, testutil.TestLogger())
 	}
