@@ -72,7 +72,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-23 · `aa04a7a5` · `CreateLocation` gets a full descriptor via a new `Dispatch.ClassChoices` vocabulary field — location-domain's first op-meta, threaded through the op-catalog lens, all four apps' catalog proxies, and descriptorform's renderer (new class-choice select). `AttachObject`/`DetachObject` stay open debt (design's own "build one" framing). location-domain 0.4.0, edge-manifest 0.17.0.
+- 2026-08-23 · `aa04a7a5` · [location-domain] `CreateLocation` gets a full descriptor via a new `Dispatch.ClassChoices` field — location-domain 0.4.0, edge-manifest 0.17.0; `AttachObject`/`DetachObject` stay open debt
 - 2026-08-23 · `fee0621b` · Clinic /api/sites + roster stop advertising verify artifacts — reapNonCanonicalSites/Patients allowlist by pinned id (name-marker missed some); reaped 10 patients + 5 buildings live.
 - 2026-08-23 · `533f639e` · The wellness class schedule stops advertising agent-verify litter — reapVerifyLitter reaps "Verify"/"Discovery"-named studios/sessions (5 sessions + 3 studios reaped live).
 - 2026-08-23 · `d46dd59f` · The applicant storefront stops going permanently empty — seed-classic-demo's backfillBareListings gives every live listing-less unit an available listing (0→5 live), mirroring the file's own reap helpers.

@@ -531,7 +531,10 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   so converting an op's dispatchers to `optionalReads` stops OUR callers tripping a `HydrationMiss` existence
   oracle without closing it for anyone else. Minted: auth-plane 4d (three dispatchers converted, oracle then
   reproduced on the wire as an ordinary consumer). Check: any claim that an op's rejections are
-  indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped one; the
+  indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped builder — and the
+  probe must reach the SCRIPT-side surface, not just the declared one, since the miss faults only when the
+  script touches the key. Gated for the two NFR-S6 ops in `packages/identity-domain/{claim,credential_link}_test.go`
+  (probe derived from the descriptor + the declared set pinned independently). The
   enforcement point is a descriptor-pinned disposition (Contract #2 §2.5), which the Processor applies as a
   floor over every envelope for the operationType.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
