@@ -603,17 +603,16 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 (`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
-- **A read disposition the CLIENT declares is not a server policy** — the Gateway copies `contextHint.reads`
-  from the request body verbatim, step 3 never inspects it, and a key in both lists keeps fail-closed `reads`,
-  so converting an op's dispatchers to `optionalReads` stops OUR callers tripping a `HydrationMiss` existence
-  oracle without closing it for anyone else. Minted: auth-plane 4d (three dispatchers converted, oracle then
-  reproduced on the wire as an ordinary consumer). Check: any claim that an op's rejections are
-  indistinguishable must be tested by submitting a HAND-ROLLED `contextHint`, not the shipped builder — and the
-  probe must reach the SCRIPT-side surface, not just the declared one, since the miss faults only when the
-  script touches the key. Gated for the two NFR-S6 ops in `packages/identity-domain/{claim,credential_link}_test.go`
-  (probe derived from the descriptor + the declared set pinned independently). The
-  enforcement point is a descriptor-pinned disposition (Contract #2 §2.5), which the Processor applies as a
-  floor over every envelope for the operationType.
+- **A mechanism whose margin the SUBMITTER prices is not a margin** — the retired entry above closed the
+  *disposition* a client may declare; nothing closes the *volume*. `opwire.MaxDeclaredReads` is 1000, the
+  Gateway copies `contextHint` verbatim (`gateway.go:823-830`) and step 3 never inspects it, so every declared
+  read resolves inside step-4 hydration — i.e. inside whatever window a timing defence has drawn around it.
+  The first ClaimIdentity reply floor was sized against a measured loaded p99 and was defeatable in ONE request
+  by padding reads until the work outran it and the already-late branch published raw service time. Minted:
+  claim-rejection timing oracle (`624d445`), cold review. Check: for any defence expressed as a duration —
+  floor, budget, deadline, timeout — name who controls the work inside it. If a submitter does, the constant
+  cannot hold and the shape must be one that has no escape branch (quantize to a lattice rather than floor),
+  plus a counter that fires when the window is exceeded (`claim_floor_late_total`).
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.
@@ -632,6 +631,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   not sufficient — mutate every OTHER surface of the mechanism the fix introduces (each interface method,
   each regex boundary, each guard) and treat a surviving mutant as an unpinned behaviour, not a
   cosmetic gap.
+  **FIFTH sighting** (claim-rejection timing floor, `624d445`): the mechanism was gated inside
+  `handleStubFailure`, and every one of its 459 test lines drove that function through a stub `Hydrator` —
+  the step-4 call site. Every real `ClaimKeyInvalid` is minted by the script at step 5, so the one call site
+  carrying all production traffic could be re-anchored (destroying the property) with the whole file green.
+  Not lint-mechanizable; the mandated TEST SHAPE is: when a mechanism is gated at a function with several
+  call sites, enumerate them and assert the one production actually reaches, not the one a stub makes easy.
+  Corollary the same fire paid for: a LOWER-BOUND assertion cannot detect a mechanism anchored too late,
+  because anchoring late makes a reply later, not earlier — the discriminator must be alignment or a
+  two-case comparison.
 - **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
   declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
   `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it
