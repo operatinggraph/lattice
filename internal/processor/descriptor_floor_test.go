@@ -3,6 +3,7 @@ package processor
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -726,4 +727,342 @@ func TestDescriptorFloorResolver_ResolvesOnceAndOnlyWhenAsked(t *testing.T) {
 			t.Fatalf("the template was warned about %d times, want exactly 1: %q", n, log.String())
 		}
 	})
+}
+
+// ---- the closed declared-read set (NFR-S6) ----
+
+// The two NFR-S6 descriptors, as packages/identity-domain ships them. They are
+// literals here because that package imports this one; the correspondence
+// between these templates, the package's own descriptor and the four shipped
+// dispatchers is pinned where it can be read from both sides —
+// identity-domain's package_test and internal/identityceremony's builder test.
+var (
+	claimDescriptor = DispatchTemplates{OptionalReads: []string{
+		"{payload.targetIdentityKey}",
+		"{payload.targetIdentityKey}.state",
+		"{payload.targetIdentityKey}.claimKey",
+	}}
+	linkDescriptor = DispatchTemplates{OptionalReads: []string{
+		"{payload.targetIdentityKey}",
+		"{payload.targetIdentityKey}.state",
+		"{payload.targetIdentityKey}.linkKey",
+		"{payload.targetIdentityKey}.credentialBinding",
+	}}
+)
+
+// shippedClaimHint / shippedLinkHint mirror identityceremony's builders — the
+// declaration every live dispatcher sends. Written out rather than derived from
+// the templates above, so an envelope and a descriptor cannot drift together.
+func shippedClaimHint(target string) *ContextHint {
+	return &ContextHint{OptionalReads: []string{target, target + ".state", target + ".claimKey"}}
+}
+
+func shippedLinkHint(target string) *ContextHint {
+	return &ContextHint{OptionalReads: []string{
+		target, target + ".state", target + ".linkKey", target + ".credentialBinding",
+	}}
+}
+
+func nfrS6Env(operationType, target string) *OperationEnvelope {
+	env := floorEnv(`{"targetIdentityKey":"` + target + `"}`)
+	env.OperationType = operationType
+	return env
+}
+
+// TestRefuseUndeclaredContextHint walks the closed set one declaration at a
+// time. The admitted rows come FIRST and are the ones that matter: this gate's
+// negatives are worthless unless the envelope every shipped dispatcher actually
+// sends passes through it untouched.
+func TestRefuseUndeclaredContextHint(t *testing.T) {
+	// A key no descriptor names: a well-formed identity key the submitter
+	// chose, which is exactly what a probe looks like.
+	probe := "vtx.identity." + floorLeaseVictim
+
+	withOptional := func(h *ContextHint, extra ...string) *ContextHint {
+		out := *h
+		out.OptionalReads = append(append([]string{}, h.OptionalReads...), extra...)
+		return &out
+	}
+
+	cases := []struct {
+		name         string
+		op           string
+		templates    DispatchTemplates
+		noDescriptor bool
+		hint         *ContextHint
+		wantRefused  bool
+	}{
+		{
+			name: "the shipped claim envelope is admitted",
+			op:   "ClaimIdentity", templates: claimDescriptor, hint: shippedClaimHint(floorTarget),
+		},
+		{
+			name: "the shipped credential-link envelope is admitted",
+			op:   "CompleteCredentialLink", templates: linkDescriptor, hint: shippedLinkHint(floorTarget),
+		},
+		{
+			name: "a descriptor `reads` template admits its key too",
+			op:   "ClaimIdentity",
+			templates: DispatchTemplates{
+				Reads:         []string{"{payload.targetIdentityKey}.claimKey"},
+				OptionalReads: []string{"{payload.targetIdentityKey}"},
+			},
+			hint: &ContextHint{
+				Reads:         []string{floorTarget + ".claimKey"},
+				OptionalReads: []string{floorTarget},
+			},
+		},
+		{
+			name: "repetition of an admitted key is not the property this closes",
+			op:   "ClaimIdentity", templates: claimDescriptor,
+			hint: withOptional(shippedClaimHint(floorTarget), floorTarget, floorTarget),
+		},
+		{
+			name: "an envelope declaring nothing at all",
+			op:   "ClaimIdentity", templates: claimDescriptor, hint: nil,
+		},
+		{
+			name: "one extra optionalReads key",
+			op:   "ClaimIdentity", templates: claimDescriptor,
+			hint:        withOptional(shippedClaimHint(floorTarget), probe),
+			wantRefused: true,
+		},
+		{
+			name: "one extra reads key",
+			op:   "CompleteCredentialLink", templates: linkDescriptor,
+			hint: &ContextHint{
+				Reads:         []string{probe},
+				OptionalReads: shippedLinkHint(floorTarget).OptionalReads,
+			},
+			wantRefused: true,
+		},
+		{
+			name: "an egressReads key, which no descriptor can name",
+			op:   "ClaimIdentity", templates: claimDescriptor,
+			hint: &ContextHint{
+				OptionalReads: shippedClaimHint(floorTarget).OptionalReads,
+				EgressReads:   []string{floorTarget + ".ssn"},
+			},
+			wantRefused: true,
+		},
+		{
+			name: "an enumeration, which no descriptor can name either",
+			op:   "ClaimIdentity", templates: claimDescriptor,
+			hint: &ContextHint{
+				OptionalReads: shippedClaimHint(floorTarget).OptionalReads,
+				Enumerations:  []EnumerationHint{{Hub: floorTarget, Relation: "holdsRole", Direction: "out"}},
+			},
+			wantRefused: true,
+		},
+		{
+			name: "a template compiling to a key SHAPE admits nothing",
+			op:   "ClaimIdentity", templates: DispatchTemplates{OptionalReads: []string{"{me.identity}"}},
+			hint:        &ContextHint{OptionalReads: []string{floorTarget}},
+			wantRefused: true,
+		},
+		{
+			name: "a template that does not compile admits nothing",
+			op:   "ClaimIdentity", templates: DispatchTemplates{OptionalReads: []string{"{payload.absentField}"}},
+			hint:        shippedClaimHint(floorTarget),
+			wantRefused: true,
+		},
+		{
+			name: "no descriptor at all admits nothing",
+			op:   "ClaimIdentity", noDescriptor: true, hint: shippedClaimHint(floorTarget),
+			wantRefused: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := nfrS6Env(tc.op, floorTarget)
+			env.ContextHint = tc.hint
+			var resolver *descriptorFloorResolver
+			if !tc.noDescriptor {
+				resolver = newDescriptorFloorResolver(tc.templates, env, testLogger())
+			}
+			err := refuseUndeclaredContextHint(env, resolver, testLogger())
+			if !tc.wantRefused {
+				if err != nil {
+					t.Fatalf("refused %+v: %v — the declaration is the descriptor's own set, so this operation is now unsubmittable", tc.hint, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("admitted %+v; the declared set for an NFR-S6 operation is closed", tc.hint)
+			}
+			var hErr *HydrationError
+			if !errors.As(err, &hErr) {
+				t.Fatalf("err = %T (%v), want a *HydrationError — anything else classifies as InternalError and answers with a different wire code", err, err)
+			}
+			if hErr.Code != "UndeclaredContextHintKey" {
+				t.Fatalf("code = %q, want UndeclaredContextHintKey", hErr.Code)
+			}
+			// The refused key is the submitter's own probe. details.missingKey
+			// is what the reply carries, so a key here IS the oracle.
+			if hErr.MissingKey != "" {
+				t.Fatalf("MissingKey = %q, want empty — the reply carries it straight back to the prober", hErr.MissingKey)
+			}
+			if strings.Contains(err.Error(), probe) || strings.Contains(err.Error(), floorTarget) {
+				t.Fatalf("the fault text quotes a declared key: %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestRefuseUndeclaredContextHint_RefusalNamesTheKeyInTheLogOnly: the operator
+// gets exactly one copy of what was refused, and it is the log's. Same posture
+// as warnContradiction — the fault the caller sees is deliberately mute, so a
+// silent refusal would leave nothing to diagnose an over-deny with.
+func TestRefuseUndeclaredContextHint_RefusalNamesTheKeyInTheLogOnly(t *testing.T) {
+	probe := "vtx.identity." + floorLeaseVictim
+	env := nfrS6Env("ClaimIdentity", floorTarget)
+	env.ContextHint = &ContextHint{OptionalReads: []string{probe}}
+
+	logger, log := capturingLogger()
+	err := refuseUndeclaredContextHint(env, newDescriptorFloorResolver(claimDescriptor, env, logger), logger)
+	if err == nil {
+		t.Fatal("admitted a key the descriptor does not name")
+	}
+	if !strings.Contains(log.String(), probe) {
+		t.Fatalf("log = %q, want the refused key — the fault carries none, so an over-deny is otherwise undiagnosable", log.String())
+	}
+	if !strings.Contains(log.String(), env.RequestID) {
+		t.Fatalf("log = %q, want the requestId that ties the refusal to a submission", log.String())
+	}
+}
+
+// TestHydrate_NFRS6ClosedDeclaredSet is the same rule at the seam that applies
+// it, with the real descriptors read out of the real DDL cache.
+//
+// The two properties the unit table cannot reach are here: the check runs
+// against the SUBMITTER's declaration at the head of step 4 (an admitted
+// envelope still hydrates, absence-tolerantly), and it is scoped to the NFR-S6
+// operations alone — an operation outside the set carrying the very same
+// descriptor keeps today's demote-and-hydrate behaviour.
+func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+
+	claimRoot := "vtx.meta." + tplID
+	seedOpMeta(t, ctx, conn, tplID, "ClaimIdentity",
+		dispatchAspect(claimRoot, templatesJSON(claimDescriptor.OptionalReads), false), false)
+	linkRoot := "vtx.meta." + instID
+	seedOpMeta(t, ctx, conn, instID, "CompleteCredentialLink",
+		dispatchAspect(linkRoot, templatesJSON(linkDescriptor.OptionalReads), false), false)
+	// The control: the SAME descriptor on an operation outside the set.
+	otherRoot := "vtx.meta." + svcTypeID
+	seedOpMeta(t, ctx, conn, svcTypeID, "CreateIdentity",
+		dispatchAspect(otherRoot, templatesJSON(claimDescriptor.OptionalReads), false), false)
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+
+	target := "vtx.identity." + testNanoIDAbsent
+	probe := "vtx.identity." + testNanoIDAbsent2
+	envFor := func(op string, hint *ContextHint) *OperationEnvelope {
+		env := newTestEnvelope(testNanoID1)
+		env.OperationType = op
+		env.Payload = []byte(`{"targetIdentityKey":"` + target + `"}`)
+		env.ContextHint = hint
+		return env
+	}
+
+	admitted := map[string]*ContextHint{
+		"ClaimIdentity":          shippedClaimHint(target),
+		"CompleteCredentialLink": shippedLinkHint(target),
+	}
+	for op, hint := range admitted {
+		t.Run("the shipped "+op+" envelope hydrates", func(t *testing.T) {
+			state, err := h.Hydrate(ctx, envFor(op, hint))
+			if err != nil {
+				t.Fatalf("Hydrate: %v — the shipped dispatcher's own declaration must reach hydration", err)
+			}
+			for _, key := range hint.OptionalReads {
+				if _, ok := state.Context.KnownAbsent[key]; !ok {
+					t.Fatalf("KnownAbsent = %v, want %q — the declared key never reached the snapshot",
+						state.Context.KnownAbsent, key)
+				}
+			}
+			if len(state.Context.RequiredAbsent) != 0 {
+				t.Fatalf("RequiredAbsent = %v, want none — every key the ceremony declares is absence-tolerant",
+					state.Context.RequiredAbsent)
+			}
+		})
+	}
+
+	refused := []struct {
+		name string
+		op   string
+		hint *ContextHint
+	}{
+		{"an extra optionalReads key on the claim", "ClaimIdentity",
+			&ContextHint{OptionalReads: append(append([]string{}, admitted["ClaimIdentity"].OptionalReads...), probe)}},
+		{"an extra reads key on the claim", "ClaimIdentity",
+			&ContextHint{Reads: []string{probe}, OptionalReads: admitted["ClaimIdentity"].OptionalReads}},
+		{"an extra optionalReads key on the credential link", "CompleteCredentialLink",
+			&ContextHint{OptionalReads: append(append([]string{}, admitted["CompleteCredentialLink"].OptionalReads...), probe)}},
+		{"an egressReads key", "ClaimIdentity",
+			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads, EgressReads: []string{target + ".ssn"}}},
+		{"an enumeration", "ClaimIdentity",
+			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads,
+				Enumerations: []EnumerationHint{{Hub: target, Relation: "holdsRole", Direction: "out"}}}},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			_, err := h.Hydrate(ctx, envFor(tc.op, tc.hint))
+			var hErr *HydrationError
+			if !errors.As(err, &hErr) || hErr.Code != "UndeclaredContextHintKey" {
+				t.Fatalf("Hydrate = %v, want the closed-set refusal — an admitted extra key is hydrated INSIDE the rejection quantum", err)
+			}
+			if hErr.MissingKey != "" {
+				t.Fatalf("MissingKey = %q, want empty", hErr.MissingKey)
+			}
+		})
+	}
+
+	t.Run("an operation outside the NFR-S6 set is unaffected", func(t *testing.T) {
+		// The same out-of-set key, the same descriptor, the fail-closed
+		// disposition: demoted where the descriptor covers it and hydrated
+		// either way, exactly as before. Closing every operation's declared set
+		// would break every submitter that declares a key its descriptor does
+		// not name, which is most of the corpus.
+		hint := &ContextHint{Reads: []string{target, probe}}
+		state, err := h.Hydrate(ctx, envFor("CreateIdentity", hint))
+		if err != nil {
+			t.Fatalf("Hydrate: %v", err)
+		}
+		if _, ok := state.Context.KnownAbsent[target]; !ok {
+			t.Fatalf("KnownAbsent = %v, want the floored key %q", state.Context.KnownAbsent, target)
+		}
+		if _, ok := state.Context.RequiredAbsent[probe]; !ok {
+			t.Fatalf("RequiredAbsent = %v, want the undescribed key %q still fail-closed", state.Context.RequiredAbsent, probe)
+		}
+	})
+
+	t.Run("an NFR-S6 operation with no descriptor refuses every declared key", func(t *testing.T) {
+		// A cache that never saw an op-meta is the same condition as a
+		// descriptor withdrawn by an upgrade: nothing is admitted, so the
+		// operation over-denies where it is visible instead of quietly
+		// reverting to the open envelope surface.
+		bare := NewHydratorWithCache(conn, testCoreBucket, nil, testLogger())
+		_, err := bare.Hydrate(ctx, envFor("ClaimIdentity", admitted["ClaimIdentity"]))
+		var hErr *HydrationError
+		if !errors.As(err, &hErr) || hErr.Code != "UndeclaredContextHintKey" {
+			t.Fatalf("Hydrate = %v, want the closed-set refusal", err)
+		}
+	})
+}
+
+// templatesJSON renders read templates as the JSON array the `.dispatch` aspect
+// carries.
+func templatesJSON(templates []string) string {
+	quoted := make([]string, len(templates))
+	for i, tpl := range templates {
+		quoted[i] = `"` + tpl + `"`
+	}
+	return "[" + strings.Join(quoted, ",") + "]"
 }

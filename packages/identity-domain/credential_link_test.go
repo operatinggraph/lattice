@@ -135,17 +135,19 @@ func completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.Ope
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"targetIdentityKey":"` + uKey + `","linkKey":"` + linkKeyPlaintext + `"}`),
 		AuthContext:   &processor.AuthContext{Target: a2Key},
-		// The shipped dispatchers' declaration
+		// The shipped dispatchers' declaration, verbatim
 		// (identityceremony.CompleteCredentialLinkContextHint, used by
-		// cmd/facet/credentials.go and cmd/loftspace-app/credentials_link.go),
-		// plus the credentialindex probe those two leave to derive_reads.
-		// Nothing required: this ceremony adjudicates an absent target with a
-		// named outcome of its own, and a required read faults HydrationMiss
-		// with the probed key before it can.
+		// cmd/facet/credentials.go and cmd/loftspace-app/credentials_link.go):
+		// the four keys this op's descriptor names and nothing else, which is
+		// the whole set the Processor's closed declared-read rule admits for an
+		// NFR-S6 operation (internal/processor/descriptor_floor.go). The
+		// credentialindex probe belongs to derive_reads and is refused if a
+		// submitter names it. Nothing required either: this ceremony
+		// adjudicates an absent target with a named outcome of its own, and a
+		// required read faults HydrationMiss with the probed key before it can.
 		ContextHint: &processor.ContextHint{
 			OptionalReads: []string{
 				uKey, uKey + ".state", uKey + ".linkKey", uKey + ".credentialBinding",
-				credentialIndexKey(a2Key),
 			},
 		},
 	}

@@ -50,7 +50,6 @@ func linkSecondCredential(t *testing.T, ctx context.Context, conn *substrate.Con
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	env := completeLinkEnv(testutil.GenReqID(label+"Cmpl"), credActorKey, uKey, plaintext)
-	env.ContextHint.OptionalReads = append(env.ContextHint.OptionalReads, credentialIndexKey(credActorKey))
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }

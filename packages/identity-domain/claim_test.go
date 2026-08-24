@@ -496,27 +496,25 @@ func hardenedClaimHint(t *testing.T, targetKey string) *processor.ContextHint {
 	return &processor.ContextHint{Reads: flooredTargetKeys(t, "ClaimIdentity", targetKey)}
 }
 
-// hostileUnflooredReadsHint is the probe the DECLARATION-side checks cannot
-// answer: the floored target-derived keys PLUS two the descriptor does not
-// floor — `.erasureRequested` and `.mergedInto`, both derived from the same
-// submitter-named target — all under `reads`.
+// hostileUnflooredReadsHint is the envelope a hostile submitter writes when it
+// reaches past the keys the descriptor names: the floored target-derived keys
+// PLUS two the descriptor does not name at all — `.erasureRequested` and
+// `.mergedInto`, both derived from the same submitter-named target — all under
+// `reads`.
 //
-// It pins the SCRIPT-side surface rather than the declaration. An unfloored
-// `reads` key stays required-absent, and internal/processor/starlark_kv.go
-// defers its HydrationMiss until the script TOUCHES the key, so what a hostile
-// submitter can actually observe is {target-derived keys the script reads
-// before its generic rejection} — which the descriptor's floor covers only for
-// as long as those two sets agree. Both keys are absent for every target these
-// arms use, live or not, so a touch anywhere above the rejection renders
-// HydrationFailed with the probed key instead of the one generic code.
+// For an NFR-S6 operation this envelope never reaches hydration. The declared
+// set of ClaimIdentity and CompleteCredentialLink is CLOSED (Contract #2 §2.5,
+// internal/processor/descriptor_floor.go's refuseUndeclaredContextHint): a key
+// outside the descriptor's own set is refused at the head of step 4 rather than
+// demoted, so the probe buys neither an answer nor a single Core KV GET inside
+// the rejection quantum. What comes back is the same generic reply on the same
+// release lattice as every other cause, with the refused key in the Processor
+// log alone.
 //
-// ClaimIdentity's script reaches neither key before it answers: it carries no
-// `.mergedInto` guard (state "merged" is the branch it takes), and its
-// `write_path_closed` erasure gate sits BELOW the secret comparison, which a
-// caller holding no valid secret never passes. Lift that gate above the
-// comparison, or re-add a `mergedInto` guard, and the surface is open again
-// with every descriptor-vs-descriptor check still green; these arms are what
-// fail then.
+// The arms using it therefore assert the closure, not the script: their
+// Health-KV outcome is `internal-fault` — the word handleStubFailure records
+// for an NFR-S6 rejection the script never reached — and the wire shape is
+// still required to match every script-rendered cause exactly.
 func hostileUnflooredReadsHint(t *testing.T, targetKey string) *processor.ContextHint {
 	t.Helper()
 	reads := flooredTargetKeys(t, "ClaimIdentity", targetKey)
@@ -711,7 +709,6 @@ func TestClaimIdentity_ReClaimAfterRealClaim_GenericError(t *testing.T) {
 	createReqID := testutil.GenReqID("ClmReclmCreate")
 	identityKey, claimKeyPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, createReqID)
 	hint := identityceremony.ClaimContextHint(identityKey)
-	hint.OptionalReads = append(hint.OptionalReads, credentialIndexKey(consumerActorKey))
 
 	claimEnv := func(reqID, submittedAt string) *processor.OperationEnvelope {
 		return &processor.OperationEnvelope{
@@ -820,16 +817,16 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// descriptor floor (Contract #2 §2.5) demoting it Processor-side.
 		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint},
 		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint},
-		// The two arms that survive a descriptor edit: they declare
-		// target-derived keys the floor does NOT cover, so what comes back
-		// depends on which keys the SCRIPT touches, not on which keys the
-		// descriptor happens to list. Both target positions are probed because
-		// the script answers them at different depths — the absent target is
-		// refused at the existence check, the live one runs all the way to the
-		// secret comparison — and a key touched before EITHER answer is a
-		// surface. See hostileUnflooredReadsHint.
-		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "no-target", hostileUnflooredReadsHint},
-		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "invalid-key", hostileUnflooredReadsHint},
+		// The two arms that reach PAST the descriptor's set: they declare
+		// target-derived keys it does not name at all. The closed declared-read
+		// set refuses them at the head of step 4, before hydration and before
+		// the script, so their outcome word is `internal-fault` — and the reply
+		// they get still has to be the same shape, on the same lattice, as
+		// every cause a script rendered. Both target positions are probed
+		// because a refusal that varied with the target's existence would be
+		// the oracle wearing a different hat. See hostileUnflooredReadsHint.
+		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "internal-fault", hostileUnflooredReadsHint},
+		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "internal-fault", hostileUnflooredReadsHint},
 	}
 
 	instance := claimInstance + "-indst"
@@ -866,14 +863,16 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
 		}
 		assertGenericClaimRejection(t, reply)
-		// The timing half of NFR-S6, on the deployed step-5 path. Every arm here
-		// is a real cause reaching a real script branch, so this is what proves
-		// the quantizer is anchored at receipt for the callsite production uses.
+		// The timing half of NFR-S6, across both depths a rejection is decided
+		// at: the script's own branches at step 5 — the callsite production
+		// takes for every conforming cause — and the closed declared-read set's
+		// refusal at the head of step 4. Both release on the same lattice or
+		// the depth itself is readable.
 		assertRejectionQuantized(t, tc.name, elapsed)
 		shapes = append(shapes, fmt.Sprintf("%s|%d", reply.Error.Code, len(reply.Error.Details)))
 
 		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count <= before {
-			t.Fatalf("%s: claim-attempts.%s = %d (found=%v), was %d before this submission — THIS cause never reached the script's own gate, so the wire-shape match is vacuous",
+			t.Fatalf("%s: claim-attempts.%s = %d (found=%v), was %d before this submission — THIS cause never reached the gate that records it, so the wire-shape match is vacuous",
 				tc.name, tc.outcome, count, ok, before)
 		}
 	}
@@ -1025,7 +1024,6 @@ func TestClaimIdentity_Merged_GenericError(t *testing.T) {
 				identityKey,
 				identityKey + ".state",
 				identityKey + ".claimKey",
-				identityKey + ".mergedInto",
 			},
 		},
 	}
@@ -1088,7 +1086,6 @@ func TestClaimIdentity_CredentialAlreadyBound_GenericError(t *testing.T) {
 				identityKey,
 				identityKey + ".state",
 				identityKey + ".claimKey",
-				credIndexKey,
 			},
 		},
 	}
@@ -1195,7 +1192,6 @@ func TestClaimIdentity_FR5_ImmediateAccess(t *testing.T) {
 	createReqID := testutil.GenReqID("FR5IACreate00")
 	identityKey, claimKeyPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, createReqID)
 
-	credIndexKey := credentialIndexKey(consumerActorKey)
 	claimReqID1 := testutil.GenReqID("FR5IAClaim0001")
 	claimEnv1 := &processor.OperationEnvelope{
 		RequestID:     claimReqID1,
@@ -1246,7 +1242,6 @@ func TestClaimIdentity_FR5_ImmediateAccess(t *testing.T) {
 				identity2Key,
 				identity2Key + ".state",
 				identity2Key + ".claimKey",
-				credIndexKey,
 			},
 		},
 	}

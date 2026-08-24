@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -217,6 +218,12 @@ type descriptorFloorResolver struct {
 	resolved bool
 	floor    descriptorFloor
 	required map[string]struct{}
+
+	admitResolved bool
+	admitted      map[string]struct{}
+
+	payloadParsed bool
+	payload       map[string]interface{}
 }
 
 // newDescriptorFloorResolver holds a descriptor's templates against one
@@ -254,10 +261,7 @@ func (r *descriptorFloorResolver) resolve() {
 	if len(r.templates.OptionalReads) == 0 {
 		return
 	}
-	var payload map[string]interface{}
-	if len(r.env.Payload) > 0 {
-		payload, _ = jsonToGenericMap(r.env.Payload)
-	}
+	payload := r.payloadMap()
 	r.floor = resolveDescriptorFloor(r.templates.OptionalReads, r.env, payload, r.logger)
 	if r.floor.empty() {
 		// No floor means no key can be excluded FROM one, so the required
@@ -265,6 +269,184 @@ func (r *descriptorFloorResolver) resolve() {
 		return
 	}
 	r.required = resolveDescriptorRequired(r.templates.Reads, r.env, payload, r.logger)
+}
+
+// payloadMap decodes the envelope's payload once for every arm that compiles a
+// template against it. A malformed payload decodes to nil, and every
+// `{payload.<field>}` template then fails to compile — the "names no key here"
+// answer each arm already has a rule for.
+func (r *descriptorFloorResolver) payloadMap() map[string]interface{} {
+	if r.payloadParsed {
+		return r.payload
+	}
+	r.payloadParsed = true
+	if len(r.env.Payload) > 0 {
+		r.payload, _ = jsonToGenericMap(r.env.Payload)
+	}
+	return r.payload
+}
+
+// admits reports whether this operation's own descriptor NAMES this key. It is
+// the membership test the CLOSED declared-read set is decided by
+// (refuseUndeclaredContextHint): the admitted set is the descriptor's `reads`
+// and `optionalReads` templates compiled against this envelope, CONCRETE KEYS
+// ONLY.
+//
+// A template that compiles to a key SHAPE contributes nothing, for the same
+// reason resolveDescriptorRequired refuses one: `{me.<type>}` covers every
+// vertex of its type, so admitting a shape would admit an unbounded set of keys
+// and hand back the very padding channel the closure exists to remove. A
+// template this Processor cannot compile against this envelope contributes
+// nothing either — it names no key here, so it admits none.
+//
+// A `{payload.<field>}` template DOES contribute, which is the opposite of
+// resolveDescriptorRequired's rule, and the polarity is the point rather than
+// an oversight. There the subject is an EXCLUSION from the floor: a submitter
+// who can steer a payload field could lift their own probe key out of the
+// control's reach, so a submitter-derived template must not build one. Here the
+// subject is the COUNT — how many keys an envelope may declare — and that comes
+// from the descriptor alone, one admitted key per template. Steering the
+// payload field steers WHICH key is admitted, never HOW MANY, and the key it
+// steers to is the key this operation's own script is about to adjudicate
+// anyway. Inheriting the exclusion would empty the admitted set for every
+// descriptor whose templates are payload-rooted — which both NFR-S6 descriptors
+// are, entirely — and refuse every legitimate submission.
+//
+// A nil resolver is an operation with no descriptor and admits nothing.
+func (r *descriptorFloorResolver) admits(key string) bool {
+	if r == nil {
+		return false
+	}
+	r.resolveAdmitted()
+	_, ok := r.admitted[key]
+	return ok
+}
+
+// resolveAdmitted compiles both descriptor lists into the admitted key set,
+// once per Hydrate call. Deferred and memoized for the reasons the header
+// gives: the Warn below asserts that a template named no key for THIS envelope,
+// and that claim belongs to the descriptor rather than to the arm that asked.
+func (r *descriptorFloorResolver) resolveAdmitted() {
+	if r.admitResolved {
+		return
+	}
+	r.admitResolved = true
+	total := len(r.templates.Reads) + len(r.templates.OptionalReads)
+	if total == 0 {
+		return
+	}
+	payload := r.payloadMap()
+	admitted := make(map[string]struct{}, total)
+	admit := func(list []string, class string) {
+		for _, tpl := range list {
+			pattern, ok := compileDescriptorTemplate(tpl, r.env, payload)
+			if !ok {
+				r.logger.Warn("step4: descriptor "+class+" template does not compile against this envelope; it admits no key into the closed declared-read set",
+					"operationType", r.env.OperationType, "requestId", r.env.RequestID, "template", tpl)
+				continue
+			}
+			key, isConcrete := pattern.concrete()
+			if !isConcrete {
+				r.logger.Warn("step4: descriptor "+class+" template compiles to a key SHAPE, not a key; it admits no key into the closed declared-read set",
+					"operationType", r.env.OperationType, "requestId", r.env.RequestID, "template", tpl)
+				continue
+			}
+			admitted[key] = struct{}{}
+		}
+	}
+	admit(r.templates.Reads, "read")
+	admit(r.templates.OptionalReads, "optionalRead")
+	r.admitted = admitted
+}
+
+// refuseUndeclaredContextHint closes the declared-read set of an NFR-S6
+// operation (claim_reply_floor.go's nfrS6Operations): the SUBMITTER's own
+// contextHint may name only what this operation's descriptor names, and
+// anything else faults the operation before hydration instead of being demoted.
+//
+// # Why the set is closed here and nowhere else
+//
+// The floor above bounds a declared key's DISPOSITION. Nothing bounds the
+// COUNT: opwire.MaxDeclaredReads admits 1000 declared keys, the Gateway copies
+// contextHint into the envelope verbatim and step 3 authorizes without
+// inspecting it, so every declared key resolves inside step-4 hydration — that
+// is, inside the window the NFR-S6 release quantum draws around the work. A
+// submitter free to name arbitrary keys prices the work inside a timing defence
+// they are the adversary of. For these two operations the descriptor already
+// names the entire legitimate set — the shipped dispatchers build their hint
+// from exactly it (internal/identityceremony) — so the set can be closed
+// outright rather than merely floored.
+//
+// Refusal, not demotion, and the difference is the whole mechanism: a demoted
+// extra key is still hydrated, still costs its GET inside the window, and still
+// lands wherever the padding lands.
+//
+// # What is refused
+//
+//   - a `reads` or `optionalReads` key the descriptor does not name (admits).
+//   - EVERY `egressReads` key. OpDispatchSpec carries no EgressReads field
+//     (internal/pkgmgr/definition.go), so no descriptor can name one and the
+//     admitted egress set is empty by construction.
+//   - EVERY `enumerations` entry, for the same structural reason. An
+//     enumeration is metadata: the Processor shape-validates it at parse and
+//     never hydrates it (Contract #2 §2.5 class (e)), so it buys no work inside
+//     the window. It is refused because the rule is CLOSED, not because it
+//     costs anything.
+//
+// Repetition is not this rule's subject: MaxDeclaredReads still admits 1000
+// copies of an admitted key, each costing one map lookup, and distinctKeys
+// collapses them before any KV work — microseconds against the quantum.
+// MEMBERSHIP is what the rule closes.
+//
+// A nil resolver is an operation with no `Dispatch` descriptor: it admits
+// nothing, so every declared key is refused. An NFR-S6 operation whose
+// descriptor is missing over-denies visibly rather than silently reverting to
+// the open envelope surface this closes.
+//
+// # What reaches the caller
+//
+// A *HydrationError carrying NO key, mirroring DeriveReadsFloorContradiction
+// (derive_reads.go). The refused key is the submitter's own probe, so echoing
+// it back in details.missingKey would answer the very question these operations
+// collapse their replies to refuse; the Warn here is the operator's only copy.
+// On an NFR-S6 operation the fault is then collapsed by replyRejection into the
+// generic ClaimKeyInvalid with nil details and released on the quantum, exactly
+// like every other rejection of these operations.
+//
+// The logger is the caller's rather than the resolver's because the
+// no-descriptor case has no resolver, and that is the case an operator most
+// needs to be able to see.
+func refuseUndeclaredContextHint(env *OperationEnvelope, resolver *descriptorFloorResolver, logger *slog.Logger) error {
+	hint := env.ContextHint
+	if hint == nil {
+		return nil
+	}
+	refuse := func(class, declared string) error {
+		logger.Warn("step4: contextHint declares a read this operation's descriptor does not name; the closed declared-read set refuses the operation",
+			"operationType", env.OperationType, "requestId", env.RequestID, "class", class, "declared", declared)
+		return &HydrationError{
+			Code: "UndeclaredContextHintKey", OperationRequestID: env.RequestID,
+			Cause: errors.New("contextHint declares a read outside the set this operation's own descriptor names; the declared read set for this operation is closed (the Processor log names what was refused)"),
+		}
+	}
+	for _, key := range hint.Reads {
+		if !resolver.admits(key) {
+			return refuse("reads", key)
+		}
+	}
+	for _, key := range hint.OptionalReads {
+		if !resolver.admits(key) {
+			return refuse("optionalReads", key)
+		}
+	}
+	if len(hint.EgressReads) > 0 {
+		return refuse("egressReads", hint.EgressReads[0])
+	}
+	if len(hint.Enumerations) > 0 {
+		e := hint.Enumerations[0]
+		return refuse("enumerations", e.Hub+" "+e.Relation+" "+e.Direction)
+	}
+	return nil
 }
 
 // warnContradiction records the derived required key the floor refuses

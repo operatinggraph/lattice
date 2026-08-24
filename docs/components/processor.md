@@ -159,6 +159,8 @@ by Gate 2 (`nfr_r1_test.go`).
 
 - **Cache-first.** A key listed in `contextHint.reads` is pre-fetched at step 4 and served from `state` at the step-4 OCC snapshot — `kv.Read` cannot force a fresher re-read of an already-hydrated key (echoing the snapshot revision as `expectedRevision` is what keeps the commit's OCC check sound). A key declared in `contextHint.optionalReads` and found **absent** at step 4 is served as `None` from the same snapshot (the *known-absent* record — no live GET, and a `create` derived off that absence is retry-attributable: a lost `CreateOnly` race re-hydrates, sees the key present, and the script re-branches). A key *not* declared at all falls through to a single on-demand GET (incurs latency, §2.5 — class (b) debt when the key was knowable at submit time).
 - **Absence is graceful.** Unlike a read of a `contextHint.reads` key recorded required-absent (a fatal `HydrationMiss`), `kv.Read` of an undeclared absent / hard-tombstoned key returns `None`, so a script can branch present-vs-absent — the read-before-create pattern a `createIfAbsent` mutation cannot express (events stay coherent with mutations because the script decides both in one branch). Declaring the key in `optionalReads` keeps this pattern **and** makes it declared/snapshotted/Edge-predictable — the §2.5 read-posture norm.
+- **The op-meta descriptor's disposition is a floor the envelope cannot raise** (§2.5, `descriptor_floor.go`, applied at the head of step 4 before `derive_reads`). Where an operation's `Dispatch` descriptor declares a key under `optionalReads`, an envelope naming that same key under `reads` is **demoted** rather than honoured; an `egressReads` key is marked absence-tolerant in place instead of moved, because relocating it would swap a bridge-opened `$sensitiveRef` for plaintext. A template compiling to a key *shape* or to nothing at all floors nothing, and a `{payload.<field>}` template contributes no *exclusion* from the floor — an exclusion the submitter can address is a bypass, not a precedence rule.
+- **For the NFR-S6 operations the declared set is CLOSED, not merely floored** (`refuseUndeclaredContextHint`, same file and same point in step 4). `ClaimIdentity` and `CompleteCredentialLink` may declare only the keys their own descriptor names — resolved to concrete keys; a shape admits nothing — and an envelope naming anything else, including **any** `egressReads` key or **any** enumeration (an `OpDispatchSpec` can name neither), is refused before hydration. The reason is the window, not the key: every declared read resolves inside step 4, i.e. inside the release quantum below, so an open set lets the submitter price the work a timing defence is drawn around. An operation with no descriptor admits nothing and refuses every declared key — a visible over-deny. Derived (class-(g)) keys are the DDL's own and are outside the rule. The refusal is a `HydrationError` carrying **no key**: the refused key is the submitter's own probe, so it goes to the Processor log alone, and the reply collapses to the generic `ClaimKeyInvalid` like every other rejection of these operations.
 - **Non-deterministic by design.** It reads *live* state, so a replayed (at-least-once) operation can branch differently. That is intentional: the Processor — not replay determinism — is the idempotency authority; the deterministic id + the `CreateOnly` commit backstop resolve the publish→commit race (Contract #10 §10.3 / [userTask-dispatch-idempotency design](../../_bmad-output/implementation-artifacts/usertask-dispatch-idempotency-design.md) §4.3–4.4).
 
 ### Forbidden
@@ -249,6 +251,22 @@ alternative fails:
   its own goroutine, bounded at 1024 concurrent deferrals; **at the bound the
   reply is dropped, never answered early**, because an early answer restores the
   signal exactly when an attacker is generating the load they are measuring.
+
+### 3. One declared-read set
+
+A lattice of fixed offsets holds only while the work fits inside a quantum, and
+`contextHint` is the submitter's own lever on that work: `opwire.MaxDeclaredReads`
+permits 1000 declared keys, each resolved inside step-4 hydration. So for these two
+operations the declared set is **closed** — the envelope may name only what the
+operation's op-meta descriptor names, and anything else is refused at the head of
+step 4 (`refuseUndeclaredContextHint`, see the `kv.Read` semantics above for the
+rule and its edges). Both descriptors already name the entire legitimate set: the
+four shipped dispatchers build their hint from `internal/identityceremony`, which
+emits exactly those templates.
+
+The refusal is an ordinary step-4 `HydrationError`, so it inherits both halves of
+the posture above — the generic `ClaimKeyInvalid` with nil details, released on the
+quantum — and it carries no key, because the key it would carry is the probe.
 
 ### Deferred-reply state
 
@@ -604,7 +622,7 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
 - **A mechanism whose margin the SUBMITTER prices is not a margin** — the retired entry above closed the
-  *disposition* a client may declare; nothing closes the *volume*. `opwire.MaxDeclaredReads` is 1000, the
+  *disposition* a client may declare; nothing closed the *volume*. `opwire.MaxDeclaredReads` is 1000, the
   Gateway copies `contextHint` verbatim (`gateway.go:823-830`) and step 3 never inspects it, so every declared
   read resolves inside step-4 hydration — i.e. inside whatever window a timing defence has drawn around it.
   The first ClaimIdentity reply floor was sized against a measured loaded p99 and was defeatable in ONE request
@@ -612,7 +630,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   claim-rejection timing oracle (`624d445`), cold review. Check: for any defence expressed as a duration —
   floor, budget, deadline, timeout — name who controls the work inside it. If a submitter does, the constant
   cannot hold and the shape must be one that has no escape branch (quantize to a lattice rather than floor),
-  plus a counter that fires when the window is exceeded (`claim_floor_late_total`).
+  plus a counter that fires when the window is exceeded (`claim_floor_late_total`). For the NFR-S6 operations
+  the volume itself is bounded rather than absorbed: `refuseUndeclaredContextHint` (`descriptor_floor.go`)
+  refuses any declared key, egress key or enumeration the operation's own descriptor does not name, so the work
+  inside the quantum is priced by the descriptor. Every other operation's declared set stays open, so the
+  question above is still the one to ask of each new defence.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.
