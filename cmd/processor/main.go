@@ -58,6 +58,13 @@ import (
 	"github.com/operatinggraph/lattice/internal/vault"
 )
 
+// claimReplyDrainBudget bounds how long shutdown waits for deferred NFR-S6
+// rejection replies to finish their release quantum. A few multiples of
+// processor.DefaultClaimRejectionFloor: enough for a reply that landed in a
+// later quantum (the padding case Metrics.ClaimFloorLate counts) to still go
+// out, short enough that a shutdown is never held hostage by non-durable state.
+const claimReplyDrainBudget = 10 * processor.DefaultClaimRejectionFloor
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -357,6 +364,18 @@ func run(logger *slog.Logger) error {
 	// op that committed in that gap would otherwise defer its event publication
 	// to the next process start. Stop is idempotent with the deferred Stop.
 	sup.Stop()
+
+	// The pump is stopped, so no further rejection can be deferred; flush the
+	// ones already waiting out their NFR-S6 release quantum before the NATS
+	// connection closes under them. Without this every SIGTERM and every rolling
+	// deploy silently discards up to a full bound of marshalled replies whose
+	// callers are still waiting. Bounded, because a deferred reply is not
+	// durable state and a shutdown must not hang on one.
+	if !cp.DrainClaimReplies(claimReplyDrainBudget) {
+		logger.Warn("shutdown: deferred rejection replies still in flight at drain deadline; they are lost",
+			"budget", claimReplyDrainBudget)
+	}
+
 	cancel()
 	<-hbDone
 	<-outboxDone

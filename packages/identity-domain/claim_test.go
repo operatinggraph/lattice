@@ -42,6 +42,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/vault"
 	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 )
 
@@ -526,6 +527,150 @@ func hostileUnflooredReadsHint(t *testing.T, targetKey string) *processor.Contex
 // assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
 // details map, and no outcome word anywhere in the message. Every claim
 // rejection cause must be indistinguishable through this surface.
+// submitAndTimeRejection submits env through the real pipeline and returns the
+// reply plus the interval from just before submission to the reply's arrival.
+//
+// This is the ONLY place the release quantizer
+// (internal/processor/claim_reply_floor.go) is exercised on the path production
+// actually takes. Every unit-tier test of the mechanism injects its failure
+// through a stub Hydrator — step 4 — but no real ClaimKeyInvalid is ever minted
+// there: it comes from classifyScriptError parsing the script's
+// fail("ClaimKeyInvalid: " + outcome) (identity-domain/ddls.go), which runs
+// inside the Executor at step 5. A regression that un-anchored the step-5
+// callsite alone would leave every one of those unit tests green.
+//
+// Measuring from before submission is the conservative direction: t0 precedes
+// the receipt instant dispatch captures, so an observed interval that clears the
+// quantum bounds the real receipt-to-publish offset from below.
+func submitAndTimeRejection(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, env *processor.OperationEnvelope) (processor.MessageOutcome, *processor.OperationReply, time.Duration) {
+	t.Helper()
+	t0 := time.Now()
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	return outcome, reply, time.Since(t0)
+}
+
+// assertRejectionQuantized fails when a rejection of an NFR-S6 operation came
+// back before its first release boundary. `elapsed` must come from
+// submitAndTimeRejection.
+func assertRejectionQuantized(t *testing.T, label string, elapsed time.Duration) {
+	t.Helper()
+	if elapsed < processor.DefaultClaimRejectionFloor {
+		t.Fatalf("%s: rejection answered after %s, before the %s NFR-S6 release quantum — "+
+			"the reply is being published at its own service time, which is what makes the "+
+			"rejection causes separable in the time domain",
+			label, elapsed, processor.DefaultClaimRejectionFloor)
+	}
+}
+
+// slowDecryptVault wraps a real Vault and spends a fixed interval on every
+// Decrypt, so a test can make one rejection cause do substantially more work
+// than another WITHOUT leaving the deployed code path — the script still runs,
+// the aspect is still real ciphertext, and the decrypt still really happens.
+//
+// The interval is not synchronising anything; its duration is the quantity
+// under test.
+type slowDecryptVault struct {
+	vault.Vault
+	work time.Duration
+}
+
+func (v slowDecryptVault) Decrypt(ctx context.Context, keyHolderKey string, env vault.Envelope, ct vault.Ciphertext) ([]byte, error) {
+	time.Sleep(v.work)
+	return v.Vault.Decrypt(ctx, keyHolderKey, env, ct)
+}
+
+// TestClaimIdentity_RejectionReleaseIsAnchoredAtReceipt is the end-to-end proof
+// that the NFR-S6 release quantizer is anchored at message ARRIVAL, on the path
+// production takes.
+//
+// It compares two real causes whose work genuinely differs: `wrong-key` reads a
+// LIVE `.claimKey` aspect, so step 4 runs the envelope read and the AEAD decrypt
+// (inflated here by slowDecryptVault), while `absent-target` finds nothing to
+// decrypt at all. Anchored at receipt, both are answered on the same lattice
+// point and the difference collapses to publish jitter. Anchored anywhere later
+// — at the step-5 callsite, or at a receipt captured below dispatch's prologue —
+// the decrypt time reappears in the gap, which is precisely the oracle.
+//
+// A lower-bound "not before the quantum" assertion cannot see this: anchoring
+// late makes a reply LATER, never earlier. Only the comparison catches it.
+func TestClaimIdentity_RejectionReleaseIsAnchoredAtReceipt(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+
+	// The quantum is set well above the injected work so both causes land in the
+	// FIRST quantum however many times the path decrypts — the assertion must
+	// not depend on that count.
+	const quantum = 400 * time.Millisecond
+	const decryptWork = 150 * time.Millisecond
+	// Far below decryptWork, far above goroutine wakeup plus a NATS round trip.
+	const tolerance = 60 * time.Millisecond
+
+	instance := claimInstance + "-anchor"
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable:             "clm-anchor",
+		Instance:            instance,
+		ClaimEmitter:        processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, testutil.TestLogger()),
+		Vault:               slowDecryptVault{Vault: testutil.TestVault(t), work: decryptWork},
+		ClaimRejectionFloor: quantum,
+	})
+
+	// A live, unclaimed identity with a LIVE claimKey aspect: the cause that
+	// really decrypts.
+	wrongKeyTarget := "vtx.identity." + testutil.GenReqID("ClmAnchorLive0")
+	seedDirectIdentity(t, ctx, conn, wrongKeyTarget, "unclaimed", "")
+	seedClaimKeyAspect(t, ctx, conn, wrongKeyTarget, sha256HexOf("the-real-anchor-secret"))
+
+	// A target that was never provisioned: nothing to read, nothing to decrypt.
+	absentTarget := "vtx.identity." + testutil.GenReqID("ClmAnchorGone0")
+
+	claimAt := func(reqID, target, secret string) time.Duration {
+		t.Helper()
+		env := &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "ClaimIdentity",
+			Actor:         consumerActorKey,
+			SubmittedAt:   "2026-05-22T10:05:00Z",
+			Class:         "identity",
+			Payload:       json.RawMessage(`{"claimKey":"` + secret + `","targetIdentityKey":"` + target + `"}`),
+			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+			ContextHint:   identityceremony.ClaimContextHint(target),
+		}
+		outcome, reply, elapsed := submitAndTimeRejection(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %q, want rejected", reqID, outcome)
+		}
+		assertGenericClaimRejection(t, reply)
+		if elapsed < quantum {
+			t.Fatalf("%s: answered after %s, before the %s quantum", reqID, elapsed, quantum)
+		}
+		return elapsed
+	}
+
+	wrongKeyElapsed := claimAt(testutil.GenReqID("ClmAnchorWrong"), wrongKeyTarget, "not-the-real-secret")
+	absentElapsed := claimAt(testutil.GenReqID("ClmAnchorAbsnt"), absentTarget, "irrelevant-secret")
+
+	gap := wrongKeyElapsed - absentElapsed
+	if gap < 0 {
+		gap = -gap
+	}
+	if gap > tolerance {
+		t.Fatalf("the two causes are separable in the time domain: wrong-key answered in %s, "+
+			"absent-target in %s, gap %s > %s — %s of injected decrypt work is visible in the reply "+
+			"timing, so the release is anchored after that work rather than at message receipt",
+			wrongKeyElapsed, absentElapsed, gap, tolerance, decryptWork)
+	}
+	// Both must also have landed in the FIRST quantum; if the injected work had
+	// pushed one into the second, the comparison above would be measuring the
+	// wrong thing.
+	if wrongKeyElapsed >= 2*quantum || absentElapsed >= 2*quantum {
+		t.Fatalf("a cause overran the first quantum (wrong-key %s, absent %s, quantum %s) — "+
+			"raise the quantum or lower the injected work so this test keeps testing anchoring",
+			wrongKeyElapsed, absentElapsed, quantum)
+	}
+}
+
 func assertGenericClaimRejection(t *testing.T, reply *processor.OperationReply) {
 	t.Helper()
 	if reply == nil || reply.Error == nil {
@@ -716,11 +861,15 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
 			ContextHint:   hint,
 		}
-		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		outcome, reply, elapsed := submitAndTimeRejection(t, ctx, conn, cp, cons, env)
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
 		}
 		assertGenericClaimRejection(t, reply)
+		// The timing half of NFR-S6, on the deployed step-5 path. Every arm here
+		// is a real cause reaching a real script branch, so this is what proves
+		// the quantizer is anchored at receipt for the callsite production uses.
+		assertRejectionQuantized(t, tc.name, elapsed)
 		shapes = append(shapes, fmt.Sprintf("%s|%d", reply.Error.Code, len(reply.Error.Details)))
 
 		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count <= before {
