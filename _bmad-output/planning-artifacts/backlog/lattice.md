@@ -140,7 +140,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-24 · `PENDING` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
+- 2026-08-24 · `b9121e8` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
 - 2026-08-24 · `3a35bde` · [Weaver] inflight_<g> suppression-vs-reclaim contract CLOSED — the error fired on a contract-legal declaration; class+key+prefix retired, verdict and two-leg suppression unchanged; cold review clean
 - 2026-08-24 · `624d445` · [Processor/identity-domain] claim-rejection timing oracle CLOSED — n=3000 overturned the same-day n=40 "no gap"; quantized release from receipt, NFR-S6 op set, reply key-echo closed; 3 cold reviews
 - 2026-08-24 · `c44216c` · [Refractor] CapabilityRepairBlocked names its class — BlockedClass across fold/sweep/health; content+retraction error-on-sight, provenance stays warning, business-lens ceiling held; guard untouched; 3 cold reviews
