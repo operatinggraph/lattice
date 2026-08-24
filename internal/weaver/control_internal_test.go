@@ -372,7 +372,6 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyDataEntity("t1", entityA, "missing_x"),
 		issueKeyDataEntity("t1", entityB, freshUntilColumn),
 		issueKeyDataEntity("t1", entityB, "entityKey"),
-		issueKeyInflightMismatch("t1", "missing_x"),
 	}
 	for _, key := range revoked {
 		h.engine.issues.set(key, "warning", "Fixture", key)
@@ -383,7 +382,6 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyGapEntity("t10", entityA, "missing_x"),
 		issueKeyGapConfig("t10", "missing_x"),
 		issueKeyDataEntity("t10", entityA, "missing_x"),
-		issueKeyInflightMismatch("t10", "missing_x"),
 	}
 	for _, key := range survivors {
 		h.engine.issues.set(key, "warning", "Fixture", key)

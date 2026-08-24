@@ -740,19 +740,19 @@ func seedInflightMismatchFixture(t *testing.T, ctx context.Context, h *sweepHarn
 	return entityID, key
 }
 
-// TestSweep_InflightActionMismatchIgnoredForUserTaskGap proves the classifier
+// TestSweep_InflightMarkerPreservesClaimIdForUserTaskGap proves the classifier
 // over a REAL parking pattern: the gap's pattern is indexed from a spec whose
-// steps include a userTask, so triggering it concludes on a person and a lens
-// mistakenly declaring its inflight_<g> companion column (a package authoring
-// bug) must NOT be trusted as proof the gap is a concluded EXTERNAL gap.
-// Without the cross-check this mark is misclassified confirmedConcluded=true
-// and reclaimed with a FRESH claimId (§10.3's external-gap behavior),
-// collapsing the "retry" onto a new, unrelated Loom instance and violating
-// §10.3's claimId-verbatim rule for a human userTask gap. The reclaim must
-// instead preserve the mark's claimId exactly like
-// TestReclaim_StableUserTaskIdentity, and the mismatch must surface as a Health
-// issue rather than fail silently (FR29).
-func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
+// steps include a userTask, so triggering it concludes on a person. A lens
+// declaring its inflight_<g> companion is contract-legal suppression, NOT an
+// authoring bug — the two human-paced lease-signing gaps do exactly this — so it
+// must NOT be trusted as proof the gap is a concluded EXTERNAL gap. Without the
+// cross-check this mark is misclassified confirmedConcluded=true and reclaimed
+// with a FRESH claimId (§10.3's external-gap behavior), collapsing the "retry"
+// onto a new, unrelated Loom instance and violating §10.3's claimId-verbatim rule
+// for a human userTask gap. The reclaim must instead preserve the mark's claimId
+// exactly like TestReclaim_StableUserTaskIdentity, and must raise NO Health issue:
+// a suppression-only declaration is the contract working as written.
+func TestSweep_InflightMarkerPreservesClaimIdForUserTaskGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -761,7 +761,7 @@ func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 	defer cancel()
 	h := newSweepHarness(t, ctx)
 
-	const targetID = "fixtureInflightMismatch"
+	const targetID = "fixtureInflightUserTask"
 	const gap = "missing_onboarding"
 	const claimID = "Lk2Pn6mQrtwzKbcXvP3T"
 	seedPatternSpec(t, h.engine.source, "onboardFlow", stepKindSystemOp, stepKindUserTask)
@@ -775,11 +775,11 @@ func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
 	}
 	if rec.ClaimID != claimID {
-		t.Fatalf("a mismatched inflight_<g> must not mint a fresh claimId for a userTask gap: got %q want preserved %q",
+		t.Fatalf("a suppression-only inflight_<g> must not mint a fresh claimId for a userTask gap: got %q want preserved %q",
 			rec.ClaimID, claimID)
 	}
-	if !hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
-		t.Fatalf("expected an InflightActionMismatch Health issue for the misdeclared column")
+	if hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
+		t.Fatalf("a suppression-only inflight_<g> declaration must raise no Health issue")
 	}
 }
 
@@ -789,9 +789,9 @@ func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 // still replaying, so the gap's pattern resolves to no indexed spec. The
 // classification is unavailable, not negative, and the engine takes the
 // human-safe side — claimId preserved verbatim, exactly as if the pattern
-// parked. Crucially it must do so QUIETLY: replay lag is transient and
-// self-healing, so raising the `error` InflightActionMismatch issue here would
-// make Weaver report unhealthy on every restart.
+// parked. It also raises no Health issue: staleMark never alerts on a
+// suppression-only inflight_<g> declaration, so this fail-safe leg — which every
+// restarted Weaver walks while the registry replays — cannot report unhealthy.
 func TestSweep_InflightMarkerIgnoredForUnindexedPattern(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -822,7 +822,7 @@ func TestSweep_InflightMarkerIgnoredForUnindexedPattern(t *testing.T) {
 		t.Fatalf("an unindexed pattern must fail SAFE (claimId preserved): got %q want %q", rec.ClaimID, claimID)
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
-		t.Fatal("registry replay lag is transient — it must not raise the error-severity InflightActionMismatch issue")
+		t.Fatal("a suppression-only inflight_<g> on an unindexed pattern must raise no Health issue")
 	}
 }
 

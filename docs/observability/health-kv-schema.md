@@ -905,7 +905,6 @@ decides whose close retires the issue. The key never appears on the wire — it 
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
 | `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo), `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
-| `inflightMismatch:<targetId>.<gapColumn>` | the lens's column declaration | `InflightActionMismatch` |
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
@@ -933,7 +932,7 @@ not — so a repaired row retires its own entry. Read each entry as "this row pr
 
 | Family | Retired on revoke by | Why |
 |---|---|---|
-| `gap:`, `gapConfig:`, `data:`, `inflightMismatch:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
+| `gap:`, `gapConfig:`, `data:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
 | `consumer:`, `timer:`, `target:<ownerVertexId>` | key clear | keyed by target alone |
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |
@@ -951,8 +950,7 @@ entry stands for the process's lifetime — including after one or both targets 
 it as "this fight was observed since `since`", not as a live condition.
 
 A retired entry is not a suppressed one. Every issue here is level-driven: if a revoked target is
-re-enabled and the condition still holds, the next delivery (or, for `inflightMismatch:`, the next
-mark whose lease expires) raises it again. Retiring on teardown removes an entry that describes a
+re-enabled and the condition still holds, the next delivery raises it again. Retiring on teardown removes an entry that describes a
 target that no longer exists; it does not decide that the underlying fault was fixed.
 
 #### `IssuesTruncated`

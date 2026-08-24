@@ -338,28 +338,28 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 // a gap that never nominated itself for the external class keeps its reclaim
 // untouched (claimId preserved verbatim, per §10.3).
 //
-// A declared inflight_<g> is only trustworthy for a gap whose dispatch can
-// actually make an external call with a later, outcome-driven conclusion —
-// externalDispatchGap decides that, from the dispatch's real shape rather than
-// from its action name alone. A gap that concludes on a human instead (an
-// assignTask, or a triggerLoom of a pattern that parks) has no such outcome, so
-// a lens declaring inflight_<g> alongside one is a lens-authoring bug, not a
-// real external gap. Trusting the marker anyway would let a misauthored column
-// silently reclassify a human episode's reclaim as an external-gap
-// stale-reconcile, dropping its §10.3 claimId-preservation guarantee.
+// inflight_<g> carries exactly one meaning by contract
+// (10-orchestration-weaver.md: "a remediation is already in flight → suppress
+// re-dispatch"): it is available to ANY gap and honored for suppression on both
+// dispatch legs (gapSuppressed). This function reads it for a SECOND, narrower
+// purpose — gating the external-gap stale-reconcile, the reclaim that mints a
+// FRESH claimId (10-orchestration-substrate.md §10.3: "re-call a dead vendor /
+// mint a fresh service instance"). That authority belongs only to a gap whose
+// dispatch can actually make such a call with a later, outcome-driven
+// conclusion, which externalDispatchGap decides from the dispatch's real shape
+// (the pattern's step kinds), never from the action name.
 //
-// Either way the marker is ignored (treated as absent), but the two failure
-// modes are surfaced differently. A PERMANENT mismatch — an action or an
-// indexed pattern that can never be external-dispatch — is an `error` Health
-// issue on its own key (issueKeyInflightMismatch, never one of the gap keys:
-// planGap's success path unconditionally clears both of those on every clean
-// dispatch, which a reclaim always attempts right after this check, so sharing
-// either would wipe the alert before the same pass ends); it self-clears once
-// staleMark next runs clean for this gap, e.g. after a package fix removes the
-// column or retargets the action. A TRANSIENT one — the referenced pattern's
-// spec has not replayed into the registry yet — is only logged: every Weaver
-// restart passes through it, it heals itself within the replay window, and
-// planGap raises its own UnresolvedReference issue if it does not.
+// A gap that concludes on a human instead (an assignTask, or a triggerLoom of a
+// pattern that parks) is NOT an authoring bug for declaring inflight_<g> — it is
+// using the column for its sole contract purpose, suppression. It simply confers
+// no stale-reconcile authority here, so staleMark returns false and the gap keeps
+// §10.3's claimId-preserved-verbatim rule; gapSuppressed still honors the marker
+// on both legs. The two human-paced lease-signing gaps (onboarding, signature)
+// declare it for exactly this reason — it is what stops their reclaim from
+// re-firing a remediation whose task already sits open. So the non-external case
+// raises nothing; it is logged at Debug (the `why` names the transient
+// unreplayed-pattern case vs. the permanent human-gap one for operators reading
+// the log, but neither is a Health issue).
 func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col string, ga GapAction) bool {
 	g, ok := strings.CutPrefix(col, gapColumnPrefix)
 	if !ok {
@@ -368,19 +368,13 @@ func (e *Engine) staleMark(targetID, entityID string, row map[string]any, col st
 	if _, declared := row[inflightColumnPrefix+g]; !declared {
 		return false
 	}
-	external, transient, why := e.externalDispatchGap(ga, row)
+	external, _, why := e.externalDispatchGap(ga, row)
 	if !external {
-		if transient {
-			e.logger.Debug("weaver: ignoring the inflight_<g> marker for now; "+why,
-				"targetId", targetID, "gap", col)
-			return false
-		}
-		e.alert(issueKeyInflightMismatch(targetID, col), "error", "InflightActionMismatch",
-			"target "+targetID+": row column "+inflightColumnPrefix+g+" is declared but gap "+col+
-				" is not external-dispatch ("+why+"); ignoring the marker")
+		e.logger.Debug("weaver: inflight_<g> declared on a non-external gap; honored for "+
+			"suppression, ignored for stale-reconcile ("+why+")",
+			"targetId", targetID, "gap", col)
 		return false
 	}
-	e.issues.clear(issueKeyInflightMismatch(targetID, col))
 	return !e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g)
 }
 
@@ -1224,10 +1218,9 @@ func (e *Engine) alert(key, severity, code, message string) {
 // teardown prefix in issueKeyTargetPrefixes is built from these, so a key shape
 // and the prefix that retires it cannot drift apart.
 const (
-	issuePrefixGapEntity        = "gap:"
-	issuePrefixGapConfig        = "gapConfig:"
-	issuePrefixData             = "data:"
-	issuePrefixInflightMismatch = "inflightMismatch:"
+	issuePrefixGapEntity = "gap:"
+	issuePrefixGapConfig = "gapConfig:"
+	issuePrefixData      = "data:"
 )
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
@@ -1250,7 +1243,6 @@ func issueKeyTargetPrefixes(targetID string) []string {
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
 		issuePrefixData + targetID + ".",
-		issuePrefixInflightMismatch + targetID + ".",
 	}
 }
 
@@ -1292,9 +1284,6 @@ func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
 }
 
-func issueKeyInflightMismatch(targetID, col string) string {
-	return issuePrefixInflightMismatch + targetID + "." + col
-}
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
 	return "effect:" + targetID + "." + gapColumn + "." + actionRef
 }

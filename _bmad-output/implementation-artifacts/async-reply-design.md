@@ -360,6 +360,11 @@ unchanged — it seeds `patternMeta` directly with no spec.
 - `internal/weaver/registry.go:348` / `:1092-1101` — the map + `removePatternLocked`: same lifetime.
 - `internal/weaver/evaluator.go:330-347` — `staleMark`: replace the action test with the containment test;
   keep the `InflightActionMismatch` alert for the case it was written for.
+  > **Superseded 2026-08-24** ([inflight-suppression-vs-reclaim-contract-design.md](inflight-suppression-vs-reclaim-contract-design.md)):
+  > the `InflightActionMismatch` alert is **removed**, not kept. A non-external gap declaring
+  > `inflight_<g>` is contract-legal suppression, not an authoring bug — the classifier now returns
+  > false and raises nothing. `TestSweep_InflightActionMismatchIgnoredForUserTaskGap` is renamed
+  > `TestSweep_InflightMarkerPreservesClaimIdForUserTaskGap` and asserts no issue is raised.
 - `internal/weaver/reconciler.go:53-56` — `collapseOnlyReclaim`: follows `confirmedConcluded`, unchanged.
 - `Makefile:1746` — the `-run` filter selects `TestLeaseConvergence|TestRenewalConvergence` only; the three
   `TestAsyncConvergence_*` match neither (verified with `go test -list`). Widen it.
