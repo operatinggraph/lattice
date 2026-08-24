@@ -414,7 +414,6 @@ func TestReconcileConsumers_RemovalRetiresPerEntityIssueFamilies(t *testing.T) {
 		issueKeyDataEntity(targetID, entityB, "entityKey"),
 		issueKeyGapEntity(targetID, entityA, "missing_x"),
 		issueKeyGapConfig(targetID, "missing_x"),
-		issueKeyInflightMismatch(targetID, "missing_x"),
 	}
 	// A target whose id shares the removed one's leading characters: the trailing
 	// separator in each family prefix is what keeps it out of the clear.

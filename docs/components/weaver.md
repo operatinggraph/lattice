@@ -974,3 +974,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   the set that `Revoke` would have swept (2026-08-23). Check: enumerate every route by which a target stops
   being registered — revoke, spec delete, vertex remove, rename — and assert each retires
   `issueKeyTargetPrefixes`, not just its own key.
+- **A Health issue whose SUBJECT is a contract-legal declaration is a false alarm, not a diagnostic —
+  verify the alerted "bug" against the whole contract clause before raising** — `InflightActionMismatch`
+  fired `error` on any `inflight_<g>` declared over a non-external gap, calling it a lens-authoring bug.
+  But the contract makes `inflight_<g>` a *suppression* companion available to ANY gap; its external-gap
+  stale-reconcile role is a second, narrower use, and answering "no" to the second is the contract working
+  as written. So lease-signing's two human gaps declaring it were correct, and the `error` stood for weeks
+  against a correctly-authored package. Minted 2026-08-24. Check: for every raise, name the contract clause
+  the alerted state actually violates; if a reader could reach the opposite verdict from the same clause
+  the raise cites, it is a design gap, not a diagnostic.
