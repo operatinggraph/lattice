@@ -20,12 +20,17 @@
 //  10. TestClaimIdentity_RejectionCausesIndistinguishable   — one wire shape
 //  11. TestClaimIdentity_SpentClaimKeyRefusedWithoutTheScrub — the script's own
 //     tombstone guard, isolated from the Processor's scrub
+//  12. TestNFRS6Ops_DescriptorFloorSetPinned                — the exact Contract
+//     #2 §2.5 floor each NFR-S6 op declares, plus the census that says which
+//     ops are in that class
 package identitydomain_test
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -408,51 +413,114 @@ var nfrS6FlooredKeys = map[string][]string{
 // envelope tests prove every key the descriptor floors is really demoted, but
 // they derive their probe FROM the descriptor, so a shrunk or relocated
 // declaration shrinks the probe right along with it and nothing fails. This
-// test compares the descriptor against the independent list above instead,
-// and additionally asserts Dispatch.Reads is empty for both ops — a floored
-// key moved there would still pass a mere set-membership check on
-// OptionalReads while reopening the oracle (Dispatch.Reads wins over
-// Dispatch.OptionalReads at the enforcement point).
+// test compares the descriptor against the independent list above instead.
+//
+// The comparison is EXACT — element for element, in order, the same line
+// package_test.go takes for the sibling op. A count plus set-membership is not
+// equality: a duplicated entry keeps the count while a real key silently drops
+// out of the floor, which is precisely the edit this test has to catch.
+//
+// It also asserts Dispatch.Reads is empty for both ops. Not because a required
+// template would out-rank the optional one — for THESE ops it would not. Every
+// template here resolves from `{payload.targetIdentityKey}`, and
+// resolveDescriptorRequired (internal/processor/descriptor_floor.go) refuses to
+// build an exclusion out of a submitter-derived template, so a key named by
+// both lists is still demoted; an exclusion set the attacker can address is a
+// bypass, not a precedence rule. The reason the list must stay empty is the
+// ceremony itself: it adjudicates an absent target with its own generic
+// outcome, and a fail-closed read is the opposite of that — it faults
+// HydrationMiss carrying the probed key before the script can answer at all.
 func TestNFRS6Ops_DescriptorFloorSetPinned(t *testing.T) {
-	for opType, want := range nfrS6FlooredKeys {
-		var found *pkgmgr.OpDispatchSpec
-		for _, m := range identitydomain.OpMetas() {
-			if m.OperationType == opType {
-				found = m.Dispatch
-				break
-			}
-		}
-		if found == nil {
-			t.Fatalf("%s: no descriptor in OpMetas(), or its Dispatch spec is nil", opType)
-		}
-		got := found.OptionalReads
-		if len(got) != len(want) {
-			t.Fatalf("%s: Dispatch.OptionalReads has %d entries, want %d (narrowing this set re-opens the identity-keyspace oracle for every caller, not just descriptor-reading clients) — want %v, got %v",
-				opType, len(got), len(want), want, got)
-		}
-		wantSet := make(map[string]struct{}, len(want))
-		for _, k := range want {
-			wantSet[k] = struct{}{}
-		}
-		for _, k := range got {
-			if _, ok := wantSet[k]; !ok {
-				t.Fatalf("%s: Dispatch.OptionalReads contains %q, not in the pinned floor — want %v, got %v", opType, k, want, got)
-			}
-		}
-		if len(found.Reads) != 0 {
-			t.Fatalf("%s: Dispatch.Reads = %v, want empty — a floored key relocated here wins over OptionalReads at the enforcement point and reopens the oracle", opType, found.Reads)
-		}
+	enrolled := make([]string, 0, len(nfrS6FlooredKeys))
+	for opType := range nfrS6FlooredKeys {
+		enrolled = append(enrolled, opType)
 	}
+	// Sorted so a run that breaks both ops names both, in the same order every
+	// time; ranging the map directly reports an arbitrary one.
+	slices.Sort(enrolled)
+
+	for _, opType := range enrolled {
+		want := nfrS6FlooredKeys[opType]
+		t.Run(opType, func(t *testing.T) {
+			var found *pkgmgr.OpDispatchSpec
+			for _, m := range identitydomain.OpMetas() {
+				if m.OperationType == opType {
+					found = m.Dispatch
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("%s: no descriptor in OpMetas(), or its Dispatch spec is nil", opType)
+			}
+			if !slices.Equal(found.OptionalReads, want) {
+				t.Fatalf("%s: Dispatch.OptionalReads = %v, want exactly %v — narrowing this set re-opens the identity-keyspace oracle for every caller, not just for clients that read the descriptor",
+					opType, found.OptionalReads, want)
+			}
+			if len(found.Reads) != 0 {
+				t.Fatalf("%s: Dispatch.Reads = %v, want empty — this ceremony adjudicates an absent target with its own generic outcome, and a fail-closed read faults HydrationMiss carrying the probed key before it can",
+					opType, found.Reads)
+			}
+		})
+	}
+
+	// The census. nfrS6FlooredKeys is a hand list and nothing else ties it to
+	// "the ops that answer with NFR-S6's one generic code". Membership in that
+	// class is a property of the SCRIPT: an op joins by calling
+	// fail("ClaimKeyInvalid: " + outcome), the message shape the Processor's
+	// classifier collapses to ErrCodeClaimKeyInvalid. Counting those call sites
+	// in the package's own script source is what makes a third op audible here
+	// instead of shipping with no floor, no pin, and no failure.
+	t.Run("enrolment-census", func(t *testing.T) {
+		src, err := os.ReadFile("ddls.go")
+		if err != nil {
+			t.Fatalf("read the package's script source: %v", err)
+		}
+		const failCall = `fail("ClaimKeyInvalid: "`
+		got := strings.Count(string(src), failCall)
+		if got != len(nfrS6FlooredKeys) {
+			t.Fatalf("ddls.go has %d `%s` call sites but %d ops are enrolled in nfrS6FlooredKeys (%v) — an op that answers with NFR-S6's generic code must be given a Contract #2 §2.5 descriptor floor and enrolled here, or its absent-target case is an identity-keyspace oracle",
+				got, failCall, len(nfrS6FlooredKeys), enrolled)
+		}
+	})
 }
 
 // hardenedClaimHint is the declaration a HOSTILE submitter sends: the
 // target-derived keys the descriptor floors, under `reads`, the fail-closed
-// disposition, hand-rolled rather than built. No shipped client produces
-// this; nothing in the transport can refuse it. It exists so the tests can
-// send the exact probe the fix has to answer, and it must never be wired into
-// a dispatcher.
+// disposition. It bypasses the shipped client builder
+// (identityceremony.ClaimContextHint), which declares the same keys under the
+// absence-tolerant disposition; nothing in the transport can refuse the
+// hardened form. It exists so the tests can send the exact probe the floor has
+// to answer, and it must never be wired into a dispatcher.
 func hardenedClaimHint(t *testing.T, targetKey string) *processor.ContextHint {
 	return &processor.ContextHint{Reads: flooredTargetKeys(t, "ClaimIdentity", targetKey)}
+}
+
+// hostileUnflooredReadsHint is the probe the DECLARATION-side checks cannot
+// answer: the floored target-derived keys PLUS two the descriptor does not
+// floor — `.erasureRequested` and `.mergedInto`, both derived from the same
+// submitter-named target — all under `reads`.
+//
+// It pins the SCRIPT-side surface rather than the declaration. An unfloored
+// `reads` key stays required-absent, and internal/processor/starlark_kv.go
+// defers its HydrationMiss until the script TOUCHES the key, so what a hostile
+// submitter can actually observe is {target-derived keys the script reads
+// before its generic rejection} — which the descriptor's floor covers only for
+// as long as those two sets agree. Both keys are absent for every target these
+// arms use, live or not, so a touch anywhere above the rejection renders
+// HydrationFailed with the probed key instead of the one generic code.
+//
+// ClaimIdentity's script reaches neither key before it answers: it carries no
+// `.mergedInto` guard (state "merged" is the branch it takes), and its
+// `write_path_closed` erasure gate sits BELOW the secret comparison, which a
+// caller holding no valid secret never passes. Lift that gate above the
+// comparison, or re-add a `mergedInto` guard, and the surface is open again
+// with every descriptor-vs-descriptor check still green; these arms are what
+// fail then.
+func hostileUnflooredReadsHint(t *testing.T, targetKey string) *processor.ContextHint {
+	t.Helper()
+	reads := flooredTargetKeys(t, "ClaimIdentity", targetKey)
+	reads = append(reads, targetKey+".erasureRequested", targetKey+".mergedInto")
+	return &processor.ContextHint{Reads: reads}
 }
 
 // assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
@@ -607,10 +675,27 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// descriptor floor (Contract #2 §2.5) demoting it Processor-side.
 		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint},
 		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint},
+		// The two arms that survive a descriptor edit: they declare
+		// target-derived keys the floor does NOT cover, so what comes back
+		// depends on which keys the SCRIPT touches, not on which keys the
+		// descriptor happens to list. Both target positions are probed because
+		// the script answers them at different depths — the absent target is
+		// refused at the existence check, the live one runs all the way to the
+		// secret comparison — and a key touched before EITHER answer is a
+		// surface. See hostileUnflooredReadsHint.
+		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "no-target", hostileUnflooredReadsHint},
+		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "invalid-key", hostileUnflooredReadsHint},
 	}
 
+	instance := claimInstance + "-indst"
 	var shapes []string
 	for _, tc := range cases {
+		// The counter is a RUNNING total shared by every arm, and several arms
+		// share an outcome — so only the delta across this one submission says
+		// anything about this one arm. Snapshot before, require a strict
+		// increase after.
+		before, _ := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome)
+
 		// Default: the identical shipped builder every live dispatcher calls,
 		// including for the absent and malformed targets. Hand-tailoring a
 		// conforming arm's declaration would hide the failure this test exists
@@ -638,10 +723,9 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		assertGenericClaimRejection(t, reply)
 		shapes = append(shapes, fmt.Sprintf("%s|%d", reply.Error.Code, len(reply.Error.Details)))
 
-		instance := claimInstance + "-indst"
-		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count < 1 {
-			t.Fatalf("%s: claim-attempts.%s = %d (found=%v) — the cause never reached the script's own gate, so the wire-shape match is vacuous",
-				tc.name, tc.outcome, count, ok)
+		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count <= before {
+			t.Fatalf("%s: claim-attempts.%s = %d (found=%v), was %d before this submission — THIS cause never reached the script's own gate, so the wire-shape match is vacuous",
+				tc.name, tc.outcome, count, ok, before)
 		}
 	}
 	for i := 1; i < len(shapes); i++ {
