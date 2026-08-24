@@ -33,9 +33,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/identityceremony"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 )
 
 const claimInstance = "icl-test"
@@ -341,15 +343,116 @@ func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 	}
 }
 
-// hardenedClaimHint is the declaration a HOSTILE submitter sends: the three
-// target-derived keys under `reads`, the fail-closed disposition, hand-rolled
-// rather than built. No shipped client produces this; nothing in the transport
-// can refuse it. It exists so the tests can send the exact probe the fix has to
-// answer, and it must never be wired into a dispatcher.
-func hardenedClaimHint(targetKey string) *processor.ContextHint {
-	return &processor.ContextHint{
-		Reads: []string{targetKey, targetKey + ".state", targetKey + ".claimKey"},
+// flooredTargetKeys resolves an op descriptor's Dispatch.OptionalReads — the
+// Contract #2 §2.5 floor the Processor applies over a submitter's envelope
+// (internal/processor/descriptor_floor.go) — against one concrete target key.
+//
+// The hostile-envelope tests below declare these keys under `reads`, the
+// fail-closed disposition, and the floor is the only thing that can demote
+// them. Reading the list from the descriptor rather than restating it is what
+// keeps the probe set and the enforcement point from drifting apart: a key
+// added to the floor is probed on the next run, and a key removed from it
+// fails these tests instead of silently narrowing them.
+func flooredTargetKeys(t *testing.T, opType, targetKey string) []string {
+	t.Helper()
+	const param = "{payload.targetIdentityKey}"
+	for _, m := range identitydomain.OpMetas() {
+		if m.OperationType != opType {
+			continue
+		}
+		if m.Dispatch == nil || len(m.Dispatch.OptionalReads) == 0 {
+			t.Fatalf("%s: descriptor declares no Dispatch.OptionalReads — the §2.5 floor these tests probe does not exist", opType)
+		}
+		out := make([]string, 0, len(m.Dispatch.OptionalReads))
+		for _, tmpl := range m.Dispatch.OptionalReads {
+			if !strings.HasPrefix(tmpl, param) {
+				// Fail closed: an unrecognized template would silently drop a
+				// floored key out of the probe set, which is the exact gap
+				// this helper exists to close.
+				t.Fatalf("%s: unhandled floor template %q — teach this helper the shape before declaring it", opType, tmpl)
+			}
+			out = append(out, targetKey+strings.TrimPrefix(tmpl, param))
+		}
+		return out
 	}
+	t.Fatalf("%s: no descriptor in OpMetas()", opType)
+	return nil
+}
+
+// nfrS6FlooredKeys pins the exact Contract #2 §2.5 floor each NFR-S6 op
+// declares, independently of the descriptor it is checked against.
+//
+// flooredTargetKeys READS the descriptor, so it proves every declared key is
+// really demoted but moves in lockstep with the declaration — it cannot notice
+// the declaration shrinking. Shrinking it is precisely the edit opmetas.go
+// warns about: removing an entry, or moving one to Dispatch.Reads, re-opens the
+// identity-keyspace oracle for every caller, not just for clients that read the
+// descriptor. Changing this table is therefore a deliberate act that has to be
+// argued in the commit, never re-pinned to match a descriptor someone narrowed.
+var nfrS6FlooredKeys = map[string][]string{
+	"ClaimIdentity": {
+		"{payload.targetIdentityKey}",
+		"{payload.targetIdentityKey}.state",
+		"{payload.targetIdentityKey}.claimKey",
+	},
+	"CompleteCredentialLink": {
+		"{payload.targetIdentityKey}",
+		"{payload.targetIdentityKey}.state",
+		"{payload.targetIdentityKey}.linkKey",
+		"{payload.targetIdentityKey}.credentialBinding",
+	},
+}
+
+// TestNFRS6Ops_DescriptorFloorSetPinned guards what flooredTargetKeys cannot:
+// that the floor each NFR-S6 op declares has not been narrowed. The hostile-
+// envelope tests prove every key the descriptor floors is really demoted, but
+// they derive their probe FROM the descriptor, so a shrunk or relocated
+// declaration shrinks the probe right along with it and nothing fails. This
+// test compares the descriptor against the independent list above instead,
+// and additionally asserts Dispatch.Reads is empty for both ops — a floored
+// key moved there would still pass a mere set-membership check on
+// OptionalReads while reopening the oracle (Dispatch.Reads wins over
+// Dispatch.OptionalReads at the enforcement point).
+func TestNFRS6Ops_DescriptorFloorSetPinned(t *testing.T) {
+	for opType, want := range nfrS6FlooredKeys {
+		var found *pkgmgr.OpDispatchSpec
+		for _, m := range identitydomain.OpMetas() {
+			if m.OperationType == opType {
+				found = m.Dispatch
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("%s: no descriptor in OpMetas(), or its Dispatch spec is nil", opType)
+		}
+		got := found.OptionalReads
+		if len(got) != len(want) {
+			t.Fatalf("%s: Dispatch.OptionalReads has %d entries, want %d (narrowing this set re-opens the identity-keyspace oracle for every caller, not just descriptor-reading clients) — want %v, got %v",
+				opType, len(got), len(want), want, got)
+		}
+		wantSet := make(map[string]struct{}, len(want))
+		for _, k := range want {
+			wantSet[k] = struct{}{}
+		}
+		for _, k := range got {
+			if _, ok := wantSet[k]; !ok {
+				t.Fatalf("%s: Dispatch.OptionalReads contains %q, not in the pinned floor — want %v, got %v", opType, k, want, got)
+			}
+		}
+		if len(found.Reads) != 0 {
+			t.Fatalf("%s: Dispatch.Reads = %v, want empty — a floored key relocated here wins over OptionalReads at the enforcement point and reopens the oracle", opType, found.Reads)
+		}
+	}
+}
+
+// hardenedClaimHint is the declaration a HOSTILE submitter sends: the
+// target-derived keys the descriptor floors, under `reads`, the fail-closed
+// disposition, hand-rolled rather than built. No shipped client produces
+// this; nothing in the transport can refuse it. It exists so the tests can
+// send the exact probe the fix has to answer, and it must never be wired into
+// a dispatcher.
+func hardenedClaimHint(t *testing.T, targetKey string) *processor.ContextHint {
+	return &processor.ContextHint{Reads: flooredTargetKeys(t, "ClaimIdentity", targetKey)}
 }
 
 // assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
@@ -478,7 +581,7 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		outcome string
 		// hint overrides the shipped builder for the hostile arms. nil means
 		// "submit exactly what a conforming dispatcher sends".
-		hint func(target string) *processor.ContextHint
+		hint func(t *testing.T, target string) *processor.ContextHint
 	}{
 		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target", nil},
 		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key", nil},
@@ -515,7 +618,7 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// or parse, so the declaration it ALWAYS sends is the one worth testing.
 		hint := identityceremony.ClaimContextHint(tc.target)
 		if tc.hint != nil {
-			hint = tc.hint(tc.target)
+			hint = tc.hint(t, tc.target)
 		}
 		env := &processor.OperationEnvelope{
 			RequestID:     tc.reqID,

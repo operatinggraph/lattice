@@ -152,16 +152,15 @@ func completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.Ope
 }
 
 // hardenedCompleteLinkEnv is completeLinkEnv as a HOSTILE submitter writes it:
-// the target-derived keys under `reads`, the fail-closed disposition. No
-// shipped client sends this and nothing in the transport can refuse it —
-// contextHint is client-supplied and step 3 never inspects it — so the only
-// thing that can stop it answering differently from every other rejection
-// cause is the Contract #2 §2.5 descriptor floor, applied Processor-side.
-func hardenedCompleteLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.OperationEnvelope {
+// the target-derived keys the descriptor floors, under `reads`, the
+// fail-closed disposition. No shipped client sends this and nothing in the
+// transport can refuse it — contextHint is client-supplied and step 3 never
+// inspects it — so the only thing that can stop it answering differently from
+// every other rejection cause is the Contract #2 §2.5 descriptor floor,
+// applied Processor-side.
+func hardenedCompleteLinkEnv(t *testing.T, reqID, a2Key, uKey, linkKeyPlaintext string) *processor.OperationEnvelope {
 	env := completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext)
-	env.ContextHint = &processor.ContextHint{
-		Reads: []string{uKey, uKey + ".state", uKey + ".linkKey"},
-	}
+	env.ContextHint = &processor.ContextHint{Reads: flooredTargetKeys(t, "CompleteCredentialLink", uKey)}
 	return env
 }
 
@@ -199,7 +198,7 @@ func TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate(t *testing.T) {
 		{"absent-target", testutil.GenReqID("CmplHardGone"), absentKey, "a-guessed-wrong-secret"},
 	} {
 		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
-			hardenedCompleteLinkEnv(tc.reqID, secondCredActorKey, tc.target, tc.secret))
+			hardenedCompleteLinkEnv(t, tc.reqID, secondCredActorKey, tc.target, tc.secret))
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
 		}
