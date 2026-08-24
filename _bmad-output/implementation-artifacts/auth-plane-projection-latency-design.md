@@ -1754,6 +1754,15 @@ descriptor-declared disposition against a submitter override, which is the Contr
 uncommitted in `main` for Andrew (extend *weakest wins* from derived-vs-envelope to descriptor-vs-envelope). Until
 that lands, this is a dispatcher-hygiene fix plus a filed contract gap, and the code comments say exactly that.
 
+> **AMENDED 2026-08-24 — the paragraph above is spent, and the "there is none" clause is now FALSE.** The
+> enforcement landed (§19.6 item 1, the descriptor floor): `internal/processor/descriptor_floor.go` demotes any
+> key the descriptor declares `optionalReads` that a submitter's envelope declared under `reads`, over every
+> envelope for the operationType. Both NFR-S6 ops declare their floor — `packages/identity-domain/opmetas.go`,
+> `ClaimIdentity` (3 keys) and `CompleteCredentialLink` (4, incl. `.credentialBinding`) — and both are pinned
+> against a HAND-ROLLED hostile envelope (`TestClaimIdentity_RejectionCausesIndistinguishable`'s
+> `hand-rolled-reads-*` arms; `TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate`). **The STRUCTURAL
+> half of NFR-S6 is closed and pinned.** What remains open is the timing half alone, below.
+
 **Residual — the timing oracle, which this fire does NOT close.** The tombstoned path returns at
 `sensitive_decrypt.go:190`, before `readPiiKeyEnvelope`'s `KVGet` (`:224`) and the AEAD decrypt (`:228`), and the
 script then exits at `wrong-state` (`ddls.go:1423`) rather than running on to `:1472`. So already-claimed is
@@ -1762,6 +1771,31 @@ not. This design's own standard makes that a real finding — `ddls.go:1489` rej
 partly because it would hand a caller holding no valid secret "a measurably shorter path". Equalizing it is a
 constant-time-rejection mechanism with no ratified pattern to extend, so it is filed for a designer pass rather
 than improvised here.
+
+**Grounded 2026-08-24 — why the obvious mechanism is not the mechanism.** The board had carried this as a ready
+item sized XS–S behind the sketch "a fixed floor on the rejection paths". Grounding it before building falsified
+the sketch, so it is recorded here rather than re-derived:
+
+- **The rejection reply is published synchronously from the lane's pump worker.** `handleStubFailure`
+  (`internal/processor/commit_path.go`) calls `replyTo` inline, and it is reached from `dispatch` under
+  `SupervisedHandler` — one message at a time per worker.
+- **A lane has 2–4 workers** (`internal/processor/lanes.go`, `LaneConsumerDefaults`: `default` 2, `urgent` 4,
+  `system` 2, `meta` 1).
+- Therefore a floor of *D* ms parked on that path caps the whole lane at `workers × 1000/D` operations per
+  second — **for every operation on the lane, not just the floored ones** — and `ClaimIdentity` is `scope: self`
+  granted to every consumer, so the attacker chooses how much of that budget to burn. A naive in-handler sleep
+  buys the timing property with a lane-wide availability regression, which is a worse trade than the oracle.
+
+So a sound fix has to either move the wait **off** the pump worker (a deferred reply — new state whose lifetime
+across crash/replay/shutdown must be specified, exactly the class this component's dossier keeps catching) or put
+the floor at the **Gateway**, which is a trust-boundary placement question rather than an in-component one.
+Either is a design, which is why this stays a designer item; the sizing is not XS–S.
+
+**One thing the designer pass must settle rather than inherit:** this section's census is two timing classes
+(already-claimed vs wrong-key). The *absent-target* arm is a plausible third and is the highest-value oracle of
+the three — it answers "does this identity exist at all" — but whether it is separable in the time domain is
+**unmeasured**; a KV miss still costs its round-trip. Measure it before choosing a mechanism, because a fix
+scoped to the decrypt asymmetry alone would leave the more valuable question open.
 
 ### 19.6 CHECKPOINT (2026-08-10) — what Increment 4 landed, and what remains
 
@@ -2157,3 +2191,45 @@ under `vtx.meta.>`, which is a wider blast radius than the op-meta arm alone —
 document there is boot-fatal for the Processor. That is the intended posture (the alternative is the plaintext
 path above), and pass 3 established no routine operation reaches it, but it is worth knowing before the first
 stack that hits it.
+
+---
+
+### Claim-rejection latency-oracle fire brief (build note, 2026-08-24)
+
+**1. Scope sentence.** The board row *"[identity-domain] A claim rejection's LATENCY still separates
+already-claimed from wrong-key"* (§19.5's residual). Green bar: the row is either built or honestly re-routed,
+and whatever the item's grounding falsifies is corrected where it stands.
+
+**2. Verified touch-list** (checked live, this fire; §19.5's own anchors had rotted — the tombstone early
+return is at `sensitive_decrypt.go`'s `doc.IsDeleted` arm, not the cited `:190`, which is comment text):
+
+- `internal/processor/descriptor_floor.go` — the Contract #2 §2.5 floor. **Exists** (§19.5's body said it did not).
+- `packages/identity-domain/opmetas.go` — `ClaimIdentity` (3 floored keys) and `CompleteCredentialLink` (4).
+- `packages/identity-domain/claim_test.go` — `hardenedClaimHint`; the `hand-rolled-reads-*` arms.
+- `packages/identity-domain/credential_link_test.go` — `hardenedCompleteLinkEnv`; `TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate`.
+- `internal/processor/commit_path.go` (`handleStubFailure` → `replyTo`) + `internal/processor/lanes.go`
+  (`LaneConsumerDefaults`) — the pair that falsifies the "fixed floor" sketch.
+
+**3. Precedents to mirror.** The hostile-envelope probe already exists for both ops; the fire mirrors
+`hardenedClaimHint`'s shape into a descriptor-derived form. No greenfield.
+
+**4. Increment order.** (i) derive both hostile envelopes' `reads` from the op descriptor's own
+`Dispatch.OptionalReads`; green check `go test ./packages/identity-domain/ -run
+'TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate|TestClaimIdentity_RejectionCausesIndistinguishable'
+-count=1`, plus the revert-proof: dropping `.credentialBinding` from the descriptor's `OptionalReads`, and
+moving it to `Reads`, must each fail the test.
+
+**5. In-scope gotchas.** Processor dossier, entry 1 — *a read disposition the CLIENT declares is not a server
+policy*; its Check mandates the hand-rolled `contextHint`. Standing checklist #3 (a negative test needs its
+positive vector, and every fix is proven by reverting it) is the acceptance above.
+
+**6. Adjacent finds.** `_bmad-output/planning-artifacts/backlog/verticals.md` fails `scripts/lint-board.go`
+(a Done-log entry over the 250-char cap). Out of this stream's lane — reported to the Verticals steward, not
+filed here and not edited.
+
+**7. Non-goals.** The timing half itself (designer-gated, above); any change to `sensitive_decrypt.go`'s
+tombstone arm; any new Starlark or dispatcher wiring.
+
+**Outcome.** The structural half was found closed AND pinned; the item's remainder is the timing half, whose
+sketched mechanism this fire falsified. Built: the probe-set drift gate (above). Re-routed: the row, to a
+designer pass with the absent pattern named.
