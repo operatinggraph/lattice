@@ -2496,3 +2496,40 @@ full closure requires bounding the work a submitter can place inside the window,
 declared-read set** for an NFR-S6 operation, which is a Contract #2 §2.5 semantic (refuse an
 out-of-set declared read rather than demote it) and therefore Andrew's. Filed on the board with that
 out; `ClaimFloorLate` is the interim detection.
+
+### 19.10 CLOSE — what shipped, and the one thing it does not close
+
+**Shipped `624d445`.** Every rejection of an **NFR-S6 operation** (`ClaimIdentity`,
+`CompleteCredentialLink` — a named set, not an error-code match) is answered on a lattice of fixed
+offsets from **receipt**: `releaseAt = receipt + ceil(elapsed/Q)*Q`, `Q = 50 ms`, released off the
+pump worker, bounded at 1024 pending, dropping rather than answering early at the bound, and drained
+after the pump stops. All eight rejection branches route through one gate, so a branch added later is
+covered by construction. The reply carries one fixed message with nil details — it previously echoed
+the failing step and the wrapped error, i.e. **the probed key itself**.
+
+**The proof matrix** (committed instrument, `LATTICE_CLAIM_TIMING_PROBE`):
+
+| | mechanism OFF | mechanism ON |
+|---|---|---|
+| sequential | all 3 CIs exclude zero, monotone | all 3 include zero |
+| concurrent (8 sub / 2 workers) | all 3 CIs exclude zero, monotone | all 3 include zero |
+
+At n=3000 with it on, the p50 spread across causes is **10.6 µs** against the ~640 µs it replaces, the
+monotone ordering is gone, and no cause is ever answered before the first boundary.
+
+**What it does NOT close, stated plainly so no one re-derives it as new.** Quantization removes the
+escape branch but not the boundary. A submitter still prices the work inside the window —
+`MaxDeclaredReads` is 1000 and the Gateway copies `contextHint` verbatim — so padding can push a
+rejection across a quantum boundary, and the *probability* of crossing remains cause-dependent. That
+converts a continuous signal into a Bernoulli one, raising the cost by roughly two orders of
+magnitude rather than removing it. Full closure requires bounding the work a submitter may place
+inside the window — a **closed declared-read set** for an NFR-S6 operation, i.e. Contract #2 §2.5
+refusing an out-of-set declared read instead of demoting it. That is a frozen-contract semantic and
+is filed for Andrew on the board. Until it lands, `claim_floor_late_total` is the detector: it counts
+exactly the requests that left the first quantum, which is the precondition for the attack.
+
+**Also open, and not this item's:** the Health-KV per-cause counters remain a perfect oracle for
+anything that can read the `health-kv` bucket. That is the pre-existing NFR-S6 design choice (the
+contract says specific outcomes surface there), reachable only by a platform component and not by the
+`scope: self` consumer this item is about — noted so a future reader does not mistake it for a
+regression introduced here.
