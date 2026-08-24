@@ -2271,5 +2271,86 @@ filed here and not edited.
 tombstone arm; any new Starlark or dispatcher wiring.
 
 **Outcome.** The structural half was found closed AND pinned; the item's remainder is the timing half, whose
-sketched mechanism this fire falsified. Built: the probe-set drift gate (above). Re-routed: the row, to a
-designer pass with the absent pattern named.
+sketched mechanism this fire falsified. Built: the probe-set drift gate (above). ~~Re-routed: the row, to a
+designer pass with the absent pattern named.~~ **STRUCK 2026-08-24** — the re-route did not survive the day:
+cold review (`1c494a7`) established the precedent this section had called absent (`AuthTraceEmitter.Emit`),
+so the row returned to a steward `📋 ready` and was then measured (`0af9845`). The row was never a designer
+item; §19.5's timing paragraph carries its live state.
+
+---
+
+### Concurrent-submitter re-measure fire brief (build note, 2026-08-24)
+
+**1. Scope sentence.** §19.5's own next step, verbatim: *"A build should therefore start by re-measuring
+against a concurrent submitter and a Vault-backed deployment; if the gap is still under the noise there, the
+honest outcome may be to close this row as not-exploitable-as-specified rather than to add a mechanism that
+costs availability for no measured signal."* Plus the open question the same section hands the build: the
+**absent-target** arm is unmeasured as a third timing class and *"a floor chosen against the decrypt asymmetry
+alone would be sized wrong if the absent arm is the outlier."* Green bar: all three causes measured under
+concurrent submission at a sample size that can resolve a sub-noise bias, and the row then **built or closed**
+on that measurement — not left ready a third time.
+
+**2. Verified touch-list** (checked live, this fire):
+
+- `internal/testutil/embedded_nats.go:58` — `DriveOne` calls `cp.HandleMessage` **synchronously on the
+  caller's goroutine** and `t.Fatalf`s. There is no pump worker in the harness, and these helpers are not
+  callable from a non-test goroutine: a concurrent probe cannot be built out of them.
+- `internal/testutil/pipeline.go:368` — `SubmitAndAwaitReply` = per-op `nats.NewInbox` + `SubscribeSync` +
+  `PublishMsg` + `DriveOne`. The per-op inbox (`:386`, and the comment at `:381-385` explaining why it is not
+  requestId-derived) is what makes concurrent in-flight ops separable at all.
+- `internal/testutil/pipeline.go:222-229` — `TestVault` = `vault.NewLocalBackend(testVaultKEK, "test-v1")`,
+  a real local backend. The wrong-key arm therefore does a genuine envelope `KVGet` + AEAD decrypt.
+- `packages/identity-domain/claim_test.go:61-70` — `newClaimPipeline`; `:75-100` `createIdentityAndGetKeys`;
+  `:309-349` the already-claimed fixture (`seedDirectIdentity` + `seedSpentClaimKeyAspect`); `:255-301` the
+  wrong-key fixture; `:631-687` the absent-target arm; `:487-496` `hardenedClaimHint`.
+- `packages/identity-domain/ddls.go` — the three branches, all reached through the same `fail_claim` macro
+  (`:1447`): `no-target` `:1460-1462`; tombstoned `.claimKey` `:1514`; `constant_time_equal` mismatch `:1521`.
+  Note `:1473` — a seeded `state: "claimed"` is caught **before** the claimKey aspect is read, so the
+  already-claimed fixture must be built so the tombstone arm is the one that actually rejects.
+- `internal/processor/lanes.go:50-55` — `LaneConsumerDefaults`: `default` 2, `urgent` 4, `system` 2, `meta` 1.
+  `ClaimIdentity` rides `default`, so the deployed analogue of "concurrent" is **2 workers**, and
+  `cp.HandleMessage` is already required to be concurrency-safe there.
+- `internal/processor/commit_path.go:966-984` — `handleStubFailure`; the reply is published inline at
+  `:1043-1048` (`MarshalReply` + `Conn.NATS().Publish`), on the pump worker.
+- `internal/processor/sensitive_decrypt.go:158-204` — `decryptSensitiveDoc`'s `doc.IsDeleted` arm. Confirmed:
+  when tombstoned and non-egress it clears the body and returns, **skipping** `readPiiKeyEnvelope` (`:263`)
+  and `v.Decrypt` (`:267`). That asymmetry is real in code; whether it is resolvable at the operation
+  boundary is exactly what is being measured.
+
+**3. Precedents to mirror.** The three fixtures already exist as named test arms (part 2) — the probe mirrors
+their setup, not new seeding. `internal/processor/latency_ring.go:75-90` (`ringPercentile`) is the shipped
+percentile shape. `AuthTraceEmitter.Emit` (`internal/processor/step3_auth_trace.go:159-182`) is the precedent
+for the floor **if** the measurement licenses building one — sync capture off the stack frame, goroutine with
+its own timeout, no durable state, no shutdown drain.
+
+**4. Increment order.**
+- **(i) The probe.** An env-gated measurement harness in `packages/identity-domain` (skipped unless
+  `LATTICE_CLAIM_TIMING_PROBE=1`), with **no wall-clock assertion**, running P concurrent submitter goroutines
+  against W concurrent `HandleMessage` workers, interleaving the three causes and recording per-op
+  publish→reply latency. Green check: `go test ./packages/identity-domain/ -run TestClaimRejectionTimingProbe
+  -count=1` passes (skips) with the variable unset, and runs with it set.
+- **(ii) The measurement + the verdict.** Run it at the deployed worker count and above, at n large enough to
+  resolve a difference of means; then either build the floor or close the row, and record the numbers in
+  §19.5 where the falsified premise lives.
+
+**Why the probe is committed this time, against §19.5's "not committed".** That call was made about a
+*wall-clock assertion*, which is correctly refused. An env-gated harness with no assertion is not that: it
+never runs in CI, and it is the instrument §19.5 itself demands for the deployment re-measure it asks for.
+The cost of the previous call is concrete — this fire had to rebuild the probe from the method paragraph.
+
+**5. In-scope gotchas.** Processor dossier entry 1 — *a read disposition the CLIENT declares is not a server
+policy*: its Check mandates a **hand-rolled** `contextHint`, not the shipped builder, and the probe must reach
+the **script-side** surface. `hardenedClaimHint` is that shape and the probe uses it, so all three causes are
+measured on the hostile envelope rather than on the absence-tolerant one. Standing checklist #2 — *every
+census is a premise*: §19.5's n=40 p50 table is re-derived here, not inherited. Standing checklist #3 — a
+negative needs its positive vector: each cause fixture is asserted to reject **for its own reason** before any
+timing is recorded, or the probe is timing the wrong branch (`:1473` is the live trap).
+
+**6. Adjacent finds.** §19.5's closing "Outcome" paragraph asserted the row had been re-routed to a designer
+pass; `1c494a7` reversed that within the hour and the paragraph was never amended. Fixed in this run (struck
+where it stands), not filed.
+
+**7. Non-goals.** Any change to `sensitive_decrypt.go`'s tombstone arm; any Starlark or dispatcher rewiring;
+the structural existence-oracle half (closed and gated, `87cb2bb`); a Vault-**deployment** measurement (the
+harness's `TestVault` is a real local backend, but a deployed KMS is not reproducible in this container — the
+committed probe is what makes that run possible later).
