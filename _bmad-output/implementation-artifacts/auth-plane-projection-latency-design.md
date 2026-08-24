@@ -2438,3 +2438,61 @@ where it stands), not filed.
 the structural existence-oracle half (closed and gated, `87cb2bb`); a Vault-**deployment** measurement (the
 harness's `TestVault` is a real local backend, but a deployed KMS is not reproducible in this container — the
 committed probe is what makes that run possible later).
+
+### 19.9 The floor's three-layer adversarial pass — what it found
+
+Three cold reviewers (none the implementer), on the built floor: an oracle-closure lens, a
+concurrency/lifetime lens, and a test-validity lens. Recorded because two of the findings are
+corrections to *this document's* reasoning, not just to the code.
+
+**BLOCKING — the tests were at a step the real vector never reaches.** Every test in
+`claim_reply_floor_test.go` injects through a stub `Hydrator`, i.e. `handleStubFailure`'s **step-4**
+callsite. But `ClaimKeyInvalid` is minted by `classifyScriptError` from the script's own
+`fail("ClaimKeyInvalid: …")`, which runs inside `Executor.Execute` — **step 5**. Re-anchoring the
+step-5 callsite at `time.Now()` destroys the entire property with all 459 new test lines green. The
+mechanism does work in production — a reviewer proved it by raising the default to 2 s and watching
+the real three-cause test go 0.97 s → 16.57 s — but that proof lived in a reviewer's scratch edit,
+not in an assertion. This is the "a gate's negative test must first prove its positive vector
+reaches the gate" class in its **fifth** sighting.
+
+**MAJOR — §19.8's sizing argument was necessary but not sufficient, and this section corrects it.**
+§19.8 concluded the floor must be sized against *loaded* tail latency because an attacker can
+generate load. That is true and still stands, but it understates the problem: the attacker does not
+need load at all. `opwire.MaxDeclaredReads = 1000`, and the Gateway copies `contextHint` verbatim
+into the envelope (`gateway.go:823-830`) with step 3 never inspecting it — so every declared read
+resolves inside `Hydrate`, *inside the floored window*. A caller pads declared reads until the work
+outruns the floor, takes the already-late inline branch, and reads the raw per-cause timing back in
+**one request at a time**, with no load and nothing rate-limiting the operation. **A floor whose
+margin the submitter prices is not a floor.** The mechanism becomes quantization — release at
+`receipt + ceil(elapsed/floor)*floor` — which deletes the already-late branch entirely: normal
+traffic lands in the first quantum and leaks nothing, and a padded request is reduced to a
+boundary-crossing probability difference rather than the full continuous signal.
+
+**MAJOR — the floor was keyed on the error code, which is both too narrow and too wide.** Too
+narrow: `.claimKey` is sensitive, so a step-4 decrypt fault on it returns a bare `fmt.Errorf` that
+`classifyStepError` falls through to `ErrCodeInternalError` — an un-floored fast path, differing in
+both code and timing, reachable for a sealed-but-unclaimed identity. That is also a **live violation
+of Contract #9 §9.3's "all failure modes collapse to the generic `ClaimKeyInvalid` reply code"** —
+restoring conformance needs no contract change, since the contract already mandates it. Too wide:
+`CompleteCredentialLink` is floored today only because `fail_link` reuses the `ClaimKeyInvalid:`
+prefix — accidental, and narrowing to `ClaimIdentity` (which the code's own comments invited) would
+have silently un-floored a second enumeration oracle with no test failing. The floor is therefore
+keyed on the **NFR-S6 operation set**, declared by name.
+
+**MAJOR — a mechanism that cannot say when it has stopped holding.** Three silent lapse modes
+(published late, dropped at the bound, discarded at shutdown), none counted. `ClaimFloorLate` is the
+one that matters: after quantization it is precisely the detector for the padded-envelope attack
+above, and the only way an operator learns the invariant is not currently holding.
+
+**Confirmed sound, stated so it is not re-litigated:** the receipt anchor is the correct and
+non-obvious choice; the deferral is properly off the pump worker, so it adds no lane-throughput
+signal; drop-rather-than-answer-early is the right fail-safe at saturation; the pending counter is
+provably balanced (a lost-decrement mutant was killed empirically); no race, panic, wedge, or flake
+reproduced under 3× CPU oversubscription; and every other reply exit a caller can time was traced
+and none depends on the claimed target's state. 11 of 15 mutations were killed.
+
+**Residual, filed not fixed:** quantization bounds the padded-envelope attack but does not erase it —
+full closure requires bounding the work a submitter can place inside the window, i.e. a **closed
+declared-read set** for an NFR-S6 operation, which is a Contract #2 §2.5 semantic (refuse an
+out-of-set declared read rather than demote it) and therefore Andrew's. Filed on the board with that
+out; `ClaimFloorLate` is the interim detection.
