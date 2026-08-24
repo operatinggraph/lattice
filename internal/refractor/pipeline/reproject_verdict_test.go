@@ -105,7 +105,7 @@ func TestVerdict_SeverityOrdering(t *testing.T) {
 	f.add(VerdictHealed, "")
 	f.add(VerdictBlocked, "the reason")
 	f.add(VerdictConverged, "")
-	v, reason := f.resolve("nothing concluded")
+	v, _, reason := f.resolve("nothing concluded")
 	require.Equal(t, VerdictBlocked, v, "the worst verdict survives later, quieter ones")
 	require.Equal(t, "the reason", reason)
 }
@@ -118,11 +118,11 @@ func TestVerdict_SeverityOrdering(t *testing.T) {
 func TestVerdictFold_DefaultDoesNotSwallowRealConclusions(t *testing.T) {
 	var healed verdictFold
 	healed.add(VerdictHealed, "")
-	v, _ := healed.resolve("nothing concluded")
+	v, _, _ := healed.resolve("nothing concluded")
 	require.Equal(t, VerdictHealed, v, "a single heal is a heal, not the unverified default")
 
 	var empty verdictFold
-	v, reason := empty.resolve("nothing concluded")
+	v, _, reason := empty.resolve("nothing concluded")
 	require.Equal(t, VerdictUnverified, v, "nothing concluded fails closed")
 	require.Equal(t, "nothing concluded", reason)
 
@@ -130,7 +130,7 @@ func TestVerdictFold_DefaultDoesNotSwallowRealConclusions(t *testing.T) {
 	var mixed verdictFold
 	mixed.add(VerdictHealed, "")
 	mixed.add(VerdictUnverified, "a real reason")
-	v, reason = mixed.resolve("nothing concluded")
+	v, _, reason = mixed.resolve("nothing concluded")
 	require.Equal(t, VerdictUnverified, v)
 	require.Equal(t, "a real reason", reason)
 }

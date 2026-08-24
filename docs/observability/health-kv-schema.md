@@ -551,10 +551,10 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | secure-redaction | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | audit-stalled | unverified | diverged | lagging | structural-pause-auto-recovered", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "blockedByClass": {"retraction": <int>, "content": <int>, "unknown": <int>, "provenance": <int>}, "blockedWorstClass": "retraction | content | unknown | provenance", "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "auditEnrolled": <bool>, "auditRefusal": "<string>", "audited": <int>, "divergentRows": {"missing": <int>, "stale": <int>, "retained": <int>}, "divergentTotal": <int>, "auditUnverified": <int>, "auditUnverifiedReason": "<string>", "auditLastPassAt": "<RFC3339>" | "", "auditCycleCompletedAt": "<RFC3339>" | "", "auditCycleAudited": <int>, "auditCycleDivergentTotal": <int>, "auditCycleUnverified": <int>, "auditCoverageBasis": "key-type", "auditListingSize": <int>, "auditSuppression": "<string>"}
     }
   },
   "issues": [
@@ -562,6 +562,7 @@ currently reserved-but-unemitted.
     {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityCoverageDivergence", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityRepairFailing", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityRepairBlocked", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilitySweepStalled", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensStructuralPauseAutoRecovered", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
@@ -664,12 +665,35 @@ changed nothing — so `RepairFailing` stays silent, and the previous accounting
 as a heal, logging *"healed a divergent projection"* once per pass for a row it provably
 could not touch. There is no retry that helps: the row stays wrong until a real CDC event
 above that watermark reprojects it, and on the auth plane that row is a permission set the
-graph no longer grants. `metrics.*.<name>.blocked` is the per-pass count and `blockedReason`
-names the governing cause, **including which kind of divergence went unrepaired** —
-`projectedFromRevisions` drift alone (coherence/debug provenance per §6.3, reachable by an
-ordinary lens-definition write) reads differently from a content divergence, which has no
-known producer and is a real finding on sight. Auth plane escalates to `error` at two
-consecutive blocked passes; business lenses stay `warning`.
+graph no longer grants. `metrics.*.<name>.blocked` is the standing count and `blockedReason`
+the governing cause; the issue message names the **sanctioned repair** — a REBUILD of the lens
+(Contract #6 §6.2: a guarded bucket's rebuild forces `truncate=true`, so the purge clears the
+stored watermarks together with the data and the stream replays from empty).
+
+**Read the class, not the count.** `metrics.*.<name>.blockedByClass` splits the total by WHICH
+condition the guard declined, and `blockedWorstClass` names the most severe class present. Only
+the classes that actually fired are emitted, so a class that is not detecting reads as ABSENT
+rather than as a zero, and the counts sum to `blocked`. Both planes publish the full
+classification. On the **auth plane** it also drives `CapabilityRepairBlocked`'s severity — from
+the class, never from parsing `blockedReason`:
+
+| class | meaning | `CapabilityRepairBlocked` severity |
+|---|---|---|
+| `retraction` | a declined `Delete`: a revoked grant stays live and honoured — the over-grant direction | `error` on sight |
+| `content` | a content divergence declined at the guard; no observed ordinary producer | `error` on sight |
+| `unknown` | no read-back, so the class cannot be proven — the fail-closed class, never demoted to the benign one | escalates to `error` at two consecutive blocked passes |
+| `provenance` | `projectedFromRevisions` drift only (coherence/debug provenance per §6.3, reachable by an ordinary lens-definition write that leaves the MATCH unchanged); the row's meaning is identical | `warning`, does not escalate |
+
+A permanent provenance-only streak is a real, benign, standing condition and stays visible at
+`warning` however long it runs — the point is that it must not hold the plane at maximum volume,
+where the classes that have no producer cannot be heard over it.
+
+`LensRepairBlocked` carries the same census, the same `blockedWorstClass`, the same class-named
+`blockedReason` and the same remedy text, but stays **`severity: warning` at every class and every
+streak length**, like every other business-lens code: an `error` there takes the whole Refractor
+instance `unhealthy`, and a single vertical's wrong read model must not take the auth plane down
+with it. Read `blockedByClass` to tell a benign business drift from a real one — the severity on
+that plane deliberately will not.
 
 `CapabilityAuditUnverified` / `LensAuditUnverified` are the third outcome: the sweep
 examined an anchor and could reach **no verdict at all**. Every count above is inferred

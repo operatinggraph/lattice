@@ -398,6 +398,23 @@ type CapabilityLensStatus struct {
 	SweepBlocked          int
 	SweepBlockedStreak    int
 	SweepLastBlocked      string
+	// The blocked total split by WHICH condition the ordering guard refused to
+	// repair, and SweepWorstBlocked naming the most severe class present ("" when
+	// nothing is blocked). The four counts sum to SweepBlocked.
+	//
+	// The split is what the total structurally cannot carry: a declined
+	// retraction leaves a revoked grant live and a content divergence has no
+	// observed producer, while projectedFromRevisions drift leaves a row whose
+	// meaning is identical and is reachable by an ordinary lens-definition
+	// write. One counter reports all three at one severity, so an alert already
+	// at maximum volume for a benign standing condition cannot raise its voice
+	// when a real one arrives. Severity is decided from these counts
+	// (blockedSeverityFor), never from SweepLastBlocked's text.
+	SweepBlockedRetraction int
+	SweepBlockedContent    int
+	SweepBlockedUnknown    int
+	SweepBlockedProvenance int
+	SweepWorstBlocked      string
 	// SweepLastPassAt is when the sweep last reached a verdict and SweepInterval
 	// its tick period; SweepSuppression names why the most recent tick was
 	// skipped ("" when it ran). Together they are the sweep's own liveness: every
@@ -502,10 +519,18 @@ type LensLivenessStatus struct {
 	SweepBlocked          int
 	SweepBlockedStreak    int
 	SweepLastBlocked      string
-	SweepLastPassAt       time.Time
-	SweepSuppression      string
-	SweepSuppressionAt    time.Time
-	SweepInterval         time.Duration
+	// The blocked total split by class, carried for a business lens exactly as
+	// CapabilityLensStatus carries it for an auth-plane one and read by the same
+	// severity rule. The four counts sum to SweepBlocked.
+	SweepBlockedRetraction int
+	SweepBlockedContent    int
+	SweepBlockedUnknown    int
+	SweepBlockedProvenance int
+	SweepWorstBlocked      string
+	SweepLastPassAt        time.Time
+	SweepSuppression       string
+	SweepSuppressionAt     time.Time
+	SweepInterval          time.Duration
 	// The divergence audit's verdicts — the plain corpus's FIRST per-row
 	// correctness signal (lens-projection-divergence-audit-design.md §4.3).
 	// They answer what neither the liveness fields nor the sweep fields can for
@@ -1133,17 +1158,14 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 		// signal: the write returned nil, so nothing errored, the heal counter
 		// ticked, and the row never changed.
 		if s.SweepBlockedStreak > 0 {
-			detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes",
-				name, s.SweepBlocked, s.SweepBlockedStreak)
+			bc := s.blockedClasses()
+			detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes%s",
+				name, s.SweepBlocked, s.SweepBlockedStreak, blockedClassBreakdown(bc))
 			if s.SweepLastBlocked != "" {
 				detail += ": " + s.SweepLastBlocked
 			}
 			blocked = append(blocked, detail+")")
-			if s.SweepBlockedStreak >= capabilityDivergenceErrorStreak {
-				blockedSeverity = "error"
-			} else if blockedSeverity == "" {
-				blockedSeverity = "warning"
-			}
+			blockedSeverity = worseSeverity(blockedSeverity, blockedSeverityFor(bc, s.SweepBlockedStreak))
 			alert = raiseAlert(alert, "repair-blocked")
 		}
 		// An anchor the sweep examined and could conclude nothing about.
@@ -1236,6 +1258,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 		if s.SweepLastBlocked != "" {
 			entryMetric["blockedReason"] = s.SweepLastBlocked
 		}
+		addBlockedClassMetrics(entryMetric, s.blockedClasses())
 		if s.Status == StatusRebuilding && !s.RebuildProgressAt.IsZero() {
 			// Only while one is running: a finished rebuild's last count is not a
 			// fact about the lens now, and publishing it would read as a rebuild
@@ -1326,7 +1349,9 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			severity: blockedSeverity,
 			message: "the convergence sweep found a divergent capability projection and the ordering guard declined its repair; " +
 				"the write returned success having changed nothing, so the row stays wrong while every other signal " +
-				"reports a heal: " + strings.Join(blocked, ", "),
+				"reports a heal. Read the class: a declined RETRACTION leaves a revoked grant live and honoured, a CONTENT " +
+				"divergence has no observed producer, while PROVENANCE-only drift leaves a row whose meaning is identical. " +
+				blockedRemedy + strings.Join(blocked, ", "),
 		}
 	}
 	if len(auditDiverged) > 0 {
@@ -1571,6 +1596,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	var paused, lagging, unreadable, blocked, unverified []string
 	var diverging, unrepaired, stalled, redacting, recovered []string
 	var diverged, auditStalled []string
+	blockedSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
@@ -1581,7 +1607,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		// repair that is failing right now is a fact about the projection, and
 		// losing it to a fault in observing something else would leave the lens
 		// looking merely unobserved.
-		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled, &blocked, &unverified)
+		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled, &blocked, &unverified, &blockedSeverity)
 		// The divergence audit's verdicts are read here for the same reason and
 		// on the same terms: they come from the in-process auditor, not from the
 		// health entry, so they stay valid across an unreadable one. A row the
@@ -1720,9 +1746,11 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	}
 	if len(blocked) > 0 {
 		active[issueLensRepairBlocked] = capIssue{
-			severity: "warning",
+			severity: blockedSeverity,
 			message: "convergence sweep found a divergent row and the ordering guard declined its repair, so the write " +
-				"reported success having changed nothing: " + strings.Join(blocked, ", "),
+				"reported success having changed nothing. Read the class: a declined RETRACTION leaves a row the graph " +
+				"says should not exist, a CONTENT divergence has no observed producer, while PROVENANCE-only drift " +
+				"leaves a row whose meaning is identical. " + blockedRemedy + strings.Join(blocked, ", "),
 		}
 	}
 	if len(unverified) > 0 {
@@ -1856,6 +1884,167 @@ func structuralRecoveryLabel(name string, rec structuralRecovery) string {
 	return fmt.Sprintf("%s (attempt %d, recovered from: %s)", name, rec.attempts, cause)
 }
 
+// blockedClasses is one lens's per-class blocked census, lifted off whichever
+// status struct carries it so the severity rule, the issue detail and the
+// published numbers below are written exactly once. It mirrors
+// structuralRecovery's accessor pattern for the same reason: the two status
+// structs are deliberately separate, and the logic reading them must not be —
+// two copies of a severity rule is how the two planes come to disagree about
+// what a content divergence means.
+type blockedClasses struct {
+	retraction int
+	content    int
+	unknown    int
+	provenance int
+	// worst names the most severe class present, "" when nothing is blocked. It
+	// is a LABEL for the operator: every decision below reads the counts.
+	worst string
+}
+
+func (s CapabilityLensStatus) blockedClasses() blockedClasses {
+	return blockedClasses{
+		retraction: s.SweepBlockedRetraction, content: s.SweepBlockedContent,
+		unknown: s.SweepBlockedUnknown, provenance: s.SweepBlockedProvenance,
+		worst: s.SweepWorstBlocked,
+	}
+}
+
+func (s LensLivenessStatus) blockedClasses() blockedClasses {
+	return blockedClasses{
+		retraction: s.SweepBlockedRetraction, content: s.SweepBlockedContent,
+		unknown: s.SweepBlockedUnknown, provenance: s.SweepBlockedProvenance,
+		worst: s.SweepWorstBlocked,
+	}
+}
+
+// blockedSeverityFor drives the blocked issue's severity from the CLASS of
+// condition the guard declined, rather than from streak length alone.
+//
+// A declined RETRACTION leaves a revoked grant live and honoured, and a CONTENT
+// divergence at a resting watermark has no observed producer — both are
+// conditions that should never appear once, so the first sighting IS the
+// finding and a streak requirement would only delay the alert. Failure
+// direction: this raises early on a condition that is real, and the cost of
+// being wrong is one loud alert on a plane where the alternative is a live
+// over-grant nobody is told about.
+//
+// An UNKNOWN class keeps the existing streak ladder. That is the fail-closed
+// direction for a row whose class could not be proven: it is not quietly
+// demoted to the benign class, and it is not escalated on evidence nobody
+// gathered either.
+//
+// PROVENANCE-only drift stays a warning however long it persists. It is
+// reachable by an ordinary lens-definition write that leaves the MATCH
+// unchanged — which reprojects nothing yet diverges every row — and the row's
+// meaning is identical. Failure direction: a permanent provenance streak is a
+// real, benign, standing condition that stays visible at warning rather than
+// holding the plane at maximum volume, where it would drown the class that has
+// no producer.
+func blockedSeverityFor(bc blockedClasses, streak int) string {
+	switch {
+	case bc.retraction > 0, bc.content > 0:
+		return "error"
+	case bc.unknown > 0 && streak >= capabilityDivergenceErrorStreak:
+		return "error"
+	default:
+		return "warning"
+	}
+}
+
+// worseSeverity keeps the higher of two issue severities. One issue code is
+// raised once for a whole lens set, so it must describe its worst member: a
+// later lens's warning may never overwrite an earlier one's error.
+func worseSeverity(held, next string) string {
+	rank := func(s string) int {
+		switch s {
+		case "error":
+			return 2
+		case "warning":
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(next) > rank(held) {
+		return next
+	}
+	return held
+}
+
+// clampToWarning caps a business lens's issue severity. The classification is
+// computed on that plane exactly as it is on the auth plane — the per-class
+// census, the worst class, the class-named reason and the remedy all cross —
+// and only the CEILING holds: a wrong business read model is one vertical's
+// outage, and an `error` there takes the whole Refractor instance unhealthy,
+// which would take the auth plane down with it. The blast radius, not the
+// finding, is what differs between the planes, so the cap sits here rather
+// than inside blockedSeverityFor, where it would silently weaken the auth
+// plane's rule too.
+func clampToWarning(severity string) string {
+	if severity == "error" {
+		return "warning"
+	}
+	return severity
+}
+
+// blockedClassBreakdown renders the per-class census for one lens's issue
+// detail, worst class first. A class with no rows is OMITTED rather than
+// printed as a zero, so the line names what was actually found — the same
+// posture the audit's divergentRows takes, where a printed zero is
+// indistinguishable from a direction that has stopped detecting.
+func blockedClassBreakdown(bc blockedClasses) string {
+	parts := make([]string, 0, 4)
+	for _, c := range []struct {
+		label string
+		n     int
+	}{
+		{"retraction", bc.retraction},
+		{"content", bc.content},
+		{"unknown", bc.unknown},
+		{"provenance-only", bc.provenance},
+	} {
+		if c.n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", c.label, c.n))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "; by class: " + strings.Join(parts, ", ")
+}
+
+// addBlockedClassMetrics publishes the per-class census beside the blocked
+// total, on both planes. Only the classes that actually fired are emitted, for
+// blockedClassBreakdown's reason; blockedWorstClass is omitted when nothing is
+// blocked rather than published as a class name nothing holds.
+func addBlockedClassMetrics(m map[string]any, bc blockedClasses) {
+	byClass := map[string]any{}
+	for label, n := range map[string]int{
+		"retraction": bc.retraction,
+		"content":    bc.content,
+		"unknown":    bc.unknown,
+		"provenance": bc.provenance,
+	} {
+		if n > 0 {
+			byClass[label] = n
+		}
+	}
+	m["blockedByClass"] = byClass
+	if bc.worst != "" {
+		m["blockedWorstClass"] = bc.worst
+	}
+}
+
+// blockedRemedy is the repair a blocked row actually has, named in the issue so
+// an operator is not left to rediscover a remedy the contract already sanctions.
+// Contract #6 §6.2: a guarded bucket's rebuild forces truncate=true, so the
+// purge clears the stored watermarks together with the data and the stream
+// replays from empty — which is the only thing that moves a row whose stored
+// watermark outranks every token reconciliation can offer.
+const blockedRemedy = "The sanctioned repair is a REBUILD of the lens (Contract #6 §6.2): a guarded bucket's " +
+	"rebuild forces truncate=true, so the purge clears the stored watermarks together with the data and the " +
+	"stream replays from empty. "
+
 // addLensSweepMetrics publishes the sweep's own state alongside the lens's
 // liveness, mirroring the capability path's fields.
 //
@@ -1891,6 +2080,7 @@ func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
 	if s.SweepLastBlocked != "" {
 		m["blockedReason"] = s.SweepLastBlocked
 	}
+	addBlockedClassMetrics(m, s.blockedClasses())
 }
 
 // evalLensSweep collects one business lens's convergence-sweep verdicts into the
@@ -1906,11 +2096,21 @@ func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
 // and — the substantive difference — never escalates past `warning`. A wrong
 // business read model is one vertical's outage; failing the whole Refractor
 // instance for it would take down the auth plane with it.
+//
+// That ceiling covers the blocked verdict too, and covering it is a decision
+// rather than an omission: the blocked CLASSIFICATION crosses here in full (the
+// per-class census, the worst class, the class-named reason, the remedy), and
+// clampToWarning is what holds the severity while letting all of it through.
+//
+// blockedSeverity is an out-parameter rather than a return value because the
+// issue is raised once for the whole lens set and must carry its worst member's
+// severity; the alert token this returns is per-lens.
 func (h *LatticeHeartbeater) evalLensSweep(
 	name string,
 	now time.Time,
 	s LensLivenessStatus,
 	diverging, unrepaired, stalled, blocked, unverified *[]string,
+	blockedSeverity *string,
 ) string {
 	alert := ""
 	if s.SweepDivergentStreak > 0 {
@@ -1935,12 +2135,15 @@ func (h *LatticeHeartbeater) evalLensSweep(
 		alert = raiseAlert(alert, "repair-failing")
 	}
 	if s.SweepBlockedStreak > 0 {
-		detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes",
-			name, s.SweepBlocked, s.SweepBlockedStreak)
+		bc := s.blockedClasses()
+		detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes%s",
+			name, s.SweepBlocked, s.SweepBlockedStreak, blockedClassBreakdown(bc))
 		if s.SweepLastBlocked != "" {
 			detail += ": " + s.SweepLastBlocked
 		}
 		*blocked = append(*blocked, detail+")")
+		*blockedSeverity = worseSeverity(*blockedSeverity,
+			clampToWarning(blockedSeverityFor(bc, s.SweepBlockedStreak)))
 		alert = raiseAlert(alert, "repair-blocked")
 	}
 	if s.SweepUnverifiedStreak > 0 {

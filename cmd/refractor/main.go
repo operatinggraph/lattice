@@ -830,22 +830,7 @@ func main() {
 			// not: an unreadable health entry is an observation fault, not a
 			// sweep one, and a live repair failure must not be lost to it.
 			if sw := entry.pipeline.Sweeper(); sw != nil {
-				status := sw.Status()
-				snap.SweepReconciled = status.Reconciled
-				snap.SweepDivergentStreak = status.DivergentStreak
-				snap.SweepFailingActors = status.FailingActors
-				snap.SweepFailedStreak = status.FailedStreak
-				snap.SweepLastFailure = status.LastFailure
-				snap.SweepUnverified = status.Unverified
-				snap.SweepUnverifiedStreak = status.UnverifiedStreak
-				snap.SweepLastUnverified = status.LastUnverified
-				snap.SweepBlocked = status.Blocked
-				snap.SweepBlockedStreak = status.BlockedStreak
-				snap.SweepLastBlocked = status.LastBlocked
-				snap.SweepLastPassAt = status.LastPassAt
-				snap.SweepSuppression = status.Suppression
-				snap.SweepSuppressionAt = status.SuppressionAt
-				snap.SweepInterval = sw.Interval()
+				copyCapabilitySweepStatus(&snap, sw.Status(), sw.Interval())
 			}
 			// The divergence audit's verdicts, read from the in-process auditor
 			// on exactly the terms the sweep's are: before the reporter, because
@@ -962,22 +947,7 @@ func main() {
 			// health entry — that is an observation fault, not a sweep one. Nil
 			// for a lens the install gate did not enrol.
 			if sw := entry.pipeline.Sweeper(); sw != nil {
-				status := sw.Status()
-				snap.SweepReconciled = status.Reconciled
-				snap.SweepDivergentStreak = status.DivergentStreak
-				snap.SweepFailingActors = status.FailingActors
-				snap.SweepFailedStreak = status.FailedStreak
-				snap.SweepLastFailure = status.LastFailure
-				snap.SweepUnverified = status.Unverified
-				snap.SweepUnverifiedStreak = status.UnverifiedStreak
-				snap.SweepLastUnverified = status.LastUnverified
-				snap.SweepBlocked = status.Blocked
-				snap.SweepBlockedStreak = status.BlockedStreak
-				snap.SweepLastBlocked = status.LastBlocked
-				snap.SweepLastPassAt = status.LastPassAt
-				snap.SweepSuppression = status.Suppression
-				snap.SweepSuppressionAt = status.SuppressionAt
-				snap.SweepInterval = sw.Interval()
+				copyLensSweepStatus(&snap, sw.Status(), sw.Interval())
 			}
 			// The divergence audit's verdicts — for a plain lens this is the
 			// ONLY per-row correctness signal there is, so it is read on the

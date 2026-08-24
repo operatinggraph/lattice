@@ -110,6 +110,91 @@ func (v Verdict) severity() int {
 	}
 }
 
+// BlockedClass names WHICH condition a VerdictBlocked result failed to repair.
+// It is carried explicitly from the point of classification to the operator: the
+// class decides how loudly the condition is reported, and recovering it by
+// matching on a reason string would be one clause standing in for a set of
+// shapes nobody enumerated.
+//
+// The zero value is BlockedUnknown, so a blocked result that reaches a consumer
+// without being classified reports "I cannot prove which kind" rather than being
+// demoted to the benign class. That is the same fail-closed default
+// VerdictUnverified takes for Verdict.
+type BlockedClass uint8
+
+const (
+	// BlockedUnknown means the class could not be proven — the write path had
+	// no read-back to classify with, or none was consulted.
+	BlockedUnknown BlockedClass = iota
+	// BlockedProvenance means the stored and recomputed rows differ ONLY in
+	// projectedFromRevisions: the row's meaning is identical. Contract #6 §6.3
+	// classifies that record as coherence/debug provenance, and it drifts under
+	// ordinary operation — a lens-definition write that leaves the MATCH
+	// unchanged reprojects nothing yet diverges every row.
+	BlockedProvenance
+	// BlockedContent means the rows differ in the row's actual content. At a
+	// resting watermark that has no observed producer, so it is a real finding
+	// on sight.
+	BlockedContent
+	// BlockedRetraction means a declined Delete: a retraction the guard refused,
+	// so a revoked grant stays live and honoured. It is the over-grant
+	// direction, and the only class that describes a row the graph says should
+	// not exist at all.
+	BlockedRetraction
+)
+
+// String renders a BlockedClass for health fields and logs.
+func (c BlockedClass) String() string {
+	switch c {
+	case BlockedRetraction:
+		return "retraction"
+	case BlockedContent:
+		return "content"
+	case BlockedProvenance:
+		return "provenance"
+	default:
+		return "unknown"
+	}
+}
+
+// severity orders blocked classes by how much attention they deserve:
+// retraction > content > unknown > provenance. It is one order, defined once,
+// and it is what breaks the fold's tie between two blocked results, what picks
+// the sweep's governing reason, and what drives the health severity.
+//
+// Retraction and content outrank the rest because neither has an observed
+// ordinary producer, so the first sighting is the finding. Unknown sits above
+// provenance rather than below it because a row whose class cannot be proven
+// must not be treated as the benign one; provenance sits at the bottom because
+// it is reachable by an ordinary operation and the row's meaning is unchanged.
+func (c BlockedClass) severity() int {
+	switch c {
+	case BlockedRetraction:
+		return 3
+	case BlockedContent:
+		return 2
+	case BlockedProvenance:
+		return 0
+	default: // BlockedUnknown
+		return 1
+	}
+}
+
+// blockedClassFor maps the comparator's divergence classification to the class
+// an operator acts on. divergenceNone reaches this only from a write path that
+// held no read-back evidence, so it takes the unknown class — never a benign
+// one, which would read as a claim the row was fine.
+func blockedClassFor(d divergence) BlockedClass {
+	switch d {
+	case divergenceProvenance:
+		return BlockedProvenance
+	case divergenceContent:
+		return BlockedContent
+	default:
+		return BlockedUnknown
+	}
+}
+
 // Reprojection reports what one Reproject call did to one actor's row.
 type Reprojection struct {
 	// Actor is the vertex key that was re-evaluated.
@@ -133,6 +218,12 @@ type Reprojection struct {
 	// VerdictBlocked, so the issue an operator reads names a condition rather
 	// than a count. Empty for Converged and Healed.
 	VerdictReason string
+	// BlockedClass is which condition a VerdictBlocked conclusion failed to
+	// repair, and is meaningful only for that verdict — every other verdict
+	// leaves it at BlockedUnknown. It travels beside VerdictReason rather than
+	// inside it, and the two always describe the same result: a consumer
+	// deciding severity reads this field, never the text.
+	BlockedClass BlockedClass
 	// ProjectionSeq is the ordering token the write carried — the pipeline's
 	// last-applied stream sequence captured before re-evaluation.
 	ProjectionSeq uint64
@@ -150,28 +241,55 @@ type Reprojection struct {
 // default and the verdict distinguishable.
 type verdictFold struct {
 	verdict   Verdict
+	class     BlockedClass
 	reason    string
 	concluded bool
 }
 
-// add folds one result's verdict in, keeping the worst and the reason that
-// produced it.
+// add folds one non-blocked result's verdict in, keeping the worst and the
+// reason that produced it. A blocked result goes through addBlocked, which is
+// the only way a class reaches the fold; anything that arrives here blocked
+// carries BlockedUnknown, the fail-closed class.
 func (f *verdictFold) add(v Verdict, reason string) {
-	switch {
-	case !f.concluded, v.severity() > f.verdict.severity():
-		f.verdict, f.reason, f.concluded = v, reason, true
-	case v == f.verdict && f.reason == "":
+	f.addBlocked(v, BlockedUnknown, reason)
+}
+
+// addBlocked folds one result's verdict in together with the class of condition
+// it failed to repair.
+//
+// Two blocked results TIE on verdict severity, so without the class the actor
+// would report whichever the loop reached first: a perEntry actor holding one
+// provenance-only blocked row and one content-divergence blocked row would name
+// either, depending on iteration order. The class is that tie's order, and the
+// reason travels with whichever class wins so the text and the class can never
+// describe different results.
+func (f *verdictFold) addBlocked(v Verdict, c BlockedClass, reason string) {
+	if !f.concluded || v.severity() > f.verdict.severity() {
+		f.verdict, f.class, f.reason, f.concluded = v, c, reason, true
+		return
+	}
+	if v != f.verdict {
+		// A strictly quieter verdict never displaces the held one.
+		return
+	}
+	if v == VerdictBlocked {
+		if c.severity() > f.class.severity() {
+			f.class, f.reason = c, reason
+		}
+		return
+	}
+	if f.reason == "" {
 		f.reason = reason
 	}
 }
 
 // resolve returns the actor's conclusion. Nothing concluded means nothing was
 // verified — never that everything converged.
-func (f *verdictFold) resolve(defaultReason string) (Verdict, string) {
+func (f *verdictFold) resolve(defaultReason string) (Verdict, BlockedClass, string) {
 	if !f.concluded {
-		return VerdictUnverified, defaultReason
+		return VerdictUnverified, BlockedUnknown, defaultReason
 	}
-	return f.verdict, f.reason
+	return f.verdict, f.class, f.reason
 }
 
 // volatileEnvelopeFields are stamped fresh on every evaluation and therefore
@@ -410,7 +528,8 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 					// declined leaves the row live. Reporting it as a heal is
 					// how a revoking MATCH edit gets silently defeated while
 					// the sweep logs a repair once a minute.
-					fold.add(VerdictBlocked, "stored watermark >= reconciliation token; retraction unrepairable")
+					fold.addBlocked(VerdictBlocked, BlockedRetraction,
+						"stored watermark >= reconciliation token; retraction unrepairable")
 					continue
 				}
 				out.Deleted = true
@@ -485,7 +604,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				// at a resting watermark is reachable by ordinary operation,
 				// whereas content divergence here has no known producer and is
 				// a real finding on sight.
-				fold.add(VerdictBlocked,
+				fold.addBlocked(VerdictBlocked, blockedClassFor(divergedAs),
 					"stored watermark >= reconciliation token; "+divergedAs.String()+" unrepairable")
 				continue
 			}
@@ -504,7 +623,12 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				// authorization surface: the sweep tells the capability plane's
 				// health a divergent grant row was fixed while it sits exactly
 				// as it was.
-				fold.add(VerdictBlocked,
+				// The class stays UNKNOWN whatever the read-back said: no stored
+				// watermark was ever consulted, so this path has not established
+				// that a guard conflict is what stands between the row and its
+				// repair. Reporting the comparator's class here would name a
+				// condition this branch did not observe.
+				fold.addBlocked(VerdictBlocked, BlockedUnknown,
 					"reconciliation write carried no ordering token; "+divergedAs.String()+" unrepairable")
 				continue
 			}
@@ -546,7 +670,7 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 		}
 	}
 
-	out.Verdict, out.VerdictReason = fold.resolve("no result reached a comparison")
+	out.Verdict, out.BlockedClass, out.VerdictReason = fold.resolve("no result reached a comparison")
 	// Converged is derived from the verdict rather than latched by any single
 	// result, so the boolean and the verdict can never disagree on the wire. A
 	// perEntry actor with one converged entry and one blocked entry is not a

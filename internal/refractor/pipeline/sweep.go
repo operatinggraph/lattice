@@ -128,6 +128,34 @@ type SweepStatus struct {
 	Blocked       int
 	BlockedStreak int
 	LastBlocked   string
+	// BlockedByClass counts the blocked set by the class of condition the guard
+	// refused to let the sweep repair, and WorstBlockedClass names the most
+	// severe class present ("" when nothing is blocked). LastBlocked is the
+	// governing reason from that same worst class, so the text and the class
+	// never name different conditions.
+	//
+	// Both are DERIVED from the standing set at publish time rather than
+	// accumulated as passes run, so a class count can never disagree with the
+	// Blocked total it is part of. The map is rebuilt on every publish and never
+	// mutated afterwards, so a snapshot taken by an earlier Status() call keeps
+	// describing the pass it was taken from.
+	//
+	// BlockedStreak counts passes carrying at least one blocked row of ANY
+	// class: it is the standing set's liveness, not a per-class ladder, and the
+	// class is what decides how loudly each of those passes is reported.
+	BlockedByClass    map[BlockedClass]int
+	WorstBlockedClass string
+}
+
+// blockedVerdict is one anchor's standing blocked state: the class of condition
+// the ordering guard refused to let the sweep repair, and the reason text that
+// names it. The two are stored together because they are one verdict — a reason
+// carried apart from its class is a text an aggregator can pick independently of
+// the class it belongs to, which is how a content divergence ends up reported
+// under a provenance heading.
+type blockedVerdict struct {
+	class  BlockedClass
+	reason string
 }
 
 // actorFailure is one anchor's unrepaired-reprojection state. It lives from the
@@ -191,8 +219,9 @@ type Sweeper struct {
 	// tick counter the per-actor backoff schedules against.
 	failing map[string]*actorFailure
 	// blocked and unverified are the standing sets of anchors whose last
-	// verdict was VerdictBlocked / VerdictUnverified, keyed by actor and
-	// valued by the governing reason.
+	// verdict was VerdictBlocked / VerdictUnverified, keyed by actor. An
+	// unverified entry holds its governing reason; a blocked one holds the
+	// class of condition the guard declined together with that class's reason.
 	//
 	// They are SETS, not per-pass counters, for the same reason `failing` is:
 	// a pass examines at most `batch` anchors chosen by cursor round-robin, so
@@ -204,7 +233,7 @@ type Sweeper struct {
 	// pass in every rotation. An entry lives from the verdict that created it
 	// until a later verdict on the SAME anchor supersedes it, or the anchor
 	// leaves the corpus.
-	blocked    map[string]string
+	blocked    map[string]blockedVerdict
 	unverified map[string]string
 	passNo     uint64
 	// coverage and orphan are the two prefilter hints' rotation + earned-share
@@ -291,7 +320,7 @@ func newSweeper(p *Pipeline, plan SweepPlan) *Sweeper {
 		interval:   iv,
 		batch:      batch,
 		failing:    map[string]*actorFailure{},
-		blocked:    map[string]string{},
+		blocked:    map[string]blockedVerdict{},
 		unverified: map[string]string{},
 	}
 }
@@ -506,14 +535,14 @@ func (s *Sweeper) pass(ctx context.Context) {
 				orphanHits++
 			}
 		}
-		s.noteVerdict(actor, res.Verdict, res.VerdictReason)
+		s.noteVerdict(actor, res.Verdict, res.BlockedClass, res.VerdictReason)
 		switch res.Verdict {
 		case VerdictBlocked:
 			// Warn, not Info: the sweep has PROVEN it cannot repair this row,
 			// and a quieter level would sit beside the heal lines it is not.
 			slog.Warn("pipeline: sweep: divergence could not be repaired — the ordering guard declined the write",
-				"ruleId", s.p.ruleID, "actor", actor, "reason", res.VerdictReason,
-				"projectionSeq", res.ProjectionSeq)
+				"ruleId", s.p.ruleID, "actor", actor, "class", res.BlockedClass.String(),
+				"reason", res.VerdictReason, "projectionSeq", res.ProjectionSeq)
 		case VerdictUnverified:
 			slog.Warn("pipeline: sweep: anchor reached no verdict",
 				"ruleId", s.p.ruleID, "actor", actor, "reason", res.VerdictReason)
@@ -543,6 +572,43 @@ func governingReasonLocked(set map[string]string) string {
 		}
 	}
 	return governing
+}
+
+// governingBlockedLocked picks the blocked verdict the heartbeat message names:
+// the worst CLASS in the set, and within that class the lexicographically first
+// reason so the published text stays stable across passes instead of flapping
+// with map iteration order.
+//
+// The class is what decides, not the text. Ordering the reasons alphabetically
+// makes the winner an accident of spelling — that "content divergence" sorts
+// ahead of "provenance-only divergence" is the letter c, not an order anyone
+// chose — and only ONE reason survives for the whole lens, so a single content
+// divergence among sixteen provenance ones is exactly the row that must not
+// lose. Caller holds s.mu.
+func governingBlockedLocked(set map[string]blockedVerdict) (BlockedClass, string) {
+	class, governing, chosen := BlockedUnknown, "", false
+	for _, bv := range set {
+		switch {
+		case !chosen, bv.class.severity() > class.severity():
+			class, governing, chosen = bv.class, bv.reason, true
+		case bv.class == class && bv.reason < governing:
+			governing = bv.reason
+		}
+	}
+	return class, governing
+}
+
+// blockedCensusLocked counts the standing blocked set by class. It is derived
+// here, at publish, rather than tallied as verdicts arrive: one source of truth
+// means a class count cannot disagree with the total it is part of, and a pass
+// that re-examined none of these anchors cannot silently drop one from the
+// census. Caller holds s.mu.
+func blockedCensusLocked(set map[string]blockedVerdict) map[BlockedClass]int {
+	census := make(map[BlockedClass]int, len(set))
+	for _, bv := range set {
+		census[bv.class]++
+	}
+	return census
 }
 
 // noteSuppressed records (or clears) the reason the last tick verified nothing.
@@ -644,12 +710,12 @@ func (s *Sweeper) reapDepartedFailures(anchors []string, targets map[string]stru
 // both entries once a later pass reaches a clean one for that anchor. A verdict
 // is per-anchor standing state: only a NEW verdict on the SAME anchor may
 // supersede it, never the mere fact that some other batch ran.
-func (s *Sweeper) noteVerdict(actor string, v Verdict, reason string) {
+func (s *Sweeper) noteVerdict(actor string, v Verdict, class BlockedClass, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch v {
 	case VerdictBlocked:
-		s.blocked[actor] = reason
+		s.blocked[actor] = blockedVerdict{class: class, reason: reason}
 		delete(s.unverified, actor)
 	case VerdictUnverified:
 		s.unverified[actor] = reason
@@ -1145,11 +1211,15 @@ func (s *Sweeper) record(ctx context.Context, healed int, fault error) {
 		s.status.LastUnverified = ""
 	}
 	s.status.Blocked = len(s.blocked)
+	s.status.BlockedByClass = blockedCensusLocked(s.blocked)
 	if len(s.blocked) > 0 {
 		s.status.BlockedStreak++
-		s.status.LastBlocked = truncateFailure(governingReasonLocked(s.blocked))
+		worst, reason := governingBlockedLocked(s.blocked)
+		s.status.WorstBlockedClass = worst.String()
+		s.status.LastBlocked = truncateFailure(reason)
 	} else {
 		s.status.BlockedStreak = 0
+		s.status.WorstBlockedClass = ""
 		s.status.LastBlocked = ""
 	}
 	s.status.FailingActors = len(s.failing)

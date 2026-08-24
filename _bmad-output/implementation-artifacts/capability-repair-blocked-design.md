@@ -127,13 +127,25 @@ allow-listed as writer-owned with a reason. That gate is the acceptance, not a c
 - A lens with exactly one content-divergence blocked row reaches `error` on the **first** pass.
 - A declined retraction reaches `error` on the first pass and is not reported as a divergence class.
 - The counts published per class sum to `SweepBlocked`.
-- Both the capability-lens and plain-lens issue paths carry the same treatment (`:1135` and `:1937`).
+- Both the capability-lens and plain-lens issue paths carry the same **classification** (`:1135` and
+  `:1937`) — per-class counts, worst class, class-named reason, remedy text.
+
+  **Amended 2026-08-24, at build.** This line originally read *"carry the same treatment"*, and the build
+  correctly read that as including severity. It does not, and shipping it that way would have been an
+  availability regression this item never grounded. The plain-lens path keeps its **`warning` ceiling**:
+  `evalLensSweep`'s own reason — *failing the whole Refractor instance for a business lens's sweep issue
+  would take the auth plane down with it* — is load-bearing, absolute in both
+  `docs/components/refractor.md` and the Health-KV schema, and untouched by anything this fire measured.
+  A business lens's blocked row is a data-correctness finding, not an authorization one; it gets the class,
+  not the ceiling. The contrast is pinned in both directions (the same input reaches `error` on the
+  capability path and stays `warning` on the plain one) so neither constant reads as arbitrary.
 - `docs/observability/health-kv-schema.md` documents the new fields in the same commit.
 - Every fix is proven by reverting it and watching its test fail (standing checklist #3).
 
 ## 5. Non-goals
 
 The ordering guard, the §6.2 tie rule, `guardedWrite`, and every write path (Andrew's 2026-08-06 hold).
+The plain-lens severity ceiling (§4's amendment).
 §15.7's drained-head token revive shape. Any repair path or new write class. The divergence audit's own
 `AuditUnverified` family. `SweepUnverified` / `SweepFailed` families beyond what shares the fold. Any
 contract edit.
