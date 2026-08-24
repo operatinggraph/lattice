@@ -262,10 +262,9 @@ func TestReprojection_PerEntryActorReportsTheWorstBlockedClass(t *testing.T) {
 	}
 }
 
-// TestReprojection_DeclinedRetractionIsClassifiedAsRetraction pins the fourth,
-// worse case that used to hide inside the same counter: a declined Delete is the
-// OVER-GRANT direction — a revoked grant stays live and honoured — and it is not
-// a divergence class at all.
+// TestReprojection_DeclinedRetractionIsClassifiedAsRetraction pins the most
+// severe blocked case: a declined Delete is the OVER-GRANT direction — a revoked
+// grant stays live and honoured — and it is not a divergence class at all.
 //
 // Fails without the stamp: the retraction reports BlockedUnknown, which is the
 // class that escalates on a streak rather than on sight.
@@ -366,6 +365,14 @@ func TestReprojection_TokenlessDropIsUnknownNotTheComparatorsClass(t *testing.T)
 	require.Equal(t, BlockedUnknown, res.BlockedClass,
 		"no watermark was consulted, so no guard conflict was observed to classify")
 	require.Contains(t, res.VerdictReason, "no ordering token")
+	// The class field and the reason text must name the same condition: an
+	// UNKNOWN block must not carry the comparator's divergence kind in its
+	// prose, or the operator reads "content" at a severity the class says is
+	// unknown.
+	require.NotContains(t, res.VerdictReason, "content divergence",
+		"the reason must not name a divergence kind the class disclaims")
+	require.NotContains(t, res.VerdictReason, "provenance",
+		"the reason must not name a divergence kind the class disclaims")
 }
 
 // mixedClassSweepAdapter poses one sweep pass holding all three blocked classes

@@ -626,10 +626,12 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				// The class stays UNKNOWN whatever the read-back said: no stored
 				// watermark was ever consulted, so this path has not established
 				// that a guard conflict is what stands between the row and its
-				// repair. Reporting the comparator's class here would name a
-				// condition this branch did not observe.
+				// repair. The reason names the block cause it DID observe — a
+				// missing token — and never the comparator's divergence kind,
+				// so the text agrees with the class an operator reads for
+				// severity.
 				fold.addBlocked(VerdictBlocked, BlockedUnknown,
-					"reconciliation write carried no ordering token; "+divergedAs.String()+" unrepairable")
+					"reconciliation write carried no ordering token; unrepairable")
 				continue
 			}
 			// Every non-committing outcome has already continued out above, so

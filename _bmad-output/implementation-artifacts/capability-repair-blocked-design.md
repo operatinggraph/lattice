@@ -269,3 +269,46 @@ Touch 18 is mandated by SKILL §4 for any health-emission change. No adjacent me
 guard, the tie rule and the write path are untouched, which is the hold's whole boundary. Declared
 dependency re-verified both ways — the fire depends on `classifyDivergence` already shipping (it does,
 `6f03b32`), and on nothing else; no unlisted dependency surfaced.
+
+## 7. Close pass — three cold reviews, findings classified
+
+Three cold adversarial reviewers (correctness, security/capability-plane, seam/lifetime), none the
+implementer, over the whole item diff.
+
+**Verdicts.** Security: SHIP, no defects — verified the guard, tie rule and every write path are
+byte-for-byte untouched (the only write-branch change is `fold.add(...)` → `fold.addBlocked(...)`, which
+touches class/reason, never verdict/`Wrote`/`Deleted`/`Converged`), that a meaning-change cannot land in
+`BlockedProvenance` (the comparator strips only `projectedFromRevisions`), and that `clampToWarning` has
+exactly one call site and cannot reach the capability path. Correctness and seam: SHIP WITH FIXES.
+
+**Fixed this round (all fixes revert-proven by the reviews' own scenarios).**
+
+1. **The tokenless-drop reason named a class it disclaims** (correctness MINOR, seam MINOR — found
+   independently). The `!outcome.Committed` branch stamps `BlockedUnknown` correctly but built its reason as
+   `"…; " + divergedAs.String() + " unrepairable"`, so a content read-back on that branch produced
+   `class=unknown` / `reason="…content divergence unrepairable"` — the exact text-vs-class disagreement the
+   item's own invariant forbids. Reachable only via a test adapter (`dropUpsertNoToken` at a nonzero seq); no
+   shipped adapter produces `Committed=false` with a real `divergedAs`, since seq==0-with-reader bails at
+   `reproject.go:589` and a byte-identical row converges before the upsert. Fixed: the reason now names only
+   the block cause it observed (a missing token), never the comparator's kind. The test
+   (`TestReprojection_TokenlessDropIsUnknownNotTheComparatorsClass`) previously enshrined the mismatch by
+   asserting only `Contains("no ordering token")`; it now also asserts the reason carries no divergence-kind
+   phrase.
+2. **Two history/changelog comments in test files** (seam MINOR — the repo's most-policed rule, and one
+   `lint-conventions` does not catch). *"used to hide inside the same counter"* narrated the pre-diff
+   undifferentiated counter; both reworded to present tense.
+
+**Latent, recorded not filed — no live producer, so nothing to fix.** The non-outcome `adpt.Delete`
+fallback (`reproject.go:547`) cannot detect a watermark-declined retraction, since a non-outcome adapter
+returns no outcome. All four shipped guarded adapters (NatsKV, Postgres, GrantWriter, Protected) implement
+`OutcomeDeleter`, so the fallback is unreachable on every guarded target and carries no `BlockedRetraction`
+risk today. It is pre-existing write-path shape behind Andrew's frozen boundary, not this fire's mechanism;
+a guard here would be building for an adapter shape that does not exist. If a fifth guarded adapter ever
+ships without `OutcomeDeleter`, the symmetric `SeqGuarded && !OutcomeDeleter` fail-closed check (mirroring
+the upsert-side guard at `reproject.go:589`) is where it belongs.
+
+**Dossier classification (`docs/components/refractor.md`).** The two findings map to existing entries, so
+nothing new is minted and nothing promotes to a gate: (1) is *"an authoring gate and its runtime resolver
+must agree"* in its text-vs-field form (the class field is the resolver, the reason string the advisory
+text); (2) is the standing no-changelog rule. Both were caught by cold review, not the author — the value
+the close pass is designed to deliver.

@@ -96,10 +96,10 @@ func TestBlockedSeverity_ContentReachesErrorOnTheFirstPass(t *testing.T) {
 	}
 }
 
-// TestBlockedSeverity_RetractionReachesErrorOnTheFirstPass covers the fourth,
-// worse case that used to hide inside the same counter: a declined retraction is
-// the OVER-GRANT direction — a revoked grant stays live and honoured — and it is
-// not a divergence class at all.
+// TestBlockedSeverity_RetractionReachesErrorOnTheFirstPass covers the most
+// severe blocked case: a declined retraction is the OVER-GRANT direction — a
+// revoked grant stays live and honoured — and it is not a divergence class at
+// all.
 func TestBlockedSeverity_RetractionReachesErrorOnTheFirstPass(t *testing.T) {
 	_, is := capBlocked(t, capBlockedSnap("capabilityRoles", 1, 1, 0, 0, 0, "retraction",
 		"stored watermark >= reconciliation token; retraction unrepairable"))
