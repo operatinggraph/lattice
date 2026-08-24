@@ -119,6 +119,34 @@ const probeBootstrapIterations = 5000
 // given the same sample data.
 const probeBootstrapSeed = 42
 
+// probeSubjectOn is the physical NATS subject the emitter-ON arm publishes
+// to and its consumer filters on — the plain default-lane subject every
+// other identity-domain test uses, so createIdentityAndGetKeys (which
+// publishes through testutil.PublishOp, hardcoding "ops."+Lane) can drive
+// the wrong-key fixture's setup op through this same pipeline.
+const probeSubjectOn = "ops." + string(processor.LaneDefault)
+
+// probeSubjectOff is a DISTINCT physical subject (still under the
+// "ops.>" wildcard the core-operations stream subscribes to, so the
+// message is still captured; internal/testutil/pipeline.go's
+// ProvisionHarness) for the emitter-OFF arm.
+//
+// A freshly created JetStream durable consumer defaults to delivering the
+// WHOLE retained backlog on its filter subject, not just messages published
+// after its own creation. Filtering the ON and OFF arms on the same
+// "ops.default" subject would mean the OFF arm's brand-new consumer starts
+// by replaying every message the ON arm already published (each landing as
+// a step-2 dedup "duplicate" against Core KV, since the ON arm already
+// committed/rejected that requestId) before ever reaching a genuinely new
+// OFF-arm submission — starving the OFF arm's own workers and timing out its
+// submitters. Lane authorization (step 3) reads `env.Lane` from the envelope
+// body, not the physical NATS subject a message arrived on
+// (commit_path.go's messageFromJetstream only uses msg.Subject() for
+// diagnostics), so every OFF-arm envelope still declares Lane: LaneDefault
+// and authorizes exactly as the ON arm's does; only the transport subject
+// differs, keeping the two arms' backlogs from ever mixing.
+const probeSubjectOff = probeSubjectOn + ".probe-off"
+
 func TestClaimRejectionTimingProbe(t *testing.T) {
 	if os.Getenv("LATTICE_CLAIM_TIMING_PROBE") == "" {
 		t.Skip("set LATTICE_CLAIM_TIMING_PROBE=1 to run this instrument (env-gated, not part of CI); " +
@@ -136,7 +164,7 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	// Health KV counters that only exist when a ClaimEmitter is wired, and the
 	// wrong-key fixture's own setup (a real CreateUnclaimedIdentity op) needs
 	// some working pipeline to drive it through, so this one does double duty.
-	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true)
+	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true, probeSubjectOn)
 
 	// ---- fixtures — the deployed shapes, not a synthetic shortcut ----
 
@@ -207,7 +235,7 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	var consOff jetstream.Consumer
 	for _, withEmitter := range arms {
 		if !withEmitter {
-			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false)
+			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false, probeSubjectOff)
 			break
 		}
 	}
@@ -215,13 +243,15 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	for _, withEmitter := range arms {
 		label := "emitter=on"
 		cp, cons := cpOn, consOn
+		subject := probeSubjectOn
 		if !withEmitter {
 			label = "emitter=off"
 			cp, cons = cpOff, consOff
+			subject = probeSubjectOff
 		}
 
-		probeWarmup(t, ctx, conn, cp, cons, fixtures, 30)
-		results := probeRunConcurrent(t, ctx, conn, cp, cons, fixtures, workers, submitters, samplesPerCause)
+		probeWarmup(t, ctx, conn, cp, cons, fixtures, 30, subject)
+		results := probeRunConcurrent(t, ctx, conn, cp, cons, fixtures, workers, submitters, samplesPerCause, subject)
 		probeReport(t, label, fixtures, results)
 	}
 }
@@ -285,10 +315,10 @@ func probeNanoID(t *testing.T) string {
 // commit_path.go's handleStubFailure only calls it when non-nil, so leaving
 // cfg.ClaimEmitter unset is a genuine emitter-off path — no separate
 // CommitPath wiring is needed to isolate the two arms.
-func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool) (*processor.CommitPath, jetstream.Consumer, string) {
+func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool, filterSubject string) (*processor.CommitPath, jetstream.Consumer, string) {
 	t.Helper()
 	instance := claimInstance + "-" + durable
-	cfg := testutil.PipelineConfig{Durable: durable, Instance: instance}
+	cfg := testutil.PipelineConfig{Durable: durable, Instance: instance, FilterSubjects: []string{filterSubject}}
 	if withEmitter {
 		cfg.ClaimEmitter = processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, testutil.TestLogger())
 	}
@@ -329,27 +359,71 @@ func probeClaimEnvelope(t *testing.T, reqID, target, secret string, hint *proces
 	return env
 }
 
+// probeSubmitAndAwaitReply is testutil.SubmitAndAwaitReply
+// (internal/testutil/pipeline.go) with an explicit publish subject instead of
+// one derived from env.Lane — needed because the emitter-OFF arm publishes on
+// probeSubjectOff (see its doc comment), not the plain default-lane subject
+// that helper hardcodes. Drives exactly one message through cp via
+// testutil.DriveOne, which is itself subject-agnostic (it only pulls from the
+// consumer passed to it, whose FilterSubjects was fixed at construction).
+func probeSubmitAndAwaitReply(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, env *processor.OperationEnvelope, subject string) (processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+
+	inbox := nats.NewInbox()
+	sub, err := conn.NATS().SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", inbox, err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if err := conn.NATS().Flush(); err != nil {
+		t.Fatalf("flush subscription: %v", err)
+	}
+
+	msg := &nats.Msg{Subject: subject, Data: b, Header: nats.Header{probeReplyInboxHeader: []string{inbox}}}
+	if _, err := conn.JetStream().PublishMsg(ctx, msg); err != nil {
+		t.Fatalf("publish to %s: %v", subject, err)
+	}
+
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+
+	replyMsg, err := sub.NextMsg(probeReplyWait)
+	if err != nil {
+		t.Fatalf("no reply on %s within %s (outcome %q): %v", inbox, probeReplyWait, outcome, err)
+	}
+	var reply processor.OperationReply
+	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	return outcome, &reply
+}
+
 // probeWarmup runs perCause discarded submissions per fixture, sequentially
 // on the main goroutine, before the timed concurrent run — so DDL-cache
 // population, vault key fetch, and Starlark JIT effects land here rather than
 // in the measured samples.
-func probeWarmup(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, fixtures []*probeFixture, perCause int) {
+func probeWarmup(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, fixtures []*probeFixture, perCause int, subject string) {
 	t.Helper()
 	for i := 0; i < perCause; i++ {
 		for _, f := range fixtures {
 			env := probeClaimEnvelope(t, probeNanoID(t), f.target, f.secret, f.hint)
-			testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			probeSubmitAndAwaitReply(t, ctx, conn, cp, cons, env, subject)
 		}
 	}
 }
 
-// probeSubmitOnce publishes one ClaimIdentity op for fixture f and returns
-// the publish→reply latency. It hand-rolls testutil.SubmitAndAwaitReply's
-// subscribe-before-publish sequencing (internal/testutil/pipeline.go) rather
-// than calling it, because that helper also drives the consumer itself
-// (DriveOne) — here the WORKER goroutines own that role, and the timed region
-// must be exactly publish→reply, not publish→drive→reply.
-func probeSubmitOnce(ctx context.Context, conn *substrate.Conn, f *probeFixture) (time.Duration, error) {
+// probeSubmitOnce publishes one ClaimIdentity op for fixture f on subject and
+// returns the publish→reply latency. It hand-rolls
+// testutil.SubmitAndAwaitReply's subscribe-before-publish sequencing
+// (internal/testutil/pipeline.go) rather than calling it, because that helper
+// also drives the consumer itself (DriveOne) — here the WORKER goroutines own
+// that role, and the timed region must be exactly publish→reply, not
+// publish→drive→reply.
+func probeSubmitOnce(ctx context.Context, conn *substrate.Conn, f *probeFixture, subject string) (time.Duration, error) {
 	reqID, err := keys.NewNanoID()
 	if err != nil {
 		return 0, fmt.Errorf("nanoid: %w", err)
@@ -376,7 +450,7 @@ func probeSubmitOnce(ctx context.Context, conn *substrate.Conn, f *probeFixture)
 	}
 
 	msg := &nats.Msg{
-		Subject: "ops." + string(processor.LaneDefault),
+		Subject: subject,
 		Data:    b,
 		Header:  nats.Header{probeReplyInboxHeader: []string{inbox}},
 	}
@@ -396,7 +470,7 @@ func probeSubmitOnce(ctx context.Context, conn *substrate.Conn, f *probeFixture)
 // ops, causes interleaved round-robin, and returns each fixture's collected
 // latencies (indexed the same as fixtures).
 func probeRunConcurrent(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
-	fixtures []*probeFixture, workerCount, submitterCount, samplesPerCause int) [][]time.Duration {
+	fixtures []*probeFixture, workerCount, submitterCount, samplesPerCause int, subject string) [][]time.Duration {
 	t.Helper()
 	n := len(fixtures)
 	total := int64(samplesPerCause * n)
@@ -451,7 +525,7 @@ func probeRunConcurrent(t *testing.T, ctx context.Context, conn *substrate.Conn,
 					return
 				}
 				causeIdx := int(i % int64(n))
-				lat, err := probeSubmitOnce(ctx, conn, fixtures[causeIdx])
+				lat, err := probeSubmitOnce(ctx, conn, fixtures[causeIdx], subject)
 				if err != nil {
 					recordErr(fmt.Errorf("%s: %w", fixtures[causeIdx].name, err))
 					continue
