@@ -1805,7 +1805,32 @@ what happens when that bound is hit. On the last one the fail-safe direction is 
 times out) rather than answer early — answering early restores the timing signal at exactly the moment an
 attacker is generating load, which is when they are measuring.
 
-**One thing the build must measure rather than inherit:** this section's census is two timing classes
+**MEASURED 2026-08-24 — and the predicted signal is not there.** Rather than hand the build an unmeasured
+premise, this fire measured all three causes end to end on `packages/identity-domain`'s harness (a real
+`TestVault` is wired, so the wrong-key arm genuinely does the envelope `KVGet` + AEAD decrypt), n=40 each,
+timed from submit to reply:
+
+| cause | min | p50 | p90 | max |
+|---|---|---|---|---|
+| absent-target | 1.64 ms | 2.26 ms | 2.89 ms | 7.77 ms |
+| already-claimed | 1.96 ms | **2.51 ms** | 2.94 ms | 7.79 ms |
+| wrong-key | 1.84 ms | **2.31 ms** | 2.74 ms | 3.29 ms |
+
+**Already-claimed is not faster than wrong-key — at p50 it is marginally SLOWER**, the opposite of this
+section's stated direction, and the ~0.2 ms between class medians sits inside a 1.6–7.8 ms per-sample spread.
+The skipped `KVGet` + decrypt is real in the code path but is not resolvable at the operation boundary here.
+
+What that does and does not license. It does **not** prove the oracle absent: a per-sample bias far below the
+noise is still extractable by averaging enough samples, and this is one in-process host with sequential
+submission. It does bound the exploit cost — many requests per bit rather than one — which is why the row
+stays ★, and it means **the floor constant cannot be derived from a measured gap, because there isn't one at
+this resolution.** A build should therefore start by re-measuring against a *concurrent* submitter and a
+Vault-backed deployment; if the gap is still under the noise there, the honest outcome may be to close this
+row as not-exploitable-as-specified rather than to add a mechanism that costs availability for no measured
+signal. Method: submit N identical-shape rejections per cause through the claim pipeline and compare
+percentiles; the throwaway probe is not committed, because a wall-clock assertion is not a CI-stable test.
+
+**The remaining open question the build still owns:** this section's census is two timing classes
 (already-claimed vs wrong-key). The *absent-target* arm is a plausible third and is the highest-value oracle of
 the three — it answers "does this identity exist at all" — but whether it is separable in the time domain is
 **unmeasured**; a KV miss still costs its round-trip. `packages/identity-domain`'s embedded-NATS harness can
