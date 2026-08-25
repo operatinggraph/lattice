@@ -126,6 +126,21 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
   `starlark_*`/`step6_validate`, `internal/refractor/adapter`'s `rls_*`, `internal/gateway/auth`, the
   CapabilityAuthorizer tests) plus the outcome-level residual in `internal/bypass`, all under `go test ./...`.
 
+  **`go test ./...` is NOT the whole gate set, and a green tree is not evidence CI will pass.** Two
+  classes sit outside it, and each has reddened `main` from a fully green local run:
+  - **Build-tagged harnesses never compile under `go test ./...`** — a test double that stops satisfying
+    an interface fails to *build* while the whole tree reports green. Enumerate them
+    (`grep -rl "^//go:build " --include=*_test.go internal/`) and run the ones your change's interfaces
+    reach: `make test-control-plane-authz`, `make test-*-convergence`, the `leaseshortwindow`,
+    `augurconvergence` and `unroutedconvergence` tags. Adding a method to an engine/service interface
+    reaches all of them.
+  - **`packages/` content edits must bump the manifest version AND the `Version` constant mirroring it**
+    — an unchanged version makes a semantic change invisible to a running stack, because a plain install
+    no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`.
+
+  **`.github/workflows/ci.yml` is the authority for what must be green** — read its steps rather than
+  trusting this list, which is a summary and has been incomplete before.
+
 ### Current workflow (Winston drives it): the swim-lane fleet, not a manual story chain
 
 Work is driven by the **scheduled swim-lane fleet** — `steward`, `designer`, `owner`, `fe-engineer`,
