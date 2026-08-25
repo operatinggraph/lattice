@@ -1015,25 +1015,9 @@ const defaultDirectOpRetryBudget = 3
 // exhausted) whether the spent budget was this engine default rather than a
 // declared cap, so the caller's escalation message can say which.
 func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol, action string) (suppressed, exhausted, budgetIsDefault bool) {
-	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
-	if !ok {
-		return false, false, false
-	}
-	if e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g) {
-		return true, false, false
-	}
-	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
-	if !ok || capN <= 0 {
-		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
-			// No usable cap on the row, and either this isn't a directOp gap
-			// (assignTask/triggerLoom/proposedOp keep their Option-D backoff
-			// path instead of a hard cap) or the row already declares
-			// inflight_<g> (a lens that has adopted the §10.3 external-gap
-			// contract; its own pacing, not this engine's to second-guess) —
-			// never auto-suppress.
-			return false, false, false
-		}
-		capN, budgetIsDefault = defaultDirectOpRetryBudget, true
+	terms := e.gapSuppressionTerms(targetID, entityID, row, gapCol, action)
+	if !terms.needsCount {
+		return terms.suppressed, false, false
 	}
 	count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
 	if err != nil {
@@ -1044,10 +1028,72 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 			"targetId", targetID, "entityId", entityID, "gap", gapCol, "err", err)
 		return false, false, false
 	}
-	if count >= capN {
-		return true, true, budgetIsDefault
+	return terms.verdict(count)
+}
+
+// gapSuppressedWithCount is gapSuppressed's verdict over a dispatch-count the
+// caller has ALREADY read — the reconciler sweep's count leg holds the key's
+// value and its revision from the same read that decided the key was not
+// corrupt, and a second read of the identical key would be a third KV
+// round-trip per parked gap per pass. Same terms, same order, same answers; the
+// only difference is where the count came from, so a caller with no count in
+// hand must keep using gapSuppressed (which reads it, and only if the verdict
+// actually rests on the budget term).
+func (e *Engine) gapSuppressedWithCount(targetID, entityID string, row map[string]any, gapCol, action string, count int) (suppressed, exhausted, budgetIsDefault bool) {
+	terms := e.gapSuppressionTerms(targetID, entityID, row, gapCol, action)
+	if !terms.needsCount {
+		return terms.suppressed, false, false
+	}
+	return terms.verdict(count)
+}
+
+// suppressionTerms is everything gapSuppressed decides from the ROW alone: the
+// authoritative inflight_<g> term, and whether a usable retry cap exists at all
+// (a row-declared maxretries_<g>, else the engine default for a bare directOp
+// gap). needsCount=false means suppressed is already the final answer and no
+// dispatch-count is consulted — which is why the inflight and no-cap paths cost
+// no KV read. needsCount=true means the verdict rests on the budget term, and
+// capN/budgetIsDefault describe the cap the count is measured against.
+type suppressionTerms struct {
+	suppressed      bool
+	needsCount      bool
+	capN            int
+	budgetIsDefault bool
+}
+
+// verdict applies the budget term to a dispatch-count: the budget is spent —
+// and the gap is suppressed as `exhausted`, the §10.8 decision point — iff the
+// count has reached the cap.
+func (t suppressionTerms) verdict(count int) (suppressed, exhausted, budgetIsDefault bool) {
+	if count >= t.capN {
+		return true, true, t.budgetIsDefault
 	}
 	return false, false, false
+}
+
+func (e *Engine) gapSuppressionTerms(targetID, entityID string, row map[string]any, gapCol, action string) suppressionTerms {
+	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
+	if !ok {
+		return suppressionTerms{}
+	}
+	if e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g) {
+		return suppressionTerms{suppressed: true}
+	}
+	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
+	budgetIsDefault := false
+	if !ok || capN <= 0 {
+		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
+			// No usable cap on the row, and either this isn't a directOp gap
+			// (assignTask/triggerLoom/proposedOp keep their Option-D backoff
+			// path instead of a hard cap) or the row already declares
+			// inflight_<g> (a lens that has adopted the §10.3 external-gap
+			// contract; its own pacing, not this engine's to second-guess) —
+			// never auto-suppress.
+			return suppressionTerms{}
+		}
+		capN, budgetIsDefault = defaultDirectOpRetryBudget, true
+	}
+	return suppressionTerms{needsCount: true, capN: capN, budgetIsDefault: budgetIsDefault}
 }
 
 // hasUsableRetryCap reports whether the row carries a positive maxretries_<g>
@@ -1084,8 +1130,13 @@ func (e *Engine) hasUsableRetryCap(targetID, entityID string, row map[string]any
 // exhausted gap's mark (if one survives) belongs to the ORIGINAL action's
 // retry lineage, while the escalation is a different action entirely, keyed
 // under its own deterministic instanceKey (deriveAugurHandle) inside
-// CreateAugurReasoningClaim's own anti-storm mark. Callable from both lane-1
-// (handleRow) and the sweep (reclaim) — the shared suppression site both use.
+// CreateAugurReasoningClaim's own anti-storm mark. Called from all three
+// suppression sites: lane-1 (handleRow), the sweep's mark leg (reclaim), and
+// the sweep's count leg (sweepCount) — the last reached from the retry budget
+// rather than from a mark, which is what keeps the §10.8 promise for a row that
+// has gone quiet and for a gap whose mark has expired. Its un-escalated raise
+// goes through alertStanding: the count leg re-derives it every pass for the
+// life of the budget, so only its arrival is loud.
 // budgetIsDefault (gapSuppressed's verdict) only shapes the un-escalated
 // alert's wording below — it never changes the escalation/alert branch taken.
 func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targetID, entityID, entityKey, gapColumn string,
@@ -1101,7 +1152,7 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		// One row's spent budget, not the target's: the count this exhausted is
 		// per (target, entity, gap) in weaver-state, so the issue is keyed the
 		// same way and another entity's gap closing never retires it.
-		e.alert(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", "GapBudgetExhausted",
+		e.alertStanding(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", "GapBudgetExhausted",
 			"target "+targetID+" entity "+entityID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
 		return substrate.Ack
 	}
@@ -1208,9 +1259,39 @@ func splitRowKey(key string) (targetID, entityID string, ok bool) {
 }
 
 // alert records a Health KV issue and logs it at Error — the FR29 loud-failure
-// pair.
+// pair. Every call logs: the families raised here include ones whose message is
+// the only thing telling two genuinely distinct faults apart at one key (a
+// dropped fired timer names the timer it dropped), so a raise is never assumed
+// to be a repetition of the last one. A raise that IS re-derived on a fixed
+// cadence for as long as its condition holds belongs on alertStanding instead.
 func (e *Engine) alert(key, severity, code, message string) {
 	e.logger.Error("weaver: " + message)
+	e.issues.set(key, severity, code, message)
+}
+
+// alertStanding records a Health KV issue exactly as alert does, but logs the
+// fact's ARRIVAL at Error and its continuation at Debug. It is for a raise the
+// engine re-derives on a CADENCE rather than on an event: the §10.8
+// exhausted-gap raise is re-evaluated by every reconciler sweep pass for as
+// long as the retry budget stands (~128h at the defaults, one pass a minute),
+// so logging each re-derivation at Error would write thousands of identical
+// lines per parked gap and bury every arrival — including the arrivals of other
+// faults — in a stream an operator reads to find out what just happened. The
+// Health issue is unaffected: it is a latch, it carries the full fact, and its
+// `since` still says when the condition first arose.
+//
+// The seam is deliberately narrow. A caller belongs here only if its message is
+// a pure function of its key, because the arrival test compares severity and
+// code alone (issueCache.standingAs): a family that varies its message per
+// occurrence at one key would have those occurrences damped to Debug and lose
+// them, so those keep using alert. A change of severity or code at the same key
+// is a different fact and arrives loudly again.
+func (e *Engine) alertStanding(key, severity, code, message string) {
+	if e.issues.standingAs(key, severity, code) {
+		e.logger.Debug("weaver: " + message)
+	} else {
+		e.logger.Error("weaver: " + message)
+	}
 	e.issues.set(key, severity, code, message)
 }
 

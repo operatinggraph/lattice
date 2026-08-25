@@ -253,10 +253,11 @@ func (m *markStore) deleteRevision(ctx context.Context, targetID, entityID, gapC
 }
 
 // countKeySuffix names the reserved dispatch-count key tail:
-// `<targetId>.<entityId>.<gapColumn>.__count`. The count is matched (and skipped)
-// by suffix wherever marks are enumerated — the reconciler sweep and the
-// marksInFlight gauge — because it is NOT a §10.3 mark: it has a 4th segment, so
-// splitMarkKey would reject it as corrupt. The "__count" tail can never be a
+// `<targetId>.<entityId>.<gapColumn>.__count`. The count is matched by suffix
+// wherever weaver-state is enumerated — the marksInFlight gauge skips it, and
+// the reconciler sweep routes it to its own count leg — because it is NOT a
+// §10.3 mark: it has a 4th segment, so splitMarkKey would reject it as corrupt.
+// The "__count" tail can never be a
 // gapColumn (singleTokenPattern forbids the dot) nor a NanoID entityId
 // (substrate.Alphabet has no underscore), so the count, mark, and `__control`
 // key shapes are mutually disjoint.
@@ -272,6 +273,22 @@ type dispatchCount struct {
 // segment shape as the mark key), with the reserved __count tail.
 func countKey(targetID, entityID, gapColumn string) string {
 	return targetID + "." + entityID + "." + gapColumn + countKeySuffix
+}
+
+// splitCountKey splits a §E dispatch-count key
+// `<targetId>.<entityId>.<gapColumn>.__count`. The reserved tail is stripped
+// first, which is what makes the shape decidable: what remains is exactly the
+// positional `<targetId>.<entityId>.<gapColumn>` mark shape, whose segments are
+// an install-validated dot-free token, a bare NanoID and another dot-free token
+// (splitMarkKey). A key without the reserved tail — a mark, a `__control`
+// marker, an `__effect` window — is not a count key, and anything that does not
+// parse is corrupt.
+func splitCountKey(key string) (targetID, entityID, gapColumn string, ok bool) {
+	head, found := strings.CutSuffix(key, countKeySuffix)
+	if !found {
+		return "", "", "", false
+	}
+	return splitMarkKey(head)
 }
 
 // dispatchCountCASRetries bounds the read-modify-write retry loop on the count
@@ -348,10 +365,14 @@ func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entity
 	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
-// deleteDispatchCount clears one gap's dispatch-count — the §E budget reset, run
-// from clearClosedMarks on gap-close (the same level-reconciled path that deletes
-// the mark). A missing key is success (idempotent): a closed gap with no prior
-// dispatch never had a count.
+// deleteDispatchCount clears one gap's dispatch-count — the §E budget reset on
+// gap-close, run from clearClosedMarks (the same level-reconciled path that
+// deletes the mark) when a row delivery observes the close. It is not the only
+// reset: the reconciler's count leg (sweeper.deleteCount) performs the same
+// reset, revision-conditioned, for a gap whose row has gone quiet and whose
+// close no delivery will ever announce. Both are level-reconciled reads of the
+// same fact, so either observing it first is correct. A missing key is success
+// (idempotent): a closed gap with no prior dispatch never had a count.
 func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) error {
 	err := m.conn.KVDelete(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
 	if err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
@@ -363,9 +384,9 @@ func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID,
 // countInFlight reports how many in-flight marks exist in the bucket, scanned
 // on the heartbeat cadence (never per-message). Reserved `<targetId>.__control`
 // dispatch-skip markers, `…__count` dispatch-count keys, and `…__effect…`
-// confidence windows are skipped — none is a §10.3 mark (the same guard the
-// reconciler sweep applies), so the marksInFlight gauge counts only real
-// in-flight dispatch.
+// confidence windows are skipped — none is a §10.3 mark, told apart by the same
+// reserved suffixes/marker the reconciler sweep splits its legs on, so the
+// marksInFlight gauge counts only real in-flight dispatch.
 func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 	keys, err := m.conn.KVListKeys(ctx, m.bucket)
 	if err != nil {
@@ -749,9 +770,10 @@ func (m *markStore) deleteEffectWindows(ctx context.Context, targetID string) (d
 
 // deleteByTargetPrefix deletes every weaver-state key with prefix
 // "<targetID>." — every `<targetId>.<entityId>.<gapColumn>` in-flight mark,
+// every `<targetId>.<entityId>.<gapColumn>.__count` retry-budget dispatch-count,
 // the `<targetId>.__control` dispatch-skip marker, and every
-// `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window (all share
-// the prefix). The trailing
+// `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window (all four
+// share the prefix, so all four go). The trailing
 // "." in the prefix means "t1." never matches a key under "t10." — no
 // accidental cross-target overlap from a shared numeric prefix. Tolerates
 // ErrKeyNotFound mid-scan (mirrors the reconciler sweep's scan-tolerance

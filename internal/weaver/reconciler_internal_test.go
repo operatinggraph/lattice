@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -559,7 +561,7 @@ func TestSweep_CorruptMark(t *testing.T) {
 	if _, err := h.conn.KVPut(ctx, "weaver-state", badValKey, []byte("{still not json")); err != nil {
 		t.Fatalf("bump corrupt mark revision: %v", err)
 	}
-	h.engine.sweep.deleteCorrupt(ctx, badValKey, staleRev, "stale-revision probe")
+	h.engine.sweep.deleteCorrupt(ctx, badValKey, staleRev, corruptShapeMark, "stale-revision probe")
 	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
 		t.Fatalf("a skipped corrupt delete must not alert a deletion")
 	}
@@ -2119,4 +2121,1130 @@ func TestSweep_GapClosedMarkRetiresStandingIssue(t *testing.T) {
 	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
 		t.Fatal("a gap-closed mark delete must retire the gap's standing issue")
 	}
+}
+
+// countExists reports whether a `…__count` retry-budget dispatch-count key is
+// present in weaver-state. Presence only — see countValue where the test's
+// claim is about the budget's magnitude.
+func (h *sweepHarness) countExists(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string) bool {
+	t.Helper()
+	_, err := h.conn.KVGet(ctx, "weaver-state", countKey(targetID, entityID, gapColumn))
+	if err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
+		t.Fatalf("count read %q: %v", countKey(targetID, entityID, gapColumn), err)
+	}
+	return err == nil
+}
+
+// countValue reads the gap's current dispatch-count. A test asserting that a
+// leg did not SPEND the budget must compare this, not countExists: a dispatch
+// bumps the count and leaves the key exactly where it was, so presence alone
+// cannot tell an untouched budget from a consumed one.
+func (h *sweepHarness) countValue(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string) int {
+	t.Helper()
+	n, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, gapColumn)
+	if err != nil {
+		t.Fatalf("dispatch-count read: %v", err)
+	}
+	return n
+}
+
+// seedCount drives the gap's dispatch-count to n through the real increment
+// path, so the seeded budget carries the same value shape and TTL a chain of n
+// genuine dispatches leaves behind.
+func (h *sweepHarness) seedCount(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+}
+
+// deleteRow removes an entity's weaver-targets row — the entity tombstoned, its
+// Lens re-projected without it, or a lens rebuild mid-purge.
+func (h *sweepHarness) deleteRow(t *testing.T, ctx context.Context, targetID, entityID string) {
+	t.Helper()
+	if err := h.conn.KVDelete(ctx, "weaver-targets", targetID+"."+entityID); err != nil {
+		t.Fatalf("delete row: %v", err)
+	}
+}
+
+// seedIssue plants a standing per-entity gap issue, so a test whose claim is
+// about a CLEAR has something to retire that it did not have to raise first.
+func (h *sweepHarness) seedIssue(targetID, entityID, gapColumn string) {
+	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", "GapBudgetExhausted",
+		"target "+targetID+" entity "+entityID+": row column "+gapColumn+" has exhausted its declared retry budget")
+}
+
+// restart replaces the harness's engine with a FRESH one over the SAME NATS
+// connection and the same weaver-state/weaver-targets buckets: a new
+// issueCache (empty — the cache is process-local, health.go), a new sweeper,
+// and an empty registry. That is the shape a Weaver process has moments after a
+// restart, so anything held only in the old process's memory is gone while
+// every durable key survives. The caller re-seeds the registry, standing in for
+// the meta.weaverTarget replay.
+func (h *sweepHarness) restart(t *testing.T) {
+	t.Helper()
+	h.engine = NewEngine(h.conn, h.engine.cfg)
+}
+
+// logCapture records every log record the engine emits, AT EVERY LEVEL. Level
+// is deliberately not part of the filter: e.alert logs a fact's arrival at
+// Error and a re-raise of the same standing fact at Debug, so a counter that
+// looked only at Error would silently stop counting the very repeats a
+// "how many times did this happen" assertion exists to catch.
+type logCapture struct {
+	mu   sync.Mutex
+	recs []capturedRecord
+}
+
+type capturedRecord struct {
+	level   slog.Level
+	message string
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	c.recs = append(c.recs, capturedRecord{level: r.Level, message: r.Message})
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *logCapture) WithGroup(string) slog.Handler      { return c }
+
+// countContaining reports how many captured records mention sub — used with an
+// entityId to attribute records to one subject.
+func (c *logCapture) countContaining(sub string) int {
+	return len(c.levelsContaining(sub))
+}
+
+// levelsContaining returns the level of every captured record mentioning sub,
+// in emission order.
+func (c *logCapture) levelsContaining(sub string) []slog.Level {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []slog.Level
+	for _, r := range c.recs {
+		if strings.Contains(r.message, sub) {
+			out = append(out, r.level)
+		}
+	}
+	return out
+}
+
+// exhaustedRow is the §10.2 row shape every count-leg vector starts from: a
+// violating entity whose gap is open, whose retry cap is declared, and which
+// declares no in-flight remediation. Callers mutate the one column their vector
+// is about, so a negative vector differs from its positive control in exactly
+// one field.
+func exhaustedRow(entityID, gapColumn string, budget int) map[string]any {
+	g := strings.TrimPrefix(gapColumn, gapColumnPrefix)
+	return map[string]any{
+		"entityKey":                "vtx.leaseApp." + entityID,
+		"violating":                true,
+		gapColumn:                  true,
+		inflightColumnPrefix + g:   false,
+		maxretriesColumnPrefix + g: budget,
+	}
+}
+
+// TestSweep_CountLegEscalatesExhaustedGapWithNoMark is the core of the
+// count-anchored sweep leg. An exhausted gap stops refreshing its mark (the
+// exhausted branch deliberately never reclaims), so once that mark's TTL
+// expires the only durable trace of the suppression is the `…__count` retry
+// budget — which outlives the mark by two orders of magnitude and keeps the gap
+// from dispatching the whole time. The count leg is what re-derives Contract
+// #10 §10.8's loud stop from it: one pass over a violating, still-open,
+// budget-spent, markless gap raises GapBudgetExhausted on the
+// per-(target, entity, gap) latch, dispatches nothing, and leaves the budget at
+// exactly the value it found (the suppression is unchanged — only its silence
+// is fixed).
+func TestSweep_CountLegEscalatesExhaustedGapWithNoMark(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegRaise"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("setup: this vector requires a markless gap")
+	}
+
+	h.pass(ctx)
+
+	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x"))
+	if !ok {
+		t.Fatalf("a markless exhausted gap must still raise its §10.8 loud stop (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if issue.Code != "GapBudgetExhausted" || issue.Severity != "warning" {
+		t.Fatalf("issue = %q/%q, want GapBudgetExhausted/warning", issue.Code, issue.Severity)
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != budget {
+		t.Fatalf("dispatch-count = %d, want %d: raising the alert must not spend the budget it reports on", got, budget)
+	}
+	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("an un-escalated exhausted gap must not be dispatched by the count leg")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegReRaisesExhaustedGapAfterRestart pins the durability the
+// leg exists for. The GapBudgetExhausted issue lives in the process-local
+// issueCache; the suppression that causes it lives in weaver-state. A fresh
+// engine over the same buckets — empty cache, empty registry, every durable key
+// intact — must re-derive the issue from the count alone, so the loud stop
+// stands for as long as the park it explains.
+func TestSweep_CountLegReRaisesExhaustedGapAfterRestart(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegRestart"
+	const budget = 2
+	target := &Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	}
+	h.seedTarget(target)
+	entityID := testNanoID(t)
+	issueKey := issueKeyGapEntity(targetID, entityID, "missing_x")
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	h.pass(ctx)
+	if _, ok := issueAt(h.engine.issues, issueKey); !ok {
+		t.Fatal("setup: the first pass must raise the standing issue")
+	}
+
+	h.restart(t)
+	h.agePastWarmup()
+	h.seedTarget(target)
+	if _, ok := issueAt(h.engine.issues, issueKey); ok {
+		t.Fatal("setup: a restarted engine must start with an empty issueCache")
+	}
+
+	h.pass(ctx)
+
+	issue, ok := issueAt(h.engine.issues, issueKey)
+	if !ok {
+		t.Fatalf("the loud stop must be re-derivable from the durable count after a restart (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if issue.Code != "GapBudgetExhausted" {
+		t.Fatalf("re-raised issue code = %q, want GapBudgetExhausted", issue.Code)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegEscalatesToAugurWithNoMark covers the count leg's DISPATCH
+// branch: where the target's augur block escalates "exhausted", the leg does
+// not merely alert — it fires a real CreateAugurReasoningClaim episode for a
+// gap that has no mark and no fresh CDC delivery, and retires the standing
+// warning in favour of that escalation. The fresh episode is a genuine
+// dispatch, so it bumps the chain's count exactly once; anything more would
+// mean the leg double-counted an attempt it made once.
+func TestSweep_CountLegEscalatesToAugurWithNoMark(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegAugur"
+	const budget = 2
+	id := testNanoID(t)
+	spec := targetSpecFixture(targetID) // gaps.missing_a -> directOp FixA
+	spec["augur"] = map[string]any{"escalate": []any{"exhausted"}}
+	h.engine.source.handle(vertexEvent(t, id, weaverTargetClass))
+	h.engine.source.handle(specEvent(t, id, spec))
+
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_a", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_a", budget))
+
+	h.pass(ctx)
+
+	op := h.nextOp(t)
+	if op["operationType"] != defaultAugurOp {
+		t.Fatalf("operationType = %v, want %q (the escalation the count leg dispatched)",
+			op["operationType"], defaultAugurOp)
+	}
+	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_a")) {
+		t.Fatal("the escalation episode must hold the gap's mark (its own anti-storm claim)")
+	}
+	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_a"), budget+1; got != want {
+		t.Fatalf("dispatch-count = %d, want %d: the escalation is ONE fresh dispatch, counted once", got, want)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+		t.Fatal("an escalated gap must not also hold the un-escalated standing warning")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegDefersToTheMarkLeg pins WHERE the mark-listed guard sits:
+// below the level reconcile (which must run for every key, gated by nothing)
+// and above every arm that escalates. Two entities, one pass, one target:
+//
+//   - held: a LIVE mark. The mark leg leaves an in-flight episode alone and
+//     never escalates it, so if the count leg escalated over it the gap would be
+//     escalated while its remediation is still running — the guard's whole
+//     point. Nothing may be raised for this entity at all, which is an
+//     assertion no logging or severity choice can hollow out.
+//   - stale: an expired mark. Both legs reach the same exhausted gap, and the
+//     escalation site must be reached exactly ONCE — counted over records at
+//     every level, since a repeat raise logs at Debug rather than Error.
+func TestSweep_CountLegDefersToTheMarkLeg(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logs := &logCapture{}
+	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegDefers"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	held, stale := testNanoID(t), testNanoID(t)
+	h.putMark(t, ctx, markKey(targetID, held, "missing_x"),
+		fixtureMark(targetID, held, "missing_x", "directOp", futureLease()))
+	h.putMark(t, ctx, markKey(targetID, stale, "missing_x"),
+		fixtureMark(targetID, stale, "missing_x", "directOp", pastLease()))
+	for _, entityID := range []string{held, stale} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	}
+
+	h.pass(ctx)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, held, "missing_x")); ok {
+		t.Fatal("a gap whose episode is still in flight must not be escalated by the count leg")
+	}
+	if got := logs.countContaining("entity " + held); got != 0 {
+		t.Fatalf("records naming the in-flight entity = %d, want 0", got)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, stale, "missing_x")); !ok {
+		t.Fatal("setup: the expired-mark vector must escalate once, via the mark leg")
+	}
+	if got := logs.countContaining("entity " + stale); got != 1 {
+		t.Fatalf("escalations of one gap in one pass = %d, want exactly 1 (the mark leg's)", got)
+	}
+}
+
+// TestSweep_CountLegLevelReconcilesAboveTheGates pins the arm ORDER against
+// sweepMark's: the level reconcile runs for every count key, gated by nothing,
+// because retiring a satisfied gap's bookkeeping is cleanup and never new
+// dispatch. Both vectors have a PRESENT row whose gap column reads false — the
+// positive evidence that the chain the budget bounded has ended — and both are
+// behind a gate that stops the acting arms:
+//
+//   - a target frozen by the operator `__control` marker. If the freeze gated
+//     the reconcile, the spent budget and its standing issue would survive the
+//     whole freeze, and the moment the operator re-enabled the target a
+//     re-opened gap would be suppressed against a budget spent by a chain that
+//     already closed.
+//   - a target absent from the registry (a replay that has not landed). Same
+//     stranding, with no operator action to notice it.
+func TestSweep_CountLegLevelReconcilesAboveTheGates(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const frozen = "fixtureCountLegFrozenClose"
+	const unknown = "fixtureCountLegUnknownClose"
+	h.seedTarget(&Target{
+		TargetID: frozen,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	if err := h.engine.marks.setDisabled(ctx, frozen, true); err != nil {
+		t.Fatalf("setDisabled: %v", err)
+	}
+	if err := h.engine.seedDisabledTargets(ctx); err != nil {
+		t.Fatalf("seedDisabledTargets: %v", err)
+	}
+	closedRow := func(entityID string) map[string]any {
+		row := exhaustedRow(entityID, "missing_x", 2)
+		row["violating"], row["missing_x"] = false, false
+		return row
+	}
+	frozenEntity, unknownEntity := testNanoID(t), testNanoID(t)
+	for targetID, entityID := range map[string]string{frozen: frozenEntity, unknown: unknownEntity} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", 2)
+		h.putRow(t, ctx, targetID, entityID, closedRow(entityID))
+		h.seedIssue(targetID, entityID, "missing_x")
+	}
+
+	h.pass(ctx)
+
+	for targetID, entityID := range map[string]string{frozen: frozenEntity, unknown: unknownEntity} {
+		if h.countExists(t, ctx, targetID, entityID, "missing_x") {
+			t.Fatalf("%s: a closed gap's budget must be reset whatever gate stands over the target", targetID)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+			t.Fatalf("%s: the close must retire the standing issue whatever gate stands over the target", targetID)
+		}
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegOnlyEscalatesForARegisteredTarget pins the registry gate on
+// the ACTING arms. "Not installed" reads identically for a target that was
+// removed and one whose meta.weaverTarget replay has not landed yet, and an
+// escalation is a dispatch — so a gap the engine cannot even describe must not
+// be escalated on the strength of a key left in a bucket. The positive vector
+// runs first, in the same pass on an identical row and an identical budget, so
+// the negative pins the REGISTRATION and not an inert leg.
+func TestSweep_CountLegOnlyEscalatesForARegisteredTarget(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const registered = "fixtureCountLegRegistered"
+	const unregistered = "fixtureCountLegUnknown"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: registered,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	live, ghost := testNanoID(t), testNanoID(t)
+	for targetID, entityID := range map[string]string{registered: live, unregistered: ghost} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	}
+
+	h.pass(ctx)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(registered, live, "missing_x")); !ok {
+		t.Fatalf("a registered target's exhausted gap must escalate (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(unregistered, ghost, "missing_x")); ok {
+		t.Fatal("an unregistered target must not be escalated: replay lag reads exactly like removal")
+	}
+	if got := h.countValue(t, ctx, unregistered, ghost, "missing_x"); got != budget {
+		t.Fatalf("unregistered target's dispatch-count = %d, want %d (the bound itself is never destroyed here)", got, budget)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegSkipsDisabledTarget proves the freeze gate reaches the
+// count leg's acting arms: an escalation is a dispatch (on an augur target it
+// fires a real op), and an operator freeze stops new dispatch — the gate
+// sweepMark's reclaim and lane-1's Ack-skip already honour. The enabled target
+// in the same pass carries the identical row, gap and spent budget, so the
+// negative proves the FREEZE rather than a vector that could never escalate.
+func TestSweep_CountLegSkipsDisabledTarget(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const frozen = "fixtureCountLegDisabled"
+	const active = "fixtureCountLegEnabled"
+	const budget = 2
+	for _, targetID := range []string{frozen, active} {
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+		})
+	}
+	if err := h.engine.marks.setDisabled(ctx, frozen, true); err != nil {
+		t.Fatalf("setDisabled: %v", err)
+	}
+	// The durable `__control` marker is the authority; the in-memory set the
+	// gate reads is rebuilt from it exactly as a restart rebuilds it.
+	if err := h.engine.seedDisabledTargets(ctx); err != nil {
+		t.Fatalf("seedDisabledTargets: %v", err)
+	}
+	frozenEntity, activeEntity := testNanoID(t), testNanoID(t)
+	for targetID, entityID := range map[string]string{frozen: frozenEntity, active: activeEntity} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	}
+
+	h.pass(ctx)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(active, activeEntity, "missing_x")); !ok {
+		t.Fatalf("the same vector on an ENABLED target must escalate (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(frozen, frozenEntity, "missing_x")); ok {
+		t.Fatal("a frozen target must not escalate: escalation is dispatch")
+	}
+	if got := h.countValue(t, ctx, frozen, frozenEntity, "missing_x"); got != budget {
+		t.Fatalf("frozen target's dispatch-count = %d, want %d (a freeze touches nothing)", got, budget)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegNeverEscalatesAnOrphanColumn pins the orphan-column arm,
+// and what it deliberately does NOT do. A column the playbook no longer names
+// is a gap this leg has no remediation to bound, so escalating it would be a
+// dispatch nothing asked for — and on an augur-escalating target it would not
+// terminate: the escalation re-creates the gap's mark and re-arms its count,
+// the mark leg's own orphan arm deletes that mark, and the next pass escalates
+// again, firing a real CreateAugurReasoningClaim every sweep interval forever.
+//
+// The standing issue is left exactly as found. Lane 1 raises GapBudgetExhausted
+// at this same latch for this same column — openGapColumns enumerates every
+// true missing_*, playbook-named or not — so a clear here would fight a raise
+// the other leg believes in, flapping the latch and re-stamping its `since` on
+// every round trip. Not escalating is this leg's whole job here; the latch
+// stays lane 1's.
+func TestSweep_CountLegNeverEscalatesAnOrphanColumn(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegOrphanColumn"
+	const budget = 2
+	id := testNanoID(t)
+	spec := targetSpecFixture(targetID) // declares gaps.missing_a ONLY
+	spec["augur"] = map[string]any{"escalate": []any{"exhausted"}}
+	h.engine.source.handle(vertexEvent(t, id, weaverTargetClass))
+	h.engine.source.handle(specEvent(t, id, spec))
+
+	entityID := testNanoID(t)
+	// missing_dropped is a live, violating, budget-spent gap column that the
+	// playbook does not name — the shape a package re-author leaves behind.
+	h.seedCount(t, ctx, targetID, entityID, "missing_dropped", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_dropped", budget))
+	h.seedIssue(targetID, entityID, "missing_dropped")
+
+	h.pass(ctx)
+	h.pass(ctx)
+
+	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_dropped")) {
+		t.Fatal("an orphan column must never be dispatched — that is the non-terminating escalation loop")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_dropped")); !ok {
+		t.Fatal("the latch at this key belongs to lane 1, which raises for this column too: this leg must not clear it")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_dropped"); got != budget {
+		t.Fatalf("dispatch-count = %d, want %d (an intermediate replay definition is not evidence)", got, budget)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegKeepsTheBudgetWhenTheRowIsGone pins absence-is-not-evidence
+// on the one key that IS the retry bound. A Refractor lens rebuild purges a
+// target's rows and re-replays them; inside that window a registered, enabled
+// target reads row-gone for every entity it has. Deleting the budgets there
+// would re-arm exactly the storm defaultDirectOpRetryBudget exists to prevent,
+// and would buy only prompt collection of a key the 128h TTL already collects.
+// The standing ISSUE is retired — it states a fact about a row that is not
+// there — and the next pass re-raises it if the row returns still exhausted.
+func TestSweep_CountLegKeepsTheBudgetWhenTheRowIsGone(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegRowGone"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	issueKey := issueKeyGapEntity(targetID, entityID, "missing_x")
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	h.pass(ctx)
+	if _, ok := issueAt(h.engine.issues, issueKey); !ok {
+		t.Fatal("setup: the first pass must raise the standing issue")
+	}
+
+	// The row vanishes (a tombstone, or a lens rebuild mid-purge).
+	h.deleteRow(t, ctx, targetID, entityID)
+	h.pass(ctx)
+
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != budget {
+		t.Fatalf("dispatch-count = %d, want %d: a missing row is not evidence, and this key is the retry bound", got, budget)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKey); ok {
+		t.Fatal("the issue names a row that is not there and must be retired")
+	}
+
+	// The row comes back still exhausted: the loud stop returns with it.
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	h.pass(ctx)
+	if _, ok := issueAt(h.engine.issues, issueKey); !ok {
+		t.Fatal("a returning row with a spent budget must re-raise the loud stop")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegClearsBudgetAndIssueWhenTheGapCloses is the counterpart to
+// the row-gone vector, and the contrast is the whole rule: a PRESENT row whose
+// gap column reads false is positive evidence that the chain this budget
+// bounded has ended, so here the count IS deleted — otherwise it stands for its
+// whole TTL and suppresses the next chain the moment the gap re-opens, while
+// the standing issue keeps naming a gap that closed. The delete is visible on
+// the sweep's orphan metric, like every other key the sweep removes.
+func TestSweep_CountLegClearsBudgetAndIssueWhenTheGapCloses(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegGapClosed"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	issueKey := issueKeyGapEntity(targetID, entityID, "missing_x")
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	h.pass(ctx)
+	if _, ok := issueAt(h.engine.issues, issueKey); !ok {
+		t.Fatal("setup: the first pass must raise the standing issue")
+	}
+
+	closed := exhaustedRow(entityID, "missing_x", budget)
+	closed["violating"], closed["missing_x"] = false, false
+	h.putRow(t, ctx, targetID, entityID, closed)
+	h.pass(ctx)
+
+	if h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("a closed gap's retry budget must be reset by the count leg")
+	}
+	if _, ok := issueAt(h.engine.issues, issueKey); ok {
+		t.Fatal("the raise must be retired by the same read that observes the close")
+	}
+	if _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+		t.Fatalf("sweepOrphansDeleted = %d, want 1: a budget the sweep deletes must be visible on the heartbeat", orphans)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegLeavesBudgetOnUnparseableRow pins never-act-on-unreadable-
+// evidence for the budget. Both entities carry a directOp gap with no declared
+// cap and a count already at defaultDirectOpRetryBudget, so a readable row
+// escalates on the engine default — which is exactly what the control entity
+// does in the same pass. The vector under test differs only in that its row
+// body is not JSON: the leg must neither escalate on it nor reset the budget.
+func TestSweep_CountLegLeavesBudgetOnUnparseableRow(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegBadRow"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	readable, garbled := testNanoID(t), testNanoID(t)
+	for _, entityID := range []string{readable, garbled} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", defaultDirectOpRetryBudget)
+	}
+	// No maxretries_x on either row: the engine default is the cap in play.
+	h.putRow(t, ctx, targetID, readable, map[string]any{
+		"entityKey": "vtx.leaseApp." + readable, "violating": true, "missing_x": true,
+	})
+	if _, err := h.conn.KVPut(ctx, "weaver-targets", targetID+"."+garbled, []byte("{not json")); err != nil {
+		t.Fatalf("put bad row: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, readable, "missing_x")); !ok {
+		t.Fatalf("the same vector with a READABLE row must escalate on the engine default (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, garbled, "missing_x")); ok {
+		t.Fatal("an unparseable row must never drive an escalation")
+	}
+	if got := h.countValue(t, ctx, targetID, garbled, "missing_x"); got != defaultDirectOpRetryBudget {
+		t.Fatalf("dispatch-count = %d, want %d: an unparseable row must not touch the budget",
+			got, defaultDirectOpRetryBudget)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegDeletesACorruptBudgetBody proves the count leg deletes a
+// retry budget whose BODY no reader can parse, says so loudly, and retires the
+// gap's standing issue with it (the leg reaches that gap only through the key
+// it is removing, so a latch left behind would never be revisited). This is not
+// cosmetic parity with the mark and effect legs: every read of a garbled count
+// errors, gapSuppressed's read-failure posture is deliberately the dispatchable
+// side, and incrementDispatchCount's read-modify-write fails identically — so
+// the budget can never accumulate and a directOp gap retries with no cap at
+// all. The delete re-arms from 0 (what the garbled body already yields) and
+// leaves a key that can count again — and once it does, the CorruptMark issue
+// is retired, because a count key's name comes back by construction and the
+// listing-based retirement never fires for one.
+func TestSweep_CountLegDeletesACorruptBudgetBody(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegCorrupt"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	if _, err := h.conn.KVPut(ctx, "weaver-state", countKey(targetID, entityID, "missing_x"), []byte("{not json")); err != nil {
+		t.Fatalf("put corrupt count: %v", err)
+	}
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", 2))
+	h.seedIssue(targetID, entityID, "missing_x")
+
+	h.pass(ctx)
+
+	if h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("a retry budget whose body cannot be parsed must be deleted: it can never accumulate")
+	}
+	if !hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("the delete must be loud (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+		t.Fatal("deleting the key the leg navigates by must retire that gap's standing issue with it")
+	}
+	if _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 1 {
+		t.Fatalf("sweepCorrupt = %d, want 1", corrupt)
+	}
+
+	// The next dispatch recreates the same key with a countable body: the
+	// CorruptMark issue is about the value that was deleted, not the name.
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", 1)
+	h.pass(ctx)
+	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatal("a key that reads and parses cleanly must retire its CorruptMark issue")
+	}
+}
+
+// TestSweep_CountLegLeavesACorruptBodyAloneBehindTheGates pins WHERE the
+// corrupt-body delete sits: below the registry and freeze gates, because it
+// destroys durable state and those gates exist to stop exactly that during
+// replay lag or under an operator freeze. The realistic trigger is a rolling
+// upgrade writing a body an older build cannot parse — shredding every budget
+// of a target the registry has not replayed yet would be the worst possible
+// response to it. The corrupt-KEY delete is different and stays ungated: an
+// unsplittable key names no target, so no gate can decide it.
+func TestSweep_CountLegLeavesACorruptBodyAloneBehindTheGates(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const unregistered = "fixtureCountLegCorruptUnknown"
+	const frozen = "fixtureCountLegCorruptFrozen"
+	h.seedTarget(&Target{
+		TargetID: frozen,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	if err := h.engine.marks.setDisabled(ctx, frozen, true); err != nil {
+		t.Fatalf("setDisabled: %v", err)
+	}
+	if err := h.engine.seedDisabledTargets(ctx); err != nil {
+		t.Fatalf("seedDisabledTargets: %v", err)
+	}
+	ghost, frozenEntity := testNanoID(t), testNanoID(t)
+	for targetID, entityID := range map[string]string{unregistered: ghost, frozen: frozenEntity} {
+		if _, err := h.conn.KVPut(ctx, "weaver-state", countKey(targetID, entityID, "missing_x"), []byte("{not json")); err != nil {
+			t.Fatalf("put corrupt count: %v", err)
+		}
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", 2))
+	}
+	// A key no split can attribute to any target: nothing gates this one.
+	unattributable := "fixtureCountLegCorruptKey.__count"
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", unattributable, []byte(`{"count":1}`)); err != nil {
+		t.Fatalf("create corrupt-key count: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if !h.countExists(t, ctx, unregistered, ghost, "missing_x") {
+		t.Fatal("an unregistered target's budget must survive an unparseable body: replay lag is not corruption")
+	}
+	if !h.countExists(t, ctx, frozen, frozenEntity, "missing_x") {
+		t.Fatal("a frozen target's budget must survive an unparseable body: a freeze forbids destroying its state")
+	}
+	if h.markExists(t, ctx, unattributable) {
+		t.Fatal("a count key that names no target can be gated by nothing and must be deleted")
+	}
+	if _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 1 {
+		t.Fatalf("sweepCorrupt = %d, want 1 (the unattributable key only)", corrupt)
+	}
+}
+
+// TestSweep_CountLegLeavesBudgetOnRowWithNoEntityKey pins the
+// incomplete-evidence gate. escalateExhaustedGap feeds entityKey to planGap so
+// the escalation can name its candidate, and lane 1 declines to dispatch a
+// violating row that carries no §10.2 entityKey echo at all — the mark leg
+// reaches that call only past the reclaim's own non-empty guard, and this leg
+// has no mark to have been guarded. The control entity carries the identical
+// row WITH the echo, in the same pass, so the negative pins the echo.
+func TestSweep_CountLegLeavesBudgetOnRowWithNoEntityKey(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegNoEntityKey"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	echoed, silent := testNanoID(t), testNanoID(t)
+	for _, entityID := range []string{echoed, silent} {
+		h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	}
+	h.putRow(t, ctx, targetID, echoed, exhaustedRow(echoed, "missing_x", budget))
+	silentRow := exhaustedRow(silent, "missing_x", budget)
+	delete(silentRow, "entityKey")
+	h.putRow(t, ctx, targetID, silent, silentRow)
+
+	h.pass(ctx)
+
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, echoed, "missing_x")); !ok {
+		t.Fatalf("the same vector WITH an entityKey must escalate (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, silent, "missing_x")); ok {
+		t.Fatal("a violating row with no entityKey echo must not drive an escalation the plan cannot name")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CorruptMarkIssueRetiresWhenTheMarkKeyComesBack pins the retirement
+// route pass's listing check cannot reach. A mark key's NAME recurs by
+// construction: the gap stays open, so the next episode CAS-creates a mark at
+// the very key the corrupt one was deleted from, and from then on every listing
+// contains it. The CorruptMark issue is about the VALUE that was deleted, so a
+// key that reads and parses cleanly must retire it — otherwise one garbled
+// value pins an `error`-severity issue, and with it the component's whole
+// health status, for the life of the process while the gap remediates normally.
+func TestSweep_CorruptMarkIssueRetiresWhenTheMarkKeyComesBack(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCorruptMarkReturns"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, []byte("{not json")); err != nil {
+		t.Fatalf("create corrupt-value mark: %v", err)
+	}
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+	})
+
+	h.pass(ctx)
+	if !hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("setup: the corrupt mark must alert (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if h.markExists(t, ctx, key) {
+		t.Fatal("setup: the corrupt mark must be deleted")
+	}
+
+	// The gap is still open, so the next episode claims the same key with a
+	// well-formed §10.3 mark — the recurrence a listing check can never see.
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", futureLease()))
+
+	h.pass(ctx)
+
+	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("a mark key that reads and parses cleanly must retire its CorruptMark issue (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if !h.markExists(t, ctx, key) {
+		t.Fatal("the fresh episode's mark must survive the pass that retires the issue")
+	}
+}
+
+// TestSweep_CorruptMarkIssueRetiresWhenTheEffectKeyComesBack is the same
+// retirement for the `__effect` family, which recurs the same way: the window
+// is keyed per (target, gapColumn, actionRef), so the next dispatch of that
+// same pair writes a fresh window at the deleted key's name and every later
+// listing contains it. Without the leg's own retirement the CorruptMark issue
+// would outlive the value it describes by the life of the process.
+func TestSweep_CorruptMarkIssueRetiresWhenTheEffectKeyComesBack(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCorruptEffectReturns"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	key := effectKey(targetID, "missing_x", "directOp")
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, []byte("{not json")); err != nil {
+		t.Fatalf("create corrupt-value effect window: %v", err)
+	}
+
+	h.pass(ctx)
+	if !hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("setup: the corrupt window must alert (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if h.markExists(t, ctx, key) {
+		t.Fatal("setup: the corrupt window must be deleted")
+	}
+
+	// The next dispatch of the same (target, gap, action) books a fresh window
+	// at the same key.
+	if err := h.engine.marks.recordEffectDispatch(ctx, targetID, "missing_x", "directOp"); err != nil {
+		t.Fatalf("record effect dispatch: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("an effect key that reads and parses cleanly must retire its CorruptMark issue (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if !h.markExists(t, ctx, key) {
+		t.Fatal("a live target/column's rebuilt window must survive the pass that retires the issue")
+	}
+}
+
+// TestSweep_CountLegRetiresACorruptIssueUnderAFreeze pins the retirement side
+// of the corrupt-body handling ABOVE the gates that stop the delete. The two
+// steps answer different questions: deleting a garbled value destroys durable
+// state, so a freeze and an unreplayed registry must both veto it — but reading
+// a value that parses destroys nothing, and the CorruptMark issue it retires is
+// `error`-severity, which aggregateStatus maps straight to an unhealthy
+// component. Gating the retirement behind the freeze would therefore pin the
+// whole of Weaver unhealthy for the length of an operator freeze, over a value
+// that no longer exists and a key that is now perfectly well-formed — a red an
+// operator has no way to clear.
+func TestSweep_CountLegRetiresACorruptIssueUnderAFreeze(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegCorruptFrozenRetire"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	if _, err := h.conn.KVPut(ctx, "weaver-state", countKey(targetID, entityID, "missing_x"), []byte("{not json")); err != nil {
+		t.Fatalf("put corrupt count: %v", err)
+	}
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", 2))
+
+	h.pass(ctx)
+	if !hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("setup: the corrupt body must alert (issues: %+v)", h.engine.issues.snapshot())
+	}
+
+	// The next dispatch recreates the key with a countable body, and only then
+	// does an operator freeze the target.
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", 1)
+	if err := h.engine.marks.setDisabled(ctx, targetID, true); err != nil {
+		t.Fatalf("setDisabled: %v", err)
+	}
+	if err := h.engine.seedDisabledTargets(ctx); err != nil {
+		t.Fatalf("seedDisabledTargets: %v", err)
+	}
+
+	h.pass(ctx)
+
+	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("a freeze must not strand an error-severity issue about a value that no longer exists (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if !h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("the rebuilt budget must survive the pass that retires the issue")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegSkipsTheRowReadWhileTheMarkStands pins the mark-listed
+// check ABOVE the row read. The mark leg visits the same gap in the same pass
+// and reads the same row, so a read here is a duplicate on every pass of every
+// actively-remediating gap — the common case, not the edge. The observable
+// consequence of the ordering is that this leg does not act on the row at all
+// while a mark stands: a gap whose column has already closed keeps its budget
+// for exactly one more pass, and the pass after the mark leg clears the mark
+// resets it. That latency is correct — the mark leg owns the gap while its mark
+// stands, and it does the same reset itself.
+func TestSweep_CountLegSkipsTheRowReadWhileTheMarkStands(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegMarkFirst"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	markK := markKey(targetID, entityID, "missing_x")
+	// A LIVE mark: the mark leg leaves an in-flight episode alone, so nothing
+	// but this leg's own ordering decides what happens to the count this pass.
+	h.putMark(t, ctx, markK, fixtureMark(targetID, entityID, "missing_x", "directOp", futureLease()))
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", 2)
+	closed := exhaustedRow(entityID, "missing_x", 2)
+	closed["violating"], closed["missing_x"] = false, false
+	h.putRow(t, ctx, targetID, entityID, closed)
+
+	h.pass(ctx)
+
+	if !h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("while a mark stands the count leg must not reach the row at all — the mark leg owns the gap")
+	}
+	// The mark leg's own level reconcile clears the mark on that same pass, so
+	// the next pass finds no mark and the count leg does the reset.
+	if h.markExists(t, ctx, markK) {
+		t.Fatal("setup: the mark leg must clear a closed gap's mark on the first pass")
+	}
+	h.pass(ctx)
+	if h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("with the mark gone the count leg must reset the closed gap's budget")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegLogsTheParkOnceNotEveryPass pins the damping at the site
+// the fire made expensive. The count leg re-derives the SAME exhausted-gap fact
+// on every pass for as long as the budget stands — a minute apart, for the
+// count's ~128h TTL — so if that raise logged at Error each time, one parked gap
+// would write thousands of identical Error lines and bury every arrival, its own
+// included, in the stream an operator reads to find out what just happened. The
+// Health issue is unchanged: it is the latch, it carries the fact, and `since`
+// still says when the park began.
+func TestSweep_CountLegLogsTheParkOnceNotEveryPass(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logs := &logCapture{}
+	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegParkLog"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	for i := 0; i < 3; i++ {
+		h.pass(ctx)
+	}
+
+	levels := logs.levelsContaining("entity " + entityID)
+	if len(levels) != 3 {
+		t.Fatalf("records for the parked gap = %d, want 3 (every pass re-derives the fact and says so somewhere)", len(levels))
+	}
+	if levels[0] != slog.LevelError {
+		t.Fatalf("the park's arrival logged at %v, want Error", levels[0])
+	}
+	if levels[1] != slog.LevelDebug || levels[2] != slog.LevelDebug {
+		t.Fatalf("re-derivations logged at %v/%v, want Debug — the park arrived once", levels[1], levels[2])
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); !ok {
+		t.Fatal("the standing issue must hold across every pass whatever the log level")
+	}
+	h.requireNoOp(t)
 }

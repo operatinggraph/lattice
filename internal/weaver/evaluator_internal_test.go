@@ -1916,3 +1916,56 @@ func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 			e.issues.snapshot())
 	}
 }
+
+// TestGapSuppressedWithCount_MatchesTheReadingVariant pins the two entry points
+// to the §E dispatch-suppression gate against each other. The sweep's count leg
+// already holds the dispatch-count's value and revision from the read that
+// decided the key was not corrupt, so it answers the gate from that value
+// instead of paying a second round-trip for the identical key; every other
+// caller has no count in hand and reads it. The two must never diverge — a gate
+// that suppresses on one path and dispatches on the other would make the
+// §10.8 park depend on which leg observed it — so this drives both over the
+// same rows and the same seeded counts and compares the full verdict triple.
+func TestGapSuppressedWithCount_MatchesTheReadingVariant(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureSuppressionParity"
+	cases := []struct {
+		name   string
+		row    map[string]any
+		action string
+		count  int
+	}{
+		{"in flight, cap irrelevant", map[string]any{"inflight_x": true, "maxretries_x": 2}, actionDirectOp, 5},
+		{"budget spent on a declared cap", map[string]any{"inflight_x": false, "maxretries_x": 2}, actionDirectOp, 2},
+		{"budget spent past a declared cap", map[string]any{"inflight_x": false, "maxretries_x": 2}, actionDirectOp, 7},
+		{"budget left on a declared cap", map[string]any{"inflight_x": false, "maxretries_x": 5}, actionDirectOp, 2},
+		{"no cap declared, directOp default reached", map[string]any{}, actionDirectOp, defaultDirectOpRetryBudget},
+		{"no cap declared, directOp default not reached", map[string]any{}, actionDirectOp, defaultDirectOpRetryBudget - 1},
+		{"no cap declared, non-directOp never auto-suppresses", map[string]any{}, actionAssignTask, 99},
+		{"inflight declared without a usable cap", map[string]any{"inflight_x": false}, actionDirectOp, 99},
+		{"non-positive declared cap", map[string]any{"inflight_x": false, "maxretries_x": 0}, actionAssignTask, 99},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entityID := testNanoID(t)
+			h.seedCount(t, ctx, targetID, entityID, "missing_x", tc.count)
+			row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true}
+			for k, v := range tc.row {
+				row[k] = v
+			}
+			wantS, wantE, wantD := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", tc.action)
+			gotS, gotE, gotD := h.engine.gapSuppressedWithCount(targetID, entityID, row, "missing_x", tc.action, tc.count)
+			if gotS != wantS || gotE != wantE || gotD != wantD {
+				t.Fatalf("gapSuppressedWithCount = (%v,%v,%v), gapSuppressed = (%v,%v,%v)",
+					gotS, gotE, gotD, wantS, wantE, wantD)
+			}
+		})
+	}
+}

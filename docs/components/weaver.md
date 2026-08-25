@@ -242,8 +242,13 @@ remediation already in flight, and a spent retry budget — sourced differently:
   (`<targetId>.<entityId>.<gapColumn>.__count`, a reserved key shape disjoint from marks and the
   `__control` marker). It is **incremented on each actual dispatch** — the lane-1 CAS-create-and-fire
   and the sweep's reclaim, so it tracks one-per-anti-storm-window real attempts from **both** dispatch
-  legs — and **reset (deleted) on gap-close** by `clearClosedMarks` (the same level-reconciled path
-  that deletes the mark). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
+  legs — and **reset (deleted) on gap-close** by whichever level-reconciled path observes the close
+  first: `clearClosedMarks` on a row delivery, or the reconciler sweep's own **count leg**
+  (`sweepCount`), the only one that reaches a gap whose row has gone quiet. That leg also re-derives
+  the §10.8 `GapBudgetExhausted` standing issue from the count on every pass — so the alert that
+  explains a suppression outlives a restart for as long as the suppression itself does — and retires
+  it on the row's own evidence (the gap closed, the row is gone, or the playbook stopped naming the
+  column). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
   (package policy baked into the cypher, like the freshness window). The budget term suppresses when
   `dispatchCount(target, entity, gap) >= maxretries_<g>`.
 
@@ -944,8 +949,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   (`GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError`) is identical for every row and would
   mint N copies. Splitting is where clears get stranded — one key served both scopes, so a single clear
   incidentally retired facts that now need naming. Minted: `issueKeyGap`, two concurrent erasures
-  (2026-08-23); the missing-`entityKey` data key carried the same shape one function over. Check: enumerate every raise and
-  every clear, assert each raise still reaches each clear it had, and pin two entities on one column.
+  (2026-08-23); the missing-`entityKey` data key carried the same shape one function over. **Before adding
+  a CLEAR, enumerate every OTHER leg that raises at that key** — a clear one leg believes against a raise
+  another believes does not settle: the latch flaps, re-stamps its `since` on every re-raise, and defeats
+  any arrival-vs-repeat damping downstream. Minted 2026-08-25: the sweep's count leg cleared an orphan
+  column's `GapBudgetExhausted` while lane-1's `openGapColumns` kept raising it, that scan enumerating
+  every true `missing_*` whether the playbook names it or not. Check: enumerate every raise and every
+  clear — grep the family's key CONSTRUCTOR, not only the file you are editing — assert each raise still
+  reaches each clear it had, and pin two entities on one column.
 - **A per-entity Health issue is unbounded, and the heartbeat is ONE KV value** — `issueCache.snapshot()`
   feeds the whole slice into `health.weaver.<instance>`, so the moment a key gains an entity segment the
   document grows with the subject count. Aggregate status over ALL issues, then bound the listing, and
@@ -963,23 +974,31 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   bounds the DOCUMENT, not the cache. Minted: the `data:` key split (2026-08-23) — the per-increment
   reviews all passed; only the cumulative close pass saw it. Check: for every raise, name the clear that
   retires that exact column, and pair the retirement with the READ so it is level-driven.
-- **A redundant safety line cannot be proven by reverting it — check whether the two orders are provably
-  equivalent before citing a test as its proof** — aggregating status before vs. after truncation is
-  identical whenever the severity roll-up collapses on the same split, so the "proof" passes either way.
-  Minted: `TestEmit_TruncatesListingButNotStatus`, which was cited in this dossier as a check it never
-  performed. Check: revert the line; if nothing reds, either make it load-bearing or delete the claim —
-  do not keep both.
-- **Prove each changed line by reverting THAT LINE, not the feature** — a builder who proves its own new
-  lines can leave the line it was asked to change covered by nothing: reverting the whole feature reds the
-  new tests, so the gap is invisible. Minted twice in one item (2026-08-23): the `contextHint` attach-guard
-  and the spec-body JSON tag both reverted clean with the full suite green, and three of the gap-key
-  proofs passed vacuously until an isolation vector forced the shadowed path. **Where the claim is about
-  WHERE a block sits, the mutation is a MOVE, not a revert** — reverting proves the block does something,
-  never that it must run before the return the comment names. Minted again (2026-08-23): the anchor
-  bookkeeping's placement above the disabled-target skip is what stops the latch re-forming in a narrower
-  window, and moving it below left the whole suite green. Check: for each line the commit message claims,
-  revert it alone; for each ordering it claims, move it past the boundary it claims to precede — and name
-  the test that fails.
+- **Prove each changed line by reverting THAT LINE, not the feature — and a line whose two orders are
+  provably equivalent cannot be proven at all** — a builder who proves only its own new lines leaves the
+  line it was asked to change covered by nothing: reverting the whole feature reds the new tests, so the
+  gap is invisible. Minted twice in one item (2026-08-23): the `contextHint` attach-guard and the
+  spec-body JSON tag both reverted clean with the full suite green. **Where the claim is about WHERE a
+  block sits, the mutation is a MOVE, not a revert** — reverting proves the block does something, never
+  that it must run before the return the comment names (minted 2026-08-23 on the anchor bookkeeping's
+  placement above the disabled-target skip). Where the two orders collapse to the same result — status
+  aggregated before vs. after truncation — the "proof" passes either way and proves nothing
+  (`TestEmit_TruncatesListingButNotStatus`, cited here as a check it never performed). And anchor every
+  mutation to its own function: a bare `s.bump(&s.orphansDeleted)` is a SUBSTRING of its 3-tab siblings
+  and one identical `KVGet` line appears in three legs, so a first-occurrence patch silently mutates the
+  wrong one and greens (minted 2026-08-25, three times in one item). Check: revert each claimed line
+  alone, move each claimed ordering past the boundary it claims to precede, and name the test that fails;
+  if nothing reds, make the line load-bearing or delete the claim.
+- **A leg's arms are a lattice, not a list: every RETIRE belongs above every "cannot act" GUARD** — a
+  guard answers *may this leg act* (an unreplayed registry, an operator freeze, another leg already owns
+  the gap); a retire answers *does this fact still hold* (a closed gap's budget, an issue about a value
+  that no longer exists). A retire ordered below a guard strands its fact for as long as the guard holds —
+  and an `error`-severity issue stranded that way pins the whole component `unhealthy` through a freeze,
+  with nothing the operator can do to clear it. Minted three times in one item (2026-08-25): the registry
+  and freeze gates sat above the gap-close reconcile, the corrupt-body READ sat below the freeze, and an
+  `entityKey` guard sat above an orphan-column arm. Check: label every arm guard / act / retire, then
+  assert each retire is still reachable with every guard's condition true — destruction is an act and
+  stays below the gates, reading is not.
 - **A target leaves the registry by more routes than the teardown verb, and each must retire the whole
   family** — the issue families are prefix-keyed below the target, so a route that clears only the key it
   owns strands every per-entity entry: once the registration is gone, `handleRow` returns at its registry

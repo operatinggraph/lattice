@@ -94,6 +94,27 @@ func (c *issueCache) set(key, severity, code, message string) {
 	c.mu.Unlock()
 }
 
+// standingAs reports whether an issue with exactly this severity and code is
+// already active at key. It answers one question only — "is this fact already
+// on the board" — for a caller that re-raises the same fact on a fixed cadence
+// and needs to tell the fact's ARRIVAL from its continuation (Engine.alertStanding).
+//
+// Message is deliberately NOT compared. Several issue families raise the same
+// (key, severity, code) with a different message per occurrence — a per-drop
+// TimerDataError names the timer it dropped — and for those the message is the
+// only thing distinguishing two genuinely distinct faults. Comparing it would
+// make every such raise an arrival, which is right for them and is exactly why
+// they use alert rather than this seam; comparing it HERE would instead make an
+// embedded varying value (a count, a timestamp) re-arrive on every pass and
+// bring the flood back. So the seam is narrow by construction: only a fact
+// whose message is a pure function of its key belongs on it.
+func (c *issueCache) standingAs(key, severity, code string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	is, ok := c.issues[key]
+	return ok && is.Severity == severity && is.Code == code
+}
+
 func (c *issueCache) clear(key string) {
 	c.mu.Lock()
 	delete(c.issues, key)
