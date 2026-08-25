@@ -306,7 +306,7 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		}
 		// A row's own template data is that row's fact: keyed per entity, so a
 		// sibling row resolving cleanly cannot retire it.
-		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "missing_onboarding")); !ok {
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, "missing_onboarding")); !ok {
 			t.Fatalf("the TemplateDataError must be keyed to the row that carries it, issues = %+v",
 				h.engine.issues.snapshot())
 		}
