@@ -498,18 +498,23 @@ func hardenedClaimHint(t *testing.T, targetKey string) *processor.ContextHint {
 
 // hostileUnflooredReadsHint is the envelope a hostile submitter writes when it
 // reaches past the keys the descriptor names: the floored target-derived keys
-// PLUS two the descriptor does not name at all — `.erasureRequested` and
-// `.mergedInto`, both derived from the same submitter-named target — all under
-// `reads`.
+// PLUS two more off the same submitter-named target, all under `reads`.
+// `.erasureRequested` is one of ClaimIdentity's OWN class-(g) derived reads
+// (ddls.go's erasure_gate_keys), which the DDL declares absence-tolerantly and
+// no submitter may declare at all; `.mergedInto` is named by neither the
+// descriptor nor the derivation. Both are outside what a SUBMITTER may say,
+// which is the property the hint probes.
 //
 // For an NFR-S6 operation this envelope never reaches hydration. The declared
-// set of ClaimIdentity and CompleteCredentialLink is CLOSED (Contract #2 §2.5,
-// internal/processor/descriptor_floor.go's refuseUndeclaredContextHint): a key
-// outside the descriptor's own set is refused at the head of step 4 rather than
-// demoted, so the probe buys neither an answer nor a single Core KV GET inside
-// the rejection quantum. What comes back is the same generic reply on the same
-// release lattice as every other cause, with the refused key in the Processor
-// log alone.
+// set of ClaimIdentity and CompleteCredentialLink is CLOSED — a rule the CODE
+// holds (internal/processor/descriptor_floor.go's refuseUndeclaredContextHint),
+// not the frozen contract: Contract #2 §2.5 still describes the descriptor's
+// disposition as a floor, and the closed-set clause is an unratified proposal on
+// branch claude/contract-2-5-nfr-s6-closed-declared-set. A key outside the
+// descriptor's own set is refused at the head of step 4 rather than demoted, so
+// the probe buys neither an answer nor any hydration work inside the rejection
+// quantum. What comes back is the same generic reply on the same release lattice
+// as every other cause, with the refused key in the Processor log alone.
 //
 // The arms using it therefore assert the closure, not the script: their
 // Health-KV outcome is `internal-fault` — the word handleStubFailure records
@@ -818,13 +823,26 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint},
 		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint},
 		// The two arms that reach PAST the descriptor's set: they declare
-		// target-derived keys it does not name at all. The closed declared-read
-		// set refuses them at the head of step 4, before hydration and before
-		// the script, so their outcome word is `internal-fault` — and the reply
-		// they get still has to be the same shape, on the same lattice, as
-		// every cause a script rendered. Both target positions are probed
-		// because a refusal that varied with the target's existence would be
-		// the oracle wearing a different hat. See hostileUnflooredReadsHint.
+		// target-derived keys a SUBMITTER may not declare. The closed
+		// declared-read set refuses them at the head of step 4, before
+		// hydration and before the script, so their outcome word is
+		// `internal-fault` — and the reply they get still has to be the same
+		// shape, on the same lattice, as every cause a script rendered. Both
+		// target positions are probed because a refusal that varied with the
+		// target's existence would be the oracle wearing a different hat. See
+		// hostileUnflooredReadsHint.
+		//
+		// What these two arms pin is the CLOSURE: a submitter's over-declaration
+		// is answered indistinguishably, at step-4 depth, from a cause the
+		// script adjudicated at step-5 depth. What they do NOT pin is the
+		// SCRIPT-side property — that ClaimIdentity's branches touch no
+		// unfloored target-derived key before answering — because the refusal
+		// lands before step 5 runs at all. Nothing else in this file reaches
+		// that property either, and nothing can: the only live route to an
+		// unfloored target-derived key is derive_reads, which returns
+		// `optionalReads` exclusively (ddls.go), so no key on this path is ever
+		// recorded required-absent and no branch can fault HydrationMiss on
+		// one. The closure is what holds that surface.
 		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "internal-fault", hostileUnflooredReadsHint},
 		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "internal-fault", hostileUnflooredReadsHint},
 	}

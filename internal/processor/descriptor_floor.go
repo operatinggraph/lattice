@@ -299,6 +299,17 @@ func (r *descriptorFloorResolver) payloadMap() map[string]interface{} {
 // template this Processor cannot compile against this envelope contributes
 // nothing either — it names no key here, so it admits none.
 //
+// A template whose compiled text is not a Contract #1 KEY contributes nothing
+// either, and that rule belongs to this membership test rather than to a gate
+// further down step 4 that happens to reach the same outcome. The
+// segment matcher is grammar-blind: a `{payload.targetIdentityKey}` the
+// submitter fills with `vtx.identity.*` compiles to three literal segments, so
+// concrete() reports a key and the wildcard would be admitted as a declaration.
+// step4_hydrate's substrate.ClassifyKey check would then reject it — but that
+// runs AFTER this membership decision, and a closure that admits what it cannot
+// name is only accidentally right. So the compiled text is classified here,
+// with the same classifier the hydrate path uses, and a non-key admits nothing.
+//
 // A `{payload.<field>}` template DOES contribute, which is the opposite of
 // resolveDescriptorRequired's rule, and the polarity is the point rather than
 // an oversight. There the subject is an EXCLUSION from the floor: a submitter
@@ -326,13 +337,40 @@ func (r *descriptorFloorResolver) admits(key string) bool {
 // once per Hydrate call. Deferred and memoized for the reasons the header
 // gives: the Warn below asserts that a template named no key for THIS envelope,
 // and that claim belongs to the descriptor rather than to the arm that asked.
+//
+// Two whole-descriptor conditions admit NOTHING, and each carries its own Warn
+// because the alternative is an over-deny with no per-template Warn to explain
+// it — an operator watching a closed-set operation refuse every submission
+// otherwise cannot tell "the submitter declared an extra key" from "this
+// descriptor names nothing to declare".
+//
+//   - MORE THAN ONE op-meta root claims this operationType. floorsByOpType
+//     UNIONS their templates, which is the safe direction for a floor (more
+//     demotion) and the dangerous one for a closed set (more admission): a
+//     second claimant carrying a thousand `{payload.padN}` templates would hand
+//     the padding channel straight back. pkgmgr refuses a duplicate claimant at
+//     install, so reaching here takes install privilege — the closure holds its
+//     own line anyway, and over-denies visibly rather than admitting a union it
+//     cannot attribute.
+//   - The descriptor names NO read template at all. That is reachable with no
+//     operator error: loadOpMetaDispatch reports an op-meta whose `.dispatch` is
+//     absent or tombstoned as found-with-empty-lists, so an identity-domain
+//     version predating the `Dispatch` block leaves hasDescriptor true and every
+//     template list empty.
 func (r *descriptorFloorResolver) resolveAdmitted() {
 	if r.admitResolved {
 		return
 	}
 	r.admitResolved = true
+	if r.templates.Claimants > 1 {
+		r.logger.Warn("step4: more than one op-meta descriptor claims this operationType; their union is not attributable, so the closed declared-read set admits NO key",
+			"operationType", r.env.OperationType, "requestId", r.env.RequestID, "claimants", r.templates.Claimants)
+		return
+	}
 	total := len(r.templates.Reads) + len(r.templates.OptionalReads)
 	if total == 0 {
+		r.logger.Warn("step4: this operation's descriptor names NO read template; the closed declared-read set admits NO key, so every declared key is refused",
+			"operationType", r.env.OperationType, "requestId", r.env.RequestID)
 		return
 	}
 	payload := r.payloadMap()
@@ -351,12 +389,31 @@ func (r *descriptorFloorResolver) resolveAdmitted() {
 					"operationType", r.env.OperationType, "requestId", r.env.RequestID, "template", tpl)
 				continue
 			}
+			if substrate.ClassifyKey(key) == substrate.KindUnknown {
+				r.logger.Warn("step4: descriptor "+class+" template compiles to text the Contract #1 key grammar rejects; it admits no key into the closed declared-read set",
+					"operationType", r.env.OperationType, "requestId", r.env.RequestID, "template", tpl)
+				continue
+			}
 			admitted[key] = struct{}{}
 		}
 	}
 	admit(r.templates.Reads, "read")
 	admit(r.templates.OptionalReads, "optionalRead")
 	r.admitted = admitted
+}
+
+// admittedCount reports how many concrete keys this operation's descriptor
+// names for this envelope. It exists for the refusal Warn: the fault carries no
+// key, so the log is the operator's only copy, and the SIZE of the admitted set
+// is what separates "this submitter declared one key too many" from "this
+// descriptor admits nothing at all". A nil resolver is an operation with no
+// descriptor, which admits nothing.
+func (r *descriptorFloorResolver) admittedCount() int {
+	if r == nil {
+		return 0
+	}
+	r.resolveAdmitted()
+	return len(r.admitted)
 }
 
 // refuseUndeclaredContextHint closes the declared-read set of an NFR-S6
@@ -378,8 +435,8 @@ func (r *descriptorFloorResolver) resolveAdmitted() {
 // outright rather than merely floored.
 //
 // Refusal, not demotion, and the difference is the whole mechanism: a demoted
-// extra key is still hydrated, still costs its GET inside the window, and still
-// lands wherever the padding lands.
+// extra key is still hydrated, still enlarges the batched step-4 snapshot inside
+// the window, and still lands wherever the padding lands.
 //
 // # What is refused
 //
@@ -401,14 +458,21 @@ func (r *descriptorFloorResolver) resolveAdmitted() {
 // A nil resolver is an operation with no `Dispatch` descriptor: it admits
 // nothing, so every declared key is refused. An NFR-S6 operation whose
 // descriptor is missing over-denies visibly rather than silently reverting to
-// the open envelope surface this closes.
+// the open envelope surface this closes. resolveAdmitted names the two other
+// whole-descriptor conditions that admit nothing — a multi-claimant
+// operationType and a descriptor with no read template at all — and each is
+// audible at Warn on its own, because an over-deny an operator cannot attribute
+// is one nobody fixes.
 //
 // # What reaches the caller
 //
 // A *HydrationError carrying NO key, mirroring DeriveReadsFloorContradiction
 // (derive_reads.go). The refused key is the submitter's own probe, so echoing
 // it back in details.missingKey would answer the very question these operations
-// collapse their replies to refuse; the Warn here is the operator's only copy.
+// collapse their replies to refuse; the Warn here is the operator's only copy,
+// and it carries the size of the admitted set beside the refused declaration —
+// an over-deny reads as "admitted=0" where an over-declaring submitter reads as
+// a positive count.
 // On an NFR-S6 operation the fault is then collapsed by replyRejection into the
 // generic ClaimKeyInvalid with nil details and released on the quantum, exactly
 // like every other rejection of these operations.
@@ -423,7 +487,8 @@ func refuseUndeclaredContextHint(env *OperationEnvelope, resolver *descriptorFlo
 	}
 	refuse := func(class, declared string) error {
 		logger.Warn("step4: contextHint declares a read this operation's descriptor does not name; the closed declared-read set refuses the operation",
-			"operationType", env.OperationType, "requestId", env.RequestID, "class", class, "declared", declared)
+			"operationType", env.OperationType, "requestId", env.RequestID, "class", class, "declared", declared,
+			"admitted", resolver.admittedCount())
 		return &HydrationError{
 			Code: "UndeclaredContextHintKey", OperationRequestID: env.RequestID,
 			Cause: errors.New("contextHint declares a read outside the set this operation's own descriptor names; the declared read set for this operation is closed (the Processor log names what was refused)"),

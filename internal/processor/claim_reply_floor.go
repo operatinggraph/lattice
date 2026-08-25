@@ -150,9 +150,10 @@ func newClaimReplyFloor(quantum time.Duration, metrics *Metrics, logger *slog.Lo
 // answered at `done` and leaks its full service time. That is one request away:
 // opwire.MaxDeclaredReads allows 1000 declared reads, the Gateway copies
 // contextHint into the envelope verbatim and step 3 never inspects it, and every
-// declared read resolves inside Hydrate, i.e. inside the window. A caller pads
-// declared reads until the work exceeds the quantum and then reads the raw
-// per-cause timing straight back, with no load and no coordination.
+// declared read resolves inside Hydrate — in one batched KVGetMulti whose cost
+// grows with the declared set — i.e. inside the window. A caller pads declared
+// reads until the work exceeds the quantum and then reads the raw per-cause
+// timing straight back, with no load and no coordination.
 //
 // Under quantization there is no such escape hatch: the answer always lands on a
 // lattice of fixed offsets from ARRIVAL (receipt+Q, receipt+2Q, ...), so what a

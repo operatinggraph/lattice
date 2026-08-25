@@ -1,7 +1,7 @@
 // Package identityceremony holds the declared read sets the identity claim
 // and credential-link ceremonies submit, shared by every client that
 // dispatches them: Facet, the LoftSpace app, the `lattice identity` CLI and
-// the verify-claim-ceremony harness.
+// the claim- and erasure-ceremony verification harnesses.
 //
 // It exists because the declaration is a SECURITY property of these
 // ceremonies, not a per-client convenience. Both are NFR-S6 paths: every
@@ -11,8 +11,8 @@
 // that declares the target under `reads` instead of `optionalReads`, or that
 // declares a malformed key at all, gets a DIFFERENT wire code back for the
 // "no such identity" case, which is an enumeration oracle over the identity
-// keyspace. Keeping the rule in one place is what stops four dispatchers from
-// each having their own answer.
+// keyspace. Keeping the rule in one place is what stops the six dispatch sites
+// across the two ceremonies from each having their own answer.
 //
 // What this package does NOT do is enforce anything itself, and for the two
 // ceremonies in the NFR-S6 set it does not need to. Contract #2 §2.5 makes the
@@ -26,8 +26,18 @@
 // is refused before hydration
 // (internal/processor/descriptor_floor.go, refuseUndeclaredContextHint). A
 // hand-rolled envelope from an ordinary consumer credential therefore cannot
-// re-open the oracle for itself, and cannot pad the work inside the rejection
-// quantum either.
+// re-open the oracle for itself, and cannot price the hydration work inside the
+// rejection quantum: MEMBERSHIP of the declared set — and so the KV work it
+// buys — is the descriptor's to fix, not the submitter's.
+//
+// That closure covers the DECLARATION and nothing else. The PAYLOAD is still
+// submitter-priced work inside the same window: its bytes are deep-decoded by
+// the guard itself (payloadMap, before it can answer), again by the
+// `derive_reads` pre-pass that ClaimIdentity runs (deriveReadsOpValue →
+// goValueToStarlark), and again by step 5's runner — and nothing bounds a
+// payload below the Gateway's 1 MiB body cap or enforces InputSchema
+// server-side. The declared-read channel into the quantum is closed; the
+// payload-sized one is open.
 //
 // What the builders below owe that mechanism is the other half: each emits
 // EXACTLY the template set its op's descriptor declares

@@ -261,8 +261,12 @@ operations the declared set is **closed** — the envelope may name only what th
 operation's op-meta descriptor names, and anything else is refused at the head of
 step 4 (`refuseUndeclaredContextHint`, see the `kv.Read` semantics above for the
 rule and its edges). Both descriptors already name the entire legitimate set: the
-four shipped dispatchers build their hint from `internal/identityceremony`, which
-emits exactly those templates.
+six dispatch sites across the two operations — `cmd/facet/claim.go`,
+`cmd/lattice/identity`, `scripts/verify-claim-ceremony.go`,
+`scripts/verify-erasure-ceremony.go`, `cmd/facet/credentials.go` and
+`cmd/loftspace-app/credentials_link.go` — build their hint from
+`internal/identityceremony`, whose builders emit exactly the KEYS those templates
+compile to (the templates themselves live in `packages/identity-domain/opmetas.go`).
 
 The refusal is an ordinary step-4 `HydrationError`, so it inherits both halves of
 the posture above — the generic `ClaimKeyInvalid` with nil details, released on the
@@ -622,7 +626,7 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
 - **A mechanism whose margin the SUBMITTER prices is not a margin** — the retired entry above closed the
-  *disposition* a client may declare; nothing closed the *volume*. `opwire.MaxDeclaredReads` is 1000, the
+  *disposition* a client may declare; nothing closes the *volume*. `opwire.MaxDeclaredReads` is 1000, the
   Gateway copies `contextHint` verbatim (`gateway.go:823-830`) and step 3 never inspects it, so every declared
   read resolves inside step-4 hydration — i.e. inside whatever window a timing defence has drawn around it.
   The first ClaimIdentity reply floor was sized against a measured loaded p99 and was defeatable in ONE request
@@ -634,7 +638,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   the volume itself is bounded rather than absorbed: `refuseUndeclaredContextHint` (`descriptor_floor.go`)
   refuses any declared key, egress key or enumeration the operation's own descriptor does not name, so the work
   inside the quantum is priced by the descriptor. Every other operation's declared set stays open, so the
-  question above is still the one to ask of each new defence.
+  question above is still the one to ask of each new defence — and it is asked per AXIS, not once: closing
+  the declared set bounds the KV work and nothing else, while `payload` bytes are still submitter-sized and
+  are deep-decoded three times inside the same window (the admitted-set compile, the `derive_reads` pre-pass,
+  the step-5 runner), under no server-side schema and no bound below the Gateway's body cap. Check: after
+  closing one lever, re-enumerate every remaining piece of step-4/step-5 work whose SIZE the submitter sets,
+  and say plainly which ones the defence does not cover rather than describing the axis you closed as the
+  window.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.
@@ -692,6 +702,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   shape, where a tombstone dropped a canonicalName a second root still declared). Check: keep per-root truth
   and derive the aggregate from it, and prove it with a TWO-claimant test asserting byte-equality against a
   full `Refresh` — a single-claimant test passes vacuously.
+  **Second sighting**, on the same index and in the direction that decides a security answer: a union is a
+  WIDENING, so it is the safe direction for a floor (more demotion) and the dangerous one for a closed
+  declared-read set (more admission), and `floorsByOpType`'s merged entry could not tell its two consumers
+  apart. Check: when one aggregate feeds both a widening and a narrowing consumer, carry the contributor
+  COUNT on the entry (`DispatchTemplates.Claimants`) and let the narrowing consumer fail closed on any union
+  it cannot attribute — an aggregate that erases who contributed is not a fact the narrowing side may read.
 - **A corpus-wide authoring gate does not bind the runtime install path** — `scripts/lint-*.go` rules iterate
   `pkgregistry`, but an approved capability proposal materializes a one-artifact `Definition` under an
   arbitrary package name that the registry never sees, and per-`Definition` validation is trivially unique.

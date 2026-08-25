@@ -789,8 +789,12 @@ func TestRefuseUndeclaredContextHint(t *testing.T) {
 		op           string
 		templates    DispatchTemplates
 		noDescriptor bool
-		hint         *ContextHint
-		wantRefused  bool
+		// target overrides the payload's targetIdentityKey, for the rows whose
+		// subject is what a template COMPILES to rather than what is declared.
+		// Empty means floorTarget.
+		target      string
+		hint        *ContextHint
+		wantRefused bool
 	}{
 		{
 			name: "the shipped claim envelope is admitted",
@@ -871,11 +875,49 @@ func TestRefuseUndeclaredContextHint(t *testing.T) {
 			op:   "ClaimIdentity", noDescriptor: true, hint: shippedClaimHint(floorTarget),
 			wantRefused: true,
 		},
+		{
+			// loadOpMetaDispatch reports an op-meta whose `.dispatch` is absent
+			// or tombstoned as found-with-empty-lists, so this is the shape a
+			// descriptor withdrawn by an upgrade leaves behind: a descriptor
+			// that exists and names nothing.
+			name: "a descriptor naming no read template at all admits nothing",
+			op:   "ClaimIdentity", templates: DispatchTemplates{},
+			hint:        shippedClaimHint(floorTarget),
+			wantRefused: true,
+		},
+		{
+			// floorsByOpType UNIONS two claimants of one operationType, which
+			// widens a floor safely and widens an admitted set dangerously — a
+			// second claimant's thousand padding templates would be admitted as
+			// declarations. The closure refuses the whole union instead.
+			name: "an operationType two op-metas claim admits nothing, union or not",
+			op:   "ClaimIdentity",
+			templates: DispatchTemplates{
+				OptionalReads: claimDescriptor.OptionalReads, Claimants: 2,
+			},
+			hint:        shippedClaimHint(floorTarget),
+			wantRefused: true,
+		},
+		{
+			// The grammar rule. Three literal segments compile from a payload
+			// value of `vtx.identity.*`, so the segment matcher calls it
+			// concrete — and admitting it would let the declaration name a NATS
+			// subject filter rather than a key.
+			name: "a template compiling to a wildcard is not a key, so it admits nothing",
+			op:   "ClaimIdentity", templates: claimDescriptor,
+			target:      "vtx.identity.*",
+			hint:        &ContextHint{OptionalReads: []string{"vtx.identity.*"}},
+			wantRefused: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := nfrS6Env(tc.op, floorTarget)
+			target := tc.target
+			if target == "" {
+				target = floorTarget
+			}
+			env := nfrS6Env(tc.op, target)
 			env.ContextHint = tc.hint
 			var resolver *descriptorFloorResolver
 			if !tc.noDescriptor {
@@ -930,6 +972,100 @@ func TestRefuseUndeclaredContextHint_RefusalNamesTheKeyInTheLogOnly(t *testing.T
 	if !strings.Contains(log.String(), env.RequestID) {
 		t.Fatalf("log = %q, want the requestId that ties the refusal to a submission", log.String())
 	}
+	if !strings.Contains(log.String(), "admitted=3") {
+		t.Fatalf("log = %q, want the admitted-set size — without it an over-deny reads exactly like an over-declaring submitter", log.String())
+	}
+}
+
+// TestRefuseUndeclaredContextHint_OverDenyIsAttributable: the three ways this
+// rule refuses a submission the shipped dispatcher actually sends are the ways
+// an operator has to be able to tell apart, because the fault carries no key
+// and the refusal is collapsed into the same generic reply as every other
+// cause. Each states its own condition, and none of them is a per-template Warn
+// — the descriptor never reaches template compilation in any of the three.
+func TestRefuseUndeclaredContextHint_OverDenyIsAttributable(t *testing.T) {
+	shipped := shippedClaimHint(floorTarget)
+
+	cases := []struct {
+		name      string
+		templates DispatchTemplates
+		// noDescriptor drops the resolver entirely, the case an op-meta the
+		// cache never saw produces.
+		noDescriptor bool
+		want         string
+	}{
+		{
+			name:      "a descriptor naming no read template says so",
+			templates: DispatchTemplates{},
+			want:      "names NO read template",
+		},
+		{
+			name:      "a multi-claimant operationType says so",
+			templates: DispatchTemplates{OptionalReads: claimDescriptor.OptionalReads, Claimants: 2},
+			want:      "claims this operationType",
+		},
+		{
+			name: "an over-declaring submitter is not confused with either",
+			// The control: a descriptor that admits its three keys, refusing
+			// one the submitter added. Nothing about the descriptor is at
+			// fault, so neither whole-descriptor line may appear.
+			templates: claimDescriptor,
+			want:      "admitted=3",
+		},
+		{
+			name: "no descriptor at all reaches the operator as an empty admitted set",
+			// A nil resolver has no Warn of its own to give — admittedCount is
+			// what carries the condition.
+			noDescriptor: true,
+			want:         "admitted=0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := nfrS6Env("ClaimIdentity", floorTarget)
+			env.ContextHint = &ContextHint{
+				OptionalReads: append(append([]string{}, shipped.OptionalReads...), "vtx.identity."+floorLeaseVictim),
+			}
+			logger, log := capturingLogger()
+			var resolver *descriptorFloorResolver
+			if !tc.noDescriptor {
+				resolver = newDescriptorFloorResolver(tc.templates, env, logger)
+			}
+			if err := refuseUndeclaredContextHint(env, resolver, logger); err == nil {
+				t.Fatal("admitted a declaration the descriptor does not name")
+			}
+			if !strings.Contains(log.String(), tc.want) {
+				t.Fatalf("log = %q, want it to carry %q", log.String(), tc.want)
+			}
+			if tc.want == "admitted=3" {
+				for _, unwanted := range []string{"names NO read template", "claims this operationType"} {
+					if strings.Contains(log.String(), unwanted) {
+						t.Fatalf("log = %q, must not blame the descriptor for a submitter's extra key", log.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDescriptorFloorResolver_MultiClaimantStillFloors: the union is refused as
+// an ADMISSION and kept as a FLOOR, and the asymmetry is the point. Demotion is
+// the weaker disposition, so inheriting a second claimant's optional template
+// costs nothing an attacker wants; admission is the stronger one, and a second
+// claimant's templates would enlarge the set the closure exists to pin.
+func TestDescriptorFloorResolver_MultiClaimantStillFloors(t *testing.T) {
+	env := nfrS6Env("ClaimIdentity", floorTarget)
+	templates := DispatchTemplates{OptionalReads: claimDescriptor.OptionalReads, Claimants: 2}
+	r := newDescriptorFloorResolver(templates, env, testLogger())
+
+	got := applyDescriptorFloor(declaredReads{Reads: []string{floorTarget}}, r)
+	if len(got.Reads) != 0 || !slices.Contains(got.OptionalReads, floorTarget) {
+		t.Fatalf("reads=%v optionalReads=%v, want the key demoted — a union is still a floor", got.Reads, got.OptionalReads)
+	}
+	if r.admits(floorTarget) {
+		t.Fatal("a union admitted a key into the closed declared-read set")
+	}
 }
 
 // TestHydrate_NFRS6ClosedDeclaredSet is the same rule at the seam that applies
@@ -939,7 +1075,7 @@ func TestRefuseUndeclaredContextHint_RefusalNamesTheKeyInTheLogOnly(t *testing.T
 // against the SUBMITTER's declaration at the head of step 4 (an admitted
 // envelope still hydrates, absence-tolerantly), and it is scoped to the NFR-S6
 // operations alone — an operation outside the set carrying the very same
-// descriptor keeps today's demote-and-hydrate behaviour.
+// descriptor is demoted and hydrated, never refused.
 func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -1027,7 +1163,7 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 	t.Run("an operation outside the NFR-S6 set is unaffected", func(t *testing.T) {
 		// The same out-of-set key, the same descriptor, the fail-closed
 		// disposition: demoted where the descriptor covers it and hydrated
-		// either way, exactly as before. Closing every operation's declared set
+		// either way. Closing every operation's declared set
 		// would break every submitter that declares a key its descriptor does
 		// not name, which is most of the corpus.
 		hint := &ContextHint{Reads: []string{target, probe}}
@@ -1053,6 +1189,96 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 		var hErr *HydrationError
 		if !errors.As(err, &hErr) || hErr.Code != "UndeclaredContextHintKey" {
 			t.Fatalf("Hydrate = %v, want the closed-set refusal", err)
+		}
+	})
+}
+
+// TestHydrate_NFRS6ClosureRunsOnTheSubmittersDeclarationAlone pins the ORDER
+// the whole rule rests on: the closure's subject is env.ContextHint, resolved
+// at the head of step 4, BEFORE `derive_reads` runs.
+//
+// The ordering is not cosmetic in either direction. Derived keys are the DDL's
+// own — authored by the package, not priced by the caller — so a closure that
+// saw the merged set would refuse the package's own class-(g) probes and make
+// every conforming submission of these two operations unsubmittable. And a
+// refusal that happened after the derivation would have already run a Starlark
+// program on the submitter's payload inside the rejection quantum, which is the
+// work the closure exists to keep out of it.
+//
+// Two arms, because one alone does not pin the order. The first moves the
+// subject (a derived key must survive); the second moves the POINT (the
+// refusal must beat a derivation that faults).
+func TestHydrate_NFRS6ClosureRunsOnTheSubmittersDeclarationAlone(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+
+	claimRoot := "vtx.meta." + tplID
+	seedOpMeta(t, ctx, conn, tplID, "ClaimIdentity",
+		dispatchAspect(claimRoot, templatesJSON(claimDescriptor.OptionalReads), false), false)
+
+	target := "vtx.identity." + testNanoIDAbsent
+	// A key no descriptor template can compile to, so the closure would refuse
+	// it if it ever became the closure's subject. It is exactly the shape of
+	// identity-domain's own credentialindex dedup probe: derived from the
+	// actor by a hash the template vocabulary cannot express.
+	derivedKey := "vtx.credentialindex." + testNanoID2
+	seedDeriveDDL(t, ctx, conn, `
+def derive_reads(op):
+    return {"optionalReads": ["`+derivedKey+`"]}
+`)
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+
+	envFor := func(hint *ContextHint) *OperationEnvelope {
+		env := newTestEnvelope(testNanoID1)
+		env.OperationType = "ClaimIdentity"
+		env.Payload = []byte(`{"targetIdentityKey":"` + target + `"}`)
+		env.ContextHint = hint
+		return env
+	}
+
+	t.Run("a derived key the descriptor does not name still joins the set", func(t *testing.T) {
+		state, err := h.Hydrate(ctx, envFor(shippedClaimHint(target)))
+		if err != nil {
+			t.Fatalf("Hydrate: %v — the closure refused the package's OWN derived key, so no conforming submission of this operation can succeed", err)
+		}
+		if _, ok := state.Context.KnownAbsent[derivedKey]; !ok {
+			t.Fatalf("KnownAbsent = %v, want the derived key %q — a class-(g) key is outside the closure",
+				state.Context.KnownAbsent, derivedKey)
+		}
+	})
+
+	t.Run("the refusal beats a derivation that faults", func(t *testing.T) {
+		// The derivation for THIS envelope raises, so the fault code names
+		// which of the two ran first. UndeclaredContextHintKey means the
+		// closure answered before any Starlark ran on the payload;
+		// DeriveReadsFailed means the check moved past it.
+		faulting, faultConn, _, _, _ := setupTestPipeline(t)
+		seedOpMeta(t, faulting, faultConn, tplID, "ClaimIdentity",
+			dispatchAspect(claimRoot, templatesJSON(claimDescriptor.OptionalReads), false), false)
+		seedDeriveDDL(t, faulting, faultConn, `
+def derive_reads(op):
+    fail("this derivation must never be reached for a refused envelope")
+`)
+		faultCache := NewDDLCache(faultConn, testCoreBucket, testLogger())
+		if err := faultCache.Refresh(faulting); err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
+		fh := NewHydratorWithCache(faultConn, testCoreBucket, faultCache, testLogger())
+
+		probe := "vtx.identity." + testNanoIDAbsent2
+		hint := &ContextHint{OptionalReads: append(append([]string{}, shippedClaimHint(target).OptionalReads...), probe)}
+		_, err := fh.Hydrate(faulting, envFor(hint))
+		var hErr *HydrationError
+		if !errors.As(err, &hErr) {
+			t.Fatalf("Hydrate = %v, want a *HydrationError", err)
+		}
+		if hErr.Code != "UndeclaredContextHintKey" {
+			t.Fatalf("code = %q, want UndeclaredContextHintKey — the derivation ran on a payload the closure had already refused, i.e. inside the rejection quantum", hErr.Code)
 		}
 	})
 }

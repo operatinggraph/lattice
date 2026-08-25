@@ -15,7 +15,8 @@ import (
 // opaque-mode binding a browser cannot compute its own derived ActorID, so
 // without this endpoint no FE can fill authContext.target for any
 // self-scoped op (ClaimIdentity, InitiateCredentialLink,
-// CompleteCredentialLink) or declare the credentialindex dedup read. Roles
+// CompleteCredentialLink). The credentialindex dedup key it also returns is
+// package-derived and must not be declared — see CredentialIndexKey. Roles
 // and Anchors report the resolved actor's role-derived grant keys and
 // residence/workplace anchors (persona-worlds-design.md §10) — both omitted
 // (omitempty) when no resolver is configured or the resolver reports
@@ -142,10 +143,16 @@ func (s *Server) probeExistingIdentityHint(ctx context.Context, actor auth.Verif
 
 // CredentialIndexKey returns the credentialindex vertex key that records which
 // business identity an authenticated actor's credential is bound to. It backs
-// the `credentialIndexKey` field of GET /v1/actor, whose stated purpose — let a
-// browser declare the dedup read on ClaimIdentity / CompleteCredentialLink —
-// no longer holds: identity-domain's `derive_reads` declares that key for both
-// ops itself (packages/identity-domain/ddls.go), so no client has to.
+// the `credentialIndexKey` field of GET /v1/actor.
+//
+// A CLIENT MUST NOT DECLARE THIS KEY on ClaimIdentity or CompleteCredentialLink.
+// It is a class-(g) key identity-domain's own `derive_reads` computes from the
+// actor (packages/identity-domain/ddls.go), so no descriptor names it — and
+// those two operations hold a CLOSED declared-read set, which refuses the whole
+// operation for any declared key the descriptor does not name
+// (internal/processor/descriptor_floor.go's refuseUndeclaredContextHint). An
+// envelope that declares it is rejected outright, not merely served a redundant
+// read.
 //
 // The actor key is already a Contract #1 key, so it is hashed as-is: no
 // normalization, matching identity-domain's credential_index_key.
@@ -153,13 +160,12 @@ func CredentialIndexKey(actorKey string) string {
 	// derived-key: the credentialindex vertex key for an actor, the same value
 	// identity-domain's `credential_index_key(actor_key)` computes. It is not a
 	// declared read the gateway should defer to the package for, because it is
-	// not a declared read at all any more — `derive_reads` supersedes the
-	// purpose this field was added for, no caller in the tree consumes the
-	// field, and client-ceremony-op-descriptors-design.md §A2 rejects
-	// generalizing the gateway-derives direction it was the sole precedent for.
-	// What survives is a legacy field on a public wire response, kept because
-	// removing it is a wire-visible change and a separate decision, and kept
-	// honest by TestCredentialIndexKeyAgreesWithIdentityDomain
+	// not a declared read at all: `derive_reads` owns it, no caller in the tree
+	// consumes the field, and client-ceremony-op-descriptors-design.md §A2
+	// rejects generalizing the gateway-derives direction it is the sole
+	// precedent for. What it is, is a field on a public wire response, kept
+	// because removing it is a wire-visible change and a separate decision, and
+	// kept honest by TestCredentialIndexKeyAgreesWithIdentityDomain
 	// (packages/identity-domain/gateway_agreement_test.go), which drives a real
 	// ceremony through the real Starlark and fails if the two stop matching.
 	return "vtx.credentialindex." + substrate.SHA256NanoID(actorKey)
