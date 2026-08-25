@@ -142,6 +142,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-25 · `d835bdf9` · [Bootstrap] prior-epoch operator-role detection CLOSED — the cross-epoch orphan class the `vtx.meta.>` census cannot reach; ranked by what it confers, hard gate only in verify-kernel; 3 cold reviews + close pass
 - 2026-08-25 · `c69aa4a4` · [Processor/facet] NFR-S6 declared-read set CLOSED — descriptor-named keys only, refused at step-4 head; grammar-checked, union-attributed, over-deny made audible; facet's self-key padding removed; 3 cold reviews
 - 2026-08-24 · `b9121e8` · [Weaver/Pkgmgr] inflight_<g>⇒maxretries_<g> companion pair GATED at install — directOp only; privacy-base's inert const-false markers replaced by reach-derived caps
 - 2026-08-24 · `3a35bde` · [Weaver] inflight_<g> suppression-vs-reclaim contract CLOSED — the error fired on a contract-legal declaration; class+key+prefix retired, verdict and two-leg suppression unchanged; cold review clean
