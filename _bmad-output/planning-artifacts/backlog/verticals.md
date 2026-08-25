@@ -74,7 +74,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-25 · `30170c74` · A café resident's front-desk class + visit badge finally renders — backfillCafeFrontDeskBadges converges on a tenanted lease + linked patient, booking + appointment now live in front-desk-bookings/front-desk-visits.
+- 2026-08-25 · `54a5fedc` · A café resident's front-desk class + visit badge finally renders — backfillCafeFrontDeskBadges converges on a tenanted lease + linked patient, booking + appointment now live in front-desk-bookings/front-desk-visits.
 - 2026-08-25 · `5aa287b0` · `MarkPastDueNoShow` stops billing the automated no-show sweep — only staff-observed no-shows charge now. clinic-domain 0.34.6
 - 2026-08-23 · `aa04a7a5` · [location-domain] `CreateLocation` gets a full descriptor via a new `Dispatch.ClassChoices` field — location-domain 0.4.0, edge-manifest 0.17.0; `AttachObject`/`DetachObject` stay open debt
 - 2026-08-23 · `fee0621b` · Clinic /api/sites + roster stop advertising verify artifacts — reapNonCanonicalSites/Patients allowlist by pinned id (name-marker missed some); reaped 10 patients + 5 buildings live.
