@@ -303,7 +303,7 @@ var (
 	// pinned: `== false &&` and `!= true ||` are comparisons whose result feeds
 	// the conjunction, and the corpus is full of them.
 	deadConjunct = regexp.MustCompile(`(?:\bif\s+|&&\s+|\|\|\s+|\(\s*)(?:false\s*&&|true\s*\|\|)|(?:&&\s*false|\|\|\s*true)\s*(?:\)|\{|$)`)
-	coreKVRead         = regexp.MustCompile(`\bCoreKVBucket\b|"core-kv"`)
+	coreKVRead   = regexp.MustCompile(`\bCoreKVBucket\b|"core-kv"`)
 	// p7Discriminator — a package script emitting a discriminator-shaped aspect (a
 	// `.class` / `.family` / `.kind` localName that shadows the envelope `class`).
 	// Anchored on the Starlark aspect-emit helper so a discriminator word used
