@@ -92,7 +92,7 @@ func TestSweep_ReclaimBackoff_SuppressesRecentUserTask(t *testing.T) {
 	if err != nil || entry.Revision != rev {
 		t.Fatalf("a backed-off reclaim must leave the mark untouched (rev %d, err=%v)", rev, err)
 	}
-	reclaims, suppressed, _, _, _ := h.engine.sweep.metrics()
+	reclaims, suppressed, _, _, _, _ := h.engine.sweep.metrics()
 	if reclaims != 0 || suppressed != 1 {
 		t.Fatalf("metrics: reclaims=%d suppressed=%d, want 0, 1", reclaims, suppressed)
 	}
@@ -137,7 +137,7 @@ func TestSweep_ReclaimBackoff_FiresWhenAged(t *testing.T) {
 	if err != nil || entry.Revision == rev {
 		t.Fatalf("an aged userTask reclaim must re-arm the mark with a fresh revision (old %d, err=%v)", rev, err)
 	}
-	reclaims, suppressed, _, _, _ := h.engine.sweep.metrics()
+	reclaims, suppressed, _, _, _, _ := h.engine.sweep.metrics()
 	if reclaims != 1 || suppressed != 0 {
 		t.Fatalf("metrics: reclaims=%d suppressed=%d, want 1, 0", reclaims, suppressed)
 	}
@@ -173,7 +173,7 @@ func TestSweep_ReclaimBackoff_DirectOpNeverSuppressed(t *testing.T) {
 	h.pass(ctx)
 
 	h.nextOp(t) // directOp re-dispatches despite the recent ClaimedAt
-	reclaims, suppressed, _, _, _ := h.engine.sweep.metrics()
+	reclaims, suppressed, _, _, _, _ := h.engine.sweep.metrics()
 	if reclaims != 1 || suppressed != 0 {
 		t.Fatalf("metrics: reclaims=%d suppressed=%d, want 1, 0 (directOp must never back off)", reclaims, suppressed)
 	}
@@ -222,7 +222,7 @@ func TestSweep_ReclaimBackoff_ProposedOpSuppressed(t *testing.T) {
 	if err != nil || entry.Revision != rev {
 		t.Fatalf("a backed-off proposedOp reclaim must leave the mark untouched (rev %d, err=%v)", rev, err)
 	}
-	reclaims, suppressed, _, _, _ := h.engine.sweep.metrics()
+	reclaims, suppressed, _, _, _, _ := h.engine.sweep.metrics()
 	if reclaims != 0 || suppressed != 1 {
 		t.Fatalf("metrics: reclaims=%d suppressed=%d, want 0, 1 (proposedOp must back off like a userTask reclaim)", reclaims, suppressed)
 	}

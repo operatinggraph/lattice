@@ -92,7 +92,7 @@ func TestHandleSweepFired_RunsReconcilePass(t *testing.T) {
 	if op := h.nextOp(t); op["requestId"] == nil {
 		t.Fatal("the fired sweep must emit a reclaim op for the expired mark")
 	}
-	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 {
+	if reclaims, _, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 {
 		t.Fatalf("sweepReclaims = %d, want 1 (the fired occurrence ran one pass)", reclaims)
 	}
 }

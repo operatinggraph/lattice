@@ -292,9 +292,10 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		h.logger.Warn("weaver heartbeat: in-flight mark scan failed", "err", err)
 	}
 	if h.sweep != nil {
-		reclaims, reclaimsSuppressed, orphans, corrupt, lastRun := h.sweep.metrics()
+		reclaims, reclaimsSuppressed, reArms, orphans, corrupt, lastRun := h.sweep.metrics()
 		metrics["sweepReclaims"] = reclaims
 		metrics["sweepReclaimsSuppressed"] = reclaimsSuppressed
+		metrics["sweepReArms"] = reArms
 		metrics["sweepOrphansDeleted"] = orphans
 		metrics["sweepCorrupt"] = corrupt
 		if !lastRun.IsZero() {
