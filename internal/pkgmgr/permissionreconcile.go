@@ -261,13 +261,24 @@ type PermissionFinding struct {
 //     attacker who controls a package's manifest writes both halves of the
 //     comparison for edges too — the first residual above, unchanged, on one
 //     more object.
-//   - The ROLE a package-declared edge should point at is not pinned. A
+//   - The ROLE a declared edge points at is pinned by nothing. A
 //     PermissionSpec names its grant target by canonical name
 //     (`GrantsTo: []string{"operator"}`), which cmd/lattice-pkg resolves to a
-//     role id at install time, so the compiled Definition alone does not
-//     name the target role — this pass verifies that the edge's permission is
-//     one the declaring package owns, and accepts whichever role the declared
-//     key points at.
+//     role id at install time, so the compiled Definition alone does not name
+//     the target role. The derivation check (GrantFindingKeyMismatch) compares
+//     only the PERMISSION side of an edge against what its declaring package
+//     owns, and accepts whichever role the key names.
+//   - `origin` is client-supplied at every authoring channel — the classifier's
+//     own input is chosen by whoever wrote the edge. `package` is the only
+//     class that leads anywhere: it is reconciled against declaredKeys and the
+//     derivation check. `runtime` is asserted by the edge's own body and
+//     reconciled against nothing, so an edge that stamps itself `runtime` is
+//     inventory whatever it grants; `unstamped` is checked against declaredKeys
+//     and the derivation check but not against any stamp. Adding a field is a
+//     cheaper laundering than deleting one. The one thing that holds whatever
+//     the body claims is the kernel's own grant topology
+//     (GrantFindingKernelRegrant): a primordial permission has exactly one
+//     legitimate edge, so a second one is drift in every class.
 type PermissionReconciliation struct {
 	Drift   []PermissionFinding
 	Notices []PermissionFinding
@@ -353,11 +364,16 @@ func classifyLivePermission(p LivePermission, kernelKeys map[string]bool, anyDec
 //
 // installedPackages names every currently-installed (non-tombstoned)
 // package by its manifest name; kernelKeys is bootstrap's six primordial
-// permission keys. Output is sorted (Class, Key, Package, OperationType,
-// Scope) so two calls with the same logical input produce byte-identical
-// output regardless of live/declared slice order — a gate that reports in
-// map order is untestable.
-func ReconcilePermissions(live []LivePermission, declared []DeclaredPermission, installedPackages map[string]bool, kernelKeys map[string]bool) PermissionReconciliation {
+// permission keys; undecodableKeys are the permission keys the gatherer found
+// OCCUPIED but could not read, which the gatherer has already reported as
+// FindingUndecodable — a kernel key in that state is not reported absent as
+// well, because a document does occupy it. Output is sorted (Class, Key,
+// Package, OperationType, Scope, Reason, Detail) — a total order over every
+// field a finding carries, so two calls with the same logical input produce
+// byte-identical output regardless of live/declared slice order. A gate that
+// reports in map order is untestable, and a sort that ties on two distinct
+// findings leaves their order to sort.Slice's unstable pivot.
+func ReconcilePermissions(live []LivePermission, declared []DeclaredPermission, installedPackages, kernelKeys, undecodableKeys map[string]bool) PermissionReconciliation {
 	declaredKeysByPkg := make(map[string]map[string]bool, len(declared))
 	anyDeclaredKey := make(map[string]bool, len(declared))
 	for _, d := range declared {
@@ -439,6 +455,13 @@ func ReconcilePermissions(live []LivePermission, declared []DeclaredPermission, 
 	}
 
 	for k := range remainingKernel {
+		if undecodableKeys[k] {
+			// A document DOES occupy this key — the gatherer already reported
+			// it as FindingUndecodable. "Absent from the live set" would be a
+			// second, actively wrong diagnosis of the same key, carrying a
+			// remedy for a state it is not in.
+			continue
+		}
 		drift = append(drift, PermissionFinding{
 			Class: FindingKernelMissing, Key: k,
 			Detail: fmt.Sprintf("kernel permission %s is absent from the live set", k),
@@ -508,7 +531,18 @@ func sortPermissionFindings(findings []PermissionFinding) {
 		if a.OperationType != b.OperationType {
 			return a.OperationType < b.OperationType
 		}
-		return a.Scope < b.Scope
+		if a.Scope != b.Scope {
+			return a.Scope < b.Scope
+		}
+		// Reason and Detail are the last tiebreakers, not decoration: without
+		// them two findings that agree on every earlier field compare equal,
+		// and sort.Slice is not stable — their relative order would then be
+		// whichever way the pivot fell, which is exactly the map-order
+		// non-determinism this sort exists to remove.
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		return a.Detail < b.Detail
 	})
 }
 
@@ -536,17 +570,26 @@ const (
 	// GrantProvenancePackage is `origin == "package"` — an edge a package's
 	// install batch wrote alongside the permission it grants.
 	GrantProvenancePackage GrantProvenance = "package"
-	// GrantProvenanceRuntime is `origin == "runtime"` — rbac-domain's
-	// GrantPermission, the ratified second grant channel, never reconciled
-	// against a manifest. As on the vertex plane, this pass can verify only
-	// the STAMP, never the channel: an actor holding GrantPermission may point
-	// an edge at any live permission and it reconciles as inventory.
+	// GrantProvenanceRuntime is `origin == "runtime"` — the stamp
+	// rbac-domain's GrantPermission writes, the ratified second grant channel,
+	// reconciled against nothing. This class is asserted by the edge's own
+	// body and believed: `origin` is client-supplied at every authoring
+	// channel, so ANY writer of an edge — not only an actor holding
+	// GrantPermission — selects this class for itself simply by setting the
+	// field, and the edge is then inventory whatever it grants. The one thing
+	// that still holds is GrantFindingKernelRegrant, which is decided before
+	// any origin is read.
 	GrantProvenanceRuntime GrantProvenance = "runtime"
 	// GrantProvenanceUnstamped is a live edge carrying no `origin` WHOSE KEY
 	// IS declared by some installed package's declaredKeys — an install
 	// predating the stamp, healable by upgrading the declaring package. The
-	// declaredKeys check is load-bearing: without it, omitting `origin`
-	// entirely would be the cheapest way to reconcile a forged edge clean.
+	// declaredKeys check is what stops a bare omission being the cheapest
+	// laundering, and the derivation check runs on this class too (an
+	// unstamped edge must still grant a permission its declaring package
+	// owns). Neither makes the class safe on its own: an attacker who also
+	// writes the key into a package's declaredKeys, for a permission that
+	// package does declare, reconciles here as a notice. Only the
+	// registry-anchor pass over the compiled Definition closes that.
 	GrantProvenanceUnstamped GrantProvenance = "unstamped"
 	// GrantProvenanceUnrecognized is everything else: no origin and an
 	// undeclared key, or a non-empty origin that is neither "package" nor
@@ -611,14 +654,33 @@ const (
 	// GrantProvenanceUnrecognized (no origin and undeclared, or an origin
 	// value that is neither wire value).
 	GrantFindingUndeclared GrantFindingClass = "undeclared"
-	// GrantFindingKeyMismatch is drift: a package-origin edge, already
-	// confirmed declared, whose key grants a permission the declaring package
-	// does not itself declare — a declared edge pointing at somebody else's
-	// permission. This is the edge plane's derivation check, and it is the one
-	// that matters here: an escalation needs no new permission vertex, only an
-	// edge onto an existing high-value one. Checked only once an edge has
-	// cleared the undeclared question, so one forged edge reports one finding.
+	// GrantFindingKeyMismatch is drift: an edge that IS declared by an
+	// installed package, whose key grants a permission that package does not
+	// itself declare — a declared edge pointing at somebody else's permission.
+	// This is the derivation check the `package` and `unstamped` classes both
+	// run; the `runtime` class reaches no check at all (see
+	// GrantProvenanceRuntime), so this is not a property of every live edge.
+	// Checked only once an edge has cleared the undeclared question, so one
+	// forged edge reports one finding.
 	GrantFindingKeyMismatch GrantFindingClass = "keyMismatch"
+	// GrantFindingKernelRegrant is drift, in every provenance class and
+	// whatever the edge's body claims: an edge granting one of bootstrap's six
+	// primordial permissions that is not itself one of the six kernel grant
+	// edges. A kernel permission has exactly one legitimate grant topology —
+	// the seeder's own edge to the operator role — and no package declares a
+	// key it cannot address (kernel permission ids are per-deployment NanoIDs)
+	// while a runtime grant onto one is an escalation by construction. This is
+	// the only check decided before `origin` is read, and so the only one an
+	// attacker cannot select their way out of by choosing a class.
+	GrantFindingKernelRegrant GrantFindingClass = "kernelRegrant"
+	// GrantFindingMalformedKey is drift: a key occupying the grant-edge
+	// namespace (`lnk.permission.*.grantedBy.role.*` by segment) whose ids are
+	// not valid NanoIDs, so it is not a Contract #1 link key at all
+	// (substrate.ParseLinkKey rejects it). No writer the Processor validated
+	// can produce one; a direct Core-KV write can. Reported rather than
+	// skipped: dropping it from the enumeration would let the malformed shape
+	// opt out of every other class.
+	GrantFindingMalformedKey GrantFindingClass = "malformedKey"
 	// GrantFindingMissing is drift: a declared grant-edge key backed by NO
 	// document at all — a partial or interrupted install, or a hard purge
 	// outside the Processor's soft-tombstone path. A declared key backed by a
@@ -696,37 +758,55 @@ type GrantFinding struct {
 	Detail        string
 }
 
-// grantLinkKeyParts splits a `lnk.permission.<permID>.grantedBy.role.<roleID>`
+// grantRelation is the link-key relation segment that expresses a grant.
+// `lnk.permission.<id>.forOperation.meta.<id>` shares the `lnk.permission.`
+// prefix and is not one.
+const grantRelation = "grantedBy"
+
+// GrantLinkKeyParts splits a `lnk.permission.<permID>.grantedBy.role.<roleID>`
 // key into the permission and role vertex keys it addresses, reporting false
-// for anything that is not exactly that shape. The whole 6-segment shape is
-// checked rather than a prefix: `lnk.permission.<id>.forOperation.meta.<id>`
-// shares the prefix and is not a grant, and an empty id segment is what a key
-// derived from unloaded bootstrap globals looks like. Sole owner of this key
-// shape's parsing — the enumeration filter, the declaredKeys filter, the
-// kernel-set validation and the derivation check all ask here.
-func grantLinkKeyParts(key string) (permissionKey, roleKey string, ok bool) {
+// for anything else. The key grammar is delegated to substrate.ParseLinkKey —
+// Contract #1's own parser, NanoID validation included — so "what does a grant
+// edge key address" has exactly one definition, the one the refractor pipeline
+// projects through. Exported because the provenance gate's registry-anchor
+// pass needs the permission side of a declared edge key and must not carry a
+// second copy of this grammar (scripts/verify-permission-provenance.go).
+func GrantLinkKeyParts(key string) (permissionKey, roleKey string, ok bool) {
+	type1, id1, relation, type2, id2, ok := substrate.ParseLinkKey(key)
+	if !ok || type1 != "permission" || relation != grantRelation || type2 != "role" {
+		return "", "", false
+	}
+	return "vtx.permission." + id1, "vtx.role." + id2, true
+}
+
+// grantLinkShaped reports whether key OCCUPIES the grant-edge namespace —
+// `lnk.permission.<a>.grantedBy.role.<b>` by segment position — without
+// requiring the id segments to be valid NanoIDs. Deliberately looser than
+// GrantLinkKeyParts, and used only to decide what to enumerate and what to
+// collect off a declaredKeys record: the writer this whole plane exists to
+// catch puts bytes straight into Core KV and never passed the Processor's key
+// validation, so filtering the enumeration on the strict grammar would let a
+// malformed grant key opt out of every finding class. Such a key is
+// enumerated and reported as GrantFindingMalformedKey instead of vanishing.
+func grantLinkShaped(key string) bool {
 	parts := strings.Split(key, ".")
-	if len(parts) != 6 {
-		return "", "", false
-	}
-	if parts[0] != "lnk" || parts[1] != "permission" || parts[3] != "grantedBy" || parts[4] != "role" {
-		return "", "", false
-	}
-	if parts[2] == "" || parts[5] == "" {
-		return "", "", false
-	}
-	return "vtx.permission." + parts[2], "vtx.role." + parts[5], true
+	return len(parts) == 6 &&
+		parts[0] == "lnk" && parts[1] == "permission" &&
+		parts[3] == grantRelation && parts[4] == "role"
 }
 
 // classifyGrantLink sorts one live edge into exactly one of the five
 // GrantProvenance classes: key membership in kernelKeys takes priority over
 // the edge's own claimed origin, because kernel status is a property of WHICH
-// key this is, not of what the document at that key says. anyDeclaredKey is
-// the union of every installed package's declared grant-edge keys — the one
+// key this is, not of what the document at that key says. declaringPackages
+// maps an edge key to the installed packages whose declaredKeys name it — the
 // piece of data that tells a genuine pre-stamp install apart from a forgery
 // that simply omitted the field, since a pre-stamp edge's key was always
-// written by some package's own install batch and so is always a member.
-func classifyGrantLink(l LiveGrantLink, kernelKeys map[string]bool, anyDeclaredKey map[string]bool) GrantProvenance {
+// written by some package's own install batch. It carries the package names
+// rather than bare membership so the unstamped arm can run its derivation
+// check against the same packages this classification consulted, instead of
+// against a second set that could drift from it.
+func classifyGrantLink(l LiveGrantLink, kernelKeys map[string]bool, declaringPackages map[string][]string) GrantProvenance {
 	if kernelKeys[l.Key] {
 		return GrantProvenanceKernel
 	}
@@ -736,7 +816,7 @@ func classifyGrantLink(l LiveGrantLink, kernelKeys map[string]bool, anyDeclaredK
 	case PermissionOriginRuntime:
 		return GrantProvenanceRuntime
 	case "":
-		if anyDeclaredKey[l.Key] {
+		if len(declaringPackages[l.Key]) > 0 {
 			return GrantProvenanceUnstamped
 		}
 		return GrantProvenanceUnrecognized
@@ -748,48 +828,84 @@ func classifyGrantLink(l LiveGrantLink, kernelKeys map[string]bool, anyDeclaredK
 	}
 }
 
+// GrantLinkReconcileInput is ReconcileGrantLinks' full input. A struct rather
+// than a positional argument list: the edge plane reconciles one live
+// population against four independent facts — the declared edges, the
+// declaring packages' own permissions, the kernel's edges and the kernel's
+// permissions — plus the keys the read could not decode, and a call site that
+// wide cannot be read.
+type GrantLinkReconcileInput struct {
+	Live     []LiveGrantLink
+	Declared []DeclaredGrantLink
+	// DeclaredPermissions is the vertex plane's declared side, consulted for
+	// one question: does the package that declares an edge also declare the
+	// permission that edge grants (GrantFindingKeyMismatch).
+	DeclaredPermissions []DeclaredPermission
+	// InstalledPackages names every currently-installed (non-tombstoned)
+	// package by its manifest name.
+	InstalledPackages map[string]bool
+	// KernelGrantLinkKeys is bootstrap's six seeded edges — the kernel class.
+	KernelGrantLinkKeys map[string]bool
+	// KernelPermissionKeys is bootstrap's six primordial permission keys. An
+	// edge granting one of them that is not itself a kernel edge is drift
+	// whatever its body claims (GrantFindingKernelRegrant).
+	KernelPermissionKeys map[string]bool
+	// UndecodableKeys are edge keys the gatherer found OCCUPIED but could not
+	// read, already reported as GrantFindingUndecodable. Named here so a
+	// kernel edge in that state is not ALSO reported absent.
+	UndecodableKeys map[string]bool
+}
+
 // ReconcileGrantLinks classifies every live grant edge and every declared
 // grant-edge key against each other — ReconcilePermissions for the object
 // authorization travels. Pure; LoadPermissionReconciliation is the Core-KV
 // gatherer that feeds it (and the only place GrantFindingUndecodable is
 // raised).
 //
+// Two checks are decided BEFORE the edge's own `origin` is read, because
+// `origin` is client-supplied and a class it selects for itself cannot gate
+// anything: a key that is not a Contract #1 link key at all is
+// GrantFindingMalformedKey, and an edge granting a primordial permission that
+// is not one of the kernel's own six edges is GrantFindingKernelRegrant. Every
+// other check hangs off the classification.
+//
 // The declared identity is DeclaredGrantLink.Key, the granularity a package's
 // declaredKeys record carries, so `undeclared` and `missing` are plain
 // key-membership tests. The derivation check is the edge plane's own:
-// declaredPermissions supplies, per package, the `vtx.permission.*` keys that
-// package declares, and a declared package-origin edge whose key grants a
-// permission outside that set is keyMismatch — an edge may only point at a
-// permission its declaring package owns. It is checked only after the edge has
-// cleared the "is this even declared" question, so one forged edge produces
-// one finding with one remedy.
+// DeclaredPermissions supplies, per package, the `vtx.permission.*` keys that
+// package declares, and a DECLARED edge whose key grants a permission outside
+// that set is keyMismatch — an edge may only point at a permission its
+// declaring package owns. It runs on the `package` and `unstamped` classes
+// alike (an edge is not made trustworthy by omitting the stamp), and only
+// after the edge has cleared the "is this even declared" question, so one
+// forged edge produces one finding with one remedy.
 //
-// installedPackages names every currently-installed (non-tombstoned) package
-// by its manifest name; kernelKeys is bootstrap's six seeded grant edges.
-// Output is sorted (Class, Key, Package, PermissionKey, RoleKey) so two calls
+// Output is sorted (Class, Key, Package, PermissionKey, RoleKey, Reason,
+// Detail) — a total order over every field a finding carries, so two calls
 // with the same logical input produce byte-identical output regardless of
-// live/declared slice order — a gate that reports in map order is untestable.
-func ReconcileGrantLinks(
-	live []LiveGrantLink,
-	declared []DeclaredGrantLink,
-	declaredPermissions []DeclaredPermission,
-	installedPackages map[string]bool,
-	kernelKeys map[string]bool,
-) (drift, notices []GrantFinding, declaredGrantLinksByPackage map[string][]string) {
-	declaredKeysByPkg := make(map[string]map[string]bool, len(declared))
-	anyDeclaredKey := make(map[string]bool, len(declared))
-	for _, d := range declared {
+// live/declared slice order.
+func ReconcileGrantLinks(in GrantLinkReconcileInput) (drift, notices []GrantFinding, declaredGrantLinksByPackage map[string][]string) {
+	declaredKeysByPkg := make(map[string]map[string]bool, len(in.Declared))
+	declaringPackages := make(map[string][]string, len(in.Declared))
+	for _, d := range in.Declared {
 		set, ok := declaredKeysByPkg[d.Package]
 		if !ok {
 			set = map[string]bool{}
 			declaredKeysByPkg[d.Package] = set
 		}
-		set[d.Key] = true
-		anyDeclaredKey[d.Key] = true
+		if !set[d.Key] {
+			set[d.Key] = true
+			declaringPackages[d.Key] = append(declaringPackages[d.Key], d.Package)
+		}
+	}
+	// Sorted so the package a finding names when several declare the same key
+	// is a property of the input, not of its order.
+	for k := range declaringPackages {
+		sort.Strings(declaringPackages[k])
 	}
 
-	declaredPermsByPkg := make(map[string]map[string]bool, len(declaredPermissions))
-	for _, d := range declaredPermissions {
+	declaredPermsByPkg := make(map[string]map[string]bool, len(in.DeclaredPermissions))
+	for _, d := range in.DeclaredPermissions {
 		set, ok := declaredPermsByPkg[d.Package]
 		if !ok {
 			set = map[string]bool{}
@@ -798,15 +914,34 @@ func ReconcileGrantLinks(
 		set[d.Key] = true
 	}
 
-	liveKeys := make(map[string]bool, len(live))
-	remainingKernel := make(map[string]bool, len(kernelKeys))
-	for k := range kernelKeys {
+	liveKeys := make(map[string]bool, len(in.Live))
+	remainingKernel := make(map[string]bool, len(in.KernelGrantLinkKeys))
+	for k := range in.KernelGrantLinkKeys {
 		remainingKernel[k] = true
 	}
 
-	for _, l := range live {
+	for _, l := range in.Live {
 		liveKeys[l.Key] = true
-		switch classifyGrantLink(l, kernelKeys, anyDeclaredKey) {
+
+		permissionKey, _, parsed := GrantLinkKeyParts(l.Key)
+		if !parsed {
+			drift = append(drift, GrantFinding{
+				Class: GrantFindingMalformedKey, Key: l.Key,
+				PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
+				Detail: fmt.Sprintf("%q occupies the grant-edge namespace but is not a well-formed lnk.permission.<id>.grantedBy.role.<id> key — no writer the Processor validated can produce it", l.Key),
+			})
+			continue
+		}
+		if !in.KernelGrantLinkKeys[l.Key] && in.KernelPermissionKeys[permissionKey] {
+			drift = append(drift, GrantFinding{
+				Class: GrantFindingKernelRegrant, Key: l.Key, Package: l.DeclaredBy,
+				PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
+				Detail: fmt.Sprintf("%s grants primordial permission %s to a role the kernel did not, claiming origin %q — a kernel permission has exactly one legitimate grant edge and this is not it", l.Key, permissionKey, l.Origin),
+			})
+			continue
+		}
+
+		switch classifyGrantLink(l, in.KernelGrantLinkKeys, declaringPackages) {
 		case GrantProvenanceKernel:
 			delete(remainingKernel, l.Key)
 
@@ -814,19 +949,35 @@ func ReconcileGrantLinks(
 			notices = append(notices, GrantFinding{
 				Class: GrantFindingRuntimeInventory, Key: l.Key,
 				PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
-				Detail: fmt.Sprintf("%s is runtime-origin (%q granted by %q) — GrantPermission's ratified channel, inventory only", l.Key, l.PermissionKey, l.RoleKey),
+				Detail: fmt.Sprintf("%s stamps itself runtime-origin, granting %s to %q — GrantPermission's ratified channel writes that stamp, and so can any other writer of the edge; it is reconciled against nothing", l.Key, permissionKey, l.RoleKey),
 			})
 
 		case GrantProvenanceUnstamped:
+			declaring := declaringPackages[l.Key]
+			owner := ""
+			for _, p := range declaring {
+				if declaredPermsByPkg[p][permissionKey] {
+					owner = p
+					break
+				}
+			}
+			if owner == "" {
+				drift = append(drift, GrantFinding{
+					Class: GrantFindingKeyMismatch, Key: l.Key, Package: declaring[0],
+					PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
+					Detail: fmt.Sprintf("%s carries no origin and package %q declares its key, but it grants %s, which no package declaring this key declares as a permission of its own", l.Key, declaring[0], permissionKey),
+				})
+				break
+			}
 			notices = append(notices, GrantFinding{
-				Class: GrantFindingUnstampedInventory, Key: l.Key,
+				Class: GrantFindingUnstampedInventory, Key: l.Key, Package: owner,
 				PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
-				Detail: fmt.Sprintf("%s carries no origin but its key is declared by an installed package — a pre-provenance-stamp install. This edge's own body does not name its declaring package (that is exactly what is missing); cross-reference DeclaredGrantLinksByPackage to find which installed package declares this key, and upgrade THAT one", l.Key),
+				Detail: fmt.Sprintf("%s carries no origin, and package %q declares both its key and the permission %s it grants. That is an install predating the stamp (upgrade %[2]q to heal it), an upgrade that retargeted the edge without preserving origin/declaredBy, or a key an attacker wrote into that package's declaredKeys to buy this notice — this pass cannot tell the three apart; the gate's registry-anchor pass over the compiled Definition can", l.Key, owner, permissionKey),
 			})
 
 		case GrantProvenanceUnrecognized:
 			reason := GrantReasonNoOriginUndeclared
-			detail := fmt.Sprintf("%s carries no origin and its key is declared by no installed package — a grant edge authored by neither install nor GrantPermission, not a recognized pre-stamp legacy shape", l.Key)
+			detail := fmt.Sprintf("%s carries no origin and no installed package declares its key. An install-authored edge always lands in its package's declaredKeys, and a GrantPermission-authored edge carries origin %q — so this is a forged edge, or a runtime grant minted before that stamp existed", l.Key, PermissionOriginRuntime)
 			if l.Origin != "" {
 				reason = GrantReasonUnrecognizedOriginValue
 				detail = fmt.Sprintf("%s carries origin %q, which is neither %q nor %q — not a recognized provenance stamp", l.Key, l.Origin, PermissionOriginPackage, PermissionOriginRuntime)
@@ -838,9 +989,8 @@ func ReconcileGrantLinks(
 			})
 
 		case GrantProvenancePackage:
-			permissionKey, _, _ := grantLinkKeyParts(l.Key)
 			switch {
-			case !installedPackages[l.DeclaredBy]:
+			case !in.InstalledPackages[l.DeclaredBy]:
 				drift = append(drift, GrantFinding{
 					Class: GrantFindingUndeclared, Key: l.Key, Package: l.DeclaredBy, Reason: GrantReasonPackageNotInstalled,
 					PermissionKey: l.PermissionKey, RoleKey: l.RoleKey,
@@ -863,13 +1013,19 @@ func ReconcileGrantLinks(
 	}
 
 	for k := range remainingKernel {
+		if false {
+			// A document DOES occupy this key — the gatherer already reported
+			// it as GrantFindingUndecodable. "Absent from the live set" would
+			// be a second, actively wrong diagnosis of the same key.
+			continue
+		}
 		drift = append(drift, GrantFinding{
 			Class: GrantFindingKernelMissing, Key: k,
 			Detail: fmt.Sprintf("kernel grant edge %s is absent from the live set — a primordial permission no longer reaches the operator role", k),
 		})
 	}
 
-	for _, d := range declared {
+	for _, d := range in.Declared {
 		if liveKeys[d.Key] {
 			continue
 		}
@@ -898,8 +1054,8 @@ func ReconcileGrantLinks(
 	sortGrantFindings(drift)
 	sortGrantFindings(notices)
 
-	declaredGrantLinksByPackage = make(map[string][]string, len(installedPackages))
-	for pkg := range installedPackages {
+	declaredGrantLinksByPackage = make(map[string][]string, len(in.InstalledPackages))
+	for pkg := range in.InstalledPackages {
 		keys := declaredKeysByPkg[pkg]
 		list := make([]string, 0, len(keys))
 		for k := range keys {
@@ -927,7 +1083,17 @@ func sortGrantFindings(findings []GrantFinding) {
 		if a.PermissionKey != b.PermissionKey {
 			return a.PermissionKey < b.PermissionKey
 		}
-		return a.RoleKey < b.RoleKey
+		if a.RoleKey != b.RoleKey {
+			return a.RoleKey < b.RoleKey
+		}
+		// Reason and Detail are the last tiebreakers, not decoration: without
+		// them two findings that agree on every earlier field compare equal,
+		// and sort.Slice is not stable — their relative order would then be
+		// whichever way the pivot fell.
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		return a.Detail < b.Detail
 	})
 }
 
@@ -961,14 +1127,16 @@ type grantLinkDoc struct {
 	} `json:"data"`
 }
 
-// grantLinkRootKeys keeps only well-formed grant edges out of an already
-// fetched key list — the `lnk.permission.` prefix also enumerates
-// `forOperation` edges onto op metas, which express no grant and have no
-// declared-vs-live story on this plane.
+// grantLinkRootKeys keeps only grant edges out of an already fetched key list
+// — the `lnk.permission.` prefix also enumerates `forOperation` edges onto op
+// metas, which express no grant and have no declared-vs-live story on this
+// plane. The filter is grantLinkShaped, not the strict grammar: a key in the
+// grant namespace whose ids are malformed is kept and reported
+// (GrantFindingMalformedKey) rather than dropped.
 func grantLinkRootKeys(keys []string) []string {
 	out := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if _, _, ok := grantLinkKeyParts(k); !ok {
+		if !grantLinkShaped(k) {
 			continue
 		}
 		out = append(out, k)
@@ -995,10 +1163,11 @@ func permissionVertexRootKeys(keys []string) []string {
 }
 
 // kvGetMultiChunked runs KVGetMulti in abstractGuardReadChunk-sized batches
-// and merges the results. vtx.permission. is the one namespace this file
-// reads that grows monotonically — every CreatePermission mints a fresh
-// NanoID and TombstonePermission leaves the key rather than freeing it — so
-// it is the one read here that can cross KVGetMulti's 1,024-subject fast path
+// and merges the results. Two namespaces this file reads grow monotonically
+// and both go through here: vtx.permission. (every CreatePermission mints a
+// fresh NanoID, TombstonePermission leaves the key rather than freeing it) and
+// lnk.permission. (every GrantPermission mints an edge key, RevokePermission
+// leaves it), so either read can cross KVGetMulti's 1,024-subject fast path
 // (taxonomy.go's abstractGuardReadChunk / readDeclaredKeyOccupants is the
 // existing idiom this reuses rather than a new constant). vtx.package. stays
 // unchunked, matching findInstalledPackage's existing precedent — the
@@ -1040,12 +1209,116 @@ type permissionInputs struct {
 	// set, both derived from the same bootstrap globals.
 	kernelPermissionKeys map[string]bool
 	kernelGrantLinkKeys  map[string]bool
-	// undecodable and undecodableGrantLinks are the keys this pass could not
-	// account for at all. They never reach either pure reconciler's typed
-	// inputs — a key that does not decode becomes no live or declared record —
-	// so LoadPermissionReconciliation folds them into the drift it returns.
-	undecodable           []PermissionFinding
-	undecodableGrantLinks []GrantFinding
+	// undecodable and undecodableGrantLinks are the findings for keys this pass
+	// could not account for at all. They never reach either pure reconciler's
+	// typed inputs — a key that does not decode becomes no live or declared
+	// record — so LoadPermissionReconciliation folds them into the drift it
+	// returns. undecodableKeys / undecodableGrantLinkKeys are the same keys as
+	// a set: the reconcilers need them to tell "occupied but unreadable" from
+	// "absent" when a KERNEL key is in that state.
+	undecodable              []PermissionFinding
+	undecodableGrantLinks    []GrantFinding
+	undecodableKeys          map[string]bool
+	undecodableGrantLinkKeys map[string]bool
+}
+
+// decodePermissionVertices turns one batched read of `vtx.permission.<id>`
+// roots into the live population, the snapshot map the declared side enriches
+// from, the keys this pass could not account for, and the findings that name
+// them. Split out of gatherPermissionInputs so both failure arms are
+// exercisable on plain in-memory input — in particular the listed-but-not-
+// returned arm, a torn view between the list and the batched read that no test
+// can stage against a live bucket without racing it.
+//
+// A root this pass cannot account for is NAMED rather than skipped: no
+// authorization path reads any field this reconciler classifies on, so a
+// vertex with one malformed field still authorizes normally, and a plain
+// `continue` would let it opt out of every finding class. A tombstoned root
+// decodes into docs (the declared side reads its preserved data) but is not
+// live.
+func decodePermissionVertices(roots []string, entries map[string]*substrate.KVEntry) (
+	live []LivePermission, docs map[string]permissionDoc, undecodableKeys map[string]bool, findings []PermissionFinding,
+) {
+	docs = make(map[string]permissionDoc, len(roots))
+	undecodableKeys = make(map[string]bool)
+	for _, k := range roots {
+		entry, present := entries[k]
+		if !present {
+			undecodableKeys[k] = true
+			findings = append(findings, PermissionFinding{
+				Class: FindingUndecodable, Key: k,
+				Detail: fmt.Sprintf("%s was listed under vtx.permission. but the batched read did not return it", k),
+			})
+			continue
+		}
+		var doc permissionDoc
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			undecodableKeys[k] = true
+			findings = append(findings, PermissionFinding{
+				Class: FindingUndecodable, Key: k,
+				Detail: fmt.Sprintf("%s does not decode as a permission envelope: %v", k, err),
+			})
+			continue
+		}
+		docs[k] = doc
+		if doc.IsDeleted {
+			continue
+		}
+		live = append(live, LivePermission{
+			Key:           k,
+			OperationType: doc.Data.OperationType,
+			Scope:         doc.Data.Scope,
+			Origin:        doc.Data.Origin,
+			DeclaredBy:    doc.Data.DeclaredBy,
+		})
+	}
+	return live, docs, undecodableKeys, findings
+}
+
+// decodeGrantLinks is decodePermissionVertices for the edge plane, with one
+// difference that is the whole point of the class: a TOMBSTONED edge is not
+// live. RevokePermission soft-deletes rather than removing the key, and a
+// tombstoned edge is out of the capability walk, so reporting it live would
+// present a completed revocation as a standing grant. It still lands in docs,
+// which is how the declared side reports it as a revocation rather than a
+// missing edge.
+func decodeGrantLinks(roots []string, entries map[string]*substrate.KVEntry) (
+	live []LiveGrantLink, docs map[string]grantLinkDoc, undecodableKeys map[string]bool, findings []GrantFinding,
+) {
+	docs = make(map[string]grantLinkDoc, len(roots))
+	undecodableKeys = make(map[string]bool)
+	for _, k := range roots {
+		entry, present := entries[k]
+		if !present {
+			undecodableKeys[k] = true
+			findings = append(findings, GrantFinding{
+				Class: GrantFindingUndecodable, Key: k,
+				Detail: fmt.Sprintf("%s was listed under lnk.permission. but the batched read did not return it", k),
+			})
+			continue
+		}
+		var doc grantLinkDoc
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			undecodableKeys[k] = true
+			findings = append(findings, GrantFinding{
+				Class: GrantFindingUndecodable, Key: k,
+				Detail: fmt.Sprintf("%s does not decode as a link envelope: %v", k, err),
+			})
+			continue
+		}
+		docs[k] = doc
+		if doc.IsDeleted {
+			continue
+		}
+		live = append(live, LiveGrantLink{
+			Key:           k,
+			PermissionKey: doc.SourceVertex,
+			RoleKey:       doc.TargetVertex,
+			Origin:        doc.Data.Origin,
+			DeclaredBy:    doc.Data.DeclaredBy,
+		})
+	}
+	return live, docs, undecodableKeys, findings
 }
 
 // gatherPermissionInputs performs every Core-KV read LoadPermissionReconciliation
@@ -1103,39 +1376,8 @@ func gatherPermissionInputs(ctx context.Context, conn *substrate.Conn) (permissi
 		return permissionInputs{}, fmt.Errorf("pkgmgr: read %d permission vertices: %w", len(permRoots), err)
 	}
 
-	docs := make(map[string]permissionDoc, len(permRoots))
-	undecodableKeys := make(map[string]bool)
-	for _, k := range permRoots {
-		entry, present := permEntries[k]
-		if !present {
-			undecodableKeys[k] = true
-			in.undecodable = append(in.undecodable, PermissionFinding{
-				Class: FindingUndecodable, Key: k,
-				Detail: fmt.Sprintf("%s was listed under vtx.permission. but the batched read did not return it", k),
-			})
-			continue
-		}
-		var doc permissionDoc
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			undecodableKeys[k] = true
-			in.undecodable = append(in.undecodable, PermissionFinding{
-				Class: FindingUndecodable, Key: k,
-				Detail: fmt.Sprintf("%s does not decode as a permission envelope: %v", k, err),
-			})
-			continue
-		}
-		docs[k] = doc
-		if doc.IsDeleted {
-			continue
-		}
-		in.live = append(in.live, LivePermission{
-			Key:           k,
-			OperationType: doc.Data.OperationType,
-			Scope:         doc.Data.Scope,
-			Origin:        doc.Data.Origin,
-			DeclaredBy:    doc.Data.DeclaredBy,
-		})
-	}
+	live, docs, undecodableKeys, permFindings := decodePermissionVertices(permRoots, permEntries)
+	in.live, in.undecodable, in.undecodableKeys = live, permFindings, undecodableKeys
 
 	linkKeys, err := conn.KVListKeysPrefix(ctx, CoreBucket, "lnk.permission.")
 	if err != nil {
@@ -1147,39 +1389,8 @@ func gatherPermissionInputs(ctx context.Context, conn *substrate.Conn) (permissi
 		return permissionInputs{}, fmt.Errorf("pkgmgr: read %d grant links: %w", len(linkRoots), err)
 	}
 
-	linkDocs := make(map[string]grantLinkDoc, len(linkRoots))
-	undecodableLinkKeys := make(map[string]bool)
-	for _, k := range linkRoots {
-		entry, present := linkEntries[k]
-		if !present {
-			undecodableLinkKeys[k] = true
-			in.undecodableGrantLinks = append(in.undecodableGrantLinks, GrantFinding{
-				Class: GrantFindingUndecodable, Key: k,
-				Detail: fmt.Sprintf("%s was listed under lnk.permission. but the batched read did not return it", k),
-			})
-			continue
-		}
-		var doc grantLinkDoc
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			undecodableLinkKeys[k] = true
-			in.undecodableGrantLinks = append(in.undecodableGrantLinks, GrantFinding{
-				Class: GrantFindingUndecodable, Key: k,
-				Detail: fmt.Sprintf("%s does not decode as a link envelope: %v", k, err),
-			})
-			continue
-		}
-		linkDocs[k] = doc
-		if doc.IsDeleted {
-			continue
-		}
-		in.liveGrantLinks = append(in.liveGrantLinks, LiveGrantLink{
-			Key:           k,
-			PermissionKey: doc.SourceVertex,
-			RoleKey:       doc.TargetVertex,
-			Origin:        doc.Data.Origin,
-			DeclaredBy:    doc.Data.DeclaredBy,
-		})
-	}
+	liveLinks, linkDocs, undecodableLinkKeys, linkFindings := decodeGrantLinks(linkRoots, linkEntries)
+	in.liveGrantLinks, in.undecodableGrantLinks, in.undecodableGrantLinkKeys = liveLinks, linkFindings, undecodableLinkKeys
 
 	pkgKeys, err := conn.KVListKeysPrefix(ctx, CoreBucket, PackageVertexPrefix)
 	if err != nil {
@@ -1232,7 +1443,7 @@ func gatherPermissionInputs(ctx context.Context, conn *substrate.Conn) (permissi
 				in.declared = append(in.declared, d)
 				continue
 			}
-			if _, _, ok := grantLinkKeyParts(dk); ok {
+			if grantLinkShaped(dk) {
 				d := DeclaredGrantLink{Package: name, Key: dk}
 				if doc, ok := linkDocs[dk]; ok {
 					d.PermissionKey = doc.SourceVertex
@@ -1257,26 +1468,79 @@ func gatherPermissionInputs(ctx context.Context, conn *substrate.Conn) (permissi
 	return in, nil
 }
 
-// LoadPermissionReconciliation reads Core KV (via gatherPermissionInputs) and
-// runs both pure reconcilers over what it found — ReconcilePermissions on the
-// permission vertices, ReconcileGrantLinks on the `grantedBy` edges — then
-// folds in the undecodable entries the read itself produced. Those never reach
-// either reconciler's typed inputs, since a key that cannot be decoded becomes
-// no usable live or declared record (see gatherPermissionInputs's doc
-// comment).
+// LoadPermissionReconciliation reads Core KV and runs both pure reconcilers
+// over what it found — ReconcilePermissions on the permission vertices,
+// ReconcileGrantLinks on the `grantedBy` edges.
+//
+// It reads and reconciles TWICE and returns only the findings both passes
+// produced, matched on (class, key). The reason is a correctness one, not
+// belt-and-braces: gatherPermissionInputs reads at six unfenced moments (three
+// list calls and three batched reads) and Core KV has no snapshot read. A
+// package lifecycle op commits atomically — an uninstall tombstones the
+// manifest AND the package's declared keys in one mutation — so a pass that
+// straddles that commit sees a half-world: edges still live and stamped
+// `declaredBy: P` while P's manifest already reads uninstalled, which is
+// indistinguishable, field for field, from a forged edge naming a package that
+// was never installed. An install straddling the same window is the mirror
+// image (declared keys with no live document yet: `missing`). Both are FALSE
+// drift, and this function's caller is a CI gate whose whole output is a
+// pass/fail. One commit cannot straddle two disjoint read windows at the same
+// key, so intersecting the two passes removes the entire class.
+//
+// What it does NOT remove: a key genuinely flapping across both windows (a
+// reinstall loop) is still reported, and a real forgery that is written and
+// removed between the passes is missed — both are the correct trade against
+// failing a gate on a transient. The returned DeclaredKeysByPackage /
+// DeclaredGrantLinksByPackage come from the SECOND pass, unintersected: they
+// are an inventory the caller's registry-anchor pass compares against repo
+// source, not a finding, and that pass carries the same quiescence assumption.
+//
+// The undecodable entries each read produced are folded into that read's own
+// drift before intersection — they never reach either reconciler's typed
+// inputs, since a key that cannot be decoded becomes no usable live or
+// declared record (see gatherPermissionInputs's doc comment).
 func LoadPermissionReconciliation(ctx context.Context, conn *substrate.Conn) (PermissionReconciliation, error) {
+	first, err := reconcileOnce(ctx, conn)
+	if err != nil {
+		return PermissionReconciliation{}, err
+	}
+	second, err := reconcileOnce(ctx, conn)
+	if err != nil {
+		return PermissionReconciliation{}, err
+	}
+
+	out := second
+	out.Drift = intersectPermissionFindings(second.Drift, first.Drift)
+	out.Notices = intersectPermissionFindings(second.Notices, first.Notices)
+	out.GrantDrift = intersectGrantFindings(second.GrantDrift, first.GrantDrift)
+	out.GrantNotices = intersectGrantFindings(second.GrantNotices, first.GrantNotices)
+	return out, nil
+}
+
+// reconcileOnce is one read-and-reconcile pass over both planes — the whole of
+// LoadPermissionReconciliation's answer except that it is a single,
+// unsynchronized observation. See that function's doc comment for why one is
+// not enough.
+func reconcileOnce(ctx context.Context, conn *substrate.Conn) (PermissionReconciliation, error) {
 	in, err := gatherPermissionInputs(ctx, conn)
 	if err != nil {
 		return PermissionReconciliation{}, err
 	}
-	rec := ReconcilePermissions(in.live, in.declared, in.installedPackages, in.kernelPermissionKeys)
+	rec := ReconcilePermissions(in.live, in.declared, in.installedPackages, in.kernelPermissionKeys, in.undecodableKeys)
 	if len(in.undecodable) > 0 {
 		rec.Drift = append(rec.Drift, in.undecodable...)
 		sortPermissionFindings(rec.Drift)
 	}
 
-	grantDrift, grantNotices, declaredGrantLinksByPackage := ReconcileGrantLinks(
-		in.liveGrantLinks, in.declaredGrantLinks, in.declared, in.installedPackages, in.kernelGrantLinkKeys)
+	grantDrift, grantNotices, declaredGrantLinksByPackage := ReconcileGrantLinks(GrantLinkReconcileInput{
+		Live:                 in.liveGrantLinks,
+		Declared:             in.declaredGrantLinks,
+		DeclaredPermissions:  in.declared,
+		InstalledPackages:    in.installedPackages,
+		KernelGrantLinkKeys:  in.kernelGrantLinkKeys,
+		KernelPermissionKeys: in.kernelPermissionKeys,
+		UndecodableKeys:      in.undecodableGrantLinkKeys,
+	})
 	if len(in.undecodableGrantLinks) > 0 {
 		grantDrift = append(grantDrift, in.undecodableGrantLinks...)
 		sortGrantFindings(grantDrift)
@@ -1285,6 +1549,48 @@ func LoadPermissionReconciliation(ctx context.Context, conn *substrate.Conn) (Pe
 	rec.GrantNotices = grantNotices
 	rec.DeclaredGrantLinksByPackage = declaredGrantLinksByPackage
 	return rec, nil
+}
+
+// findingIdentity is the pair two reads must agree on for a finding to
+// survive. Class and Key only: Detail carries observation-time prose (a decode
+// error's text, a package name recovered from a manifest that may have moved),
+// and requiring THAT to match byte-for-byte would drop a finding both passes
+// genuinely made about the same key.
+type findingIdentity struct {
+	class string
+	key   string
+}
+
+// intersectPermissionFindings keeps the findings of latest whose (class, key)
+// also appears in earlier. latest supplies the returned records, so the
+// reported detail describes the more recent observation.
+func intersectPermissionFindings(latest, earlier []PermissionFinding) []PermissionFinding {
+	seen := make(map[findingIdentity]bool, len(earlier))
+	for _, f := range earlier {
+		seen[findingIdentity{string(f.Class), f.Key}] = true
+	}
+	out := make([]PermissionFinding, 0, len(latest))
+	for _, f := range latest {
+		if seen[findingIdentity{string(f.Class), f.Key}] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// intersectGrantFindings is intersectPermissionFindings for the edge plane.
+func intersectGrantFindings(latest, earlier []GrantFinding) []GrantFinding {
+	seen := make(map[findingIdentity]bool, len(earlier))
+	for _, f := range earlier {
+		seen[findingIdentity{string(f.Class), f.Key}] = true
+	}
+	out := make([]GrantFinding, 0, len(latest))
+	for _, f := range latest {
+		if seen[findingIdentity{string(f.Class), f.Key}] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // kernelPermissionKeySet validates six already-resolved permission keys and
@@ -1356,7 +1662,7 @@ func kernelPermissionKeys() (map[string]bool, error) {
 func kernelGrantLinkKeySet(keys []string) (map[string]bool, error) {
 	set := make(map[string]bool, len(keys))
 	for _, k := range keys {
-		if _, _, ok := grantLinkKeyParts(k); !ok {
+		if _, _, ok := GrantLinkKeyParts(k); !ok {
 			return nil, fmt.Errorf("pkgmgr: kernel grant-link key %q is not a resolved lnk.permission.<id>.grantedBy.role.<id> key — bootstrap.Load(BOOTSTRAP_JSON_PATH) must run before LoadPermissionReconciliation", k)
 		}
 		set[k] = true
