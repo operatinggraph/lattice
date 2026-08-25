@@ -2,6 +2,7 @@ package control_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,10 +48,17 @@ func (r *opRecorder) seen() map[string]struct{} {
 // table missing an entry is simply a smaller table every grant still matches.
 // SERVICE → table has to be checked from the service's own registration.
 //
-// So this drives a real request at every endpoint the service registers and
-// asserts the op token that reaches Authorize resolves in the table. Two
-// further directions come free and are checked here too: an op served without
-// ever reaching Authorize is an unauthorized surface, and a table entry no
+// The served set is read from the LIVE registration (ServedEndpoints, off
+// micro's published endpoint list), not from the vars the registration loops
+// range over. The distinction is the whole strength of the guard: an endpoint
+// added by a direct AddEndpoint call outside those loops is just as routable,
+// just as authorized, and just as capable of being a permanent deny — and a
+// var-derived guard cannot see it. Reading what NATS actually publishes leaves
+// no registration path outside the check.
+//
+// Three directions fall out, and each is its own failure: an op served without
+// ever reaching Authorize is an unauthorized surface; an op that reaches
+// Authorize but is absent from the table is a permanent deny; a table entry no
 // endpoint serves is a dead grant.
 func TestControl_EveryServedOpIsAuthorizable(t *testing.T) {
 	nc := startTestServer(t)
@@ -63,21 +71,34 @@ func TestControl_EveryServedOpIsAuthorizable(t *testing.T) {
 		t.Fatalf("start listener: %v", err)
 	}
 
-	// One request per registered endpoint. The request bodies do not matter:
-	// every handler authorizes BEFORE it reads its arguments, which is what
-	// makes the op token the first thing the control plane must be able to
-	// resolve.
+	endpoints, err := svc.ServedEndpoints()
+	if err != nil {
+		t.Fatalf("read the published endpoints: %v", err)
+	}
+	if len(endpoints) == 0 {
+		t.Fatal("the service published no endpoints; the guard would pass over an empty set")
+	}
+	// One request per published endpoint. The bodies do not matter: every
+	// handler authorizes BEFORE it reads its arguments, which is what makes the
+	// op token the first thing the control plane must be able to resolve.
 	var served []string
-	for _, op := range control.RegisteredExactOps() {
-		served = append(served, op)
-		if _, err := nc.Request(control.ExactSubject(op), nil, 2*time.Second); err != nil {
-			t.Fatalf("request %q on its exact subject: %v", op, err)
+	for _, ep := range endpoints {
+		served = append(served, ep.Op)
+		subject := strings.Replace(ep.Subject, ".*.", ".t1.", 1)
+		if _, err := nc.Request(subject, nil, 2*time.Second); err != nil {
+			t.Fatalf("request %q on %q: %v", ep.Op, subject, err)
 		}
 	}
-	for _, op := range control.RegisteredTargetOps() {
-		served = append(served, op)
-		if _, err := nc.Request(control.TargetSubject("t1", op), nil, 2*time.Second); err != nil {
-			t.Fatalf("request %q on its per-target subject: %v", op, err)
+
+	// The declared sets must still describe the published one — a registration
+	// loop whose var no longer matches what it registers is its own drift.
+	declared := map[string]struct{}{}
+	for _, op := range append(control.RegisteredExactOps(), control.RegisteredTargetOps()...) {
+		declared[op] = struct{}{}
+	}
+	for _, op := range served {
+		if _, ok := declared[op]; !ok {
+			t.Errorf("the service publishes an endpoint for op %q that neither registration var names", op)
 		}
 	}
 

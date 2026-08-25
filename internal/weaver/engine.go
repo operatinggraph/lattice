@@ -206,11 +206,16 @@ func (c *Config) withDefaults() {
 // in-memory caches hold derived/registry state rebuilt by CDC replay (the
 // registry source, the consumer-state cache).
 type Engine struct {
-	cfg              Config
-	conn             *substrate.Conn
-	logger           *slog.Logger
-	source           *targetSource
-	marks            *markStore
+	cfg    Config
+	conn   *substrate.Conn
+	logger *slog.Logger
+	source *targetSource
+	marks  *markStore
+	// budgets is the un-park verb's view of the same weaver-state marks store
+	// (retryBudgetStore, always e.marks in production). The verb reaches the
+	// count through it rather than through marks directly so its
+	// lost-the-race refusal can be exercised without staging a real KV race.
+	budgets          retryBudgetStore
 	sweep            *sweeper
 	temporal         *temporalStats
 	act              *actuator
@@ -317,6 +322,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		admission:        newAdmissionScheduler(),
 		targets:          make(map[string]specFingerprint),
 	}
+	e.budgets = e.marks
 	e.source = newTargetSource(conn, cfg.CoreKVBucket, cfg.Instance, issues, cfg.Logger)
 	e.sweep = newSweeper(e, cfg.SweepInterval, cfg.SweepOrphanWarmup, cfg.ReclaimBackoffBase, cfg.ReclaimBackoffCap)
 	return e

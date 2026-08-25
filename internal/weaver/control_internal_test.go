@@ -3,6 +3,7 @@ package weaver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1099,5 +1100,136 @@ func TestResetRetryBudget_RefusesAConcurrentBump(t *testing.T) {
 	}
 	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 0 {
 		t.Fatalf("dispatch-count after the re-run = %d, want 0", got)
+	}
+}
+
+// budgetStoreStub is a retryBudgetStore whose answers a test chooses, so the
+// verb's own branches can be exercised without racing a live KV for them.
+type budgetStoreStub struct {
+	count     int
+	revision  uint64
+	found     bool
+	conflict  bool
+	readErr   error
+	writeErr  error
+	writeSeen int
+}
+
+func (b *budgetStoreStub) dispatchCountEntry(context.Context, string, string, string) (int, uint64, bool, error) {
+	return b.count, b.revision, b.found, b.readErr
+}
+
+func (b *budgetStoreStub) resetDispatchCount(_ context.Context, _, _, _ string, expectedRevision uint64) (bool, error) {
+	b.writeSeen++
+	if expectedRevision != b.revision {
+		return false, fmt.Errorf("stub: write conditioned on revision %d, want the revision the verb read (%d)",
+			expectedRevision, b.revision)
+	}
+	return b.conflict, b.writeErr
+}
+
+// TestResetRetryBudget_ReportsALostRace pins the verb's refusal when the write
+// loses its revision condition. The store reports the conflict; the branch
+// under test is what the VERB does with it, and the failure mode it prevents is
+// the worst kind of quiet one: telling an operator the budget was reset when
+// nothing was written. The gap would then sit at its old count — above zero, so
+// the sweep's re-arm skips it — parked, with the operator believing otherwise.
+//
+// A lost race is by construction a race, so it is staged rather than run: the
+// stub answers as the store answers when a dispatch lands between the verb's
+// read and its write, and asserts on the way through that the verb really did
+// condition the write on the revision it read.
+func TestResetRetryBudget_ReportsALostRace(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureResetBudgetLostRace"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	stub := &budgetStoreStub{count: 3, revision: 7, found: true, conflict: true}
+	h.engine.budgets = stub
+
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, entityID, "missing_x")
+	if err == nil {
+		t.Fatal("a reset whose write lost its revision condition wrote nothing and must not report success")
+	}
+	if !strings.Contains(err.Error(), "changed during the reset") {
+		t.Fatalf("error = %q, want it to name the concurrent change and the re-run remedy", err)
+	}
+	if stub.writeSeen != 1 {
+		t.Fatalf("the store saw %d writes, want exactly 1", stub.writeSeen)
+	}
+
+	// The same vector without the race: the verb reports what it replaced.
+	stub.conflict = false
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, entityID, "missing_x"); err != nil || previous != 3 {
+		t.Fatalf("uncontended reset = (%d, %v), want (3, nil)", previous, err)
+	}
+}
+
+// TestResetRetryBudget_RefusesACollapseOnlyGap pins the verb against the one
+// authoring shape where it would otherwise be silently inert. A gap parks on a
+// positive maxretries_<g> alone — no inflight_<g> column is required — so a
+// triggerLoom over a parking pattern, or an assignTask, can exhaust its budget
+// like any other gap. But the sweep's re-arm never dispatches a collapse-only
+// gap (its task may still be open, and a fresh episode would duplicate it), so
+// resetting that budget would write a 0 nothing acts on: the gap stays parked,
+// and its standing GapBudgetExhausted now describes a budget it no longer has.
+// The verb refuses and names the action, leaving the issue TRUE.
+//
+// The classification is by dispatch shape, so the external-eligible triggerLoom
+// — whose re-dispatch §10.3 calls for — must still reset. Without that control
+// the rule would read "triggerLoom never resets", which is the wrong rule.
+func TestResetRetryBudget_RefusesACollapseOnlyGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureResetBudgetCollapseOnly"
+	seedPatternSpec(t, h.engine.source, "parksOnAHuman", stepKindSystemOp, stepKindUserTask)
+	seedPatternSpec(t, h.engine.source, "callsAVendor", stepKindExternalTask)
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_parked": {Action: actionTriggerLoom, Pattern: "parksOnAHuman", Subject: "row.entityKey"},
+			"missing_vendor": {Action: actionTriggerLoom, Pattern: "callsAVendor", Subject: "row.entityKey"},
+		},
+	})
+	parked, vendor := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_parked": parked, "missing_vendor": vendor} {
+		h.seedCount(t, ctx, targetID, entityID, gap, 2)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, 2))
+	}
+
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, parked, "missing_parked")
+	if err == nil {
+		t.Fatal("a collapse-only gap's budget must not be reset: the sweep would never act on it")
+	}
+	for _, want := range []string{"collapse-only", "triggerLoom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to name %q", err, want)
+		}
+	}
+	if got := h.countValue(t, ctx, targetID, parked, "missing_parked"); got != 2 {
+		t.Fatalf("refused reset left the budget at %d, want 2 (nothing written)", got)
+	}
+
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, vendor, "missing_vendor"); err != nil || previous != 2 {
+		t.Fatalf("an external gap's re-dispatch is intended (§10.3) and must reset: got (%d, %v)", previous, err)
+	}
+	if got := h.countValue(t, ctx, targetID, vendor, "missing_vendor"); got != 0 {
+		t.Fatalf("external gap's budget = %d, want 0", got)
 	}
 }

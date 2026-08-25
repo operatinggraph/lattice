@@ -334,10 +334,23 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 	if !strings.HasPrefix(gapColumn, gapColumnPrefix) || !singleTokenPattern.MatchString(gapColumn) {
 		return 0, fmt.Errorf("weaver: gapColumn %q must be a single-token %s* column", gapColumn, gapColumnPrefix)
 	}
-	if _, ok := e.source.target(targetID); !ok {
+	target, ok := e.source.target(targetID)
+	if !ok {
 		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
 	}
-	previous, revision, found, err := e.marks.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
+	if ga, planned := target.Gaps[gapColumn]; planned && e.reArmDeclines(ctx, targetID, entityID, gapColumn, ga) {
+		// The sweep's re-arm never dispatches a collapse-only gap: its task or
+		// Loom instance may still be open, and a re-armed episode would mint a
+		// fresh claimId and duplicate it. Re-arming the budget here would
+		// therefore change nothing an operator can observe — the gap would sit
+		// at a count of 0, still parked, still holding a GapBudgetExhausted
+		// that now describes a budget it no longer has. Refusing keeps the
+		// standing issue TRUE and says which authoring shape is in the way.
+		return 0, fmt.Errorf("weaver: target %q entity %q gap %q dispatches %q, whose artifact may still be open: "+
+			"the sweep never re-arms a collapse-only gap, so resetting its budget would leave it parked with a fresh budget",
+			targetID, entityID, gapColumn, ga.Action)
+	}
+	previous, revision, found, err := e.budgets.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
 	if err != nil {
 		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
 	}
@@ -349,7 +362,7 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 		return 0, fmt.Errorf("weaver: no retry budget for target %q entity %q gap %q (nothing has dispatched it)",
 			targetID, entityID, gapColumn)
 	}
-	conflict, err := e.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision)
+	conflict, err := e.budgets.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision)
 	if err != nil {
 		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
 	}
@@ -360,6 +373,29 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 	e.logger.Info("weaver: retry budget reset",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn, "previousCount", previous)
 	return previous, nil
+}
+
+// reArmDeclines reports whether the reconciler's count-leg re-arm would refuse
+// to dispatch this gap because its action is collapse-only — the same
+// collapseOnlyReclaim-over-staleMark predicate the arm itself applies, read
+// over the gap's current row so an EXTERNAL gap (whose re-dispatch §10.3 says
+// to make) is not refused alongside the human ones. A row that is missing or
+// unreadable classifies as collapse-only for the three collapse-only actions,
+// which is the same answer the arm reaches: it does not dispatch a gap with no
+// row either.
+//
+// It answers one question — does this gap's ACTION put it outside the re-arm —
+// and never "will this gap dispatch", which depends on gates (a freeze, the
+// registry, the row's own columns) that move independently of the operator's
+// decision and are the sweep's to apply, not this verb's to predict.
+func (e *Engine) reArmDeclines(ctx context.Context, targetID, entityID, gapColumn string, ga GapAction) bool {
+	var row map[string]any
+	if entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID); err == nil {
+		if uErr := json.Unmarshal(entry.Value, &row); uErr != nil {
+			row = nil
+		}
+	}
+	return collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga))
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the

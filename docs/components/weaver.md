@@ -834,7 +834,11 @@ records. A successful reset therefore means the budget is re-armed, never that t
 again. One deterministic key, one writer, one path.
 
 It refuses — writing nothing — when the target is not registered, when the arguments are not the
-§10.2/§10.3 key shapes, when **no budget exists at that gap** (a count key exists only where a chain
+§10.2/§10.3 key shapes, when the gap's action is **collapse-only** (an `assignTask`, or a
+`triggerLoom` over a pattern that parks on a human: the sweep never re-arms one, because its task may
+still be open and a re-armed episode would mint a fresh `claimId` and duplicate it — so resetting
+would leave the gap parked with a fresh budget and a standing issue that no longer describes it),
+when **no budget exists at that gap** (a count key exists only where a chain
 has actually dispatched, so inventing one would hand the sweep a gap nobody chose — this is the
 honest answer to a mistyped `entityId`), and when a dispatch bumped the count between the read and
 the write (the operator's intent is stale; re-running is the remedy).

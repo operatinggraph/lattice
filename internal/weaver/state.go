@@ -365,6 +365,18 @@ func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entity
 	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
+// retryBudgetStore is the two-operation view of weaver-state the un-park verb
+// needs: read the budget WITH the revision it was read at, then write it back
+// to 0 conditioned on that revision. Naming the pair as an interface is what
+// makes the verb's refusal path reachable in a test — the conflict it exists to
+// report is a lost race against a concurrent dispatch, and racing a live KV to
+// produce one is the kind of proof that passes when it feels like it. markStore
+// is the only production implementation.
+type retryBudgetStore interface {
+	dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (count int, revision uint64, found bool, err error)
+	resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string, expectedRevision uint64) (conflict bool, err error)
+}
+
 // dispatchCountEntry reads one gap's dispatch-count together with the KV
 // revision it was read at — the revision a conditioned write must name to prove
 // it is replacing the value it looked at. found=false means no chain has ever
