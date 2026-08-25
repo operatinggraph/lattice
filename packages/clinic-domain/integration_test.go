@@ -849,10 +849,11 @@ func TestClinic_NoShowFee(t *testing.T) {
 // TestClinic_MarkPastDueNoShow proves the Weaver-only auto no-show op: given
 // only appointmentKey (no caller-supplied provider/patient — clinic-reminders'
 // pastDueAppointments playbook has none to supply), it resolves both LIVE off
-// the appointment's own links, upserts .status{noShow, the auto note,
-// noShowFeeCents: 2500}, and releases the held slot-claim cells — the same
-// effect as a staff SetAppointmentStatus(noShow), minus the caller-supplied
-// params.
+// the appointment's own links, upserts .status{noShow, the auto note}, and
+// releases the held slot-claim cells. Unlike a staff SetAppointmentStatus
+// (noShow), it never sets noShowFeeCents — an appointment nobody at the desk
+// closed is a documentation lapse, not a missed visit (PO ruling,
+// verticals.md), so the automated sweep marks without a fee.
 func TestClinic_MarkPastDueNoShow(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
@@ -876,8 +877,8 @@ func TestClinic_MarkPastDueNoShow(t *testing.T) {
 	if st["value"] != "noShow" {
 		t.Fatalf("status = %v, want noShow", st["value"])
 	}
-	if got, _ := st["noShowFeeCents"].(float64); got != 2500 {
-		t.Fatalf("noShowFeeCents = %v, want default 2500", st["noShowFeeCents"])
+	if _, present := st["noShowFeeCents"]; present {
+		t.Fatalf("MarkPastDueNoShow must never set noShowFeeCents (sweep marks without a fee), got %v", st["noShowFeeCents"])
 	}
 	if st["note"] != "Auto no-show: appointment ended without a status update" {
 		t.Fatalf("note = %v, want the auto no-show note", st["note"])
