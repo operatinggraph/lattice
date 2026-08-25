@@ -393,9 +393,17 @@ func (i *Installer) buildInstallBatch(
 				roleID = role[len("vtx.role."):]
 			}
 			// Link canonical name is `grantedBy` (permission granted by role).
+			// The edge carries the same provenance stamp as the permission
+			// vertex above it, so an auditor walking the grant topology can
+			// tell a package-declared grant from a runtime-minted one
+			// (grant-edge-provenance-design.md §3) without cross-referencing
+			// the vertex it points at.
 			linkKey := "lnk.permission." + permID + ".grantedBy.role." + roleID
 			addCreate(linkKey, docLink("vtx.permission."+permID, "vtx.role."+roleID,
-				"grantedBy", "grantedBy", nil))
+				"grantedBy", "grantedBy", map[string]any{
+					"origin":     PermissionOriginPackage,
+					"declaredBy": def.Name,
+				}))
 		}
 		// `permission forOperation meta` — the edge that lets a role-standing
 		// grant reach the op meta it gates. The grant walk otherwise dead-ends

@@ -161,18 +161,21 @@ def revive_link(key, source, target, cls, local_name, data):
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
 
-def grant_link(state, key, source, target, cls, local_name):
+def grant_link(state, key, source, target, cls, local_name, data):
     # Three-state grant-if-not-alive: alive -> idempotent no-op (empty list),
     # tombstoned -> revive as update, absent -> create. Absence covers both a
     # never-granted link and a caller that did not declare the key as a read
     # (the key is simply not in the hydrated snapshot); a declared optionalReads
-    # entry is what makes the revive branch reachable.
+    # entry is what makes the revive branch reachable. data is carried into
+    # BOTH arms: a revive re-stamps the link exactly as a fresh create would,
+    # so a revoke-then-re-grant cannot launder the stamp off (grant-edge-
+    # provenance-design.md G5).
     existing = state[key] if key in state else None
     if existing != None and not (hasattr(existing, "isDeleted") and existing.isDeleted):
         return []
     if existing != None:
-        return [revive_link(key, source, target, cls, local_name, {})]
-    return [make_link(key, source, target, cls, local_name, {})]
+        return [revive_link(key, source, target, cls, local_name, data)]
+    return [make_link(key, source, target, cls, local_name, data)]
 
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
@@ -373,7 +376,7 @@ def execute(state, op):
         # primaryKey (the link key is deterministic and known to the caller).
         # The revive branch is reachable only when the caller declares lnk_key
         # in contextHint.optionalReads (see grant_link).
-        mutations = grant_link(state, lnk_key, actor_key, role_key, "holdsRole", "holdsRole")
+        mutations = grant_link(state, lnk_key, actor_key, role_key, "holdsRole", "holdsRole", {})
         if len(mutations) == 0:
             return {"mutations": [], "events": []}
         events = [{"class": "rbac.roleAssigned",
@@ -411,7 +414,13 @@ def execute(state, op):
         # absent -> create. No mutations means no committed key, so no
         # primaryKey. The revive branch needs lnk_key in the caller's
         # contextHint.optionalReads.
-        mutations = grant_link(state, lnk_key, perm_key, role_key, "grantedBy", "grantedBy")
+        # origin is the provenance stamp (Contract #6 6.1, extended to the
+        # grant edge by grant-edge-provenance-design.md): this link was
+        # authored at runtime by a grant-holding actor, not declared by an
+        # installed package's manifest. grant_link carries it into the revive
+        # arm too, so a revoke-then-re-grant does not come back unstamped.
+        mutations = grant_link(state, lnk_key, perm_key, role_key, "grantedBy", "grantedBy",
+            {"origin": "runtime"})
         if len(mutations) == 0:
             return {"mutations": [], "events": []}
         events = [{"class": "rbac.permissionGranted",
