@@ -20,11 +20,25 @@
 // and each per-package `verify-package-*` script asserts only declared→live
 // for its own package.
 //
-// A PASS here narrows the gap; it does not close it. Two residuals remain on
-// each plane, named as non-goals in grant-edge-provenance-design.md's fire
-// brief (item 7) and grant-provenance-runtime-permission-minting-design.md's
-// own fire brief before it:
+// A PASS here narrows the gap; it does not close it. The residuals below are
+// named as non-goals in grant-edge-provenance-design.md's fire brief (item 7)
+// and grant-provenance-runtime-permission-minting-design.md's own fire brief
+// before it:
 //
+//   - `origin` is client-supplied at every authoring channel, so the
+//     classifier's own input is chosen by whoever wrote the object. `package`
+//     is the only class that leads anywhere — it is reconciled against
+//     declaredKeys and, on the edge plane, against the declaring package's
+//     permissions. `runtime` is asserted by the body and reconciled against
+//     nothing: an edge that stamps itself `runtime` is a NOTE whatever it
+//     grants, and any writer of the edge can set that field, not only an actor
+//     holding GrantPermission. `unstamped` is checked against declaredKeys and
+//     the derivation check, but against no stamp. Adding a field is therefore a
+//     cheaper laundering than deleting one. Narrowed on the edge plane by
+//     `kernelRegrant` below, which is decided BEFORE any origin is read and so
+//     is the one check a chosen class cannot walk around: a primordial
+//     permission has exactly one legitimate grant edge, and a second one fails
+//     this gate in every class.
 //   - The declared side of both reconcile passes is Core KV again — a
 //     package's own declaredKeys record, not repo source. A package-plane
 //     actor writes both halves of that comparison in one operation, so an
@@ -61,8 +75,10 @@
 // classes (kernel, package, runtime, unstamped, unrecognized — see
 // internal/pkgmgr's PermissionProvenance), and every live grant edge falls
 // into the same five classes applied to the edge instead of the vertex
-// (GrantProvenance). Both planes fail on the same five drift classes, named
-// identically because each means the same thing on the other object:
+// (GrantProvenance), except for the two edge-plane checks that are decided
+// before any class is: kernelRegrant and malformedKey. Both planes fail on the
+// same five drift classes, named identically because each means the same thing
+// on the other object:
 //
 //	undeclared     a live vertex/edge this reconciler cannot attribute to any
 //	               installed package's declaredKeys (declaredBy names no
@@ -79,11 +95,24 @@
 //	undecodable    a vtx.permission.* or lnk.permission.*.grantedBy.role.* root
 //	               this pass could not read at all
 //
-// Runtime and unstamped entries are REPORTED, never failed, on both planes:
-// the first is a ratified channel (this gate can verify only the STAMP,
-// never the channel itself — see internal/pkgmgr's PermissionProvenanceRuntime
-// / GrantProvenanceRuntime), and the second heals on the declaring package's
-// next upgrade. A declared key backed by a TOMBSTONED document is also
+// The edge plane fails on two more, both decided before the edge's own
+// provenance claim is read, so no choice of `origin` avoids them:
+//
+//	kernelRegrant  a live edge granting one of the six primordial permissions
+//	               that is not itself one of the six kernel grant edges — a
+//	               second grant of a kernel permission, which no package can
+//	               declare and no runtime channel may mint
+//	malformedKey   a key in the grant-edge namespace whose ids are not valid
+//	               NanoIDs, so it is not a Contract #1 link key at all
+//
+// Runtime and unstamped entries are REPORTED, never failed, on both planes,
+// EXCEPT where kernelRegrant claims the edge first: the first is a ratified
+// channel (this gate can verify only the STAMP, never the channel itself — see
+// internal/pkgmgr's PermissionProvenanceRuntime / GrantProvenanceRuntime), and
+// the second heals on the declaring package's next upgrade — but neither
+// exemption reaches an edge granting a primordial permission, which is the
+// point of deciding that class before the stamp is read. A declared key backed
+// by a TOMBSTONED document is also
 // reported, never failed, on both planes: revocation (TombstonePermission /
 // RevokePermission) is durable (see the FindingMissing remedy below for what
 // that means for the OTHER, still-failing shape of missing).
@@ -100,7 +129,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
@@ -206,6 +234,27 @@ var grantRemedies = map[pkgmgr.GrantFindingClass]string{
 		"    authorization path reads `origin` or `declaredBy` off a grant edge, so it is\n" +
 		"    authorizing normally right now regardless of why this pass cannot read it. Read\n" +
 		"    it directly (KVGet the key) before deciding anything.",
+	pkgmgr.GrantFindingKernelRegrant: "" +
+		"    A primordial permission reaches a role the kernel never granted it to. Treat this\n" +
+		"    ahead of every other class on this plane: the six kernel permissions are\n" +
+		"    CreateMetaVertex / UpdateMetaVertex / TombstoneMetaVertex and Install / Uninstall /\n" +
+		"    UpgradePackage — whoever holds that role can install a package, and installing a\n" +
+		"    package writes permissions and grant edges of its own.\n" +
+		"    Do NOT read this edge's own origin/declaredBy as evidence of who authored it: this\n" +
+		"    class is decided before any of that is consulted, precisely because those fields\n" +
+		"    are written by the same actor that wrote the edge. No package can declare such a\n" +
+		"    key (kernel permission ids are per-deployment NanoIDs, absent from every compiled\n" +
+		"    Definition), so a package name here is a claim, not a provenance. Establish\n" +
+		"    authorship from the op log (the edge's createdByOp) and check which identities\n" +
+		"    hold the named role before revoking — revoking removes a live grant.",
+	pkgmgr.GrantFindingMalformedKey: "" +
+		"    This key occupies the grant-edge namespace but is not a Contract #1 link key —\n" +
+		"    its ids are not valid NanoIDs (substrate.ParseLinkKey rejects it). The Processor\n" +
+		"    validates keys on write, so no operation produced this: something wrote Core KV\n" +
+		"    directly. The refractor pipeline parses keys the same way, so this edge is almost\n" +
+		"    certainly conferring nothing — but a key nothing can parse is also a key nothing\n" +
+		"    else on this plane can classify, which is why it is reported rather than skipped.\n" +
+		"    Read it directly (KVGet) and find the writer before removing it.",
 }
 
 // registryFinding is the registry-anchor pass's own local finding shape. It
@@ -298,27 +347,6 @@ func checkRegistryAnchor(rec pkgmgr.PermissionReconciliation) (drift, notices []
 	return drift, notices
 }
 
-// grantLinkPermissionKey extracts the permission-vertex key
-// (`vtx.permission.<permID>`) a `lnk.permission.<permID>.grantedBy.role.<roleID>`
-// key addresses, reporting false for anything not exactly that 6-segment
-// shape. Mirrors internal/pkgmgr's unexported grantLinkKeyParts byte-for-byte
-// — this script cannot import it (it is a private helper, not part of
-// pkgmgr's exported surface) — so a change to that shape must be carried to
-// both copies.
-func grantLinkPermissionKey(key string) (string, bool) {
-	parts := strings.Split(key, ".")
-	if len(parts) != 6 {
-		return "", false
-	}
-	if parts[0] != "lnk" || parts[1] != "permission" || parts[3] != "grantedBy" || parts[4] != "role" {
-		return "", false
-	}
-	if parts[2] == "" || parts[5] == "" {
-		return "", false
-	}
-	return "vtx.permission." + parts[2], true
-}
-
 // checkGrantLinkRegistryAnchor is checkRegistryAnchor's analogue for the
 // `grantedBy` edge plane: for every installed package the compiled registry
 // actually knows, it derives — from that package's real Go
@@ -366,12 +394,13 @@ func checkGrantLinkRegistryAnchor(rec pkgmgr.PermissionReconciliation) (drift []
 
 		actual := make(map[string]int, len(rec.DeclaredGrantLinksByPackage[name]))
 		for _, k := range rec.DeclaredGrantLinksByPackage[name] {
-			permKey, ok := grantLinkPermissionKey(k)
+			permKey, _, ok := pkgmgr.GrantLinkKeyParts(k)
 			if !ok {
-				// rec.DeclaredGrantLinksByPackage is populated only from keys
-				// internal/pkgmgr's own grantLinkKeyParts already accepted
-				// (gatherPermissionInputs) — unreachable in practice. Skip
-				// rather than trust a shape this pass did not itself validate.
+				// A declared key can occupy the grant namespace without being a
+				// well-formed link key — the reconcile pass keeps those and
+				// reports them as `malformedKey` rather than dropping them, so
+				// they are already named. Counting one here would attribute it
+				// to a permission key this pass could not derive.
 				continue
 			}
 			actual[permKey]++
