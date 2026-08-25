@@ -122,7 +122,7 @@ split, level reconcile against the current row, revision-conditioned delete).
 | 8 | row not `violating` | return | mirrors lane-1's L1 gate and `sweepMark`'s violating gate (`reconciler.go:481`) |
 | 9 | `gapSuppressed` → `exhausted` | `escalateExhaustedGap` | **the fix.** Same site the mark leg calls (`reconciler.go:508`), now reachable from state that outlives the mark |
 | 10 | `gapSuppressed` → suppressed, not exhausted (`inflight_<g>`) | return | a call is in flight; the lens will re-project when it lands, and lane 1 re-delivers |
-| 11 | not suppressed, **no** mark, action is not `surface` | **dispatch** (`planGap` → `fireEpisode`), no clear of its own | the re-arm. See §4, incl. its 2026-08-25 correction: the clear already lives in `planGap` conditioned on the plan building, and `surface` returns before planning |
+| 11 | not suppressed, **no** mark, action is not `surface` | clear the issue, then **dispatch** (`planGap` → `fireEpisode`) | the re-arm. See §4, incl. its 2026-08-25 correction: the path is `planGap`+`fireEpisode` (not `dispatchGap`), the clear sits above the plan because it is level-driven on the suppression read, and a `surface` action returns before planning |
 
 **Arm ORDER is load-bearing, and `sweepMark` already fixes it (CORRECTED 2026-08-25 after cold
 review).** `sweepMark` runs its level reconcile *unconditionally, above* the registry and `__control`
@@ -258,16 +258,23 @@ do; the loser drops.
 > rowRevision, "")` then `e.fireEpisode(...)` (`reconciler.go:730-737`) — and that pair, with reclaim's
 > nil-plan branch, is what arm 11 mirrors.
 >
-> **(b) Arm 11 must NOT clear the issue itself.** `planGap` already clears
-> `issueKeyGapEntity(targetID, entityID, col)` at `evaluator.go:491`, and its own comment names exactly
-> this fire's case: *"this entity's gap has an attempt left after all (its GapBudgetExhausted, which a
-> raised maxretries_<g> or an escalation can make stale without the gap ever having closed)"*. That
-> clear is conditioned on a plan actually **building**, which is strictly more correct than an
-> unconditional pre-clear: `planGap` also returns nil for admission-deferral (`NakWithDelay`) and for a
-> transient unresolved reference, and in both the standing fact may still hold. An arm-11 clear ahead of
-> the dispatch would retire the latch in exactly those cases — the flap §3.2's AMENDED block had to
-> remove from arm 8b, one arm further down. **Arm 11 is dispatch-only; the clear it needs is already
-> inside the dispatch.**
+> **(b) Arm 11 keeps its OWN clear, above the plan.** `planGap` also clears
+> `issueKeyGapEntity(targetID, entityID, col)` at `evaluator.go:491`, and its comment names this fire's
+> case — which is why this was first corrected the other way, to "dispatch-only, ride `planGap`'s clear".
+> **That was wrong and the build refuted it.** `planGap` reaches its clear only when a plan **builds**;
+> it returns nil for admission-deferral (`NakWithDelay`, `evaluator.go:481`) and for a transient
+> unresolved reference. In neither of those is the budget spent — the gap is paced or blocked, not
+> exhausted — so `GapBudgetExhausted`'s specific claim, *this gap has no attempt left*, is false there
+> too, and riding on `planGap` would strand the standing fact in exactly the cases where the dispatch
+> cannot proceed. The retirement is level-driven on the **suppression read**, which is the dossier's
+> demand (*"pair the retirement with the READ so it is level-driven"*), so it belongs above the plan and
+> is independent of the dispatch outcome.
+>
+> It cannot flap, verified the way the dossier prescribes — by grepping the key CONSTRUCTOR rather than
+> the file being edited. `issueKeyGapEntity` has exactly **two** raise sites: `evaluator.go:239`
+> (`dispatchGap`'s surface branch), excluded by (c)'s guard; and `evaluator.go:1155`
+> (`escalateExhaustedGap`'s `alertStanding`), which raises only with the budget SPENT, excluded by this
+> arm's un-suppressed verdict. No other leg raises there for a planned, non-surface column.
 >
 > **(c) Arm 11 must guard `actionSurface` before planning.** A `surface` gap never dispatches, so it
 > never mints a mark or a count — but a package upgrade that rewrites a gap's action from `directOp` to
