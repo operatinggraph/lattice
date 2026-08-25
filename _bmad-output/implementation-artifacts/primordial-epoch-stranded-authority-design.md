@@ -60,9 +60,20 @@ identifies the **epoch**, and rotating it rotates every kernel identity at once.
 2. Drop the current epoch's own role by id. For each remaining candidate: read the aspect; keep only
    `data.value == "operator"`, not tombstoned. On a single-epoch deployment this is empty, and **steps 3–4
    never run at all** — the pass costs one listing plus one GET per role.
-3. Holder check — `lnk.identity.*.holdsRole.role.<id>`, the target-bounded form
-   `substrate/kv.go:256-268` documents. **Any live holder ⇒ not stranded**, skip silently: a held role is
-   somebody's live role, whatever it is named.
+3. Holder census — `lnk.identity.*.holdsRole.role.<id>`, the target-bounded form
+   `substrate/kv.go:256-268` documents. Live holders are **recorded**; they suppress the candidate **only
+   when one of them is an identity of the current epoch** (§3.2).
+
+   > **Amended 2026-08-25, during Fire 1's build.** This step originally read *"any live holder ⇒ not
+   > stranded, skip silently"*, on the §3.1 premise that an epoch rotation moves every holder at once.
+   > **That premise is false, and the rule it produced silenced the detector on the exact case it exists
+   > to catch.** A re-bootstrap without a wipe deletes nothing: `DecideReseed` (`primordial.go:262`) sends
+   > a freshly-generated id file down the create-only seed path for the *new* keys, and `reconcile.go:155`
+   > classifies every non-`vtx.meta.*` entry as `retained` — "deliberately left alone". So the prior
+   > epoch's admin identity, its five service actors, **and their `holdsRole` edges into the prior operator
+   > role** are all still live. The prior role is therefore *held*, by its own stranded epoch-mates, and
+   > the original rule would have returned empty on every real occurrence. The holders are part of the
+   > island, not evidence against it.
 4. Grant census — `lnk.permission.*.grantedBy.role.<id>`, same form. Live edges only (`isDeleted` read
    per edge, bounded by the stranded role's own degree).
 
@@ -76,7 +87,8 @@ Both link reads are bounded by the *stranded* role's degree, never the keyspace 
 | role id ≠ current `RoleOperatorID` | excludes the live kernel role | the whole point |
 | role vertex live, `.canonicalName` live | ignores already-tombstoned residue | nothing to report |
 | `canonicalName == "operator"` | names the class | the role's identity is its canonicalName, not its id |
-| **zero live `holdsRole` inbound** | the strand test | an epoch rotation moves every holder at once |
+| ~~zero live `holdsRole` inbound~~ | ~~the strand test~~ | ~~an epoch rotation moves every holder at once~~ — **struck 2026-08-25, premise false; see §3 step 3** |
+| **no live holder from the CURRENT epoch's identity set** | the strand test | reachability is a question about the current epoch; a prior-epoch holder is part of the island (§3.2) |
 | ≥1 live `grantedBy` inbound | escalates report → failure (§4) | live authority, not dead weight |
 
 **Not used: `createdByOp`.** §2.2 — for this class it filters out exactly the population being looked for,
@@ -84,8 +96,23 @@ and the prior epoch's op key is unknowable from the current id file. **Not used:
 carried in the report as corroboration but never gates, because `primordial.go:688` records it as retired
 as an authorization input; a predicate must not quietly revive a retired field's meaning.
 
-A package-authored role that is named `operator`, held by nobody, and carrying grants would also be
-reported. That is not a false positive worth suppressing — it is the same defect with a different author.
+A package-authored role that is named `operator`, held by nobody in the current epoch, and carrying grants
+would also be reported. That is not a false positive worth suppressing — it is the same defect with a
+different author, and Contract #7 §6 makes it an anomaly on its own terms: *"The **only** primordial role is
+`operator`"*. Nothing enforces that; `validateCanonicalNameUniqueness` is intra-`Definition` only
+(`internal/pkgmgr/canonicaluniqueness_test.go:17`), so a second live `operator`-named role is unprevented,
+not impossible.
+
+### 3.2 What counts as a holder
+
+The current epoch's identity set is exactly the loaded primordial table — `BootstrapIdentityID` plus the
+Loom / Weaver / Bridge / objmgr / privacy / Gateway service actors (`nanoid.go:555-562`). A live
+`holdsRole` edge from one of those means a running actor really can reach the role, and the candidate is
+dropped. A live edge from anything else — a prior epoch's admin, a prior service actor — is **recorded in
+`Holders` and does not suppress**, because the rotation stranded the holder and the role together.
+
+This is also why the report carries `Holders` at all: an operator reading "role X, 21 grants, held by
+identity Y" needs Y to see that Y is itself residue. A bare count would hide the shape of the island.
 
 ## 4. Surfacing — where the exit status moves, and where it must not
 
@@ -135,9 +162,14 @@ the current one. §6's first test pins that.
 1. `TestStrandedOperatorEpochs_SingleEpochBucketIsSilent` — seed once, scan, expect empty. The
    no-false-red pin for CI.
 2. `TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole` — seed epoch A, rotate the id file, seed
-   epoch B into the same bucket, scan: exactly A's role, with A's grant count.
-3. `TestStrandedOperatorEpochs_HeldRoleIsNeverStranded` — a prior-epoch role that still has one live
-   `holdsRole` edge is silent.
+   epoch B into the same bucket, scan: exactly A's role, with A's grant count. **The fixture must be the
+   real post-rotation state** — epoch A's admin identity and its live `holdsRole` edge into A's role
+   included. A fixture that omits them encodes the struck §3.1 premise and passes vacuously.
+3. `TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses` — a non-current `operator` role held by the
+   **current** epoch's admin identity is silent.
+3a. `TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress` — the same role held only by an identity
+   outside the current epoch's set is **reported**, with that holder listed. This is the §3 step-3
+   amendment's own pin: it fails against the pre-amendment predicate.
 4. `TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent` — soft-deleted role, and a
    stranded role all of whose `grantedBy` edges are `isDeleted`, drop to zero-grant (notice, not failure).
 5. `TestStrandedOperatorEpochs_ForeignRoleNameIsSilent` — a holderless, granted `vtx.role.*` whose
