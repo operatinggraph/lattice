@@ -415,19 +415,41 @@ is the first line that can dispatch from this leg, and it does not exist yet (`r
 through instead). So `main` after Increment 1 is a strict improvement — the loud stop survives a mark's
 expiry and a restart — with no new way for Weaver to act on the world.
 
+> **SPENT 2026-08-25, as designed — do not read the paragraph above as a standing property.** It is a
+> statement about the Increment-1 boundary only, and Increment 2 (`d9dde44`) deliberately ends it: the
+> count leg now dispatches. What keeps `main` correct from here is a different, narrower invariant, and
+> it is the one a later reader needs: **the arm-11 dispatch is bounded by the MARK, not by the sweep
+> cadence.** `fireEpisode` CAS-creates the gap's mark on every path that publishes an op, so the next
+> pass finds it in `listed` and stops at arm 2, and the mark's lease hands the retry chain back to the
+> mark leg, which paces and caps it exactly as it does for every other episode. A path that publishes
+> nothing — an unbuildable plan, admission control, a lost CAS, a failed create — leaves no mark and is
+> re-attempted next pass, with no op having reached the world.
+
 ### Checkpoint — 2026-08-25
 
-- **Branch:** `claude/great-lamport-q85azx` (remote container; no worktree — `REMOTE.md` §1).
-- **Done:** Increment 1 complete — `sweepCount` arms (a)–(l), `splitCountKey`, `retireCorrupt` wired
-  into all three sweep legs, `deleteCorrupt` shape-aware, `gapSuppressed` split (proved
-  behaviour-preserving over 3,780 input classes by the close pass), six falsified comments corrected.
-  Four cold reviews: three on Increment 1, one cumulative close pass. Every gate pinned by reverting
-  that gate alone (M1–M13).
-- **Next:** Increment 2 — arm 11, the re-arm dispatch (`reconciler.go`, the fall-through at the end of
-  `sweepCount`). Then Increment 3 — `Engine.ResetRetryBudget` + `lattice weaver reset-budget`,
-  mirroring `reset-confidence` (`cmd/lattice/weaver/weaver.go:239`).
+- **Branch:** `claude/great-lamport-s8dzq0` (remote container; no worktree — `REMOTE.md` §1). The
+  prior fire's branch `claude/great-lamport-q85azx` is gone from the remote and its Increment 1 is
+  merged, so the row was re-stamped to this one (`f9d832b`).
+- **Done:** Increment 1 — `sweepCount` arms (a)–(l), `splitCountKey`, `retireCorrupt` wired into all
+  three sweep legs, `deleteCorrupt` shape-aware, `gapSuppressed` split (proved behaviour-preserving
+  over 3,780 input classes by the close pass), six falsified comments corrected. Four cold reviews;
+  every gate pinned by reverting that gate alone (M1–M13).
+  **Increment 2** — arm 11, the re-arm dispatch (`d9dde44`): `planGap` → `fireEpisode` past an
+  `actionSurface` guard, with the stale `GapBudgetExhausted` retired above the plan. Four vectors,
+  five mutations (M1–M4 reverts + M5 a move); three cold reviews in flight.
+- **Next:** Increment 3 — `Engine.ResetRetryBudget` + the `resetBudget` control op + `lattice weaver
+  reset-budget` + `weaver.md` §9, per §6's CORRECTED block (capability-plane, not mechanical). Then
+  the cumulative close pass over the whole item diff.
 - **Not yet delivered:** the board row's second half, *"and cannot be un-parked"*. §4's argument stands
   — the operator verb is inert without arm 11, so Increments 2 and 3 land together or not at all.
+- **Found, this run's to fix (§4 "what a fire discovers, THIS RUN fixes"):** no leg consults
+  `actionSurface` before planning or escalating, so a package migration `directOp`→`surface` that
+  strands weaver-state walks into `buildPlan`'s `default:` and raises a config error against a
+  contract-legal playbook. Increment 2 closed this for arm 11 only; `reclaim`
+  (`reconciler.go:884`, reachable when the migration strands a MARK) and arm (l)'s escalation via
+  `gapSuppressionTerms` reading the cap without consulting the action (`evaluator.go:1082`) carry the
+  same root cause. **One unit, one root cause** (board filing gate 1: consolidate at filing), taken as
+  the batch's next unit after the Increment 2 reviews land.
 - **Open for Andrew:** the Contract #10 §10.3 text, on proposal branch
   `claude/contract-10-weaver-state-sweep-enumeration`. The code ships at L2 ahead of it, matching the
   four prior `🔭 flag-for-Andrew` precedents on this board.
