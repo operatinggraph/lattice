@@ -255,9 +255,11 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 
 // ResetConfidence deletes every `<targetId>.__effect.<gapColumn>.<actionRef>`
 // confidence window registered under targetID and returns how many were
-// removed. It is the middle rung of the operator-severity ladder — `disable`
-// pauses and deletes nothing, `resetConfidence` deletes advisory confidence
-// only, `revoke` deletes everything under the target prefix and disables.
+// removed. It sits on the operator-severity ladder between the verbs that
+// touch no data and the one that deletes everything: `disable` pauses and
+// deletes nothing, `resetBudget` rewrites one gap's retry budget,
+// `resetConfidence` deletes this target's advisory confidence windows, and
+// `revoke` deletes everything under the target prefix and disables.
 //
 // Only `__effect` keys are touched: in-flight marks, `…__count` retry budgets,
 // and the `<targetId>.__control` marker all survive, and so do every other
@@ -293,77 +295,127 @@ func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, err
 	return deleted, nil
 }
 
-// ResetRetryBudget zeroes one gap's `<targetId>.<entityId>.<gapColumn>.__count`
-// retry-budget dispatch-count and returns the count it displaced plus whether a
-// count existed at all. It is the operator's un-park verb: the way to release a
-// gap whose budget is spent and whose §10.8 GapBudgetExhausted stop is standing,
-// without raising maxretries_<g> in the package for every entity at once.
+// ResetRetryBudget re-arms ONE gap's §E retry budget — the un-park verb. It
+// writes the (target, entity, gap) dispatch-count back to 0 and returns the
+// value it replaced; the caller reports that, so an operator sees what the park
+// had actually spent.
 //
-// Scope is one gap, never one target: the count, and the standing issue that
-// explains it, are both keyed (target, entity, gap), so a target-wide reset
-// would re-arm parks nobody looked at.
+// The verb states intent and stops there: it does not clear the gap's standing
+// GapBudgetExhausted issue and does not dispatch anything. The next reconciler
+// pass (≤ 1 min) does both, because a gap with a fresh budget is a gap the
+// count leg finds violating, open, unsuppressed and markless — its re-arm arm
+// dispatches, and planGap's own "a plan about to fire disproves the park" clear
+// retires the issue. One deterministic key, one writer, one path.
 //
-// It resets the count and NOTHING else — it does not retire the standing issue
-// and it does not dispatch. The reconciler's count leg does both on its next
-// pass: it reads the zeroed count, finds the gap un-suppressed and markless, and
-// takes the re-arm arm, which retires the issue on that same suppression read
-// and fires the episode. One writer, one path — the verb states the intent and
-// the level reconcile enacts it, so a reset is reconciled by exactly the
-// machinery that would have reconciled a package raising the cap.
+// Scope is one gap, never a target: the count is per-(target, entity, gap) and
+// the issue latch is keyed the same way, so a target-wide reset would re-arm
+// parks nobody looked at.
 //
-// The write is revision-conditioned (markStore.resetDispatchCount): a dispatch
-// landing between the read and the write moved the budget itself, so it wins and
-// the conflict is returned — re-running the verb is the remedy, as it is for
-// ResetConfidence. A gap with no count is `found == false` and no error: there
-// was no suppression to lift, and the verb never mints a count for a gap that
-// has none.
-//
-// Fail-closed on shape. targetID must be registered (mirroring Disable/Enable
-// and ResetConfidence). entityID must be a canonical NanoID and gapColumn a
-// §10.2 missing_<g> single token, because the three concatenate into a KV key —
-// whitelisted against exactly the shapes countKey is ever built from, so
-// anything else is refused here rather than reaching the bucket.
-func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (cleared int, found bool, err error) {
-	if _, ok := e.source.target(targetID); !ok {
-		return 0, false, fmt.Errorf("weaver: target %q not registered", targetID)
+// Errors, each of which means nothing was written:
+//   - the target is not registered (mirrors ResetConfidence — a budget whose
+//     target is gone is the sweep's orphan problem, not an operator's, and the
+//     count leg's registry gate would refuse to act on it anyway);
+//   - the arguments are not the §10.2/§10.3 key shapes (a malformed argument
+//     must never reach the keyspace splitCountKey later reads);
+//   - the sweep's re-arm would decline the gap whatever its budget says — an
+//     orphaned column, or a collapse-only action (reArmDeclines);
+//   - there is no budget at this gap — a count key exists only where a chain
+//     has actually dispatched, so this is the honest answer to a typo'd
+//     entityId rather than a silent success;
+//   - the count changed between the read and the write (a dispatch landed
+//     first): the value the operator decided on is gone, so the write is
+//     refused rather than clobbering a fresh attempt back to 0 and handing a
+//     moving chain a second full budget. Re-running re-reads and re-decides.
+func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (previous int, err error) {
+	if !singleTokenPattern.MatchString(targetID) {
+		return 0, fmt.Errorf("weaver: targetId %q must be a single token matching %s", targetID, singleTokenPattern.String())
 	}
-	if err := ValidateGapScope(entityID, gapColumn); err != nil {
-		return 0, false, fmt.Errorf("weaver: reset retry budget %q: %w", targetID, err)
+	if !substrate.IsValidNanoID(entityID) {
+		return 0, fmt.Errorf("weaver: entityId %q must be a %d-character NanoID", entityID, substrate.NanoIDLength)
 	}
-	cleared, found, err = e.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn)
+	if !strings.HasPrefix(gapColumn, gapColumnPrefix) || !singleTokenPattern.MatchString(gapColumn) {
+		return 0, fmt.Errorf("weaver: gapColumn %q must be a single-token %s* column", gapColumn, gapColumnPrefix)
+	}
+	target, ok := e.source.target(targetID)
+	if !ok {
+		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
+	}
+	if reason := e.reArmDeclines(ctx, target, targetID, entityID, gapColumn); reason != "" {
+		// The sweep's re-arm will not act on this gap whatever the budget says,
+		// so writing a 0 would change nothing an operator can observe: the gap
+		// would sit at a count of 0, still parked, still holding a
+		// GapBudgetExhausted that now describes a budget it no longer has.
+		// Refusing keeps that standing issue TRUE and names which shape is in
+		// the way — an orphaned column and a collapse-only action are different
+		// problems with different fixes.
+		return 0, fmt.Errorf("weaver: target %q entity %q gap %q: %s; resetting its budget would leave it parked with a fresh budget",
+			targetID, entityID, gapColumn, reason)
+	}
+	previous, revision, found, err := e.budgets.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
 	if err != nil {
-		return cleared, found, fmt.Errorf("weaver: reset retry budget %q %s/%s: %w", targetID, entityID, gapColumn, err)
+		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
 	}
-	e.logger.Info("weaver: gap retry budget reset", "targetId", targetID, "entityId", entityID,
-		"gap", gapColumn, "clearedCount", cleared, "found", found)
-	return cleared, found, nil
+	if !found {
+		// Nothing is written for a gap that has no budget: a count key exists
+		// only where a chain has actually dispatched, so creating one would
+		// invent a park to un-park — and on a mistyped entityId it would hand
+		// the sweep's re-arm arm a gap nobody chose.
+		return 0, fmt.Errorf("weaver: no retry budget for target %q entity %q gap %q (nothing has dispatched it)",
+			targetID, entityID, gapColumn)
+	}
+	conflict, err := e.budgets.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision)
+	if err != nil {
+		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
+	}
+	if conflict {
+		return previous, fmt.Errorf("weaver: retry budget for target %q entity %q gap %q changed during the reset; re-run to reset the current value",
+			targetID, entityID, gapColumn)
+	}
+	e.logger.Info("weaver: retry budget reset",
+		"targetId", targetID, "entityId", entityID, "gap", gapColumn, "previousCount", previous)
+	return previous, nil
 }
 
-// ValidateGapScope accepts exactly the (entityId, gapColumn) pair a §10.3
-// weaver-state key is ever built from — a canonical 20-character NanoID and a
-// §10.2 missing_<gap> single token naming a non-empty gap, the same shape
-// install-time playbook validation enforces — and refuses everything else. It is a
-// WHITELIST rather than a set of forbidden characters on purpose: the two
-// values concatenate into a KV key, and a rule that enumerates what is legal
-// stays fail-closed as the vocabulary grows, while one that enumerates what is
-// illegal admits every shape nobody thought of.
+// reArmDeclines reports WHY the reconciler's count-leg re-arm would refuse to
+// dispatch this gap, or "" when nothing about the gap's own definition stands
+// in the way. Two shapes make the re-arm inert, and each mirrors an arm the leg
+// already applies rather than re-deriving one:
 //
-// Exported because the control plane's per-gap endpoint reads both values off a
-// NATS subject, where any token a publisher chooses arrives: the responder
-// refuses a malformed scope with this same rule before the engine — and
-// therefore the bucket — is reached at all, rather than restating a second copy
-// of the shape that could drift from this one.
-func ValidateGapScope(entityID, gapColumn string) error {
-	if !substrate.IsValidNanoID(entityID) {
-		return fmt.Errorf("entityId %q is not a %d-character NanoID over the Contract #1 alphabet",
-			entityID, substrate.NanoIDLength)
+//   - the playbook no longer names the column (the leg's orphan-column arm).
+//     Weaver has no remediation to re-arm, and the arm cannot even retire the
+//     standing issue there, because lane 1 raises at the same latch for the
+//     same column;
+//   - the action is collapse-only (the arm's collapseOnlyReclaim over
+//     staleMark), read over the gap's current row so an EXTERNAL gap — whose
+//     re-dispatch §10.3 calls for — is not refused alongside the human ones. A
+//     row that is missing or unreadable classifies as collapse-only for the
+//     three collapse-only actions, which is the same answer the arm reaches: it
+//     does not dispatch a gap with no row either.
+//
+// It answers only what this gap's own definition decides, never "will this gap
+// dispatch" — that depends on gates (a freeze, the registry, the row's own
+// columns) which move independently of the operator's decision and are the
+// sweep's to apply, not this verb's to predict. An UNREGISTERED target is
+// likewise not this function's business: replay lag is not evidence a playbook
+// dropped anything, so the verb refuses that one check earlier, under its own
+// reason, and a target mid-replay is never reported as an orphaned column.
+func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, entityID, gapColumn string) string {
+	ga, planned := target.Gaps[gapColumn]
+	if !planned {
+		return fmt.Sprintf("its playbook declares no gaps entry for %q, so there is no remediation to re-arm — "+
+			"the column is orphaned (a package re-author dropped it) and its budget expires with its own TTL", gapColumn)
 	}
-	if len(gapColumn) <= len(gapColumnPrefix) || !strings.HasPrefix(gapColumn, gapColumnPrefix) ||
-		!singleTokenPattern.MatchString(gapColumn) {
-		return fmt.Errorf("gapColumn %q must be a non-empty %s<gap> token matching %s",
-			gapColumn, gapColumnPrefix, singleTokenPattern.String())
+	var row map[string]any
+	if entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID); err == nil {
+		if uErr := json.Unmarshal(entry.Value, &row); uErr != nil {
+			row = nil
+		}
 	}
-	return nil
+	if collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+		return fmt.Sprintf("it dispatches %q, whose artifact may still be open, and the sweep never re-arms a "+
+			"collapse-only gap — a fresh episode would mint a new claimId and duplicate it", ga.Action)
+	}
+	return ""
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the

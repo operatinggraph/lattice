@@ -331,8 +331,8 @@ func (f *fakeEngine) Revoke(context.Context, string) error { return nil }
 func (f *fakeEngine) ResetConfidence(context.Context, string) (int, error) {
 	return 0, nil
 }
-func (f *fakeEngine) ResetRetryBudget(context.Context, string, string, string) (int, bool, error) {
-	return 0, false, nil
+func (f *fakeEngine) ResetRetryBudget(context.Context, string, string, string) (int, error) {
+	return 0, nil
 }
 
 // TestControlPlaneAuthz_OperatorAllowedIntruderDeniedAnonymousDenied is the

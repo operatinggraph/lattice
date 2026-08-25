@@ -36,6 +36,7 @@ const (
 	sweepReasonOrphanColumn  = "orphanColumn"
 	sweepReasonCorrupt       = "corrupt"
 	sweepReasonGapClosed     = "gapClosed"
+	sweepReasonBudgetReArm   = "budgetReArm"
 )
 
 // The weaver-state key families deleteCorrupt names in its alert, so an
@@ -72,13 +73,13 @@ func collapseOnlyReclaim(action string, confirmedConcluded bool) bool {
 // dispatch-skip marker — and each has its own leg (see pass): closed/orphaned
 // marks clear promptly and expired leases reclaim with a fresh dispatch
 // episode; an orphaned confidence window is deleted; a retry budget re-derives
-// its gap's standing §10.8 issue for as long as the budget suppresses dispatch,
-// and re-dispatches the gap itself once it stops. The sweep is the primary
-// reclaim lane; the mark's per-key TTL is only the backstop, so the sweep must
-// observe an expired lease while the key still exists (TTL =
-// markTTLBackstopFactor × lease plus the withDefaults SweepInterval ≤ MarkLease
-// clamp guarantee that window). There is no watcher on the weaver-state backing
-// stream — the sweep is interval-cadence by design.
+// its gap's standing §10.8 issue for as long as the budget suppresses
+// dispatch. The sweep is the primary reclaim lane; the mark's
+// per-key TTL is only the backstop, so the sweep must observe an expired lease
+// while the key still exists (TTL = markTTLBackstopFactor × lease plus the
+// withDefaults SweepInterval ≤ MarkLease clamp guarantee that window). There
+// is no watcher on the weaver-state backing stream — the sweep is
+// interval-cadence by design.
 type sweeper struct {
 	engine   *Engine
 	interval time.Duration
@@ -105,27 +106,25 @@ type sweeper struct {
 	mu                 sync.Mutex
 	reclaims           int64
 	reclaimsSuppressed int64
-	// reArms counts the count leg's arm-(n) dispatches — an episode fired for a
-	// markless, un-suppressed gap no CDC delivery was coming for. A lost
-	// CAS-create (a concurrent lane-1 delivery won the gap) also completes
-	// cleanly and counts here, so this reads as "re-arms that reached a
-	// dispatcher", never as a failure count.
-	reArms         int64
-	orphansDeleted int64
-	corrupt        int64
-	lastRunAt      time.Time
+	orphansDeleted     int64
+	corrupt            int64
+	// reArms counts arm-(n) dispatches: gaps the count leg re-armed because
+	// nothing else could reach them. They are NOT reclaims — no mark existed to
+	// reclaim — and an operator reading the heartbeat must be able to tell the
+	// two apart, since a rising reArms means dispatch is coming from rows that
+	// have stopped being delivered at all. Counted after the episode fires, so
+	// a failed create or publish never counts; a create that LOST its race to a
+	// concurrent lane-1 delivery is indistinguishable from a win at that seam
+	// (fireEpisode reports both as Ack) and counts too — a rare over-count of
+	// at most one per gap per pass, never an under-count.
+	reArms    int64
+	lastRunAt time.Time
 	// corruptAlerted tracks weaver-state keys carrying a standing CorruptMark
 	// issue. Each is retired either by the first completed pass that no longer
 	// lists the key (the delete held and nothing recreated it) or, when the key
 	// comes back with a value that parses, by the leg that read it
 	// (retireCorrupt).
 	corruptAlerted map[string]struct{}
-	// reArmAttempted paces arm (n): the `…__count` key → when this leg last
-	// attempted a PLAN for it. Its entries are retired by the same pass loop
-	// that retires corruptAlerted, keyed the same way, so a count key that
-	// vanishes cannot leak an entry for the life of the process. See
-	// reArmPaced for why the predicate is a clock and not a revision.
-	reArmAttempted map[string]time.Time
 }
 
 func newSweeper(e *Engine, interval, warmup, backoffBase, backoffCap time.Duration) *sweeper {
@@ -137,73 +136,7 @@ func newSweeper(e *Engine, interval, warmup, backoffBase, backoffCap time.Durati
 		backoffCap:     backoffCap,
 		startedAt:      time.Now(),
 		corruptAlerted: make(map[string]struct{}),
-		reArmAttempted: make(map[string]time.Time),
 	}
-}
-
-// reArmPaced reports whether arm (n) has already attempted a plan for this
-// count key inside the pacing window, recording the attempt when it has not.
-//
-// The window damps a plan that keeps failing. A parked gap is visited once a
-// sweep interval for the count's whole ~128h TTL, and every failed planGap
-// writes its own record — a template data error and an unresolved reference at
-// Warn, a playbook config error at Error — so an undamped arm turns one fault
-// into thousands of identical lines and buries every arrival, its own included,
-// in the stream an operator reads to find out what just happened.
-//
-// The predicate is a CLOCK, deliberately, and not "has the row changed since
-// the failure". A plan is a function of the row AND the registry, and only one
-// of planGap's three failure classes is fixed by a row write: a template data
-// error is, but a playbook config error is fixed by re-authoring the package
-// and an unresolved reference resolves when some other vertex replays — neither
-// of which touches this row's revision. A revision predicate would therefore
-// never re-attempt those two, converting a loud repeated failure into a gap
-// that is un-suppressed, never dispatched, and now silent as well — this item's
-// own defect, re-created and hidden. Ageing out suppresses nothing permanently:
-// every entry expires on its own, so a reference that resolves is still
-// discovered, just paced.
-//
-// The window is markTTLBackstopFactor × the mark lease — the same span a fresh
-// episode's own mark would have occupied had the plan built — so it introduces
-// no tunable of its own to drift from the lease.
-//
-// A restart starts with an empty map and pays one re-derivation per parked gap.
-// That is correct: after a restart the fault has not been reported in this
-// process yet, so its first record is an arrival, not a repeat.
-func (s *sweeper) reArmPaced(key string, now time.Time) bool {
-	window := markTTLBackstopFactor * s.engine.marks.lease
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if last, ok := s.reArmAttempted[key]; ok && now.Sub(last) < window {
-		return true
-	}
-	s.reArmAttempted[key] = now
-	return false
-}
-
-// reArmUnpace drops one key's pacing entry, so the next pass attempts its plan
-// again immediately. It exists for one case, and the case is a latch collision
-// this leg must not make worse.
-//
-// planGap raises a template data error at issueKeyDataEntity(target, entity,
-// gapColumn) — the SAME key boolColumn and intColumn clear on every read of that
-// column whose value parses (evaluator.go). The two facts are different (one is
-// "this row's remediation template cannot be filled", the other is "this column
-// itself is readable") and they share a latch, so the fact only stands because
-// the raise is re-derived on every evaluation, after the read that cleared it.
-// Pacing the raise while the clear keeps running every pass would therefore not
-// quiet that family — it would ERASE it, leaving the issue absent for the whole
-// window and visible for the single pass in it that re-derived it.
-//
-// So this class is deliberately left undamped, and only it: the config and
-// unresolved-reference classes raise at issueKeyGapConfig, which nothing in the
-// level reconcile clears, so pacing them costs no fact. Splitting the data latch
-// is the real fix and is not this leg's to make — a clear that today retires two
-// facts has to be re-paired with both before either moves.
-func (s *sweeper) reArmUnpace(key string) {
-	s.mu.Lock()
-	delete(s.reArmAttempted, key)
-	s.mu.Unlock()
 }
 
 // backoffInterval returns how long a repeat reclaim of the same open episode
@@ -301,15 +234,6 @@ func (s *sweeper) pass(ctx context.Context) {
 		if _, present := listed[key]; !present {
 			delete(s.corruptAlerted, key)
 			e.issues.clear(issueKeySweep(key))
-		}
-	}
-	for key := range s.reArmAttempted {
-		if _, present := listed[key]; !present {
-			// The count this paced is gone — the gap closed, an operator reset
-			// it, or its TTL collected it. The pacing entry describes a key that
-			// no longer exists, and a count that comes back is a new chain
-			// entitled to a prompt first attempt.
-			delete(s.reArmAttempted, key)
 		}
 	}
 	s.lastRunAt = time.Now()
@@ -582,40 +506,26 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 //	    GapBudgetExhausted issue;
 //	(m) gap suppressed with a call in flight (inflight_<g>) → return: the lens
 //	    re-projects when the call lands and lane-1 re-delivers;
-//	(n) NOT suppressed, a COUNT-BASED CAP governs the gap, and no mark → retire
-//	    the standing issue, then DISPATCH. Arms (c)–(l) have already established
-//	    exactly the state lane-1 dispatches on — registered, active, planned,
-//	    violating, entityKey-echoed, un-suppressed — and markless on top of it,
-//	    so for a row that has gone quiet there is no delivery coming to act on
-//	    it. The leg fires the episode itself, through the same planGap →
-//	    fireEpisode path the mark leg's leg-advance uses. This is the re-arm: it
-//	    is how a budget that stops suppressing (an operator raising
-//	    maxretries_<g> without touching anything else, or draining the count
-//	    outright) turns back into a dispatch rather than into a quieter park.
-//	    Three shapes are excluded, each for its own reason: a `surface` gap (FR29
-//	    says it never dispatches, and the latch at its key is lane-1's); a
-//	    collapse-only action, whose re-dispatch is idempotent only through a
-//	    mark's claimId this leg does not have; and a gap no count-based cap
-//	    governs at all. The last two are not cosmetic — see their gates.
-//
-// The (n) dispatch is bounded by the count, and the count only bounds a gap the
-// cap term actually governs. fireEpisode CAS-creates the gap's mark, so the next
-// pass stops at (c) — but marks.create arms only the DEFAULT per-key TTL
-// (markTTLBackstopFactor × lease), not the widened one reclaim computes for a
-// backed-off episode, so for a gap that can never be suppressed the mark simply
-// TTL-expires and this arm fires again, forever, on a period this leg picks
-// rather than the one reclaim's backoff picked — minting a fresh claimId, and so
-// a duplicate userTask/Loom instance, every time. The needsCount gate is what
-// makes the arm terminate: every gap it serves is one whose dispatch-count
-// advances toward a cap that eventually suppresses it, at which point arm (l)
-// owns it. A path that publishes nothing — an unbuildable plan, admission
-// control, a failed create — leaves no mark and is re-attempted on the arm's own
-// pacing window (reArmPaced), not every pass; a publish that fails AFTER the
-// create leaves a mark with a live lease, so the retry is the mark leg's, a
-// full MarkLease later.
+//	(n) everything above passed AND the budget reads exactly 0 AND the gap is
+//	    not collapse-only AND the sweep is warmed up → DISPATCH it as a fresh
+//	    episode. This is the only line in the leg that acts on the world, and
+//	    it is deliberately narrower than "the state lane-1 dispatches on".
+//	    Lane 1 reads identity and pacing off a mark; this seam has none, so it
+//	    carries its own bounds instead:
+//	      · a budget of 0 is what ResetRetryBudget writes, so the arm serves an
+//	        operator's decision. A positive count with no mark is a chain in
+//	        progress whose mark expired, which the reclaim ladder paces;
+//	      · a collapse-only gap is excluded because its artifact may still be
+//	        open and a fresh claimId would duplicate it — the claimId lives on
+//	        the absent mark, so preserving it is not available here;
+//	      · the warm-up gate keeps the start-up pass, and a recovered outage,
+//	        from firing every newly-reachable gap at once.
+//	    A `surface` gap is excluded too: FR29 says it never dispatches at all,
+//	    and a planned-mode gap naming no action is left to a delivery, since
+//	    only a plan could say what it would fire.
 //
 // The count read here is the only one the pass needs: its value feeds the
-// suppression terms directly, so the gate does not
+// suppression gate directly (gapSuppressedWithCount), so the gate does not
 // re-read the key. Every delete is revision-conditioned at the revision read
 // THIS pass — a dispatch racing the sweep bumps the count, and that fresh
 // budget must never be deleted blind.
@@ -716,18 +626,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		return
 	}
 
-	// One evaluation of the row's suppression terms serves both arms below.
-	// gapSuppressedWithCount is exactly this pair (evaluator.go) and stays the
-	// verdict's definition; the leg unfolds it because the re-arm needs the TERMS
-	// themselves, not just the boolean — "not suppressed" is returned both for a
-	// gap with budget left and for a gap with no budget concept at all, and those
-	// two are opposite answers for arm (n).
-	terms := e.gapSuppressionTerms(targetID, entityID, row, gapColumn, ga.Action)
-	suppressed, exhausted, budgetIsDefault := terms.suppressed, false, false
-	if terms.needsCount {
-		suppressed, exhausted, budgetIsDefault = terms.verdict(count.Count)
-	}
-	if suppressed {
+	if suppressed, exhausted, budgetIsDefault := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, count.Count); suppressed {
 		if exhausted {
 			// The loud stop, re-derived from the state that causes the
 			// suppression rather than from a mark the exhausted gap stopped
@@ -739,114 +638,118 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		}
 		return
 	}
-
-	// The re-arm. The gap is open, violating and markless, and its chain still
-	// has budget — nothing suppresses it, so lane-1 would dispatch it on the
-	// next delivery, and for a row that has gone quiet no delivery is coming.
-	// This leg is the only one that still visits such a gap, so it dispatches.
-	if surfaceOnlyGap(ga) {
-		// A count left behind by the column's previous action is not a re-arm to
-		// act on (surfaceOnlyGap): planning one would raise an `error`-severity
-		// PlaybookConfigError against a correctly-authored playbook, every pass.
-		// The latch at this key is lane-1's here — it holds the surface issue for
-		// as long as the column is true — so this leg leaves it exactly as it
-		// leaves the orphan column's (arm (j)).
+	// The re-arm (arm (n)): the operator verb's teeth, not a second general
+	// dispatch leg. Everything above has established the state lane-1's
+	// dispatchGap fires on — registered, enabled, open, violating, an entityKey
+	// to name the candidate, a playbook entry, no mark — and the one thing
+	// lane 1 also needs is a DELIVERY this row has none of. But lane-1's gates
+	// alone are not enough to fire safely from here, because this seam has no
+	// mark to read the episode's identity or pacing off. Three further
+	// conditions narrow it to gaps an operator deliberately re-armed.
+	//
+	// FIRST, the count must read exactly 0. ResetRetryBudget is the ONLY writer
+	// that persists a zero — incrementDispatchCount creates at 1 and never
+	// writes below it, and every other reset (both gap-close paths and this
+	// leg's own level reconcile) DELETES the key rather than zeroing it. So a
+	// key that exists and reads 0 is an operator's re-arm, and nothing else;
+	// a count ABOVE zero with no mark
+	// is a chain already in progress whose mark expired, and that belongs to
+	// the reclaim ladder — re-dispatching it here would run at the sweep
+	// interval instead of backoffInterval(count), and would erase the
+	// uncappedExternal hold reclaim applies to a lens that declares
+	// inflight_<g> with no usable cap. A zero has no ladder to respect, so the
+	// pacing question dissolves rather than being re-implemented against a
+	// timestamp the count does not carry.
+	//
+	// SECOND, a collapse-only gap is never re-armed here. A mark's ABSENCE is
+	// not evidence its episode concluded: a userTask or a parked Loom instance
+	// outlives its mark by orders of magnitude, which is precisely why reclaim
+	// preserves claimId verbatim and widens the mark TTL to keep the key alive
+	// across its own backoff. Firing fresh here mints a new claimId and
+	// therefore a DUPLICATE task or instance beside the open one — and
+	// preserving the claimId is not available as a fix, because the claimId
+	// lives on the mark that is gone. collapseOnlyReclaim over staleMark is the
+	// same predicate reclaim paces on; an EXTERNAL gap (staleMark true) is
+	// re-dispatchable by §10.3 and passes.
+	//
+	// THIRD, the registry warm-up gates it like the orphan arms: a start-up
+	// warm pass, or the first pass after an outage, must not fire every
+	// affected gap at once.
+	//
+	// What fires is a FRESH episode, not a reclaim: with no mark there is
+	// nothing to replace in place and no claimId to carry, so it takes
+	// fireEpisode's found=false branch — the same CAS-create lane-1 uses —
+	// which mints a claimId, derives the requestId from the create revision,
+	// and books the dispatch on the count and the `__effect` window.
+	//
+	// The CAS-create is the OCC and it is what bounds re-entry. `listed` is a
+	// snapshot, so a lane-1 delivery may create the mark between the listing
+	// and here; the create then loses and this leg drops, exactly as two
+	// concurrent evaluations already do. Once a mark exists — this leg's or
+	// lane-1's — arm (c) returns above, and the first dispatch takes the count
+	// off zero, so the arm cannot re-enter until an operator re-arms it again.
+	if count.Count != 0 {
+		// A chain in progress, not a re-armed one: the reclaim ladder owns its
+		// pacing and its mark.
 		return
 	}
-	// The standing GapBudgetExhausted claims this gap has no attempt left. The
-	// suppression verdict just taken says it has one — and says so whether or
-	// not the dispatch below can be planned, since an unresolved reference or an
-	// admission deferral means the gap is blocked or paced, never exhausted. So
-	// the fact is retired here, level-driven on the READ, rather than riding on
-	// planGap's own clear, which a plan that fails to build never reaches. It
-	// also sits ABOVE the two dispatch guards below, which are permanent
-	// properties of a gap's class rather than conditions that pass: a retire
-	// under a guard that never lifts is stranded for the life of the gap, and
-	// arm (l) — in this same leg, the only other raiser at this key — will have
-	// raised for a capped collapse-only gap whose operator has since raised the
-	// cap. Nothing else raises here for a planned, non-surface column:
-	// issueKeyGapEntity has exactly two raise sites (evaluator.go), lane-1's
-	// surface branch — excluded by the guard above — and escalateExhaustedGap,
-	// which raises only with the budget SPENT, which this arm has excluded.
-	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
-
+	if !s.warmedUp() {
+		// Registry warm-up: see sweeper.warmup. A definition still replaying
+		// may not describe this gap the way it will in a moment.
+		return
+	}
+	if ga.Action == actionSurface {
+		// FR29: a surface gap dispatches nothing and holds no mark, so it has
+		// no episode to re-arm — its count can only be a leftover from a
+		// version of the playbook that dispatched this column. buildPlan has no
+		// case for it and would raise an `error` PlaybookConfigError naming a
+		// contract-legal declaration. Leave the count to its TTL.
+		return
+	}
+	// The action is read from the playbook rather than from planGap's resolved
+	// actionRef, because the decision must precede the plan: planGap consumes
+	// an admission token and clears this gap's standing issues on the strength
+	// of a dispatch about to happen, neither of which may occur for a gap this
+	// arm then declines. For every shape that reaches here the two are the same
+	// value — resolvePlannedAction returns ga unchanged for any explicit
+	// Action, and the empty Action of a planned/goal-mode gap is refused just
+	// below, precisely because only a plan could say what it would fire and
+	// this arm must not run one to find out.
+	if ga.Action == "" {
+		e.logger.Debug("weaver sweep: gap resolves its action at plan time; leaving the re-arm to a delivery",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		return
+	}
 	if collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
-		// A collapse-only gap's re-dispatch is only harmless because it reuses
-		// the open episode's claimId, which reproduces the same taskId /
-		// Loom-instance id and collapses at the consumer (§10.3's
-		// claimId-verbatim rule; reclaim passes rec.ClaimID for exactly this).
-		// That claimId lives on the MARK, and this arm is reached only when
-		// there is no mark — so the dispatch it would make is a fresh-claimId
-		// one, minting a SECOND human task beside a first that may still be open
-		// in the world. A markless collapse-only gap is not evidence the
-		// remediation ended; a mark that TTL-expired unrefreshed under a freeze
-		// (sweepMark arm (d)) leaves exactly this shape with the task still
-		// standing. External gaps are excluded from the guard by
-		// confirmedConcluded, because for them §10.3 says the re-dispatch IS the
-		// intended fresh attempt.
-		e.logger.Debug("weaver sweep: markless gap's action collapses on a claimId this leg does not have; not re-arming",
+		e.logger.Debug("weaver sweep: collapse-only gap; not re-arming a markless episode that may still be open",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", ga.Action)
 		return
 	}
-	if !terms.needsCount {
-		// No count-based cap governs this gap, so its dispatch-count is a record
-		// of attempts and nothing else: it never reaches a cap, the suppression
-		// verdict above can never flip, and arm (l) never takes the gap off this
-		// arm's hands. Dispatching here would therefore not be a re-arm at all
-		// but a permanent second dispatch cadence, running at whatever period
-		// marks.create's DEFAULT TTL happens to give (markTTLBackstopFactor ×
-		// lease) — and pre-empting the one that already governs these gaps.
-		// reclaim paces exactly this class with its ClaimedAt + dispatch-count
-		// backoff, widening the mark's TTL past the backoff window precisely so
-		// the mark never lapses into a markless open gap; a re-arm firing in the
-		// gap that lapse leaves would mint a fresh claimId every cycle. Their
-		// pacing is reclaim's, not this leg's.
-		//
-		// needsCount, not hasUsableRetryCap: the flagship case of this whole leg
-		// is a directOp gap parked by defaultDirectOpRetryBudget with no declared
-		// maxretries_<g>, which hasUsableRetryCap reports false for by design.
-		e.logger.Debug("weaver sweep: markless gap has no count-based retry cap; leaving its pacing to the mark leg",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "action", ga.Action)
-		return
-	}
-	if s.reArmPaced(key, time.Now()) {
-		// Already attempted inside the window. The skip is silent and touches no
-		// counter: it is neither a dispatch nor a fault, and a record per pass
-		// here would reproduce the very volume the pacing exists to remove. It
-		// sits BELOW the retire above — that fact is level-driven and must be
-		// re-evaluated every pass — and below both class guards, which are free.
-		return
-	}
-	pl, actionRef, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, "")
+	pl, actionRef, _ := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, "")
 	if pl == nil {
-		// planGap has already surfaced why (an unresolved reference, a template
-		// data error, a playbook config error) on its own issue keys; this only
-		// attributes the attempt to the sweep. Nothing was published and no mark
-		// was taken, so the gap is re-attempted on the pacing window rather than
-		// on the next pass — except for the one family whose latch the level
-		// reconcile itself clears, which must keep re-deriving or vanish.
-		if e.issues.standingAs(issueKeyDataEntity(targetID, entityID, gapColumn), "warning", "TemplateDataError") {
-			s.reArmUnpace(key)
-		}
-		e.logger.Debug("weaver sweep: re-armed gap has no dispatchable plan; leaving it for the next pass",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
+		// planGap already surfaced whatever it was (an unresolved reference, a
+		// playbook config error) on its own issue keys, or declined for
+		// ordinary admission pacing. The next pass retries; the gap stays
+		// markless meanwhile, which is where it already was.
+		e.logger.Debug("weaver sweep: re-arm plan produced nothing; leaving the gap markless",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return
 	}
-	// A genuinely fresh episode (no mark to pin an action from, nothing to
-	// reclaim), so the CAS-create is the OCC: a lane-1 delivery racing this pass
-	// collapses on it exactly as two evaluations already do, and the loser drops.
+	e.logger.Warn("weaver sweep: dispatching a markless open gap",
+		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
+		"action", actionRef, "reason", sweepReasonBudgetReArm)
 	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
-		// Two different retries, and they are not the same wait. A failed
-		// CAS-create leaves the gap markless, so this arm re-enters on its
-		// pacing window. A publish that failed AFTER the create leaves a mark
-		// holding a FRESH lease, so sweepMark reads the episode as in flight and
-		// defers; the retry is reclaim's, a full MarkLease later. Bounded either
-		// way, and loud here because neither is routine — and loud at most once
-		// per window, for the same reason.
+		// Either the CAS-create failed outright (still markless — the next pass
+		// retries) or its op publish failed (the mark exists and its lease
+		// bounds the retry, like any other stuck episode). Bounded and retried
+		// either way, never a silent wedge.
 		e.logger.Warn("weaver sweep: re-arm dispatch did not complete cleanly; will retry",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return
 	}
+	// Counted only once the dispatch is real: a re-arm that lost its CAS-create
+	// to a concurrent lane-1 delivery dispatched nothing, and the heartbeat
+	// must not report it as a gap this leg fired.
 	s.bump(&s.reArms)
 }
 
@@ -929,27 +832,6 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 			targetID, entityID, gapColumn) {
 			s.bump(&s.orphansDeleted)
 		}
-		return
-	}
-	if surfaceOnlyGap(ga) {
-		// The playbook now says this column only surfaces, so the mark under this
-		// key is stranded state from the action the package replaced
-		// (surfaceOnlyGap) — an episode that was genuinely in flight at the
-		// upgrade. Every path below dispatches: the leg-advance, the escalation
-		// and the reclaim itself all end in planGap, which has no case for
-		// `surface` and would alert PlaybookConfigError, at `error` severity,
-		// against a contract-legal playbook, once per sweep interval.
-		//
-		// Leave the mark rather than deleting it. It carries its own per-key TTL
-		// (markTTLBackstopFactor × lease), re-armed only by the reclaim that no
-		// longer runs, so it self-collects on schedule — and the registry replays
-		// asynchronously, so an intermediate definition reading `surface` is not
-		// evidence to destroy the bookkeeping of a real running episode on. That
-		// is arm 8b's rule (never delete on a mid-replay verdict), and the mark
-		// leg's own orphan-column delete is gated by warmedUp for the same
-		// reason.
-		e.logger.Debug("weaver sweep: reclaim skipped for a surface gap; its mark is stranded state, not an episode to re-dispatch",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "markAction", rec.Action)
 		return
 	}
 
@@ -1338,10 +1220,10 @@ func (s *sweeper) bump(counter *int64) {
 }
 
 // metrics snapshots the since-start sweep counters for the heartbeat.
-func (s *sweeper) metrics() (reclaims, reclaimsSuppressed, reArms, orphansDeleted, corrupt int64, lastRunAt time.Time) {
+func (s *sweeper) metrics() (reclaims, reclaimsSuppressed, orphansDeleted, corrupt, reArms int64, lastRunAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.reclaims, s.reclaimsSuppressed, s.reArms, s.orphansDeleted, s.corrupt, s.lastRunAt
+	return s.reclaims, s.reclaimsSuppressed, s.orphansDeleted, s.corrupt, s.reArms, s.lastRunAt
 }
 
 // leaseLive reports whether leaseExpiresAt is set and in the future. An absent

@@ -455,7 +455,7 @@ func TestSweep_WarmUpGuardAndOrphanTarget(t *testing.T) {
 	}
 	h.nextOp(t)
 	h.requireNoOp(t)
-	if reclaims, _, _, orphans, _, _ := h.engine.sweep.metrics(); reclaims != 1 || orphans != 0 {
+	if reclaims, _, orphans, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 || orphans != 0 {
 		t.Fatalf("during warm-up: sweepReclaims = %d, sweepOrphansDeleted = %d; want 1, 0", reclaims, orphans)
 	}
 
@@ -468,7 +468,7 @@ func TestSweep_WarmUpGuardAndOrphanTarget(t *testing.T) {
 		t.Fatalf("after the warm-up window an orphan-column mark must be deleted")
 	}
 	h.requireNoOp(t)
-	if _, _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 2 {
+	if _, _, orphans, _, _, _ := h.engine.sweep.metrics(); orphans != 2 {
 		t.Fatalf("sweepOrphansDeleted = %d, want 2", orphans)
 	}
 }
@@ -506,7 +506,7 @@ func TestSweep_OrphanColumn(t *testing.T) {
 		t.Fatalf("a mark at a column absent from the current playbook must be deleted")
 	}
 	h.requireNoOp(t)
-	if _, _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+	if _, _, orphans, _, _, _ := h.engine.sweep.metrics(); orphans != 1 {
 		t.Fatalf("sweepOrphansDeleted = %d, want 1", orphans)
 	}
 
@@ -577,7 +577,7 @@ func TestSweep_CorruptMark(t *testing.T) {
 	if !hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
 		t.Fatalf("a deleted corrupt mark must surface a CorruptMark Health issue")
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 2 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 2 {
 		t.Fatalf("sweepCorrupt = %d, want 2", corrupt)
 	}
 	h.requireNoOp(t)
@@ -1176,7 +1176,7 @@ func TestSweep_MissingEntityKeyMarks(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("CorruptMark issues = %d, want 2 (one per entity, no key collision)", count)
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 2 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 2 {
 		t.Fatalf("sweepCorrupt = %d, want 2", corrupt)
 	}
 	h.requireNoOp(t)
@@ -1225,7 +1225,7 @@ func TestSweep_ControlMarkerSurvives(t *testing.T) {
 	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
 		t.Fatalf("the __control marker must never be enumerated as a CorruptMark")
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 0 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 0 {
 		t.Fatalf("sweepCorrupt = %d, want 0 (the __control marker is not a mark)", corrupt)
 	}
 	h.requireNoOp(t)
@@ -1965,7 +1965,7 @@ func TestSweep_EffectOrphanColumn(t *testing.T) {
 	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err == nil {
 		t.Fatalf("an effect window at a column absent from the current playbook must be deleted")
 	}
-	if _, _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+	if _, _, orphans, _, _, _ := h.engine.sweep.metrics(); orphans != 1 {
 		t.Fatalf("sweepOrphansDeleted = %d, want 1", orphans)
 	}
 }
@@ -1999,7 +1999,7 @@ func TestSweep_EffectTargetRemoved(t *testing.T) {
 	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err == nil {
 		t.Fatalf("after the warm-up window an uninstalled target's effect window must be deleted")
 	}
-	if _, _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+	if _, _, orphans, _, _, _ := h.engine.sweep.metrics(); orphans != 1 {
 		t.Fatalf("sweepOrphansDeleted = %d, want 1", orphans)
 	}
 }
@@ -2034,7 +2034,7 @@ func TestSweep_EffectKeyLiveTargetSurvives(t *testing.T) {
 	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err != nil {
 		t.Fatalf("a live target/column's effect window must survive the sweep: %v", err)
 	}
-	if _, _, _, orphans, corrupt, _ := h.engine.sweep.metrics(); orphans != 0 || corrupt != 0 {
+	if _, _, orphans, corrupt, _, _ := h.engine.sweep.metrics(); orphans != 0 || corrupt != 0 {
 		t.Fatalf("sweepOrphansDeleted = %d, sweepCorrupt = %d; want 0, 0", orphans, corrupt)
 	}
 }
@@ -2078,7 +2078,7 @@ func TestSweep_CountKeySurvives(t *testing.T) {
 	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
 		t.Fatalf("a dispatch-count must never be enumerated as a CorruptMark")
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 0 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 0 {
 		t.Fatalf("sweepCorrupt = %d, want 0 (the __count key is not a mark)", corrupt)
 	}
 	h.requireNoOp(t)
@@ -2157,6 +2157,24 @@ func (h *sweepHarness) seedCount(t *testing.T, ctx context.Context, targetID, en
 		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
 			t.Fatalf("seed dispatch-count: %v", err)
 		}
+	}
+}
+
+// seedReArmedCount leaves a gap's budget in exactly the state
+// ResetRetryBudget writes: a count key that EXISTS and reads 0. It goes through
+// the real increment and reset path, so the key carries the value shape,
+// revision history and TTL an operator's un-park leaves — and the distinction
+// matters, because an absent key is invisible to the count leg while a zero one
+// is what its re-arm arm fires on.
+func (h *sweepHarness) seedReArmedCount(t *testing.T, ctx context.Context, targetID, entityID, gapColumn string) {
+	t.Helper()
+	h.seedCount(t, ctx, targetID, entityID, gapColumn, 1)
+	_, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
+	if err != nil || !found {
+		t.Fatalf("read seeded count: (rev %d, found=%v, %v)", revision, found, err)
+	}
+	if conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision); err != nil || conflict {
+		t.Fatalf("reset seeded count: (conflict=%v, %v)", conflict, err)
 	}
 }
 
@@ -2770,7 +2788,7 @@ func TestSweep_CountLegClearsBudgetAndIssueWhenTheGapCloses(t *testing.T) {
 	if _, ok := issueAt(h.engine.issues, issueKey); ok {
 		t.Fatal("the raise must be retired by the same read that observes the close")
 	}
-	if _, _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+	if _, _, orphans, _, _, _ := h.engine.sweep.metrics(); orphans != 1 {
 		t.Fatalf("sweepOrphansDeleted = %d, want 1: a budget the sweep deletes must be visible on the heartbeat", orphans)
 	}
 	h.requireNoOp(t)
@@ -2870,7 +2888,7 @@ func TestSweep_CountLegDeletesACorruptBudgetBody(t *testing.T) {
 	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
 		t.Fatal("deleting the key the leg navigates by must retire that gap's standing issue with it")
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 1 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 1 {
 		t.Fatalf("sweepCorrupt = %d, want 1", corrupt)
 	}
 
@@ -2937,7 +2955,7 @@ func TestSweep_CountLegLeavesACorruptBodyAloneBehindTheGates(t *testing.T) {
 	if h.markExists(t, ctx, unattributable) {
 		t.Fatal("a count key that names no target can be gated by nothing and must be deleted")
 	}
-	if _, _, _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 1 {
+	if _, _, _, corrupt, _, _ := h.engine.sweep.metrics(); corrupt != 1 {
 		t.Fatalf("sweepCorrupt = %d, want 1 (the unattributable key only)", corrupt)
 	}
 }
@@ -3249,21 +3267,34 @@ func TestSweep_CountLegLogsTheParkOnceNotEveryPass(t *testing.T) {
 	h.requireNoOp(t)
 }
 
-// TestSweep_CountLegReArmsAMarklessUnsuppressedGap is the re-arm, and its own
-// storm bound in the same test.
+// readMark returns one mark's value and current revision, failing the test if
+// it is absent — for an assertion about WHICH episode holds a gap.
+func (h *sweepHarness) readMark(t *testing.T, ctx context.Context, key string) (mark, uint64) {
+	t.Helper()
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil {
+		t.Fatalf("mark read %q: %v", key, err)
+	}
+	var rec mark
+	if err := json.Unmarshal(entry.Value, &rec); err != nil {
+		t.Fatalf("unmarshal mark %q: %v", key, err)
+	}
+	return rec, entry.Revision
+}
+
+// TestSweep_CountLegReArmsAMarklessUnsuppressedGap is arm (n), the first line
+// of this leg that acts on the world. The vector is the state lane-1 dispatches
+// on — registered, enabled, violating, gap open, entityKey echoed, budget left,
+// no mark — minus the one thing lane 1 also needs and this row will never
+// produce: a delivery. Nothing else in the system dispatches it (the mark leg
+// enumerates marks, and there is none), so without this arm the gap sits open
+// and un-remediated for as long as the row stays quiet.
 //
-// A count standing over a gap that is registered, active, planned, open,
-// violating and NOT suppressed describes exactly the state lane-1 dispatches on
-// — and a row that has gone quiet gets no delivery, so lane-1 never sees it.
-// Deleting the count (or raising maxretries_<g>) writes no row, so nothing
-// re-delivers either: without this arm the un-suppressed gap is a quieter park
-// than the suppressed one it replaced. The leg therefore dispatches.
-//
-// The second pass is the storm proof, and it must be read off the MARK, not off
-// the op stream: the dispatch CAS-creates the gap's mark, so the very next pass
-// stops at the mark-listed guard and every pass after it does too, for as long
-// as an episode stands. A dispatch that left no mark behind would re-fire once a
-// minute forever.
+// It must be a FRESH episode, not a reclaim: a new claimId, a mark CAS-created
+// rather than replaced, a requestId derived from that create revision, and the
+// dispatch booked on the chain's budget. planGap's own "a plan about to fire
+// disproves the standing park" clear retires any GapBudgetExhausted left over
+// from before the budget was raised.
 func TestSweep_CountLegReArmsAMarklessUnsuppressedGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -3275,66 +3306,118 @@ func TestSweep_CountLegReArmsAMarklessUnsuppressedGap(t *testing.T) {
 	h.agePastWarmup()
 
 	const targetID = "fixtureCountLegReArm"
-	const budget = 2
+	const budget = 3
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.seedReArmedCount(t, ctx, targetID, entityID, "missing_x") // the state the verb writes
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	// A park raised before the budget was re-armed, which this dispatch disproves.
+	h.seedIssue(targetID, entityID, "missing_x")
+
+	h.pass(ctx)
+
+	op := h.nextOp(t)
+	if op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX (the playbook's own remediation, not an escalation)", op["operationType"])
+	}
+	rec, rev := h.readMark(t, ctx, key)
+	if rec.Action != actionDirectOp || rec.Gap != "missing_x" {
+		t.Fatalf("mark = %+v, want a directOp episode for missing_x", rec)
+	}
+	if rec.ClaimID == "" {
+		t.Fatal("a fresh episode must mint its own claimId — there is no open episode to preserve one from")
+	}
+	if rec.HeldBy != h.engine.cfg.Instance {
+		t.Fatalf("mark heldBy = %q, want this instance %q", rec.HeldBy, h.engine.cfg.Instance)
+	}
+	if !leaseLive(rec.LeaseExpiresAt, time.Now()) {
+		t.Fatalf("the re-armed episode must hold a live lease, got %q", rec.LeaseExpiresAt)
+	}
+	if want := deriveEpisodeRequestID(targetID, entityID, "missing_x", rev); op["requestId"] != want {
+		t.Fatalf("requestId = %v, want %v (derived from the CAS-create revision — a genuinely new episode)",
+			op["requestId"], want)
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 1 {
+		t.Fatalf("dispatch-count = %d, want 1: a re-arm is a real attempt and spends the first of the fresh budget", got)
+	}
+	// A dispatch path invisible on the heartbeat is a dispatch path nobody can
+	// audit. A re-arm is not a reclaim — no mark existed to reclaim — so it
+	// carries its own counter, and the operator surface must be able to say
+	// "the sweep dispatched N gaps lane 1 never saw".
+	reclaims, _, _, _, reArms, _ := h.engine.sweep.metrics()
+	if reArms != 1 {
+		t.Fatalf("sweepReArms = %d, want 1", reArms)
+	}
+	if reclaims != 0 {
+		t.Fatalf("sweepReclaims = %d, want 0: a re-arm is not a reclaim", reclaims)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+		t.Fatal("a gap that just dispatched is not parked: the standing issue must be retired")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_CountLegReArmDropsWhenAMarkRacesIt pins the OCC. `listed` is a
+// SNAPSHOT taken at the top of the pass, so a lane-1 delivery can CAS-create
+// the gap's mark between that listing and this leg reaching the dispatch —
+// arm (c) cannot see a mark that did not exist when the keys were listed. What
+// makes that safe is that the mark create IS the OCC: the second create loses,
+// its caller drops, and the winner's episode stands untouched. Driving
+// sweepCount with a listing that omits a mark which really exists reproduces
+// exactly that interleaving, deterministically.
+func TestSweep_CountLegReArmDropsWhenAMarkRacesIt(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegReArmRace"
+	const budget = 3
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
 	})
 	entityID := testNanoID(t)
 	markK := markKey(targetID, entityID, "missing_x")
-	// One attempt spent of a budget of two: the same row shape every other
-	// count-leg vector starts from, one short of exhaustion.
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.seedReArmedCount(t, ctx, targetID, entityID, "missing_x")
 	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-	// The park this gap is being re-armed out of: an operator raised the budget
-	// (or drained the count) and the latch still names a stop that has ended.
-	h.seedIssue(targetID, entityID, "missing_x")
-	if h.markExists(t, ctx, markK) {
-		t.Fatal("setup: this vector requires a markless gap")
-	}
+	// The winner: a live episode created after this pass listed its keys.
+	h.putMark(t, ctx, markK, fixtureMark(targetID, entityID, "missing_x", "directOp", futureLease()))
+	_, winnerRev := h.readMark(t, ctx, markK)
 
-	h.pass(ctx)
-
-	op := h.nextOp(t)
-	if op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX (the re-arm the count leg dispatched)", op["operationType"])
-	}
-	if !h.markExists(t, ctx, markK) {
-		t.Fatal("the re-armed episode must hold the gap's mark — that mark is the arm's only storm bound")
-	}
-	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_x"), budget; got != want {
-		t.Fatalf("dispatch-count = %d, want %d: the re-arm is ONE fresh dispatch and spends one attempt", got, want)
-	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
-		t.Fatalf("a gap that just dispatched cannot still be parked on a spent budget (issues: %+v)",
-			h.engine.issues.snapshot())
-	}
-	h.requireNoOp(t)
-
-	// The gap is still open, still violating and still un-suppressed — every
-	// condition that reached the dispatch holds — so only the mark stops a
-	// second one.
-	h.pass(ctx)
+	// The listing this leg was handed does NOT contain the mark key.
+	h.engine.sweep.sweepCount(ctx, countKey(targetID, entityID, "missing_x"), map[string]struct{}{})
 
 	h.requireNoOp(t)
-	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_x"), budget; got != want {
-		t.Fatalf("dispatch-count after a second pass = %d, want %d: the standing mark must defer the leg", got, want)
+	rec, rev := h.readMark(t, ctx, markK)
+	if rev != winnerRev {
+		t.Fatalf("mark revision = %d, want the winner's %d: the loser must not replace a live episode", rev, winnerRev)
 	}
-	if !h.markExists(t, ctx, markK) {
-		t.Fatal("the in-flight episode's mark must survive the pass that defers to it")
+	if rec.HeldBy != "dead-instance" {
+		t.Fatalf("mark heldBy = %q, want the winner's own value: the loser must not rewrite it", rec.HeldBy)
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 0 {
+		t.Fatalf("dispatch-count = %d, want 0: a dropped dispatch must not spend budget", got)
 	}
 }
 
-// TestSweep_CountLegReArmRetiresAStaleParkEvenWhenThePlanFails pins the arm's
-// CLEAR as a fact retired on its own evidence rather than a side effect of a
-// successful dispatch. The suppression verdict this arm sits under says the gap
-// has an attempt left, which is precisely what a standing GapBudgetExhausted
-// denies — so the latch is stale the moment the arm is reached, whether or not
-// the dispatch that follows can be planned. planGap clears the same latch, but
-// only on a plan it actually built, so a gap whose row cannot fill its
-// remediation's template would otherwise keep announcing a park that has ended,
-// with nothing else on the level-driven path able to retire it.
-func TestSweep_CountLegReArmRetiresAStaleParkEvenWhenThePlanFails(t *testing.T) {
+// TestSweep_CountLegReArmsOnceNotEveryPass is the anti-loop proof, against the
+// exact failure class a review already caught on this leg: the orphan-column
+// escalation re-created a mark on every pass while the mark leg's orphan arm
+// deleted it again, dispatching forever. The re-arm cannot do that, and the
+// reason is structural rather than incidental — the mark it creates PERSISTS,
+// so arm (c) returns on every subsequent pass while the episode stands, and
+// each dispatch spends budget so a capped gap converges on the escalation arm
+// instead. Five passes, one op, one bump.
+func TestSweep_CountLegReArmsOnceNotEveryPass(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -3344,48 +3427,37 @@ func TestSweep_CountLegReArmRetiresAStaleParkEvenWhenThePlanFails(t *testing.T) 
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureCountLegReArmUnplannable"
-	const budget = 2
-	// The row carries no `applicant` column, so the gap's templated param cannot
-	// resolve: the plan fails as a per-row data error and no episode fires.
+	const targetID = "fixtureCountLegReArmOnce"
+	const budget = 9 // never reached: the mark, not the cap, is what stops the repeat
 	h.seedTarget(&Target{
 		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			"missing_x": {Action: actionDirectOp, Operation: "FixX", Params: map[string]string{"applicant": "row.applicant"}},
-		},
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
 	})
 	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.seedReArmedCount(t, ctx, targetID, entityID, "missing_x")
 	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-	h.seedIssue(targetID, entityID, "missing_x")
 
-	h.pass(ctx)
+	for i := 0; i < 5; i++ {
+		h.pass(ctx)
+	}
 
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
-		t.Fatalf("a gap the suppression verdict says still has budget must not keep its park latch (issues: %+v)",
-			h.engine.issues.snapshot())
+	h.nextOp(t)
+	h.requireNoOp(t) // exactly one dispatch across five passes
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 1 {
+		t.Fatalf("dispatch-count = %d, want 1: five passes must spend exactly one attempt", got)
 	}
-	if !hasIssueCode(h.engine.issues.snapshot(), "TemplateDataError") {
-		t.Fatalf("setup: this vector must reach the dispatch and fail to plan it (issues: %+v)",
-			h.engine.issues.snapshot())
+	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("the episode's mark must still stand — it is what stops the arm re-entering")
 	}
-	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
-		t.Fatal("a plan that never built must take no mark")
-	}
-	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_x"), budget-1; got != want {
-		t.Fatalf("dispatch-count = %d, want %d: an episode that never fired spends no attempt", got, want)
-	}
-	h.requireNoOp(t)
 }
 
-// TestSweep_CountLegReArmIsGatedLikeEveryOtherActingArm pins the re-arm BELOW
-// every gate the leg's other acting arms sit below, and below the suppression
-// verdict itself. One pass, one shape of row, five entities that differ from the
-// dispatching control in exactly one field each — so each negative pins its own
-// gate rather than an inert leg. Read off the MARK: the dispatch is what creates
-// one, so its absence is the assertion no log level or issue severity can
-// hollow out.
-func TestSweep_CountLegReArmIsGatedLikeEveryOtherActingArm(t *testing.T) {
+// TestSweep_CountLegReArmGatesBlockDispatch is the negative per gate above the
+// re-arm, on vectors that would otherwise ALL dispatch: every entity here has
+// budget left, an open violating gap and no mark, so the only thing standing
+// between each one and an op is its own gate. The control vector proves that in
+// the same pass, on the same target shape — without it every negative would
+// hold vacuously.
+func TestSweep_CountLegReArmGatesBlockDispatch(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -3395,11 +3467,11 @@ func TestSweep_CountLegReArmIsGatedLikeEveryOtherActingArm(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const active = "fixtureCountLegReArmActive"
-	const frozen = "fixtureCountLegReArmFrozen"
-	const unregistered = "fixtureCountLegReArmUnknown"
-	const budget = 2
-	for _, targetID := range []string{active, frozen} {
+	const control = "fixtureReArmControl"
+	const frozen = "fixtureReArmFrozen"
+	const unknown = "fixtureReArmUnknown"
+	const budget = 3
+	for _, targetID := range []string{control, frozen} {
 		h.seedTarget(&Target{
 			TargetID: targetID,
 			Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -3412,76 +3484,60 @@ func TestSweep_CountLegReArmIsGatedLikeEveryOtherActingArm(t *testing.T) {
 		t.Fatalf("seedDisabledTargets: %v", err)
 	}
 
-	// The control: nothing stands between this gap and a dispatch.
-	dispatches := testNanoID(t)
-	h.seedCount(t, ctx, active, dispatches, "missing_x", budget-1)
-	h.putRow(t, ctx, active, dispatches, exhaustedRow(dispatches, "missing_x", budget))
-
-	// Budget spent: arm (l) owns this gap — the loud stop, never a re-dispatch
-	// of the chain the cap exists to end.
-	spent := testNanoID(t)
-	h.seedCount(t, ctx, active, spent, "missing_x", budget)
-	h.putRow(t, ctx, active, spent, exhaustedRow(spent, "missing_x", budget))
-
-	// A call already in flight: arm (m) owns it, and re-dispatching would be the
-	// duplicate remediation inflight_<g> exists to prevent.
-	inflight := testNanoID(t)
-	h.seedCount(t, ctx, active, inflight, "missing_x", budget-1)
-	inflightRow := exhaustedRow(inflight, "missing_x", budget)
-	inflightRow[inflightColumnPrefix+"x"] = true
-	h.putRow(t, ctx, active, inflight, inflightRow)
-
-	// An operator freeze stops NEW dispatch, and the re-arm is new dispatch.
+	// One entity per gate, all on the control target unless the gate is the
+	// target itself.
+	controlEntity := testNanoID(t)
 	frozenEntity := testNanoID(t)
-	h.seedCount(t, ctx, frozen, frozenEntity, "missing_x", budget-1)
-	h.putRow(t, ctx, frozen, frozenEntity, exhaustedRow(frozenEntity, "missing_x", budget))
+	unknownEntity := testNanoID(t)
+	orphanEntity := testNanoID(t)
+	silentEntity := testNanoID(t)
+	quietEntity := testNanoID(t)
+	inflightEntity := testNanoID(t)
 
-	// Replay lag reads exactly like removal: a gap the engine cannot describe
-	// must not be dispatched on the strength of a key left in a bucket.
-	ghost := testNanoID(t)
-	h.seedCount(t, ctx, unregistered, ghost, "missing_x", budget-1)
-	h.putRow(t, ctx, unregistered, ghost, exhaustedRow(ghost, "missing_x", budget))
+	seed := func(targetID, entityID, gapColumn string, mutate func(map[string]any)) {
+		h.seedReArmedCount(t, ctx, targetID, entityID, gapColumn)
+		row := exhaustedRow(entityID, gapColumn, budget)
+		if mutate != nil {
+			mutate(row)
+		}
+		h.putRow(t, ctx, targetID, entityID, row)
+	}
+	seed(control, controlEntity, "missing_x", nil)
+	seed(frozen, frozenEntity, "missing_x", nil)
+	seed(unknown, unknownEntity, "missing_x", nil)
+	seed(control, orphanEntity, "missing_dropped", nil)
+	seed(control, silentEntity, "missing_x", func(row map[string]any) { delete(row, "entityKey") })
+	seed(control, quietEntity, "missing_x", func(row map[string]any) { row["violating"] = false })
+	seed(control, inflightEntity, "missing_x", func(row map[string]any) { row["inflight_x"] = true })
 
 	h.pass(ctx)
 
-	if !h.markExists(t, ctx, markKey(active, dispatches, "missing_x")) {
-		t.Fatalf("the un-gated control must re-arm (issues: %+v)", h.engine.issues.snapshot())
+	h.nextOp(t)
+	h.requireNoOp(t) // the control dispatched; nothing else did
+	if !h.markExists(t, ctx, markKey(control, controlEntity, "missing_x")) {
+		t.Fatal("the control vector must dispatch — otherwise every negative below holds vacuously")
 	}
-	for _, tc := range []struct {
-		targetID string
-		entityID string
-		seeded   int
-		why      string
-	}{
-		{active, spent, budget, "a spent budget is the park itself — arm (l) escalates it, the re-arm must not re-dispatch it"},
-		{active, inflight, budget - 1, "a gap with a call in flight must not be re-dispatched"},
-		{frozen, frozenEntity, budget - 1, "an operator freeze stops new dispatch, and the re-arm is new dispatch"},
-		{unregistered, ghost, budget - 1, "an unregistered target must not be dispatched: replay lag reads exactly like removal"},
+	for _, blocked := range []struct{ gate, targetID, entityID, gapColumn string }{
+		{"an operator freeze", frozen, frozenEntity, "missing_x"},
+		{"an unreplayed registry", unknown, unknownEntity, "missing_x"},
+		{"a column the playbook dropped", control, orphanEntity, "missing_dropped"},
+		{"a row with no entityKey echo", control, silentEntity, "missing_x"},
+		{"a row that is not violating", control, quietEntity, "missing_x"},
+		{"a remediation already in flight", control, inflightEntity, "missing_x"},
 	} {
-		if h.markExists(t, ctx, markKey(tc.targetID, tc.entityID, "missing_x")) {
-			t.Fatalf("%s.%s: %s", tc.targetID, tc.entityID, tc.why)
-		}
-		if got := h.countValue(t, ctx, tc.targetID, tc.entityID, "missing_x"); got != tc.seeded {
-			t.Fatalf("%s.%s: dispatch-count = %d, want %d (a gated gap spends no attempt)",
-				tc.targetID, tc.entityID, got, tc.seeded)
+		if h.markExists(t, ctx, markKey(blocked.targetID, blocked.entityID, blocked.gapColumn)) {
+			t.Fatalf("%s must stop the re-arm dispatch", blocked.gate)
 		}
 	}
-	if op := h.nextOp(t); op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX (the control's re-arm)", op["operationType"])
-	}
-	h.requireNoOp(t)
 }
 
-// TestSweep_CountLegNeverReArmsASurfaceGap pins the one action the re-arm
-// excludes. FR29's `surface` gap dispatches nothing by definition — lane-1
-// returns before it ever builds a plan — but a package that migrates a column
-// from a dispatching action to `surface` leaves the old chain's count behind for
-// its whole 128h TTL, and that count is what brings this leg to the gap. Without
-// the exclusion the arm would plan an action buildPlan cannot build, raising an
-// `error`-severity PlaybookConfigError against a correctly-authored playbook
-// once a minute for five days. The latch at this key is lane-1's here — it holds
-// the surface issue for as long as the column is true — so this arm leaves it
-// exactly as the orphan-column arm leaves lane-1's raise.
+// TestSweep_CountLegNeverReArmsASurfaceGap pins the one gate the re-arm needed
+// that no arm above it provides. FR29's `surface` action dispatches nothing and
+// holds no mark, so its column can carry a count only as a leftover from a
+// playbook version that DID dispatch it — and buildPlan has no case for
+// `surface`, so planning one raises an `error`-severity PlaybookConfigError
+// naming an action the contract explicitly allows. The gap is left exactly as
+// found: no op, no mark, and no alarm about a legal declaration.
 func TestSweep_CountLegNeverReArmsASurfaceGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -3492,207 +3548,45 @@ func TestSweep_CountLegNeverReArmsASurfaceGap(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureCountLegReArmSurface"
-	const budget = 2
+	const targetID = "fixtureCountLegSurface"
+	const budget = 3
 	h.seedTarget(&Target{
 		TargetID: targetID,
-		Gaps:     map[string]GapAction{"missing_x": {Action: actionSurface, IssueCode: "Surface"}},
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionSurface, IssueCode: "SomethingOpen"}},
 	})
 	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.seedReArmedCount(t, ctx, targetID, entityID, "missing_x")
 	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-	// The standing surface issue lane-1 raises for as long as the column is true.
-	h.engine.issues.set(issueKeyGapEntity(targetID, entityID, "missing_x"), "warning", "Surface",
-		"target "+targetID+" entity "+entityID+": row column missing_x is true")
 
 	h.pass(ctx)
-	h.pass(ctx)
 
+	h.requireNoOp(t)
 	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
-		t.Fatal("a surface gap must never be dispatched — FR29: surface, never dispatch")
+		t.Fatal("a surface gap must never hold a mark: FR29 says it never dispatches")
 	}
 	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
-		t.Fatalf("planning a surface gap raises a config error against a correct playbook (issues: %+v)",
+		t.Fatalf("`surface` is a contract-legal action and must not be alerted as a config error (issues: %+v)",
 			h.engine.issues.snapshot())
 	}
-	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x"))
-	if !ok || issue.Code != "Surface" {
-		t.Fatalf("the latch at this key is lane-1's surface issue and must be left alone (issues: %+v)",
-			h.engine.issues.snapshot())
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 0 {
+		t.Fatalf("dispatch-count = %d, want 0 (untouched)", got)
 	}
-	if got, want := h.countValue(t, ctx, targetID, entityID, "missing_x"), budget-1; got != want {
-		t.Fatalf("dispatch-count = %d, want %d (the arm acts on nothing here)", got, want)
-	}
-	h.requireNoOp(t)
 }
 
-// TestSweep_CountLegReArmsADirectOpParkedOnTheEngineDefaultBudget is the
-// regression guard on the two gates below it, and it is written first
-// deliberately. The flagship park this whole leg exists to end is a `directOp`
-// gap that declares NO maxretries_<g> and NO inflight_<g> — the shape
-// gapSuppressionTerms hands defaultDirectOpRetryBudget to. Any gate phrased as
-// "does the row declare a usable cap" (hasUsableRetryCap says no here, by its
-// own contract) would exclude precisely that gap. needsCount says yes, because
-// an engine default is still a count-based cap, and this vector is what pins
-// the difference.
-func TestSweep_CountLegReArmsADirectOpParkedOnTheEngineDefaultBudget(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	h := newSweepHarness(t, ctx)
-	h.agePastWarmup()
-
-	const targetID = "fixtureCountLegReArmDefaultBudget"
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
-	})
-	entityID := testNanoID(t)
-	// One attempt spent of the ENGINE default — the row declares neither
-	// companion column, which is the whole point of the vector.
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", 1)
-	h.putRow(t, ctx, targetID, entityID, map[string]any{
-		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
-	})
-	if defaultDirectOpRetryBudget <= 1 {
-		t.Fatalf("setup: this vector needs a default budget above the seeded count, got %d", defaultDirectOpRetryBudget)
-	}
-
-	h.pass(ctx)
-
-	if op := h.nextOp(t); op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX: a gap parked on the engine default budget is the case this leg exists for",
-			op["operationType"])
-	}
-	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
-		t.Fatal("the re-armed episode must hold the gap's mark")
-	}
-	if _, _, reArms, _, _, _ := h.engine.sweep.metrics(); reArms != 1 {
-		t.Fatalf("sweepReArms = %d, want 1", reArms)
-	}
-	h.requireNoOp(t)
-}
-
-// TestSweep_CountLegNeverReArmsAGapWithNoCountBasedCap pins the gate that makes
-// the arm TERMINATE.
+// TestSweep_CountLegNeverReArmsACollapseOnlyGap pins the exclusion that keeps
+// the re-arm from duplicating a human's work. A mark's ABSENCE is not evidence
+// its episode concluded: an assignTask's task and a parked Loom instance
+// outlive their mark by orders of magnitude, which is exactly why the reclaim
+// preserves the mark's claimId verbatim and widens the mark's TTL across its
+// own backoff. Firing fresh from here mints a NEW claimId and therefore a
+// second task or instance beside the open one — and preserving the claimId is
+// not available as a fix, because the claimId lives on the mark that is gone.
 //
-// "Not suppressed" is returned identically for a gap with budget left and for a
-// gap with no budget concept at all (gapSuppressionTerms), and the second is a
-// trap: marks.create arms only the DEFAULT per-key TTL, never the widened one
-// reclaim computes for a backed-off episode, so a gap whose count can never
-// reach a cap would have its mark TTL-expire and be re-armed again — forever, on
-// a period this leg picked, pre-empting reclaim's backoff and minting a fresh
-// claimId every cycle. The count's own 128h backstop cannot stop it either:
-// every increment re-arms that TTL.
-//
-// Both negatives are timing-free — one pass, assert nothing dispatched — and
-// each differs from the dispatching control in exactly one field.
-func TestSweep_CountLegNeverReArmsAGapWithNoCountBasedCap(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	h := newSweepHarness(t, ctx)
-	h.agePastWarmup()
-
-	const targetID = "fixtureCountLegReArmNoCap"
-	uncappedGap := GapAction{Action: actionAssignTask, Operation: "ReviewH", Assignee: "row.applicant", Target: "row.entityKey"}
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
-			"missing_h": uncappedGap,
-		},
-	})
-	h.engine.source.mu.Lock()
-	h.engine.source.opMetaByType["ReviewH"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
-
-	// The control: a directOp gap on the engine default budget, which must still
-	// dispatch (the gate below must not swallow it).
-	control := testNanoID(t)
-	h.seedCount(t, ctx, targetID, control, "missing_x", 1)
-	h.putRow(t, ctx, targetID, control, map[string]any{
-		"entityKey": "vtx.leaseApp." + control, "violating": true, "missing_x": true,
-	})
-
-	// (1) The loop the design premise missed: an uncapped assignTask. No
-	// maxretries_<g>, and assignTask never takes the engine default — so the
-	// suppression verdict can never flip and reclaim's backoff is the only thing
-	// that may pace it.
-	uncapped := testNanoID(t)
-	h.seedCount(t, ctx, targetID, uncapped, "missing_h", 2)
-	uncappedRow := map[string]any{
-		"entityKey": "vtx.leaseApp." + uncapped, "violating": true, "missing_h": true,
-		"applicant": "vtx.identity." + testNanoID(t),
-	}
-	h.putRow(t, ctx, targetID, uncapped, uncappedRow)
-	// Same guard against a vacuous negative as the collapse-only vector's.
-	if pl, perr := buildPlan(h.engine.source, targetID, uncapped, "missing_h", uncappedGap, uncappedRow, 1); pl == nil {
-		t.Fatalf("setup: the uncapped vector must be genuinely dispatchable, got plan error %v", perr)
-	}
-
-	// (2) inflight_<g> PRESENT but false (or unreadable — boolColumn reads both
-	// as false) with no positive cap. Declaring the column is a lens adopting
-	// §10.3's own pacing, which gapSuppressionTerms explicitly declines to
-	// second-guess with the engine default; a re-arm here would turn an
-	// unreadable in-flight marker into a standing re-dispatch timer. directOp,
-	// so this vector is blocked by the cap gate alone and not by the
-	// collapse-only one.
-	declaresInflight := testNanoID(t)
-	h.seedCount(t, ctx, targetID, declaresInflight, "missing_x", 1)
-	h.putRow(t, ctx, targetID, declaresInflight, map[string]any{
-		"entityKey": "vtx.leaseApp." + declaresInflight, "violating": true, "missing_x": true,
-		inflightColumnPrefix + "x": false,
-	})
-
-	h.pass(ctx)
-
-	if !h.markExists(t, ctx, markKey(targetID, control, "missing_x")) {
-		t.Fatalf("the engine-default control must still re-arm (issues: %+v)", h.engine.issues.snapshot())
-	}
-	if h.markExists(t, ctx, markKey(targetID, uncapped, "missing_h")) {
-		t.Fatal("an uncapped gap must not be re-armed: its count never reaches a cap, so the arm would never stop")
-	}
-	if h.markExists(t, ctx, markKey(targetID, declaresInflight, "missing_x")) {
-		t.Fatal("a gap declaring inflight_<g> with no positive cap paces itself; the leg must not re-dispatch it")
-	}
-	if got := h.countValue(t, ctx, targetID, uncapped, "missing_h"); got != 2 {
-		t.Fatalf("uncapped gap's dispatch-count = %d, want 2 (nothing dispatched, nothing spent)", got)
-	}
-	if _, _, reArms, _, _, _ := h.engine.sweep.metrics(); reArms != 1 {
-		t.Fatalf("sweepReArms = %d, want 1 (only the control)", reArms)
-	}
-	if op := h.nextOp(t); op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX (the control's re-arm)", op["operationType"])
-	}
-	h.requireNoOp(t)
-}
-
-// TestSweep_CountLegNeverReArmsACollapseOnlyGap pins the gate that stops a
-// DUPLICATE HUMAN TASK, and it survives the cap gate: every vector here declares
-// a positive maxretries_<g>, so needsCount is true for all of them.
-//
-// A collapse-only re-dispatch (assignTask; triggerLoom of a pattern that parks;
-// proposedOp) is harmless only because it reuses the open episode's claimId,
-// which reproduces the same taskId and collapses at the consumer. That claimId
-// lives on the MARK — and this arm is reached only when there is no mark, so its
-// dispatch would mint a fresh one and a second task beside a first that may
-// still be open in the world. Markless is not evidence the remediation ended: a
-// mark whose TTL lapsed unrefreshed under an operator freeze leaves exactly this
-// shape.
-//
-// The external control is the other half of the rule: for a triggerLoom whose
-// pattern is externalTask-only, §10.3 says the re-dispatch IS the intended fresh
-// attempt, so the gate must let it through. And the stale park latch is retired
-// for the blocked vector too — the retire sits above these guards, which are
-// permanent properties of a gap's class, so a retire below one would strand its
-// fact for the life of the gap.
+// The classification is by dispatch SHAPE, not action name, so the two
+// triggerLoom vectors differ only in what their patterns do: one parks on a
+// human and must not be re-armed, the other is externalTask-only — a vendor
+// call §10.3 says to re-make — and must be. Without that pair the exclusion
+// could be "triggerLoom never re-arms", which would be the wrong rule.
 func TestSweep_CountLegNeverReArmsACollapseOnlyGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -3703,403 +3597,58 @@ func TestSweep_CountLegNeverReArmsACollapseOnlyGap(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureCountLegReArmCollapseOnly"
+	const targetID = "fixtureReArmCollapseOnly"
 	const budget = 3
-	// bgcheckFlow's every step is an externalTask, so it concludes on a vendor
-	// outcome, not a person: externalDispatchGap classifies it external.
-	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
-	humanGap := GapAction{Action: actionAssignTask, Operation: "ReviewH", Assignee: "row.applicant", Target: "row.entityKey"}
+	seedPatternSpec(t, h.engine.source, "parksOnAHuman", stepKindSystemOp, stepKindUserTask)
+	seedPatternSpec(t, h.engine.source, "callsAVendor", stepKindExternalTask)
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps: map[string]GapAction{
-			"missing_h":  humanGap,
-			"missing_bg": {Action: actionTriggerLoom, Pattern: "bgcheckFlow", Subject: "row.entityKey"},
+			"missing_parked":   {Action: actionTriggerLoom, Pattern: "parksOnAHuman", Subject: "row.entityKey"},
+			"missing_assigned": {Action: actionAssignTask, Operation: "ReviewIt", Assignee: "row.entityKey", Target: "row.entityKey"},
+			"missing_vendor":   {Action: actionTriggerLoom, Pattern: "callsAVendor", Subject: "row.entityKey"},
+			"missing_direct":   {Action: actionDirectOp, Operation: "FixX"},
 		},
 	})
-	h.engine.source.mu.Lock()
-	h.engine.source.opMetaByType["ReviewH"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
 
-	// The blocked vector: a capped assignTask whose task may still be open.
-	human := testNanoID(t)
-	h.seedCount(t, ctx, targetID, human, "missing_h", budget-1)
-	humanRow := exhaustedRow(human, "missing_h", budget)
-	humanRow["applicant"] = "vtx.identity." + testNanoID(t)
-	h.putRow(t, ctx, targetID, human, humanRow)
-	h.seedIssue(targetID, human, "missing_h")
-	// Without this the negative below would pass for the wrong reason: an
-	// unplannable vector dispatches nothing whatever the gate does. buildPlan is
-	// pure, so the check costs the test nothing it has to undo.
-	if pl, perr := buildPlan(h.engine.source, targetID, human, "missing_h", humanGap, humanRow, 1); pl == nil {
-		t.Fatalf("setup: the blocked vector must be genuinely dispatchable, got plan error %v", perr)
-	}
-
-	// The control: an external triggerLoom in the identical shape.
-	external := testNanoID(t)
-	h.seedCount(t, ctx, targetID, external, "missing_bg", budget-1)
-	h.putRow(t, ctx, targetID, external, exhaustedRow(external, "missing_bg", budget))
-
-	h.pass(ctx)
-
-	if h.markExists(t, ctx, markKey(targetID, human, "missing_h")) {
-		t.Fatal("a collapse-only gap must not be re-armed: with no mark there is no claimId to collapse onto, so the dispatch mints a SECOND human task")
-	}
-	if got := h.countValue(t, ctx, targetID, human, "missing_h"); got != budget-1 {
-		t.Fatalf("collapse-only gap's dispatch-count = %d, want %d (nothing dispatched)", got, budget-1)
-	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, human, "missing_h")); ok {
-		t.Fatalf("the park latch is stale the moment the suppression verdict says the gap has budget; a guard this arm never lifts must not strand it (issues: %+v)",
-			h.engine.issues.snapshot())
-	}
-	if !h.markExists(t, ctx, markKey(targetID, external, "missing_bg")) {
-		t.Fatalf("an externalTask-only pattern's re-dispatch is the intended fresh attempt (§10.3) and must still re-arm (issues: %+v)",
-			h.engine.issues.snapshot())
-	}
-	if _, _, reArms, _, _, _ := h.engine.sweep.metrics(); reArms != 1 {
-		t.Fatalf("sweepReArms = %d, want 1 (the external control only)", reArms)
-	}
-	if op := h.nextOp(t); op["operationType"] != opStartLoomPattern {
-		t.Fatalf("operationType = %v, want %q (the external control's re-arm)", op["operationType"], opStartLoomPattern)
-	}
-	h.requireNoOp(t)
-}
-
-// agePastReArmWindow rewinds every recorded arm-(n) plan attempt past the
-// pacing window, so the next pass reads as "the window has elapsed" with no
-// wall-clock wait — the same rewind-the-anchor idiom as agePastWarmup.
-func (h *sweepHarness) agePastReArmWindow() {
-	s := h.engine.sweep
-	past := time.Now().Add(-2 * markTTLBackstopFactor * h.engine.marks.lease)
-	s.mu.Lock()
-	for key := range s.reArmAttempted {
-		s.reArmAttempted[key] = past
-	}
-	s.mu.Unlock()
-}
-
-func (h *sweepHarness) reArmPacingEntries() int {
-	s := h.engine.sweep
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.reArmAttempted)
-}
-
-// TestSweep_ReArmPacesARepeatedlyUnplannableGap pins arm (n)'s plan-attempt
-// pacing, and pins that the pacing stops at the plan.
-//
-// Arm (n) visits a parked gap once a sweep interval for the count's ~128h TTL.
-// A gap whose plan cannot build — a row that cannot fill its remediation's
-// template, a playbook config error, a reference that has not replayed — makes
-// planGap write a record on EVERY one of those visits, at Warn or Error, which
-// is thousands of identical lines per gap and every arrival buried among them.
-//
-// What must NOT be paced is the level-driven retire above it: the standing park
-// latch is re-evaluated from the row on every pass whatever the pacing says,
-// which the re-seeded issue in the second half proves.
-func TestSweep_ReArmPacesARepeatedlyUnplannableGap(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	logs := &logCapture{}
-	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
-	h.agePastWarmup()
-
-	const targetID = "fixtureReArmPacing"
-	const budget = 3
-	// The row carries no `applicant` column, so the templated param cannot
-	// resolve and planGap fails with a per-row data error on every attempt.
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			// A directOp entry with no operationType: buildPlan rejects it as a
-			// playbook CONFIG error, which alerts at `error` severity on every
-			// attempt and latches at issueKeyGapConfig — the family nothing in
-			// the level reconcile clears, so pacing it costs no standing fact.
-			"missing_x": {Action: actionDirectOp},
-		},
-	})
-	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
-	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-	h.seedIssue(targetID, entityID, "missing_x")
-
-	for i := 0; i < 3; i++ {
-		h.pass(ctx)
-	}
-
-	const attempted = "re-armed gap has no dispatchable plan"
-	if got := logs.countContaining(attempted); got != 1 {
-		t.Fatalf("plan attempts across 3 passes = %d, want 1: an undamped arm writes one per pass for the budget's whole life", got)
-	}
-	if !hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
-		t.Fatalf("setup: the one attempt must genuinely have reached planGap and failed (issues: %+v)",
-			h.engine.issues.snapshot())
-	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
-		t.Fatal("the park latch must be retired on the first pass — the retire sits above the pacing")
-	}
-
-	// The retire is level-driven and unpaced: a latch that comes back is retired
-	// again on the very next pass, while the plan attempt stays damped.
-	h.seedIssue(targetID, entityID, "missing_x")
-	h.pass(ctx)
-	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
-		t.Fatal("pacing the plan attempt must not pace the retire above it")
-	}
-	if got := logs.countContaining(attempted); got != 1 {
-		t.Fatalf("plan attempts after a 4th pass = %d, want 1 (still inside the window)", got)
-	}
-	h.requireNoOp(t)
-}
-
-// TestSweep_ReArmResumesAfterThePacingWindow is the other half of the pacing
-// contract, and the reason the predicate is a clock rather than a row revision.
-// Two of planGap's three failure classes are not fixed by a row write at all —
-// a playbook config error needs the package re-authored, an unresolved
-// reference needs some other vertex to replay — so a revision predicate would
-// never re-attempt them, turning a loud repeated failure into a gap that is
-// un-suppressed, never dispatched, and silent. Ageing out suppresses nothing
-// permanently: the row here never changes, and the attempt still comes back.
-func TestSweep_ReArmResumesAfterThePacingWindow(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	logs := &logCapture{}
-	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
-	h.agePastWarmup()
-
-	const targetID = "fixtureReArmPacingWindow"
-	const budget = 3
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			// A directOp entry with no operationType: buildPlan rejects it as a
-			// playbook CONFIG error, which alerts at `error` severity on every
-			// attempt and latches at issueKeyGapConfig — the family nothing in
-			// the level reconcile clears, so pacing it costs no standing fact.
-			"missing_x": {Action: actionDirectOp},
-		},
-	})
-	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
-	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-
-	const attempted = "re-armed gap has no dispatchable plan"
-	h.pass(ctx)
-	h.pass(ctx)
-	if got := logs.countContaining(attempted); got != 1 {
-		t.Fatalf("setup: plan attempts inside the window = %d, want 1", got)
-	}
-
-	// Time passes; the row is untouched throughout.
-	h.agePastReArmWindow()
-	h.pass(ctx)
-
-	if got := logs.countContaining(attempted); got != 2 {
-		t.Fatalf("plan attempts after the window elapsed = %d, want 2: pacing must not become permanent suppression", got)
-	}
-	h.requireNoOp(t)
-}
-
-// TestSweep_ReArmPacingEntryRetiresWithItsCountKey gives the pacing map its
-// LIFETIME. It is process-local state keyed by a weaver-state key, so without a
-// retirement it would grow with every gap the leg has ever paced and hold those
-// entries for the life of the process. It is retired by the same pass loop that
-// retires a CorruptMark issue whose key stopped being listed, keyed the same
-// way — and a count that comes back is a new chain, entitled to a prompt first
-// attempt rather than to the old chain's leftover pacing.
-func TestSweep_ReArmPacingEntryRetiresWithItsCountKey(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	logs := &logCapture{}
-	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
-	h.agePastWarmup()
-
-	const targetID = "fixtureReArmPacingRetire"
-	const budget = 3
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			// A directOp entry with no operationType: buildPlan rejects it as a
-			// playbook CONFIG error, which alerts at `error` severity on every
-			// attempt and latches at issueKeyGapConfig — the family nothing in
-			// the level reconcile clears, so pacing it costs no standing fact.
-			"missing_x": {Action: actionDirectOp},
-		},
-	})
-	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
-	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-
-	h.pass(ctx)
-	if got := h.reArmPacingEntries(); got != 1 {
-		t.Fatalf("setup: pacing entries after one paced attempt = %d, want 1", got)
-	}
-
-	// The operator resets the budget (or the gap closes, or the TTL collects
-	// it): the count key stops being listed.
-	if err := h.engine.marks.deleteDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
-		t.Fatalf("delete dispatch-count: %v", err)
-	}
-	h.pass(ctx)
-
-	if got := h.reArmPacingEntries(); got != 0 {
-		t.Fatalf("pacing entries after the count key vanished = %d, want 0: the map must not outlive the keys it paces", got)
-	}
-
-	// A fresh chain at the same key gets a prompt first attempt, not the dead
-	// chain's leftover window.
-	const attempted = "re-armed gap has no dispatchable plan"
-	before := logs.countContaining(attempted)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
-	h.pass(ctx)
-	if got := logs.countContaining(attempted); got != before+1 {
-		t.Fatalf("plan attempts after the count returned = %d, want %d", got, before+1)
-	}
-	h.requireNoOp(t)
-}
-
-// TestSweep_ReclaimSkipsASurfaceGap pins the first of the three legs a package
-// migration to `surface` can strand state in front of.
-//
-// `surface` mints no mark — but a package upgrade that rewrites a gap's action
-// leaves behind whatever the previous action created, and an episode that was
-// in flight at the upgrade leaves a MARK. clearClosedMarks skips a surface
-// column's mark cleanup outright, so nothing but the TTL removes it, and every
-// sweep pass in between drives reclaim into planGap, which has no `surface`
-// case: an `error`-severity PlaybookConfigError against a playbook that is
-// entirely contract-legal, once a minute. The control carries the identical
-// stranded mark under a playbook that still names a dispatching action, so the
-// negative pins the ACTION and not an inert leg.
-func TestSweep_ReclaimSkipsASurfaceGap(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	h := newSweepHarness(t, ctx)
-	h.agePastWarmup()
-
-	const targetID = "fixtureReclaimSurface"
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			// The migrated gap: the package now only surfaces this column.
-			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
-			// The control: same shape, still dispatching.
-			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
-		},
-	})
-	migrated, control := testNanoID(t), testNanoID(t)
-	migratedKey := markKey(targetID, migrated, "missing_s")
-	h.putMark(t, ctx, migratedKey, fixtureMark(targetID, migrated, "missing_s", actionDirectOp, pastLease()))
-	h.putRow(t, ctx, targetID, migrated, map[string]any{
-		"entityKey": "vtx.leaseApp." + migrated, "violating": true, "missing_s": true,
-	})
-	h.putMark(t, ctx, markKey(targetID, control, "missing_x"),
-		fixtureMark(targetID, control, "missing_x", actionDirectOp, pastLease()))
-	h.putRow(t, ctx, targetID, control, map[string]any{
-		"entityKey": "vtx.leaseApp." + control, "violating": true, "missing_x": true,
-	})
-
-	h.pass(ctx)
-
-	if op := h.nextOp(t); op["operationType"] != "FixX" {
-		t.Fatalf("operationType = %v, want FixX: the control must reclaim, or the negative proves nothing",
-			op["operationType"])
-	}
-	h.requireNoOp(t)
-	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
-		t.Fatalf("a contract-legal `surface` playbook must not raise a config error (issues: %+v)",
-			h.engine.issues.snapshot())
-	}
-	if !h.markExists(t, ctx, migratedKey) {
-		t.Fatal("the stranded mark is left to its own TTL: a mid-replay definition is not evidence to destroy a running episode's bookkeeping on")
-	}
-}
-
-// TestSweep_CountLegNeverEscalatesASurfaceGap pins the second leg. A `surface`
-// gap has no remediation chain, so it has no budget to have spent — but
-// gapSuppressionTerms reads maxretries_<g> without consulting the action, so a
-// migrated column whose lens still projects the cap, over a count stranded from
-// the previous action, reads as EXHAUSTED and reaches the escalation.
-//
-// Both of that escalation's branches are wrong here, and the un-escalated one
-// is the sharper: it raises GapBudgetExhausted at issueKeyGapEntity, which is
-// the very latch lane-1 holds this column's surface issue on. The two would
-// overwrite each other and re-stamp `since` every round trip — the flap the
-// orphan-column arm was amended to stop. The seeded Surface issue must come
-// through the pass untouched.
-func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	h := newSweepHarness(t, ctx)
-	h.agePastWarmup()
-
-	const targetID = "fixtureCountLegSurfaceEscalate"
-	const budget = 2
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
-			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
-		},
-	})
-	migrated, control := testNanoID(t), testNanoID(t)
-	for gap, entityID := range map[string]string{"missing_s": migrated, "missing_x": control} {
-		h.seedCount(t, ctx, targetID, entityID, gap, budget)
+	entities := map[string]string{}
+	for _, gap := range []string{"missing_parked", "missing_assigned", "missing_vendor", "missing_direct"} {
+		entityID := testNanoID(t)
+		entities[gap] = entityID
+		h.seedReArmedCount(t, ctx, targetID, entityID, gap)
 		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
 	}
-	// The standing issue lane-1 raises for a surface column while it is true.
-	h.engine.issues.set(issueKeyGapEntity(targetID, migrated, "missing_s"), "warning", "Surface",
-		"target "+targetID+" entity "+migrated+": row column missing_s is true")
 
 	h.pass(ctx)
 
-	control_, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, control, "missing_x"))
-	if !ok || control_.Code != "GapBudgetExhausted" {
-		t.Fatalf("setup: the identical vector on a DISPATCHING gap must escalate, or the negative proves nothing (issues: %+v)",
-			h.engine.issues.snapshot())
+	for _, gap := range []string{"missing_vendor", "missing_direct"} {
+		if !h.markExists(t, ctx, markKey(targetID, entities[gap], gap)) {
+			t.Fatalf("%s: a gap whose re-dispatch mounts a genuinely new attempt must be re-armed", gap)
+		}
 	}
-	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, migrated, "missing_s"))
-	if !ok || issue.Code != "Surface" {
-		t.Fatalf("the latch at a surface column is lane-1's; a GapBudgetExhausted raise here flaps it (issues: %+v)",
-			h.engine.issues.snapshot())
+	for _, gap := range []string{"missing_parked", "missing_assigned"} {
+		if h.markExists(t, ctx, markKey(targetID, entities[gap], gap)) {
+			t.Fatalf("%s: a collapse-only gap must not be re-armed — its artifact may still be open, "+
+				"and a fresh claimId would duplicate it", gap)
+		}
+		if got := h.countValue(t, ctx, targetID, entities[gap], gap); got != 0 {
+			t.Fatalf("%s: dispatch-count = %d, want 0 (untouched)", gap, got)
+		}
 	}
-	if h.markExists(t, ctx, markKey(targetID, migrated, "missing_s")) {
-		t.Fatal("a surface gap must never be dispatched, escalation included")
+	if _, _, _, _, reArms, _ := h.engine.sweep.metrics(); reArms != 2 {
+		t.Fatalf("sweepReArms = %d, want 2 (the two re-dispatchable gaps only)", reArms)
 	}
-	h.requireNoOp(t)
 }
 
-// TestSweep_ReArmDoesNotPaceAFactTheLevelReconcileErases is the carve-out, and
-// the reason the pacing is not uniform.
-//
-// planGap raises its template data error at issueKeyDataEntity(target, entity,
-// gapColumn) — the very key boolColumn and intColumn clear on every read of that
-// column whose value parses. Two different facts share one latch, so the raise
-// only stands because it is re-derived on every evaluation, AFTER the read that
-// cleared it. Pacing that raise while the clear keeps running would not quiet
-// the family, it would erase it: absent for the whole window, present for the
-// one pass inside it that re-derived it. The config-class vector in the pacing
-// tests latches at issueKeyGapConfig, which nothing in the level reconcile
-// touches, which is why that one is safe to damp and this one is not.
-func TestSweep_ReArmDoesNotPaceAFactTheLevelReconcileErases(t *testing.T) {
+// TestSweep_CountLegReArmsOnlyAZeroedBudget pins the re-arm to the state an
+// operator actually created. A count ABOVE zero with no mark is not a re-armed
+// gap — it is a chain already in progress whose mark expired, and the reclaim
+// ladder owns its pacing (backoffInterval keyed on the count, plus the
+// uncappedExternal hold). Re-arming it here would re-dispatch at the sweep
+// interval instead, which for a 24h hold is three orders of magnitude faster
+// than intended. Zero is what ResetRetryBudget writes and what a gap-close
+// reset leaves, and zero has no backoff ladder to respect.
+func TestSweep_CountLegReArmsOnlyAZeroedBudget(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -4109,29 +3658,142 @@ func TestSweep_ReArmDoesNotPaceAFactTheLevelReconcileErases(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureReArmPacingCarveOut"
+	const targetID = "fixtureReArmZeroBudget"
+	const budget = 5
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	rearmed, inProgress := testNanoID(t), testNanoID(t)
+	h.seedReArmedCount(t, ctx, targetID, rearmed, "missing_x")
+	// Same gap, same row, same absent mark — two attempts already spent.
+	h.seedCount(t, ctx, targetID, inProgress, "missing_x", 2)
+	for _, entityID := range []string{rearmed, inProgress} {
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	}
+
+	h.pass(ctx)
+
+	h.nextOp(t)
+	h.requireNoOp(t)
+	if !h.markExists(t, ctx, markKey(targetID, rearmed, "missing_x")) {
+		t.Fatal("a budget an operator zeroed must be re-armed")
+	}
+	if h.markExists(t, ctx, markKey(targetID, inProgress, "missing_x")) {
+		t.Fatal("a chain mid-flight must be left to the reclaim ladder, which paces it; this arm does not")
+	}
+	if got := h.countValue(t, ctx, targetID, inProgress, "missing_x"); got != 2 {
+		t.Fatalf("in-progress dispatch-count = %d, want 2 (untouched)", got)
+	}
+}
+
+// TestSweep_CountLegReArmIsWarmUpGated pins the re-arm behind the same
+// registry-replay warm-up the orphan arms use. The sweep's warm pass runs at
+// engine start, when the registry is still replaying and every re-armed gap in
+// the bucket is visible at once: dispatching there turns a restart, or the
+// first pass after an outage, into a fan-out of every affected gap
+// simultaneously. The gate costs at most one sweep interval of latency on a
+// re-arm an operator asked for minutes or hours earlier.
+func TestSweep_CountLegReArmIsWarmUpGated(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureReArmWarmup"
 	const budget = 3
 	h.seedTarget(&Target{
 		TargetID: targetID,
-		Gaps: map[string]GapAction{
-			"missing_x": {Action: actionDirectOp, Operation: "FixX", Params: map[string]string{"applicant": "row.applicant"}},
-		},
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
 	})
 	entityID := testNanoID(t)
-	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.seedReArmedCount(t, ctx, targetID, entityID, "missing_x")
 	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
-	dataKey := issueKeyDataEntity(targetID, entityID, "missing_x")
 
-	for i := 0; i < 3; i++ {
-		h.pass(ctx)
-		issue, ok := issueAt(h.engine.issues, dataKey)
-		if !ok || issue.Code != "TemplateDataError" {
-			t.Fatalf("pass %d: the data fact must stand after every pass, not one in every window (issues: %+v)",
-				i+1, h.engine.issues.snapshot())
-		}
-	}
-	if got := h.reArmPacingEntries(); got != 0 {
-		t.Fatalf("pacing entries for the carved-out class = %d, want 0", got)
-	}
+	// Inside the warm-up window — the shape of a start-up warm pass.
+	h.pass(ctx)
 	h.requireNoOp(t)
+	if h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("the warm pass must not dispatch: a replaying registry may not describe this gap yet")
+	}
+
+	// The same pass once the window has elapsed.
+	h.agePastWarmup()
+	h.pass(ctx)
+
+	h.nextOp(t)
+	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("past the warm-up the same gap must be re-armed — the gate is a delay, not a veto")
+	}
+}
+
+// TestSweep_CountLegNeverReArmsAPlanTimeAction pins the gate that makes the
+// collapse-only exclusion hold for a mode:"planned" target. Such a gap declares
+// CANDIDATES and an empty Action: what it would fire is decided by
+// rankCandidates at plan time, so the classifier the exclusion depends on has
+// nothing to read here — an empty Action is not one of the three collapse-only
+// names, and the exclusion would wave it through. The ranking can then pick an
+// assignTask or a parking triggerLoom, and the duplicate-artifact bug the
+// exclusion exists to stop is back for every planned-mode target.
+//
+// Running the plan to find out is not available either: planGap consumes an
+// admission token and clears the gap's standing issues on the strength of a
+// dispatch about to happen. So a gap whose action only a plan can name is left
+// to a delivery, where lane 1 plans it once and dispatches it once. The control
+// gap is explicit-Action on the SAME planned target, so the negative pins the
+// empty Action rather than the mode.
+func TestSweep_CountLegNeverReArmsAPlanTimeAction(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReArmPlanTimeAction"
+	const budget = 3
+	seedPatternSpec(t, h.engine.source, "parksOnAHuman", stepKindSystemOp, stepKindUserTask)
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Mode:     targetModePlanned,
+		Gaps: map[string]GapAction{
+			// No Action: the winner is whatever rankCandidates picks — here a
+			// pattern that parks on a human, the collapse-only shape. It plans
+			// cleanly, so nothing but the gate stops it dispatching.
+			"missing_planned": {Candidates: []GapCandidate{
+				{Action: actionTriggerLoom, Pattern: "parksOnAHuman", Subject: "row.entityKey"},
+			}},
+			// The control: an explicit Action on the same planned target, which
+			// resolvePlannedAction passes through unchanged.
+			"missing_explicit": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	planned, explicit := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_planned": planned, "missing_explicit": explicit} {
+		h.seedReArmedCount(t, ctx, targetID, entityID, gap)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
+	}
+
+	h.pass(ctx)
+
+	if !h.markExists(t, ctx, markKey(targetID, explicit, "missing_explicit")) {
+		t.Fatal("the explicit-Action control must be re-armed — otherwise the negative below holds vacuously")
+	}
+	if h.markExists(t, ctx, markKey(targetID, planned, "missing_planned")) {
+		t.Fatal("a gap whose action only a plan can name must be left to a delivery: " +
+			"the collapse-only classifier cannot read an empty Action, so the ranking could mint a duplicate task")
+	}
+	if got := h.countValue(t, ctx, targetID, planned, "missing_planned"); got != 0 {
+		t.Fatalf("plan-time gap's dispatch-count = %d, want 0 (untouched)", got)
+	}
+	h.nextOp(t)
+	h.requireNoOp(t) // the control dispatched; the plan-time gap did not
+	if _, _, _, _, reArms, _ := h.engine.sweep.metrics(); reArms != 1 {
+		t.Fatalf("sweepReArms = %d, want 1 (the explicit-Action control only)", reArms)
+	}
 }

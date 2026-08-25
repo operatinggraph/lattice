@@ -160,10 +160,8 @@ func TestPackage_NeverGrantsAnyWriteOp(t *testing.T) {
 		// A confidence reset deletes engine state — narrow and advisory-only,
 		// but a write. F20.3's inspect-only boundary keeps it out.
 		"ctrl.weaver.resetConfidence": true,
-		// A budget reset deletes nothing at all — it zeroes one gap's retry
-		// count — but the reconciler then DISPATCHES that gap, so the verb is
-		// the demo posture's furthest thing from inspect-only: it makes the
-		// platform act on the world.
+		// A budget reset re-arms one gap's retry budget, which makes Weaver
+		// DISPATCH again — the furthest thing from inspect-only.
 		"ctrl.weaver.resetBudget":   true,
 		"ctrl.loom.pause":           true,
 		"ctrl.loom.resume":          true,

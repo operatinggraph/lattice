@@ -27,12 +27,11 @@ type fakeEngine struct {
 	errOn   map[string]error
 	// resetDeleted is the window count ResetConfidence reports on success.
 	resetDeleted int
-	// resetCleared/resetFound are what ResetRetryBudget reports on success.
-	resetCleared int
-	resetFound   bool
-	// resetBudgetCalls records every (target, entity, gap) scope that reached
-	// the engine, so a test can assert one never did.
-	resetBudgetCalls []string
+	// resetPrevious is the dispatch-count ResetRetryBudget reports on success;
+	// budgetArgs records the per-gap arguments it received, which the control
+	// subject cannot carry and which therefore have to survive the request body.
+	resetPrevious int
+	budgetArgs    []string
 }
 
 func (f *fakeEngine) ListTargets(_ context.Context) ([]internalweaver.TargetSummary, error) {
@@ -58,13 +57,12 @@ func (f *fakeEngine) ResetConfidence(_ context.Context, targetID string) (int, e
 	return f.resetDeleted, nil
 }
 
-func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gapColumn string) (int, bool, error) {
-	scope := targetID + ":" + entityID + ":" + gapColumn
-	f.resetBudgetCalls = append(f.resetBudgetCalls, scope)
-	if err := f.errOn["resetBudget:"+scope]; err != nil {
-		return 0, false, err
+func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gapColumn string) (int, error) {
+	f.budgetArgs = append(f.budgetArgs, targetID+"/"+entityID+"/"+gapColumn)
+	if err := f.errOn["resetBudget:"+targetID]; err != nil {
+		return 0, err
 	}
-	return f.resetCleared, f.resetFound, nil
+	return f.resetPrevious, nil
 }
 
 // startWeaverControlTest starts an embedded NATS server with a
@@ -323,17 +321,13 @@ func TestWeaverResetConfidence_NotRegistered_JSON(t *testing.T) {
 	assert.Contains(t, out, `"ok":false`)
 }
 
-// cliNanoID is a 20-character Contract #1 NanoID for the reset-budget verb's
-// entityId argument.
-const cliNanoID = "abcdefghijkmnpqrstuv"
-
 // TestWeaverResetBudget_HappyPath verifies `reset-budget <targetId> <entityId>
-// <gapColumn>` reaches the resetBudget endpoint with all three scope tokens and
-// reports the budget it released — plus the fact that the release is enacted by
-// the next reconciler sweep, not by the command, which is what an operator
-// watching for the dispatch needs to know.
+// <gapColumn>` reaches the resetBudget endpoint with all three arguments — two
+// of which the control subject cannot carry — and reports what the park had
+// spent, plus what happens next. A successful reset means "the next sweep pass
+// will dispatch it", not "it has dispatched", and the line says so.
 func TestWeaverResetBudget_HappyPath(t *testing.T) {
-	eng := &fakeEngine{errOn: map[string]error{}, resetCleared: 3, resetFound: true}
+	eng := &fakeEngine{errOn: map[string]error{}, resetPrevious: 3}
 	url := startWeaverControlTest(t, eng)
 
 	natsURL := url
@@ -341,35 +335,21 @@ func TestWeaverResetBudget_HappyPath(t *testing.T) {
 	actorKey := ""
 	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
 
-	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", cliNanoID, "missing_x"})
+	const entityID = "entityAAAAAAAAAAAAAA"
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", entityID, "missing_x"})
 	require.NoError(t, err)
-	assert.Contains(t, out, `target "t1" gap `+cliNanoID+`/missing_x retry budget reset (was 3)`)
-	assert.Contains(t, out, "next reconciler sweep re-arms it")
-	assert.Equal(t, []string{"t1:" + cliNanoID + ":missing_x"}, eng.resetBudgetCalls)
+	assert.Contains(t, out, "retry budget re-armed (was 3)")
+	// The verb re-arms a budget; whether anything dispatches is the sweep's
+	// call (the gap may be frozen, its row gone, its target unregistered), so
+	// the line must not promise a dispatch it never checked.
+	assert.Contains(t, out, "if it is still dispatchable")
+	require.Equal(t, []string{"t1/" + entityID + "/missing_x"}, eng.budgetArgs)
 }
 
-// TestWeaverResetBudget_NotFoundSaysSo pins the absence wording: a gap that was
-// never parked must not be reported as a released park, or an operator chasing
-// a stuck entity concludes the fix landed when nothing happened.
-func TestWeaverResetBudget_NotFoundSaysSo(t *testing.T) {
-	eng := &fakeEngine{errOn: map[string]error{}, resetCleared: 0, resetFound: false}
-	url := startWeaverControlTest(t, eng)
-
-	natsURL := url
-	outputFmt := ""
-	actorKey := ""
-	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
-
-	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", cliNanoID, "missing_x"})
-	require.NoError(t, err)
-	assert.Contains(t, out, "had no retry budget recorded")
-	assert.NotContains(t, out, "retry budget reset")
-}
-
-// TestWeaverResetBudget_JSONReportsTheOutcome pins the machine-readable shape
-// operators and Loupe read.
-func TestWeaverResetBudget_JSONReportsTheOutcome(t *testing.T) {
-	eng := &fakeEngine{errOn: map[string]error{}, resetCleared: 2, resetFound: true}
+// TestWeaverResetBudget_JSONReportsPreviousCount pins the machine-readable
+// shape operators and Loupe read.
+func TestWeaverResetBudget_JSONReportsPreviousCount(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, resetPrevious: 2}
 	url := startWeaverControlTest(t, eng)
 
 	natsURL := url
@@ -377,18 +357,47 @@ func TestWeaverResetBudget_JSONReportsTheOutcome(t *testing.T) {
 	actorKey := ""
 	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
 
-	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", cliNanoID, "missing_x"})
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", "entityAAAAAAAAAAAAAA", "missing_x"})
 	require.NoError(t, err)
 	assert.Contains(t, out, `"ok":true`)
-	assert.Contains(t, out, `"clearedCount":2`)
-	assert.Contains(t, out, `"found":true`)
+	assert.Contains(t, out, `"previousCount":2`)
 }
 
-// TestWeaverResetBudget_NotRegistered_JSON verifies an unregistered target fails
-// loudly rather than printing a successful zero reset.
-func TestWeaverResetBudget_NotRegistered_JSON(t *testing.T) {
+// TestWeaverResetBudget_RejectsMalformedArgumentsLocally verifies each argument
+// shape is refused before a request is published. The weaver-state key this
+// names is split positionally, so a dotted or non-NanoID argument would name a
+// key nothing can parse — and the round trip would only report the same thing
+// less clearly. The engine must not be reached at all.
+func TestWeaverResetBudget_RejectsMalformedArgumentsLocally(t *testing.T) {
+	for _, tc := range []struct{ name, targetID, entityID, gapColumn, want string }{
+		{"dotted targetId", "a.b", "entityAAAAAAAAAAAAAA", "missing_x", "must not contain"},
+		{"entityId is not a NanoID", "t1", "nope", "missing_x", "NanoID"},
+		{"gapColumn is not a missing_ column", "t1", "entityAAAAAAAAAAAAAA", "violating", "missing_"},
+		{"dotted gapColumn", "t1", "entityAAAAAAAAAAAAAA", "missing_a.b", "single token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := &fakeEngine{errOn: map[string]error{}}
+			url := startWeaverControlTest(t, eng)
+
+			natsURL := url
+			outputFmt := ""
+			actorKey := ""
+			cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+			_, err := runCmd(t, cmd, []string{"reset-budget", tc.targetID, tc.entityID, tc.gapColumn})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Empty(t, eng.budgetArgs, "a locally-rejected argument must never reach the engine")
+		})
+	}
+}
+
+// TestWeaverResetBudget_NoBudget_JSON verifies the engine's refusal — a gap
+// nothing has ever dispatched has no budget to reset — surfaces as a failed
+// command rather than a cheerful zero.
+func TestWeaverResetBudget_NoBudget_JSON(t *testing.T) {
 	eng := &fakeEngine{errOn: map[string]error{
-		"resetBudget:ghost:" + cliNanoID + ":missing_x": errors.New(`weaver: target "ghost" not registered`),
+		"resetBudget:t1": errors.New(`weaver: no retry budget for target "t1" entity "entityAAAAAAAAAAAAAA" gap "missing_x" (nothing has dispatched it)`),
 	}}
 	url := startWeaverControlTest(t, eng)
 
@@ -397,71 +406,8 @@ func TestWeaverResetBudget_NotRegistered_JSON(t *testing.T) {
 	actorKey := ""
 	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
 
-	out, err := runCmd(t, cmd, []string{"reset-budget", "ghost", cliNanoID, "missing_x"})
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", "entityAAAAAAAAAAAAAA", "missing_x"})
 	require.Error(t, err)
-	assert.Contains(t, out, "ghost")
+	assert.Contains(t, out, "no retry budget")
 	assert.Contains(t, out, `"ok":false`)
-}
-
-// TestWeaverResetBudget_MalformedScopeFailsLocally verifies the client-side
-// whitelist: a malformed entityId or gapColumn builds a subject the responder's
-// wildcards cannot match, so without this check the operator would wait out the
-// client timeout for an opaque "no responders". The request must never be
-// published — the engine records nothing.
-func TestWeaverResetBudget_MalformedScopeFailsLocally(t *testing.T) {
-	for _, tc := range []struct{ name, entityID, gapColumn, wantIn string }{
-		{"entityId is not a NanoID", "short", "missing_x", "entityId"},
-		{"entityId carries an excluded character", "abcdefghijkmnpqrstu0", "missing_x", "entityId"},
-		{"gapColumn without the missing_ prefix", cliNanoID, "notagap", "gapColumn"},
-		{"gapColumn with a dot", cliNanoID, "missing_x.y", "gapColumn"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			eng := &fakeEngine{errOn: map[string]error{}, resetCleared: 9, resetFound: true}
-			url := startWeaverControlTest(t, eng)
-
-			natsURL := url
-			outputFmt := ""
-			actorKey := ""
-			cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
-
-			out, err := runCmd(t, cmd, []string{"reset-budget", "t1", tc.entityID, tc.gapColumn})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantIn)
-			assert.Empty(t, out)
-			assert.Empty(t, eng.resetBudgetCalls, "a locally-refused scope must never be published")
-		})
-	}
-}
-
-// TestWeaverResetBudget_ClientValidatorsAgreeWithTheEngineGate pins the one
-// shape this package restates. The responder re-checks every scope with
-// weaver.ValidateGapScope, which owns the rule; a client validator that drifted
-// looser would send requests the responder refuses, and one that drifted
-// stricter would refuse scopes that are legal — so the two must agree case for
-// case, and a test says so rather than a comment.
-func TestWeaverResetBudget_ClientValidatorsAgreeWithTheEngineGate(t *testing.T) {
-	for _, tc := range []struct{ entityID, gapColumn string }{
-		{cliNanoID, "missing_x"},
-		{cliNanoID, "missing_bg-check_2"},
-		{"", "missing_x"},
-		{"short", "missing_x"},
-		{cliNanoID + "A", "missing_x"},
-		{"abcdefghijkmnpqrstu0", "missing_x"},
-		{"abcdefghijkmnpqrstuI", "missing_x"},
-		{cliNanoID, ""},
-		{cliNanoID, "missing_"},
-		{cliNanoID, "violating"},
-		{cliNanoID, "missing_x.y"},
-		{cliNanoID, "missing_x y"},
-		{cliNanoID, "__count"},
-	} {
-		clientErr := validateEntityID(tc.entityID)
-		if clientErr == nil {
-			clientErr = validateGapColumn(tc.gapColumn)
-		}
-		engineErr := internalweaver.ValidateGapScope(tc.entityID, tc.gapColumn)
-		assert.Equalf(t, engineErr == nil, clientErr == nil,
-			"client and engine disagree on (%q, %q): client=%v engine=%v",
-			tc.entityID, tc.gapColumn, clientErr, engineErr)
-	}
 }

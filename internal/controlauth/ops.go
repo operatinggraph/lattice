@@ -15,11 +15,11 @@ type OpMeta struct {
 // per-cmd wiring test asserts this table stays in lockstep with the service's
 // dispatch tables (design R5). resetConfidence carries its own verb rather than
 // reusing revoke's: it is a strictly narrower deletion (advisory confidence
-// windows only), and folding it under an existing verb would grant the wider one
-// to every actor that needs the narrower. resetBudget carries its own verb for
-// the same reason and is narrower still: it zeroes ONE gap's retry-budget
-// dispatch-count, releasing a §10.8 exhausted-gap park so the reconciler
-// re-arms it, and deletes nothing at all.
+// windows only), and folding it under an existing verb would grant the wider
+// one to every actor that needs the narrower. resetBudget likewise: it re-arms
+// one gap's retry budget, which makes Weaver DISPATCH again — an authority
+// unrelated to draining confidence data or to pausing a target, so it is
+// neither wider nor narrower than any existing verb and shares none.
 var WeaverOps = map[string]OpMeta{
 	"list":            {Verb: "read", Read: true},
 	"disable":         {Verb: "disable", Read: false},

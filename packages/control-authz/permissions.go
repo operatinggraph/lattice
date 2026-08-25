@@ -9,10 +9,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // Grant matrix:
 //
-//	ctrl.weaver.{read,disable,enable,revoke,resetConfidence,resetBudget}          → control-operator
-//	ctrl.loom.{read,pause,resume,redrive}                                        → control-operator
+//	ctrl.weaver.{read,disable,enable,revoke,resetConfidence,resetBudget} → control-operator
+//	ctrl.loom.{read,pause,resume,redrive}                             → control-operator
 //	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject,requesthydration} → control-operator
-//	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}              → control-operator, consumer, frontOfHouse, backOfHouse, provider
+//	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}   → control-operator, consumer, frontOfHouse, backOfHouse, provider
 //
 // The op→verb tables here MUST stay in lockstep with
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps (both are read off
