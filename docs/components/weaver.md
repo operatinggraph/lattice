@@ -990,13 +990,23 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   "no", landing on the unsafe side silently. "Every step is a known non-parking kind" fails safe by
   construction. Minted: the first cut of the pattern-step probe. Check: the unrecognised-kind + empty-steps
   cases in the classifier table.
-- **A restated cross-package constant needs a test that pins it** — Weaver may not import `internal/loom`
-  (`boundary_test.go`), so step-kind strings are hand-copied; nothing failed if they drifted, and the drift
-  failed unsafe. Check: `TestPatternStepKinds_MatchLoomVocabulary` (test-file-only import, boundary intact).
-- **A test that hand-seeds an engine's internal registry map pins the FALLBACK, not its name** — every sweep
-  test seeded `patternMeta` bare, so each one silently became a proof about unindexed patterns. Minted: the
-  whole reclaim/backoff corpus at this fire's close. Check: `seedPatternSpec`, which builds the aspect
-  envelope CDC actually delivers.
+- **A shared test fixture that always supplies an OPTIONAL input pins only the supplied case** — every sweep
+  test seeded `patternMeta` bare, so each one silently became a proof about unindexed patterns; one item
+  later `exhaustedRow` always set `maxretries_<g>`, so the entire count-leg family was capped-gap-only and
+  both of that leg's blocking defects — a re-arm that pre-empted `reclaim`'s backoff, and one that
+  duplicated a human task — were untestable by construction, not merely untested. Minted: the
+  reclaim/backoff corpus, then the count-leg corpus (2026-08-25). Check: for every fixture helper, list the
+  columns it writes that production code treats as OPTIONAL, and require one vector that omits each.
+- **An operator verb that hands a gap to a reconciler arm must refuse exactly what that arm PERMANENTLY
+  declines** — the verb's whole effect is the arm's next pass, so accepting a shape the arm will never act
+  on reports success, changes nothing an operator can observe, and leaves the operator's own diagnostic
+  standing over a fact that is no longer true. The declines split, and the split is the rule: TRANSIENT
+  ones (warm-up, replay lag) the verb must accept; PERMANENT ones (the gap's class) it must refuse and
+  NAME — an orphaned column and a collapse-only action are different problems with different fixes, so one
+  wording for both misdirects. Minted 2026-08-25, four times on one verb: `reset-budget` accepted
+  collapse-only, then orphan-column, and still accepted `surface` and plan-time-resolved (`Action == ""`)
+  gaps. Check: enumerate the arm's permanent declines, assert the verb refuses each with its own message —
+  one vector per decline, plus a control that resets.
 - **An `error`-severity Health issue must not fire on a self-healing condition** — an unreplayed pattern is
   replay lag, not a package bug, and the sweep reaches that branch on every restart. Minted: the `!known`
   branch of the same classifier. Check: `TestSweep_InflightMarkerIgnoredForUnindexedPattern` asserts no issue.
