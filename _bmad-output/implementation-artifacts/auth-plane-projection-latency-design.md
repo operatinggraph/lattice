@@ -2522,10 +2522,17 @@ escape branch but not the boundary. A submitter still prices the work inside the
 `MaxDeclaredReads` is 1000 and the Gateway copies `contextHint` verbatim — so padding can push a
 rejection across a quantum boundary, and the *probability* of crossing remains cause-dependent. That
 converts a continuous signal into a Bernoulli one, raising the cost by roughly two orders of
-magnitude rather than removing it. Full closure requires bounding the work a submitter may place
-inside the window — a **closed declared-read set** for an NFR-S6 operation, i.e. Contract #2 §2.5
-refusing an out-of-set declared read instead of demoting it. That is a frozen-contract semantic and
-is filed for Andrew on the board. Until it lands, `claim_floor_late_total` is the detector: it counts
+magnitude rather than removing it. Closure requires bounding the work a submitter may place
+inside the window — on the declared-read axis that is a **closed declared-read set** for an NFR-S6
+operation, i.e. Contract #2 §2.5 refusing an out-of-set declared read instead of demoting it. That is a
+frozen-contract semantic and is filed for Andrew on the board.
+
+**Amended 2026-08-25** — the word this paragraph carried was "full", and the build below falsified it. A
+closed declared-read set is not full closure: declared reads are not the only submitter-sized work in the
+window. `payload` bytes are decoded three times inside it (the admitted-set compile, the `derive_reads`
+pre-pass, the step-5 runner), under no server-side `InputSchema` enforcement and no bound below the
+Gateway's 1 MiB body cap. The closed set removes the KV lever; the payload lever is its own unit on
+`backlog/lattice.md`. Until it lands, `claim_floor_late_total` is the detector: it counts
 exactly the requests that left the first quantum, which is the precondition for the attack.
 
 **Also open, and not this item's:** the Health-KV per-cause counters remain a perfect oracle for
@@ -2645,3 +2652,64 @@ Not touched: the quantum's value or the release mechanism (`claim_reply_floor.go
 counters (§19.10's other open item, explicitly not this one's); `MaxDeclaredReads` for any non-NFR-S6
 operation; `InitiateCredentialLink`, which is not in the NFR-S6 set; the descriptor floor's demotion
 behaviour for every other operation, which is unchanged.
+
+### 8. CLOSE (2026-08-25) — what shipped, what the reviews corrected, and the axis that stays open
+
+**Shipped `c69aa4a4`** (closure `118c0d46` + fix round `3bd76011`). `ClaimIdentity` and
+`CompleteCredentialLink` admit only the keys their own `Dispatch` descriptor names, compiled against the
+envelope, concrete keys only and key-grammar-checked; every `egressReads` key and every `enumerations`
+entry is refused, since `OpDispatchSpec` can name neither. The refusal is a `*HydrationError` carrying no
+key, at the head of step 4 before `derive_reads` and before the batched snapshot, collapsed by
+`replyRejection` into the generic `ClaimKeyInvalid` and released on the quantum like every other rejection.
+Class-(g) derived keys stay outside the closure by call-site order, and two arms fail if that order moves.
+
+**Adjudications made here** (decide-don't-defer):
+
+- **Over-deny is the safe direction, and it must be attributable.** Three whole-descriptor conditions admit
+  nothing — no descriptor, a descriptor naming no read template, and a multi-claimant `operationType` — and
+  each is fail-closed on purpose. NFR-S6's reply collapse makes such an outage indistinguishable from user
+  error at the wire, so the Warn is the only channel that can separate them and now does; the refusal
+  carries the admitted-set size beside the refused declaration.
+- **A union is safe for a floor and unsafe for a closed set.** `floorsByOpType` keeps unioning; the closure
+  refuses to read a union it cannot attribute (`DispatchTemplates.Claimants`).
+- **A client declares what the descriptor names.** The asymmetry that governs every submitter: an
+  undescribed declared key refuses a closed-set operation, an undeclared read still resolves lazily. Facet's
+  descriptor-driven path had the opposite rule written into it.
+
+**Review classification** (per component, for the dossiers): one *implementation-bug* class in the
+Processor — an aggregate that erases its contributors read by a narrowing consumer (appended as the second
+sighting of the union/attribution entry); one *design-gap* class — a defence described by the axis it
+closed rather than by the work in the window (appended to the submitter-prices-the-margin entry); one
+*brief-gap* — the fire's census of "every shipped dispatcher" enumerated Go call sites and missed the
+browser client, and undercounted the six ceremony call sites as four.
+
+**Accounting — every discovery this fire made, and where it went.** Fixed in `3bd76011`: the Facet
+declaration padding (+ a `.mjs` pin), the unattributable over-deny, the union admission, the grammar-blind
+membership test, the missing ordering pin, and six doc-truth defects (the false "cannot pad the work"
+claim, a test comment citing §2.5 as authority for an unratified rule, the gateway's `credentialIndexKey`
+guidance, the sequential-GET cost model in two engine files, the dispatcher census). Routed out, each with
+its row: **(1) Andrew** — two frozen-contract proposals, `claude/contract-2-5-nfr-s6-closed-declared-set`
+(the closed-set clause plus its carve-outs at the hydration duty, class (e) and class (f)) and
+`claude/contract-2-5-declared-read-cost-model` (§2.5 describes a sequential GET per declared key; step 4
+issues one batched read); **(2) Designer** — the payload axis, below.
+
+**The axis that stays open, stated so no one reads this item as more than it is.** Closing the declared set
+removes the KV lever inside the quantum. It does not remove the payload lever: `env.Payload` is decoded by
+the admitted-set compile, again by the `derive_reads` pre-pass, and again by the step-5 runner, and nothing
+bounds its size below the Gateway's 1 MiB cap or validates it against the descriptor's `InputSchema` — the
+Processor never loads that aspect and carries no schema validator. That is a new mechanism rather than an
+extension of a ratified one, so it is filed designer-gated on `backlog/lattice.md`. §19.10's "full closure"
+wording is amended above.
+
+**Examined and accepted, not filed.** A refusal short-circuits before any KV work yet still books one of
+`maxPendingDeferredReplies`' 1024 slots for a quantum, so the cost ratio of "make the Processor hold a slot"
+improved slightly for an attacker. The bound and its drop-rather-than-answer-early behaviour are §19.10's
+own mechanism, unchanged here, and reaching the bound still needs authorized submissions at a rate that
+saturates it; answering a refusal early instead would trade that for a distinguisher. The Gateway trims
+whitespace from declared keys but not from `payload.targetIdentityKey`, so a padded target compiles to a
+key the trimmed declaration does not match and is refused — correct: a key with whitespace is a different
+key and fails every downstream comparison too.
+
+**Deployment consequence.** A client older than `ec04eca9` declared `vtx.credentialindex.<hash>` on both
+ceremonies itself; such a binary, or an envelope it already left durable in `ops.default`, is refused
+against this Processor. There is no version negotiation, and every binary here is built from one tree.
