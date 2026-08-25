@@ -467,13 +467,14 @@ func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external
 // like a spent budget, which SKIPS the column and switches its diagnostic off.
 //
 // The four sites are handleRow's suppression gate, escalateExhaustedGap, the
-// sweep's reclaim, and the count leg's re-arm. escalateExhaustedGap is guarded
-// INSIDE rather than at its callers, so all of its entry points (lane-1's
-// suppression gate, reclaim's, the count leg's arm (l)) are covered at once.
-// handleRow needs its own guard even so, because it declines one step earlier
-// than the escalation: by the time the escalation is reached the column has
-// already been skipped, and the Surface issue dispatchGap raises is what that
-// skip costs.
+// sweep's reclaim, and the count leg's re-arm. handleRow and reclaim each need a
+// guard of their own because each declines something the escalation never sees:
+// handleRow SKIPS the column outright on a spent budget, and the Surface issue
+// dispatchGap would have raised is what that skip costs; reclaim would
+// re-dispatch a stranded mark. With both guarded, the escalation's only
+// currently-reachable surface path is the count leg's arm (l) — but the guard
+// sits INSIDE escalateExhaustedGap rather than at that one caller, so a future
+// third caller inherits it instead of having to remember it.
 //
 // A column with no playbook entry at all reads false here — the zero GapAction
 // carries no action — which is right: an orphan column is a different verdict
