@@ -17,14 +17,23 @@ the precedent this Fire mirrors; its Increment 2 is the precedent for why the de
 ## 1. The gap, in three lines
 
 `lattice.bootstrap.json` carries the deployment's primordial NanoIDs — one **epoch**. Regenerating that
-file mints a fresh `roleOperator` NanoID (`nanoid.go:472-512` `generate()` → `substrate.NewNanoID()` per
-field), so the next boot seeds a **new** `vtx.role.<newId>` and points every `holdsRole` edge at it
-(`nanoid.go:620-626`). If Core KV was not wiped, the **previous** `vtx.role.<oldId>` is still live, still
-carries its `grantedBy` permissions, and now has **no holder at all**. Nothing deletes it, and
-`bootstrap verify` / `verify-kernel` both report green.
+file mints a fresh NanoID for *every* primordial entity (`nanoid.go:472-512` `generate()` →
+`substrate.NewNanoID()` per field), so the next boot seeds a **new** `vtx.role.<newId>` and **creates new**
+`holdsRole` edges into it from the new epoch's own identities (`nanoid.go:620-626`).
+
+**Nothing is re-pointed and nothing is removed.** The seed path is create-only, and `reconcile.go:155`
+classifies every non-`vtx.meta.*` entry as `retained` — "deliberately left alone". So if Core KV was not
+wiped, the **whole previous epoch survives intact**: its `vtx.role.<oldId>`, its `grantedBy` permissions,
+its six operator-holding identities, and their `holdsRole` edges still pointing at the old role. What the
+rotation destroys is not the old epoch — it is every *current* actor's ability to reach it. `bootstrap
+verify` and `verify-kernel` both report green throughout.
 
 Measured on a live deployment (the board row): **21 grants reachable only from the dead role** —
 `AttachObject`, the ledger creates, the erasure set.
+
+> **Amended 2026-08-25.** This section originally said the next boot *"points every `holdsRole` edge at"*
+> the new role and that the previous role *"now has no holder at all"*. Both are false and they are the
+> premise the whole design turned on — see §3 step 3 and §4.1 for what they cost.
 
 ## 2. Why the existing census structurally cannot see it
 
@@ -46,7 +55,8 @@ and is exactly why detection has to live beside it rather than inside it.
 
 `docs/components/bootstrap.md`'s dossier entry 3 already named the root: *"`BootstrapOpKey` identifies the
 deployment, not the binary generation."* This row is the other half of that sentence — the id file is what
-identifies the **epoch**, and rotating it rotates every kernel identity at once.
+identifies the **epoch**, and rotating it mints a fresh kernel identity set *alongside* the old one, which
+nothing removes.
 
 ## 3. Fire 1 — what this builds
 
@@ -195,8 +205,11 @@ hard gate lives in `scripts/verify-kernel.go`, whose only consumers are CI and a
 `make verify-kernel` deliberately.
 
 **CI cannot redden on this.** `stack-gates` (`ci.yml:265`) runs `make verify-kernel` against a container
-that generated its id file and seeded an empty bucket in the same job: exactly one operator role, and it is
-the current one. §6's first test pins that.
+that generated its id file and seeded an empty bucket in the same job — and it runs **before** any
+`verify-package-*` install, so the bucket is single-epoch: exactly one operator role, and it is the current
+one. The end-to-end pin is the pre-existing `TestVerifyKernel_FreshlySeededPasses`
+(`verify_kernel_test.go:60`), which drives a full seeded kernel through `VerifyKernel` and asserts no
+failures; §6.1 pins the scanner, one layer below.
 
 ## 5. Non-goals
 
@@ -235,19 +248,27 @@ the current one. §6's first test pins that.
 
 1. `TestStrandedOperatorEpochs_SingleEpochBucketIsSilent` — seed once, scan, expect empty. The
    no-false-red pin for CI.
-2. `TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole` — seed epoch A, rotate the id file, seed
-   epoch B into the same bucket, scan: exactly A's role, with A's grant count. **The fixture must be the
-   real post-rotation state** — epoch A's admin identity and its live `holdsRole` edge into A's role
-   included. A fixture that omits them encodes the struck §3.1 premise and passes vacuously.
+2. `TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole` — a prior epoch hand-planted beside a real
+   current one, scanned: exactly the prior role, with its grants and its prior-epoch holder. **The fixture
+   must be the real post-rotation state** — the prior admin identity and its live `holdsRole` edge into the
+   prior role included. A fixture that omits them encodes the struck §3.1 premise and passes vacuously.
+
+   *Scope note (2026-08-25): this deliberately does NOT drive a real `LoadOrGenerate` rotation and re-seed.
+   The end-to-end vector — rotate the id file, run the seeder twice against one bucket — is exercised
+   nowhere in the suite. The hand-planted fixture is faithful in shape (same envelope helpers) and is what
+   pins the predicate; the end-to-end rotation is Fire 2's to build, alongside the verb that acts on it.*
 3. `TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses` — a non-current `operator` role held by the
-   **current** epoch's admin identity is silent.
+   **current** epoch's admin identity demotes to a notice naming that edge (§3.2), never vanishes.
 3a. `TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress` — the same role held only by an identity
    outside the current epoch's set is **reported**, with that holder listed. This is the §3 step-3
    amendment's own pin: it fails against the pre-amendment predicate.
-4. `TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent` — soft-deleted role, and a
-   stranded role all of whose edges are `isDeleted`, drop to the notice class.
-5. `TestStrandedOperatorEpochs_ForeignRoleNameIsSilent` — a holderless, granted `vtx.role.*` whose
-   canonicalName is not `operator` is never reported.
+4. A soft-deleted role is silent; a live role whose edges are all `isDeleted` **reports in the notice
+   class**. The shipped test name must state that outcome rather than calling both cases "silent" — the
+   second one reports.
+5. `TestStrandedOperatorEpochs_ForeignRoleNameIsSilent` — a `vtx.role.*` with no current-epoch holder,
+   carrying grants, whose canonicalName is not `operator`, is never reported.
+5a. `TestStrandedOperatorEpochs_TombstonedHolderDoesNotSuppress` and
+   `TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses` — the link-liveness and unloaded-table pins.
 6. The severity split at the gate, keyed on `Holders` (§4.1): **holders + zero grants → failure**
    (the dangerous state), **grants + zero holders → notice** (the inert one), current-epoch holder →
    notice naming the edge.
@@ -260,6 +281,8 @@ the current one. §6's first test pins that.
 9. A truncated or erroring per-key read must surface as `StrandedScanErr`, never as an empty result: the
    gate printing "no stranded epochs" because its reads timed out is the same false green this fire exists
    to end.
+10. `ReconcilePrimordial` stays advisory — seed a prior epoch, reconcile, `require.NoError`, four outcomes
+   unchanged. §4's headline promise is otherwise unpinned, and §4.2 is why that matters.
 
 Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
 ./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./internal/substrate/...`, full
@@ -312,8 +335,8 @@ is still live and reachable from no current-epoch identity — the cross-epoch o
 |---|---|---|
 | `internal/bootstrap/reconcile.go` | `62` `type reconcilePlan` · `162` `planReconcile` calls `scanKernelOrphans` · `203-264` `scanKernelOrphans` · `291-307` `kernelCandidatePasses` · `379-387` `ReconcilePrimordial` warns · `449-456` `type KernelReport` · `464-482` `ReadKernelReport` | new `strandedEpochs`/`strandedScanErr` plan fields, plan call, boot Warn, report fields |
 | `internal/bootstrap/strandedepoch.go` | new | `StrandedOperatorEpoch`, `StrandedOperatorEpochs` |
-| `internal/bootstrap/verify.go` | `266-295` the `ReadKernelReport` switch | failure/notice split (§4) |
-| `scripts/verify-kernel.go` | `327-360` the report + orphan blocks | same split, printed |
+| `internal/bootstrap/verify.go` | `266-295` the `ReadKernelReport` switch | notices only — never a failure (§4.2) |
+| `scripts/verify-kernel.go` | `327-360` the report + orphan blocks | the failure/notice split, printed (§4.1) |
 | `internal/bootstrap/strandedepoch_test.go` | new | §6.1–6.5, 6.7 |
 | `internal/bootstrap/verify_kernel_test.go` | `1-257` | §6.6 |
 | `docs/components/bootstrap.md` | `167` dossier | close-pass entries |
@@ -321,6 +344,14 @@ is still live and reachable from no current-epoch identity — the cross-epoch o
 Rotted leads corrected during grounding: a scout reported `scanKernelOrphans` already reaching
 `vtx.role.*`/`vtx.permission.*` — **false**, `reconcile.go:204` filters `vtx.meta.>` and `:303` keys on the
 current `BootstrapOpKey` (§2). The design's premise stands on the verified reading.
+
+> **Blast-radius correction (2026-08-25, cold pass).** This touch-list named only the files the fire
+> *edits*, and the scope-diff gate below passed on that basis — "every touch is detection or reporting."
+> True of the edits, **false of the blast radius**: `VerifyKernel`'s failure slice is consumed by
+> `cmd/lattice/bootstrap/bootstrap.go:134,165`, whose exit code is `Makefile:202`'s `FRESH` oracle, so a
+> new failure class there changes `make up`'s control flow (§4.2). **Neither file was in the touch-list.**
+> The gate should have been run over the *consumers* of every value the fire changes, not over the files
+> it opens. That is the lesson this fire mints for the dossier, not a note.
 
 **3. Precedents to mirror.**
 

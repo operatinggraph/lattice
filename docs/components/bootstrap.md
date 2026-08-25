@@ -199,3 +199,19 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   identifier refuses an unloaded table (`ErrPrimordialIDsUnloaded`) before it reads the graph — and the test
   that covers such a path must reach it the way the BINARY does, not by calling `EnsurePrimordials` /
   `LoadOrGenerate` itself, which loads the file the binary never loads and hides the wiring gap.
+- **`VerifyKernel` is not a report surface — its exit code is `make up`'s `FRESH` oracle, so a new failure
+  class there changes the Makefile's control flow.** `cmd/lattice/bootstrap/bootstrap.go:134,165` exits 1 on
+  any failure and `Makefile:202` reads that as "not fresh", falling through to `probe-empty` → `rm -f
+  lattice.bootstrap.json` → a fresh epoch minted into the un-wiped bucket. Minted: stranded-epoch Fire 1 —
+  a detector whose hard failure would have made the defect it detects self-amplify once per `make up`, with
+  the reason swallowed by `>/dev/null 2>&1`. Check: the scope-diff gate runs over the **consumers of every
+  value the fire changes**, not over the files it opens; a new entry in a `failures` slice states which
+  exit codes it moves.
+- **A reachability predicate that suppresses on "somebody holds it" is silenced when the holder is part of
+  the same stranded island.** Rotation strands holder and held together, so "has a holder" refutes nothing;
+  and capability here is conferred by the `holdsRole` edge the suppressor was reading, not by the
+  `grantedBy` edge the severity keyed on — the gate was loudest on the inert state and quiet on the
+  dangerous one. Minted: stranded-epoch Fire 1, twice (the suppressor at design time, the severity at
+  review time). Check: a predicate over residue names which edge actually **projects** the capability —
+  read the lens cypher, not the topology's shape — and scopes reachability to the *current* generation's
+  actor set, never to "any actor at all".
