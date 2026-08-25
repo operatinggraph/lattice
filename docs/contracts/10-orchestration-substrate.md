@@ -255,13 +255,24 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
 
 The mark shape above shares the bucket with reserved engine keys. All are structurally disjoint from
 marks: `entityId`s are NanoIDs (`substrate.Alphabet` contains no underscore) and gap columns carry the
-`missing_` prefix, so a reserved `__`-token can never collide with a mark segment. The reconciler sweep
-skips all three (never enumerated as `CorruptMark`).
+`missing_` prefix, so a reserved `__`-token can never collide with a mark segment.
+
+> **📐 PROPOSED — UNRATIFIED.** The paragraph below replaces the sentence *"The reconciler sweep skips
+> all three (never enumerated as `CorruptMark`)."* That sentence is contradicted by the `__effect` row
+> of this very table (*"GC'd by the sweep's orphan legs"*), and the count leg that closes §10.8's
+> "never a silent park" promise makes it false for `__count` as well. No engine behaviour is proposed
+> here — this text is being brought into line with what the sweep does.
+
+**The sweep routes each reserved shape to its own leg; only `__control` is skipped.** A reserved key is
+never parsed as a mark — each shape has its own split, so none is enumerated as a *mark*. But `__effect`
+and `__count` each carry their own level-reconcile / orphan leg, and each may be deleted, with a
+`CorruptMark` raise, when its key or body is unreadable: weaver-state is weaver-private, so garbage in
+any reserved shape must be collectable rather than immortal.
 
 | Key shape | Role |
 |---|---|
 | `<targetId>.__control` | Durable dispatch-disable marker; authority for the control plane's `disable`/`enable`/`revoke` remediation-skip (`docs/components/weaver.md`). |
-| `<targetId>.<entityId>.<gapColumn>.__count` | The retry-budget dispatch-count bounded by the lens's `maxretries_<g>` column; incremented on both dispatch legs, deleted on gap-close, long-TTL orphan backstop. |
+| `<targetId>.<entityId>.<gapColumn>.__count` | The retry-budget dispatch-count bounded by the lens's `maxretries_<g>` column; incremented on both dispatch legs, deleted on gap-close, long-TTL orphan backstop. **📐 PROPOSED — UNRATIFIED:** it is also the durable anchor from which the sweep re-derives an exhausted gap's standing `GapBudgetExhausted` issue, so that §10.8's "a loud stop, never a silent park" survives a mark's expiry and a Weaver restart — the alert that explains a suppression must be re-derivable for as long as that suppression lasts. The sweep's count leg therefore also level-reconciles the budget: deleted promptly when the row is gone or the gap has closed, rather than waiting out the TTL backstop. |
 | `<targetId>.__effect.<gapColumn>.<actionRef>` | Per-(gap, action) effect bookkeeping (§10.8 planner extension): dispatch/close counters over a sliding window of the last K episodes (K = 20, compile-time; event-keyed ring, no clock sampling). Written on the two real dispatch legs and the level-reconciled gap-close path; GC'd by the sweep's orphan legs when the target/gap/action leaves the registry. |
 
 ### `weaver-claims` — retired
