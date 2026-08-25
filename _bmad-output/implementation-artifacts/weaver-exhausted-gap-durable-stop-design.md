@@ -131,7 +131,13 @@ gap is cleanup, never new dispatch"* (`reconciler.go:231`). The first build put 
 gates above the level reconcile, so a frozen target's closed gap kept its spent budget and a standing
 issue **forever** — and on re-enable a reopened gap was instantly suppressed against a budget spent by
 a chain that had already closed. The leg therefore orders: **corrupt key → level reconcile (arms 5, 7)
-→ mark-listed → registry → corrupt body → freeze → the acting arms.** The corrupt-*body* delete moves
+→ mark-listed → registry → freeze → corrupt body → entityKey → orphan column (8b) → violating → the
+acting arms.** (An earlier revision of this list put the corrupt body *above* the freeze gate,
+contradicting the sentence that follows it; the build's own test caught the contradiction before the
+code did. The reason governs, and it only holds below both gates.) Arm 8b sits above the `violating`
+gate: its verdict — Weaver no longer manages this gap — does not depend on `violating`, and below that
+gate the clear it exists for is unreachable for a non-violating row whose orphan column is still true.
+The corrupt-*body* delete moves
 *below* the registry and freeze gates for the same reason those gates exist — destroying durable state
 during replay lag or under an operator freeze is exactly what they forbid, and a rolling upgrade
 writing a body an older build cannot parse is the realistic trigger. The corrupt-*key* delete cannot be
