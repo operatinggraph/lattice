@@ -131,7 +131,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **`internal/refractor`'s claim-ceremony e2e family is non-deterministic at head** | Membership rotates over the three claim-ceremony e2es: `cap.roles.<target>` never gains the role-derived grant from the real `ClaimIdentity` op's `holdsRole` write within 25s. The test never waits for the adjacency edge the reprojection walks (the sweep e2e beside it does), so a lens pass can precede it. | ★★ | S–M | 📋 ready · owner: Whetstone · no repro on a quiet 4-core box · tighten, never loosen · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §19.5 |
 | **Suite reddens under parallel load, in packages the change never touched** | Rotating membership across unit-1, unit-2 and the convergence job. THREE mechanisms open: (a) `substrate.Connect`'s 2s no-retry handshake, ~45 sites remain; (b) a starvation signature (`found=map[]`); (c) a wall-clock DEADLINE read as correctness — specimen: `TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns` (20s lens activation, unit-1, green on re-run). (d) `privacy-pii-key-envelopes` race in `internal/leaseconvergence` FIXED. | ★★★ | M | 🏗️ owner: Whetstone · next: root-cause (b) |
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Ten parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` carved out with its own `-parallel`; lease-convergence's async trio parallelized as its own group. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · lint-build Build step 41.4s→39s avg (5c6b5d1) · next: rebalance shard-1↔shard-3, now near-tied poles |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Ten parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` carved out with its own `-parallel`; lease-convergence's async trio parallelized as its own group. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · unit-1 pole cut 277s→170s, shard-1/3 rebalanced (ad15f91) · next: lint-build/unit-1/unit-4 now tied ~170-195s |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -142,6 +142,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-25 · `ad15f91` · [CI] unit-1/unit-3 shard rebalance SHIPPED — refractor growth made unit-1 the pole (332s vs 154s summed); moved 84s of whole-package globs to unit-3; unit-1 277s→170s, run 282s→198s
 - 2026-08-25 · `866f623` · [Weaver] a migrated `surface` gap's stranded state acted on by three legs CLOSED — `handleRow` skipped the column and silenced its Surface issue; `escalateExhaustedGap` guarded inside, `reclaim` leaves the mark to TTL
 - 2026-08-25 · `057286f` · [Weaver] exhausted-gap durable stop + un-park CLOSED — alert re-derived from the budget that suppresses it, re-arm narrowed to a zeroed budget, operator verb + its capability verb; 6 review rounds
 - 2026-08-25 · `d835bdf9` · [Bootstrap] prior-epoch operator-role detection CLOSED — the cross-epoch orphan class the `vtx.meta.>` census cannot reach; ranked by what it confers, hard gate only in verify-kernel; 3 cold reviews + close pass
