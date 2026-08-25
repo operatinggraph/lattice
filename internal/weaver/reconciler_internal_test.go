@@ -3763,3 +3763,375 @@ func TestSweep_CountLegNeverReArmsACollapseOnlyGap(t *testing.T) {
 	}
 	h.requireNoOp(t)
 }
+
+// agePastReArmWindow rewinds every recorded arm-(n) plan attempt past the
+// pacing window, so the next pass reads as "the window has elapsed" with no
+// wall-clock wait — the same rewind-the-anchor idiom as agePastWarmup.
+func (h *sweepHarness) agePastReArmWindow() {
+	s := h.engine.sweep
+	past := time.Now().Add(-2 * markTTLBackstopFactor * h.engine.marks.lease)
+	s.mu.Lock()
+	for key := range s.reArmAttempted {
+		s.reArmAttempted[key] = past
+	}
+	s.mu.Unlock()
+}
+
+func (h *sweepHarness) reArmPacingEntries() int {
+	s := h.engine.sweep
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.reArmAttempted)
+}
+
+// TestSweep_ReArmPacesARepeatedlyUnplannableGap pins arm (n)'s plan-attempt
+// pacing, and pins that the pacing stops at the plan.
+//
+// Arm (n) visits a parked gap once a sweep interval for the count's ~128h TTL.
+// A gap whose plan cannot build — a row that cannot fill its remediation's
+// template, a playbook config error, a reference that has not replayed — makes
+// planGap write a record on EVERY one of those visits, at Warn or Error, which
+// is thousands of identical lines per gap and every arrival buried among them.
+//
+// What must NOT be paced is the level-driven retire above it: the standing park
+// latch is re-evaluated from the row on every pass whatever the pacing says,
+// which the re-seeded issue in the second half proves.
+func TestSweep_ReArmPacesARepeatedlyUnplannableGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logs := &logCapture{}
+	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
+	h.agePastWarmup()
+
+	const targetID = "fixtureReArmPacing"
+	const budget = 3
+	// The row carries no `applicant` column, so the templated param cannot
+	// resolve and planGap fails with a per-row data error on every attempt.
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// A directOp entry with no operationType: buildPlan rejects it as a
+			// playbook CONFIG error, which alerts at `error` severity on every
+			// attempt and latches at issueKeyGapConfig — the family nothing in
+			// the level reconcile clears, so pacing it costs no standing fact.
+			"missing_x": {Action: actionDirectOp},
+		},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	h.seedIssue(targetID, entityID, "missing_x")
+
+	for i := 0; i < 3; i++ {
+		h.pass(ctx)
+	}
+
+	const attempted = "re-armed gap has no dispatchable plan"
+	if got := logs.countContaining(attempted); got != 1 {
+		t.Fatalf("plan attempts across 3 passes = %d, want 1: an undamped arm writes one per pass for the budget's whole life", got)
+	}
+	if !hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
+		t.Fatalf("setup: the one attempt must genuinely have reached planGap and failed (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+		t.Fatal("the park latch must be retired on the first pass — the retire sits above the pacing")
+	}
+
+	// The retire is level-driven and unpaced: a latch that comes back is retired
+	// again on the very next pass, while the plan attempt stays damped.
+	h.seedIssue(targetID, entityID, "missing_x")
+	h.pass(ctx)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+		t.Fatal("pacing the plan attempt must not pace the retire above it")
+	}
+	if got := logs.countContaining(attempted); got != 1 {
+		t.Fatalf("plan attempts after a 4th pass = %d, want 1 (still inside the window)", got)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ReArmResumesAfterThePacingWindow is the other half of the pacing
+// contract, and the reason the predicate is a clock rather than a row revision.
+// Two of planGap's three failure classes are not fixed by a row write at all —
+// a playbook config error needs the package re-authored, an unresolved
+// reference needs some other vertex to replay — so a revision predicate would
+// never re-attempt them, turning a loud repeated failure into a gap that is
+// un-suppressed, never dispatched, and silent. Ageing out suppresses nothing
+// permanently: the row here never changes, and the attempt still comes back.
+func TestSweep_ReArmResumesAfterThePacingWindow(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logs := &logCapture{}
+	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
+	h.agePastWarmup()
+
+	const targetID = "fixtureReArmPacingWindow"
+	const budget = 3
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// A directOp entry with no operationType: buildPlan rejects it as a
+			// playbook CONFIG error, which alerts at `error` severity on every
+			// attempt and latches at issueKeyGapConfig — the family nothing in
+			// the level reconcile clears, so pacing it costs no standing fact.
+			"missing_x": {Action: actionDirectOp},
+		},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	const attempted = "re-armed gap has no dispatchable plan"
+	h.pass(ctx)
+	h.pass(ctx)
+	if got := logs.countContaining(attempted); got != 1 {
+		t.Fatalf("setup: plan attempts inside the window = %d, want 1", got)
+	}
+
+	// Time passes; the row is untouched throughout.
+	h.agePastReArmWindow()
+	h.pass(ctx)
+
+	if got := logs.countContaining(attempted); got != 2 {
+		t.Fatalf("plan attempts after the window elapsed = %d, want 2: pacing must not become permanent suppression", got)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ReArmPacingEntryRetiresWithItsCountKey gives the pacing map its
+// LIFETIME. It is process-local state keyed by a weaver-state key, so without a
+// retirement it would grow with every gap the leg has ever paced and hold those
+// entries for the life of the process. It is retired by the same pass loop that
+// retires a CorruptMark issue whose key stopped being listed, keyed the same
+// way — and a count that comes back is a new chain, entitled to a prompt first
+// attempt rather than to the old chain's leftover pacing.
+func TestSweep_ReArmPacingEntryRetiresWithItsCountKey(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logs := &logCapture{}
+	h := newSweepHarness(t, ctx, func(cfg *Config) { cfg.Logger = slog.New(logs) })
+	h.agePastWarmup()
+
+	const targetID = "fixtureReArmPacingRetire"
+	const budget = 3
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// A directOp entry with no operationType: buildPlan rejects it as a
+			// playbook CONFIG error, which alerts at `error` severity on every
+			// attempt and latches at issueKeyGapConfig — the family nothing in
+			// the level reconcile clears, so pacing it costs no standing fact.
+			"missing_x": {Action: actionDirectOp},
+		},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	h.pass(ctx)
+	if got := h.reArmPacingEntries(); got != 1 {
+		t.Fatalf("setup: pacing entries after one paced attempt = %d, want 1", got)
+	}
+
+	// The operator resets the budget (or the gap closes, or the TTL collects
+	// it): the count key stops being listed.
+	if err := h.engine.marks.deleteDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		t.Fatalf("delete dispatch-count: %v", err)
+	}
+	h.pass(ctx)
+
+	if got := h.reArmPacingEntries(); got != 0 {
+		t.Fatalf("pacing entries after the count key vanished = %d, want 0: the map must not outlive the keys it paces", got)
+	}
+
+	// A fresh chain at the same key gets a prompt first attempt, not the dead
+	// chain's leftover window.
+	const attempted = "re-armed gap has no dispatchable plan"
+	before := logs.countContaining(attempted)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.pass(ctx)
+	if got := logs.countContaining(attempted); got != before+1 {
+		t.Fatalf("plan attempts after the count returned = %d, want %d", got, before+1)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ReclaimSkipsASurfaceGap pins the first of the three legs a package
+// migration to `surface` can strand state in front of.
+//
+// `surface` mints no mark — but a package upgrade that rewrites a gap's action
+// leaves behind whatever the previous action created, and an episode that was
+// in flight at the upgrade leaves a MARK. clearClosedMarks skips a surface
+// column's mark cleanup outright, so nothing but the TTL removes it, and every
+// sweep pass in between drives reclaim into planGap, which has no `surface`
+// case: an `error`-severity PlaybookConfigError against a playbook that is
+// entirely contract-legal, once a minute. The control carries the identical
+// stranded mark under a playbook that still names a dispatching action, so the
+// negative pins the ACTION and not an inert leg.
+func TestSweep_ReclaimSkipsASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReclaimSurface"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// The migrated gap: the package now only surfaces this column.
+			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
+			// The control: same shape, still dispatching.
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	migrated, control := testNanoID(t), testNanoID(t)
+	migratedKey := markKey(targetID, migrated, "missing_s")
+	h.putMark(t, ctx, migratedKey, fixtureMark(targetID, migrated, "missing_s", actionDirectOp, pastLease()))
+	h.putRow(t, ctx, targetID, migrated, map[string]any{
+		"entityKey": "vtx.leaseApp." + migrated, "violating": true, "missing_s": true,
+	})
+	h.putMark(t, ctx, markKey(targetID, control, "missing_x"),
+		fixtureMark(targetID, control, "missing_x", actionDirectOp, pastLease()))
+	h.putRow(t, ctx, targetID, control, map[string]any{
+		"entityKey": "vtx.leaseApp." + control, "violating": true, "missing_x": true,
+	})
+
+	h.pass(ctx)
+
+	if op := h.nextOp(t); op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX: the control must reclaim, or the negative proves nothing",
+			op["operationType"])
+	}
+	h.requireNoOp(t)
+	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
+		t.Fatalf("a contract-legal `surface` playbook must not raise a config error (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if !h.markExists(t, ctx, migratedKey) {
+		t.Fatal("the stranded mark is left to its own TTL: a mid-replay definition is not evidence to destroy a running episode's bookkeeping on")
+	}
+}
+
+// TestSweep_CountLegNeverEscalatesASurfaceGap pins the second leg. A `surface`
+// gap has no remediation chain, so it has no budget to have spent — but
+// gapSuppressionTerms reads maxretries_<g> without consulting the action, so a
+// migrated column whose lens still projects the cap, over a count stranded from
+// the previous action, reads as EXHAUSTED and reaches the escalation.
+//
+// Both of that escalation's branches are wrong here, and the un-escalated one
+// is the sharper: it raises GapBudgetExhausted at issueKeyGapEntity, which is
+// the very latch lane-1 holds this column's surface issue on. The two would
+// overwrite each other and re-stamp `since` every round trip — the flap the
+// orphan-column arm was amended to stop. The seeded Surface issue must come
+// through the pass untouched.
+func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSurfaceEscalate"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	migrated, control := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_s": migrated, "missing_x": control} {
+		h.seedCount(t, ctx, targetID, entityID, gap, budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
+	}
+	// The standing issue lane-1 raises for a surface column while it is true.
+	h.engine.issues.set(issueKeyGapEntity(targetID, migrated, "missing_s"), "warning", "Surface",
+		"target "+targetID+" entity "+migrated+": row column missing_s is true")
+
+	h.pass(ctx)
+
+	control_, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, control, "missing_x"))
+	if !ok || control_.Code != "GapBudgetExhausted" {
+		t.Fatalf("setup: the identical vector on a DISPATCHING gap must escalate, or the negative proves nothing (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, migrated, "missing_s"))
+	if !ok || issue.Code != "Surface" {
+		t.Fatalf("the latch at a surface column is lane-1's; a GapBudgetExhausted raise here flaps it (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if h.markExists(t, ctx, markKey(targetID, migrated, "missing_s")) {
+		t.Fatal("a surface gap must never be dispatched, escalation included")
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ReArmDoesNotPaceAFactTheLevelReconcileErases is the carve-out, and
+// the reason the pacing is not uniform.
+//
+// planGap raises its template data error at issueKeyDataEntity(target, entity,
+// gapColumn) — the very key boolColumn and intColumn clear on every read of that
+// column whose value parses. Two different facts share one latch, so the raise
+// only stands because it is re-derived on every evaluation, AFTER the read that
+// cleared it. Pacing that raise while the clear keeps running would not quiet
+// the family, it would erase it: absent for the whole window, present for the
+// one pass inside it that re-derived it. The config-class vector in the pacing
+// tests latches at issueKeyGapConfig, which nothing in the level reconcile
+// touches, which is why that one is safe to damp and this one is not.
+func TestSweep_ReArmDoesNotPaceAFactTheLevelReconcileErases(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReArmPacingCarveOut"
+	const budget = 3
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_x": {Action: actionDirectOp, Operation: "FixX", Params: map[string]string{"applicant": "row.applicant"}},
+		},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget-1)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+	dataKey := issueKeyDataEntity(targetID, entityID, "missing_x")
+
+	for i := 0; i < 3; i++ {
+		h.pass(ctx)
+		issue, ok := issueAt(h.engine.issues, dataKey)
+		if !ok || issue.Code != "TemplateDataError" {
+			t.Fatalf("pass %d: the data fact must stand after every pass, not one in every window (issues: %+v)",
+				i+1, h.engine.issues.snapshot())
+		}
+	}
+	if got := h.reArmPacingEntries(); got != 0 {
+		t.Fatalf("pacing entries for the carved-out class = %d, want 0", got)
+	}
+	h.requireNoOp(t)
+}

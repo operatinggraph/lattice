@@ -1969,3 +1969,63 @@ func TestGapSuppressedWithCount_MatchesTheReadingVariant(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleRow_NeverEscalatesASurfaceGap pins the third entry point into the
+// exhausted-gap escalation, and the reason the guard lives inside that function
+// rather than at its callers.
+//
+// handleRow reaches the escalation from openGapColumns — every true missing_*
+// column, whatever its playbook action — and consults gapSuppressed BEFORE
+// dispatchGap's own `surface` branch is ever reached. gapSuppressionTerms reads
+// maxretries_<g> without consulting the action, so a package migration to
+// `surface` whose lens still projects the cap, over a dispatch-count stranded
+// from the previous action, reads as EXHAUSTED on the very next delivery. The
+// un-escalated branch would then raise GapBudgetExhausted at issueKeyGapEntity —
+// the same latch this same delivery raises the column's Surface issue on, one
+// function later — so the row's own handler would overwrite its own fact and
+// re-stamp `since` on every delivery.
+func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureHandleRowSurfaceExhausted"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_s": {Action: actionSurface, IssueCode: "Surface"}},
+	})
+	entityID := testNanoID(t)
+	for i := 0; i < budget; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_s"); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_s": true,
+		"inflight_s": false, "maxretries_s": budget,
+	}
+
+	// Setup: the stranded count really does read as exhausted for this gap, so
+	// the negative below pins the guard and not an unreachable branch.
+	if _, exhausted, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_s", actionSurface); !exhausted {
+		t.Fatal("setup: this vector must reach the escalation — the stranded count must read as exhausted")
+	}
+
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
+		t.Fatalf("handleRow = %v, want Ack", dec)
+	}
+
+	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_s"))
+	if !ok {
+		t.Fatalf("the surface gap must still raise its own issue (issues: %+v)", h.engine.issues.snapshot())
+	}
+	if issue.Code != "Surface" {
+		t.Fatalf("issue code = %q, want Surface: the escalation must not overwrite the latch this column's own action owns", issue.Code)
+	}
+	h.requireNoOp(t)
+}
