@@ -290,19 +290,25 @@ var (
 	// legitimate use of this letter range takes that shape today.
 	reviewFindingLabel = regexp.MustCompile(`(?:^|\s)(?://|#).*\([ABCEF][0-9]{1,2}\)\.?\s*$`)
 	aspPrefix          = regexp.MustCompile(`"asp\.`)
-	// deadConjunct — a boolean literal wired into a condition so the branch it
-	// guards can never run (`if false && x`) or always runs (`if true || x`).
-	// The shape has one real source: a mutation planted to prove a test fails
-	// without the arm it disables. That is a legitimate thing to do and an
-	// illegitimate thing to leave behind, and the window between planting and
-	// restoring is exactly when a parallel commit picks the tree up — which is
-	// how a guard shipped inert, with a test asserting against the disabled
-	// behaviour and passing. Nothing else writes this: a genuinely constant
-	// condition is written as the constant.
-	// The literal must be a standalone OPERAND, so the preceding token is
-	// pinned: `== false &&` and `!= true ||` are comparisons whose result feeds
-	// the conjunction, and the corpus is full of them.
-	deadConjunct = regexp.MustCompile(`(?:\bif\s+|&&\s+|\|\|\s+|\(\s*)(?:false\s*&&|true\s*\|\|)|(?:&&\s*false|\|\|\s*true)\s*(?:\)|\{|$)`)
+	// deadConjunct — a boolean literal wired into a condition, so the branch it
+	// guards can never run (`if false && x`, `if false {`) or always runs
+	// (`if true || x`). The shape has one real source: a mutation planted to
+	// prove a test fails without the arm it disables. That is a legitimate
+	// thing to do and an illegitimate thing to leave behind, and the window
+	// between planting and restoring is exactly when a parallel commit picks
+	// the tree up — which is how a guard shipped inert, with a test asserting
+	// against the disabled behaviour and passing. Nothing else writes this: a
+	// genuinely constant condition is written as the constant.
+	//
+	// Both shapes are matched because the bare one is what a planter reaches
+	// for when the real condition is long: replacing `if in.Undecodable[k] {`
+	// with `if false {` is one edit, and a rule that caught only the conjunct
+	// form let exactly that through.
+	//
+	// In the conjunct form the literal must be a standalone OPERAND, so the
+	// preceding token is pinned: `== false &&` and `!= true ||` are comparisons
+	// whose result feeds the conjunction, and the corpus is full of them.
+	deadConjunct = regexp.MustCompile(`(?:\bif\s+|&&\s+|\|\|\s+|\(\s*)(?:false\s*&&|true\s*\|\|)|(?:&&\s*false|\|\|\s*true)\s*(?:\)|\{|$)|\bif\s+(?:false|true)\s*\{`)
 	coreKVRead   = regexp.MustCompile(`\bCoreKVBucket\b|"core-kv"`)
 	// p7Discriminator — a package script emitting a discriminator-shaped aspect (a
 	// `.class` / `.family` / `.kind` localName that shadows the envelope `class`).

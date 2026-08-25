@@ -1013,7 +1013,7 @@ func ReconcileGrantLinks(in GrantLinkReconcileInput) (drift, notices []GrantFind
 	}
 
 	for k := range remainingKernel {
-		if false {
+		if in.UndecodableKeys[k] {
 			// A document DOES occupy this key — the gatherer already reported
 			// it as GrantFindingUndecodable. "Absent from the live set" would
 			// be a second, actively wrong diagnosis of the same key.
@@ -1500,11 +1500,23 @@ func gatherPermissionInputs(ctx context.Context, conn *substrate.Conn) (permissi
 // inputs, since a key that cannot be decoded becomes no usable live or
 // declared record (see gatherPermissionInputs's doc comment).
 func LoadPermissionReconciliation(ctx context.Context, conn *substrate.Conn) (PermissionReconciliation, error) {
-	first, err := reconcileOnce(ctx, conn)
+	return reconcileTwice(func() (PermissionReconciliation, error) {
+		return reconcileOnce(ctx, conn)
+	})
+}
+
+// reconcileTwice performs read twice and returns only the findings both reads
+// produced, matched on (class, key) — LoadPermissionReconciliation's whole
+// answer, with the Core-KV read behind a parameter so the combining rule is
+// testable without staging a race against a live bucket. The maps come from
+// the second read, unintersected; see LoadPermissionReconciliation's doc
+// comment for what that does and does not buy.
+func reconcileTwice(read func() (PermissionReconciliation, error)) (PermissionReconciliation, error) {
+	first, err := read()
 	if err != nil {
 		return PermissionReconciliation{}, err
 	}
-	second, err := reconcileOnce(ctx, conn)
+	second, err := read()
 	if err != nil {
 		return PermissionReconciliation{}, err
 	}
