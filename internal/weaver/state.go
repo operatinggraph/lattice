@@ -365,6 +365,63 @@ func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entity
 	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
+// dispatchCountEntry reads one gap's dispatch-count together with the KV
+// revision it was read at — the revision a conditioned write must name to prove
+// it is replacing the value it looked at. found=false means no chain has ever
+// dispatched this gap. An unreadable body reports count 0 with its real
+// revision: the value is unknowable, but the key is still the one to condition
+// on, and a reset is exactly the repair for it.
+func (m *markStore) dispatchCountEntry(ctx context.Context, targetID, entityID, gapColumn string) (count int, revision uint64, found bool, err error) {
+	entry, err := m.conn.KVGet(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, err
+	}
+	var dc dispatchCount
+	if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {
+		return 0, entry.Revision, true, nil
+	}
+	return dc.Count, entry.Revision, true, nil
+}
+
+// resetDispatchCount re-arms one gap's §E retry budget by writing its
+// dispatch-count back to 0 at expectedRevision — the operator un-park
+// (Engine.ResetRetryBudget), conditioned on the revision its caller read so it
+// can only ever replace the value the operator was shown.
+//
+// It writes 0; it does NOT delete the key, and the difference is the whole
+// point. The reconciler's count leg is COUNT-ANCHORED: it enumerates
+// `…__count` keys, so a gap whose count key is gone is a gap that leg cannot
+// see. Deleting here would leave a parked gap with no count, no mark and no
+// delivery coming — un-suppressed and still un-dispatched, a quieter park than
+// the one the operator was trying to end. A 0 is indistinguishable from an
+// absent key to every reader (getDispatchCount returns 0 for both), so the
+// budget is genuinely fresh, while the key survives for the next pass to
+// enumerate and dispatch from. The write re-arms the same long TTL every other
+// count write uses.
+//
+// conflict=true means the count moved between that read and this write — a
+// dispatch landed first — so nothing is written: the chain is going again on
+// its own, and forcing it back to 0 would hand it a second full budget nobody
+// asked for. A key that vanished mid-flight reports the same way; both are
+// "the state you decided on is gone", and re-reading is the remedy.
+func (m *markStore) resetDispatchCount(ctx context.Context, targetID, entityID, gapColumn string, expectedRevision uint64) (conflict bool, err error) {
+	body, mErr := json.Marshal(dispatchCount{Count: 0})
+	if mErr != nil {
+		return false, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+	}
+	if _, uErr := m.conn.KVUpdateWithTTL(ctx, m.bucket, countKey(targetID, entityID, gapColumn), body,
+		expectedRevision, dispatchCountTTLBackstopFactor*m.lease); uErr != nil {
+		if errors.Is(uErr, substrate.ErrRevisionConflict) || errors.Is(uErr, substrate.ErrKeyNotFound) {
+			return true, nil
+		}
+		return false, uErr
+	}
+	return false, nil
+}
+
 // deleteDispatchCount clears one gap's dispatch-count — the §E budget reset on
 // gap-close, run from clearClosedMarks (the same level-reconciled path that
 // deletes the mark) when a row delivery observes the close. It is not the only

@@ -27,6 +27,11 @@ type fakeEngine struct {
 	errOn   map[string]error
 	// resetDeleted is the window count ResetConfidence reports on success.
 	resetDeleted int
+	// resetPrevious is the dispatch-count ResetRetryBudget reports on success;
+	// budgetArgs records the per-gap arguments it received, which the control
+	// subject cannot carry and which therefore have to survive the request body.
+	resetPrevious int
+	budgetArgs    []string
 }
 
 func (f *fakeEngine) ListTargets(_ context.Context) ([]internalweaver.TargetSummary, error) {
@@ -50,6 +55,14 @@ func (f *fakeEngine) ResetConfidence(_ context.Context, targetID string) (int, e
 		return 0, err
 	}
 	return f.resetDeleted, nil
+}
+
+func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gapColumn string) (int, error) {
+	f.budgetArgs = append(f.budgetArgs, targetID+"/"+entityID+"/"+gapColumn)
+	if err := f.errOn["resetBudget:"+targetID]; err != nil {
+		return 0, err
+	}
+	return f.resetPrevious, nil
 }
 
 // startWeaverControlTest starts an embedded NATS server with a
@@ -305,5 +318,96 @@ func TestWeaverResetConfidence_NotRegistered_JSON(t *testing.T) {
 	out, err := runCmd(t, cmd, []string{"reset-confidence", "ghost"})
 	require.Error(t, err)
 	assert.Contains(t, out, "ghost")
+	assert.Contains(t, out, `"ok":false`)
+}
+
+// TestWeaverResetBudget_HappyPath verifies `reset-budget <targetId> <entityId>
+// <gapColumn>` reaches the resetBudget endpoint with all three arguments — two
+// of which the control subject cannot carry — and reports what the park had
+// spent, plus what happens next. A successful reset means "the next sweep pass
+// will dispatch it", not "it has dispatched", and the line says so.
+func TestWeaverResetBudget_HappyPath(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, resetPrevious: 3}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := ""
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	const entityID = "entityAAAAAAAAAAAAAA"
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", entityID, "missing_x"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "retry budget re-armed (was 3)")
+	// The verb re-arms a budget; whether anything dispatches is the sweep's
+	// call (the gap may be frozen, its row gone, its target unregistered), so
+	// the line must not promise a dispatch it never checked.
+	assert.Contains(t, out, "if it is still dispatchable")
+	require.Equal(t, []string{"t1/" + entityID + "/missing_x"}, eng.budgetArgs)
+}
+
+// TestWeaverResetBudget_JSONReportsPreviousCount pins the machine-readable
+// shape operators and Loupe read.
+func TestWeaverResetBudget_JSONReportsPreviousCount(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, resetPrevious: 2}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", "entityAAAAAAAAAAAAAA", "missing_x"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"ok":true`)
+	assert.Contains(t, out, `"previousCount":2`)
+}
+
+// TestWeaverResetBudget_RejectsMalformedArgumentsLocally verifies each argument
+// shape is refused before a request is published. The weaver-state key this
+// names is split positionally, so a dotted or non-NanoID argument would name a
+// key nothing can parse — and the round trip would only report the same thing
+// less clearly. The engine must not be reached at all.
+func TestWeaverResetBudget_RejectsMalformedArgumentsLocally(t *testing.T) {
+	for _, tc := range []struct{ name, targetID, entityID, gapColumn, want string }{
+		{"dotted targetId", "a.b", "entityAAAAAAAAAAAAAA", "missing_x", "must not contain"},
+		{"entityId is not a NanoID", "t1", "nope", "missing_x", "NanoID"},
+		{"gapColumn is not a missing_ column", "t1", "entityAAAAAAAAAAAAAA", "violating", "missing_"},
+		{"dotted gapColumn", "t1", "entityAAAAAAAAAAAAAA", "missing_a.b", "single token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := &fakeEngine{errOn: map[string]error{}}
+			url := startWeaverControlTest(t, eng)
+
+			natsURL := url
+			outputFmt := ""
+			actorKey := ""
+			cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+			_, err := runCmd(t, cmd, []string{"reset-budget", tc.targetID, tc.entityID, tc.gapColumn})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Empty(t, eng.budgetArgs, "a locally-rejected argument must never reach the engine")
+		})
+	}
+}
+
+// TestWeaverResetBudget_NoBudget_JSON verifies the engine's refusal — a gap
+// nothing has ever dispatched has no budget to reset — surfaces as a failed
+// command rather than a cheerful zero.
+func TestWeaverResetBudget_NoBudget_JSON(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{
+		"resetBudget:t1": errors.New(`weaver: no retry budget for target "t1" entity "entityAAAAAAAAAAAAAA" gap "missing_x" (nothing has dispatched it)`),
+	}}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"reset-budget", "t1", "entityAAAAAAAAAAAAAA", "missing_x"})
+	require.Error(t, err)
+	assert.Contains(t, out, "no retry budget")
 	assert.Contains(t, out, `"ok":false`)
 }

@@ -253,6 +253,41 @@ This arm also closes the *other* remedy the scout found: raising `maxretries_<g>
 re-projects the row and does produce a delivery, so that path already worked — but only because the row
 changed. Arm 11 makes the re-arm work when nothing about the row changes.
 
+### 4.1 Arm 11 is NARROW — three conditions the first cut missed (CORRECTED 2026-08-25, close pass)
+
+The first cut argued arm 11 purely from *"this is the state lane 1 would dispatch on"* and inherited lane
+1's **gates** without the reclaim's **identity and pacing contract**. Three defects followed, all verified
+by execution, all sharing one root.
+
+**(a) A mark's ABSENCE is not evidence the episode concluded.** A userTask or Loom instance outlives its
+mark by orders of magnitude — which is exactly why `reclaim` preserves `claimId` verbatim and widens the
+mark TTL, saying in as many words that a markless open gap re-dispatched with a fresh `claimId` *"mints a
+DUPLICATE task"*. Arm 11 turned that rare CDC race into a guaranteed dispatch on the next pass. And the
+fix cannot be "preserve the claimId": **the claimId lives on the mark, so when the mark is gone the
+information is gone.** Therefore **arm 11 must not dispatch a collapse-only gap at all** — the file
+already owns the predicate (`collapseOnlyReclaim` over `staleMark`). Protection via a lens declaring
+`inflight_<g>` is authoring-conditional, not structural: the install gate requires `maxretries_<g>` when
+`inflight_<g>` is declared, never the reverse.
+
+**(b) It dispatched only where the budget was deliberately re-armed — so require that.** Arm 11 exists to
+give §5's verb teeth. A count **greater than zero** with no mark is a chain already in progress whose
+mark expired; that belongs to the reclaim ladder and its backoff, and arm 11 re-dispatching it runs at
+the sweep interval instead of `backoffInterval(count)` — measured at 1,440× the intended rate for a
+24 h hold, with no authoring escape for the `uncappedExternal` class whose "defense in depth" block it
+erases. **Arm 11 fires only when the count reads 0**: the state the verb writes, and the state a
+**only** writer that persists one: `incrementDispatchCount` creates at 1 and never writes below it, and
+every other reset — both gap-close paths and this leg's own level reconcile — **deletes** the key rather
+than zeroing it. A key that exists and reads 0 is therefore an operator's re-arm and nothing else, which
+is a stronger bound than "the verb or a gap-close". A count of 0 has no backoff ladder to respect, so the pacing question dissolves
+rather than being re-implemented against a timestamp the count does not carry.
+
+**(c) It must be warm-up gated,** like the orphan arms (`s.warmedUp()`). Without it the start-up warm
+pass dispatches, and one pass over a recovered outage re-fires every affected gap at once.
+
+Together these make arm 11 what §4 says it is: the verb's teeth, not a second general dispatch leg.
+Fan-out becomes operator-bounded — only gaps someone deliberately re-armed — which is the right bound
+for a leg whose whole purpose is acting on an operator's decision.
+
 ## 5. The operator verb
 
 `lattice weaver reset-budget <targetId> <entityId> <gapColumn>` → `Engine.ResetRetryBudget`, mirroring
@@ -262,7 +297,20 @@ revision-conditioned delete, tolerant of a key that vanished mid-scan, reports w
 Scope is one gap, not one target: the count is per-(target, entity, gap), the issue latch is keyed the
 same way (`evaluator.go:1255`), and a target-wide reset would re-arm parks an operator never looked at.
 
-The verb deletes the count and nothing else. It does not clear the issue and does not dispatch — the
+**The verb writes the count to 0 — it does NOT delete the key. CORRECTED 2026-08-25, before build.**
+The original text said "deletes the count and nothing else", which would have shipped an inert verb.
+`sweepCount` is **count-anchored**: it enumerates count keys, so a gap whose count key is gone is a gap
+the leg cannot see. Delete the count and the parked gap has no count, no mark, and no CDC delivery
+coming — arm 11 never fires and the gap stays silently parked, merely with a fresh budget. That is the
+exact failure §4 predicts for a verb with no re-arm behind it, reintroduced through the anchor instead.
+
+Writing 0 re-arms the budget and keeps the anchor alive: `getDispatchCount` returns 0 for an absent key
+too (`state.go:290`), so 0 and absent are indistinguishable to `gapSuppressed` — the budget is
+genuinely fresh — while the key survives for the next pass to enumerate. That pass finds a violating,
+open, unsuppressed, markless gap and arm 11 dispatches it. The first dispatch increments 0 → 1 and the
+chain proceeds normally.
+
+The verb writes the count and nothing else. It does not clear the issue and does not dispatch — the
 next sweep pass (≤ 1 min, `reconciler.go:21`) does both, through arm 11. One writer, one path: the
 verb states intent, the level reconcile enacts it. (Checklist rule 5: *one deterministic key, one
 writer.*)
@@ -342,3 +390,15 @@ expiry and a restart — with no new way for Weaver to act on the world.
 ## 8. Build note
 
 *(Appended per increment: checkpoint + deviations only — not a fire journal.)*
+
+**Increment 2 — one guard the arm table did not name, and one exposure that is not one.** Arm (n)
+excludes `ga.Action == actionSurface`: FR29's surface gap dispatches nothing and holds no mark, so its
+column can carry a `…__count` only as a leftover from a playbook version that DID dispatch it, and
+`buildPlan` has no `surface` case — planning one would raise an `error`-severity `PlaybookConfigError`
+naming a contract-legal declaration. The guard is scoped to arm (n) alone; the Increment-1 arms treat a
+surface gap exactly as before.
+
+`reclaim` looks like it needs the same guard and does **not**: it is reached only from a mark, a surface
+gap never creates one (`dispatchGap` returns at its own surface branch before any CAS-create), so no
+mark can exist at a surface gap's key for the mark leg to visit. Defensive code there would be dead code
+reading as a live hazard. Recorded here so the next reader does not re-derive it as a bug.

@@ -3,6 +3,7 @@ package weaver
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -873,5 +874,230 @@ func TestReconcileRemove_DeletesControlMarker(t *testing.T) {
 		if k == controlKey(targetID) {
 			t.Fatalf("orphan `__control` marker %q leaked after uninstall", k)
 		}
+	}
+}
+
+// TestResetRetryBudget_UnParksAGapEndToEnd proves the verb un-parks a gap: the
+// whole path from an operator's decision to a remediation on the wire.
+//
+// The setup is a genuinely parked gap: budget spent, no mark (an exhausted gap
+// stops refreshing one), and a row nothing will re-deliver. The sweep's count
+// leg re-derives the standing GapBudgetExhausted from the count on every pass
+// and dispatches nothing, forever, which is correct until an operator says
+// otherwise. The verb is that operator saying otherwise — and one pass later
+// the gap must actually be trying again: an op on the wire and a mark holding
+// the fresh episode.
+//
+// This is also what pins the verb's one load-bearing implementation choice.
+// Writing the count to 0 leaves the key the count leg enumerates; DELETING it
+// would leave a gap with no count, no mark and no delivery coming — invisible
+// to every leg, un-suppressed and still un-dispatched. The op below is the
+// difference between the two.
+func TestResetRetryBudget_UnParksAGapEndToEnd(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureResetBudgetE2E"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", budget)
+	h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, "missing_x", budget))
+
+	// The park: the sweep raises the loud stop and dispatches nothing.
+	h.pass(ctx)
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); !ok {
+		t.Fatal("setup: the gap must be parked before it can be un-parked")
+	}
+
+	previous, err := h.engine.ResetRetryBudget(ctx, targetID, entityID, "missing_x")
+	if err != nil {
+		t.Fatalf("ResetRetryBudget: %v", err)
+	}
+	if previous != budget {
+		t.Fatalf("previous count = %d, want %d (what the park had actually spent)", previous, budget)
+	}
+	// The verb states intent and stops: no dispatch of its own, and the issue
+	// is still standing because nothing has disproved it yet.
+	h.requireNoOp(t)
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); !ok {
+		t.Fatal("the verb must not clear the issue itself — the dispatch that disproves it does")
+	}
+	if !h.countExists(t, ctx, targetID, entityID, "missing_x") {
+		t.Fatal("the count key IS the anchor the sweep enumerates: writing 0 must keep it")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 0 {
+		t.Fatalf("dispatch-count after the reset = %d, want 0", got)
+	}
+
+	// One pass later the gap is trying again.
+	h.pass(ctx)
+
+	op := h.nextOp(t)
+	if op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX (the playbook's remediation, dispatched again)", op["operationType"])
+	}
+	if !h.markExists(t, ctx, markKey(targetID, entityID, "missing_x")) {
+		t.Fatal("the un-parked gap must hold a fresh episode's mark")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 1 {
+		t.Fatalf("dispatch-count = %d, want 1: the re-armed chain's first attempt", got)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_x")); ok {
+		t.Fatal("a gap that just dispatched is not parked: the standing issue must be retired")
+	}
+	if _, _, _, _, reArms, _ := h.engine.sweep.metrics(); reArms != 1 {
+		t.Fatalf("sweepReArms = %d, want 1 (the un-park is visible on the heartbeat)", reArms)
+	}
+}
+
+// TestResetRetryBudget_RefusesWhatItCannotHonour pins every way the verb
+// declines, because each one is a case where writing would be worse than
+// refusing. The vectors that matter most are the two that would CREATE a key:
+// a gap with no budget at all, and the same with no row either. A count key
+// exists only where a chain has actually dispatched, so inventing one would
+// hand the sweep's re-arm arm a gap nobody chose — on a mistyped entityId, an
+// arbitrary entity's gap would start dispatching.
+func TestResetRetryBudget_RefusesWhatItCannotHonour(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureResetBudgetRefuse"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	budgeted := testNanoID(t)
+	unbudgeted := testNanoID(t)
+	rowless := testNanoID(t)
+	h.seedCount(t, ctx, targetID, budgeted, "missing_x", 2)
+	h.putRow(t, ctx, targetID, budgeted, exhaustedRow(budgeted, "missing_x", 2))
+	// unbudgeted has a row but no chain has ever dispatched it; rowless has
+	// neither.
+	h.putRow(t, ctx, targetID, unbudgeted, exhaustedRow(unbudgeted, "missing_x", 2))
+
+	for _, tc := range []struct {
+		name                       string
+		targetID, entityID, gapCol string
+		wantErrContains            string
+	}{
+		{"no budget at this gap", targetID, unbudgeted, "missing_x", "no retry budget"},
+		{"no budget and no row", targetID, rowless, "missing_x", "no retry budget"},
+		{"unregistered target", "ghostTarget", budgeted, "missing_x", "not registered"},
+		{"dotted targetId", "a.b", budgeted, "missing_x", "single token"},
+		{"entityId is not a NanoID", targetID, "not-a-nanoid", "missing_x", "NanoID"},
+		{"gapColumn is not a missing_ column", targetID, budgeted, "violating", "missing_"},
+		{"dotted gapColumn", targetID, budgeted, "missing_a.b", "missing_"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.engine.ResetRetryBudget(ctx, tc.targetID, tc.entityID, tc.gapCol)
+			if err == nil {
+				t.Fatalf("ResetRetryBudget(%q,%q,%q) must refuse", tc.targetID, tc.entityID, tc.gapCol)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrContains) {
+				t.Fatalf("error = %q, want it to mention %q", err, tc.wantErrContains)
+			}
+		})
+	}
+
+	// Nothing was written anywhere: no invented anchors.
+	keys, err := h.conn.KVListKeys(ctx, "weaver-state")
+	if err != nil {
+		t.Fatalf("list weaver-state: %v", err)
+	}
+	for _, k := range keys {
+		if strings.HasSuffix(k, countKeySuffix) && k != countKey(targetID, budgeted, "missing_x") {
+			t.Fatalf("a refused reset created a budget key: %q", k)
+		}
+	}
+	// And the one real budget is untouched by every refusal above.
+	if got := h.countValue(t, ctx, targetID, budgeted, "missing_x"); got != 2 {
+		t.Fatalf("the surviving budget = %d, want 2 (a refusal writes nothing)", got)
+	}
+
+	// A rowless gap that DOES carry a budget resets fine — the verb re-arms the
+	// budget; whether the gap is dispatchable is the sweep's judgement, and its
+	// row-gone arm leaves that count alone rather than acting on absence.
+	h.seedCount(t, ctx, targetID, rowless, "missing_x", 3)
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, rowless, "missing_x"); err != nil || previous != 3 {
+		t.Fatalf("ResetRetryBudget on a rowless budget = (%d, %v), want (3, nil)", previous, err)
+	}
+	h.pass(ctx)
+	h.requireNoOp(t)
+	if got := h.countValue(t, ctx, targetID, rowless, "missing_x"); got != 0 {
+		t.Fatalf("rowless budget = %d, want 0: the reset holds, and the sweep never dispatched it", got)
+	}
+}
+
+// TestResetRetryBudget_RefusesAConcurrentBump pins the revision condition on
+// the reset — the only thing standing between the verb and a chain that is
+// already moving again.
+//
+// The verb reads the budget the operator is deciding about, then writes 0
+// conditioned on that read. If a dispatch lands in between, the value they
+// decided on is gone: writing anyway would force a chain that has just spent an
+// attempt back to a full budget nobody asked for, and the sweep would then keep
+// re-arming it. The interleave is staged the way the count leg's OCC race is —
+// by handing the write the revision a caller read BEFORE the bump, which is
+// exactly the state a losing writer holds.
+func TestResetRetryBudget_RefusesAConcurrentBump(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureResetBudgetRace"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	h.seedCount(t, ctx, targetID, entityID, "missing_x", 2)
+
+	// What the verb read: the budget as the operator saw it.
+	previous, revision, found, err := h.engine.marks.dispatchCountEntry(ctx, targetID, entityID, "missing_x")
+	if err != nil || !found || previous != 2 {
+		t.Fatalf("read = (%d, rev %d, found=%v, %v), want (2, _, true, nil)", previous, revision, found, err)
+	}
+	// What landed in between: one more dispatch on the same chain.
+	h.engine.bumpDispatchCount(ctx, targetID, entityID, "missing_x")
+
+	conflict, err := h.engine.marks.resetDispatchCount(ctx, targetID, entityID, "missing_x", revision)
+	if err != nil {
+		t.Fatalf("resetDispatchCount: %v", err)
+	}
+	if !conflict {
+		t.Fatal("a reset conditioned on a superseded revision must report the conflict, not silently win")
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 3 {
+		t.Fatalf("dispatch-count = %d, want 3: the dispatch that raced the reset must survive it", got)
+	}
+
+	// Re-reading is the remedy the error tells the operator to apply, and it
+	// resets the value that is actually there now.
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, entityID, "missing_x"); err != nil || previous != 3 {
+		t.Fatalf("re-run after the conflict = (%d, %v), want (3, nil)", previous, err)
+	}
+	if got := h.countValue(t, ctx, targetID, entityID, "missing_x"); got != 0 {
+		t.Fatalf("dispatch-count after the re-run = %d, want 0", got)
 	}
 }

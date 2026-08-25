@@ -518,10 +518,10 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 }
 
 // admitGap consults Fire 8's admission scheduler for one resolved gap
-// dispatch, called from BOTH fresh-dispatch seams planGap serves (lane-1's
-// dispatchGap and the reconciler's reclaim) — mirroring bumpEffectDispatch/
-// bumpOscillation's "same two seams" precedent, so a declared budget paces
-// reclaim re-fires exactly like fresh episodes. target.Admission == nil (a
+// dispatch, called from every fresh-dispatch seam planGap serves — lane-1's
+// dispatchGap, the reconciler's reclaim, and the reconciler's count-leg re-arm
+// (sweepCount's arm (n), for a gap whose row has gone quiet) — so a declared
+// budget paces a re-fire and a re-arm exactly like a fresh episode. target.Admission == nil (a
 // target with no policy configured) short-circuits true without reading the
 // row's priority column — byte-identical dispatch. id is the mark-key shape
 // (<targetId>.<entityId>.<gapColumn>), a stable identity for this gap's

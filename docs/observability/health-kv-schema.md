@@ -240,7 +240,10 @@ Source package: `internal/weaver/`
 
 The heartbeat `metrics` carry: `consumers` (map of consumer name → state — `running` / `pausedManual` /
 `pausedStructural` / `pausedInfra`), `targets` (registered convergence-target count), `marksInFlight`, the
-reconciler sweep counters (`sweepReclaims`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepLastRunAt`), the
+reconciler sweep counters (`sweepReclaims`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepReArms`,
+`sweepLastRunAt` — `sweepReArms` counts gaps the sweep's count leg dispatched from a retry budget rather
+than from a mark, i.e. rows that have stopped being delivered at all, so it is distinct from a reclaim and
+a rising value means dispatch is coming from otherwise-invisible rows), the
 lane-3 temporal counters (`timersScheduled`, `timersFired`), and `contractionTrajectory` (map of targetId →
 `shrinking` / `steady` / `diverging` — the planner-mandate design §3.4 contraction monitor: a bounded,
 sweep-cadence-sampled ring of each target's current violating-row count, present only once a target has ≥ 2
@@ -882,6 +885,7 @@ never installed, which is the monitoring equivalent of reporting healthy.
     "sweepReclaims": <int>,
     "sweepOrphansDeleted": <int>,
     "sweepCorrupt": <int>,
+    "sweepReArms": <int>,
     "sweepLastRunAt": "<RFC3339>",
     "timersScheduled": <int>,
     "timersFired": <int>

@@ -160,16 +160,19 @@ func TestPackage_NeverGrantsAnyWriteOp(t *testing.T) {
 		// A confidence reset deletes engine state — narrow and advisory-only,
 		// but a write. F20.3's inspect-only boundary keeps it out.
 		"ctrl.weaver.resetConfidence": true,
-		"ctrl.loom.pause":             true,
-		"ctrl.loom.resume":            true,
-		"ctrl.refractor.rebuild":      true,
-		"ctrl.refractor.pause":        true,
-		"ctrl.refractor.resume":       true,
-		"ctrl.refractor.delete":       true,
-		"ctrl.refractor.register":     true,
-		"ctrl.refractor.deregister":   true,
-		"ctrl.refractor.hydrate":      true,
-		"ctrl.refractor.sessionkey":   true,
+		// A budget reset re-arms one gap's retry budget, which makes Weaver
+		// DISPATCH again — the furthest thing from inspect-only.
+		"ctrl.weaver.resetBudget":   true,
+		"ctrl.loom.pause":           true,
+		"ctrl.loom.resume":          true,
+		"ctrl.refractor.rebuild":    true,
+		"ctrl.refractor.pause":      true,
+		"ctrl.refractor.resume":     true,
+		"ctrl.refractor.delete":     true,
+		"ctrl.refractor.register":   true,
+		"ctrl.refractor.deregister": true,
+		"ctrl.refractor.hydrate":    true,
+		"ctrl.refractor.sessionkey": true,
 		// ctrl.refractor.syncgap is Read: true in controlauth, so it is a read,
 		// not a write — it is deliberately not granted (the demo doesn't need
 		// it and Loupe never invokes it) but it belongs to the read-only

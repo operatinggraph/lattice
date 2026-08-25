@@ -24,20 +24,21 @@ import (
 )
 
 // engineControl is the minimal interface this package needs from
-// *weaver.Engine — list/disable/enable/revoke/resetConfidence. Defining it
-// here (rather than depending on the full *weaver.Engine) keeps the dependency
-// surface to exactly these five methods plus weaver.TargetSummary.
+// *weaver.Engine — list/disable/enable/revoke/resetConfidence/resetBudget.
+// Defining it here (rather than depending on the full *weaver.Engine) keeps the
+// dependency surface to exactly these six methods plus weaver.TargetSummary.
 type engineControl interface {
 	ListTargets(ctx context.Context) ([]weaver.TargetSummary, error)
 	Disable(ctx context.Context, targetID string) error
 	Enable(ctx context.Context, targetID string) error
 	Revoke(ctx context.Context, targetID string) error
 	ResetConfidence(ctx context.Context, targetID string) (int, error)
+	ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (int, error)
 }
 
 // subjectPrefix is the wildcard subject pattern the control endpoints are
 // registered under. "list" is registered on the exact subject
-// subjectPrefix+".list"; disable/enable/revoke/resetConfidence are registered on
+// subjectPrefix+".list"; the per-target ops are registered on
 // subjectPrefix+".*.<op>" — wildcards let one endpoint handler serve all
 // target IDs, since the Weaver does not know the full set of target IDs at
 // registration time.
@@ -55,6 +56,7 @@ const handlerTimeout = 5 * time.Second
 // On success (enable op): Enable is present.
 // On success (revoke op): Revoke is present.
 // On success (resetConfidence op): ResetConfidence is present.
+// On success (resetBudget op): ResetBudget is present.
 // On error: only Error is present.
 type ControlResponse struct {
 	Targets         []weaver.TargetSummary `json:"targets,omitempty"`
@@ -62,7 +64,30 @@ type ControlResponse struct {
 	Enable          *EnableResult          `json:"enable,omitempty"`
 	Revoke          *RevokeResult          `json:"revoke,omitempty"`
 	ResetConfidence *ResetConfidenceResult `json:"resetConfidence,omitempty"`
+	ResetBudget     *ResetBudgetResult     `json:"resetBudget,omitempty"`
 	Error           string                 `json:"error,omitempty"`
+}
+
+// ResetBudgetRequest is the JSON body of a "resetBudget" request. The op is
+// per-(target, entity, gap) but the control subject carries only the targetId —
+// the endpoints are registered on a single-token wildcard
+// (lattice.ctrl.weaver.*.<op>), and an entityId/gapColumn in the subject would
+// need a new grammar and would put a caller-supplied string into a subject.
+// They ride the body instead, where they are validated as data.
+type ResetBudgetRequest struct {
+	EntityID  string `json:"entityId"`
+	GapColumn string `json:"gapColumn"`
+}
+
+// ResetBudgetResult is the synchronous acknowledgement returned by the
+// "resetBudget" op. PreviousCount is the dispatch-count the reset replaced —
+// what the park had actually spent — so an operator sees that the budget really
+// was exhausted (or that they reset a chain still mid-flight). The count is
+// written to 0, never deleted: the reconciler's count leg enumerates count
+// keys, so the key must survive for the next pass to find the gap and
+// re-dispatch it.
+type ResetBudgetResult struct {
+	PreviousCount int `json:"previousCount"`
 }
 
 // DisableResult is the synchronous acknowledgement returned by the
@@ -100,11 +125,19 @@ const (
 	opEnable          = "enable"
 	opRevoke          = "revoke"
 	opResetConfidence = "resetConfidence"
+	opResetBudget     = "resetBudget"
 )
 
 // targetOps enumerates the per-target (wildcard-subject) ops registered
-// under subjectPrefix+".*.<op>".
-var targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence}
+// under subjectPrefix+".*.<op>"; exactOps enumerates the ops registered on an
+// EXACT subject, subjectPrefix+".<op>", because they name no target. Both are
+// ranged over by StartNATSListener, and together they ARE the set of ops this
+// service serves — nothing is registered outside them, so a reader (or a
+// lockstep test) that ranges the same two vars sees exactly what NATS routes.
+var (
+	targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence, opResetBudget}
+	exactOps  = []string{opList}
+)
 
 // Service is the Weaver control-plane NATS responder. It wraps an
 // engineControl (in production, *weaver.Engine) and a CapabilityChecker.
@@ -187,11 +220,15 @@ func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
 		return fmt.Errorf("control: micro.AddService: %w", err)
 	}
 
-	if err := svc.AddEndpoint("weaver-control-"+opList,
-		micro.HandlerFunc(func(req micro.Request) { s.handleList(req) }),
-		micro.WithEndpointSubject(subjectPrefix+"."+opList)); err != nil {
-		_ = svc.Stop()
-		return fmt.Errorf("control: AddEndpoint %q: %w", opList, err)
+	for _, op := range exactOps {
+		op := op // capture for closure
+		subj := subjectPrefix + "." + op
+		if err := svc.AddEndpoint("weaver-control-"+op,
+			micro.HandlerFunc(func(req micro.Request) { s.exactEndpoint(op, req) }),
+			micro.WithEndpointSubject(subj)); err != nil {
+			_ = svc.Stop()
+			return fmt.Errorf("control: AddEndpoint %q on %q: %w", op, subj, err)
+		}
 	}
 
 	for _, op := range targetOps {
@@ -240,8 +277,22 @@ func (s *Service) handleList(req micro.Request) {
 	s.respondMicro(req, ControlResponse{Targets: targets})
 }
 
+// exactEndpoint is the entry point for every op registered on an exact
+// subject (exactOps) — the ops that name no target. It dispatches by op for
+// the same reason dispatchEndpoint does: registration ranges over a var, so
+// the handler is chosen from the op token rather than baked into one closure.
+func (s *Service) exactEndpoint(op string, req micro.Request) {
+	switch op {
+	case opList:
+		s.handleList(req)
+	default:
+		// Unreachable — exactOps gates the endpoint registration.
+		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})
+	}
+}
+
 // dispatchEndpoint is the entry point for the disable/enable/revoke/
-// resetConfidence endpoints. It extracts the target ID from the subject, authorizes the
+// resetConfidence/resetBudget endpoints. It extracts the target ID from the subject, authorizes the
 // operation, dispatches by op, and writes the JSON response.
 func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	subject := req.Subject()
@@ -290,6 +341,20 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 		}
 		s.respondMicro(req, ControlResponse{
 			ResetConfidence: &ResetConfidenceResult{WindowsDeleted: deleted}})
+	case opResetBudget:
+		var body ResetBudgetRequest
+		if err := json.Unmarshal(req.Data(), &body); err != nil {
+			s.respondMicro(req, ControlResponse{
+				Error: fmt.Sprintf("invalid %s request body: %v", opResetBudget, err)})
+			return
+		}
+		previous, err := s.engine.ResetRetryBudget(ctx, targetID, body.EntityID, body.GapColumn)
+		if err != nil {
+			s.respondMicro(req, ControlResponse{Error: err.Error()})
+			return
+		}
+		s.respondMicro(req, ControlResponse{
+			ResetBudget: &ResetBudgetResult{PreviousCount: previous}})
 	default:
 		// Unreachable — targetOps gates the endpoint registration.
 		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})
@@ -321,7 +386,8 @@ func ListSubject() string {
 }
 
 // TargetSubject returns the canonical request subject for the given target
-// ID + op (disable/enable/revoke). Exposed for tests and tooling.
+// ID + op (disable/enable/revoke/resetConfidence/resetBudget). Exposed for
+// tests and tooling.
 func TargetSubject(targetID, op string) string {
 	return subjectPrefix + "." + targetID + "." + op
 }

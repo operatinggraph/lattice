@@ -60,6 +60,9 @@ declares:
     - operationType: ctrl.weaver.resetConfidence
       scope: any
       grantsTo: [consoleOperator]
+    - operationType: ctrl.weaver.resetBudget
+      scope: any
+      grantsTo: [consoleOperator]
     - operationType: ctrl.loom.read
       scope: any
       grantsTo: [consoleOperator]

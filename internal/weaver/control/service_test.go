@@ -18,8 +18,9 @@ import (
 )
 
 // fakeEngine satisfies the unexported engineControl interface structurally —
-// it implements ListTargets/Disable/Enable/Revoke/ResetConfidence with the exact same
-// signatures as *weaver.Engine, so control.NewService accepts it. No real
+// it implements ListTargets/Disable/Enable/Revoke/ResetConfidence/
+// ResetRetryBudget with the exact same signatures as *weaver.Engine, so
+// control.NewService accepts it. No real
 // *weaver.Engine is needed for this package's tests (internal/weaver's own
 // tests cover the real engine wiring, per Task 3).
 type fakeEngine struct {
@@ -29,6 +30,11 @@ type fakeEngine struct {
 	errOn   map[string]error
 	// resetDeleted is the window count ResetConfidence reports on success.
 	resetDeleted int
+	// resetPrevious is the dispatch-count ResetRetryBudget reports on success,
+	// and resetBudgetArgs records the per-gap arguments it was called with —
+	// the two the subject cannot carry.
+	resetPrevious   int
+	resetBudgetArgs []string
 }
 
 func newFakeEngine(targets ...weaver.TargetSummary) *fakeEngine {
@@ -62,6 +68,26 @@ func (f *fakeEngine) ResetConfidence(_ context.Context, targetID string) (int, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.resetDeleted, nil
+}
+
+func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gapColumn string) (int, error) {
+	f.mu.Lock()
+	f.resetBudgetArgs = append(f.resetBudgetArgs, targetID+"/"+entityID+"/"+gapColumn)
+	f.mu.Unlock()
+	if err := f.record("resetBudget", targetID); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resetPrevious, nil
+}
+
+func (f *fakeEngine) budgetArgs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.resetBudgetArgs))
+	copy(out, f.resetBudgetArgs)
+	return out
 }
 
 func (f *fakeEngine) record(op, targetID string) error {
@@ -311,4 +337,77 @@ func TestControl_StartNATSListener_AlreadyStarted(t *testing.T) {
 	err := svc.StartNATSListener(ctx, nc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already started")
+}
+
+// TestControl_ResetBudget_CarriesThePerGapArgumentsInTheBody pins the one way
+// this op differs from every other per-target op: the control endpoints are
+// registered on a single-token wildcard (lattice.ctrl.weaver.*.<op>), so the
+// subject can carry the targetId and nothing else — but the retry budget is
+// per-(target, entity, gap). The entityId and gapColumn ride the request body,
+// and must arrive at the engine intact, or the verb would reset a different
+// gap than the operator named.
+func TestControl_ResetBudget_CarriesThePerGapArgumentsInTheBody(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine(weaver.TargetSummary{TargetID: "t1"})
+	eng.resetPrevious = 3
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	if err := svc.StartNATSListener(ctx, nc); err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+
+	const entityID = "entityAAAAAAAAAAAAAA"
+	body, err := json.Marshal(control.ResetBudgetRequest{EntityID: entityID, GapColumn: "missing_x"})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	msg, err := nc.Request(control.TargetSubject("t1", "resetBudget"), body, 2*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var resp control.ControlResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("unexpected error response: %s", resp.Error)
+	}
+	if resp.ResetBudget == nil || resp.ResetBudget.PreviousCount != 3 {
+		t.Fatalf("resetBudget result = %+v, want previousCount 3", resp.ResetBudget)
+	}
+	if got, want := eng.budgetArgs(), []string{"t1/" + entityID + "/missing_x"}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("engine received %v, want %v", got, want)
+	}
+}
+
+// TestControl_ResetBudget_RejectsAnUnreadableBody verifies a malformed request
+// fails with a structured error rather than resetting some zero-valued gap: an
+// empty entityId/gapColumn would otherwise reach the engine as a real request.
+func TestControl_ResetBudget_RejectsAnUnreadableBody(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine(weaver.TargetSummary{TargetID: "t1"})
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	if err := svc.StartNATSListener(ctx, nc); err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+
+	msg, err := nc.Request(control.TargetSubject("t1", "resetBudget"), []byte("{not json"), 2*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var resp control.ControlResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error == "" {
+		t.Fatal("a malformed resetBudget body must produce an error response")
+	}
+	if len(eng.budgetArgs()) != 0 {
+		t.Fatalf("the engine must not be called for a malformed body, got %v", eng.budgetArgs())
+	}
 }

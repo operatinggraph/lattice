@@ -9,6 +9,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
 	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TargetSummary is the operator-facing snapshot of one registered target
@@ -254,9 +255,11 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 
 // ResetConfidence deletes every `<targetId>.__effect.<gapColumn>.<actionRef>`
 // confidence window registered under targetID and returns how many were
-// removed. It is the middle rung of the operator-severity ladder — `disable`
-// pauses and deletes nothing, `resetConfidence` deletes advisory confidence
-// only, `revoke` deletes everything under the target prefix and disables.
+// removed. It sits on the operator-severity ladder between the verbs that
+// touch no data and the one that deletes everything: `disable` pauses and
+// deletes nothing, `resetBudget` rewrites one gap's retry budget,
+// `resetConfidence` deletes this target's advisory confidence windows, and
+// `revoke` deletes everything under the target prefix and disables.
 //
 // Only `__effect` keys are touched: in-flight marks, `…__count` retry budgets,
 // and the `<targetId>.__control` marker all survive, and so do every other
@@ -290,6 +293,73 @@ func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, err
 	}
 	e.logger.Info("weaver: target confidence reset", "targetId", targetID, "windowsDeleted", deleted)
 	return deleted, nil
+}
+
+// ResetRetryBudget re-arms ONE gap's §E retry budget — the un-park verb. It
+// writes the (target, entity, gap) dispatch-count back to 0 and returns the
+// value it replaced; the caller reports that, so an operator sees what the park
+// had actually spent.
+//
+// The verb states intent and stops there: it does not clear the gap's standing
+// GapBudgetExhausted issue and does not dispatch anything. The next reconciler
+// pass (≤ 1 min) does both, because a gap with a fresh budget is a gap the
+// count leg finds violating, open, unsuppressed and markless — its re-arm arm
+// dispatches, and planGap's own "a plan about to fire disproves the park" clear
+// retires the issue. One deterministic key, one writer, one path.
+//
+// Scope is one gap, never a target: the count is per-(target, entity, gap) and
+// the issue latch is keyed the same way, so a target-wide reset would re-arm
+// parks nobody looked at.
+//
+// Errors, each of which means nothing was written:
+//   - the target is not registered (mirrors ResetConfidence — a budget whose
+//     target is gone is the sweep's orphan problem, not an operator's, and the
+//     count leg's registry gate would refuse to act on it anyway);
+//   - the arguments are not the §10.2/§10.3 key shapes (a malformed argument
+//     must never reach the keyspace splitCountKey later reads);
+//   - there is no budget at this gap — a count key exists only where a chain
+//     has actually dispatched, so this is the honest answer to a typo'd
+//     entityId rather than a silent success;
+//   - the count changed between the read and the write (a dispatch landed
+//     first): the value the operator decided on is gone, so the write is
+//     refused rather than clobbering a fresh attempt back to 0 and handing a
+//     moving chain a second full budget. Re-running re-reads and re-decides.
+func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (previous int, err error) {
+	if !singleTokenPattern.MatchString(targetID) {
+		return 0, fmt.Errorf("weaver: targetId %q must be a single token matching %s", targetID, singleTokenPattern.String())
+	}
+	if !substrate.IsValidNanoID(entityID) {
+		return 0, fmt.Errorf("weaver: entityId %q must be a %d-character NanoID", entityID, substrate.NanoIDLength)
+	}
+	if !strings.HasPrefix(gapColumn, gapColumnPrefix) || !singleTokenPattern.MatchString(gapColumn) {
+		return 0, fmt.Errorf("weaver: gapColumn %q must be a single-token %s* column", gapColumn, gapColumnPrefix)
+	}
+	if _, ok := e.source.target(targetID); !ok {
+		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
+	}
+	previous, revision, found, err := e.marks.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
+	if err != nil {
+		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
+	}
+	if !found {
+		// Nothing is written for a gap that has no budget: a count key exists
+		// only where a chain has actually dispatched, so creating one would
+		// invent a park to un-park — and on a mistyped entityId it would hand
+		// the sweep's re-arm arm a gap nobody chose.
+		return 0, fmt.Errorf("weaver: no retry budget for target %q entity %q gap %q (nothing has dispatched it)",
+			targetID, entityID, gapColumn)
+	}
+	conflict, err := e.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn, revision)
+	if err != nil {
+		return 0, fmt.Errorf("weaver: reset retry budget %s.%s.%s: %w", targetID, entityID, gapColumn, err)
+	}
+	if conflict {
+		return previous, fmt.Errorf("weaver: retry budget for target %q entity %q gap %q changed during the reset; re-run to reset the current value",
+			targetID, entityID, gapColumn)
+	}
+	e.logger.Info("weaver: retry budget reset",
+		"targetId", targetID, "entityId", entityID, "gap", gapColumn, "previousCount", previous)
+	return previous, nil
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the

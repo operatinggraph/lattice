@@ -49,6 +49,9 @@ declares:
     - operationType: ctrl.weaver.resetConfidence
       scope: any
       grantsTo: [control-operator]
+    - operationType: ctrl.weaver.resetBudget
+      scope: any
+      grantsTo: [control-operator]
     - operationType: ctrl.loom.read
       scope: any
       grantsTo: [control-operator]

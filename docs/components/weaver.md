@@ -715,10 +715,11 @@ Services responder (`internal/weaver/control`), mirroring Refractor's control pl
 | `lattice.ctrl.weaver.<targetId>.enable` | `enable` — resume dispatch for `<targetId>` |
 | `lattice.ctrl.weaver.<targetId>.revoke` | `revoke` — immediate cleanup + disable for `<targetId>` |
 | `lattice.ctrl.weaver.<targetId>.resetConfidence` | `resetConfidence` — drain `<targetId>`'s `__effect` confidence windows; returns `windowsDeleted` |
+| `lattice.ctrl.weaver.<targetId>.resetBudget` | `resetBudget` — re-arm ONE gap's §10.8 retry budget; `entityId` + `gapColumn` ride the request **body** (the subject carries only `targetId`); returns `previousCount` |
 
-The three mutating verbs form one operator-severity ladder: `disable` (pause, delete nothing) ·
-`resetConfidence` (delete advisory confidence only) · `revoke` (delete everything under the target
-prefix + disable).
+The mutating verbs form one operator-severity ladder: `disable` (pause, delete nothing) ·
+`resetBudget` (re-arm one gap's retry budget) · `resetConfidence` (delete advisory confidence
+only) · `revoke` (delete everything under the target prefix + disable).
 
 `TargetSummary.state` is a 2-value enum — there is no durable "revoked" state; `revoke` is a
 strict superset of `disable` (see below) and reports `"disabled"`.
@@ -803,6 +804,41 @@ prevent the target from being re-installed via a fresh `meta.weaverTarget` verte
 not retire the target's underlying Lens. Fully decommissioning a target requires also retiring
 its Lens (out of this story's scope — an op-path/Refractor concern).
 
+### `resetBudget`
+
+`resetBudget <targetId> <entityId> <gapColumn>` re-arms one gap's §10.8 retry budget: it writes that
+gap's `<targetId>.<entityId>.<gapColumn>.__count` dispatch-count back to **0** and returns the count
+it replaced. Scope is one gap, never a target — the budget is per-`(target, entity, gap)` and so is
+the `GapBudgetExhausted` latch, so a target-wide reset would re-arm parks nobody looked at.
+
+Why it exists: a gap whose budget is spent stops dispatching and holds a standing
+`GapBudgetExhausted` issue (§10.8's "loud stop, never a silent park"). That state is correct and
+**terminal** — the count clears only on gap-close, gap-close needs a remediation dispatch, and
+dispatch is what the budget suppresses. Once the operator has fixed whatever the retries were
+failing against, this is the only thing that lets the gap try again without re-authoring
+`maxretries_<g>` in the package.
+
+**It writes 0; it does not delete the key**, and that is load-bearing rather than incidental. The
+reconciler's count leg is *count-anchored* — it enumerates `…__count` keys — so a gap whose count
+key is gone is a gap that leg cannot see. Deleting would leave the gap with no count, no mark and no
+CDC delivery coming: un-suppressed and still un-dispatched, a quieter park than the one being ended.
+A `0` is indistinguishable from an absent key to every reader, so the budget is genuinely fresh,
+while the key survives for the next pass to find.
+
+The verb states intent and stops there: it does not clear the issue, does not dispatch, and does not
+check that anything will. The next sweep pass (≤ 1 min) decides that — it dispatches the gap through
+the count leg's re-arm arm **if the gap is still dispatchable** (still violating, open, unsuppressed
+and markless, on a registered, enabled target), and that dispatch is what retires the issue
+(`planGap` clears the latch on a plan about to fire) and what the `sweepReArms` heartbeat counter
+records. A successful reset therefore means the budget is re-armed, never that the gap has tried
+again. One deterministic key, one writer, one path.
+
+It refuses — writing nothing — when the target is not registered, when the arguments are not the
+§10.2/§10.3 key shapes, when **no budget exists at that gap** (a count key exists only where a chain
+has actually dispatched, so inventing one would hand the sweep a gap nobody chose — this is the
+honest answer to a mistyped `entityId`), and when a dispatch bumped the count between the read and
+the write (the operator's intent is stale; re-running is the remedy).
+
 ### `resetConfidence`
 
 `resetConfidence <targetId>` deletes every `<targetId>.__effect.<gapColumn>.<actionRef>` confidence
@@ -846,9 +882,9 @@ it reuses.
 | Path | Role |
 |------|------|
 | `internal/weaver/` | Engine: Sensorium, 3-lane work stream, Evaluator tiers, Strategist dispatcher, Actuator |
-| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke`/`resetConfidence` NATS Services responder |
+| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` NATS Services responder |
 | `cmd/weaver/` | Binary entry point (extractable; shares only `substrate/*`) — starts the control-plane listener alongside the engine |
-| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke\|reset-confidence` CLI command group |
+| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke\|reset-confidence\|reset-budget` CLI command group |
 
 **Package data:** target Lens cypher, playbook definitions, gap→action mappings (`lease-signing`).
 
@@ -864,7 +900,7 @@ it reuses.
 | Out | ops via `core-operations` (`ops.<lane>`) | fire-and-forget; OCC `expectedRevision` payload; trigger-Loom |
 | Out | `@at` schedules via `core-schedules` (`schedule.weaver.timer.<targetId>.<entityId>`) | lane 3 scheduling leg; replace-on-reschedule (one schedule per subject) |
 | Out (own) | `weaver-state` bucket | in-flight convergence marks (anti-storm); per-key TTL backstop (2× lease) + reconciler sweep |
-| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke`/`resetConfidence` — see "Control plane" below |
+| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` — see "Control plane" below |
 
 ---
 
@@ -900,9 +936,9 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Reconciler sweep** | ✅ Shipped (`internal/weaver/reconciler.go`; cadence: `internal/weaver/sweep_schedule.go`): one pass per fired occurrence of a **durable `@every` schedule** on `core-schedules` (`schedule.weaver.sweep` → `schedule.weaver.sweep.fired`, the fixed `weaver-sweep` durable, `MaxAckPending: 1`; armed idempotently on every start via `substrate.ScheduleEvery`, 1s floor, plus a warm pass at start — the cadence survives restart, is operator-visible in the stream, and fires once across replicas; default 1m, clamped ≤ the lease so expiry is always observed before the TTL backstop; lease default 30m, both `Config`-tunable) over every mark — prompt level-clearing of closed gaps, orphan reclaim (target removed, column dropped from row + playbook), corrupt-mark delete+alert (the issue retires once the key stays gone), and **expired-lease reclaim as a fresh episode**: a revision-conditioned **in-place replace** of the mark (fresh lease, re-armed TTL → new revision → new `requestId`), so the key is never absent across a reclaim and only **violating** rows re-dispatch (mirroring lane-1's L1 gate). A re-fired reclaim cannot duplicate a **human** artifact: for those gaps the mark's per-open-episode `claimId` is preserved across every reclaim (§10.3), so the re-dispatch names the **same** Loom instance / task and the consumer collapses the repeat. Because that repeat is therefore pure waste (a no-op commit + a fresh Contract #4 tracker every sweep) for an episode held open for days, repeat reclaims of those **collapse-only** actions are **paced by an exponential backoff** keyed on the mark's own `claimedAt` + dispatch-count (`backoffInterval`: first reclaim at lease-expiry, then ≈ lease → 2× → 4× …, capped at the 24h tracker horizon) — surfaced via the `sweepReclaimsSuppressed` heartbeat metric. **Which gaps those are is decided by the dispatch's shape, not by its action name**: `assignTask` always, and `triggerLoom` only when its pattern parks on a human. A `triggerLoom` whose pattern's every step is `systemOp`/`externalTask` (lease-signing's `backgroundCheck`/`collectPayment`) is an EXTERNAL gap exactly like `directOp` — its reclaim is the **intended bounded retry** (governed by `inflight_<g>`/`maxretries_<g>`), so it mints a **fresh `claimId`, and therefore a genuinely new Loom instance and a new vendor call**, and is **never** backed off. That is what makes a timed-out external call retry at all. The classifier reads the indexed pattern spec from the registry (`internal/weaver/registry.go`) and fails safe: a pattern whose spec has not replayed yet, or whose step list this build cannot fully account for, counts as parking. §10.3 also requires a gap declaring `inflight_<g>` to declare `maxretries_<g>` — install-gated for the actions classifiable from the playbook alone (see *Dispatch suppression*); a gap that reaches the sweep declaring the marker with no usable cap falls back to the backoff pacing rather than running unbounded **and** unpaced. All sweep deletes are revision-conditioned; both orphan legs are gated for a warm-up window after start (`SweepOrphanWarmup`, default 5m — a registry-replay-readiness proxy). |
 | **Actuator** | ✅ Shipped as **fire-and-forget publish** to `ops.<lane>` with a deterministic per-dispatch-episode `requestId` (derived from the mark's current revision — its CAS-create, or the sweep's reclaim replace; Contract #4 collapses re-fires). **No request-reply, no command outbox** — Weaver has no cursor advance to dual-write; recovery is the mark + level-reconcile + lease: a rejected/lost op leaves the mark in place and the sweep re-attempts it at lease expiry. The op payload carries the row's `expectedRevision` (the OCC revision-condition); `triggerLoom` resolves the live `meta.loomPattern` vertex for `authContext.target` (pattern-as-target). |
 | **Actions** | `triggerLoom` (→ `StartLoomPattern` op, never a Go call), `assignTask` (→ `CreateTask` with episode-deterministic `taskId`), `directOp` ✅. External idempotent I/O is `triggerLoom` of a Loom `externalTask` pattern — the **bridge** executes the call (`docs/components/bridge.md`); Weaver never holds an adapter. `proposedOp` ✅ (the Augur's Fire 2b "Augur dispatch") sources its op + params from the ROW — not playbook config — for the primordial `augurDispatch` target only: it materialises an approved proposal's `proposedAction`/`proposedParams` after a dispatch-time re-validation (action vocabulary + default-deny scope to the TRUSTED candidate + live-registry resolution), fires it under a **proposal-scoped deterministic `requestId`** (collapse-only under a sweep reclaim, unlike every other action's episode-scoped id), then submits `RecordProposalDispatch` as a same-dispatch follow-up (a failed follow-up publish self-heals on the next sweep, never Naks the episode). `surface` ✅ (FR29 — `orchestration-base`'s `unroutedTasks` target) dispatches **no op and creates no mark**: while the gap column stays true it raises a named `IssueCode`/`IssueSeverity` Health-KV issue (default severity `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column (`clearClosedMarks` special-cases it — a surface gap never had a mark to clean up). Manual-intervention-only; unlike every other action it never touches `ops.<lane>`. An action the playbook names outside this set fails closed (a loud `PlaybookConfigError` Health issue), never a silent skip. |
-| **Health** | ✅ Contract #5 heartbeat at `health.weaver.<instance>` (metrics: `consumers`, `targets`, `marksInFlight`, `sweepReclaims`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepLastRunAt`, `timersScheduled`, `timersFired`) + per-consumer pause-state docs at `health.weaver.consumer-state.<name>` (consumer-scoped, not instance-scoped — survives a restart under a new instance); config/data errors surface as issues. |
+| **Health** | ✅ Contract #5 heartbeat at `health.weaver.<instance>` (metrics: `consumers`, `targets`, `marksInFlight`, `sweepReclaims`, `sweepReclaimsSuppressed`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepReArms`, `sweepLastRunAt`, `timersScheduled`, `timersFired`) + per-consumer pause-state docs at `health.weaver.consumer-state.<name>` (consumer-scoped, not instance-scoped — survives a restart under a new instance); config/data errors surface as issues. |
 | **Lane 3 (temporal)** | ✅ Shipped (Contract #10 §10.4). One **fixed supervised durable** `weaver-temporal` on `core-schedules` filtered `schedule.weaver.timer.fired.>`; the lane-1 row handler's **scheduling leg** re-arms `@at(freshUntil)` per delivery (level-driven, replace-on-reschedule); the fired→op conversion submits `MarkExpired` under the **deterministic timer `requestId`** (schedule subject + fire instant) with **no weaver-state mark**. See "Temporal lane" above for the convention column and the accepted Phase 2 bounds. |
-| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke`/`resetConfidence` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
+| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
 | **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fire 5 ✅: `mode:"planned"` candidate selection actually dispatches (see above) — the first fire that changes a real decision; mark-pinned across reclaim, byte-identical for every other mode/explicit-action gap. Fire 6 Increments 1–3 ✅: the runtime op-effects catalog, the goal-regression State-schema (row↔aspect) bridge, and the per-gap `actions` planning-catalog parse/install-validation (see above) — all zero dispatch-decision change. Fire 6 R1 ✅: `resolveGoalAction`'s dispatch wiring — `planner.Synthesize` over a gap's `actions` catalog, per-leg dispatch + pin, and `releaseCompletedLeg`'s effects-hold leg-advance (see "Goal-regression dispatch + per-leg pin/release" above) — the first fire a `goal` gap actually dispatches. Fire 6 R1 pkgmgr ✅: `pkgmgr` authoring fields for `mode`/`goal`/`goalColumns`/`actions` (see "pkgmgr authoring" above) — a package now authors a goal-mode target directly; `Candidates` (Fire 5) authoring remains a separate, unbuilt pkgmgr surface. Fire 7 ✅: the contraction monitor + oscillation detector (see above) — heartbeat-surfaced diagnostics only, zero dispatch-decision change (a goal leg's own ref→effects oscillation bridge is unwired follow-up polish). Fire 8 ✅: admission control (dispatch-pacing token bucket + §10.2 `priority` column). Fire 9 (Augur floor) remains: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
@@ -926,7 +962,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `assignTask` are how a gap dispatches, not what it concludes on; an `externalTask`-bodied `triggerLoom`
   concludes on a vendor outcome exactly like a `directOp`. Minted: `staleMark` classified external-vs-userTask
   by action name, so lease-signing's `missing_bgcheck`/`missing_payment` never retried after a timeout and
-  raised a standing `error` for a correctly-authored package. Check: `TestStaleMark_ExternalDispatchClassifier`.
+  raised a standing `error` for a correctly-authored package. **A NEW dispatch seam inherits that
+  classifier and the pacing built on it, not just the gates above it** — a mark's ABSENCE is not evidence
+  the episode concluded (a userTask outlives its mark by orders of magnitude), which is why the reclaim
+  preserves `claimId`, backs off, and widens the mark TTL; a seam that fires without those mints a
+  duplicate task, and it cannot fix that by preserving the `claimId` because the `claimId` lives on the
+  mark that is gone. Minted 2026-08-25: the count leg's re-arm dispatched collapse-only gaps. Check: for
+  every new seam that fires an episode, name the classifier it calls and the pacing rule it inherits — if
+  a sibling seam guards the same state with a predicate this one skips, prove the skip.
 - **Classify by whitelist, not blacklist, when the vocabulary can grow** — "has a userTask step ⇒ parks" reads
   a *parse* miss (zero steps, a drifted envelope, a renamed field, a future fourth step kind) as a confident
   "no", landing on the unsafe side silently. "Every step is a known non-parking kind" fails safe by
