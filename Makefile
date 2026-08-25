@@ -625,13 +625,16 @@ verify-package-lease-signing:
 	@echo "==> Running lease-signing package assertions..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-lease-signing.go
 
-## verify-permission-provenance — Reconcile the live vtx.permission.* population
-## against what installed manifests declare. Cross-package, so run it AFTER the
-## per-package verify targets: it fails on a package-origin permission no
-## manifest declares, a declared permission with no live vertex, and an absent
-## primordial permission. Runtime-origin grants are reported, never failed.
+## verify-permission-provenance — Reconcile two live populations against what
+## installed manifests declare: the vtx.permission.* permission vertices, and
+## the lnk.permission.*.grantedBy.role.* grant edges that actually confer them
+## (authorization travels the edge, not the vertex). Cross-package, so run it
+## AFTER the per-package verify targets: it fails on a package-origin
+## permission/edge no manifest declares, a declared permission/edge with
+## nothing live at it, and an absent primordial permission or kernel grant
+## edge. Runtime-origin grants are reported, never failed, on either plane.
 verify-permission-provenance:
-	@echo "==> Reconciling live permission vertices against installed manifests..."
+	@echo "==> Reconciling live permission vertices and grant edges against installed manifests..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-permission-provenance.go
 
 ## install-ai — Install the opt-in AI-native-loop packages onto a running full

@@ -309,7 +309,7 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-      - name: Reconcile live permission vertices against installed manifests
+      - name: Reconcile live permission vertices and grant edges against installed manifests
         # Cross-package, so it runs after every per-package verify — but no
         # per-package verify can see an extra belonging to a package it does
         # not check, or an unattributed one (each does assert its own
@@ -318,11 +318,16 @@ jobs:
         # CreatePermission (origin: runtime, a notice here) and never
         # tombstones one or uninstalls a package, so this position covers
         # strictly more committed state at no added false-positive risk, and
-        # exercises the runtime-notice path in CI itself. Fails on a
-        # package-origin permission no manifest declares, a body whose key it
-        # does not derive, a declared key with nothing live at it, an absent
-        # primordial permission, or a vtx.permission.* root this pass could
-        # not even read.
+        # exercises the runtime-notice path in CI itself. Reconciles both the
+        # vtx.permission.* vertices and the lnk.permission.*.grantedBy.role.*
+        # edges that actually confer them, plus a registry-anchor pass on each
+        # plane against the compiled Go Definition. Fails on a package-origin
+        # permission/edge no manifest declares, a body whose key it does not
+        # derive, an edge granting a permission its declaring package does not
+        # itself declare, a declared key with nothing live at it, an absent
+        # primordial permission or kernel grant edge, or a
+        # vtx.permission.*/lnk.permission.*.grantedBy.role.* root this pass
+        # could not even read.
         run: make verify-permission-provenance
 
       - name: Run Health KV completeness gate (Phase 1 Gate 5)
