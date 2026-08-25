@@ -99,11 +99,14 @@ split, level reconcile against the current row, revision-conditioned delete).
 | # | condition | action | why |
 |---|---|---|---|
 | 1 | key does not split into `<t>.<e>.<g>.__count` | `deleteCorrupt` + `CorruptMark` alert | weaver-state is weaver-private; garbage otherwise lives forever (`sweepMark` arm (a)) |
+| 1b | count **value** does not unmarshal | `deleteCorrupt` + `CorruptMark` alert | both sibling legs delete a corrupt value; this leg must too, and here it is not cosmetic. A garbled body makes `getDispatchCount` error, `gapSuppressed` read its safe (dispatchable) side, and `incrementDispatchCount`'s read-modify-write fail the same way — so the budget can never accumulate and a `directOp` gap retries unbounded, which is the exact outcome `defaultDirectOpRetryBudget` exists to prevent. Deleting re-arms the budget from 0, which is what the garbled body already yields, but leaves a key that can accumulate again |
 | 2 | mark key `<t>.<e>.<g>` present in **this pass's** `listed` set | return | the mark leg owns this gap; never escalate twice in one pass. Uses the set `pass()` already builds (`reconciler.go:159`) — no extra KV read |
 | 3 | target not registered | **return — never delete** | an unreplayed target is replay lag, not absence; deleting the budget here would re-arm every parked gap on every restart. (Dossier: *"an `error`-severity Health issue must not fire on a self-healing condition"* — the same trap, one severity down) |
 | 4 | target disabled (`__control`) | return | mirrors `sweepMark` arm (d) and lane-1's Ack-skip: an operator freeze stops dispatch, and escalation is dispatch |
 | 5 | row read → `ErrKeyNotFound` | delete count (rev-conditioned) + clear `issueKeyGapEntity` | the entity is gone. This is the orphan GC `state.go:64` says the TTL exists for, done promptly and properly |
+| 5b | row read fails for any reason other than `ErrKeyNotFound` | Warn + return | a transient KV error is not evidence the entity is gone; mirrors `sweepMark`'s read-failure posture |
 | 6 | row value unparseable | return | never act on unreadable evidence (`sweepMark`'s posture, `reconciler.go:270`) |
+| 6b | row carries no `entityKey` | return | `escalateExhaustedGap`'s augur arm feeds `entityKey` to `planGap`; the mark leg reaches that call only past the reclaim's non-empty guard, and this leg has no mark to have been guarded. Lane 1 raises `RowDataError` and declines to dispatch a violating row with no `entityKey` (`evaluator.go:87`), so this leg must not dispatch one either — never act on incomplete evidence |
 | 7 | `missing_<g>` not true | delete count + clear issue | the gap closed without a mark to carry the level reconcile |
 | 8 | row not `violating` | return | mirrors lane-1's L1 gate and `sweepMark`'s violating gate (`reconciler.go:481`) |
 | 9 | `gapSuppressed` → `exhausted` | `escalateExhaustedGap` | **the fix.** Same site the mark leg calls (`reconciler.go:508`), now reachable from state that outlives the mark |
@@ -128,6 +131,35 @@ only through a mark or a delivery; after this fire the count leg reaches every o
   adds no new per-entity family. It does raise the *population* of an existing family: entities whose
   rows have gone quiet can now hold a standing issue where before they silently held none. That is the
   point of the fire, and it is bounded by the number of parked gaps.
+
+### 3.2 Two decisions the arm table does not otherwise state
+
+**The `action` argument to `gapSuppressed` (arms 9/10) is `target.Gaps[gapColumn]`'s zero value when the
+playbook no longer names the column.** The mark leg reaches `gapSuppressed` past a checked lookup its
+orphan-column arm guarantees; this leg has no orphan-column arm and gains none. `action` is consulted
+only to decide the cap *fallback* (`evaluator.go:1027`), so the consequence is bounded and correct: a
+gap the playbook has dropped loses the `directOp` engine-default budget, while a row-declared
+`maxretries_<g>` still caps it and still escalates. An orphan column is a playbook-shaped condition,
+already surfaced by its own config-keyed issue; it is not this leg's to re-diagnose.
+
+**A duplicate augur escalation is not observable on the ops stream, by design.**
+`escalateExhaustedGap`'s live-mark guard (`evaluator.go:1131`) makes the second call in a window find
+the first's fresh mark and Ack — load-bearing anti-storm behaviour, not a defect. It means arm 2's
+"exactly one escalation per pass" claim must be observed on the alert/log surface rather than by
+counting dispatched ops. Any future test of that claim inherits the same constraint.
+
+### 3.3 Comments this leg falsifies, corrected with it
+
+Routing `…__count` to a real leg makes four standing comments untrue. Each is corrected in the same
+increment — an unamended comment is a wrong instruction to the next reader:
+
+- `pass()`'s `…__count` skip rationale (*"The sweep never enumerates, reclaims, or deletes either"*).
+- `sweeper.pass()`'s own doc (*"pass sweeps every current mark"*) — a four-leg loop.
+- the `sweeper` struct doc (*"the bucket holds ONLY marks, bounded by the in-flight count"*) — false
+  for `__count`, `__control` and `__effect`, and false before this fire too.
+- `countInFlight`'s parenthetical claiming the sweep applies "the same guard" to counts.
+- `deleteByTargetPrefix` and `Engine.Revoke` (`control.go:182`) each enumerate the reserved shapes their
+  prefix delete removes and each omits `…__count`, which shares the `<targetId>.` prefix and is deleted.
 
 ## 4. The re-arm (arm 11), and why the verb needs it
 
