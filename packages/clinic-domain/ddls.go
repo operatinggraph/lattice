@@ -3010,7 +3010,13 @@ def execute(state, op):
         if provider == None or patient == None:
             fail("MissingBinding: appointment " + appt_key + " has no bound provider/patient; cannot auto no-show")
 
-        status_data = {"value": "noShow", "note": "Auto no-show: appointment ended without a status update", "noShowFeeCents": 2500}
+        # No noShowFeeCents here, deliberately: the automated sweep marks a
+        # documentation lapse, not a missed visit (PO ruling,
+        # verticals.md), so only a staff-observed SetAppointmentStatus(noShow)
+        # bills. clinicNoShowSettlement's gaps both require feeCents > 0, so a
+        # None value here simply never converges a charge — no downstream
+        # change needed.
+        status_data = {"value": "noShow", "note": "Auto no-show: appointment ended without a status update"}
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
         # read-posture: (a) declared in contextHint.reads — same key SetAppointmentStatus's
         # terminal branch reads, always needed here (MarkPastDueNoShow is always terminal).
