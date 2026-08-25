@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -2390,4 +2391,97 @@ func TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily(t *testing.T) {
 	if is, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, col)); ok {
 		t.Fatalf("a gap column that parses retires its own data error, still standing as %+v", is)
 	}
+}
+
+// TestPlanGap_FailureArmsAreLogPaced pins the wiring of planGap's failure switch
+// to the paced seam, arm by arm. Each of these faults is re-derived on a
+// CADENCE, not on an event: for a parked gap the switch runs once per sweep
+// pass — from reclaim, the count leg's re-arm, the goal leg-advance and
+// escalateExhaustedGap — for the dispatch-count TTL's whole life, which is some
+// 7,680 identical records per parked (target, entity, gap). The arrival stays at
+// the arm's own loud level; the pass right behind it is Debug, so the record
+// still exists and the stream is still readable.
+func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// deliver drives the same unrepaired row twice and returns the levels of the
+	// records naming sub, in emission order.
+	deliver := func(t *testing.T, h *handlerHarness, targetID, entityID string, row map[string]any,
+		want substrate.Decision, sub string) []slog.Level {
+		t.Helper()
+		logs := &logCapture{}
+		h.engine.logger = slog.New(logs)
+		for i, seq := range []uint64{1, 2} {
+			if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, seq, 1)); dec != want {
+				t.Fatalf("delivery %d = %v, want %v", i+1, dec, want)
+			}
+		}
+		return logs.levelsContaining(sub)
+	}
+
+	t.Run("errTransient: an unresolved reference", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedTransient"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				"missing_y": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"},
+			},
+		})
+		entityID := testNanoID(t)
+		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_y": true}
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithDelay, "gap missing_y dispatch deferred")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]: the arrival is loud, the re-derivation behind it is damped", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_y")); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+
+	t.Run("errConfig: an un-dispatchable action", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedConfig"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			// A candidates-only gap on a non-planned target: the unknown-action
+			// dead-end, which is the errConfig arm.
+			Gaps: map[string]GapAction{
+				"missing_z": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "SendReminder"}}},
+			},
+		})
+		entityID := testNanoID(t)
+		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_z": true}
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap missing_z:")
+		if len(levels) != 2 || levels[0] != slog.LevelError || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Error Debug]: an `error` raise keeps its own loud level", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+
+	t.Run("errData: a template reference that resolves null", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedTemplateGap"
+		entityID, row := seedTemplateFaultTarget(t, h, targetID)
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap "+templateFaultGap+":")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, templateFaultGap)); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
 }

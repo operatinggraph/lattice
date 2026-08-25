@@ -552,6 +552,14 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			return pl, actionRef, substrate.Ack
 		}
 	}
+	// Every arm below is re-derived on a CADENCE, not on an event: for a parked
+	// gap this switch runs once per sweep pass — from reclaim, the count leg's
+	// re-arm, the goal leg-advance and escalateExhaustedGap — for the whole life
+	// of the dispatch-count TTL. All three therefore log through alertPaced,
+	// which keeps the Health latch set on every pass and rations the loud
+	// records to one an hour per key. None of these faults is event-shaped: each
+	// message is a pure function of its key and the current failure, so nothing
+	// unique is lost to a damped pass.
 	switch perr.kind {
 	case errTransient:
 		// An unresolved reference may be replay lag or a permanent config
@@ -559,18 +567,15 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// bounded redelivery cadence (never a hot loop) and surface to
 		// Health until it resolves; the issue clears on the first
 		// successful plan.
-		e.logger.Warn("weaver: gap dispatch deferred; nak with delay for redelivery",
-			"targetId", targetID, "entityId", entityID, "gap", col, "reason", perr.msg)
-		e.issues.set(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
-			"target "+targetID+" gap "+col+": "+perr.msg)
+		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
+			"target "+targetID+" gap "+col+" dispatch deferred for redelivery: "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
-		msg := "target " + targetID + " entity " + entityID + " gap " + col + ": " + perr.msg
-		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError", msg)
+		e.alertPaced(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError",
+			"target "+targetID+" entity "+entityID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.Ack
 	default:
-		e.alert(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
+		e.alertPaced(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.Ack
 	}
@@ -1398,6 +1403,45 @@ func (e *Engine) alertStanding(key, severity, code, message string) {
 		e.logger.Debug("weaver: " + message)
 	} else {
 		e.logger.Error("weaver: " + message)
+	}
+	e.issues.set(key, severity, code, message)
+}
+
+// alertPaced records a Health KV issue exactly as alert does, but rations its
+// LOUD log records to one per logPaceInterval per key — logging the rest at
+// Debug — and it rations them against a CLOCK rather than against the latch.
+// That is the whole difference from alertStanding, and it is what planGap's
+// failure switch needs. planGap re-derives its faults once per sweep pass for a
+// parked gap, and the keys it raises at are cleared by paths that are not
+// evidence the fault ended: issueKeyGapConfig is target-scoped, so one entity's
+// column closing retires the fact another entity's parked gap is still raising.
+// An arrival test built on latch presence therefore reports an arrival on
+// essentially every pass, which is no damping at all. A clock survives the
+// clear, so the pacing holds.
+//
+// The loud level is the caller's own severity — an `error` raise stays Error, a
+// `warning` raise stays Warn — so each arm of the switch keeps the loudness it
+// had; unlike alert, which is Error for every caller.
+//
+// The Health entry is set on EVERY call, carrying the newest message: latch
+// semantics are untouched, and only the log is paced. The consequence is that a
+// family varying its message at one key has the variants inside a window damped
+// to Debug, where only the newest survives in the latch. That is the accepted
+// trade for this seam alone: never drop a record entirely (an unrecoverable
+// record is the regression that reverted the previous attempt at this —
+// weaver-exhausted-gap-durable-stop-design.md §3.2b), and never damp on
+// Message, since an embedded count or timestamp would re-arrive every pass and
+// restore the flood. A change of severity or code is a different fact and is
+// loud immediately, whatever the window says.
+func (e *Engine) alertPaced(key, severity, code, message string) {
+	loud := e.issues.shouldLogPaced(key, severity, code, time.Now())
+	switch {
+	case !loud:
+		e.logger.Debug("weaver: " + message)
+	case severity == "error":
+		e.logger.Error("weaver: " + message)
+	default:
+		e.logger.Warn("weaver: " + message)
 	}
 	e.issues.set(key, severity, code, message)
 }
