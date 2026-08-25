@@ -186,3 +186,22 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   only by cold review (2026-08-23). Check: for each shared helper name the question each caller asks and
   split them if the answers differ; for each boundary computed in two places, delete one and make the other
   the single source.
+- **A provenance stamp the audited party writes is a label, not evidence — so the classes keyed on it must
+  not be where the semantic check lives** — the grant-edge reconciler classified `origin` into five classes
+  and ran its derivation check ("an edge may only grant a permission its declaring package owns") in the
+  `package` arm alone. `origin` is client-supplied at every authoring channel, so a forger picks their own
+  class: stamping `{"origin":"runtime"}` landed a live edge conferring the kernel's `InstallPackage`
+  permission on an arbitrary role in an inventory NOTICE, invisible to the gate. The design had reasoned
+  that omitting the field was the cheapest laundering; adding one was cheaper. Minted: grant-edge
+  provenance, cold security review (2026-08-25). Check: for every class a self-asserted field selects, ask
+  what is still verified when the attacker picks that class — and anchor at least one predicate on something
+  the writer does not control (here: a kernel permission has exactly one legitimate grant edge, so any other
+  edge onto it is drift whatever it claims).
+- **A reconciler reading its two sides at different moments reports a state that never existed** — the
+  permission gate takes six sequential unfenced reads; a package uninstall commits the manifest tombstone and
+  the declared-key tombstones atomically, but a read landing between them sees live package-origin edges and
+  an already-uninstalled package, and reports one forgery-shaped drift finding per edge. The remedy it prints
+  describes an attack; the cause is a concurrent install. Minted: grant-edge provenance, cold correctness
+  review (2026-08-25). Check: a gate that FAILS CI on a multi-read comparison must either fence the reads,
+  intersect two passes, or state its quiescence precondition where the operator reading a red gate sees it —
+  a false positive in a gate is a defect, not noise.
