@@ -550,3 +550,5 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-07 · `df369e13` · [privacy-base] erasure Fire B inc 4 — PurgeIdentityDedupFootprint, the dedup-plane sweep
 - 2026-08-15 · `965a8415` · [Processor] `data.protected`/`data.sensitive` fail-opens CLOSED — mutation gate + a review-found live gap at the `.sensitive` aspect read site, fixed same fire; Loupe sibling filed
 - 2026-08-22 · `0f202d5e` · [bridge/capability-author] NL edit of an installed weaver target — contextRef names the target, adapter files upgradeExisting (first producer); admissible only where the proposal covers the whole package, every silent-change class refused before a vendor call
+- 2026-08-21 · `ea28627` · [Pkgmgr] install-path double bucket-list CLOSED — checkCoreBucketExists → KVStatus probe; findInstalledPackage → `vtx.package.` prefix-list + batched KVGetMulti; cold review clean
+- 2026-08-21 · `814e4c8` · [CI] substrate backfill ack-floor race CLOSED — `Ack()`→`DoubleAck(ctx)`; async-ack raced the before-snapshot, not a handler reattach
