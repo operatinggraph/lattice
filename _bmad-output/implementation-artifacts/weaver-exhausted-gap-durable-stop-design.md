@@ -1,9 +1,20 @@
 # Weaver — an exhausted gap's loud stop must outlive the suppression that causes it
 
 > **✅ Winston-ratified — build-ready (2026-08-25).** Every open question in this document is an
-> implementation call and is answered here (Steward §0/§2.5). **No frozen-contract change is proposed
-> or required:** Contract #10 §10.8 already promises the behaviour twice, in as many words — this is a
-> conformance fix, not an amendment. Where this banner and the body disagree, the banner wins.
+> implementation call and is answered here (Steward §0/§2.5). Where this banner and the body disagree,
+> the banner wins.
+>
+> **CORRECTED 2026-08-25 — this banner's original "no frozen-contract change is proposed or required"
+> was WRONG, and a cold review caught it.** The *behaviour* is a conformance fix — Contract #10 §10.8
+> promises "a loud stop, never a silent park" twice and this fire delivers it. But §10.3's reserved-key
+> paragraph (`10-orchestration-substrate.md`) states *"The reconciler sweep skips all three (never
+> enumerated as `CorruptMark`)"*, and the count leg enumerates `__count` and can raise `CorruptMark` on
+> it. That sentence is **already self-contradicted** by the same table's `__effect` row ("GC'd by the
+> sweep's orphan legs"), so this fire widens pre-existing drift rather than creating it — which is a
+> reason to correct the text, never to ship past it. The correction is prepared as a proposal branch,
+> `claude/contract-10-weaver-state-sweep-enumeration` (branch-vs-main diff IS the proposal; ratify =
+> Andrew merges), and flagged on the board. Per §0 the code still ships at L2: the behaviour is
+> revertible, the bucket is weaver-private, and no consumer outside `internal/weaver` observes it.
 
 **Board row:** `[Weaver] An exhausted gap's loud stop dies at restart and cannot be un-parked`
 (`backlog/lattice.md`, Component maintenance, ★★ · M).
@@ -103,7 +114,7 @@ split, level reconcile against the current row, revision-conditioned delete).
 | 2 | mark key `<t>.<e>.<g>` present in **this pass's** `listed` set | return | the mark leg owns this gap; never escalate twice in one pass. Uses the set `pass()` already builds (`reconciler.go:159`) — no extra KV read |
 | 3 | target not registered | **return — never delete** | an unreplayed target is replay lag, not absence; deleting the budget here would re-arm every parked gap on every restart. (Dossier: *"an `error`-severity Health issue must not fire on a self-healing condition"* — the same trap, one severity down) |
 | 4 | target disabled (`__control`) | return | mirrors `sweepMark` arm (d) and lane-1's Ack-skip: an operator freeze stops dispatch, and escalation is dispatch |
-| 5 | row read → `ErrKeyNotFound` | delete count (rev-conditioned) + clear `issueKeyGapEntity` | the entity is gone. This is the orphan GC `state.go:64` says the TTL exists for, done promptly and properly |
+| 5 | row read → `ErrKeyNotFound` | **clear `issueKeyGapEntity` only — never delete the count** | **CORRECTED 2026-08-25 after cold review.** The original arm deleted the count here and was wrong. Absence is not evidence: a Refractor lens rebuild purges a target's rows and re-replays them, and a registered, enabled target reads row-gone for every entity inside that window. The thing destroyed is the retry *bound itself*, so a mass delete re-arms exactly the storm `defaultDirectOpRetryBudget` exists to prevent — while the delete buys only prompt GC of a ~20-byte key that the 128 h TTL (`state.go:64`) already collects risk-free. Arm 3 states this rule one arm earlier; this arm must not break it. Contrast arm 7: a *present* row whose column reads false is positive evidence, and keeps its delete |
 | 5b | row read fails for any reason other than `ErrKeyNotFound` | Warn + return | a transient KV error is not evidence the entity is gone; mirrors `sweepMark`'s read-failure posture |
 | 6 | row value unparseable | return | never act on unreadable evidence (`sweepMark`'s posture, `reconciler.go:270`) |
 | 6b | row carries no `entityKey` | return | `escalateExhaustedGap`'s augur arm feeds `entityKey` to `planGap`; the mark leg reaches that call only past the reclaim's non-empty guard, and this leg has no mark to have been guarded. Lane 1 raises `RowDataError` and declines to dispatch a violating row with no `entityKey` (`evaluator.go:87`), so this leg must not dispatch one either — never act on incomplete evidence |
@@ -112,6 +123,20 @@ split, level reconcile against the current row, revision-conditioned delete).
 | 9 | `gapSuppressed` → `exhausted` | `escalateExhaustedGap` | **the fix.** Same site the mark leg calls (`reconciler.go:508`), now reachable from state that outlives the mark |
 | 10 | `gapSuppressed` → suppressed, not exhausted (`inflight_<g>`) | return | a call is in flight; the lens will re-project when it lands, and lane 1 re-delivers |
 | 11 | not suppressed, **no** mark | clear the issue, then **dispatch** | the re-arm. See §4 |
+
+**Arm ORDER is load-bearing, and `sweepMark` already fixes it (CORRECTED 2026-08-25 after cold
+review).** `sweepMark` runs its level reconcile *unconditionally, above* the registry and `__control`
+gates, and says why: *"Runs regardless of the target's `__control` freeze: closing an already-satisfied
+gap is cleanup, never new dispatch"* (`reconciler.go:231`). The first build put the registry and freeze
+gates above the level reconcile, so a frozen target's closed gap kept its spent budget and a standing
+issue **forever** — and on re-enable a reopened gap was instantly suppressed against a budget spent by
+a chain that had already closed. The leg therefore orders: **corrupt key → level reconcile (arms 5, 7)
+→ mark-listed → registry → corrupt body → freeze → the acting arms.** The corrupt-*body* delete moves
+*below* the registry and freeze gates for the same reason those gates exist — destroying durable state
+during replay lag or under an operator freeze is exactly what they forbid, and a rolling upgrade
+writing a body an older build cannot parse is the realistic trigger. The corrupt-*key* delete cannot be
+gated (an unsplittable key names no target) and stays first, which is `sweepMark`'s posture for
+unattributable garbage.
 
 Arms 5, 7 and 11 also give the **clear** that pairs with each raise — the dossier's standing demand
 (*"for every raise, name the clear that retires that exact column, and pair the retirement with the
@@ -132,15 +157,27 @@ only through a mark or a delivery; after this fire the count leg reaches every o
   rows have gone quiet can now hold a standing issue where before they silently held none. That is the
   point of the fire, and it is bounded by the number of parked gaps.
 
-### 3.2 Two decisions the arm table does not otherwise state
+### 3.2 The orphan-column arm, and the reasoning this section originally got wrong
 
-**The `action` argument to `gapSuppressed` (arms 9/10) is `target.Gaps[gapColumn]`'s zero value when the
-playbook no longer names the column.** The mark leg reaches `gapSuppressed` past a checked lookup its
-orphan-column arm guarantees; this leg has no orphan-column arm and gains none. `action` is consulted
-only to decide the cap *fallback* (`evaluator.go:1027`), so the consequence is bounded and correct: a
-gap the playbook has dropped loses the `directOp` engine-default budget, while a row-declared
-`maxretries_<g>` still caps it and still escalates. An orphan column is a playbook-shaped condition,
-already surfaced by its own config-keyed issue; it is not this leg's to re-diagnose.
+**STRUCK 2026-08-25 — this section originally argued the leg needs no orphan-column arm. Three cold
+reviewers independently refuted it, two by execution.** The original argument was that `action` is
+consulted only for the cap *fallback*, so a dropped playbook column merely loses the `directOp` engine
+default. That reasoning missed two things: a row-declared `maxretries_<g>` escalates **regardless** of
+`action`, and `escalateExhaustedGap` on an augur-configured target **re-creates the mark and bumps the
+count**, which re-arms the count's own 128 h TTL. The result was a **non-terminating loop** — the count
+leg escalates, `fireEpisode` creates a mark, the mark leg's orphan arm deletes it, the count leg
+escalates again — dispatching a real `CreateAugurReasoningClaim` every ~30–60 min, forever, for a gap
+Weaver no longer manages. Without augur it was instead a permanent false alarm with no reachable clear
+(arm 7 needs the column to go false; an orphan column stays true).
+
+**Arm 8b, therefore: the target is registered but `target.Gaps` does not name `gapColumn` → clear
+`issueKeyGapEntity` and return.** Never escalate, and — per arm 5's rule — never delete the count
+either: a partially replayed target is present in the registry with an intermediate definition that may
+not yet name the gap (`reconciler.go:628` says so in as many words), so a missing key is absence-shaped
+evidence. The TTL collects it. `reclaim`'s orphan arm deletes the *mark* there, which is an anti-storm
+gate the next dispatch recreates; a count is the bound itself, and the two are not comparable.
+
+### 3.2a One decision the arm table does not otherwise state
 
 **A duplicate augur escalation is not observable on the ops stream, by design.**
 `escalateExhaustedGap`'s live-mark guard (`evaluator.go:1131`) makes the second call in a window find
