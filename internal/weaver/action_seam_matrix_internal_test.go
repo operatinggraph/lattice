@@ -723,6 +723,12 @@ func runDispatchGapSeam(t *testing.T, ctx context.Context, seam actionSeam) *sea
 // in-flight mark over a still-violating row, the shape a reclaim re-dispatches.
 // One pass covers the whole axis, so the control's re-dispatch and every
 // refusal are decided by the same sweep.
+//
+// reclaim reaches planGap twice — the ordinary re-dispatch and the goal
+// leg-advance releaseCompletedLeg opens — and its action guard sits above BOTH,
+// so what this drives is that shared guard. The leg-advance itself is reachable
+// only for a gap declaring a Goal, which is one shape of the plan-time-resolved
+// cell; the matrix drives that cell through its candidates form.
 func runReclaimSeam(t *testing.T, ctx context.Context, seam actionSeam) *seamOutcome {
 	const targetID = "matrixReclaim"
 	h := newSweepHarness(t, ctx)
