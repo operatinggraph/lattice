@@ -41,9 +41,19 @@ func CoreKVEmpty(ctx context.Context, conn *substrate.Conn) (bool, error) {
 // elements exist with correct envelopes. Returns a (possibly empty) slice of
 // failure descriptions — an empty slice means all assertions passed — plus a
 // (possibly empty) slice of informational notices that never affect
-// pass/fail: today, kernel-orphaned vtx.meta.* entities and aspects
-// (kernel-orphan-retirement-design.md §9) an operator may want to see but
-// that this pass neither writes nor holds against the bucket.
+// pass/fail: kernel-orphaned vtx.meta.* entities and aspects
+// (kernel-orphan-retirement-design.md §9), and stranded operator roles
+// (primordial-epoch-stranded-authority-design.md §4) — conditions an operator
+// may want to see but that this pass neither writes nor holds against the
+// bucket.
+//
+// The failures slice is load-bearing beyond this function: cmd/lattice/bootstrap
+// exits 1 on any entry and `make up` reads that exit code as its freshness
+// oracle, responding to a non-zero result by discarding lattice.bootstrap.json
+// and minting a fresh primordial set. Nothing belongs in it that a re-bootstrap
+// would not fix — which is why the stranded-role class, whose remedy is a link
+// revocation and whose cause a re-mint REPEATS, is reported here as a notice
+// and escalated only in scripts/verify-kernel.go.
 //
 // This is the callable equivalent of scripts/verify-kernel.go so that
 // any tooling can reuse the same assertions without drift.

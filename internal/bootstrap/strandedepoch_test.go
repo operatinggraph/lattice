@@ -1,17 +1,21 @@
 package bootstrap
 
-// Tests for StrandedOperatorEpochs — the cross-epoch orphan detector
-// (primordial-epoch-stranded-authority-design.md §6.1-6.5). They live
-// in-package because the predicate is keyed on the RoleOperatorID package
-// variable, which the unloaded-table case has to be able to clear.
+// Tests for StrandedOperatorEpochs — the detector for live roles named
+// `operator` that this deployment's primordial table does not name
+// (primordial-epoch-stranded-authority-design.md §6). They live in-package
+// because the predicate is keyed on the primordial ID globals, which the
+// unloaded-table case has to be able to clear, and because the plan-level
+// posture tests stub the unexported strandedScan seam.
 //
-// Every negative here is written against the §6.2 positive: the same fixture,
-// one guard's precondition changed, expecting silence.
+// Every negative here is written against the positive vector in
+// _RotatedIdFileStrandsPriorRole: the same fixture, one guard's precondition
+// changed.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -46,7 +50,7 @@ func putDoc(ctx context.Context, t *testing.T, kv jetstream.KeyValue, key string
 	require.NoError(t, putErr)
 }
 
-// seedRole writes a role vertex plus its canonicalName aspect.
+// seedRole writes a live role vertex plus its canonicalName aspect.
 func seedRole(ctx context.Context, t *testing.T, kv jetstream.KeyValue, roleID, canonicalName string) string {
 	t.Helper()
 	return seedRoleWithState(ctx, t, kv, roleID, canonicalName, false, false)
@@ -67,36 +71,58 @@ func seedRoleWithState(ctx context.Context, t *testing.T, kv jetstream.KeyValue,
 	return roleKey
 }
 
-// seedGrant writes one `permission grantedBy role` edge and returns the
-// permission vertex key it grants.
-func seedGrant(ctx context.Context, t *testing.T, kv jetstream.KeyValue, roleID string, deleted bool) string {
+// seedGrant writes a permission vertex and its `permission grantedBy role`
+// edge, returning the permission vertex key. Both ends exist because the scan
+// requires both to be live before it counts a grant.
+func seedGrant(ctx context.Context, t *testing.T, kv jetstream.KeyValue, roleID string, edgeDeleted bool) string {
+	t.Helper()
+	return seedGrantWithState(ctx, t, kv, roleID, false, edgeDeleted)
+}
+
+func seedGrantWithState(ctx context.Context, t *testing.T, kv jetstream.KeyValue, roleID string, permDeleted, edgeDeleted bool) string {
 	t.Helper()
 	permID := newNanoID(t)
 	permKey := substrate.VertexKey("permission", permID)
+	permVal, permErr := MakeVertexEnvelope(permKey, "permission", map[string]any{"operationType": "AttachObject"})
+	putDoc(ctx, t, kv, permKey, permVal, permErr, permDeleted)
+
 	linkKey := substrate.LinkKey("permission", permID, "grantedBy", "role", roleID)
 	val, err := MakeLinkEnvelope(linkKey, permKey, substrate.VertexKey("role", roleID),
 		"grantedBy", "link.grantedBy", nil)
-	putDoc(ctx, t, kv, linkKey, val, err, deleted)
+	putDoc(ctx, t, kv, linkKey, val, err, edgeDeleted)
 	return permKey
 }
 
-// seedHolder writes one `identity holdsRole role` edge and returns the holding
-// identity's vertex key.
-func seedHolder(ctx context.Context, t *testing.T, kv jetstream.KeyValue, identityID, roleID string, deleted bool) string {
+// seedHolder writes an identity vertex and its `identity holdsRole role` edge,
+// returning the identity's vertex key.
+func seedHolder(ctx context.Context, t *testing.T, kv jetstream.KeyValue, identityID, roleID string, edgeDeleted bool) string {
+	t.Helper()
+	return seedHolderWithState(ctx, t, kv, identityID, roleID, false, edgeDeleted)
+}
+
+func seedHolderWithState(ctx context.Context, t *testing.T, kv jetstream.KeyValue, identityID, roleID string, identityDeleted, edgeDeleted bool) string {
 	t.Helper()
 	identityKey := substrate.VertexKey("identity", identityID)
+	idVal, idErr := MakeVertexEnvelope(identityKey, "identity", nil)
+	putDoc(ctx, t, kv, identityKey, idVal, idErr, identityDeleted)
+
 	linkKey := substrate.LinkKey("identity", identityID, "holdsRole", "role", roleID)
 	val, err := MakeLinkEnvelope(linkKey, identityKey, substrate.VertexKey("role", roleID),
 		"holdsRole", "link.holdsRole", nil)
-	putDoc(ctx, t, kv, linkKey, val, err, deleted)
+	putDoc(ctx, t, kv, linkKey, val, err, edgeDeleted)
 	return identityKey
 }
 
+// holdsRoleKey is the link key seedHolder writes.
+func holdsRoleKey(identityKey, roleID string) string {
+	_, identityID, _ := substrate.ParseVertexKey(identityKey)
+	return substrate.LinkKey("identity", identityID, "holdsRole", "role", roleID)
+}
+
 // seedCurrentEpoch plants this deployment's own operator role exactly as
-// primordial.go seeds it — vertex, canonicalName, one holder, one grant. Every
-// test carries it, so a predicate that ever reported the LIVE kernel role
-// (an unloaded id table, a broken id filter) reddens here rather than in one
-// dedicated case.
+// primordial.go seeds it — vertex, canonicalName, a holder from the primordial
+// table, one grant. Every test carries it, so a predicate that ever reported
+// the LIVE kernel role reddens broadly rather than in one dedicated case.
 func seedCurrentEpoch(ctx context.Context, t *testing.T, kv jetstream.KeyValue) {
 	t.Helper()
 	seedRole(ctx, t, kv, RoleOperatorID, "operator")
@@ -111,17 +137,25 @@ func strandedTestContext(t *testing.T) context.Context {
 	return ctx
 }
 
+// sortedCopy sorts a copy of keys using the standard library, so an assertion
+// never checks production output against the production helper that produced
+// its ordering.
+func sortedCopy(keys []string) []string {
+	out := append([]string(nil), keys...)
+	sort.Strings(out)
+	return out
+}
+
 // TestStrandedOperatorEpochs_SingleEpochBucketIsSilent is the no-false-red pin
 // for CI: `stack-gates` runs verify-kernel against a container that generated
 // its id file and seeded an empty bucket in the same job, so the bucket holds
-// exactly one operator role and it is the current one. That deployment must
-// scan silent.
+// exactly one operator role and it is the current one.
 //
-// The second case is what pins the id filter specifically. In the first, the
-// current role has a holder, so the strand test alone would keep it silent
-// even if the id comparison were wrong; strip the holders and the id filter is
-// the ONLY thing standing between the live kernel role and a report of the
-// deployment's own authority as stranded.
+// The second case pins the id filter specifically. In the first, the current
+// role has a holder from the primordial table, so the reachability rule alone
+// would classify it harmlessly even if the id comparison were wrong; strip the
+// holders and the id filter is the ONLY thing keeping the deployment's own
+// authority out of the report.
 func TestStrandedOperatorEpochs_SingleEpochBucketIsSilent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -135,7 +169,7 @@ func TestStrandedOperatorEpochs_SingleEpochBucketIsSilent(t *testing.T) {
 
 		stranded, err := StrandedOperatorEpochs(ctx, kv)
 		require.NoError(t, err)
-		require.Empty(t, stranded, "the live kernel role must never be reported as stranded")
+		require.Empty(t, stranded, "the live kernel role must never be reported")
 	})
 
 	t.Run("current_role_with_every_holder_revoked", func(t *testing.T) {
@@ -159,12 +193,12 @@ func TestStrandedOperatorEpochs_SingleEpochBucketIsSilent(t *testing.T) {
 //
 // A re-bootstrap on a regenerated id file takes the full create-only seed path
 // (DecideReseed returns true on a freshly generated file, primordial.go:262)
-// and deletes nothing: reconcile.go:155 classifies every non-vtx.meta.* entry
-// as retained, "deliberately left alone". So the prior epoch's admin identity,
-// its service actors, and their holdsRole edges into the prior operator role
-// are ALL still live. The whole epoch strands together — which is why a live
-// holder is not, on its own, evidence that the role is reachable. The holder
-// below is part of the island, and the role must still be reported.
+// and deletes nothing: reconcile.go classifies every non-vtx.meta.* entry as
+// retained, "deliberately left alone". So the prior epoch's admin identity, its
+// service actors, and their holdsRole edges into the prior operator role are
+// ALL still live. The whole epoch strands together, which is why a live holder
+// is not on its own evidence that the role is reachable — and why this holder
+// makes the finding severe rather than silencing it.
 func TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -187,18 +221,53 @@ func TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stranded, 1, "exactly the prior epoch's role must be reported")
 	require.Equal(t, priorKey, stranded[0].RoleKey)
-	require.ElementsMatch(t, wantGrants, stranded[0].GrantedBy)
-	require.Equal(t, sortedUnique(wantGrants), stranded[0].GrantedBy, "grants must be reported sorted")
+	require.Equal(t, sortedCopy(wantGrants), stranded[0].GrantedBy, "grants must be reported sorted")
 	require.Equal(t, []string{priorAdmin}, stranded[0].Holders,
-		"the prior epoch's own holder is part of the island and must be reported, not treated as reachability")
-	require.True(t, stranded[0].Protected, "the report carries data.protected as corroboration")
+		"the prior epoch's own holder is part of the island and must be named, not treated as reachability")
+	require.Empty(t, stranded[0].ReachableVia)
+	require.Zero(t, stranded[0].UnreadableEdges)
+	require.True(t, stranded[0].Protected, "the report carries data.protected as a repairability signal")
+	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
 }
 
-// TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses pins the reachability
-// test: an identity of the CURRENT primordial epoch holding a non-current
-// `operator` role really can reach it, so the role is live topology and the
-// scan says nothing. This is the only holder relationship that suppresses.
-func TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses(t *testing.T) {
+// TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice pins the
+// reachability rule AND the decision not to suppress. An identity the
+// primordial table names really can reach the role, so the finding drops to the
+// benign rank — but it is still reported, and it names the edge, because the
+// holdsRole create that produces it is an ordinary link create that the
+// commit-time kernel guard does not cover. A single AssignRole must not be able
+// to switch this check off.
+func TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	seedCurrentEpoch(ctx, t, kv)
+
+	priorID := newNanoID(t)
+	priorKey := seedRole(ctx, t, kv, priorID, "operator")
+	seedGrant(ctx, t, kv, priorID, false)
+	holder := seedHolder(ctx, t, kv, BootstrapIdentityID, priorID, false)
+
+	stranded, err := StrandedOperatorEpochs(ctx, kv)
+	require.NoError(t, err)
+	require.Len(t, stranded, 1, "a reachable role is demoted, never dropped")
+	require.Equal(t, priorKey, stranded[0].RoleKey)
+	require.Empty(t, stranded[0].Holders, "a current-epoch identity is not an unaccounted-for holder")
+	require.Equal(t, []string{holdsRoleKey(holder, priorID)}, stranded[0].ReachableVia,
+		"the report must name the suppressing edge")
+	require.Equal(t, StrandedSeverityReachable, stranded[0].Severity())
+}
+
+// TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability pins Contract #7
+// §7.2's one exception. Six of the seven primordial identities hold the
+// operator role; the Gateway deliberately does not, being internet-facing and
+// scoped narrow. A holdsRole edge from it into an `operator` role is therefore
+// the most serious finding available here — the wildcard lens would hand the
+// internet-facing actor installation-wide read — and must never read as health.
+func TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -209,21 +278,22 @@ func TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses(t *testing.T) {
 
 	priorID := newNanoID(t)
 	seedRole(ctx, t, kv, priorID, "operator")
-	seedGrant(ctx, t, kv, priorID, false)
-	seedGrant(ctx, t, kv, priorID, false)
-	seedHolder(ctx, t, kv, BootstrapIdentityID, priorID, false)
+	gateway := seedHolder(ctx, t, kv, GatewayIdentityID, priorID, false)
 
 	stranded, err := StrandedOperatorEpochs(ctx, kv)
 	require.NoError(t, err)
-	require.Empty(t, stranded, "a role a current-epoch identity holds is genuinely reachable")
+	require.Len(t, stranded, 1)
+	require.Equal(t, []string{gateway}, stranded[0].Holders,
+		"the Gateway does not hold the operator role, so holding one is a finding")
+	require.Empty(t, stranded[0].ReachableVia)
+	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
 }
 
 // TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress is the focused
-// negative against the suppressor above, and the reason the holder check cannot
-// be existential. The fixture differs from _CurrentEpochHolderSuppresses in one
-// respect — the holding identity is outside the current epoch's primordial set —
-// and that single difference must flip silence into a report, because a
-// prior-epoch identity is itself stranded and reaches nothing.
+// negative against reachability, and the reason the holder check cannot be
+// existential. The fixture differs from the demotion case in one respect — the
+// holding identity is outside the primordial table — and that single difference
+// must flip the rank.
 func TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -236,21 +306,21 @@ func TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress(t *testing.T) {
 	priorID := newNanoID(t)
 	priorKey := seedRole(ctx, t, kv, priorID, "operator")
 	seedGrant(ctx, t, kv, priorID, false)
-	seedGrant(ctx, t, kv, priorID, false)
 	foreignHolder := seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
 
 	stranded, err := StrandedOperatorEpochs(ctx, kv)
 	require.NoError(t, err)
-	require.Len(t, stranded, 1, "a holder outside the current epoch is part of the island, not reachability")
+	require.Len(t, stranded, 1)
 	require.Equal(t, priorKey, stranded[0].RoleKey)
 	require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
-	require.Len(t, stranded[0].GrantedBy, 2)
+	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
 }
 
-// TestStrandedOperatorEpochs_TombstonedHolderDoesNotSuppress keeps the
-// suppressor honest about liveness: a revoked grant of the role to a
-// current-epoch identity is not reachability either.
-func TestStrandedOperatorEpochs_TombstonedHolderDoesNotSuppress(t *testing.T) {
+// TestStrandedOperatorEpochs_UnaccountedHolderOutranksAReachableOne pins the
+// rank ordering: a current-epoch holder alongside an unaccounted-for one must
+// not demote the finding, or the demotion path would be the silencer the
+// classification was introduced to prevent.
+func TestStrandedOperatorEpochs_UnaccountedHolderOutranksAReachableOne(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -260,23 +330,106 @@ func TestStrandedOperatorEpochs_TombstonedHolderDoesNotSuppress(t *testing.T) {
 	seedCurrentEpoch(ctx, t, kv)
 
 	priorID := newNanoID(t)
-	priorKey := seedRole(ctx, t, kv, priorID, "operator")
-	seedGrant(ctx, t, kv, priorID, false)
-	seedHolder(ctx, t, kv, LoomIdentityID, priorID, true)
+	seedRole(ctx, t, kv, priorID, "operator")
+	foreignHolder := seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
+	seedHolder(ctx, t, kv, LoomIdentityID, priorID, false)
 
 	stranded, err := StrandedOperatorEpochs(ctx, kv)
 	require.NoError(t, err)
-	require.Len(t, stranded, 1, "a tombstoned holdsRole edge confers no reachability")
-	require.Equal(t, priorKey, stranded[0].RoleKey)
-	require.Empty(t, stranded[0].Holders, "a revoked holder is not a live holder")
+	require.Len(t, stranded, 1)
+	require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
+	require.Len(t, stranded[0].ReachableVia, 1)
+	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity(),
+		"an AssignRole to a current-epoch identity must not demote a live escalation")
 }
 
-// TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent covers
-// the three tombstone positions: a soft-deleted role vertex and a soft-deleted
-// canonicalName aspect are already-retired residue with nothing to report,
-// while a live role whose every grant is revoked drops to zero grants — the
-// notice class of §4, not a failure and not silence.
-func TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent(t *testing.T) {
+// TestStrandedOperatorEpochs_DeadEndpointsAreNotLiveEdges covers the liveness
+// of both ends of both link families. An edge is only authority if the document
+// at each end is live: a revoked edge, a tombstoned permission, a tombstoned
+// identity. The identity case matters most — it is the false-negative
+// direction, where a dead service actor's surviving edge would otherwise demote
+// a severe finding.
+func TestStrandedOperatorEpochs_DeadEndpointsAreNotLiveEdges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	t.Run("tombstoned_grant_edge", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		seedRole(ctx, t, kv, priorID, "operator")
+		seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
+		seedGrant(ctx, t, kv, priorID, true)
+
+		stranded, err := StrandedOperatorEpochs(ctx, kv)
+		require.NoError(t, err)
+		require.Len(t, stranded, 1)
+		require.Empty(t, stranded[0].GrantedBy, "a revoked grant is not live authority")
+	})
+
+	t.Run("tombstoned_permission_vertex", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		seedRole(ctx, t, kv, priorID, "operator")
+		seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
+		seedGrantWithState(ctx, t, kv, priorID, true, false)
+
+		stranded, err := StrandedOperatorEpochs(ctx, kv)
+		require.NoError(t, err)
+		require.Len(t, stranded, 1)
+		require.Empty(t, stranded[0].GrantedBy,
+			"a live edge to a tombstoned permission confers nothing")
+	})
+
+	t.Run("tombstoned_holder_edge", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		seedRole(ctx, t, kv, priorID, "operator")
+		seedGrant(ctx, t, kv, priorID, false)
+		seedHolder(ctx, t, kv, newNanoID(t), priorID, true)
+
+		stranded, err := StrandedOperatorEpochs(ctx, kv)
+		require.NoError(t, err)
+		require.Len(t, stranded, 1)
+		require.Empty(t, stranded[0].Holders, "a revoked holdsRole edge confers no reachability")
+		require.Equal(t, StrandedSeverityInert, stranded[0].Severity())
+	})
+
+	t.Run("tombstoned_current_epoch_identity_does_not_demote", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		seedRole(ctx, t, kv, priorID, "operator")
+		foreignHolder := seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
+		seedHolderWithState(ctx, t, kv, LoomIdentityID, priorID, true, false)
+
+		stranded, err := StrandedOperatorEpochs(ctx, kv)
+		require.NoError(t, err)
+		require.Len(t, stranded, 1)
+		require.Empty(t, stranded[0].ReachableVia,
+			"a tombstoned identity reaches nothing, so its surviving edge cannot demote")
+		require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
+		require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
+	})
+}
+
+// TestStrandedOperatorEpochs_TombstonedRoleIsSilentAndRevokedGrantsStillReport
+// covers the tombstone positions on the ROLE itself, and the boundary between
+// "nothing to report" and "report with nothing in it". A soft-deleted role
+// vertex or canonicalName aspect is already-retired residue; a live role whose
+// grants and holders are all revoked is still reported, at the inert rank.
+func TestStrandedOperatorEpochs_TombstonedRoleIsSilentAndRevokedGrantsStillReport(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -309,7 +462,7 @@ func TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent(t *tes
 		require.Empty(t, stranded, "a role whose canonicalName is tombstoned no longer names the class")
 	})
 
-	t.Run("all_grants_tombstoned_reports_zero_grants", func(t *testing.T) {
+	t.Run("all_edges_revoked_reports_at_inert_rank", func(t *testing.T) {
 		ctx := strandedTestContext(t)
 		_, kv := newReconcileSeeder(ctx, t)
 		seedCurrentEpoch(ctx, t, kv)
@@ -323,13 +476,15 @@ func TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent(t *tes
 		require.NoError(t, err)
 		require.Len(t, stranded, 1)
 		require.Equal(t, priorKey, stranded[0].RoleKey)
-		require.Empty(t, stranded[0].GrantedBy, "a revoked grant is not live authority")
+		require.Empty(t, stranded[0].GrantedBy)
+		require.Empty(t, stranded[0].Holders)
+		require.Equal(t, StrandedSeverityInert, stranded[0].Severity())
 	})
 }
 
 // TestStrandedOperatorEpochs_ForeignRoleNameIsSilent pins the canonicalName
-// equality: a holderless, granted role that is not an `operator` role is
-// ordinary topology whose lifecycle belongs to operations.
+// equality: a held, granted role that is not named `operator` is ordinary
+// topology whose lifecycle belongs to operations.
 func TestStrandedOperatorEpochs_ForeignRoleNameIsSilent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -341,6 +496,7 @@ func TestStrandedOperatorEpochs_ForeignRoleNameIsSilent(t *testing.T) {
 
 	foreignID := newNanoID(t)
 	seedRole(ctx, t, kv, foreignID, "loftspaceStaff")
+	seedHolder(ctx, t, kv, newNanoID(t), foreignID, false)
 	seedGrant(ctx, t, kv, foreignID, false)
 
 	stranded, err := StrandedOperatorEpochs(ctx, kv)
@@ -348,11 +504,146 @@ func TestStrandedOperatorEpochs_ForeignRoleNameIsSilent(t *testing.T) {
 	require.Empty(t, stranded, "only an `operator` role names this class")
 }
 
+// TestStrandedOperatorEpochs_ReportsEveryStrandedRoleSorted pins the ordering
+// of the returned slice, which no single-role fixture can exercise.
+func TestStrandedOperatorEpochs_ReportsEveryStrandedRoleSorted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	seedCurrentEpoch(ctx, t, kv)
+
+	var want []string
+	for range 3 {
+		id := newNanoID(t)
+		want = append(want, seedRole(ctx, t, kv, id, "operator"))
+		seedHolder(ctx, t, kv, newNanoID(t), id, false)
+	}
+
+	stranded, err := StrandedOperatorEpochs(ctx, kv)
+	require.NoError(t, err)
+	var got []string
+	for _, s := range stranded {
+		got = append(got, s.RoleKey)
+	}
+	require.Equal(t, sortedCopy(want), got, "findings must come back sorted by role key")
+}
+
+// getFailingKV fails Get for one key and delegates everything else, so a
+// per-candidate read failure can be induced with no timing dependence.
+type getFailingKV struct {
+	jetstream.KeyValue
+	failOn string
+	err    error
+}
+
+func (k getFailingKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	if key == k.failOn {
+		return nil, k.err
+	}
+	return k.KeyValue.Get(ctx, key)
+}
+
+// TestStrandedOperatorEpochs_ReadFailureAbortsRatherThanReportingClean is the
+// pin against the most dangerous failure this scan can have. Absorbing a read
+// error as "not live" would let an expired context — scripts/verify-kernel.go
+// runs the whole gate under a 15s budget — skip every candidate and return an
+// empty, authoritative-looking all-clear over a bucket full of live authority.
+// A key that is genuinely absent is still an answer, not a failure.
+func TestStrandedOperatorEpochs_ReadFailureAbortsRatherThanReportingClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	t.Run("transient_read_error_propagates", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		priorKey := seedRole(ctx, t, kv, priorID, "operator")
+		seedHolder(ctx, t, kv, newNanoID(t), priorID, false)
+
+		boom := errors.New("nats: connection closed")
+		stranded, err := StrandedOperatorEpochs(ctx, getFailingKV{KeyValue: kv, failOn: priorKey, err: boom})
+		require.ErrorIs(t, err, boom, "a read that failed must not be reported as clean")
+		require.Nil(t, stranded)
+	})
+
+	t.Run("cancelled_context_never_reports_clean", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+		seedRole(ctx, t, kv, newNanoID(t), "operator")
+
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		stranded, err := StrandedOperatorEpochs(cancelled, kv)
+		require.Error(t, err)
+		require.Nil(t, stranded)
+	})
+
+	t.Run("absent_key_is_an_answer_not_an_error", func(t *testing.T) {
+		ctx := strandedTestContext(t)
+		_, kv := newReconcileSeeder(ctx, t)
+		seedCurrentEpoch(ctx, t, kv)
+
+		priorID := newNanoID(t)
+		seedRole(ctx, t, kv, priorID, "operator")
+		// A holdsRole edge whose identity vertex was never written: the
+		// endpoint read comes back ErrKeyNotFound, which establishes "not
+		// live" rather than "could not tell".
+		identityID := newNanoID(t)
+		linkKey := substrate.LinkKey("identity", identityID, "holdsRole", "role", priorID)
+		val, err := MakeLinkEnvelope(linkKey, substrate.VertexKey("identity", identityID),
+			substrate.VertexKey("role", priorID), "holdsRole", "link.holdsRole", nil)
+		putDoc(ctx, t, kv, linkKey, val, err, false)
+
+		stranded, scanErr := StrandedOperatorEpochs(ctx, kv)
+		require.NoError(t, scanErr)
+		require.Len(t, stranded, 1)
+		require.Empty(t, stranded[0].Holders)
+		require.Zero(t, stranded[0].UnreadableEdges, "an absent endpoint is established, not unreadable")
+	})
+}
+
+// TestStrandedOperatorEpochs_UnreadableEdgeIsCountedNotDropped pins the
+// remaining silent-skip. An unparseable edge document cannot be classified, and
+// every such skip can only shrink the holder list severity keys on — so it is
+// surfaced as a count that marks the report a lower bound, rather than folded
+// into a clean-looking number.
+func TestStrandedOperatorEpochs_UnreadableEdgeIsCountedNotDropped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	seedCurrentEpoch(ctx, t, kv)
+
+	priorID := newNanoID(t)
+	seedRole(ctx, t, kv, priorID, "operator")
+	corruptEdge := substrate.LinkKey("identity", newNanoID(t), "holdsRole", "role", priorID)
+	_, err := kv.Put(ctx, corruptEdge, []byte(`{"isDeleted":"not-a-bool"}`))
+	require.NoError(t, err)
+
+	stranded, scanErr := StrandedOperatorEpochs(ctx, kv)
+	require.NoError(t, scanErr)
+	require.Len(t, stranded, 1)
+	require.Empty(t, stranded[0].Holders)
+	require.Equal(t, 1, stranded[0].UnreadableEdges)
+	require.Contains(t, stranded[0].Report(), "lower bound",
+		"a report built on an unreadable edge must say the counts are a lower bound")
+}
+
 // TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses pins the sharpest
-// hazard: the predicate excludes the current role by id, so an unloaded table
-// (empty string) matches every role and would report the LIVE kernel role as
-// stranded. The refusal must land before the graph is touched at all — the nil
-// bucket below is what proves "before".
+// hazard: both halves of the predicate are keyed on the primordial table, so an
+// unloaded one would match every role AND empty the reachability set, reporting
+// the live kernel role with its own holders counted as strangers. The refusal
+// must land before the graph is touched — the nil bucket is what proves it.
 func TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -374,68 +665,42 @@ func TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses(t *testing.T) {
 	require.Empty(t, strandedNilKV)
 }
 
-// TestReadKernelReport_StrandedScanErrNeverFailsTheBuiltSetComparison pins the
-// posture the whole surfacing rests on: the stranded scan is advisory, so its
-// failure travels in the report and never in ReadKernelReport's returned error.
-// Every consumer of the built-set comparison — KernelDrift, VerifyKernel,
-// ReconcilePrimordial's repair path — depends on getting its own answer whether
-// or not an unrelated advisory scan could run.
-//
-// The failure is injected at the plan→report projection rather than through a
-// live bucket, because neither of the scan's two failure modes is reachable
-// end-to-end here. An unloaded primordial table never gets as far as the scan:
-// buildPrimordialEntries, which planReconcile calls first, refuses an empty
-// NanoID outright. A failed listing is a substrate condition with no
-// deterministic trigger — and inducing one by breaking the bucket would break
-// the built-set comparison in the same stroke, which is precisely the confusion
-// this test exists to rule out. The live half below covers the succeeding path.
-func TestReadKernelReport_StrandedScanErrNeverFailsTheBuiltSetComparison(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires NATS")
+// TestStrandedOperatorEpoch_SeverityAndReport covers the classification and its
+// rendering without a bucket, including the property that made a bare count
+// wrong: the report has to name the keys an operator would act on.
+func TestStrandedOperatorEpoch_SeverityAndReport(t *testing.T) {
+	role := "vtx.role.aaaaaaaaaaaaaaaaaaaa"
+	holder := "vtx.identity.bbbbbbbbbbbbbbbbbbbb"
+	perm := "vtx.permission.cccccccccccccccccccc"
+	edge := "lnk.identity.dddddddddddddddddddd.holdsRole.role.aaaaaaaaaaaaaaaaaaaa"
+
+	severe := StrandedOperatorEpoch{RoleKey: role, Holders: []string{holder}}
+	require.Equal(t, StrandedSeverityUnreachableAuthority, severe.Severity(),
+		"a holder with no grants is the dangerous state — the wildcard lens needs no grant")
+	require.Contains(t, severe.Report(), holder, "the holder key is the remedy, not a statistic")
+	require.Contains(t, severe.Report(), "Remedy: tombstone")
+
+	inertWithGrants := StrandedOperatorEpoch{RoleKey: role, GrantedBy: []string{perm}}
+	require.Equal(t, StrandedSeverityInert, inertWithGrants.Severity(),
+		"grants with no holder are unreachable")
+	require.Contains(t, inertWithGrants.Report(), perm)
+
+	reachable := StrandedOperatorEpoch{RoleKey: role, ReachableVia: []string{edge}}
+	require.Equal(t, StrandedSeverityReachable, reachable.Severity())
+	require.Contains(t, reachable.Report(), edge, "the demoting edge must be named")
+
+	many := make([]string, strandedReportKeysShown+4)
+	for i := range many {
+		many[i] = perm
 	}
+	require.Contains(t, StrandedOperatorEpoch{RoleKey: role, GrantedBy: many}.Report(), "+4 more",
+		"a long list must be elided by count, not printed whole")
+}
 
-	t.Run("failed_scan_leaves_the_comparison_intact", func(t *testing.T) {
-		missingKey := "vtx.meta.aaaaaaaaaaaaaaaaaaaa"
-		staleKey := "vtx.meta.bbbbbbbbbbbbbbbbbbbb.script"
-		scanErr := errors.New(`list "vtx.role.*.canonicalName": interrupted (partial result discarded)`)
-		plan := reconcilePlan{
-			missing:         []reconcileStep{{key: missingKey}},
-			stale:           []reconcileStep{{key: staleKey}},
-			strandedScanErr: scanErr,
-		}
-
-		report := kernelReportFromPlan(plan)
-		require.Equal(t, scanErr, report.StrandedScanErr, "the scan's failure belongs in its own field")
-		require.Empty(t, report.StrandedOperatorEpochs, "a failed scan reports nothing")
-		require.Equal(t, []string{missingKey}, report.Missing,
-			"the built-set comparison must survive an advisory scan's failure")
-		require.Equal(t, []string{staleKey}, report.Stale)
-	})
-
-	t.Run("succeeding_scan_reports_alongside_a_stale_kernel", func(t *testing.T) {
-		ctx := strandedTestContext(t)
-		seeder, kv := newReconcileSeeder(ctx, t)
-
-		_, err := seeder.ReconcilePrimordial(ctx)
-		require.NoError(t, err)
-
-		staleKey := upgradeScriptKey()
-		staleVal, staleErr := MakeAspectEnvelope(staleKey, UpgradePackageDDLKey, "script", "script",
-			map[string]any{"source": "def execute(state, op):\n    fail(\"an older binary\")\n"})
-		require.NoError(t, staleErr)
-		_, err = kv.Put(ctx, staleKey, staleVal)
-		require.NoError(t, err)
-
-		priorID := newNanoID(t)
-		priorKey := seedRole(ctx, t, kv, priorID, "operator")
-		seedGrant(ctx, t, kv, priorID, false)
-
-		report, err := ReadKernelReport(ctx, kv)
-		require.NoError(t, err)
-		require.NoError(t, report.StrandedScanErr)
-		require.Contains(t, report.Stale, staleKey,
-			"the built-set comparison and the stranded scan are answered from one plan")
-		require.Len(t, report.StrandedOperatorEpochs, 1)
-		require.Equal(t, priorKey, report.StrandedOperatorEpochs[0].RoleKey)
-	})
+// TestSortedUnique_DoesNotMutateItsInput pins the property a caller reusing a
+// slice after passing it here depends on.
+func TestSortedUnique_DoesNotMutateItsInput(t *testing.T) {
+	input := []string{"c", "a", "b", "a"}
+	require.Equal(t, []string{"a", "b", "c"}, sortedUnique(input))
+	require.Equal(t, []string{"c", "a", "b", "a"}, input, "sortedUnique must leave its argument alone")
 }

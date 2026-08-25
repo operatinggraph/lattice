@@ -359,30 +359,34 @@ func main() {
 		}
 	}
 
-	// Stranded primordial-epoch roles
-	// (primordial-epoch-stranded-authority-design.md §4). Unlike a kernel
-	// orphan, an `operator` role left behind by an id-file rotation that still
-	// confers live grants is authority no identity can reach, so it moves the
-	// exit status. A role whose grants are all revoked is dead weight and only
-	// informs.
-	fmt.Println("Checking for stranded primordial-epoch operator roles...")
+	// Stranded operator roles
+	// (primordial-epoch-stranded-authority-design.md §4). This is the one
+	// surface where the class moves an exit status: bootstrap.VerifyKernel
+	// reports it as a notice, because `make up` uses that command's exit code as
+	// its freshness oracle and would respond to a failure by discarding
+	// lattice.bootstrap.json and minting yet another epoch into the same bucket.
+	// Nothing consumes this script's exit code that way.
+	//
+	// Severity keys on HOLDERS, never on grants. The wildcard read-grant lens
+	// selects holders of any role NAMED `operator` and reads no grantedBy edge,
+	// so a holder the primordial table does not name already has
+	// installation-wide read of every RLS-protected table — while grants on a
+	// role nobody holds are unreachable.
+	fmt.Println("Checking for stranded operator roles (fails on unaccounted-for holders)...")
 	switch {
 	case reportErr != nil:
-		fmt.Printf("  INFO  cannot check for stranded primordial-epoch roles: kernel content comparison itself failed: %v\n", reportErr)
+		fmt.Printf("  INFO  cannot check for stranded operator roles: kernel content comparison itself failed: %v\n", reportErr)
 	case report.StrandedScanErr != nil:
-		fmt.Printf("  INFO  cannot check for stranded primordial-epoch roles: %v\n", report.StrandedScanErr)
+		fmt.Printf("  INFO  cannot check for stranded operator roles: %v\n", report.StrandedScanErr)
 	case len(report.StrandedOperatorEpochs) == 0:
-		fmt.Printf("  OK  no stranded primordial-epoch operator roles\n")
+		fmt.Printf("  OK  no stranded operator roles\n")
 	default:
 		for _, stranded := range report.StrandedOperatorEpochs {
-			if len(stranded.GrantedBy) == 0 {
-				fmt.Printf("  INFO  STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and reachable from no current-epoch identity (no live grants, %d prior-epoch holder(s))\n",
-					stranded.RoleKey, len(stranded.Holders))
+			if stranded.Severity() == bootstrap.StrandedSeverityUnreachableAuthority {
+				failures = append(failures, stranded.Report())
 				continue
 			}
-			failures = append(failures, fmt.Sprintf(
-				"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, reachable from no current-epoch identity, and still confers %d live grant(s) (%d prior-epoch holder(s))",
-				stranded.RoleKey, len(stranded.GrantedBy), len(stranded.Holders)))
+			fmt.Printf("  INFO  %s\n", stranded.Report())
 		}
 	}
 

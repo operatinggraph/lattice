@@ -212,81 +212,119 @@ func TestVerifyKernel_ReportsKernelOrphanAsNoticeNotFailure(t *testing.T) {
 }
 
 // seedPriorEpochOperatorRole plants the residue an id-file rotation leaves
-// behind: an `operator` role from a bootstrap epoch other than the one this
-// kernel was seeded from, carrying `grants` live grantedBy edges and still held
-// by that prior epoch's own admin identity — the create-only re-seed deletes
-// nothing, so the identity and its holdsRole edge survive alongside the role.
-// The freshly seeded kernel beside it supplies the current epoch, so the
-// fixture is exactly the two-epoch bucket the detector is about.
-func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substrate.Conn, grants int) string {
+// behind: an `operator` role whose id this deployment's primordial table does
+// not name, still held by that prior epoch's own admin identity — the
+// create-only re-seed deletes nothing, so the identity and its holdsRole edge
+// survive alongside the role — and carrying `grants` live grantedBy edges. Both
+// ends of every edge are written, because the scan counts an edge only when the
+// documents at both ends are live. The freshly seeded kernel beside it supplies
+// the current epoch, so the fixture is the two-epoch bucket the detector is
+// about. It returns the stranded role's key and its prior-epoch holder's key.
+func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substrate.Conn, grants int) (roleKey, holderKey string) {
 	t.Helper()
-	roleID, err := substrate.NewNanoID()
-	require.NoError(t, err)
-	roleKey := substrate.VertexKey("role", roleID)
+	put := func(key string, raw []byte, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		_, putErr := conn.KVPut(ctx, bootstrap.CoreKVBucket, key, raw)
+		require.NoError(t, putErr)
+	}
+	nanoID := func() string {
+		t.Helper()
+		id, err := substrate.NewNanoID()
+		require.NoError(t, err)
+		return id
+	}
 
-	roleVal, err := bootstrap.MakeVertexEnvelope(roleKey, "role", map[string]any{"protected": true})
-	require.NoError(t, err)
-	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, roleKey, roleVal)
-	require.NoError(t, err)
+	roleID := nanoID()
+	roleKey = substrate.VertexKey("role", roleID)
+	roleVal, roleErr := bootstrap.MakeVertexEnvelope(roleKey, "role", map[string]any{"protected": true})
+	put(roleKey, roleVal, roleErr)
 
 	cnKey := substrate.AspectKey(roleKey, "canonicalName")
-	cnVal, err := bootstrap.MakeAspectEnvelope(cnKey, roleKey, "canonicalName", "canonicalName",
+	cnVal, cnErr := bootstrap.MakeAspectEnvelope(cnKey, roleKey, "canonicalName", "canonicalName",
 		map[string]any{"value": "operator"})
-	require.NoError(t, err)
-	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, cnKey, cnVal)
-	require.NoError(t, err)
+	put(cnKey, cnVal, cnErr)
 
-	priorAdminID, err := substrate.NewNanoID()
-	require.NoError(t, err)
+	priorAdminID := nanoID()
+	holderKey = substrate.VertexKey("identity", priorAdminID)
+	adminVal, adminErr := bootstrap.MakeVertexEnvelope(holderKey, "identity", nil)
+	put(holderKey, adminVal, adminErr)
+
 	holdsRoleKey := substrate.LinkKey("identity", priorAdminID, "holdsRole", "role", roleID)
-	holdsRoleVal, err := bootstrap.MakeLinkEnvelope(holdsRoleKey, substrate.VertexKey("identity", priorAdminID),
-		roleKey, "holdsRole", "link.holdsRole", nil)
-	require.NoError(t, err)
-	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, holdsRoleKey, holdsRoleVal)
-	require.NoError(t, err)
+	holdsRoleVal, holdsRoleErr := bootstrap.MakeLinkEnvelope(holdsRoleKey, holderKey, roleKey,
+		"holdsRole", "link.holdsRole", nil)
+	put(holdsRoleKey, holdsRoleVal, holdsRoleErr)
 
 	for range grants {
-		permID, idErr := substrate.NewNanoID()
-		require.NoError(t, idErr)
+		permID := nanoID()
+		permKey := substrate.VertexKey("permission", permID)
+		permVal, permErr := bootstrap.MakeVertexEnvelope(permKey, "permission",
+			map[string]any{"operationType": "AttachObject"})
+		put(permKey, permVal, permErr)
+
 		linkKey := substrate.LinkKey("permission", permID, "grantedBy", "role", roleID)
-		linkVal, linkErr := bootstrap.MakeLinkEnvelope(linkKey, substrate.VertexKey("permission", permID),
-			roleKey, "grantedBy", "link.grantedBy", nil)
-		require.NoError(t, linkErr)
-		_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, linkKey, linkVal)
-		require.NoError(t, err)
+		linkVal, linkErr := bootstrap.MakeLinkEnvelope(linkKey, permKey, roleKey,
+			"grantedBy", "link.grantedBy", nil)
+		put(linkKey, linkVal, linkErr)
 	}
-	return roleKey
+	return roleKey, holderKey
 }
 
-// TestVerifyKernel_StrandedEpochWithGrantsFails is where the false green ends:
-// a prior epoch's operator role still conferring live grants is authority no
-// identity can reach, so it moves this gate's exit status rather than sitting
-// in the notices a 30-line output scrolls past.
-func TestVerifyKernel_StrandedEpochWithGrantsFails(t *testing.T) {
+// TestVerifyKernel_StrandedEpochReturnsNoFailures is the property `make up`
+// depends on, and it must not regress silently.
+//
+// cmd/lattice/bootstrap exits 1 on any failure this function returns
+// (bootstrap.go:134,165) and Makefile:202 uses that exit code as the freshness
+// oracle. A failure here sends `make up` down the mismatch path, where
+// `bootstrap probe-empty` exits 1 on a populated bucket and the recipe deletes
+// lattice.bootstrap.json and mints a fresh primordial set (Makefile:211-214) —
+// stranding the current epoch too, once per invocation, with this output
+// discarded to /dev/null. Firing on the condition it detects would make the
+// detector self-amplifying.
+func TestVerifyKernel_StrandedEpochReturnsNoFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn := seededKernelConn(ctx, t)
 
-	roleKey := seedPriorEpochOperatorRole(ctx, t, conn, 2)
-
-	failures, _ := bootstrap.VerifyKernel(ctx, conn)
-	require.Condition(t, containsSubstring(failures, "STRANDED OPERATOR ROLE: "+roleKey))
-	require.Condition(t, containsSubstring(failures, "2 live grant(s)"))
-}
-
-// TestVerifyKernel_StrandedEpochWithoutGrantsIsNotice is the other half of the
-// §4 split: the same stranded role with nothing left to confer is dead weight,
-// and dead weight does not redden a gate.
-func TestVerifyKernel_StrandedEpochWithoutGrantsIsNotice(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	conn := seededKernelConn(ctx, t)
-
-	roleKey := seedPriorEpochOperatorRole(ctx, t, conn, 0)
+	roleKey, _ := seedPriorEpochOperatorRole(ctx, t, conn, 2)
 
 	failures, notices := bootstrap.VerifyKernel(ctx, conn)
-	require.Empty(t, failures, "a stranded role conferring nothing must not fail the gate")
+	require.Empty(t, failures,
+		"a stranded operator role must never fail bootstrap verify — `make up` reads that exit code")
 	require.Condition(t, containsSubstring(notices, "STRANDED OPERATOR ROLE: "+roleKey))
+}
+
+// TestVerifyKernel_StrandedEpochWithoutGrantsIsStillReported pins that the
+// benign-looking half is not silence either: a role with holders and no grants
+// is the state the wildcard read-grant lens projects root read for, so it is
+// exactly the one that must not be dropped for having an empty grant list.
+func TestVerifyKernel_StrandedEpochWithoutGrantsIsStillReported(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	roleKey, _ := seedPriorEpochOperatorRole(ctx, t, conn, 0)
+
+	failures, notices := bootstrap.VerifyKernel(ctx, conn)
+	require.Empty(t, failures)
+	require.Condition(t, containsSubstring(notices, "STRANDED OPERATOR ROLE: "+roleKey))
+}
+
+// TestVerifyKernel_StrandedEpochNoticeNamesItsHolders pins that the notice
+// carries the keys an operator acts on. A bare count would send the reader to
+// Loupe to discover what to revoke, and under the holder-keyed severity rule
+// the holder keys ARE the actionable item — each names an edge to tombstone.
+func TestVerifyKernel_StrandedEpochNoticeNamesItsHolders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	roleKey, holder := seedPriorEpochOperatorRole(ctx, t, conn, 1)
+
+	_, notices := bootstrap.VerifyKernel(ctx, conn)
+	require.Condition(t, containsSubstring(notices, holder),
+		"the notice must name the holding identity, not just count it")
+	require.Condition(t, containsSubstring(notices, roleKey))
 }
 
 func containsSubstring(haystack []string, want string) func() bool {

@@ -60,8 +60,8 @@ type reconcileStep struct {
 // run; only a caller whose contract IS the orphan report (KernelOrphans)
 // surfaces it.
 //
-// `strandedEpochs` names prior-bootstrap-epoch operator roles that are still
-// live and reachable from no current-epoch identity
+// `strandedEpochs` names live roles named `operator` that this deployment's
+// primordial table does not name
 // (primordial-epoch-stranded-authority-design.md §3) —
 // an orphan class over a different key family than the vtx.meta.> census, and
 // likewise reported here rather than acted on. `strandedScanErr` carries that
@@ -495,11 +495,11 @@ type KernelReport struct {
 	// returns, which reflects only a failure of the built-set comparison
 	// every consumer depends on.
 	OrphanScanErr error
-	// StrandedOperatorEpochs names prior-bootstrap-epoch operator roles that
-	// are still live and reachable from no current-epoch identity
-	// (primordial-epoch-stranded-authority-design.md §3). The count of live
-	// grants on each is what decides its severity at the gate: authority no
-	// identity can reach is a failure, dead weight is a notice.
+	// StrandedOperatorEpochs names live roles named `operator` that this
+	// deployment's primordial table does not name
+	// (primordial-epoch-stranded-authority-design.md §3). Each finding carries
+	// its own Severity; only scripts/verify-kernel.go turns the severe rank into
+	// an exit status, deliberately (VerifyKernel's doc explains why).
 	StrandedOperatorEpochs []StrandedOperatorEpoch
 	// StrandedScanErr is the stranded-epoch SCAN's own failure — narrower, the
 	// same way OrphanScanErr is, than the error ReadKernelReport returns: the
