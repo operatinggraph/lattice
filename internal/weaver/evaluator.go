@@ -1015,25 +1015,9 @@ const defaultDirectOpRetryBudget = 3
 // exhausted) whether the spent budget was this engine default rather than a
 // declared cap, so the caller's escalation message can say which.
 func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol, action string) (suppressed, exhausted, budgetIsDefault bool) {
-	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
-	if !ok {
-		return false, false, false
-	}
-	if e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g) {
-		return true, false, false
-	}
-	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
-	if !ok || capN <= 0 {
-		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
-			// No usable cap on the row, and either this isn't a directOp gap
-			// (assignTask/triggerLoom/proposedOp keep their Option-D backoff
-			// path instead of a hard cap) or the row already declares
-			// inflight_<g> (a lens that has adopted the §10.3 external-gap
-			// contract; its own pacing, not this engine's to second-guess) —
-			// never auto-suppress.
-			return false, false, false
-		}
-		capN, budgetIsDefault = defaultDirectOpRetryBudget, true
+	terms := e.gapSuppressionTerms(targetID, entityID, row, gapCol, action)
+	if !terms.needsCount {
+		return terms.suppressed, false, false
 	}
 	count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
 	if err != nil {
@@ -1044,10 +1028,72 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 			"targetId", targetID, "entityId", entityID, "gap", gapCol, "err", err)
 		return false, false, false
 	}
-	if count >= capN {
-		return true, true, budgetIsDefault
+	return terms.verdict(count)
+}
+
+// gapSuppressedWithCount is gapSuppressed's verdict over a dispatch-count the
+// caller has ALREADY read — the reconciler sweep's count leg holds the key's
+// value and its revision from the same read that decided the key was not
+// corrupt, and a second read of the identical key would be a third KV
+// round-trip per parked gap per pass. Same terms, same order, same answers; the
+// only difference is where the count came from, so a caller with no count in
+// hand must keep using gapSuppressed (which reads it, and only if the verdict
+// actually rests on the budget term).
+func (e *Engine) gapSuppressedWithCount(targetID, entityID string, row map[string]any, gapCol, action string, count int) (suppressed, exhausted, budgetIsDefault bool) {
+	terms := e.gapSuppressionTerms(targetID, entityID, row, gapCol, action)
+	if !terms.needsCount {
+		return terms.suppressed, false, false
+	}
+	return terms.verdict(count)
+}
+
+// suppressionTerms is everything gapSuppressed decides from the ROW alone: the
+// authoritative inflight_<g> term, and whether a usable retry cap exists at all
+// (a row-declared maxretries_<g>, else the engine default for a bare directOp
+// gap). needsCount=false means suppressed is already the final answer and no
+// dispatch-count is consulted — which is why the inflight and no-cap paths cost
+// no KV read. needsCount=true means the verdict rests on the budget term, and
+// capN/budgetIsDefault describe the cap the count is measured against.
+type suppressionTerms struct {
+	suppressed      bool
+	needsCount      bool
+	capN            int
+	budgetIsDefault bool
+}
+
+// verdict applies the budget term to a dispatch-count: the budget is spent —
+// and the gap is suppressed as `exhausted`, the §10.8 decision point — iff the
+// count has reached the cap.
+func (t suppressionTerms) verdict(count int) (suppressed, exhausted, budgetIsDefault bool) {
+	if count >= t.capN {
+		return true, true, t.budgetIsDefault
 	}
 	return false, false, false
+}
+
+func (e *Engine) gapSuppressionTerms(targetID, entityID string, row map[string]any, gapCol, action string) suppressionTerms {
+	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
+	if !ok {
+		return suppressionTerms{}
+	}
+	if e.boolColumn(targetID, entityID, row, inflightColumnPrefix+g) {
+		return suppressionTerms{suppressed: true}
+	}
+	capN, ok := e.intColumn(targetID, entityID, row, maxretriesColumnPrefix+g)
+	budgetIsDefault := false
+	if !ok || capN <= 0 {
+		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
+			// No usable cap on the row, and either this isn't a directOp gap
+			// (assignTask/triggerLoom/proposedOp keep their Option-D backoff
+			// path instead of a hard cap) or the row already declares
+			// inflight_<g> (a lens that has adopted the §10.3 external-gap
+			// contract; its own pacing, not this engine's to second-guess) —
+			// never auto-suppress.
+			return suppressionTerms{}
+		}
+		capN, budgetIsDefault = defaultDirectOpRetryBudget, true
+	}
+	return suppressionTerms{needsCount: true, capN: capN, budgetIsDefault: budgetIsDefault}
 }
 
 // hasUsableRetryCap reports whether the row carries a positive maxretries_<g>
@@ -1207,11 +1253,21 @@ func splitRowKey(key string) (targetID, entityID string, ok bool) {
 	return targetID, entityID, true
 }
 
-// alert records a Health KV issue and logs it at Error — the FR29 loud-failure
-// pair.
+// alert records a Health KV issue and logs it — the FR29 loud-failure pair. The
+// issue is the standing surface and is idempotent; the log is a stream, so only
+// the ARRIVAL of a fact (a first raise, or a change of severity/code at the same
+// key) logs at Error, and a re-raise of a fact already standing logs at Debug.
+// Every raise here is level-driven — the same condition is re-evaluated on every
+// sweep pass and every redelivery — so logging each one at Error would write one
+// Error per subject per pass for as long as the condition holds, burying the
+// arrivals that an operator actually needs to see. The Health issue keeps the
+// full fact either way.
 func (e *Engine) alert(key, severity, code, message string) {
-	e.logger.Error("weaver: " + message)
-	e.issues.set(key, severity, code, message)
+	if e.issues.set(key, severity, code, message) {
+		e.logger.Error("weaver: " + message)
+		return
+	}
+	e.logger.Debug("weaver: " + message)
 }
 
 // The issue-key family prefixes. Every key constructor below and every

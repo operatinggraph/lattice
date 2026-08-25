@@ -253,10 +253,11 @@ func (m *markStore) deleteRevision(ctx context.Context, targetID, entityID, gapC
 }
 
 // countKeySuffix names the reserved dispatch-count key tail:
-// `<targetId>.<entityId>.<gapColumn>.__count`. The count is matched (and skipped)
-// by suffix wherever marks are enumerated — the reconciler sweep and the
-// marksInFlight gauge — because it is NOT a §10.3 mark: it has a 4th segment, so
-// splitMarkKey would reject it as corrupt. The "__count" tail can never be a
+// `<targetId>.<entityId>.<gapColumn>.__count`. The count is matched by suffix
+// wherever weaver-state is enumerated — the marksInFlight gauge skips it, and
+// the reconciler sweep routes it to its own count leg — because it is NOT a
+// §10.3 mark: it has a 4th segment, so splitMarkKey would reject it as corrupt.
+// The "__count" tail can never be a
 // gapColumn (singleTokenPattern forbids the dot) nor a NanoID entityId
 // (substrate.Alphabet has no underscore), so the count, mark, and `__control`
 // key shapes are mutually disjoint.

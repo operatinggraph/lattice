@@ -83,8 +83,20 @@ func newIssueCache() *issueCache {
 	return &issueCache{issues: make(map[string]healthIssue), since: make(map[string]string)}
 }
 
-func (c *issueCache) set(key, severity, code, message string) {
+// set records (or refreshes) the issue at key and reports whether this was a
+// TRANSITION — the first raise of this key, or a raise whose severity or code
+// differs from the one standing there. A latch is level-driven, so the same
+// condition re-raises on every evaluation of it (every sweep pass, every
+// redelivery); callers that pair a log line with the raise use the transition
+// bit to log the arrival loudly and the repeat quietly, which is what keeps one
+// parked gap from writing one Error per pass for the life of its budget.
+//
+// since is preserved across a repeat (Contract #5 §5.5: the issue has been open
+// since it first arose) and re-stamped only when the key had no active entry.
+func (c *issueCache) set(key, severity, code, message string) (transition bool) {
 	c.mu.Lock()
+	prior, standing := c.issues[key]
+	transition = !standing || prior.Severity != severity || prior.Code != code
 	since, ok := c.since[key]
 	if !ok {
 		since = substrate.FormatTimestamp(time.Now())
@@ -92,6 +104,7 @@ func (c *issueCache) set(key, severity, code, message string) {
 	}
 	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since}
 	c.mu.Unlock()
+	return transition
 }
 
 func (c *issueCache) clear(key string) {

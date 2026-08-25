@@ -242,8 +242,13 @@ remediation already in flight, and a spent retry budget — sourced differently:
   (`<targetId>.<entityId>.<gapColumn>.__count`, a reserved key shape disjoint from marks and the
   `__control` marker). It is **incremented on each actual dispatch** — the lane-1 CAS-create-and-fire
   and the sweep's reclaim, so it tracks one-per-anti-storm-window real attempts from **both** dispatch
-  legs — and **reset (deleted) on gap-close** by `clearClosedMarks` (the same level-reconciled path
-  that deletes the mark). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
+  legs — and **reset (deleted) on gap-close** by whichever level-reconciled path observes the close
+  first: `clearClosedMarks` on a row delivery, or the reconciler sweep's own **count leg**
+  (`sweepCount`), the only one that reaches a gap whose row has gone quiet. That leg also re-derives
+  the §10.8 `GapBudgetExhausted` standing issue from the count on every pass — so the alert that
+  explains a suppression outlives a restart for as long as the suppression itself does — and retires
+  it on the row's own evidence (the gap closed, the row is gone, or the playbook stopped naming the
+  column). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
   (package policy baked into the cypher, like the freshness window). The budget term suppresses when
   `dispatchCount(target, entity, gap) >= maxretries_<g>`.
 
