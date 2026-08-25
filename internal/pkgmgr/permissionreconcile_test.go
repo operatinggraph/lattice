@@ -383,20 +383,20 @@ func writeRawPermission(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // (kernel-clean and package-clean produce no finding at all).
 func livePermissionClassCounts(t *testing.T, ctx context.Context, conn *substrate.Conn) map[PermissionProvenance]int {
 	t.Helper()
-	live, declared, _, kernelKeys, undecodable, err := gatherPermissionInputs(ctx, conn)
+	in, err := gatherPermissionInputs(ctx, conn)
 	if err != nil {
 		t.Fatalf("gatherPermissionInputs: %v", err)
 	}
-	if len(undecodable) > 0 {
-		t.Fatalf("gatherPermissionInputs reported undecodable entries in a clean fixture: %+v", undecodable)
+	if len(in.undecodable) > 0 {
+		t.Fatalf("gatherPermissionInputs reported undecodable entries in a clean fixture: %+v", in.undecodable)
 	}
-	anyDeclaredKey := make(map[string]bool, len(declared))
-	for _, d := range declared {
+	anyDeclaredKey := make(map[string]bool, len(in.declared))
+	for _, d := range in.declared {
 		anyDeclaredKey[d.Key] = true
 	}
 	counts := map[PermissionProvenance]int{}
-	for _, p := range live {
-		counts[classifyLivePermission(p, kernelKeys, anyDeclaredKey)]++
+	for _, p := range in.live {
+		counts[classifyLivePermission(p, in.kernelPermissionKeys, anyDeclaredKey)]++
 	}
 	return counts
 }
@@ -836,6 +836,797 @@ func TestLoadPermissionReconciliation_UndecodableDeclaredKeyIsNotAlsoMissing(t *
 	for _, d := range got.Drift {
 		if d.Key == realKey && d.Class != FindingUndecodable {
 			t.Errorf("realKey produced an extra drift finding %+v — should be undecodable alone; missing must not also fire for an occupied-but-unreadable key", d)
+		}
+	}
+}
+
+// --- the grant-edge plane ---
+
+// grantClassesOf extracts and sorts the Class of every grant finding, so a
+// test can compare "which classes fired" without caring about slice order (the
+// pure function's own ordering is asserted separately, by
+// TestReconcileGrantLinks_DeterministicOrder).
+func grantClassesOf(findings []GrantFinding) []GrantFindingClass {
+	out := make([]GrantFindingClass, len(findings))
+	for i, f := range findings {
+		out[i] = f.Class
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// TestReconcileGrantLinks is the grant-edge table: one row per classification
+// and per drift leg, each drift class carrying both a clean (positive) row and
+// a firing (negative) row.
+func TestReconcileGrantLinks(t *testing.T) {
+	const (
+		roleOperatorID = "SWZpB4hde9askSkMWU7s"
+		roleForgedID   = "2QuyoBDkFGC5kdgrYkTF"
+		kernelPermID   = "7LDVS9C2JGmCgTwYXMEP"
+		legacyPermID   = "6p5Esr7taUqEp7j61FuE"
+		runtimePermID  = "zY2iRfHmEQh8DgQbEXia"
+	)
+	kernelEdge := substrate.LinkKey("permission", kernelPermID, "grantedBy", "role", roleOperatorID)
+	kernelOnly := map[string]bool{kernelEdge: true}
+
+	samplePermID := PermissionID("sample-pkg", "SampleOp", "any")
+	samplePermKey := "vtx.permission." + samplePermID
+	sampleEdge := substrate.LinkKey("permission", samplePermID, "grantedBy", "role", roleOperatorID)
+	samplePerms := []DeclaredPermission{{Package: "sample-pkg", Key: samplePermKey}}
+
+	// An edge onto the KERNEL's install permission, wearing sample-pkg's
+	// declaration — the escalation this plane exists to catch, since it forges
+	// no permission vertex at all.
+	stolenEdge := substrate.LinkKey("permission", kernelPermID, "grantedBy", "role", roleForgedID)
+
+	cases := []struct {
+		name                string
+		live                []LiveGrantLink
+		declared            []DeclaredGrantLink
+		declaredPermissions []DeclaredPermission
+		installedPackages   map[string]bool
+		kernelKeys          map[string]bool
+		wantDrift           []GrantFindingClass
+		wantNotices         []GrantFindingClass
+		// wantReason, when set, is checked against the single Drift finding's
+		// Reason field (the row must produce exactly one Drift finding).
+		// Class/Key/Package are identical across the undeclared arms, so only
+		// Reason can tell a disabled branch's finding from the real one.
+		wantReason GrantUndeclaredReason
+	}{
+		{
+			name:       "kernel grant edge present is silent (positive vector)",
+			live:       []LiveGrantLink{{Key: kernelEdge, PermissionKey: "vtx.permission." + kernelPermID, RoleKey: "vtx.role." + roleOperatorID}},
+			kernelKeys: kernelOnly,
+		},
+		{
+			name:       "kernel grant edge absent fires kernelMissing",
+			kernelKeys: kernelOnly,
+			wantDrift:  []GrantFindingClass{GrantFindingKernelMissing},
+		},
+		{
+			name: "package edge on its own declared permission is clean (undeclared + keyMismatch positive vector)",
+			live: []LiveGrantLink{
+				{Key: sampleEdge, PermissionKey: samplePermKey, RoleKey: "vtx.role." + roleOperatorID,
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+			},
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: sampleEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+		},
+		{
+			name: "package edge declaredBy an uninstalled package fires undeclared",
+			live: []LiveGrantLink{
+				{Key: sampleEdge, PermissionKey: samplePermKey, RoleKey: "vtx.role." + roleOperatorID,
+					Origin: PermissionOriginPackage, DeclaredBy: "ghost-pkg"},
+			},
+			installedPackages: map[string]bool{},
+			wantDrift:         []GrantFindingClass{GrantFindingUndeclared},
+			wantReason:        GrantReasonPackageNotInstalled,
+		},
+		{
+			name: "package edge whose key is not in its declaring package's declaredKeys fires undeclared",
+			live: []LiveGrantLink{
+				{Key: stolenEdge, PermissionKey: "vtx.permission." + kernelPermID, RoleKey: "vtx.role." + roleForgedID,
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+			},
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: sampleEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			// sampleEdge is declared but not live, so `missing` fires for it as
+			// well as `undeclared` for the forged edge — two findings, so
+			// wantReason (which demands exactly one) stays unset and the
+			// dedicated keyNotDeclared reason is pinned by the row below.
+			wantDrift: []GrantFindingClass{GrantFindingMissing, GrantFindingUndeclared},
+		},
+		{
+			name: "an undeclared edge reports only undeclared, never also keyMismatch",
+			live: []LiveGrantLink{
+				// Both undeclared (absent from sample-pkg's declaredKeys) AND
+				// pointing at a permission sample-pkg does not declare — both
+				// checks would independently fire on this edge if keyMismatch
+				// were checked unconditionally, so this row pins that only
+				// undeclared does.
+				{Key: stolenEdge, PermissionKey: "vtx.permission." + kernelPermID, RoleKey: "vtx.role." + roleForgedID,
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+			},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			wantDrift:           []GrantFindingClass{GrantFindingUndeclared},
+			wantReason:          GrantReasonKeyNotDeclared,
+		},
+		{
+			name: "a declared edge granting a permission its package does not own fires keyMismatch",
+			live: []LiveGrantLink{
+				// Declared — an attacker-authored manifest can say so — but the
+				// permission it grants belongs to the kernel, not to sample-pkg.
+				{Key: stolenEdge, PermissionKey: "vtx.permission." + kernelPermID, RoleKey: "vtx.role." + roleForgedID,
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+			},
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: stolenEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			wantDrift:           []GrantFindingClass{GrantFindingKeyMismatch},
+		},
+		{
+			name: "declared edge with a live link is clean (missing positive vector)",
+			live: []LiveGrantLink{
+				{Key: sampleEdge, PermissionKey: samplePermKey, RoleKey: "vtx.role." + roleOperatorID,
+					Origin: PermissionOriginPackage, DeclaredBy: "sample-pkg"},
+			},
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: sampleEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+		},
+		{
+			name:                "declared edge with no document at all fires missing",
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: sampleEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			wantDrift:           []GrantFindingClass{GrantFindingMissing},
+		},
+		{
+			name: "declared edge backed by a tombstoned document is a respected revocation, not missing",
+			declared: []DeclaredGrantLink{
+				{Package: "sample-pkg", Key: sampleEdge, PermissionKey: samplePermKey,
+					RoleKey: "vtx.role." + roleOperatorID, Tombstoned: true},
+			},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			wantNotices:         []GrantFindingClass{GrantFindingRevoked},
+		},
+		{
+			name: "declared edge marked Undecodable produces no missing drift",
+			declared: []DeclaredGrantLink{
+				{Package: "sample-pkg", Key: sampleEdge, Undecodable: true},
+			},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			// Neither drift nor notice from THIS call: GrantFindingUndecodable
+			// is raised by the gatherer, not by ReconcileGrantLinks itself.
+		},
+		{
+			name: "runtime-origin edge is inventory, never drift",
+			live: []LiveGrantLink{
+				{Key: substrate.LinkKey("permission", runtimePermID, "grantedBy", "role", roleOperatorID),
+					PermissionKey: "vtx.permission." + runtimePermID, RoleKey: "vtx.role." + roleOperatorID,
+					Origin: PermissionOriginRuntime},
+			},
+			wantNotices: []GrantFindingClass{GrantFindingRuntimeInventory},
+		},
+		{
+			name: "a no-origin edge whose key IS declared by an installed package is inventory, never drift (unstamped)",
+			live: []LiveGrantLink{
+				{Key: substrate.LinkKey("permission", legacyPermID, "grantedBy", "role", roleOperatorID),
+					PermissionKey: "vtx.permission." + legacyPermID, RoleKey: "vtx.role." + roleOperatorID},
+			},
+			declared: []DeclaredGrantLink{
+				{Package: "sample-pkg", Key: substrate.LinkKey("permission", legacyPermID, "grantedBy", "role", roleOperatorID)},
+			},
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantNotices:       []GrantFindingClass{GrantFindingUnstampedInventory},
+		},
+		{
+			name: "a no-origin edge whose key is declared nowhere fires undeclared, not a notice (the field-deletion vector)",
+			live: []LiveGrantLink{
+				{Key: stolenEdge, PermissionKey: "vtx.permission." + kernelPermID, RoleKey: "vtx.role." + roleForgedID},
+			},
+			// No declared entry for stolenEdge anywhere: an edge carrying no
+			// origin that no installed package declares is a forgery wearing a
+			// legacy shape, not a legacy install.
+			installedPackages: map[string]bool{"sample-pkg": true},
+			wantDrift:         []GrantFindingClass{GrantFindingUndeclared},
+			wantReason:        GrantReasonNoOriginUndeclared,
+		},
+		{
+			name: "a non-empty, unrecognized origin is drift outright even when its key IS declared",
+			live: []LiveGrantLink{
+				{Key: sampleEdge, PermissionKey: samplePermKey, RoleKey: "vtx.role." + roleOperatorID,
+					Origin: "Package"}, // capital-P typo, not the wire value
+			},
+			declared:            []DeclaredGrantLink{{Package: "sample-pkg", Key: sampleEdge}},
+			declaredPermissions: samplePerms,
+			installedPackages:   map[string]bool{"sample-pkg": true},
+			wantDrift:           []GrantFindingClass{GrantFindingUndeclared},
+			wantReason:          GrantReasonUnrecognizedOriginValue,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			drift, notices, _ := ReconcileGrantLinks(tc.live, tc.declared, tc.declaredPermissions, tc.installedPackages, tc.kernelKeys)
+			gotDrift := grantClassesOf(drift)
+			gotNotices := grantClassesOf(notices)
+			if !slices.Equal(gotDrift, tc.wantDrift) {
+				t.Errorf("Drift classes = %v, want %v (findings: %+v)", gotDrift, tc.wantDrift, drift)
+			}
+			if !slices.Equal(gotNotices, tc.wantNotices) {
+				t.Errorf("Notice classes = %v, want %v (findings: %+v)", gotNotices, tc.wantNotices, notices)
+			}
+			if tc.wantReason != "" {
+				if len(drift) != 1 {
+					t.Fatalf("wantReason %q set but len(drift) = %d, want exactly 1: %+v", tc.wantReason, len(drift), drift)
+				}
+				if drift[0].Reason != tc.wantReason {
+					t.Errorf("drift[0].Reason = %q, want %q", drift[0].Reason, tc.wantReason)
+				}
+			}
+		})
+	}
+}
+
+// TestReconcileGrantLinks_DeterministicOrder asserts the drift slice is
+// sorted, not emitted in map-iteration order: two calls whose declared slices
+// are supplied in opposite orders must produce byte-identical output.
+func TestReconcileGrantLinks_DeterministicOrder(t *testing.T) {
+	kernelKeys := map[string]bool{
+		substrate.LinkKey("permission", "SWZpB4hde9askSkMWU7s", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT"): true,
+		substrate.LinkKey("permission", "2QuyoBDkFGC5kdgrYkTF", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT"): true,
+	}
+	declared := []DeclaredGrantLink{
+		{Package: "pkg-b", Key: substrate.LinkKey("permission", "vRbFXBLr7MCKANjA8qu3", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT")},
+		{Package: "pkg-a", Key: substrate.LinkKey("permission", "6p5Esr7taUqEp7j61FuE", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT")},
+	}
+	declaredReversed := []DeclaredGrantLink{declared[1], declared[0]}
+	installed := map[string]bool{"pkg-a": true, "pkg-b": true}
+
+	drift1, _, _ := ReconcileGrantLinks(nil, declared, nil, installed, kernelKeys)
+	drift2, _, _ := ReconcileGrantLinks(nil, declaredReversed, nil, installed, kernelKeys)
+
+	raw1, _ := json.Marshal(drift1)
+	raw2, _ := json.Marshal(drift2)
+	if string(raw1) != string(raw2) {
+		t.Fatalf("drift order depends on input order:\n got1=%s\n got2=%s", raw1, raw2)
+	}
+	// 2 kernelMissing + 2 missing == 4, and the classes must sort before one
+	// another alphabetically (kernelMissing < missing).
+	if len(drift1) != 4 {
+		t.Fatalf("len(drift) = %d, want 4: %+v", len(drift1), drift1)
+	}
+	for i := 0; i < 2; i++ {
+		if drift1[i].Class != GrantFindingKernelMissing {
+			t.Errorf("drift[%d].Class = %q, want %q (kernelMissing sorts first)", i, drift1[i].Class, GrantFindingKernelMissing)
+		}
+	}
+	for i := 2; i < 4; i++ {
+		if drift1[i].Class != GrantFindingMissing {
+			t.Errorf("drift[%d].Class = %q, want %q", i, drift1[i].Class, GrantFindingMissing)
+		}
+	}
+}
+
+// TestKernelGrantLinkKeySet pins the fail-loud contract on plain string input,
+// so it never has to touch internal/bootstrap's package-level state (see
+// kernelGrantLinkKeySet's own doc comment for why mutating those globals would
+// race the rest of this package's tests).
+func TestKernelGrantLinkKeySet(t *testing.T) {
+	resolved := []string{
+		substrate.LinkKey("permission", "SWZpB4hde9askSkMWU7s", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT"),
+		substrate.LinkKey("permission", "2QuyoBDkFGC5kdgrYkTF", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT"),
+	}
+	cases := []struct {
+		name    string
+		keys    []string
+		wantErr bool
+	}{
+		{name: "all resolved", keys: resolved},
+		{name: "unloaded — empty string", keys: []string{""}, wantErr: true},
+		{
+			// The shape bootstrap.KernelGrantLinkKeys derives from unpopulated
+			// primordial IDs: the key's segments are all there, its ids are not.
+			name:    "unloaded — empty id segments",
+			keys:    []string{"lnk.permission..grantedBy.role."},
+			wantErr: true,
+		},
+		{
+			name:    "unloaded — only the role id is empty",
+			keys:    []string{"lnk.permission.SWZpB4hde9askSkMWU7s.grantedBy.role."},
+			wantErr: true,
+		},
+		{
+			name:    "not a grant edge at all",
+			keys:    []string{"lnk.permission.SWZpB4hde9askSkMWU7s.forOperation.meta.u3RxRfKybLhhhsLe3NiT"},
+			wantErr: true,
+		},
+		{name: "one of several unresolved still refuses the whole set", keys: []string{resolved[0], ""}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := kernelGrantLinkKeySet(tc.keys)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("kernelGrantLinkKeySet(%v) = %v, nil error; want a refusal", tc.keys, got)
+				}
+				if !strings.Contains(err.Error(), "bootstrap.Load") {
+					t.Errorf("error should name the remedy that actually resolves it (bootstrap.Load): %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("kernelGrantLinkKeySet(%v): unexpected error %v", tc.keys, err)
+			}
+			if len(got) != len(tc.keys) {
+				t.Errorf("len(got) = %d, want %d (%v)", len(got), len(tc.keys), got)
+			}
+		})
+	}
+}
+
+// writeForgedGrantLink writes a `grantedBy` link envelope directly into
+// core-kv via KVPut, standing in for the hazard this plane exists to catch —
+// an edge authored by neither an install batch nor GrantPermission. The
+// document's sourceVertex/targetVertex agree with the key, exactly as every
+// sanctioned writer's do, so a test's forgery is not caught by a disagreement
+// no real attacker would leave behind.
+func writeForgedGrantLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, data map[string]any) {
+	t.Helper()
+	permissionKey, roleKey, ok := grantLinkKeyParts(key)
+	if !ok {
+		t.Fatalf("%q is not a grant-edge key", key)
+	}
+	doc := map[string]any{
+		"class": "grantedBy", "isDeleted": false, "data": data,
+		"sourceVertex": permissionKey, "targetVertex": roleKey, "localName": "grantedBy",
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal forged grant link %s: %v", key, err)
+	}
+	if _, err := conn.KVPut(ctx, CoreBucket, key, raw); err != nil {
+		t.Fatalf("KVPut forged grant link %s: %v", key, err)
+	}
+}
+
+// writeRawGrantLink writes an ARBITRARY raw body at a grant-edge key,
+// bypassing writeForgedGrantLink's typed document — the only way to construct
+// an envelope this pass cannot decode at all.
+func writeRawGrantLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, rawBody string) {
+	t.Helper()
+	if _, err := conn.KVPut(ctx, CoreBucket, key, []byte(rawBody)); err != nil {
+		t.Fatalf("KVPut raw grant link %s: %v", key, err)
+	}
+}
+
+// declareKey appends key to an installed package's manifest declaredKeys — the
+// attacker-authored-manifest half of the comparison this reconciler makes
+// against Core KV, and the fact that turns an unrecognized edge into a
+// declared one.
+func declareKey(t *testing.T, ctx context.Context, conn *substrate.Conn, manifestKey, key string) {
+	t.Helper()
+	patchDoc(t, ctx, conn, manifestKey, func(doc map[string]any) {
+		data, _ := doc["data"].(map[string]any)
+		keys, _ := data["declaredKeys"].([]any)
+		data["declaredKeys"] = append(keys, key)
+	})
+}
+
+// liveGrantLinkClassCounts independently re-derives the classification
+// LoadPermissionReconciliation's gatherer feeds ReconcileGrantLinks, so a test
+// can assert how many kernel/package/runtime/unstamped/unrecognized edges are
+// live — a fact the reconciler does not surface for the silent classes
+// (kernel-clean and package-clean produce no finding at all).
+func liveGrantLinkClassCounts(t *testing.T, ctx context.Context, conn *substrate.Conn) map[GrantProvenance]int {
+	t.Helper()
+	in, err := gatherPermissionInputs(ctx, conn)
+	if err != nil {
+		t.Fatalf("gatherPermissionInputs: %v", err)
+	}
+	if len(in.undecodableGrantLinks) > 0 {
+		t.Fatalf("gatherPermissionInputs reported undecodable grant links in a clean fixture: %+v", in.undecodableGrantLinks)
+	}
+	anyDeclaredKey := make(map[string]bool, len(in.declaredGrantLinks))
+	for _, d := range in.declaredGrantLinks {
+		anyDeclaredKey[d.Key] = true
+	}
+	counts := map[GrantProvenance]int{}
+	for _, l := range in.liveGrantLinks {
+		counts[classifyGrantLink(l, in.kernelGrantLinkKeys, anyDeclaredKey)]++
+	}
+	return counts
+}
+
+// findGrantByClass returns the single finding of the given class, failing the
+// test if there is not exactly one.
+func findGrantByClass(t *testing.T, findings []GrantFinding, class GrantFindingClass) GrantFinding {
+	t.Helper()
+	var matches []GrantFinding
+	for _, f := range findings {
+		if f.Class == class {
+			matches = append(matches, f)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("grant findings of class %q = %d, want exactly 1 (all findings: %+v)", class, len(matches), findings)
+	}
+	return matches[0]
+}
+
+// TestLoadPermissionReconciliation_GrantLinks_CleanInstall installs a real
+// package through the Processor and asserts the edge plane reads back with
+// zero drift, bootstrap's six kernel grant edges, and one package-origin edge
+// per GrantsTo entry sampleDef declares.
+func TestLoadPermissionReconciliation_GrantLinks_CleanInstall(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, def); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	if len(got.GrantDrift) != 0 {
+		t.Fatalf("GrantDrift on a clean install = %+v, want none", got.GrantDrift)
+	}
+
+	counts := liveGrantLinkClassCounts(t, ctx, conn)
+	if counts[GrantProvenanceKernel] != len(bootstrap.KernelGrantLinkKeys()) {
+		t.Errorf("kernel class count = %d, want %d", counts[GrantProvenanceKernel], len(bootstrap.KernelGrantLinkKeys()))
+	}
+	wantPackage := 0
+	for _, p := range def.Permissions {
+		wantPackage += len(p.GrantsTo)
+	}
+	if counts[GrantProvenancePackage] != wantPackage {
+		t.Errorf("package class count = %d, want %d (sampleDef's declared grants)", counts[GrantProvenancePackage], wantPackage)
+	}
+
+	wantEdge := substrate.LinkKey("permission", PermissionID("sample-pkg", "SampleOp", "any"), "grantedBy", "role", bootstrap.RoleOperatorID)
+	keys, ok := got.DeclaredGrantLinksByPackage["sample-pkg"]
+	if !ok {
+		t.Fatalf("DeclaredGrantLinksByPackage[%q] missing, want an entry (installed package)", "sample-pkg")
+	}
+	if !slices.Contains(keys, wantEdge) {
+		t.Errorf("DeclaredGrantLinksByPackage[%q] = %v, want it to contain %q", "sample-pkg", keys, wantEdge)
+	}
+	// The `forOperation` edges an install also writes share the
+	// `lnk.permission.` prefix and must not be collected as grants.
+	for _, k := range keys {
+		if _, _, ok := grantLinkKeyParts(k); !ok {
+			t.Errorf("DeclaredGrantLinksByPackage[%q] carries %q, which is not a grant edge", "sample-pkg", k)
+		}
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsForgedGrantEdge writes the cheapest
+// real escalation: a `grantedBy` edge onto the KERNEL's InstallPackage
+// permission, granting it to a role of the attacker's choosing. No permission
+// vertex is forged, so the vertex plane sees nothing at all. With no origin
+// and no declaration, the edge must be drift — and must NOT also surface as an
+// unstamped notice (the field-deletion vector: omitting `origin` is the
+// cheapest way to try to look like a legacy install).
+func TestLoadPermissionReconciliation_DetectsForgedGrantEdge(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	attackerRoleID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	forgedEdge := substrate.LinkKey("permission", bootstrap.PermInstallPackageID, "grantedBy", "role", attackerRoleID)
+	writeForgedGrantLink(t, ctx, conn, forgedEdge, map[string]any{})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	if got.HasDrift() != true {
+		t.Fatalf("HasDrift() = false, want true — a forged grant edge is drift")
+	}
+	if len(got.Drift) != 0 {
+		t.Errorf("the vertex plane reported %+v; a forged EDGE forges no vertex, so only the edge plane should fire", got.Drift)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingUndeclared)
+	if f.Key != forgedEdge {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, forgedEdge)
+	}
+	if f.Reason != GrantReasonNoOriginUndeclared {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, GrantReasonNoOriginUndeclared)
+	}
+	if f.PermissionKey != bootstrap.PermInstallPackageKey {
+		t.Errorf("undeclared finding PermissionKey = %q, want %q", f.PermissionKey, bootstrap.PermInstallPackageKey)
+	}
+	for _, n := range got.GrantNotices {
+		if n.Key == forgedEdge {
+			t.Errorf("forged edge %s appeared as a notice (%+v) as well as drift — it should be drift only", forgedEdge, n)
+		}
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsForgedGrantEdge_PackageNotInstalled
+// stamps the forged edge `package` and names a package that was never
+// installed — the arm that fires before declaredKeys is ever consulted. If
+// `!installedPackages[l.DeclaredBy]` is disabled, execution falls through to
+// the next arm and produces an identical Class/Key/Package finding; only
+// Reason distinguishes which check actually fired.
+func TestLoadPermissionReconciliation_DetectsForgedGrantEdge_PackageNotInstalled(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	attackerRoleID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	forgedEdge := substrate.LinkKey("permission", bootstrap.PermInstallPackageID, "grantedBy", "role", attackerRoleID)
+	writeForgedGrantLink(t, ctx, conn, forgedEdge, map[string]any{
+		"origin": PermissionOriginPackage, "declaredBy": "never-installed-pkg",
+	})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingUndeclared)
+	if f.Key != forgedEdge {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, forgedEdge)
+	}
+	if f.Reason != GrantReasonPackageNotInstalled {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, GrantReasonPackageNotInstalled)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsForgedGrantEdge_KeyNotDeclared
+// stamps the forged edge with an INSTALLED package's name, which its
+// declaredKeys does not carry — the second undeclared arm.
+func TestLoadPermissionReconciliation_DetectsForgedGrantEdge_KeyNotDeclared(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	attackerRoleID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	forgedEdge := substrate.LinkKey("permission", bootstrap.PermInstallPackageID, "grantedBy", "role", attackerRoleID)
+	writeForgedGrantLink(t, ctx, conn, forgedEdge, map[string]any{
+		"origin": PermissionOriginPackage, "declaredBy": "sample-pkg",
+	})
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingUndeclared)
+	if f.Key != forgedEdge {
+		t.Errorf("undeclared finding Key = %q, want %q", f.Key, forgedEdge)
+	}
+	if f.Package != "sample-pkg" {
+		t.Errorf("undeclared finding Package = %q, want %q", f.Package, "sample-pkg")
+	}
+	if f.Reason != GrantReasonKeyNotDeclared {
+		t.Errorf("undeclared finding Reason = %q, want %q", f.Reason, GrantReasonKeyNotDeclared)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsGrantEdgeKeyMismatch goes one step
+// further than _KeyNotDeclared: the attacker also writes the forged edge into
+// sample-pkg's own declaredKeys, so both membership tests pass. The edge still
+// grants a KERNEL permission, which sample-pkg does not declare — the
+// derivation check is the only thing left that catches it, and it is what
+// stops a package from declaring an edge onto somebody else's permission.
+func TestLoadPermissionReconciliation_DetectsGrantEdgeKeyMismatch(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	res, err := inst.Install(ctx, sampleDef("0.1.0"))
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	attackerRoleID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	forgedEdge := substrate.LinkKey("permission", bootstrap.PermInstallPackageID, "grantedBy", "role", attackerRoleID)
+	writeForgedGrantLink(t, ctx, conn, forgedEdge, map[string]any{
+		"origin": PermissionOriginPackage, "declaredBy": "sample-pkg",
+	})
+	declareKey(t, ctx, conn, res.PackageKey+".manifest", forgedEdge)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingKeyMismatch)
+	if f.Key != forgedEdge {
+		t.Errorf("keyMismatch finding Key = %q, want %q", f.Key, forgedEdge)
+	}
+	if f.Package != "sample-pkg" {
+		t.Errorf("keyMismatch finding Package = %q, want %q", f.Package, "sample-pkg")
+	}
+	// Exactly one finding for this key, not also undeclared.
+	for _, d := range got.GrantDrift {
+		if d.Key == forgedEdge && d.Class != GrantFindingKeyMismatch {
+			t.Errorf("forged edge produced an extra finding %+v — should be keyMismatch alone", d)
+		}
+	}
+}
+
+// TestLoadPermissionReconciliation_GrantLinks_RuntimeAndUnstampedAreNotices
+// forges a runtime-origin edge (GrantPermission's ratified channel) and a
+// no-origin edge whose key IS injected into an installed package's
+// declaredKeys (the genuine pre-stamp shape), asserting the gatherer's decode
+// of `data.origin` and the declaredKeys membership test together route both to
+// notices and neither to drift. Paired with
+// _DetectsForgedGrantEdge, which uses the same no-origin body WITHOUT the
+// declaredKeys entry: that one difference is the whole unstamped/unrecognized
+// split.
+func TestLoadPermissionReconciliation_GrantLinks_RuntimeAndUnstampedAreNotices(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	res, err := inst.Install(ctx, sampleDef("0.1.0"))
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtimePermID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	runtimeEdge := substrate.LinkKey("permission", runtimePermID, "grantedBy", "role", bootstrap.RoleOperatorID)
+	writeForgedGrantLink(t, ctx, conn, runtimeEdge, map[string]any{"origin": PermissionOriginRuntime})
+
+	unstampedPermID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	unstampedEdge := substrate.LinkKey("permission", unstampedPermID, "grantedBy", "role", bootstrap.RoleOperatorID)
+	writeForgedGrantLink(t, ctx, conn, unstampedEdge, map[string]any{})
+	declareKey(t, ctx, conn, res.PackageKey+".manifest", unstampedEdge)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	if len(got.GrantDrift) != 0 {
+		t.Fatalf("GrantDrift = %+v, want none — runtime/unstamped are inventory only", got.GrantDrift)
+	}
+	rf := findGrantByClass(t, got.GrantNotices, GrantFindingRuntimeInventory)
+	if rf.Key != runtimeEdge {
+		t.Errorf("runtimeInventory finding Key = %q, want %q", rf.Key, runtimeEdge)
+	}
+	uf := findGrantByClass(t, got.GrantNotices, GrantFindingUnstampedInventory)
+	if uf.Key != unstampedEdge {
+		t.Errorf("unstampedInventory finding Key = %q, want %q", uf.Key, unstampedEdge)
+	}
+}
+
+// TestLoadPermissionReconciliation_TombstonedGrantEdgeIsNotLive soft-deletes
+// sample-pkg's own grant edge, the state RevokePermission leaves behind — it
+// tombstones rather than removing the key. A tombstoned edge is out of the
+// capability walk, so it must not be read as a live grant; it is the declared
+// side that reports it, as a revoked notice rather than a missing-edge drift.
+func TestLoadPermissionReconciliation_TombstonedGrantEdgeIsNotLive(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	edge := substrate.LinkKey("permission", PermissionID("sample-pkg", "SampleOp", "any"), "grantedBy", "role", bootstrap.RoleOperatorID)
+	tombstoneKey(t, ctx, conn, edge)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	if len(got.GrantDrift) != 0 {
+		t.Fatalf("GrantDrift = %+v, want none — a tombstoned declared edge is a respected revocation, not missing", got.GrantDrift)
+	}
+	f := findGrantByClass(t, got.GrantNotices, GrantFindingRevoked)
+	if f.Key != edge {
+		t.Errorf("revoked finding Key = %q, want %q", f.Key, edge)
+	}
+	if f.Package != "sample-pkg" {
+		t.Errorf("revoked finding Package = %q, want %q", f.Package, "sample-pkg")
+	}
+	counts := liveGrantLinkClassCounts(t, ctx, conn)
+	if counts[GrantProvenancePackage] != 0 {
+		t.Errorf("package class count = %d, want 0 — the only package edge is tombstoned, so nothing is live", counts[GrantProvenancePackage])
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsGrantKernelMissing tombstones one of
+// bootstrap's six kernel grant edges: a primordial permission that no longer
+// reaches the operator role.
+func TestLoadPermissionReconciliation_DetectsGrantKernelMissing(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	kernelEdge := bootstrap.KernelGrantLinkKeys()[0]
+	tombstoneKey(t, ctx, conn, kernelEdge)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingKernelMissing)
+	if f.Key != kernelEdge {
+		t.Errorf("kernelMissing finding Key = %q, want %q", f.Key, kernelEdge)
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsGrantEdgeMissing injects a grant-edge
+// key into sample-pkg's declaredKeys that is backed by no document at all — a
+// partial install, or a hard purge outside the Processor's soft-tombstone
+// path. Distinct from the tombstoned case above, which IS backed by a
+// document.
+func TestLoadPermissionReconciliation_DetectsGrantEdgeMissing(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	res, err := inst.Install(ctx, sampleDef("0.1.0"))
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	phantomPermID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	phantomEdge := substrate.LinkKey("permission", phantomPermID, "grantedBy", "role", bootstrap.RoleOperatorID)
+	declareKey(t, ctx, conn, res.PackageKey+".manifest", phantomEdge)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingMissing)
+	if f.Key != phantomEdge {
+		t.Errorf("missing finding Key = %q, want %q", f.Key, phantomEdge)
+	}
+	if f.Package != "sample-pkg" {
+		t.Errorf("missing finding Package = %q, want %q", f.Package, "sample-pkg")
+	}
+}
+
+// TestLoadPermissionReconciliation_DetectsGrantEdgeUndecodable overwrites
+// sample-pkg's real, declared grant edge with a body that is not JSON at all.
+// No authorization path reads `origin` off an edge, so the edge still
+// authorizes; a decode failure must surface as its own drift finding rather
+// than as silence — and never ALSO as missing, since the key is occupied.
+func TestLoadPermissionReconciliation_DetectsGrantEdgeUndecodable(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	edge := substrate.LinkKey("permission", PermissionID("sample-pkg", "SampleOp", "any"), "grantedBy", "role", bootstrap.RoleOperatorID)
+	writeRawGrantLink(t, ctx, conn, edge, `not json at all {{{`)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	f := findGrantByClass(t, got.GrantDrift, GrantFindingUndecodable)
+	if f.Key != edge {
+		t.Errorf("undecodable finding Key = %q, want %q", f.Key, edge)
+	}
+	for _, d := range got.GrantDrift {
+		if d.Key == edge && d.Class != GrantFindingUndecodable {
+			t.Errorf("the edge produced an extra drift finding %+v — should be undecodable alone; missing must not also fire for an occupied-but-unreadable key", d)
 		}
 	}
 }
