@@ -322,6 +322,39 @@ func TestCountKey_Shape(t *testing.T) {
 	}
 }
 
+// TestSplitCountKey_ParsesOnlyCountKeys proves the count leg's key parse is
+// decidable and family-exclusive: it round-trips a real count key back to its
+// (targetId, entityId, gapColumn), and rejects every other weaver-state family
+// — a §10.3 mark, the `__control` marker, an `__effect` window — plus the
+// malformed shapes the sweep must treat as corrupt rather than act on. Without
+// the reserved-tail check a mark key would parse as a count (and vice versa),
+// and the sweep would reconcile a gap's budget against the wrong evidence.
+func TestSplitCountKey_ParsesOnlyCountKeys(t *testing.T) {
+	t.Parallel()
+	const entityID = "entityAAAAAAAAAAAAAA"
+
+	targetID, gotEntity, gapColumn, ok := splitCountKey(countKey("t1", entityID, "missing_x"))
+	if !ok || targetID != "t1" || gotEntity != entityID || gapColumn != "missing_x" {
+		t.Fatalf("splitCountKey(countKey(...)) = (%q,%q,%q,%v), want (t1,%s,missing_x,true)",
+			targetID, gotEntity, gapColumn, ok, entityID)
+	}
+
+	for _, tc := range []struct{ name, key string }{
+		{"a mark key", markKey("t1", entityID, "missing_x")},
+		{"the __control marker", controlKey("t1")},
+		{"an __effect window", effectKey("t1", "missing_x", "directOp")},
+		{"the bare suffix", countKeySuffix},
+		{"no entity segment", "t1.missing_x" + countKeySuffix},
+		{"a non-NanoID entity segment", "t1.not-an-entity.missing_x" + countKeySuffix},
+		{"a dotted gap column", "t1." + entityID + ".missing.x" + countKeySuffix},
+		{"the suffix mid-key", "t1." + entityID + countKeySuffix + ".missing_x"},
+	} {
+		if _, _, _, ok := splitCountKey(tc.key); ok {
+			t.Errorf("splitCountKey must reject %s (%q)", tc.name, tc.key)
+		}
+	}
+}
+
 // TestDispatchCount_TTLBackstop proves the count carries the long per-key TTL
 // backstop (dispatchCountTTLBackstopFactor × lease) on the wire — the GC of an
 // orphaned count whose gap-close was never observed. The factor is far larger than

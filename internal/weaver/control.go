@@ -181,7 +181,9 @@ func (e *Engine) Enable(ctx context.Context, targetID string) error {
 // reconcileConsumers's removal semantics) and deletes the consumer's
 // health-sink entry, (b) deletes every weaver-state key with prefix
 // "<targetID>." via markStore.deleteByTargetPrefix — every
-// <targetId>.<entityId>.<gapColumn> in-flight mark AND the
+// <targetId>.<entityId>.<gapColumn> in-flight mark, every
+// <targetId>.<entityId>.<gapColumn>.__count retry budget, every
+// <targetId>.__effect.<gapColumn>.<actionRef> confidence window, AND the
 // <targetId>.__control marker — and (c) clears the standing issueCache
 // entries for targetID, THEN (d) re-writes the `<targetId>.__control`
 // disabled marker and sets the in-memory disabled-set so that if

@@ -55,11 +55,16 @@ func collapseOnlyReclaim(action string, confirmedConcluded bool) bool {
 		(action == actionAssignTask || action == actionTriggerLoom || action == actionProposedOp)
 }
 
-// sweeper is the §10.3 active reconciler: on each pass it enumerates every
-// weaver-state mark (the bucket holds ONLY marks, bounded by the in-flight
-// count) and level-reconciles each against its current weaver-targets row —
-// clearing closed/orphaned marks promptly and reclaiming expired leases with a
-// fresh dispatch episode. The sweep is the primary reclaim lane; the mark's
+// sweeper is the §10.3 active reconciler: on each pass it enumerates the whole
+// weaver-state bucket and level-reconciles every key it holds against that
+// key's current weaver-targets row. The bucket holds four reserved families —
+// §10.3 in-flight marks (bounded by the in-flight count), `…__count` retry
+// budgets, `__effect` confidence windows, and the per-target `__control`
+// dispatch-skip marker — and each has its own leg (see pass): closed/orphaned
+// marks clear promptly and expired leases reclaim with a fresh dispatch
+// episode; an orphaned confidence window is deleted; a retry budget re-derives
+// its gap's standing §10.8 issue for as long as the budget suppresses
+// dispatch. The sweep is the primary reclaim lane; the mark's
 // per-key TTL is only the backstop, so the sweep must observe an expired lease
 // while the key still exists (TTL = markTTLBackstopFactor × lease plus the
 // withDefaults SweepInterval ≤ MarkLease clamp guarantee that window). There
@@ -146,10 +151,13 @@ func (s *sweeper) warmPass(ctx context.Context) {
 	s.pass(ctx)
 }
 
-// pass sweeps every current mark, then retires CorruptMark issues whose keys
-// are no longer listed (the corrupt entry was deleted on an earlier pass and
-// stayed gone) — a one-off corrupt mark must not degrade the heartbeat for
-// the life of the process.
+// pass lists the weaver-state bucket once and routes every key to the leg that
+// owns its family — an `__effect` confidence window to sweepEffect, a `…__count`
+// retry budget to sweepCount, the `__control` marker to no leg at all, and
+// everything else to sweepMark as a §10.3 mark. It then retires CorruptMark
+// issues whose keys are no longer listed (the corrupt entry was deleted on an
+// earlier pass and stayed gone) — a one-off corrupt key must not degrade the
+// heartbeat for the life of the process.
 func (s *sweeper) pass(ctx context.Context) {
 	e := s.engine
 	keys, err := e.conn.KVListKeys(ctx, e.cfg.WeaverStateBucket)
@@ -174,16 +182,25 @@ func (s *sweeper) pass(ctx context.Context) {
 			s.sweepEffect(ctx, key)
 			continue
 		}
-		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) {
-			// Neither the `<targetId>.__control` dispatch-skip marker nor a
-			// `…__count` retry-budget dispatch-count is a §10.3 mark — the
-			// control marker has no <entityId>.<gapColumn> tail and the count has
-			// a 4th segment, so splitMarkKey would reject each as corrupt. Both
-			// are reserved and engine-owned (the control marker via
-			// Disable/Enable/Revoke; the count via fireEpisode/reclaim increment
-			// and clearClosedMarks reset). The sweep never enumerates, reclaims,
-			// or deletes either; the count's gap-close reset and its long TTL
-			// backstop are its only lifecycle.
+		if strings.HasSuffix(key, controlKeySuffix) {
+			// The `<targetId>.__control` dispatch-skip marker is not a §10.3
+			// mark — it has no <entityId>.<gapColumn> tail, so splitMarkKey
+			// would reject it as corrupt. It is reserved and engine-owned
+			// (Disable/Enable/Revoke write it), it names no entity to
+			// level-reconcile against a row, and the sweep neither reclaims nor
+			// deletes it: it is read, via the in-memory disabled-set, as a gate
+			// on the other legs.
+			continue
+		}
+		if strings.HasSuffix(key, countKeySuffix) {
+			// A `<targetId>.<entityId>.<gapColumn>.__count` retry-budget
+			// dispatch-count is not a §10.3 mark either (a 4th segment;
+			// splitMarkKey would reject it), but it IS per-(target, entity, gap)
+			// state that level-reconciles against a row — and it outlives the
+			// gap's mark by two orders of magnitude, so for a row that has gone
+			// quiet it is the only durable trace of a suppressed gap. Its own
+			// leg (below) reconciles it.
+			s.sweepCount(ctx, key, listed)
 			continue
 		}
 		s.sweepMark(ctx, key)
@@ -376,6 +393,196 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 	}
 	e.logger.Warn("weaver sweep: effect key reclaimed", "key", key, "reason", reason)
 	return true
+}
+
+// sweepCount level-reconciles one
+// `<targetId>.<entityId>.<gapColumn>.__count` retry-budget dispatch-count
+// against its current row. The count is what SUPPRESSES dispatch once the
+// budget is spent (gapSuppressed's cap term) and it outlives the gap's mark by
+// two orders of magnitude (dispatchCountTTLBackstopFactor × lease against
+// markTTLBackstopFactor × lease), so it — not the mark — is the durable state a
+// suppressed gap's standing Health issue is re-derived from: the issueCache is
+// process-local, and an exhausted gap stops refreshing its mark, so the mark
+// leg cannot carry Contract #10 §10.8's "never a silent park" promise for as
+// long as the suppression it explains actually lasts.
+//
+//	(a) corrupt key, or a count body this build cannot parse → alert + delete
+//	    (weaver-state is weaver-private, so garbage otherwise lives forever —
+//	    sweepMark arm (a)). A garbled body is not cosmetic: getDispatchCount
+//	    errors on it, so gapSuppressed reads its safe (dispatchable) side and
+//	    incrementDispatchCount's read-modify-write fails the same way — the
+//	    budget can never accumulate and a directOp gap retries unbounded, the
+//	    exact outcome defaultDirectOpRetryBudget exists to prevent. The delete
+//	    re-arms the budget from 0, which is what the garbled body already
+//	    yields, and leaves a key that can accumulate again;
+//	(b) the gap's own mark is listed in THIS pass → return: the mark leg owns
+//	    the gap and reaches the same escalation site, so one gap is never
+//	    escalated twice in one pass;
+//	(c) target not registered → return, deleting NOTHING: the registry replays
+//	    asynchronously, so "not installed" may be replay lag rather than
+//	    absence, and this key is the retry budget itself — dropping it would
+//	    un-suppress the gap and re-arm every parked chain on every restart;
+//	(d) target DISABLED (the `__control` marker) → return: an operator freeze
+//	    (or the oscillation auto-freeze) stops NEW dispatch, and an escalation
+//	    is dispatch — the same gate sweepMark arm (d) and lane-1's Ack-skip
+//	    apply;
+//	(e) row gone, or missing_<gapColumn> not currently true → delete the count
+//	    and retire this gap's standing issue: the budget belongs to an entity
+//	    that no longer exists, or to a gap that is already closed. An
+//	    UNPARSEABLE row (or a failed row read) leaves the count untouched:
+//	    never act on unreadable evidence (sweepMark's posture);
+//	(f) row carries no §10.2 entityKey echo → return: the escalation feeds
+//	    entityKey to planGap to name its candidate, and lane 1 itself declines
+//	    to dispatch a violating row missing it. The mark leg reaches the
+//	    escalation only past the reclaim's non-empty entityKey guard; this leg
+//	    has no mark to have been guarded, so it gates itself. The level
+//	    reconcile above still runs — a closed gap's budget is cleared whatever
+//	    the row's other columns say;
+//	(g) row not violating → return, mirroring lane-1's L1 gate and the
+//	    reclaim's own violating gate: this leg never acts where lane-1 would
+//	    not;
+//	(h) gap suppressed with its retry budget SPENT → escalate, through the same
+//	    escalateExhaustedGap site the mark leg calls — a fresh Augur episode
+//	    where the target escalates "exhausted", else the standing
+//	    GapBudgetExhausted issue;
+//	(i) gap suppressed with a call in flight (inflight_<g>) → return: the lens
+//	    re-projects when the call lands and lane-1 re-delivers.
+//
+// A count standing over a violating, un-suppressed, markless gap falls through
+// untouched: its chain still has budget left.
+//
+// Every delete is revision-conditioned at the revision read THIS pass: a
+// dispatch racing the sweep bumps the count, and that fresh budget must never
+// be deleted blind.
+func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]struct{}) {
+	e := s.engine
+	entry, err := e.conn.KVGet(ctx, e.cfg.WeaverStateBucket, key)
+	if err != nil {
+		if !errors.Is(err, substrate.ErrKeyNotFound) {
+			e.logger.Warn("weaver sweep: dispatch-count read failed", "key", key, "err", err)
+		}
+		return
+	}
+	targetID, entityID, gapColumn, ok := splitCountKey(key)
+	if !ok {
+		s.deleteCorrupt(ctx, key, entry.Revision,
+			"dispatch-count key is not <targetId>.<entityId>.<gapColumn>.__count")
+		return
+	}
+	var count dispatchCount
+	if err := json.Unmarshal(entry.Value, &count); err != nil {
+		// A body no reader can parse is a budget that can never accumulate:
+		// every read of it errors, and gapSuppressed's read failure is
+		// deliberately the dispatchable side, so the gap retries with no cap at
+		// all. Delete it, so the next dispatch creates a countable one.
+		s.deleteCorrupt(ctx, key, entry.Revision, "dispatch-count value unparseable: "+err.Error())
+		return
+	}
+	if _, marked := listed[markKey(targetID, entityID, gapColumn)]; marked {
+		// The mark leg visits this same gap in this same pass and reaches the
+		// same escalation site from its own evidence.
+		return
+	}
+	target, installed := e.source.target(targetID)
+	if !installed {
+		return
+	}
+	if e.isTargetDisabled(targetID) {
+		e.logger.Debug("weaver sweep: target disabled; leaving the dispatch-count unreconciled",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		return
+	}
+
+	rowEntry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			// The row is gone (entity tombstoned, or never projected): no column
+			// can be true, so no chain can be accumulating against this budget.
+			s.deleteCount(ctx, key, entry.Revision, targetID, entityID, gapColumn)
+			return
+		}
+		e.logger.Warn("weaver sweep: row read failed; leaving dispatch-count", "key", key, "err", err)
+		return
+	}
+	var row map[string]any
+	if len(rowEntry.Value) != 0 {
+		if err := json.Unmarshal(rowEntry.Value, &row); err != nil {
+			e.logger.Warn("weaver sweep: row value unparseable; leaving dispatch-count",
+				"key", key, "err", err)
+			return
+		}
+	}
+	if !e.boolColumn(targetID, entityID, row, gapColumn) {
+		// The gap is closed (or the column is gone from the row) and no mark
+		// exists to carry the level reconcile: this leg is the one that resets
+		// the budget and retires the standing issue.
+		s.deleteCount(ctx, key, entry.Revision, targetID, entityID, gapColumn)
+		return
+	}
+	entityKey, _ := row["entityKey"].(string)
+	if entityKey == "" {
+		// Without the §10.2 entityKey echo the escalation's own plan cannot name
+		// its candidate, and lane-1 declines to dispatch such a row at all
+		// (handleRow raises a RowDataError and skips it, evaluator.go) — so this
+		// leg must not dispatch one either. The mark leg reaches the escalation
+		// only past the reclaim's non-empty entityKey guard; this leg carries its
+		// own. The count stays: an incomplete row is no evidence about the
+		// budget, and its TTL bounds the key.
+		return
+	}
+	if !e.boolColumn(targetID, entityID, row, "violating") {
+		return
+	}
+
+	// The playbook's action for this gap, the same input the reclaim's
+	// suppression gate reads. A column the playbook no longer names yields the
+	// zero action; the consequence is bounded to the cap FALLBACK — such a gap
+	// loses the directOp engine-default budget, while a row-declared
+	// maxretries_<g> still caps it and still escalates here.
+	ga := target.Gaps[gapColumn]
+	if suppressed, exhausted, budgetIsDefault := e.gapSuppressed(ctx, targetID, entityID, row, gapColumn, ga.Action); suppressed {
+		if exhausted {
+			// The loud stop, re-derived from the state that causes the
+			// suppression rather than from a mark the exhausted gap stopped
+			// refreshing (§10.8: "never a silent park").
+			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowEntry.Revision, budgetIsDefault) != substrate.Ack {
+				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
+					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+			}
+		}
+		return
+	}
+	// The gap is open, violating and markless, and its chain still has budget:
+	// nothing about this count contradicts the row, so the leg leaves it — the
+	// suppression this leg exists to explain is not in force.
+}
+
+// deleteCount deletes one `…__count` retry-budget dispatch-count at the
+// revision read this pass and retires the (target, entity, gap) standing issue
+// the budget's exhaustion raises. A revision conflict means a dispatch bumped
+// the count between the read and this delete — that fresh budget stands and the
+// delete is skipped (re-evaluated next pass); a key that already vanished is
+// already in the desired state.
+//
+// The issue retirement is driven by the ROW read that reached this call (the
+// gap is closed, or the entity is gone), not by the delete's outcome, so the
+// latch is retired by the same level reconcile that observed the close —
+// idempotent when none stands.
+func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, targetID, entityID, gapColumn string) {
+	e := s.engine
+	if err := e.conn.KVDeleteRevision(ctx, e.cfg.WeaverStateBucket, key, revision); err != nil {
+		switch {
+		case errors.Is(err, substrate.ErrRevisionConflict), errors.Is(err, substrate.ErrKeyNotFound):
+			e.logger.Debug("weaver sweep: dispatch-count changed since read; skipping delete", "key", key)
+		default:
+			e.logger.Warn("weaver sweep: dispatch-count delete failed", "key", key, "err", err)
+		}
+	} else {
+		e.logger.Info("weaver sweep: dispatch-count cleared",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn,
+			"reason", sweepReasonGapClosed)
+	}
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
 }
 
 // reclaim handles an expired (or lease-less) mark whose column is still true:
