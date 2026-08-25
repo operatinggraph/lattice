@@ -3797,3 +3797,127 @@ func TestSweep_CountLegNeverReArmsAPlanTimeAction(t *testing.T) {
 		t.Fatalf("sweepReArms = %d, want 1 (the explicit-Action control only)", reArms)
 	}
 }
+
+// TestSweep_ReclaimSkipsASurfaceGap pins the mark leg against a package
+// migration to `surface`.
+//
+// A surface gap mints no mark of its own — but a package upgrade that rewrites a
+// gap's action leaves behind whatever the previous action created, and an
+// episode that was in flight at the upgrade leaves a MARK. clearClosedMarks
+// skips a surface column's mark cleanup outright, so nothing but the per-key TTL
+// removes it, and every sweep pass in between drives reclaim into planGap, which
+// has no `surface` case: an `error`-severity PlaybookConfigError against a
+// playbook that is entirely contract-legal, once per sweep interval for the
+// mark's whole life.
+//
+// The control carries the identical stranded mark under a playbook that still
+// names a dispatching action, so the negative pins the ACTION and not an inert
+// leg.
+func TestSweep_ReclaimSkipsASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReclaimSurface"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			// The migrated gap: the package now only surfaces this column.
+			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
+			// The control: same shape, still dispatching.
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	migrated, control := testNanoID(t), testNanoID(t)
+	migratedKey := markKey(targetID, migrated, "missing_s")
+	h.putMark(t, ctx, migratedKey, fixtureMark(targetID, migrated, "missing_s", actionDirectOp, pastLease()))
+	h.putRow(t, ctx, targetID, migrated, map[string]any{
+		"entityKey": "vtx.leaseApp." + migrated, "violating": true, "missing_s": true,
+	})
+	h.putMark(t, ctx, markKey(targetID, control, "missing_x"),
+		fixtureMark(targetID, control, "missing_x", actionDirectOp, pastLease()))
+	h.putRow(t, ctx, targetID, control, map[string]any{
+		"entityKey": "vtx.leaseApp." + control, "violating": true, "missing_x": true,
+	})
+
+	h.pass(ctx)
+
+	if op := h.nextOp(t); op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX: the control must reclaim, or the negative proves nothing",
+			op["operationType"])
+	}
+	h.requireNoOp(t)
+	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
+		t.Fatalf("a contract-legal `surface` playbook must not raise a config error (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if !h.markExists(t, ctx, migratedKey) {
+		t.Fatal("the stranded mark is left to its own TTL: a mid-replay definition is not evidence to destroy a running episode's bookkeeping on")
+	}
+}
+
+// TestSweep_CountLegNeverEscalatesASurfaceGap pins arm (l), the escalation.
+//
+// A surface gap has no remediation chain, so it has no budget to have spent —
+// but the cap term reads maxretries_<g> without consulting the action, so a
+// migrated column whose lens still projects the cap, over a count stranded from
+// the previous action, reads as EXHAUSTED and reaches escalateExhaustedGap.
+//
+// Both of that call's branches are wrong here, and the un-escalated one is the
+// sharper: it raises GapBudgetExhausted at issueKeyGapEntity, which is the very
+// latch lane-1 holds this column's surface issue on. The two would overwrite
+// each other and re-stamp `since` every round trip — the flap the orphan-column
+// arm was amended to stop. The seeded Surface issue must come through the pass
+// untouched, and the dispatching control in the same pass must still escalate.
+func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountLegSurfaceEscalate"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	migrated, control := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_s": migrated, "missing_x": control} {
+		h.seedCount(t, ctx, targetID, entityID, gap, budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
+	}
+	// The standing issue lane-1 raises for a surface column while it is true.
+	h.engine.issues.set(issueKeyGapEntity(targetID, migrated, "missing_s"), "warning", "Surface",
+		"target "+targetID+" entity "+migrated+": row column missing_s is true")
+
+	h.pass(ctx)
+
+	if issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, control, "missing_x")); !ok || issue.Code != "GapBudgetExhausted" {
+		t.Fatalf("setup: the identical vector on a DISPATCHING gap must escalate, or the negative proves nothing (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, migrated, "missing_s"))
+	if !ok || issue.Code != "Surface" {
+		t.Fatalf("the latch at a surface column is lane-1's; a GapBudgetExhausted raise here flaps it (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if h.markExists(t, ctx, markKey(targetID, migrated, "missing_s")) {
+		t.Fatal("a surface gap must never be dispatched, escalation included")
+	}
+	if got := h.countValue(t, ctx, targetID, migrated, "missing_s"); got != budget {
+		t.Fatalf("dispatch-count = %d, want %d (the arm acts on nothing here)", got, budget)
+	}
+	h.requireNoOp(t)
+}

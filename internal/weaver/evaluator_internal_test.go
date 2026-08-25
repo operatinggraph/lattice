@@ -1969,3 +1969,65 @@ func TestGapSuppressedWithCount_MatchesTheReadingVariant(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleRow_NeverEscalatesASurfaceGap pins lane 1, and it is the site whose
+// failure is SILENT rather than noisy.
+//
+// handleRow reaches the suppression gate from openGapColumns — every true
+// missing_* column, whatever its playbook action — and consults gapSuppressed
+// BEFORE dispatchGap's own `surface` branch is ever reached. The cap term reads
+// maxretries_<g> without consulting the action, so a package migration to
+// `surface` whose lens still projects the cap, over a dispatch-count stranded
+// from the previous action, reads as spent on the very next delivery. The column
+// is then skipped for as long as that count outlives the migration — and with it
+// the Surface issue dispatchGap raises, which is the entire output of a gap
+// whose contract is to surface and never dispatch. Nothing on Health says so.
+//
+// (The escalation guard inside escalateExhaustedGap cannot cover this: by the
+// time that call is reached the column has already been skipped.)
+func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureHandleRowSurfaceExhausted"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_s": {Action: actionSurface, IssueCode: "Surface"}},
+	})
+	entityID := testNanoID(t)
+	for i := 0; i < budget; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_s"); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_s": true,
+		"inflight_s": false, "maxretries_s": budget,
+	}
+
+	// Setup: the stranded count really does read as spent for this gap, so the
+	// assertions below pin the guard and not an unreachable branch.
+	if _, exhausted, _ := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_s", actionSurface); !exhausted {
+		t.Fatal("setup: this vector must reach the suppression branch — the stranded count must read as spent")
+	}
+
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
+		t.Fatalf("handleRow = %v, want Ack", dec)
+	}
+
+	issue, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_s"))
+	if !ok {
+		t.Fatalf("a surface gap's whole output is its issue; a stranded count must not switch it off (issues: %+v)",
+			h.engine.issues.snapshot())
+	}
+	if issue.Code != "Surface" {
+		t.Fatalf("issue code = %q, want Surface: the escalation must not overwrite the latch this column's own action owns", issue.Code)
+	}
+	h.requireNoOp(t)
+}

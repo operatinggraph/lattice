@@ -134,12 +134,28 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	nak := false
 	delayed := false
 	for _, col := range e.openGapColumns(targetID, entityID, row) {
-		// The static playbook action for this gap (zero value "" when the
-		// column has no gaps entry at all — the "no playbook entry" dead-end
-		// dispatchGap below handles separately): gapSuppressed's cap-fallback
-		// term only ever engages for a literal "directOp" entry.
-		action := target.Gaps[col].Action
-		if suppressed, exhausted, budgetIsDefault := e.gapSuppressed(ctx, targetID, entityID, row, col, action); suppressed {
+		// The static playbook entry for this gap (zero value when the column has
+		// no gaps entry at all — the "no playbook entry" dead-end dispatchGap
+		// below handles separately): gapSuppressed's cap-fallback term only ever
+		// engages for a literal "directOp" action.
+		ga := target.Gaps[col]
+		// A surface gap has nothing to suppress: it dispatches no op, mints no
+		// mark and advances no dispatch-count, so neither companion column can
+		// describe it (surfaceOnlyGap). A package upgrade that rewrote this
+		// column to `surface` nevertheless leaves the previous action's
+		// dispatch-count behind, and the cap term reads maxretries_<g> without
+		// consulting the action — so that stranded count reads as spent, takes
+		// the branch below, and skips the column entirely. The gap's own Surface
+		// issue, raised by dispatchGap, would then stop being raised for as long
+		// as the count outlived the migration: the diagnostic the column exists
+		// to produce, silently switched off, with nothing on Health to say so.
+		// Fall straight through to the dispatch leg, which is where `surface` is
+		// actually handled.
+		suppressed, exhausted, budgetIsDefault := false, false, false
+		if !surfaceOnlyGap(ga) {
+			suppressed, exhausted, budgetIsDefault = e.gapSuppressed(ctx, targetID, entityID, row, col, ga.Action)
+		}
+		if suppressed {
 			// A remediation is in flight (inflight_<g>): ordinary in-progress
 			// state, never escalated — the gap stays violating but must NOT be
 			// (re-)dispatched. Skip it — mark-clearing already ran above, so a
@@ -427,6 +443,43 @@ func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external
 	default:
 		return false, false, "its playbook action " + strconv.Quote(ga.Action) + " never makes an external call"
 	}
+}
+
+// surfaceOnlyGap reports whether ga is FR29's `surface` action — the one entry
+// in the playbook vocabulary that dispatches NOTHING (Contract #10: "surface,
+// never dispatch"). It raises a named Health issue while its column is true and
+// is cleared by the ordinary level reconcile; it mints no mark, no episode and
+// no dispatch-count, and buildPlan has no case for it at all.
+//
+// It is a predicate rather than a repeated comparison because four sites need
+// the same verdict for the same reason, and the reason is not obvious at any of
+// them: a package upgrade that rewrites a gap's action to `surface` STRANDS the
+// weaver-state the previous action left — a mark for an episode that was in
+// flight at the upgrade, a dispatch-count for the chain that had run, both
+// outliving the action that created them (a surface column is even skipped by
+// clearClosedMarks' mark cleanup, so only TTL collects it). Every leg that
+// reaches a gap through that stranded state, rather than through dispatchGap's
+// own surface branch, therefore meets a `surface` gap it must not act on:
+// planning one falls to buildPlan's default and alerts `PlaybookConfigError`
+// against a playbook that is entirely contract-legal; escalating one raises
+// GapBudgetExhausted at the very latch lane-1 holds the surface issue on; and
+// merely reading the suppression verdict for one makes a stranded count look
+// like a spent budget, which SKIPS the column and switches its diagnostic off.
+//
+// The four sites are handleRow's suppression gate, escalateExhaustedGap, the
+// sweep's reclaim, and the count leg's re-arm. escalateExhaustedGap is guarded
+// INSIDE rather than at its callers, so all of its entry points (lane-1's
+// suppression gate, reclaim's, the count leg's arm (l)) are covered at once.
+// handleRow needs its own guard even so, because it declines one step earlier
+// than the escalation: by the time the escalation is reached the column has
+// already been skipped, and the Surface issue dispatchGap raises is what that
+// skip costs.
+//
+// A column with no playbook entry at all reads false here — the zero GapAction
+// carries no action — which is right: an orphan column is a different verdict
+// with its own arms.
+func surfaceOnlyGap(ga GapAction) bool {
+	return ga.Action == actionSurface
 }
 
 // planGap resolves one gap's plan (Evaluator L2 + Strategist), routing a
@@ -1141,6 +1194,25 @@ func (e *Engine) hasUsableRetryCap(targetID, entityID string, row map[string]any
 // alert's wording below — it never changes the escalation/alert branch taken.
 func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targetID, entityID, entityKey, gapColumn string,
 	row map[string]any, rowRevision uint64, budgetIsDefault bool) substrate.Decision {
+
+	if surfaceOnlyGap(target.Gaps[gapColumn]) {
+		// A surface gap has no remediation chain, so it has no budget to have
+		// spent: the count that reached this call is stranded from the action
+		// the package replaced (surfaceOnlyGap). Both branches below would be
+		// wrong for it. The un-escalated one raises GapBudgetExhausted at
+		// issueKeyGapEntity — the SAME latch lane-1 holds this column's surface
+		// issue on, so the two would overwrite each other and re-stamp `since`
+		// on every round trip, the flap the orphan-column arm was amended to
+		// stop. The escalated one dispatches a real Augur reasoning episode for
+		// a gap whose whole contract is that Weaver never dispatches for it.
+		// Ack: nothing to do, and nothing to redeliver for.
+		//
+		// The latch is left exactly as found. It is lane-1's here, and a clear
+		// would fight the raise it re-derives while the column stays true.
+		e.logger.Debug("weaver: exhausted-gap escalation skipped for a surface gap; its budget is stranded state, not a spent chain",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		return substrate.Ack
+	}
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)
 	if !escalated {

@@ -698,7 +698,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// may not describe this gap the way it will in a moment.
 		return
 	}
-	if ga.Action == actionSurface {
+	if surfaceOnlyGap(ga) {
 		// FR29: a surface gap dispatches nothing and holds no mark, so it has
 		// no episode to re-arm — its count can only be a leftover from a
 		// version of the playbook that dispatched this column. buildPlan has no
@@ -832,6 +832,27 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 			targetID, entityID, gapColumn) {
 			s.bump(&s.orphansDeleted)
 		}
+		return
+	}
+	if surfaceOnlyGap(ga) {
+		// The playbook now says this column only surfaces, so the mark under this
+		// key is stranded state from the action the package replaced
+		// (surfaceOnlyGap) — an episode that was genuinely in flight at the
+		// upgrade. Every path below dispatches: the leg-advance, the escalation
+		// and the reclaim itself all end in planGap, which has no case for
+		// `surface` and would alert PlaybookConfigError, at `error` severity,
+		// against a contract-legal playbook, once per sweep interval.
+		//
+		// Leave the mark rather than deleting it — the entityKey arm just below
+		// would otherwise treat this same pair as corrupt evidence and delete it.
+		// It carries its own per-key TTL (markTTLBackstopFactor × lease), re-armed
+		// only by the reclaim that no longer runs, so it self-collects on
+		// schedule; and the registry replays asynchronously, so an intermediate
+		// definition reading `surface` is not evidence to destroy the bookkeeping
+		// of a real running episode on. That is the orphan-column arm's rule, and
+		// the reason its own delete is gated by warmedUp.
+		e.logger.Debug("weaver sweep: reclaim skipped for a surface gap; its mark is stranded state, not an episode to re-dispatch",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "markAction", rec.Action)
 		return
 	}
 
