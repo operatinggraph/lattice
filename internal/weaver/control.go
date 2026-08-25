@@ -317,8 +317,9 @@ func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, err
 //     count leg's registry gate would refuse to act on it anyway);
 //   - the arguments are not the §10.2/§10.3 key shapes (a malformed argument
 //     must never reach the keyspace splitCountKey later reads);
-//   - the sweep's re-arm would decline the gap whatever its budget says — an
-//     orphaned column, or a collapse-only action (reArmDeclines);
+//   - the sweep's re-arm PERMANENTLY declines the gap whatever its budget says
+//     — an orphaned column, a `surface` gap, a plan-time-resolved action, or a
+//     collapse-only action (reArmDeclines);
 //   - there is no budget at this gap — a count key exists only where a chain
 //     has actually dispatched, so this is the honest answer to a typo'd
 //     entityId rather than a silent success;
@@ -346,8 +347,8 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 		// would sit at a count of 0, still parked, still holding a
 		// GapBudgetExhausted that now describes a budget it no longer has.
 		// Refusing keeps that standing issue TRUE and names which shape is in
-		// the way — an orphaned column and a collapse-only action are different
-		// problems with different fixes.
+		// the way — the four shapes are four different problems with four
+		// different remedies, so one shared wording would misdirect.
 		return 0, fmt.Errorf("weaver: target %q entity %q gap %q: %s; resetting its budget would leave it parked with a fresh budget",
 			targetID, entityID, gapColumn, reason)
 	}
@@ -378,13 +379,29 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 
 // reArmDeclines reports WHY the reconciler's count-leg re-arm would refuse to
 // dispatch this gap, or "" when nothing about the gap's own definition stands
-// in the way. Two shapes make the re-arm inert, and each mirrors an arm the leg
-// already applies rather than re-deriving one:
+// in the way.
+//
+// The arm's declines split in two, and only one half belongs here. A TRANSIENT
+// decline — the registry warm-up, replay lag, a row not yet projected — lifts on
+// its own and the arm acts on a later pass, so the verb must ACCEPT it: the
+// budget an operator resets is spent the moment the condition clears. A
+// PERMANENT decline is a property of the gap's CLASS, never lifts for that gap,
+// and makes the reset a false success — a 0 nothing will ever act on, reported
+// as if the gap were re-armed. Four shapes are permanent, and each mirrors the
+// arm's own predicate rather than re-deriving one:
 //
 //   - the playbook no longer names the column (the leg's orphan-column arm).
 //     Weaver has no remediation to re-arm, and the arm cannot even retire the
 //     standing issue there, because lane 1 raises at the same latch for the
 //     same column;
+//   - the action is FR29's `surface` (surfaceOnlyGap, the predicate the arm
+//     itself calls): the gap dispatches nothing at all, so it has no episode to
+//     re-arm and its count is stranded from an action a package upgrade
+//     replaced;
+//   - the playbook names no action, leaving a planned/goal-mode gap to resolve
+//     one at plan time. The arm refuses it because only a plan could say what it
+//     would fire, and running one to find out would consume an admission token
+//     and clear the gap's standing issues for a dispatch that may not happen;
 //   - the action is collapse-only (the arm's collapseOnlyReclaim over
 //     staleMark), read over the gap's current row so an EXTERNAL gap — whose
 //     re-dispatch §10.3 calls for — is not refused alongside the human ones. A
@@ -399,11 +416,25 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 // likewise not this function's business: replay lag is not evidence a playbook
 // dropped anything, so the verb refuses that one check earlier, under its own
 // reason, and a target mid-replay is never reported as an orphaned column.
+//
+// The two action-shape declines are answered before the row is read, mirroring
+// the arm's own order: neither consults the row, and a gap that dispatches
+// nothing has no reason to cost a KV round trip.
 func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, entityID, gapColumn string) string {
 	ga, planned := target.Gaps[gapColumn]
 	if !planned {
 		return fmt.Sprintf("its playbook declares no gaps entry for %q, so there is no remediation to re-arm — "+
 			"the column is orphaned (a package re-author dropped it) and its budget expires with its own TTL", gapColumn)
+	}
+	if surfaceOnlyGap(ga) {
+		return fmt.Sprintf("its playbook action is %q, which raises a Health issue while the column is true and "+
+			"dispatches nothing — there is no episode to re-arm, and the budget is stranded from the action "+
+			"the package replaced", ga.Action)
+	}
+	if ga.Action == "" {
+		return "its playbook names no action and resolves one at plan time (a planned/goal-mode gap), and the " +
+			"sweep's re-arm never runs a plan to find out what it would fire — the re-arm this verb serves " +
+			"would decline it on every pass"
 	}
 	var row map[string]any
 	if entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID); err == nil {

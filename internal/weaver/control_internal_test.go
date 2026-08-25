@@ -1300,3 +1300,168 @@ func TestResetRetryBudget_RefusesAnOrphanColumn(t *testing.T) {
 		t.Fatalf("error = %q: a target mid-replay must never be reported as an orphaned column", err)
 	}
 }
+
+// TestResetRetryBudget_RefusesASurfaceGap pins the verb against FR29's one
+// non-dispatching action.
+//
+// A `surface` gap mints no episode and no dispatch-count of its own, but a
+// package upgrade that rewrites a dispatching column to `surface` STRANDS the
+// count the previous action left. That count still reads as a budget, so a
+// migrated column is exactly the shape an operator finds parked and reaches for
+// this verb over — and the sweep's re-arm skips it by the same surfaceOnlyGap
+// predicate the verb calls here, forever. Accepting would spend the operator's
+// budget on a gap that dispatches nothing.
+//
+// The refusal names the ACTION rather than borrowing the orphan-column or
+// collapse-only wording: the remedy is a package re-author's, and the stranded
+// count expires with its own TTL, which is neither of the other two fixes.
+func TestResetRetryBudget_RefusesASurfaceGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureResetBudgetSurface"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			"missing_s": {Action: actionSurface, IssueCode: "Surface"},
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	migrated, control := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_s": migrated, "missing_x": control} {
+		h.seedCount(t, ctx, targetID, entityID, gap, budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
+	}
+
+	// The control: the identical vector on a dispatching gap of the same target
+	// resets, so the refusal below is the ACTION and not a broken verb.
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, control, "missing_x"); err != nil || previous != budget {
+		t.Fatalf("a dispatching gap must reset: got (%d, %v), want (%d, nil)", previous, err, budget)
+	}
+
+	if got := h.countValue(t, ctx, targetID, migrated, "missing_s"); got != budget {
+		t.Fatalf("setup: the surface column's stranded budget = %d, want %d — "+
+			"a refusal over an absent budget would prove nothing", got, budget)
+	}
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, migrated, "missing_s")
+	if err == nil {
+		t.Fatal("a `surface` gap's budget must not be reset: the sweep's re-arm never dispatches one")
+	}
+	if !strings.Contains(err.Error(), actionSurface) || !strings.Contains(err.Error(), "dispatches nothing") {
+		t.Fatalf("error = %q, want it to name the `surface` action and that it dispatches nothing", err)
+	}
+	for _, wrong := range []string{"collapse-only", "no gaps entry", "plan time"} {
+		if strings.Contains(err.Error(), wrong) {
+			t.Fatalf("error = %q, want the surface reason and not the %q wording — "+
+				"the four declines have four different remedies", err, wrong)
+		}
+	}
+	if got := h.countValue(t, ctx, targetID, migrated, "missing_s"); got != budget {
+		t.Fatalf("refused reset left the budget at %d, want %d (nothing written)", got, budget)
+	}
+
+	// Why the refusal is the right answer and not merely a strict one: a
+	// surface gap whose count already reads 0 — what an accepted reset would
+	// have left — dispatches nothing on the next pass, while the dispatching
+	// control in the same pass re-arms.
+	h.seedReArmedCount(t, ctx, targetID, migrated, "missing_s")
+	h.pass(ctx)
+	if op := h.nextOp(t); op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX: the control must re-arm, or the negative proves nothing",
+			op["operationType"])
+	}
+	h.requireNoOp(t)
+	if h.markExists(t, ctx, markKey(targetID, migrated, "missing_s")) {
+		t.Fatal("a re-armed `surface` gap must still dispatch nothing — which is why the verb refuses it")
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "PlaybookConfigError") {
+		t.Fatalf("the re-arm must decline a `surface` gap by its own predicate, not by planning one and "+
+			"alerting a config error against a contract-legal playbook (issues: %+v)", h.engine.issues.snapshot())
+	}
+}
+
+// TestResetRetryBudget_RefusesAPlanTimeResolvedGap pins the verb against a
+// planned/goal-mode gap: one whose playbook states candidates or a goal instead
+// of an action, leaving the action to be picked when a delivery plans it.
+//
+// Such a gap dispatches and accumulates a budget like any other, so it parks
+// like any other — but the sweep's re-arm declines it, because only a plan could
+// say what it would fire and running one there would consume an admission token
+// and clear the gap's standing issues for a dispatch that may never happen. The
+// re-arm therefore leaves this gap to a delivery, permanently, and a reset would
+// spend the budget on a pass that skips it.
+//
+// The control is an explicit-action gap on the SAME planned-mode target, so what
+// is pinned is the gap's empty action and not the target's mode.
+func TestResetRetryBudget_RefusesAPlanTimeResolvedGap(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureResetBudgetPlanTime"
+	const budget = 2
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Mode:     targetModePlanned,
+		Gaps: map[string]GapAction{
+			"missing_p": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "FixP"}}},
+			"missing_x": {Action: actionDirectOp, Operation: "FixX"},
+		},
+	})
+	planned, control := testNanoID(t), testNanoID(t)
+	for gap, entityID := range map[string]string{"missing_p": planned, "missing_x": control} {
+		h.seedCount(t, ctx, targetID, entityID, gap, budget)
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, budget))
+	}
+
+	// The control: an explicit action on the same planned-mode target resets.
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, control, "missing_x"); err != nil || previous != budget {
+		t.Fatalf("an explicit-action gap must reset: got (%d, %v), want (%d, nil)", previous, err, budget)
+	}
+
+	if got := h.countValue(t, ctx, targetID, planned, "missing_p"); got != budget {
+		t.Fatalf("setup: the planned gap's budget = %d, want %d — "+
+			"a refusal over an absent budget would prove nothing", got, budget)
+	}
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, planned, "missing_p")
+	if err == nil {
+		t.Fatal("a plan-time-resolved gap's budget must not be reset: the sweep's re-arm leaves it to a delivery")
+	}
+	if !strings.Contains(err.Error(), "plan time") || !strings.Contains(err.Error(), "names no action") {
+		t.Fatalf("error = %q, want it to name the absent action and its plan-time resolution", err)
+	}
+	for _, wrong := range []string{"collapse-only", "no gaps entry", actionSurface} {
+		if strings.Contains(err.Error(), wrong) {
+			t.Fatalf("error = %q, want the plan-time reason and not the %q wording — "+
+				"the four declines have four different remedies", err, wrong)
+		}
+	}
+	if got := h.countValue(t, ctx, targetID, planned, "missing_p"); got != budget {
+		t.Fatalf("refused reset left the budget at %d, want %d (nothing written)", got, budget)
+	}
+
+	// The refusal's reason, executed: at the budget an accepted reset would have
+	// written, the re-arm still declines this gap while the control re-arms.
+	h.seedReArmedCount(t, ctx, targetID, planned, "missing_p")
+	h.pass(ctx)
+	if op := h.nextOp(t); op["operationType"] != "FixX" {
+		t.Fatalf("operationType = %v, want FixX: the control must re-arm, or the negative proves nothing",
+			op["operationType"])
+	}
+	h.requireNoOp(t)
+	if h.markExists(t, ctx, markKey(targetID, planned, "missing_p")) {
+		t.Fatal("a re-armed plan-time-resolved gap must still be left to a delivery — which is why the verb refuses it")
+	}
+}

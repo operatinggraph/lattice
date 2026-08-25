@@ -950,7 +950,7 @@ func main() {
 		files = append(files, a)
 	}
 	if len(files) == 0 {
-		files = trackedGoFiles()
+		files = trackedGoFiles(strict)
 	}
 
 	var findings []finding
@@ -3349,7 +3349,7 @@ func historyLineSelfTest() []string {
 	return failures
 }
 
-func trackedGoFiles() []string {
+func trackedGoFiles(strict bool) []string {
 	out, err := exec.Command("git", "ls-files", "*.go").Output()
 	if err != nil {
 		return nil
@@ -3360,7 +3360,7 @@ func trackedGoFiles() []string {
 			files = append(files, l)
 		}
 	}
-	reportUntrackedGoFiles()
+	reportUntrackedGoFiles(strict)
 	return files
 }
 
@@ -3374,11 +3374,14 @@ func trackedGoFiles() []string {
 // red build on main. Saying which files were skipped costs one line and turns
 // that silence into something the author can act on before pushing.
 //
-// Informational on purpose: it is written to stderr and changes no exit code.
-// Untracked .go files are a normal mid-edit state, so failing on them would
-// make the gate unusable during ordinary work; the fix is to make the gap
-// visible, not to forbid it.
-func reportUntrackedGoFiles() {
+// Untracked .go files are a normal mid-edit state, so an ordinary local run
+// only reports them: failing there would make the gate unusable during the work
+// it is meant to support. Under STRICT — the verdict a build gate reads — the
+// same banner exits 1 instead. A gate that could not see the files under review
+// has no verdict to give, and a green "0 issues" over a scan set missing exactly
+// the new file is worse than no verdict at all: it reads as a pass in a
+// green-bar list and the first real answer arrives as a red build on main.
+func reportUntrackedGoFiles(strict bool) {
 	out, err := exec.Command("git", "ls-files", "--others", "--exclude-standard", "*.go").Output()
 	if err != nil {
 		return
@@ -3395,5 +3398,8 @@ func reportUntrackedGoFiles() {
 	fmt.Fprintf(os.Stderr, "lint-conventions: NOT SCANNED — %d untracked .go file(s); `git add` them for this gate to see what CI will:\n", len(skipped))
 	for _, f := range skipped {
 		fmt.Fprintf(os.Stderr, "  %s\n", f)
+	}
+	if strict {
+		os.Exit(1)
 	}
 }

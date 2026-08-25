@@ -149,7 +149,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lint-capability-kv-readers: %v — refusing to report a false all-clear\n", err)
 		os.Exit(2)
 	}
-	reportUntrackedGoFiles()
+	reportUntrackedGoFiles(strict)
 
 	var issues int
 	for _, f := range files {
@@ -331,7 +331,13 @@ func trackedGoFiles() ([]string, error) {
 // name. The scan set comes from `git ls-files`, so a file not yet `git add`ed is
 // invisible to this gate locally while CI (which lints a committed tree) would
 // see it; this makes that gap visible instead of leaving it silent.
-func reportUntrackedGoFiles() {
+//
+// An ordinary local run only reports them (a mid-edit untracked file is normal
+// work). Under STRICT — the verdict a build gate reads — it exits 1: a gate that
+// could not see the files under review has no all-clear to give, and the same
+// posture the broken-scan branch above takes for zero scanned files applies to a
+// scan set missing exactly the file under review.
+func reportUntrackedGoFiles(strict bool) {
 	out, err := exec.Command("git", "ls-files", "--others", "--exclude-standard", "*.go").Output()
 	if err != nil {
 		return
@@ -348,5 +354,8 @@ func reportUntrackedGoFiles() {
 	fmt.Fprintf(os.Stderr, "lint-capability-kv-readers: NOT SCANNED — %d untracked .go file(s); `git add` them for this gate to see what CI will:\n", len(skipped))
 	for _, f := range skipped {
 		fmt.Fprintf(os.Stderr, "  %s\n", f)
+	}
+	if strict {
+		os.Exit(1)
 	}
 }
