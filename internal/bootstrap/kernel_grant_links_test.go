@@ -57,11 +57,14 @@ func TestKernelGrantLinkKeys_MatchesWhatTheSeederEmits(t *testing.T) {
 	}
 }
 
-// Every key KernelGrantLinkKeys names must be reachable as a LIVE grant edge,
-// not a tombstone and not some other class that happens to sit at a grant-edge
-// key: internal/pkgmgr classifies by key membership BEFORE reading the
-// document, so a kernel key holding a non-grant or deleted envelope would be
-// waved through as kernel-clean.
+// Every key KernelGrantLinkKeys names must be seeded as a live grant edge onto
+// the operator role. The wrong-class half is what a reader would not guess:
+// internal/pkgmgr classifies by key membership before it reads the document
+// and never checks `class`, so a kernel key holding some other link class
+// would be waved through as kernel-clean. (A tombstoned envelope is the
+// opposite — the reconciler drops deleted edges before classifying, so one
+// would surface loudly as kernelMissing. It is pinned here because a kernel
+// edge seeded dead is still a kernel the seeder got wrong.)
 func TestKernelGrantLinkKeys_NameLiveGrantEdges(t *testing.T) {
 	populateForTest(t)
 

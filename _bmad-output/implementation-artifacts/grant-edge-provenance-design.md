@@ -42,9 +42,12 @@ the item. This design falsifies it and it is rewritten in the same change.
 
 ## 2. Grounding ledger
 
+**Line citations in this ledger are anchored at `c24ba63`, the base this design was written against — the
+build has since moved several of them.**
+
 | # | Fact | Citation |
 |---|---|---|
-| G1 | Four writers of `lnk.permission.<id>.grantedBy.role.<id>` exist, and only four. Kernel seed (meta + install perms → operator role); package install; runtime `GrantPermission`; runtime `RevokePermission` (tombstone). | `internal/bootstrap/primordial.go:776-798`; `internal/pkgmgr/build.go:390-399`; `packages/rbac-domain/ddls.go:399-421`; `:422-435` |
+| G1 | Four writers **author a body** at `lnk.permission.<id>.grantedBy.role.<id>`, and only four. Kernel seed (meta + install perms → operator role); package install; runtime `GrantPermission`; runtime `RevokePermission` (tombstone). Uninstall and upgrade mutate the same keys but author no body of their own (`installer.go:1852` soft-deletes every declaredKeys entry; `upgrade.go:549-565` emits create/update/tombstone from the diff), so they carry whatever the authoring writer stamped. | `internal/bootstrap/primordial.go:776-798`; `internal/pkgmgr/build.go:390-399`; `packages/rbac-domain/ddls.go:399-421`; `:422-435` |
 | G2 | All four write `data: {}` / `nil` on the edge. No writer stamps anything. | `primordial.go:783`; `build.go:396-398` (`docLink(..., nil)`); `ddls.go:174-175` (`grant_link` hardcodes `{}`) |
 | G3 | A package's `declaredKeys` manifest record already contains **`lnk.*` keys as well as `vtx.*`** — `addCreate` appends every written key. So the declared side for a package-authored grant edge exists today, unused. | `internal/pkgmgr/build.go:71`, snapshot at `:430` |
 | G4 | The kernel's six grant edges are derivable from the same six bootstrap globals the vertex plane already resolves: for each kernel permission id, `lnk.permission.<id>.grantedBy.role.<RoleOperatorID>`. | `primordial.go:776-798`; `permissionreconcile.go:736-750` |
@@ -55,19 +58,28 @@ the item. This design falsifies it and it is rewritten in the same change.
 ## 3. The shape
 
 **The invariant, extended.** *Every grant edge declares its origin, and an edge whose origin cannot be
-accounted for is drift.* Three authoring channels, three accountable classes, mirroring the vertex plane
-one-for-one:
+accounted for is drift.* Three authoring channels, five classes, mirroring the vertex plane one-for-one —
+plus one rule that does not key on the stamp at all:
 
 | class | how it is recognized | verdict |
 |---|---|---|
 | `kernel` | key ∈ the six derived kernel grant-link keys (G4) | clean |
-| `package` | `data.origin == "package"`, `data.declaredBy` names an installed package whose `declaredKeys` contains this link key, and the key derives from that package's own `(permission, role)` pair | clean; any of the three failing is drift |
-| `runtime` | `data.origin == "runtime"` | **notice** — the ratified second grant channel (Branch A), inventory only |
+| `package` | `data.origin == "package"`, `data.declaredBy` names an installed package whose `declaredKeys` contains this link key, and the permission its key names is one that package declares (the **role** side is accepted as declared — §5) | clean; any of the three failing is drift |
+| `runtime` | `data.origin == "runtime"` | **notice — self-asserted and reconciled against nothing.** `origin` is written by whoever wrote the edge, so this class is the one an attacker selects: stamping `runtime` is cheaper laundering than omitting the field, and nothing below fails such an edge except the kernel-regrant rule |
 | `unstamped` | no origin, key IS in some installed package's `declaredKeys` | notice — pre-stamp install, healed by upgrading that package |
 | `unrecognized` | no origin and undeclared, **or** an origin that is neither `package` nor `runtime` | **drift** |
+| *(any)* | the edge grants one of the six **kernel** permissions and is not one of the six kernel edges | **drift, whatever the origin claims** — the one predicate not keyed on a self-asserted field |
 
-The `unstamped` / `unrecognized` split is the load-bearing one, exactly as on the vertex plane: without it,
-deleting one JSON field is the cheapest way to make a forged edge reconcile as a legacy install.
+The `unstamped` / `unrecognized` split guards one direction: without it, deleting `origin` would make a
+forged edge reconcile as a legacy install. **It does not guard the other, and the other is cheaper** —
+`origin` is client-supplied at every authoring channel, so a forger who *adds* `{"origin":"runtime"}` lands
+in a notice arm that is reconciled against nothing at all. Cold review demonstrated a live edge conferring
+the kernel's `InstallPackage` permission on an arbitrary role passing the whole gate that way
+(2026-08-25). The answer is not to distrust the stamp — a self-asserted label can never be evidence — but
+to put one predicate on ground the writer does not control: **a kernel permission has exactly one
+legitimate grant edge, so any other edge onto one of the six is drift whatever its origin claims.** Beyond
+that, `runtime` remains inventory by design, and §7 records it as a stated residual rather than a
+guarantee.
 
 **What this fire ships is DETECTION, and that is the whole of it.** Step 3 is not changed; no grant is
 refused on link origin. Two grounded reasons, not timidity:
@@ -187,7 +199,8 @@ conditions* (→ every live edge lands in exactly one class); *a security-plane 
 tombstone-state alone* (→ the `isDeleted` filter is not the classification). From the standing checklist:
 **#4 removal needs a transport and an observer** — `RevokePermission` tombstones, so the reconciler must
 filter `isDeleted` and the revive arm must re-stamp; **#6 precedent may carry debt** — verify the vertex
-plane's own residuals (its doc comment names three) before copying its posture wholesale.
+plane's own residuals (its doc comment names two, and the build found a third the vertex plane shares —
+§7) before copying its posture wholesale.
 
 **6. Adjacent finds, and what this run did with each.**
 - *The four-writer census (G1) and the declaredKeys shape (G3)* were re-run live and matched.
@@ -200,10 +213,26 @@ plane's own residuals (its doc comment names three) before copying its posture w
   alone it would have reddened `main`.
 - *Committing from a tree a builder is still mutating.* A staged commit captured a revert-proof mutation
   (a constant-false conjunct disabling the double-diagnosis guard) that was live in the tree for the
-  seconds between the builder planting it and restoring it. **Fixed this run** (`936b4fd`). The lesson is
-  a lead-side one and belongs in the dossier: a green bar is not a safe commit point while a builder is
-  running revert-proofs — only the builder's *report* is.
+  seconds between the builder planting it and restoring it. **Fixed this run** three ways (`936b4fd`
+  repaired the artifact; `7f8ee79` mechanised the class as a blocking `lint-conventions` rule, proven
+  against the exact mutation that shipped; `ec74ee4` wrote the lead-side rule into
+  `agents/fire-brief-template.md` and the pkgmgr dossier). Repairing only the artifact would have left the
+  class unaddressed, which is what the accounting rule forbids.
+- *The provenance stamp is attacker-selected* (cold security review). The derivation check lived only in
+  the `package` arm, so stamping `runtime` walked a forged edge past the gate. **Fixed this run** — the
+  kernel-regrant rule (§3) plus the residual stated where the code drops the data, not only in this doc.
+- *Six unfenced reads report a state that never existed* (cold correctness review). A package lifecycle op
+  committing between the live read and the manifest read yields forgery-shaped drift for a concurrent
+  install. **Fixed this run**; a false red in a CI gate is a defect, not noise.
 
-**7. Non-goals.** Enforcement on edge origin (§3 — needs relationship-property projection, a designer
-pass if and when a driver appears); `holdsRole` (§3 — no declared side); any `docs/contracts/*` edit (§4);
-the vertex plane's own three stated residuals.
+**7. Non-goals, and the residuals this fire does NOT close.** Enforcement on edge origin (§3 — needs
+relationship-property projection, a designer pass if and when a driver appears); `holdsRole` (§3 — no
+declared side); any `docs/contracts/*` edit (§4). Three residuals stand, each recorded at the point the
+code drops the data rather than only here:
+1. **The declared side is Core KV on both planes** — a package-plane actor writes both halves of the
+   comparison. The registry anchor closes it for a package the compiled registry knows, and only there.
+2. **`origin` is self-asserted**, so `runtime` and `unstamped` are inventory reconciled against nothing.
+   Narrowed, not closed, by the kernel-regrant rule (§3).
+3. **The role side of a declared edge is not pinnable from source** — `GrantsTo` names a canonical role
+   name that `cmd/lattice-pkg` resolves at install (§5). Resolving role ids from Core KV to "close" it
+   would put the writer back on both sides of the comparison.

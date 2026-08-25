@@ -414,8 +414,10 @@ def execute(state, op):
         # absent -> create. No mutations means no committed key, so no
         # primaryKey. The revive branch needs lnk_key in the caller's
         # contextHint.optionalReads.
-        # origin is the provenance stamp (Contract #6 6.1, extended to the
-        # grant edge by grant-edge-provenance-design.md): this link was
+        # origin is the stamp Contract #6 6.1 requires on the permission
+        # vertex, applied by the same convention to the grant edge — no
+        # contract clause governs edge origin (grant-edge-provenance-design.md
+        # 4). This link was
         # authored at runtime by a grant-holding actor, not declared by an
         # installed package's manifest. grant_link carries it into the revive
         # arm too, so a revoke-then-re-grant does not come back unstamped.
