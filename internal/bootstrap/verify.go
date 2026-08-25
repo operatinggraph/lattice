@@ -295,12 +295,14 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 
 		// Stranded primordial-epoch roles
 		// (primordial-epoch-stranded-authority-design.md §4). The split is on
-		// live grants, not on the role: an `operator` role from a prior epoch
-		// that still confers permissions is an authority island on the trust
-		// boundary that no identity can reach and no census above can see, so
-		// it is a FAILURE — the green is the defect this row is about. With
-		// every grant revoked the same role is dead weight, which belongs with
-		// the orphans in notices.
+		// live grants, not on the role and never on its holders: an `operator`
+		// role from a prior epoch that still confers permissions is an
+		// authority island on the trust boundary that no current-epoch identity
+		// can reach and no census above can see, so it is a FAILURE — the green
+		// is the defect this row is about. With every grant revoked the same
+		// role is dead weight, which belongs with the orphans in notices. The
+		// prior-epoch holders are reported as detail because they are part of
+		// the island being described, and they move nothing.
 		switch {
 		case report.StrandedScanErr != nil:
 			notices = append(notices, fmt.Sprintf("CANNOT check for stranded primordial-epoch roles: %v", report.StrandedScanErr))
@@ -308,13 +310,13 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 			for _, stranded := range report.StrandedOperatorEpochs {
 				if len(stranded.GrantedBy) == 0 {
 					notices = append(notices, fmt.Sprintf(
-						"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and held by nobody (no live grants)",
-						stranded.RoleKey))
+						"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and reachable from no current-epoch identity (no live grants, %d prior-epoch holder(s))",
+						stranded.RoleKey, len(stranded.Holders)))
 					continue
 				}
 				failures = append(failures, fmt.Sprintf(
-					"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, held by nobody, and still confers %d live grant(s) reachable by no identity",
-					stranded.RoleKey, len(stranded.GrantedBy)))
+					"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, reachable from no current-epoch identity, and still confers %d live grant(s) (%d prior-epoch holder(s))",
+					stranded.RoleKey, len(stranded.GrantedBy), len(stranded.Holders)))
 			}
 		}
 	}

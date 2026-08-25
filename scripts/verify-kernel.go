@@ -376,13 +376,13 @@ func main() {
 	default:
 		for _, stranded := range report.StrandedOperatorEpochs {
 			if len(stranded.GrantedBy) == 0 {
-				fmt.Printf("  INFO  STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and held by nobody (no live grants)\n",
-					stranded.RoleKey)
+				fmt.Printf("  INFO  STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and reachable from no current-epoch identity (no live grants, %d prior-epoch holder(s))\n",
+					stranded.RoleKey, len(stranded.Holders))
 				continue
 			}
 			failures = append(failures, fmt.Sprintf(
-				"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, held by nobody, and still confers %d live grant(s) reachable by no identity",
-				stranded.RoleKey, len(stranded.GrantedBy)))
+				"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, reachable from no current-epoch identity, and still confers %d live grant(s) (%d prior-epoch holder(s))",
+				stranded.RoleKey, len(stranded.GrantedBy), len(stranded.Holders)))
 		}
 	}
 

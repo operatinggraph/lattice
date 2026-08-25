@@ -189,7 +189,8 @@ func TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole(t *testing.T) {
 	require.Equal(t, priorKey, stranded[0].RoleKey)
 	require.ElementsMatch(t, wantGrants, stranded[0].GrantedBy)
 	require.Equal(t, sortedUnique(wantGrants), stranded[0].GrantedBy, "grants must be reported sorted")
-	_ = priorAdmin
+	require.Equal(t, []string{priorAdmin}, stranded[0].Holders,
+		"the prior epoch's own holder is part of the island and must be reported, not treated as reachability")
 	require.True(t, stranded[0].Protected, "the report carries data.protected as corroboration")
 }
 

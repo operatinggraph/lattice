@@ -213,9 +213,11 @@ func TestVerifyKernel_ReportsKernelOrphanAsNoticeNotFailure(t *testing.T) {
 
 // seedPriorEpochOperatorRole plants the residue an id-file rotation leaves
 // behind: an `operator` role from a bootstrap epoch other than the one this
-// kernel was seeded from, held by nobody, carrying `grants` live grantedBy
-// edges. The freshly seeded kernel beside it supplies the current epoch's role,
-// so the fixture is exactly the two-epoch bucket the detector is about.
+// kernel was seeded from, carrying `grants` live grantedBy edges and still held
+// by that prior epoch's own admin identity — the create-only re-seed deletes
+// nothing, so the identity and its holdsRole edge survive alongside the role.
+// The freshly seeded kernel beside it supplies the current epoch, so the
+// fixture is exactly the two-epoch bucket the detector is about.
 func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substrate.Conn, grants int) string {
 	t.Helper()
 	roleID, err := substrate.NewNanoID()
@@ -232,6 +234,15 @@ func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substra
 		map[string]any{"value": "operator"})
 	require.NoError(t, err)
 	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, cnKey, cnVal)
+	require.NoError(t, err)
+
+	priorAdminID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	holdsRoleKey := substrate.LinkKey("identity", priorAdminID, "holdsRole", "role", roleID)
+	holdsRoleVal, err := bootstrap.MakeLinkEnvelope(holdsRoleKey, substrate.VertexKey("identity", priorAdminID),
+		roleKey, "holdsRole", "link.holdsRole", nil)
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, holdsRoleKey, holdsRoleVal)
 	require.NoError(t, err)
 
 	for range grants {

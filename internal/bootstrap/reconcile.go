@@ -61,7 +61,8 @@ type reconcileStep struct {
 // surfaces it.
 //
 // `strandedEpochs` names prior-bootstrap-epoch operator roles that are still
-// live and held by nobody (primordial-epoch-stranded-authority-design.md §3) —
+// live and reachable from no current-epoch identity
+// (primordial-epoch-stranded-authority-design.md §3) —
 // an orphan class over a different key family than the vtx.meta.> census, and
 // likewise reported here rather than acted on. `strandedScanErr` carries that
 // scan's own failure for exactly the reason orphanScanErr does: the scan is
@@ -412,8 +413,9 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 			"error", plan.strandedScanErr)
 	default:
 		for _, stranded := range plan.strandedEpochs {
-			s.logger.Warn("operator role from a prior bootstrap epoch is live and held by nobody — reported, not retired",
-				"key", stranded.RoleKey, "liveGrants", len(stranded.GrantedBy), "protected", stranded.Protected)
+			s.logger.Warn("operator role from a prior bootstrap epoch is live and reachable from no current-epoch identity — reported, not retired",
+				"key", stranded.RoleKey, "liveGrants", len(stranded.GrantedBy),
+				"priorEpochHolders", len(stranded.Holders), "protected", stranded.Protected)
 		}
 	}
 
@@ -486,7 +488,7 @@ type KernelReport struct {
 	// every consumer depends on.
 	OrphanScanErr error
 	// StrandedOperatorEpochs names prior-bootstrap-epoch operator roles that
-	// are still live and held by nobody
+	// are still live and reachable from no current-epoch identity
 	// (primordial-epoch-stranded-authority-design.md §3). The count of live
 	// grants on each is what decides its severity at the gate: authority no
 	// identity can reach is a failure, dead weight is a notice.
