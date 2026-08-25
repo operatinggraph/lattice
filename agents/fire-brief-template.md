@@ -101,6 +101,17 @@ widen its own scope. Winston files the board row (canonical demand) and, only if
 wanted, spawns a chip whose prompt **names the skill to run** (`/steward <stream>` + the row). Dispatched
 builder prompts should state this explicitly. See [[feedback_chip_prompts_name_the_skill]].
 
+**A green bar is not a safe commit point while a builder is still running — only its REPORT is.** Proving a
+fix by reverting it (the standing checklist's #3) means the builder plants a mutation, runs the test, and
+restores it; between the plant and the restore its working tree is deliberately wrong, and the lead
+polling for green sees a tree that builds and passes because the test was written against the plant. A
+commit taken in that window ships an inert guard with a passing test asserting the disabled behaviour —
+which is exactly the state the revert-proof exists to detect, now committed. `lint-conventions` rejects the
+`if false && …` / `if true || …` shape so the worst form fails a gate, but the shape is not the rule: **wait
+for the builder's final report before staging its files, and stage only files it has reported on.** The
+same applies in reverse to the lead's own probes: never copy-restore a file a running builder owns — take
+the probe on a copy of the tree, not the shared one.
+
 **Every dispatched builder prompt forbids the tree-wide git verbs, by name.** Parallel builders share one
 working tree, so `git stash`, `git checkout`, `git reset`, `git restore` and `git clean` reach every other
 builder's uncommitted work, not just the caller's files. A builder reaching for one to isolate a build error
