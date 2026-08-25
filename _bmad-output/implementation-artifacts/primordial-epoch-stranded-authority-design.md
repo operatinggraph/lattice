@@ -1,7 +1,10 @@
 # Stranded primordial-epoch authority — the orphan class the kernel census cannot reach
 
-**Status:** ✅ **Winston-ratified — Fire 1 build-ready** (detector + verify gate).
-**Fire 2 (the reconciliation verb) is 🔭 flagged for Andrew** — §7.
+**Status:** ✅ **Fire 1 SHIPPED 2026-08-25** (detector + verify gate) — Winston-ratified, three cold
+adversarial reviews plus a cumulative close pass, which between them overturned two ratified claims (§3
+step 3, §4.1) before it landed.
+**Fire 2 is 🔭 awaiting Andrew's direction** — the reconciliation verb *and* the prior epoch's
+still-projecting capability lenses (§5, §7). It is the board row's live state, not a note here.
 
 **Component:** `internal/bootstrap` (+ `scripts/verify-kernel.go`).
 
@@ -71,8 +74,9 @@ nothing removes.
    `data.value == "operator"`, not tombstoned. On a single-epoch deployment this is empty, and **steps 3–4
    never run at all** — the pass costs one listing plus one GET per role.
 3. Holder census — `lnk.identity.*.holdsRole.role.<id>`, the target-bounded form
-   `substrate/kv.go:256-268` documents. Live holders are **recorded**; they suppress the candidate **only
-   when one of them is an identity of the current epoch** (§3.2).
+   `substrate/kv.go:256-268` documents. Live holders are **recorded, never suppressing**: they are
+   partitioned into unaccounted-for holders and current-epoch operator-holders, and that partition sets the
+   finding's rank (§3.2, §4.1). Nothing is dropped.
 
    > **Amended 2026-08-25, during Fire 1's build.** This step originally read *"any live holder ⇒ not
    > stranded, skip silently"*, on the §3.1 premise that an epoch rotation moves every holder at once.
@@ -98,8 +102,14 @@ Both link reads are bounded by the *stranded* role's degree, never the keyspace 
 | role vertex live, `.canonicalName` live | ignores already-tombstoned residue | nothing to report |
 | `canonicalName == "operator"` | names the class | the role's identity is its canonicalName, not its id |
 | ~~zero live `holdsRole` inbound~~ | ~~the strand test~~ | ~~an epoch rotation moves every holder at once~~ — **struck 2026-08-25, premise false; see §3 step 3** |
-| **no live holder from the CURRENT epoch's identity set** | the strand test | reachability is a question about the current epoch; a prior-epoch holder is part of the island (§3.2) |
-| ≥1 live `grantedBy` inbound | escalates report → failure (§4) | live authority, not dead weight |
+| holders partitioned by the CURRENT epoch's verified operator-holders | **ranks the finding — never filters it** | reachability is a question about the current epoch; a prior-epoch holder is part of the island (§3.2) |
+| ~~≥1 live `grantedBy` inbound~~ | ~~escalates report → failure (§4)~~ | ~~live authority, not dead weight~~ — **struck 2026-08-25, inverted; see §4.1** |
+| ≥1 live `grantedBy` inbound **together with any holder** | escalates to failure (§4.1) | `capabilityRolesSpec` matches *any* role, so the dead epoch's grants land in that holder's capability document |
+
+**Nothing in this table filters except the first three rows.** Every candidate that clears them is reported;
+the holder partition sets its rank. An earlier draft made reachability a suppressor — see §3 step 3 for why
+that silenced the detector on its own target class, and §3.2 for why a silent drop is additionally
+unauditable.
 
 **Not used: `createdByOp`.** §2.2 — for this class it filters out exactly the population being looked for,
 and the prior epoch's op key is unknowable from the current id file. **Not used: `data.protected`.** It is
@@ -117,8 +127,15 @@ not impossible.
 
 The current epoch's identity set is the **six** operator-holding kernel identities of the loaded primordial
 table — `BootstrapIdentityID` plus the Loom / Weaver / Bridge / objmgr / privacy service actors
-(`nanoid.go:555-562`). A live `holdsRole` edge from one of those means a running actor really can reach the
-role, and the candidate **demotes to a notice naming the suppressing edge** — never vanishes: the
+(`nanoid.go:555-562`) — **intersected with the identities that actually hold the current operator role**, by
+a live `lnk.identity.*.holdsRole.role.<RoleOperatorID>` edge with both endpoints live. The ID table alone is
+not enough: membership in it is a *name*, not a *fact about the graph*, and a primordial identity whose
+current-role edge was tombstoned (an ordinary link mutation — §4.1) would otherwise be credited with
+authority it no longer has, while drawing `cap-read.root` purely from the stranded role. This is
+`SystemActorKeys`' question (`system_actors.go:60-77`), asked the same way.
+
+A live `holdsRole` edge from one of those verified holders means a running actor really can reach the
+role, and the candidate **demotes to a notice naming that edge** — never vanishes: the
 suppressing input is an ordinary `AssignRole` link create that `rejectProtectedMutations` does not cover
 (`step8_commit.go:727-729` skips creates), so a silent `continue` would let one benign-looking grant
 permanently mute the gate while removing none of the residue. A live edge from anything else — a prior
@@ -168,8 +185,25 @@ Capability is conferred by the `holdsRole` edge, not by the `grantedBy` edge, an
 - The mirror state is inert. A stranded role with 21 `grantedBy` edges and **zero** live holders projects
   nothing: every consumer requires the holder edge — the core write lens (`lenses.go:135`), the wildcard
   read lens (above), and rbac's `capabilityRolesSpec` (`packages/rbac-domain/lenses.go:92-93`).
+- **But grants stop being mere detail the moment ANY holder exists**, including an accounted-for one.
+  `capabilityRolesSpec` is `MATCH (identity {key: $actorKey}) OPTIONAL MATCH
+  (identity)-[:holdsRole]->(role:role)<-[:grantedBy]-(perm:permission)` — **no canonicalName filter, no id
+  filter, any role**. So a current-epoch identity holding a *prior* epoch's operator role has that role's
+  every permission materialized into its `cap.roles.<actor>` document, and those grants are by construction
+  not a subset of the current role's — that is §1's whole premise. Reached by one `AssignRole`.
 
-So the gate keys on `len(Holders) >= 1`; the grant count rides along as detail.
+So the ranks are: **failure** on any unaccounted-for holder, or on any holder together with ≥1 live grant;
+**notice** when the only holders are identities *verified* to hold the current operator role and the role
+confers no grants; **inert** when nothing live holds it. A finding whose counts are a declared lower bound
+(unreadable edges) never ranks inert — unknown is not the same as empty.
+
+> **Amended 2026-08-25 by the close pass.** The first rewrite of this section keyed severity on
+> `len(Holders) >= 1` alone and called a current-epoch holder benign, reasoning *"they already hold the
+> current operator role, so the wildcard lens grants them nothing they did not have."* **That generalized
+> from one lens again** — true of the wildcard *read* lens, false of `capabilityRolesSpec` on the write
+> plane. The lesson is now dossier entry 6 in `docs/components/bootstrap.md`, and this section is its first
+> repeat offence: a claim about what residue confers must enumerate *every* consumer that walks the edge,
+> not the one that prompted the question.
 
 > **Struck.** The ratified text argued: *"A kernel orphan is inert; this is live authority. Twenty-one
 > permission vertices … hanging off a role nobody holds are a live, unreachable authority island."*
@@ -257,7 +291,7 @@ failures; §6.1 pins the scanner, one layer below.
    The end-to-end vector — rotate the id file, run the seeder twice against one bucket — is exercised
    nowhere in the suite. The hand-planted fixture is faithful in shape (same envelope helpers) and is what
    pins the predicate; the end-to-end rotation is Fire 2's to build, alongside the verb that acts on it.*
-3. `TestStrandedOperatorEpochs_CurrentEpochHolderSuppresses` — a non-current `operator` role held by the
+3. `TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice` — a non-current `operator` role held by the
    **current** epoch's admin identity demotes to a notice naming that edge (§3.2), never vanishes.
 3a. `TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress` — the same role held only by an identity
    outside the current epoch's set is **reported**, with that holder listed. This is the §3 step-3
@@ -267,7 +301,8 @@ failures; §6.1 pins the scanner, one layer below.
    second one reports.
 5. `TestStrandedOperatorEpochs_ForeignRoleNameIsSilent` — a `vtx.role.*` with no current-epoch holder,
    carrying grants, whose canonicalName is not `operator`, is never reported.
-5a. `TestStrandedOperatorEpochs_TombstonedHolderDoesNotSuppress` and
+5a. `TestStrandedOperatorEpochs_DeadEndpointsAreNotLiveEdges` (subtests cover the tombstoned holder edge,
+   the tombstoned permission vertex, and the tombstoned current-epoch identity) and
    `TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses` — the link-liveness and unloaded-table pins.
 6. The severity split at the gate, keyed on `Holders` (§4.1): **holders + zero grants → failure**
    (the dangerous state), **grants + zero holders → notice** (the inert one), current-epoch holder →
@@ -337,7 +372,8 @@ is still live and reachable from no current-epoch identity — the cross-epoch o
 | `internal/bootstrap/strandedepoch.go` | new | `StrandedOperatorEpoch`, `StrandedOperatorEpochs` |
 | `internal/bootstrap/verify.go` | `266-295` the `ReadKernelReport` switch | notices only — never a failure (§4.2) |
 | `scripts/verify-kernel.go` | `327-360` the report + orphan blocks | the failure/notice split, printed (§4.1) |
-| `internal/bootstrap/strandedepoch_test.go` | new | §6.1–6.5, 6.7 |
+| `internal/bootstrap/strandedepoch_test.go` | new | §6.1–6.5, 6.9 |
+| `internal/bootstrap/strandedplan_test.go` | new | §6.8, §6.10 — the `strandedScan` seam and the boot-posture pins |
 | `internal/bootstrap/verify_kernel_test.go` | `1-257` | §6.6 |
 | `docs/components/bootstrap.md` | `167` dossier | close-pass entries |
 
@@ -405,8 +441,17 @@ documents duplicates (`substrate/kv.go:309-317` de-dups for exactly this reason)
 **6. Adjacent finds.** (a) `scanKernelOrphans`'s missing de-dup, above — **absorbed**: the new scan de-dups,
 and the existing one is not widened by this fire (its double-report is a repeat, not membership loss, since
 it classifies per key rather than paging). (b) The rest of the prior epoch — stranded identities, meta-root,
-lenses — is the same root cause and belongs to this item's Fire 2, not a new row (§5). (c) The
-destructive verb itself: **needs Andrew** (§7), flagged, not filed as work.
+and the still-projecting capability lenses — is the same root cause and consolidates into this item's Fire 2
+(§5). (c) The destructive verb itself: **needs Andrew** (§7).
+
+**Where (b) and (c) resolve.** Both ride **one** out, and it is an actual row: this item's own row in
+`backlog/lattice.md`, flipped to `🔭 flag-for-Andrew` at close, naming Fire 2 as the verb *plus* the lens
+residue. *(Corrected at close: this section previously read "flagged, not filed as work" while the row was
+still stamped `🏗️ … next: Fire 1`. A "flagged" claim with no row in that state is precisely the false record
+`agents/steward/SKILL.md` §4 forbids — the close pass caught it here, in the section whose job is to prevent
+it.)* The §3.1 `CreateRole` vector — a runtime role may take the canonicalName `operator`, since
+`validateCanonicalNameUniqueness` is intra-`Definition` only — is **detected** by what shipped, and its
+*prevention* consolidates into the same Fire 2 row rather than a second one.
 
 **7. Non-goals.** No writes of any kind. No change to `reconcile.go`'s four outcomes, the `vtx.meta.>`
 census, or any seeding path. No new board row.
