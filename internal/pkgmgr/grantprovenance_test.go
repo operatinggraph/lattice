@@ -72,3 +72,48 @@ func TestBuildInstallBatch_PermissionCarriesPackageProvenance(t *testing.T) {
 		t.Errorf("note = %q, want \"deliberate\" — the provenance stamp must be additive", got)
 	}
 }
+
+// The `grantedBy` link the installer writes alongside the permission vertex
+// is the edge Step 3's capability walk actually authorizes on
+// (grant-edge-provenance-design.md §1) — a stamped vertex that no live edge
+// points at confers nothing, and a forged edge onto an existing permission
+// confers everything that permission names regardless of the vertex's own
+// stamp. So the link needs its own provenance, independently of the vertex
+// test above.
+func TestBuildInstallBatch_GrantLinkCarriesPackageProvenance(t *testing.T) {
+	def := Definition{
+		Name:    "provenance-link-test-pkg",
+		Version: "0.0.1",
+		Permissions: []PermissionSpec{
+			{OperationType: "SignLease", Scope: "any", GrantsTo: []string{"operator"}},
+		},
+	}
+
+	ops, _, err := BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+
+	var linkData map[string]any
+	found := 0
+	for _, op := range ops {
+		if !strings.HasPrefix(op.Key, "lnk.permission.") || !strings.Contains(op.Key, ".grantedBy.role.") {
+			continue
+		}
+		found++
+		linkData, _ = op.Document["data"].(map[string]any)
+	}
+	if found != 1 {
+		t.Fatalf("expected 1 grantedBy grant link, got %d", found)
+	}
+	if linkData == nil {
+		t.Fatalf("grantedBy link has no data map")
+	}
+	if got, _ := linkData["origin"].(string); got != "package" {
+		t.Errorf("grantedBy link data.origin = %q, want \"package\" — an unstamped grant edge is "+
+			"indistinguishable from a forged one (grant-edge-provenance-design.md §1)", got)
+	}
+	if got, _ := linkData["declaredBy"].(string); got != def.Name {
+		t.Errorf("grantedBy link data.declaredBy = %q, want %q", got, def.Name)
+	}
+}

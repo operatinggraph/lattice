@@ -13,7 +13,8 @@
 //   - TestStarlark_Rbac_CreatePermission
 //   - TestStarlark_Rbac_AssignRole          (holdsRole link key shape)
 //   - TestStarlark_Rbac_RevokeRole
-//   - TestStarlark_Rbac_GrantPermission     (grantedBy link key shape)
+//   - TestStarlark_Rbac_GrantPermission     (grantedBy link key shape + runtime origin stamp)
+//   - TestStarlark_Rbac_GrantPermission_ReviveRestamps (revive arm re-stamps origin)
 //   - TestStarlark_Rbac_Parses              (rbac compiles for every op)
 //
 // `reportsTo` is NOT in the rbac-domain package. The pre-4.7
@@ -349,6 +350,44 @@ func TestStarlark_Rbac_GrantPermission(t *testing.T) {
 	}
 	if len(result.Events) == 0 || result.Events[0].Class != "rbac.permissionGranted" {
 		t.Fatalf("expected PermissionGranted, got %+v", result.Events)
+	}
+	data, _ := result.Mutations[0].Document["data"].(map[string]interface{})
+	if got, _ := data["origin"].(string); got != "runtime" {
+		t.Fatalf("grantedBy link data.origin = %q, want \"runtime\" (grant-edge-provenance-design.md §3)", got)
+	}
+}
+
+// TestStarlark_Rbac_GrantPermission_ReviveRestamps asserts that re-granting
+// a TOMBSTONED grantedBy link (the revive_link arm) writes the same runtime
+// origin stamp a fresh create would — a revoke-then-re-grant must not
+// launder the stamp off (grant-edge-provenance-design.md G5).
+func TestStarlark_Rbac_GrantPermission_ReviveRestamps(t *testing.T) {
+	runner := processor.NewStarlarkRunner(0, 0)
+	permKey := "vtx.permission." + starlarkPermID
+	roleKey := "vtx.role." + starlarkRoleID
+	linkKey := "lnk.permission." + starlarkPermID + ".grantedBy.role." + starlarkRoleID
+	hydrated := map[string]processor.VertexDoc{
+		permKey: aliveVertex(permKey, "permission"),
+		roleKey: aliveVertex(roleKey, "role"),
+		linkKey: {Key: linkKey, Class: "grantedBy", IsDeleted: true, Data: map[string]interface{}{}},
+	}
+	sc := makeRbacScriptContext("GrantPermission",
+		`{"permKey":"`+permKey+`","roleKey":"`+roleKey+`"}`, hydrated)
+	result, err := runner.Run(context.Background(), sc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assertContract3Shape(t, result, true)
+	if result.Mutations[0].Op != "update" {
+		t.Fatalf("op = %q, want \"update\" (revive arm)", result.Mutations[0].Op)
+	}
+	if result.Mutations[0].Key != linkKey {
+		t.Fatalf("mutations[0].key = %q, want %q", result.Mutations[0].Key, linkKey)
+	}
+	data, _ := result.Mutations[0].Document["data"].(map[string]interface{})
+	if got, _ := data["origin"].(string); got != "runtime" {
+		t.Fatalf("revived grantedBy link data.origin = %q, want \"runtime\" — a revoke-then-re-grant "+
+			"must not come back unstamped", got)
 	}
 }
 
