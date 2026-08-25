@@ -122,7 +122,7 @@ split, level reconcile against the current row, revision-conditioned delete).
 | 8 | row not `violating` | return | mirrors lane-1's L1 gate and `sweepMark`'s violating gate (`reconciler.go:481`) |
 | 9 | `gapSuppressed` → `exhausted` | `escalateExhaustedGap` | **the fix.** Same site the mark leg calls (`reconciler.go:508`), now reachable from state that outlives the mark |
 | 10 | `gapSuppressed` → suppressed, not exhausted (`inflight_<g>`) | return | a call is in flight; the lens will re-project when it lands, and lane 1 re-delivers |
-| 11 | not suppressed, **no** mark | clear the issue, then **dispatch** | the re-arm. See §4 |
+| 11 | not suppressed, **no** mark, action is not `surface` | **dispatch** (`planGap` → `fireEpisode`), no clear of its own | the re-arm. See §4, incl. its 2026-08-25 correction: the clear already lives in `planGap` conditioned on the plan building, and `surface` returns before planning |
 
 **Arm ORDER is load-bearing, and `sweepMark` already fixes it (CORRECTED 2026-08-25 after cold
 review).** `sweepMark` runs its level reconcile *unconditionally, above* the registry and `__control`
@@ -245,9 +245,40 @@ no mark to visit. The gap would be un-suppressed and still un-dispatched: a *qui
 So the count leg carries the dispatch arm. When the count stands, the target is registered and active,
 the gap is open and violating, `gapSuppressed` returns false, and **no mark exists**, the gap is by
 definition in the state lane-1 would dispatch on the next delivery — and no delivery is coming. The leg
-dispatches, through the same `dispatchGap` path the mark leg's reclaim uses. The mark CAS-create is the
+dispatches, through the same path the mark leg's reclaim uses. The mark CAS-create is the
 OCC (`state.go:113`), so a concurrent lane-1 delivery collapses on it exactly as two evaluations already
 do; the loser drops.
+
+> **CORRECTED 2026-08-25 (Increment 2 grounding).** Three statements above and in §3's arm-11 row are
+> wrong about the code they name; each is corrected here and the arm table's row 11 is corrected with them.
+>
+> **(a) The path is `planGap` + `fireEpisode`, not `dispatchGap`.** `dispatchGap` (`evaluator.go:200`)
+> is *lane 1's* entry and takes the CDC `substrate.Message` the sweep does not have. The mark leg's
+> reclaim resolves the plan itself — `e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row,
+> rowRevision, "")` then `e.fireEpisode(...)` (`reconciler.go:730-737`) — and that pair, with reclaim's
+> nil-plan branch, is what arm 11 mirrors.
+>
+> **(b) Arm 11 must NOT clear the issue itself.** `planGap` already clears
+> `issueKeyGapEntity(targetID, entityID, col)` at `evaluator.go:491`, and its own comment names exactly
+> this fire's case: *"this entity's gap has an attempt left after all (its GapBudgetExhausted, which a
+> raised maxretries_<g> or an escalation can make stale without the gap ever having closed)"*. That
+> clear is conditioned on a plan actually **building**, which is strictly more correct than an
+> unconditional pre-clear: `planGap` also returns nil for admission-deferral (`NakWithDelay`) and for a
+> transient unresolved reference, and in both the standing fact may still hold. An arm-11 clear ahead of
+> the dispatch would retire the latch in exactly those cases — the flap §3.2's AMENDED block had to
+> remove from arm 8b, one arm further down. **Arm 11 is dispatch-only; the clear it needs is already
+> inside the dispatch.**
+>
+> **(c) Arm 11 must guard `actionSurface` before planning.** A `surface` gap never dispatches, so it
+> never mints a mark or a count — but a package upgrade that rewrites a gap's action from `directOp` to
+> `surface` leaves a stale `…__count` behind, and arm 11 is the first leg that can reach such a gap
+> without passing `dispatchGap`'s surface branch (`evaluator.go:224`, the only one in the engine).
+> `buildPlan` has no `actionSurface` case, so planning one falls to its `default:` and returns
+> `errConfig "unknown action \"surface\""` (`strategist.go:323`) — a config alert against a
+> **contract-legal playbook**, which is the dossier entry *"A Health issue whose SUBJECT is a
+> contract-legal declaration is a false alarm, not a diagnostic"* verbatim. It would also fight lane 1,
+> which raises at that same `issueKeyGapEntity` latch for a surface gap (`evaluator.go:239`).
+> **The arm returns on `ga.Action == actionSurface` without planning, dispatching, or clearing.**
 
 This arm also closes the *other* remedy the scout found: raising `maxretries_<g>` in the package
 re-projects the row and does produce a delivery, so that path already worked — but only because the row
@@ -256,16 +287,41 @@ changed. Arm 11 makes the re-arm work when nothing about the row changes.
 ## 5. The operator verb
 
 `lattice weaver reset-budget <targetId> <entityId> <gapColumn>` → `Engine.ResetRetryBudget`, mirroring
-`reset-confidence` (`cmd/lattice/weaver/weaver.go:239`) and `deleteEffectWindows` (`state.go:718`):
-revision-conditioned delete, tolerant of a key that vanished mid-scan, reports what it removed.
+`reset-confidence` (`cmd/lattice/weaver/weaver.go:239`) and `deleteEffectWindows` (`state.go:739`):
+revision-conditioned write, tolerant of a key that vanished mid-scan, reports what it reset.
 
 Scope is one gap, not one target: the count is per-(target, entity, gap), the issue latch is keyed the
 same way (`evaluator.go:1255`), and a target-wide reset would re-arm parks an operator never looked at.
 
-The verb deletes the count and nothing else. It does not clear the issue and does not dispatch — the
+The verb resets the count and nothing else. It does not clear the issue and does not dispatch — the
 next sweep pass (≤ 1 min, `reconciler.go:21`) does both, through arm 11. One writer, one path: the
 verb states intent, the level reconcile enacts it. (Checklist rule 5: *one deterministic key, one
 writer.*)
+
+> **CORRECTED 2026-08-25 (Increment 3 grounding). The verb ZEROES the count; it must not DELETE the
+> key.** As originally written this section and §4 were mutually inconsistent, and the inconsistency
+> destroyed the verb's whole purpose.
+>
+> `pass()` enumerates the **weaver-state bucket** and routes by key shape (`reconciler.go:174-220`);
+> `sweepCount` — and therefore arm 11, the only re-arm dispatch that exists — is reached **only** for a
+> key ending `.__count`. An exhausted gap's mark is long gone (that is this item's founding premise,
+> §1), so once the verb deletes the count key, **no key in the bucket names that gap at all**: nothing
+> enumerates it, arm 11 never fires, and the gap stays un-suppressed and un-dispatched. That is
+> precisely the *"quieter silent park"* §4 opens by naming as the failure the arm exists to prevent —
+> the delete-verb and the enumeration-driven re-arm cannot both be right.
+>
+> **Resolution: `ResetRetryBudget` writes `dispatchCount{Count: 0}` under the key's read revision**
+> (`KVUpdateWithTTL`, the same TTL `incrementDispatchCount` stamps — `state.go:329`), rather than
+> deleting. The key survives to be enumerated; the next pass reads count 0, `gapSuppressedWithCount`
+> returns not-suppressed, and arm 11 dispatches — which re-increments it to 1 and mints the mark. A key
+> that vanished mid-scan (`ErrKeyNotFound`) is success and reports 0 reset: no count means no
+> suppression to lift. A revision conflict means a concurrent dispatch already moved the budget; it
+> wins, and a rerun is the remedy — `resetConfidence`'s stated posture (`weaver.md` §9), unchanged.
+> Nothing here adds a key, a bucket, or a TTL (§3.1 holds): the 128 h backstop still collects the key
+> if the operator's reset is never acted on.
+>
+> `markStore.deleteDispatchCount` (`state.go:376`) stays as it is — the gap-close reset, where an
+> unconditional delete is correct because the fact it records is gone. The verb is a different verb.
 
 ## 6. Increment order + green bar
 
@@ -273,8 +329,38 @@ writer.*)
 |---|---|---|---|
 | 1 | `sweepCount` arms 1–10; `pass()` routes `…__count`; correct `deleteByTargetPrefix`'s comment, which enumerates three reserved shapes but deletes four (counts share the `<targetId>.` prefix) | **posture-changing** — new enforcement point in the sweep | full 3-layer adversarial |
 | 2 | arm 11 (the re-arm dispatch) | **posture-changing** — new dispatch leg | full 3-layer adversarial |
-| 3 | `Engine.ResetRetryBudget` + `lattice weaver reset-budget` + `docs/components/weaver.md` §9 | mechanical, mirrors `reset-confidence` | lead review |
+| 3 | `Engine.ResetRetryBudget` + the `resetBudget` control-plane op + `lattice weaver reset-budget` + `docs/components/weaver.md` §9 | **capability-plane** — a new authorized control verb | full 3-layer adversarial |
 | — | close | — | **one cumulative adversarial pass over the whole item diff** |
+
+> **CORRECTED 2026-08-25 (Increment 3 grounding). Increment 3 is a capability-plane change, not a
+> mechanical mirror, and its blast radius is wider than this table said.** `reset-confidence` is not
+> just a CLI verb: it is an authorized control-plane op, so `reset-budget` needs a `resetBudget` entry in
+> `controlauth.WeaverOps` (`internal/controlauth/ops.go:25` — carrying **its own verb**, for the reason
+> stated there about `resetConfidence`: folding it under an existing verb grants the wider capability to
+> every actor that needs the narrower), a grant in `packages/control-authz/permissions.go:38` and
+> `packages/console-operator/permissions.go:58`, an explicit **deny** in
+> `packages/demo-operator/package_test.go:157` (that test pins demoOperator's surface exhaustively), and
+> a manifest **version bump** for each `packages/` definition it touches — CI's *Package version-bump
+> gate* (`scripts/lint-package-version.go`) fails a content edit at an unchanged version. Steward
+> `SKILL.md` §4 makes any capability-plane change full-3-layer regardless of size, and §3's tier table
+> puts a new enforcement point on the **opus** builder tier; both apply here and override this table's
+> original "mechanical / lead review".
+>
+> **Subject grammar — decided here (Winston, §0).** `resetConfidence` is target-scoped on a subject
+> `targetIDFromSubject` requires to be **exactly 5 tokens** (`service.go:301`); `resetBudget` is scoped
+> to (target, entity, gap). The scope travels **in the subject** —
+> `lattice.ctrl.weaver.<targetId>.resetBudget.<entityId>.<gapColumn>`, registered as its own endpoint on
+> `subjectPrefix+".*."+opResetBudget+".*.*"` and parsed by a dedicated function that leaves
+> `targetIDFromSubject` and the 5-token ops untouched. Both extra tokens are dot-free by construction (a
+> `gapColumn` is `singleTokenPattern`, an `entityId` is a NanoID over `substrate.Alphabet`), and
+> `deploy/nats-server.conf` already allows `lattice.ctrl.>`, so no transport change is needed. Rejected:
+> carrying them in the request body. It would fork nothing in the subject grammar, but a body-carried
+> scope is **invisible to the transport's own authorization layer** — NATS permissions can scope a
+> subject and can never scope a body — and this board already carries a ★★★ natsperm row whose finding
+> is precisely that a request *body* smuggles scope past subject-level denies. A new authorized verb
+> does not get to add another instance of that. Authorization itself is unchanged and stays
+> target-scoped: `Authorize(ctx, actor, opResetBudget, targetID)`, with the entity and gap tokens
+> validated fail-closed before they ever reach `countKey`.
 
 **Green bar, as runnable commands:**
 
