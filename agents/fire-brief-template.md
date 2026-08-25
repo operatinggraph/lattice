@@ -107,10 +107,19 @@ restores it; between the plant and the restore its working tree is deliberately 
 polling for green sees a tree that builds and passes because the test was written against the plant. A
 commit taken in that window ships an inert guard with a passing test asserting the disabled behaviour —
 which is exactly the state the revert-proof exists to detect, now committed. `lint-conventions` rejects the
-`if false && …` / `if true || …` shape so the worst form fails a gate, but the shape is not the rule: **wait
-for the builder's final report before staging its files, and stage only files it has reported on.** The
-same applies in reverse to the lead's own probes: never copy-restore a file a running builder owns — take
-the probe on a copy of the tree, not the shared one.
+`if false && …` / `if false {` / `if true || …` shape so the worst form fails a gate — but the gate is a
+backstop, not the rule, and it cannot see a mutation that substitutes one call for another rather than
+planting a literal.
+
+**The rule that actually closes this: the revert-proof loop must not run in the tree the lead commits
+from.** A builder that plants, runs, and restores in the shared tree has a window no restore discipline on
+its side can close — it is open *during* the test run, which is exactly when a lead polling for green
+looks. Give the builder a `git worktree` copy for its proofs, or have it prove in a scratch copy under
+`/tmp`. Where that is not arranged, the lead's fallback is: **wait for the builder's final report before
+staging its files, stage only files it has reported on**, and treat *tests green + the dead-conjunct gate
+clean* as the safe-commit signal, since a live plant makes its own test fail. Both forms of this shipped
+in one fire (2026-08-25) — the second slipping through the gate written for the first. The same applies in
+reverse to the lead's own probes: never copy-restore a file a running builder owns.
 
 **Every dispatched builder prompt forbids the tree-wide git verbs, by name.** Parallel builders share one
 working tree, so `git stash`, `git checkout`, `git reset`, `git restore` and `git clean` reach every other
