@@ -2229,3 +2229,58 @@ func TestIntersectFindings(t *testing.T) {
 		t.Fatalf("intersect = %+v, want only the kernelRegrant both reads made — the packageNotInstalled finding appeared in one read only", gotGrant)
 	}
 }
+
+// TestReconcileTwice pins the read structure LoadPermissionReconciliation is
+// built on: TWO reads, and a finding survives only if both produced it. The
+// hazard is not hypothetical — a package lifecycle op commits atomically
+// (uninstall tombstones the manifest and every declared key together) while
+// this pass reads it across six unfenced moments, so a single read that
+// straddles the commit sees live edges stamped with a package whose manifest
+// already reads uninstalled: field for field, a forged edge naming a package
+// that was never installed. A gate must not fail on that.
+func TestReconcileTwice(t *testing.T) {
+	const forgedKey = "vtx.permission.SWZpB4hde9askSkMWU7s"
+	edge := substrate.LinkKey("permission", "2QuyoBDkFGC5kdgrYkTF", "grantedBy", "role", "u3RxRfKybLhhhsLe3NiT")
+
+	// The first read straddles an uninstall: it reports the transient
+	// undeclared/missing findings a half-committed lifecycle op produces,
+	// alongside one genuine forgery. The second read, after the commit, sees
+	// only the forgery.
+	reads := []PermissionReconciliation{
+		{
+			Drift:      []PermissionFinding{{Class: FindingUndeclared, Key: forgedKey}, {Class: FindingMissing, Key: "vtx.permission.6p5Esr7taUqEp7j61FuE", Package: "going-away-pkg"}},
+			GrantDrift: []GrantFinding{{Class: GrantFindingUndeclared, Key: edge, Reason: GrantReasonPackageNotInstalled}},
+			Notices:    []PermissionFinding{{Class: FindingRevoked, Key: forgedKey}},
+		},
+		{
+			Drift:                       []PermissionFinding{{Class: FindingUndeclared, Key: forgedKey}},
+			GrantDrift:                  nil,
+			DeclaredKeysByPackage:       map[string][]string{"sample-pkg": {forgedKey}},
+			DeclaredGrantLinksByPackage: map[string][]string{"sample-pkg": {edge}},
+		},
+	}
+	calls := 0
+	got, err := reconcileTwice(func() (PermissionReconciliation, error) {
+		rec := reads[calls]
+		calls++
+		return rec, nil
+	})
+	if err != nil {
+		t.Fatalf("reconcileTwice: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("read called %d time(s), want 2 — one unsynchronized observation cannot tell a lifecycle op from a forgery", calls)
+	}
+	if len(got.Drift) != 1 || got.Drift[0].Key != forgedKey {
+		t.Errorf("Drift = %+v, want only the finding both reads made (%s)", got.Drift, forgedKey)
+	}
+	if len(got.GrantDrift) != 0 {
+		t.Errorf("GrantDrift = %+v, want none — the packageNotInstalled finding appeared in the straddling read only", got.GrantDrift)
+	}
+	if len(got.Notices) != 0 {
+		t.Errorf("Notices = %+v, want none — notices are intersected on the same rule as drift", got.Notices)
+	}
+	if _, ok := got.DeclaredGrantLinksByPackage["sample-pkg"]; !ok {
+		t.Errorf("DeclaredGrantLinksByPackage = %v, want the SECOND read's map — it is an inventory for the registry-anchor pass, not a finding", got.DeclaredGrantLinksByPackage)
+	}
+}
