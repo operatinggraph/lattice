@@ -24,6 +24,13 @@ type StrandedOperatorEpoch struct {
 	// edge targets this role — the authority island the role still confers.
 	// Empty means the role is dead weight rather than live authority.
 	GrantedBy []string
+	// Holders holds the sorted vtx.identity.<id> keys with a live holdsRole
+	// edge into this role. Every one of them is itself a prior-epoch identity,
+	// stranded by the same id-file rotation — a current-epoch holder would have
+	// kept the role out of this report entirely. They are reported so a human
+	// reading the finding can see the shape of the island rather than only its
+	// root, and they never gate severity.
+	Holders []string
 	// Protected mirrors the role vertex's data.protected. It is carried for
 	// corroboration when a human reads the report and never gates the
 	// predicate: primordial.go records that field as retired as an
@@ -73,14 +80,14 @@ func StrandedOperatorEpochs(ctx context.Context, kv jetstream.KeyValue) ([]Stran
 		if !ok || roleID == RoleOperatorID {
 			continue
 		}
-		aspect, live := readLiveDocument(ctx, kv, aspectKey)
+		aspect, live := readDocument(ctx, kv, aspectKey)
 		if !live {
 			continue
 		}
 		if name, _ := aspect.Data["value"].(string); name != "operator" {
 			continue
 		}
-		role, live := readLiveDocument(ctx, kv, roleKey)
+		role, live := readDocument(ctx, kv, roleKey)
 		if !live {
 			continue
 		}
@@ -120,7 +127,7 @@ func hasLiveLink(ctx context.Context, kv jetstream.KeyValue, filter string) (boo
 		return false, err
 	}
 	for _, key := range keys {
-		if _, live := readLiveDocument(ctx, kv, key); live {
+		if _, live := readDocument(ctx, kv, key); live {
 			return true, nil
 		}
 	}
@@ -145,7 +152,7 @@ func liveGrantSources(ctx context.Context, kv jetstream.KeyValue, roleID string)
 		if !ok {
 			continue
 		}
-		if _, live := readLiveDocument(ctx, kv, key); !live {
+		if _, live := readDocument(ctx, kv, key); !live {
 			continue
 		}
 		grants = append(grants, substrate.VertexKey("permission", permID))
@@ -202,21 +209,22 @@ type storedDocument struct {
 	Data      map[string]any `json:"data"`
 }
 
-// readLiveDocument reads one key and reports it live only when it is present,
-// parses, and carries no tombstone. Any failure answers "not live", which
-// keeps the candidate out of the report: this scan reports a defect, so an
-// unreadable key must never be able to manufacture one.
-func readLiveDocument(ctx context.Context, kv jetstream.KeyValue, key string) (storedDocument, bool) {
+// readDocument reads one key and reports whether it is live: present, parseable
+// and carrying no soft tombstone. An absent or unparseable key answers "not
+// live" with an empty document — this scan reports a defect, so a key it cannot
+// read must never be able to manufacture one.
+//
+// A tombstoned document is returned with its data intact alongside live=false,
+// so a caller reading a field cannot accidentally satisfy the tombstone check
+// by finding the field empty. Deciding on the tombstone is each caller's own
+// step.
+func readDocument(ctx context.Context, kv jetstream.KeyValue, key string) (doc storedDocument, live bool) {
 	stored, err := kv.Get(ctx, key)
 	if err != nil {
 		return storedDocument{}, false
 	}
-	var doc storedDocument
 	if err := json.Unmarshal(stored.Value(), &doc); err != nil {
 		return storedDocument{}, false
 	}
-	if doc.IsDeleted {
-		return storedDocument{}, false
-	}
-	return doc, true
+	return doc, !doc.IsDeleted
 }

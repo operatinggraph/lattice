@@ -59,6 +59,14 @@ type reconcileStep struct {
 // not be denied its own answer because the unrelated orphan scan could not
 // run; only a caller whose contract IS the orphan report (KernelOrphans)
 // surfaces it.
+//
+// `strandedEpochs` names prior-bootstrap-epoch operator roles that are still
+// live and held by nobody (primordial-epoch-stranded-authority-design.md §3) —
+// an orphan class over a different key family than the vtx.meta.> census, and
+// likewise reported here rather than acted on. `strandedScanErr` carries that
+// scan's own failure for exactly the reason orphanScanErr does: the scan is
+// advisory, so its inability to run must never deny an unrelated reader its own
+// answer, and must never turn a boot into a failed boot.
 type reconcilePlan struct {
 	missing          []reconcileStep
 	stale            []reconcileStep
@@ -67,6 +75,8 @@ type reconcilePlan struct {
 	orphanedEntities []string
 	orphanedAspects  []string
 	orphanScanErr    error
+	strandedEpochs   []StrandedOperatorEpoch
+	strandedScanErr  error
 }
 
 func (p reconcilePlan) steps() []reconcileStep {
@@ -163,6 +173,10 @@ func planReconcile(ctx context.Context, kv jetstream.KeyValue) (reconcilePlan, e
 	plan.orphanedEntities = orphanedEntities
 	plan.orphanedAspects = orphanedAspects
 	plan.orphanScanErr = orphanErr
+
+	strandedEpochs, strandedErr := StrandedOperatorEpochs(ctx, kv)
+	plan.strandedEpochs = strandedEpochs
+	plan.strandedScanErr = strandedErr
 
 	return plan, nil
 }
@@ -386,6 +400,23 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 		}
 	}
 
+	// A stranded prior-epoch operator role is advisory at boot and never fatal:
+	// boot cannot fix it (the remedy is a re-bootstrap from clean state, or the
+	// reconciliation verb that does not exist yet), and a boot that refused to
+	// come up over a condition it cannot repair would take the deployment down
+	// without moving it any closer to repaired. verify-kernel is where this
+	// moves an exit status.
+	switch {
+	case plan.strandedScanErr != nil:
+		s.logger.Warn("cannot scan for stranded primordial-epoch roles — kernel repair proceeds without that report",
+			"error", plan.strandedScanErr)
+	default:
+		for _, stranded := range plan.strandedEpochs {
+			s.logger.Warn("operator role from a prior bootstrap epoch is live and held by nobody — reported, not retired",
+				"key", stranded.RoleKey, "liveGrants", len(stranded.GrantedBy), "protected", stranded.Protected)
+		}
+	}
+
 	steps := plan.steps()
 	if len(steps) == 0 {
 		s.logger.Info("kernel definitions already match this binary — no writes",
@@ -454,18 +485,39 @@ type KernelReport struct {
 	// returns, which reflects only a failure of the built-set comparison
 	// every consumer depends on.
 	OrphanScanErr error
+	// StrandedOperatorEpochs names prior-bootstrap-epoch operator roles that
+	// are still live and held by nobody
+	// (primordial-epoch-stranded-authority-design.md §3). The count of live
+	// grants on each is what decides its severity at the gate: authority no
+	// identity can reach is a failure, dead weight is a notice.
+	StrandedOperatorEpochs []StrandedOperatorEpoch
+	// StrandedScanErr is the stranded-epoch SCAN's own failure — narrower, the
+	// same way OrphanScanErr is, than the error ReadKernelReport returns: the
+	// scan alone could not be trusted, which says nothing about Missing/Stale
+	// and must never reach a caller that never asked about stranded epochs.
+	StrandedScanErr error
 }
 
 // ReadKernelReport runs planReconcile once and returns everything a
 // verification gate needs from it. The returned error is non-nil only when
 // the built-set comparison itself failed — a plan no caller can trust at
-// all. OrphanScanErr is narrower: the orphan listing alone could not be
-// trusted, which does not invalidate Missing/Stale.
+// all. OrphanScanErr and StrandedScanErr are narrower: one advisory scan alone
+// could not be trusted, which does not invalidate Missing/Stale.
 func ReadKernelReport(ctx context.Context, kv jetstream.KeyValue) (KernelReport, error) {
 	plan, err := planReconcile(ctx, kv)
 	if err != nil {
 		return KernelReport{}, err
 	}
+	return kernelReportFromPlan(plan), nil
+}
+
+// kernelReportFromPlan projects a completed plan into the report shape. It is
+// the whole of ReadKernelReport that decides what an advisory scan's failure
+// does, and it is separated from the I/O so that decision is assertable
+// directly: an advisory scan's error reaches its own report field and nothing
+// else, leaving the built-set comparison every consumer depends on intact
+// beside it.
+func kernelReportFromPlan(plan reconcilePlan) KernelReport {
 	var report KernelReport
 	for _, st := range plan.missing {
 		report.Missing = append(report.Missing, st.key)
@@ -476,7 +528,9 @@ func ReadKernelReport(ctx context.Context, kv jetstream.KeyValue) (KernelReport,
 	report.OrphanedEntities = plan.orphanedEntities
 	report.OrphanedAspects = plan.orphanedAspects
 	report.OrphanScanErr = plan.orphanScanErr
-	return report, nil
+	report.StrandedOperatorEpochs = plan.strandedEpochs
+	report.StrandedScanErr = plan.strandedScanErr
+	return report
 }
 
 // KernelDrift reports kernel entries this binary builds that Core KV does not

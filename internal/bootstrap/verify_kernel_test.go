@@ -211,6 +211,73 @@ func TestVerifyKernel_ReportsKernelOrphanAsNoticeNotFailure(t *testing.T) {
 	require.Condition(t, containsSubstring(notices, "KERNEL ENTITY ORPHANED: "+orphan))
 }
 
+// seedPriorEpochOperatorRole plants the residue an id-file rotation leaves
+// behind: an `operator` role from a bootstrap epoch other than the one this
+// kernel was seeded from, held by nobody, carrying `grants` live grantedBy
+// edges. The freshly seeded kernel beside it supplies the current epoch's role,
+// so the fixture is exactly the two-epoch bucket the detector is about.
+func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substrate.Conn, grants int) string {
+	t.Helper()
+	roleID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	roleKey := substrate.VertexKey("role", roleID)
+
+	roleVal, err := bootstrap.MakeVertexEnvelope(roleKey, "role", map[string]any{"protected": true})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, roleKey, roleVal)
+	require.NoError(t, err)
+
+	cnKey := substrate.AspectKey(roleKey, "canonicalName")
+	cnVal, err := bootstrap.MakeAspectEnvelope(cnKey, roleKey, "canonicalName", "canonicalName",
+		map[string]any{"value": "operator"})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, cnKey, cnVal)
+	require.NoError(t, err)
+
+	for range grants {
+		permID, idErr := substrate.NewNanoID()
+		require.NoError(t, idErr)
+		linkKey := substrate.LinkKey("permission", permID, "grantedBy", "role", roleID)
+		linkVal, linkErr := bootstrap.MakeLinkEnvelope(linkKey, substrate.VertexKey("permission", permID),
+			roleKey, "grantedBy", "link.grantedBy", nil)
+		require.NoError(t, linkErr)
+		_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, linkKey, linkVal)
+		require.NoError(t, err)
+	}
+	return roleKey
+}
+
+// TestVerifyKernel_StrandedEpochWithGrantsFails is where the false green ends:
+// a prior epoch's operator role still conferring live grants is authority no
+// identity can reach, so it moves this gate's exit status rather than sitting
+// in the notices a 30-line output scrolls past.
+func TestVerifyKernel_StrandedEpochWithGrantsFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	roleKey := seedPriorEpochOperatorRole(ctx, t, conn, 2)
+
+	failures, _ := bootstrap.VerifyKernel(ctx, conn)
+	require.Condition(t, containsSubstring(failures, "STRANDED OPERATOR ROLE: "+roleKey))
+	require.Condition(t, containsSubstring(failures, "2 live grant(s)"))
+}
+
+// TestVerifyKernel_StrandedEpochWithoutGrantsIsNotice is the other half of the
+// §4 split: the same stranded role with nothing left to confer is dead weight,
+// and dead weight does not redden a gate.
+func TestVerifyKernel_StrandedEpochWithoutGrantsIsNotice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	roleKey := seedPriorEpochOperatorRole(ctx, t, conn, 0)
+
+	failures, notices := bootstrap.VerifyKernel(ctx, conn)
+	require.Empty(t, failures, "a stranded role conferring nothing must not fail the gate")
+	require.Condition(t, containsSubstring(notices, "STRANDED OPERATOR ROLE: "+roleKey))
+}
+
 func containsSubstring(haystack []string, want string) func() bool {
 	return func() bool {
 		for _, s := range haystack {

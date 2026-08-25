@@ -359,6 +359,33 @@ func main() {
 		}
 	}
 
+	// Stranded primordial-epoch roles
+	// (primordial-epoch-stranded-authority-design.md §4). Unlike a kernel
+	// orphan, an `operator` role left behind by an id-file rotation that still
+	// confers live grants is authority no identity can reach, so it moves the
+	// exit status. A role whose grants are all revoked is dead weight and only
+	// informs.
+	fmt.Println("Checking for stranded primordial-epoch operator roles...")
+	switch {
+	case reportErr != nil:
+		fmt.Printf("  INFO  cannot check for stranded primordial-epoch roles: kernel content comparison itself failed: %v\n", reportErr)
+	case report.StrandedScanErr != nil:
+		fmt.Printf("  INFO  cannot check for stranded primordial-epoch roles: %v\n", report.StrandedScanErr)
+	case len(report.StrandedOperatorEpochs) == 0:
+		fmt.Printf("  OK  no stranded primordial-epoch operator roles\n")
+	default:
+		for _, stranded := range report.StrandedOperatorEpochs {
+			if len(stranded.GrantedBy) == 0 {
+				fmt.Printf("  INFO  STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and held by nobody (no live grants)\n",
+					stranded.RoleKey)
+				continue
+			}
+			failures = append(failures, fmt.Sprintf(
+				"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, held by nobody, and still confers %d live grant(s) reachable by no identity",
+				stranded.RoleKey, len(stranded.GrantedBy)))
+		}
+	}
+
 	fmt.Println()
 	if len(failures) == 0 {
 		fmt.Printf("verify-kernel: ALL ASSERTIONS PASSED\n")
