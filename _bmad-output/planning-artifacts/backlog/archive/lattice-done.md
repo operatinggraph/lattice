@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-21 · `f28f832` · [Processor/Pkgmgr] §2.5 floor template-coverage CLOSED — `{me.*}` compiles to whole-segment patterns; install gate pins the vocabulary; review caught a submitter-steerable exclusion, fixed pre-ship
 - 2026-08-21 · `dd22e08c` · [Pkgmgr] uninstall secure-lens attestation CLOSED — operator-attested `UninstallOptions`, CLI/Loupe/UI; 4 cold reviews found 2 bypasses; guard-vs-oracle agreement test mechanizes the class
 - 2026-08-21 · `84d5aee` · [CI/hellolattice] main-red CLOSED — model-runner's 3 packages sorted into a unit shard (tests had never run in CI); the 2s NFR-P3 guard no longer spans lens cold start; 3 title-keyed Postgres polls key-scoped
 - 2026-08-21 · `2df02bfd` · [model-runner/bridge/pkgmgr] NL-1 — model-runner service (sole vendor credential) + real capabilityAuthor adapter + authored-target dispatch-authority containment; 4 cold reviews, mutation-proven; env-opt-in. CI green
