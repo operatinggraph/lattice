@@ -3921,3 +3921,202 @@ func TestSweep_CountLegNeverEscalatesASurfaceGap(t *testing.T) {
 	}
 	h.requireNoOp(t)
 }
+
+// seedSweepTemplateFault drives one sweep pass over an expired mark whose row
+// keeps the gap open, its Loom subject template resolving null and both
+// companion columns malformed — so the reclaim's own planGap raises the template
+// fault and its gapSuppressed raises both companion data errors. Every raise
+// here comes from a SWEEP caller: for a row that has gone quiet these are the
+// only legs that run at all, and they are the legs no lane-1 clear can follow.
+// Returns the mark key and the three issue keys that must not outlive the gap.
+func seedSweepTemplateFault(t *testing.T, ctx context.Context, h *sweepHarness,
+	targetID, entityID, col string) (string, []string) {
+
+	t.Helper()
+	g := strings.TrimPrefix(col, gapColumnPrefix)
+	key := targetID + "." + entityID + "." + col
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true,
+		inflightColumnPrefix + g: "maybe", maxretriesColumnPrefix + g: "three",
+	})
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, col, actionTriggerLoom, pastLease()))
+
+	h.pass(ctx)
+
+	raised := []string{
+		issueKeyTemplateEntity(targetID, entityID, col),
+		issueKeyDataEntity(targetID, entityID, inflightColumnPrefix+g),
+		issueKeyDataEntity(targetID, entityID, maxretriesColumnPrefix+g),
+	}
+	for _, k := range raised {
+		if _, ok := issueAt(h.engine.issues, k); !ok {
+			t.Fatalf("setup: the sweep must raise %q; issues = %+v", k, h.engine.issues.snapshot())
+		}
+	}
+	return key, raised
+}
+
+// TestSweep_GapCloseRetiresWhatTheSweepItselfRaised pins the sweep leg of the
+// gap-close retirement. clearClosedMarks only ever runs on a DELIVERY, so a row
+// that stops being projected never reaches it — and deleteMark's own doc names
+// that case: the sweep is whichever leg observed the close first, and for a
+// quiet row it is the only leg that ever will. Every entry the sweep's own
+// reclaim raises (the template fault from planGap, both companion data errors
+// from gapSuppressed) would otherwise stand for the process's lifetime with no
+// pass left that could reach it.
+//
+// This is also the resolution of the live-row interleave: a sweep holding a row
+// read at revision R can re-raise a companion entry moments after lane-1's
+// delivery of R+1 cleared it. Nothing reads that column again — but the next
+// pass reads R+1, sees the gap closed, and retires it here.
+func TestSweep_GapCloseRetiresWhatTheSweepItselfRaised(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const col = "missing_x"
+
+	t.Run("the row closes the gap", func(t *testing.T) {
+		h := newSweepHarness(t, ctx)
+		const targetID = "fixtureSweepCloseRetire"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				col: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.applicant"},
+			},
+		})
+		h.engine.source.mu.Lock()
+		h.engine.source.patternMeta["onboardFlow"] = "vtx.meta." + testNanoID(t)
+		h.engine.source.mu.Unlock()
+		entityID := testNanoID(t)
+		key, raised := seedSweepTemplateFault(t, ctx, h, targetID, entityID, col)
+
+		// The row is re-projected with the gap closed and never delivered to
+		// lane 1 — the quiet-row case, where the sweep is the only observer.
+		h.putRow(t, ctx, targetID, entityID, map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": false, col: false,
+			"inflight_x": "maybe", "maxretries_x": "three",
+		})
+		h.pass(ctx)
+
+		if h.markExists(t, ctx, key) {
+			t.Fatal("setup: the closed gap's mark must be deleted by this pass")
+		}
+		for _, k := range raised {
+			if is, ok := issueAt(h.engine.issues, k); ok {
+				t.Fatalf("the sweep observed the close; %q must retire with it, still standing as %+v", k, is)
+			}
+		}
+	})
+
+	t.Run("the entity's row is deleted outright", func(t *testing.T) {
+		h := newSweepHarness(t, ctx)
+		const targetID = "fixtureSweepRowGone"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				col: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.applicant"},
+			},
+		})
+		h.engine.source.mu.Lock()
+		h.engine.source.patternMeta["onboardFlow"] = "vtx.meta." + testNanoID(t)
+		h.engine.source.mu.Unlock()
+		entityID := testNanoID(t)
+		_, raised := seedSweepTemplateFault(t, ctx, h, targetID, entityID, col)
+
+		if err := h.conn.KVDelete(ctx, "weaver-targets", targetID+"."+entityID); err != nil {
+			t.Fatalf("delete row: %v", err)
+		}
+		h.pass(ctx)
+
+		for _, k := range raised {
+			if is, ok := issueAt(h.engine.issues, k); ok {
+				t.Fatalf("the row is gone, so no column can be true; %q must retire, still standing as %+v", k, is)
+			}
+		}
+	})
+}
+
+// TestSweep_OrphanReasonsRetireTheGapsIssues pins the two orphan arms, which are
+// the routes NO other clear can reach. Once a package upgrade drops the gap from
+// the playbook and the lens stops projecting the column, markCandidateColumns —
+// the playbook's gaps keys unioned with the row's missing_* columns — yields the
+// column from neither source ever again, so every lane-1 retirement is gated on
+// a walk that no longer enumerates it. The entity stays alive, so no tombstone
+// prefix clear ever comes either. The orphan delete is the last pass that will
+// ever name this (entity, gap), which makes it the pass that must retire it.
+func TestSweep_OrphanReasonsRetireTheGapsIssues(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const col = "missing_x"
+	seed := func(t *testing.T, targetID string) (*sweepHarness, string, string, []string) {
+		t.Helper()
+		h := newSweepHarness(t, ctx)
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				col: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.applicant"},
+			},
+		})
+		h.engine.source.mu.Lock()
+		h.engine.source.patternMeta["onboardFlow"] = "vtx.meta." + testNanoID(t)
+		h.engine.source.mu.Unlock()
+		entityID := testNanoID(t)
+		key, raised := seedSweepTemplateFault(t, ctx, h, targetID, entityID, col)
+		h.agePastWarmup()
+		h.reexpireMark(t, ctx, key)
+		return h, entityID, key, raised
+	}
+
+	t.Run("the playbook drops the gap while the entity lives on", func(t *testing.T) {
+		const targetID = "fixtureSweepOrphanColumn"
+		h, _, key, raised := seed(t, targetID)
+
+		// The package upgrade lands: the target keeps its registration and this
+		// gap is gone from it. The row still reports the column true — the lens
+		// has not caught up, or the underlying condition genuinely still holds —
+		// which is what routes the pass to the orphan-column arm rather than to
+		// the gap-close one, and what keeps lane-1's candidate walk from ever
+		// retiring anything for it (a column that reads true is skipped, not
+		// closed).
+		h.seedTarget(&Target{TargetID: targetID, Gaps: map[string]GapAction{"missing_other": {Action: actionDirectOp, Operation: "FixOther"}}})
+		h.pass(ctx)
+
+		if h.markExists(t, ctx, key) {
+			t.Fatal("setup: the orphaned column's mark must be deleted by this pass")
+		}
+		for _, k := range raised {
+			if is, ok := issueAt(h.engine.issues, k); ok {
+				t.Fatalf("no later pass can name this gap; %q must retire with the orphan delete, still standing as %+v", k, is)
+			}
+		}
+	})
+
+	t.Run("the target leaves the registry", func(t *testing.T) {
+		const targetID = "fixtureSweepTargetGone"
+		h, _, key, raised := seed(t, targetID)
+
+		h.engine.source.mu.Lock()
+		delete(h.engine.source.targets, targetID)
+		h.engine.source.mu.Unlock()
+		h.pass(ctx)
+
+		if h.markExists(t, ctx, key) {
+			t.Fatal("setup: the removed target's mark must be deleted by this pass")
+		}
+		for _, k := range raised {
+			if is, ok := issueAt(h.engine.issues, k); ok {
+				t.Fatalf("%q must retire with the targetRemoved delete rather than wait on a teardown "+
+					"that may already have run, still standing as %+v", k, is)
+			}
+		}
+	})
+}

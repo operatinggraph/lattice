@@ -1215,16 +1215,25 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
 		}
-		// This entity's standing GapBudgetExhausted retires with the close: the
-		// issue is keyed per (target, entity, gap), and this leg is whichever
-		// one observed the close first. Only the entity scope retires here — a
-		// mark close says nothing about the playbook, and lane-1's own delivery
-		// of the closed (or deleted) row is what retires the target-scoped
-		// config issues. Idempotent when none stands.
-		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
 	}
+	// The delete won, so under EVERY reason this gap has stopped being a live
+	// dispatch candidate for this entity: gapClosed says the column is no longer
+	// true, orphanColumn that the playbook dropped the gap, targetRemoved that
+	// the whole target left. Each ends the same per-(entity, gap) facts, so each
+	// retires them — through the function lane-1's own close arm uses, so the
+	// two legs cannot drift apart.
+	//
+	// This leg is not a duplicate of that one. For a row that has gone quiet,
+	// lane-1 never runs again and the sweep is the only leg that will observe
+	// the close at all; on the orphan reasons lane-1 CANNOT observe it, because
+	// a gap the playbook no longer names and the row no longer projects leaves
+	// the candidate walk with nothing to enumerate. Only a won delete retires:
+	// a revision conflict means a fresh episode CAS-created the key between the
+	// read and the delete, and that gap is live again (both error paths above
+	// have already returned).
+	e.retireGapIssues(targetID, entityID, gapColumn)
 	return true
 }
 

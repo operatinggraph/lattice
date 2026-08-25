@@ -2113,9 +2113,9 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 // TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose pins the template
 // family's live-path teardown. The fault says "this gap's plan cannot be built
 // for this row"; a gap that stops being reported has no plan left to build, and
-// no read of any column retires the entry (the split removed the gap column's
-// bool read from its clear set on purpose), so the close is the only live path
-// that can reach it.
+// no column read retires the entry — the gap column's own bool read settles a
+// different fact at a different key — so the close is the only live path that
+// reaches it.
 func TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -2338,12 +2338,13 @@ func TestClearClosedMarks_RetiresPriorityDataErrorOnTheLastClose(t *testing.T) {
 	}
 }
 
-// TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily is the leak guard on the
-// split. The gap column carries TWO facts — "missing_<g> is not the §10.2 bool"
-// (boolColumn's RowDataError) and "this row's plan cannot be built"
-// (planGap's TemplateDataError) — and moving the second onto its own key must
-// not take the first with it. The type fault stays in the `data:` family, keyed
-// at the gap column, raised and retired by that column's own read.
+// TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily is the leak guard between
+// the two facts one gap column carries: "missing_<g> is not the §10.2 bool"
+// (boolColumn's RowDataError) and "this row's plan cannot be built" (planGap's
+// TemplateDataError). They live in different families precisely so neither
+// retires the other, and the type fault is the one that must stay in the
+// `data:` family — keyed at the gap column, raised and retired by that column's
+// own read.
 func TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

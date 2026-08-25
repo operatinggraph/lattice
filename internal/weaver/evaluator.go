@@ -843,25 +843,20 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// A closed gap retires the standing issues at this column along with its
 		// bookkeeping — a row that stopped reporting the column closed it, a
 		// retraction tombstone included (its body carries no gap columns at
-		// all). All three scopes retire here, and the config one is not
+		// all). retireGapIssues carries the per-(entity, gap) set, shared with
+		// the sweep leg that observes the same end from a mark.
+		//
+		// The config scope retires here and only here, and that is not
 		// incidental: this is the ONLY clear site a GapWithoutPlaybook /
 		// UnresolvedReference / PlaybookConfigError can reach when the column
 		// simply stops being reported, since every other config clear requires
-		// the config to have been FIXED. Idempotent when none stands.
-		e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
+		// the config to have been FIXED. It stays on this leg because it is a
+		// fact about the whole target, and only a walk of the candidate set —
+		// which the sweep, holding one mark, does not have — observes a column
+		// leaving rather than one entity's gap ending. Idempotent when none
+		// stands.
+		e.retireGapIssues(targetID, entityID, col)
 		e.issues.clear(issueKeyGapConfig(targetID, col))
-		e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
-		// The gap's two companion columns are read only while the gap is a live
-		// dispatch candidate — markCandidateColumns enumerates missing_* alone,
-		// so nothing reads inflight_<g> or maxretries_<g> again once this column
-		// stops being true. The close is therefore what ends the read, and the
-		// only site that can retire a malformed value's entry for them. A
-		// candidate that is not missing_*-shaped (a target.Gaps key the package
-		// authored without the prefix) has no companions to name.
-		if g, isGapColumn := strings.CutPrefix(col, gapColumnPrefix); isGapColumn {
-			e.issues.clear(issueKeyDataEntity(targetID, entityID, inflightColumnPrefix+g))
-			e.issues.clear(issueKeyDataEntity(targetID, entityID, maxretriesColumnPrefix+g))
-		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column.
@@ -908,6 +903,47 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		e.issues.clear(issueKeyDataEntity(targetID, entityID, admissionPriorityColumn))
 	}
 	return ok
+}
+
+// retireGapIssues retires the per-(entity, gap) issues whose facts end when
+// this gap stops being a live dispatch candidate for this entity: the gap's own
+// entity-scoped issue (a `surface` gap standing open, a spent retry budget),
+// the template fault at its plan, and the two companion columns' data errors.
+//
+// It is shared because TWO legs observe that end, and either can be the only
+// one that does. Lane-1's clearClosedMarks sees it when a delivery stops
+// reporting the column. The sweep's deleteMark sees it when a mark's gap has
+// closed, when the playbook drops the gap, or when the target leaves — and for
+// a row that has gone QUIET the sweep is the only leg that runs at all, while
+// for a gap the playbook no longer names it is the only leg that CAN run
+// (markCandidateColumns is the playbook's gaps keys unioned with the row's
+// missing_* columns, so a gap dropped from both is never walked again). One
+// function keeps a retirement added for one leg from silently missing the other.
+//
+// gapColumn is not assumed to carry the missing_ prefix. On the lane-1 leg the
+// candidate set guarantees it, but the sweep leg derives it from a weaver-state
+// mark KEY, and splitMarkKey validates the segment's token shape rather than the
+// column convention — so a mark stranded by an earlier package version reaches
+// here with any legal token, and a gap column that is not missing_*-shaped
+// simply has no companions to name.
+//
+// Three things deliberately do NOT retire here. The gap column's own data entry
+// says "missing_<g> is not the §10.2 bool", and the read that decides that is
+// the same read that brought either leg to this point — it has just settled the
+// entry itself, so clearing it again would retire a fault the current row is
+// still carrying. The target-scoped config issue is one fact for every row, and
+// one entity's gap ending is not evidence about the playbook. The admission
+// priority entry belongs to the ENTITY rather than to any one gap, so it may
+// only retire when no candidate column of the entity stayed open — a caller
+// holding a single gap cannot see that, and clearing per gap would erase an
+// entry the entity's other open gap keeps re-raising.
+func (e *Engine) retireGapIssues(targetID, entityID, gapColumn string) {
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	e.issues.clear(issueKeyTemplateEntity(targetID, entityID, gapColumn))
+	if g, isGapColumn := strings.CutPrefix(gapColumn, gapColumnPrefix); isGapColumn {
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, inflightColumnPrefix+g))
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, maxretriesColumnPrefix+g))
+	}
 }
 
 // releaseCompletedLeg reports whether gap col's currently-pinned goal-mode
@@ -1516,14 +1552,24 @@ func issueKeyGapConfig(targetID, col string) string {
 // clean read, so the next projection carrying a usable value (or dropping the
 // column) is the retirement. The columns read only while some gap is open —
 // the per-gap companions inflight_<g> and maxretries_<g>, and the admission
-// priority column — have no such next read once that gap closes, so
-// clearClosedMarks retires them at the close: the companions with their own
-// gap, the priority entry once no candidate column of the entity stayed open.
-// Above those, two prefix teardowns cover a subject that leaves entirely —
-// clearClosedMarks prefix-clears the entity on its deletion tombstone, and a
-// target leaving by either route (Revoke or registry removal via
-// reconcileConsumers) prefix-clears the target (issueKeyTargetPrefixes).
-// Between them no exit from handleRow leaves an entry no later pass can reach.
+// priority column — have no such next read once that gap closes, so the close
+// retires them: the companions with their own gap (retireGapIssues, called by
+// BOTH legs that can observe a gap ending — lane-1's clearClosedMarks and the
+// sweep's deleteMark), and the priority entry from clearClosedMarks once no
+// candidate column of the entity stayed open. Above those, two prefix teardowns
+// cover a subject that leaves entirely — clearClosedMarks prefix-clears the
+// entity on its deletion tombstone, and a target leaving by either route
+// (Revoke or registry removal via reconcileConsumers) prefix-clears the target
+// (issueKeyTargetPrefixes).
+//
+// Two exits from handleRow retire nothing, and neither strands an entry. A row
+// whose body does not parse returns before the reconcile: that is unreadable
+// evidence, not evidence of repair (the sweep takes the same posture on the same
+// input), and every retirement above stays reachable by the next delivery that
+// does parse — including the deletion tombstone, whose empty body needs no
+// parsing. A row for an unregistered target returns at the registry miss, and
+// its target's whole issue set is retired wholesale by the reconcileConsumers
+// teardown that made the registration go away.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
 }
@@ -1544,11 +1590,11 @@ func issueKeyDataEntity(targetID, entityID, col string) string {
 // now and reporting a week-old fault as seconds old (Contract #5 §5.5). Its own
 // prefix keeps the two facts on independent timelines.
 //
-// Its teardowns mirror the data family's, minus the "read is the retirement"
-// leg that the split exists to remove: a successful plan retires it (that IS
-// the fact ending), the gap-close arm of clearClosedMarks retires it when the
-// column stops being reported, and the entity-tombstone and target prefix
-// clears cover a subject that leaves entirely.
+// Its teardowns are the data family's without the "read is the retirement"
+// leg, which no column read can serve here: a successful plan retires it (that
+// IS the fact ending), retireGapIssues retires it on whichever leg observes the
+// gap end, and the entity-tombstone and target prefix clears cover a subject
+// that leaves entirely.
 func issueKeyTemplateEntity(targetID, entityID, col string) string {
 	return issuePrefixTemplate + targetID + "." + entityID + "." + col
 }
