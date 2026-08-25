@@ -2,17 +2,17 @@ package controlauthz
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions returns the 19 ctrl.<component>.<verb> platform permissions,
+// Permissions returns the 22 ctrl.<component>.<verb> platform permissions,
 // each granting `scope: any` (v1 — the only working platform scope,
 // control-plane-capability-authz-design.md §2(a)) to the control-operator
 // role.
 //
 // Grant matrix:
 //
-//	ctrl.weaver.{read,disable,enable,revoke,resetConfidence}         → control-operator
-//	ctrl.loom.{read,pause,resume,redrive}                             → control-operator
+//	ctrl.weaver.{read,disable,enable,revoke,resetConfidence,resetBudget}          → control-operator
+//	ctrl.loom.{read,pause,resume,redrive}                                        → control-operator
 //	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject,requesthydration} → control-operator
-//	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}   → control-operator, consumer, frontOfHouse, backOfHouse, provider
+//	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}              → control-operator, consumer, frontOfHouse, backOfHouse, provider
 //
 // The op→verb tables here MUST stay in lockstep with
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps (both are read off
@@ -35,7 +35,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // via componentPermissions, same as rebuild/pause/resume/delete.
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{}
-	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence"})...)
+	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence", "resetBudget"})...)
 	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume", "redrive"})...)
 	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject", "requesthydration"})...)
 	perms = append(perms, personalLensPermissions("register", "deregister", "hydrate", "sessionkey", "syncgap")...)

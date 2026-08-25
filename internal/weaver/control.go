@@ -9,6 +9,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
 	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TargetSummary is the operator-facing snapshot of one registered target
@@ -290,6 +291,79 @@ func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, err
 	}
 	e.logger.Info("weaver: target confidence reset", "targetId", targetID, "windowsDeleted", deleted)
 	return deleted, nil
+}
+
+// ResetRetryBudget zeroes one gap's `<targetId>.<entityId>.<gapColumn>.__count`
+// retry-budget dispatch-count and returns the count it displaced plus whether a
+// count existed at all. It is the operator's un-park verb: the way to release a
+// gap whose budget is spent and whose §10.8 GapBudgetExhausted stop is standing,
+// without raising maxretries_<g> in the package for every entity at once.
+//
+// Scope is one gap, never one target: the count, and the standing issue that
+// explains it, are both keyed (target, entity, gap), so a target-wide reset
+// would re-arm parks nobody looked at.
+//
+// It resets the count and NOTHING else — it does not retire the standing issue
+// and it does not dispatch. The reconciler's count leg does both on its next
+// pass: it reads the zeroed count, finds the gap un-suppressed and markless, and
+// takes the re-arm arm, which retires the issue on that same suppression read
+// and fires the episode. One writer, one path — the verb states the intent and
+// the level reconcile enacts it, so a reset is reconciled by exactly the
+// machinery that would have reconciled a package raising the cap.
+//
+// The write is revision-conditioned (markStore.resetDispatchCount): a dispatch
+// landing between the read and the write moved the budget itself, so it wins and
+// the conflict is returned — re-running the verb is the remedy, as it is for
+// ResetConfidence. A gap with no count is `found == false` and no error: there
+// was no suppression to lift, and the verb never mints a count for a gap that
+// has none.
+//
+// Fail-closed on shape. targetID must be registered (mirroring Disable/Enable
+// and ResetConfidence). entityID must be a canonical NanoID and gapColumn a
+// §10.2 missing_<g> single token, because the three concatenate into a KV key —
+// whitelisted against exactly the shapes countKey is ever built from, so
+// anything else is refused here rather than reaching the bucket.
+func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (cleared int, found bool, err error) {
+	if _, ok := e.source.target(targetID); !ok {
+		return 0, false, fmt.Errorf("weaver: target %q not registered", targetID)
+	}
+	if err := ValidateGapScope(entityID, gapColumn); err != nil {
+		return 0, false, fmt.Errorf("weaver: reset retry budget %q: %w", targetID, err)
+	}
+	cleared, found, err = e.marks.resetDispatchCount(ctx, targetID, entityID, gapColumn)
+	if err != nil {
+		return cleared, found, fmt.Errorf("weaver: reset retry budget %q %s/%s: %w", targetID, entityID, gapColumn, err)
+	}
+	e.logger.Info("weaver: gap retry budget reset", "targetId", targetID, "entityId", entityID,
+		"gap", gapColumn, "clearedCount", cleared, "found", found)
+	return cleared, found, nil
+}
+
+// ValidateGapScope accepts exactly the (entityId, gapColumn) pair a §10.3
+// weaver-state key is ever built from — a canonical 20-character NanoID and a
+// §10.2 missing_<gap> single token naming a non-empty gap, the same shape
+// install-time playbook validation enforces — and refuses everything else. It is a
+// WHITELIST rather than a set of forbidden characters on purpose: the two
+// values concatenate into a KV key, and a rule that enumerates what is legal
+// stays fail-closed as the vocabulary grows, while one that enumerates what is
+// illegal admits every shape nobody thought of.
+//
+// Exported because the control plane's per-gap endpoint reads both values off a
+// NATS subject, where any token a publisher chooses arrives: the responder
+// refuses a malformed scope with this same rule before the engine — and
+// therefore the bucket — is reached at all, rather than restating a second copy
+// of the shape that could drift from this one.
+func ValidateGapScope(entityID, gapColumn string) error {
+	if !substrate.IsValidNanoID(entityID) {
+		return fmt.Errorf("entityId %q is not a %d-character NanoID over the Contract #1 alphabet",
+			entityID, substrate.NanoIDLength)
+	}
+	if len(gapColumn) <= len(gapColumnPrefix) || !strings.HasPrefix(gapColumn, gapColumnPrefix) ||
+		!singleTokenPattern.MatchString(gapColumn) {
+		return fmt.Errorf("gapColumn %q must be a non-empty %s<gap> token matching %s",
+			gapColumn, gapColumnPrefix, singleTokenPattern.String())
+	}
+	return nil
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the

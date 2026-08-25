@@ -1,5 +1,6 @@
 // Package weaver implements the lattice weaver command group: operator
-// list/disable/enable/revoke/reset-confidence controls for Weaver convergence targets (FR30),
+// list/disable/enable/revoke/reset-confidence/reset-budget controls for Weaver
+// convergence targets (FR30),
 // via the lattice.ctrl.weaver.* NATS Services control plane.
 package weaver
 
@@ -7,12 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
 	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 	"github.com/operatinggraph/lattice/internal/weaver/control"
 )
 
@@ -34,19 +37,52 @@ func validateTargetID(targetID string) error {
 	return nil
 }
 
+// validateEntityID and validateGapColumn accept exactly the two extra subject
+// tokens `reset-budget` carries — a Contract #1 20-character NanoID entityId
+// and a §10.2 missing_<gap> column — and reject everything else. Both are
+// whitelists, not rejected-character lists: the tokens ride in the control
+// subject and the engine builds a weaver-state key out of them, so a shape
+// nobody anticipated must fail rather than travel. The responder re-checks with
+// the same rule (weaver.ValidateGapScope, which these two agree with case for
+// case — a test pins that); checking here is what turns a typo into a clear
+// local error instead of a request to a subject no endpoint matches and an
+// opaque "no responders" at the client timeout.
+//
+// gapColumnPattern is the one restated shape: it spells out the missing_ prefix
+// and the single-token charset the engine validates with its own unexported
+// constants. The entityId rule is not restated — it reads the canonical
+// validator off substrate/keys, the leaf package that owns the alphabet.
+var gapColumnPattern = regexp.MustCompile(`^missing_[A-Za-z0-9_-]+$`)
+
+func validateEntityID(entityID string) error {
+	if !keys.IsValidNanoID(entityID) {
+		return fmt.Errorf("entityId %q must be a %d-character NanoID (Contract #1 alphabet: A-Za-z0-9 minus I, l, O, 0)",
+			entityID, keys.NanoIDLength)
+	}
+	return nil
+}
+
+func validateGapColumn(gapColumn string) error {
+	if !gapColumnPattern.MatchString(gapColumn) {
+		return fmt.Errorf("gapColumn %q must be a missing_<gap> token of letters, digits, '_' or '-'", gapColumn)
+	}
+	return nil
+}
+
 // NewCommand returns the cobra.Command for the weaver command group.
 // defaultActor is the credential-file actor key (op.NewCommand's third arg);
 // each subcommand also accepts its own --actor override.
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "weaver",
-		Short: "Operate Weaver convergence targets (list/disable/enable/revoke/reset-confidence)",
+		Short: "Operate Weaver convergence targets (list/disable/enable/revoke/reset-confidence/reset-budget)",
 	}
 	cmd.AddCommand(newListCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newDisableCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newEnableCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newRevokeCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newResetConfidenceCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newResetBudgetCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 
@@ -266,6 +302,68 @@ func newResetConfidenceCommand(natsURL, outputFmt, defaultActor *string) *cobra.
 				deleted = resp.ResetConfidence.WindowsDeleted
 			}
 			fmt.Printf("target %q confidence reset (%d window(s) deleted)\n", targetID, deleted)
+			return nil
+		},
+	}
+	output.AddActorFlags(cmd, &actor, &actorToken)
+	return cmd
+}
+
+// newResetBudgetCommand builds `lattice weaver reset-budget <targetId>
+// <entityId> <gapColumn>` — the un-park verb, and the one rung of the
+// operator-severity ladder that deletes nothing: it zeroes ONE gap's
+// retry-budget dispatch-count so the reconciler's next pass finds that gap
+// un-suppressed and re-arms it (clearing the standing GapBudgetExhausted issue
+// and dispatching). Scope is a single (target, entity, gap) because the budget
+// and the issue are both keyed that way — a target-wide reset would re-arm
+// parks nobody looked at.
+//
+// The two extra scope tokens ride in the control subject, so request() needs no
+// change; they are validated locally first, because a malformed token builds a
+// subject the responder's wildcards cannot match.
+func newResetBudgetCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+	var actor string
+	var actorToken string
+	cmd := &cobra.Command{
+		Use:   "reset-budget <targetId> <entityId> <gapColumn>",
+		Short: "Reset one gap's retry budget so the reconciler re-arms it (un-park an exhausted gap)",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if actor == "" {
+				actor = *defaultActor
+			}
+			targetID, entityID, gapColumn := args[0], args[1], args[2]
+			for _, err := range []error{
+				validateTargetID(targetID),
+				validateEntityID(entityID),
+				validateGapColumn(gapColumn),
+			} {
+				if err != nil {
+					if *outputFmt == "json" {
+						return output.PrintJSONError("ControlError", err.Error())
+					}
+					return err
+				}
+			}
+			resp, err := request(*natsURL, control.ResetBudgetSubject(targetID, entityID, gapColumn),
+				output.ResolveActorHeader(actor, actorToken))
+			if err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+
+			if *outputFmt == "json" {
+				return output.PrintJSON(resp.ResetBudget)
+			}
+			if resp.ResetBudget == nil || !resp.ResetBudget.Found {
+				fmt.Printf("target %q gap %s/%s had no retry budget recorded (nothing to reset)\n",
+					targetID, entityID, gapColumn)
+				return nil
+			}
+			fmt.Printf("target %q gap %s/%s retry budget reset (was %d); the next reconciler sweep re-arms it\n",
+				targetID, entityID, gapColumn, resp.ResetBudget.ClearedCount)
 			return nil
 		},
 	}

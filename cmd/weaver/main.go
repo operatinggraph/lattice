@@ -56,6 +56,8 @@ var _ interface {
 	Disable(ctx context.Context, targetID string) error
 	Enable(ctx context.Context, targetID string) error
 	Revoke(ctx context.Context, targetID string) error
+	ResetConfidence(ctx context.Context, targetID string) (int, error)
+	ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (int, bool, error)
 } = (*weaver.Engine)(nil)
 
 func main() {

@@ -1,10 +1,13 @@
 // Package control implements the Weaver control plane (FR30): a NATS
 // Services responder exposing list/disable/enable/revoke operator commands
 // for Weaver convergence targets, plus the cmd/lattice/weaver CLI's server
-// side. Depends on internal/weaver only for the four engineControl methods
-// and the weaver.TargetSummary type — internal/weaver never imports this
-// package (one-way dependency, mirrors internal/refractor/control being a
-// sibling of internal/refractor/{pipeline,lens,...}).
+// side. Depends on internal/weaver only for the engineControl methods, the
+// weaver.TargetSummary type, and weaver.ValidateGapScope (the gap-scope
+// whitelist the per-gap endpoint applies to its subject tokens, read off the
+// package that owns the key shape rather than restated here) — internal/weaver
+// never imports this package (one-way dependency, mirrors
+// internal/refractor/control being a sibling of
+// internal/refractor/{pipeline,lens,...}).
 package control
 
 import (
@@ -24,15 +27,16 @@ import (
 )
 
 // engineControl is the minimal interface this package needs from
-// *weaver.Engine — list/disable/enable/revoke/resetConfidence. Defining it
-// here (rather than depending on the full *weaver.Engine) keeps the dependency
-// surface to exactly these five methods plus weaver.TargetSummary.
+// *weaver.Engine — list/disable/enable/revoke/resetConfidence/resetRetryBudget.
+// Defining it here (rather than depending on the full *weaver.Engine) keeps the
+// dependency surface to exactly these six methods plus weaver.TargetSummary.
 type engineControl interface {
 	ListTargets(ctx context.Context) ([]weaver.TargetSummary, error)
 	Disable(ctx context.Context, targetID string) error
 	Enable(ctx context.Context, targetID string) error
 	Revoke(ctx context.Context, targetID string) error
 	ResetConfidence(ctx context.Context, targetID string) (int, error)
+	ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (int, bool, error)
 }
 
 // subjectPrefix is the wildcard subject pattern the control endpoints are
@@ -40,7 +44,11 @@ type engineControl interface {
 // subjectPrefix+".list"; disable/enable/revoke/resetConfidence are registered on
 // subjectPrefix+".*.<op>" — wildcards let one endpoint handler serve all
 // target IDs, since the Weaver does not know the full set of target IDs at
-// registration time.
+// registration time. resetBudget is scoped to one (target, entity, gap) rather
+// than one target, so it carries two further wildcards of its own
+// (subjectPrefix+".*.resetBudget.*.*"): the scope travels IN THE SUBJECT, where
+// NATS' own subject-level permissions can see it, never in a request body a
+// transport-layer deny cannot read.
 const subjectPrefix = "lattice.ctrl.weaver"
 
 // handlerTimeout bounds each control handler's engine call so a blocked KV op
@@ -55,6 +63,7 @@ const handlerTimeout = 5 * time.Second
 // On success (enable op): Enable is present.
 // On success (revoke op): Revoke is present.
 // On success (resetConfidence op): ResetConfidence is present.
+// On success (resetBudget op): ResetBudget is present.
 // On error: only Error is present.
 type ControlResponse struct {
 	Targets         []weaver.TargetSummary `json:"targets,omitempty"`
@@ -62,6 +71,7 @@ type ControlResponse struct {
 	Enable          *EnableResult          `json:"enable,omitempty"`
 	Revoke          *RevokeResult          `json:"revoke,omitempty"`
 	ResetConfidence *ResetConfidenceResult `json:"resetConfidence,omitempty"`
+	ResetBudget     *ResetBudgetResult     `json:"resetBudget,omitempty"`
 	Error           string                 `json:"error,omitempty"`
 }
 
@@ -92,18 +102,34 @@ type ResetConfidenceResult struct {
 	WindowsDeleted int `json:"windowsDeleted"`
 }
 
-// listOp and the disable/enable/revoke/resetConfidence per-target ops
-// registered as individual NATS Services endpoints.
+// ResetBudgetResult is the synchronous acknowledgement returned by the
+// "resetBudget" op. Found reports whether the gap had a retry-budget
+// dispatch-count at all, and ClearedCount is the value the reset displaced —
+// so an operator can tell "the park is released" from "that gap was never
+// parked" (a mistyped entity or gap reads as Found: false, not as a silent
+// success). Found with ClearedCount 0 is an already-reset gap, also a success.
+type ResetBudgetResult struct {
+	ClearedCount int  `json:"clearedCount"`
+	Found        bool `json:"found"`
+}
+
+// listOp, the disable/enable/revoke/resetConfidence per-target ops, and the
+// per-gap resetBudget op, each registered as an individual NATS Services
+// endpoint.
 const (
 	opList            = "list"
 	opDisable         = "disable"
 	opEnable          = "enable"
 	opRevoke          = "revoke"
 	opResetConfidence = "resetConfidence"
+	opResetBudget     = "resetBudget"
 )
 
 // targetOps enumerates the per-target (wildcard-subject) ops registered
-// under subjectPrefix+".*.<op>".
+// under subjectPrefix+".*.<op>". opResetBudget is deliberately NOT one of
+// them: its subject carries two extra scope tokens, so it registers its own
+// endpoint and is parsed by its own function, leaving targetIDFromSubject's
+// exact-5-token rule (and every op that relies on it) untouched.
 var targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence}
 
 // Service is the Weaver control-plane NATS responder. It wraps an
@@ -159,10 +185,12 @@ func (s *Service) resolveActor(ctx context.Context, req micro.Request) (string, 
 }
 
 // StartNATSListener registers the Weaver control plane as a NATS
-// micro-service named "weaver-control". Four endpoints are added: "list" on
-// the exact subject subjectPrefix+".list", and "disable"/"enable"/"revoke"
-// on the wildcard subjectPrefix+".*.<op>" so a single handler instance
-// serves every target ID without prior knowledge.
+// micro-service named "weaver-control". Endpoints are added for "list" on
+// the exact subject subjectPrefix+".list", for "disable"/"enable"/"revoke"/
+// "resetConfidence" on the wildcard subjectPrefix+".*.<op>" so a single handler
+// instance serves every target ID without prior knowledge, and for
+// "resetBudget" on subjectPrefix+".*."+opResetBudget+".*.*", whose two extra
+// wildcards carry its (entityId, gapColumn) scope.
 //
 // All endpoints share the default queue group ("q") so multiple Weaver
 // instances distribute load. The service framework auto-registers the
@@ -203,6 +231,14 @@ func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
 			_ = svc.Stop()
 			return fmt.Errorf("control: AddEndpoint %q on %q: %w", op, subj, err)
 		}
+	}
+
+	budgetSubj := subjectPrefix + ".*." + opResetBudget + ".*.*"
+	if err := svc.AddEndpoint("weaver-control-"+opResetBudget,
+		micro.HandlerFunc(func(req micro.Request) { s.handleResetBudget(req) }),
+		micro.WithEndpointSubject(budgetSubj)); err != nil {
+		_ = svc.Stop()
+		return fmt.Errorf("control: AddEndpoint %q on %q: %w", opResetBudget, budgetSubj, err)
 	}
 
 	s.mu.Lock()
@@ -296,6 +332,56 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	}
 }
 
+// handleResetBudget serves the "resetBudget" op, registered on
+// subjectPrefix+".*."+opResetBudget+".*.*". It has its own handler rather than
+// a case in dispatchEndpoint because its subject carries a (target, entity,
+// gap) scope, not a target: the extra tokens are what makes the op's scope
+// visible to the transport's own subject-level permissions, and keeping the
+// parse here leaves targetIDFromSubject's exact-5-token contract — which every
+// other op depends on — alone.
+//
+// Authorization is target-scoped (Authorize(ctx, actor, opResetBudget,
+// targetID)), exactly as the per-target ops are: the capability grants the verb
+// over a target, and the entity and gap narrow which of that target's parked
+// gaps the operator is releasing.
+//
+// The entity and gap tokens are whitelisted (weaver.ValidateGapScope) before
+// the engine is called: they are publisher-supplied subject tokens that
+// concatenate into a KV key, so a malformed scope is refused here rather than
+// reaching weaver-state.
+func (s *Service) handleResetBudget(req micro.Request) {
+	subject := req.Subject()
+	targetID, entityID, gapColumn, ok := resetBudgetScopeFromSubject(subject)
+	if !ok {
+		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("invalid control subject %q", subject)})
+		return
+	}
+	if err := weaver.ValidateGapScope(entityID, gapColumn); err != nil {
+		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("invalid %s scope: %v", opResetBudget, err)})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
+	actor, aerr := s.resolveActor(ctx, req)
+	if aerr != nil {
+		s.respondMicro(req, ControlResponse{Error: aerr.Error()})
+		return
+	}
+	if err := s.capability.Authorize(ctx, actor, opResetBudget, targetID); err != nil {
+		s.respondMicro(req, ControlResponse{Error: err.Error()})
+		return
+	}
+
+	cleared, found, err := s.engine.ResetRetryBudget(ctx, targetID, entityID, gapColumn)
+	if err != nil {
+		s.respondMicro(req, ControlResponse{Error: err.Error()})
+		return
+	}
+	s.respondMicro(req, ControlResponse{
+		ResetBudget: &ResetBudgetResult{ClearedCount: cleared, Found: found}})
+}
+
 // targetIDFromSubject extracts the target ID from a control subject. The
 // expected shape is "lattice.ctrl.weaver.<targetId>.<op>" — exactly 5
 // dot-separated tokens. Returns ok=false on any deviation. Mirrors
@@ -314,6 +400,31 @@ func targetIDFromSubject(subject string) (string, bool) {
 	return parts[3], true
 }
 
+// resetBudgetScopeFromSubject extracts the (target, entity, gap) scope from a
+// resetBudget control subject. The expected shape is
+// "lattice.ctrl.weaver.<targetId>.resetBudget.<entityId>.<gapColumn>" — exactly
+// 7 dot-separated tokens, the last two carrying the scope the per-target ops do
+// not have. Returns ok=false on any deviation, including an empty token: a
+// subject with an empty token is one NATS' wildcard matching would never
+// deliver here, so it can only come from a direct caller.
+//
+// Separate from targetIDFromSubject deliberately. That parser hard-requires 5
+// tokens and serves disable/enable/revoke/resetConfidence; loosening it to
+// accept a longer subject would silently widen every one of them.
+func resetBudgetScopeFromSubject(subject string) (targetID, entityID, gapColumn string, ok bool) {
+	parts := strings.Split(subject, ".")
+	if len(parts) != 7 {
+		return "", "", "", false
+	}
+	if parts[0] != "lattice" || parts[1] != "ctrl" || parts[2] != "weaver" || parts[4] != opResetBudget {
+		return "", "", "", false
+	}
+	if parts[3] == "" || parts[5] == "" || parts[6] == "" {
+		return "", "", "", false
+	}
+	return parts[3], parts[5], parts[6], true
+}
+
 // ListSubject returns the canonical request subject for the "list" op.
 // Exposed for tests and tooling.
 func ListSubject() string {
@@ -324,6 +435,14 @@ func ListSubject() string {
 // ID + op (disable/enable/revoke). Exposed for tests and tooling.
 func TargetSubject(targetID, op string) string {
 	return subjectPrefix + "." + targetID + "." + op
+}
+
+// ResetBudgetSubject returns the canonical request subject for the
+// "resetBudget" op's (target, entity, gap) scope. Exposed for the CLI and
+// tests — the scope rides in the subject, so this is the only place the shape
+// is built.
+func ResetBudgetSubject(targetID, entityID, gapColumn string) string {
+	return subjectPrefix + "." + targetID + "." + opResetBudget + "." + entityID + "." + gapColumn
 }
 
 // respondMicro marshals v to JSON and sends it as the micro reply. On a
