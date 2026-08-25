@@ -176,12 +176,44 @@ escalates again — dispatching a real `CreateAugurReasoningClaim` every ~30–6
 Weaver no longer manages. Without augur it was instead a permanent false alarm with no reachable clear
 (arm 7 needs the column to go false; an orphan column stays true).
 
-**Arm 8b, therefore: the target is registered but `target.Gaps` does not name `gapColumn` → clear
-`issueKeyGapEntity` and return.** Never escalate, and — per arm 5's rule — never delete the count
+**Arm 8b, therefore: the target is registered but `target.Gaps` does not name `gapColumn` → return.**
+Never escalate, and — per arm 5's rule — never delete the count
+
+> **AMENDED 2026-08-25 (close pass).** Arm 8b originally *cleared* `issueKeyGapEntity` before returning.
+> That contradicted lane 1, which raises `GapBudgetExhausted` at the very same latch for an orphan
+> column: `openGapColumns` (`evaluator.go:1229`) enumerates **every** true `missing_*` column, playbook
+> or not, so a half-migrated package (playbook drops the gap, lens keeps `maxretries_<g>`) has one leg
+> raising and the other clearing. Verified flapping raise→clear→raise, which also re-stamps `since` on
+> every re-raise — against Contract #5 §5.5's "open since it first arose" — and makes every raise an
+> *arrival*, defeating arrival-vs-repeat log damping. **The arm returns without clearing.** Stopping the
+> escalation was the blocking fix; the latch stays owned by lane 1 exactly as on `main`, and that
+> condition already carries its own config-keyed `GapWithoutPlaybook` diagnostic. Teaching lane 1 the
+> orphan-column rule is a dispatch-semantics change outside this fire's ratified scope.
 either: a partially replayed target is present in the registry with an intermediate definition that may
 not yet name the gap (`reconciler.go:628` says so in as many words), so a missing key is absence-shaped
 evidence. The TTL collects it. `reclaim`'s orphan arm deletes the *mark* there, which is an anti-storm
 gate the next dispatch recreates; a count is the bound itself, and the two are not comparable.
+
+### 3.2b The log-volume fix is CALL-SITE scoped — `alert` itself is not this fire's to change
+
+Re-deriving the alert every pass turns one `Error` record per parked gap per *mark lifetime* into one
+per *sweep pass*, for the budget's whole life — roughly 7,680 records per parked `(target, entity, gap)`
+at the defaults. The latch is correctly idempotent (`issueCache.set` preserves `since`); only the paired
+log is not.
+
+**A mid-build attempt to fix this inside `alert` — logging `Error` on arrival and `Debug` on a repeat,
+comparing severity and code — was WRONG and is reverted.** It changed a shared FR29 primitive for every
+issue family in the component to solve one leg's symptom, and §7's drift fence never named `alert`. The
+regression it caused is instructive: `TimerDataError` is **event-shaped, not level-driven** — it raises
+once per discrete dropped fired-timer, same severity and code, a *different message* each time. With
+`Message` excluded from the comparison every drop after the first logged at `Debug`, which the
+production logger (`LevelInfo`) discards, while the single Health slot keeps only the latest — so
+distinct faults were recorded nowhere at all. `issueKeyTimer("")` has no clear site, so they were
+permanently silent. Adding `Message` to the comparison is not the fix either: a message embedding a
+varying value would then spam by construction.
+
+**The damping belongs at `escalateExhaustedGap`'s call site**, which is the only raise this fire made
+128× louder. Every other family keeps `main`'s behaviour exactly.
 
 ### 3.2a One decision the arm table does not otherwise state
 
@@ -280,6 +312,32 @@ go test ./... -p 4                 # with POSTGRES_TEST_DSN exported (REMOTE.md 
 Not touched: `gapSuppressed`'s verdict or defaults; the mark lease/TTL constants; the Augur escalation
 path's own anti-storm mark; `inflight_<g>` semantics; the heartbeat listing cap; any `docs/contracts/*`
 file; `internal/weaver`'s planner, contraction monitor, oscillation detector or temporal lane.
+
+## 7a. Landing shape + checkpoint (multi-fire)
+
+**Landing shape: land each increment on `main`** (the second of the two sound shapes). The invariant
+that keeps `main` correct across the boundary is stated and testable: **through Increment 1 the count
+leg only ever READS, RETIRES, or ESCALATES — it opens no new dispatch path.** Arm 11's re-arm dispatch
+is the first line that can dispatch from this leg, and it does not exist yet (`reconciler.go` falls
+through instead). So `main` after Increment 1 is a strict improvement — the loud stop survives a mark's
+expiry and a restart — with no new way for Weaver to act on the world.
+
+### Checkpoint — 2026-08-25
+
+- **Branch:** `claude/great-lamport-q85azx` (remote container; no worktree — `REMOTE.md` §1).
+- **Done:** Increment 1 complete — `sweepCount` arms (a)–(l), `splitCountKey`, `retireCorrupt` wired
+  into all three sweep legs, `deleteCorrupt` shape-aware, `gapSuppressed` split (proved
+  behaviour-preserving over 3,780 input classes by the close pass), six falsified comments corrected.
+  Four cold reviews: three on Increment 1, one cumulative close pass. Every gate pinned by reverting
+  that gate alone (M1–M13).
+- **Next:** Increment 2 — arm 11, the re-arm dispatch (`reconciler.go`, the fall-through at the end of
+  `sweepCount`). Then Increment 3 — `Engine.ResetRetryBudget` + `lattice weaver reset-budget`,
+  mirroring `reset-confidence` (`cmd/lattice/weaver/weaver.go:239`).
+- **Not yet delivered:** the board row's second half, *"and cannot be un-parked"*. §4's argument stands
+  — the operator verb is inert without arm 11, so Increments 2 and 3 land together or not at all.
+- **Open for Andrew:** the Contract #10 §10.3 text, on proposal branch
+  `claude/contract-10-weaver-state-sweep-enumeration`. The code ships at L2 ahead of it, matching the
+  four prior `🔭 flag-for-Andrew` precedents on this board.
 
 ## 8. Build note
 
