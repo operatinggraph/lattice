@@ -215,6 +215,37 @@ varying value would then spam by construction.
 **The damping belongs at `escalateExhaustedGap`'s call site**, which is the only raise this fire made
 128× louder. Every other family keeps `main`'s behaviour exactly.
 
+> **EXTENDED 2026-08-25 — Increment 2 made a SECOND raise 128× louder, and the same ruling applies.**
+> Arm 11 calls `planGap` every pass for a parked-but-unplannable gap. `planGap` emits its own undamped
+> record per failure class — `errTransient` Warn (`evaluator.go:502`), `errData` Warn (`:510`),
+> `errConfig` **Error** (`:1268`) — measured at one record per pass, i.e. 60/hour, **7,680 over the
+> count's 128 h TTL**. Before arm 11 the delta was zero, not smaller: a quiet markless gap was
+> unreachable from lane 1 (needs a delivery) and from `reclaim` (needs a mark).
+>
+> **Two fixes were considered and REJECTED before the third was taken.**
+>
+> **Rejected — route those three sites through `alertStanding`.** Its contract is explicit
+> (`evaluator.go:1283-1288`): *"A caller belongs here only if its message is a pure function of its
+> key, because the arrival test compares severity and code alone."* `errConfig` emits at least three
+> distinct messages at one key (`unknown action %q`, a removed pinned action, the internal
+> ranked-candidate case), so damping would silently drop two of them to `Debug` — the exact
+> `TimerDataError` failure this section was minted from, one family over.
+>
+> **Rejected — skip the re-attempt when the ROW REVISION is unchanged.** Superficially level-driven,
+> but the three failure classes divide precisely on whether a row write is the remedy: `errData` is
+> fixed by a row write (revision moves, invalidates correctly); `errConfig` is fixed by a package
+> re-author and `errTransient` by an unrelated vertex replaying — **neither moves the row revision**.
+> Both would wedge un-suppressed and never dispatched, which is this item's own defect re-created, and
+> worse, invisible, because the log that would have shown it is what the throttle suppressed.
+>
+> **Taken — pace the ATTEMPT on time, derived from the existing lease.** Arm 11 attempts a plan at most
+> once per `markTTLBackstopFactor × lease` per (target, entity, gap), held in-process on the `sweeper`
+> and evicted in `pass()`'s existing `listed` retirement loop (the lifetime `corruptAlerted` already
+> uses — *new state needs a lifetime, not a data structure*). Nothing is suppressed permanently: every
+> entry ages out, so a transient condition that resolves is still discovered, only paced. ~7,680 → ~64
+> per parked gap. A restart clears the map and costs one loud re-derivation, which is correct arrival
+> behaviour.
+
 ### 3.2a One decision the arm table does not otherwise state
 
 **A duplicate augur escalation is not observable on the ops stream, by design.**
@@ -329,6 +360,23 @@ writer.*)
 >
 > `markStore.deleteDispatchCount` (`state.go:376`) stays as it is — the gap-close reset, where an
 > unconditional delete is correct because the fact it records is gone. The verb is a different verb.
+>
+> **AMENDED 2026-08-25 by the build (`32121f3`), three corrections to this section:**
+>
+> **(i) "Tolerant of a key that vanished mid-scan" is true only of the READ.** `KVUpdateWithTTL` never
+> returns `ErrKeyNotFound`: a delete landing between the read and the write bumps the subject's last
+> sequence, so it surfaces as `ErrRevisionConflict`. The first cut carried a dead `ErrKeyNotFound`
+> branch on the write. Absence is detected at the read (→ success, 0 reset, no key minted); a
+> mid-flight delete is a revision conflict like any other loser.
+>
+> **(ii) The whitelist must require a non-empty gap NAME.** `singleTokenPattern` alone accepts a bare
+> `missing_`, which install-time playbook validation rejects. The rule is: `missing_` prefix **and**
+> length strictly greater than the prefix **and** `singleTokenPattern`.
+>
+> **(iii) A garbled count body is REPORTED, not overwritten.** A garbled budget never suppressed the
+> gap in the first place (`getDispatchCount` errors, so `gapSuppressed` reads its dispatchable side),
+> so there is no park to release; and the count leg's own corrupt-body arm deletes it within a pass.
+> Overwriting would destroy the evidence of a distinct fault.
 
 ## 6. Increment order + green bar
 
@@ -348,7 +396,14 @@ writer.*)
 > `packages/console-operator/permissions.go:58`, an explicit **deny** in
 > `packages/demo-operator/package_test.go:157` (that test pins demoOperator's surface exhaustively), and
 > a manifest **version bump** for each `packages/` definition it touches — CI's *Package version-bump
-> gate* (`scripts/lint-package-version.go`) fails a content edit at an unchanged version. Steward
+> gate* (`scripts/lint-package-version.go`) fails a content edit at an unchanged version.
+> **Understated, corrected by the build:** each `packages/` definition enumerates its permissions in
+> **`manifest.yaml` as well as `permissions.go`** (pinned by `TestPackage_ManifestMatchesDefinition`),
+> so both files need the new entry *and* the bump. Two further gates only the build found:
+> `go vet -tags controlplaneauthz` — `make vet` does not cover build-tagged files, and
+> `internal/controlplaneauthz`'s e2e `fakeEngine` stops compiling when `engineControl` gains a method;
+> and `lint-conventions` prints **`NOT SCANNED`** rather than failing while a `packages/`-adjacent
+> `.go` file is untracked, so a new test file must be staged before that gate means anything. Steward
 > `SKILL.md` §4 makes any capability-plane change full-3-layer regardless of size, and §3's tier table
 > puts a new enforcement point on the **opus** builder tier; both apply here and override this table's
 > original "mechanical / lead review".
