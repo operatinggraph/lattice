@@ -644,11 +644,37 @@ func persistWithStatus(path string, raw PrimordialIDsRaw, status string) error {
 	return nil
 }
 
+// KernelGrantLinkKeys returns the six `permission grantedBy role` edges the
+// kernel seeds — one per primordial permission (3 meta + 3 package-lifecycle),
+// each granted to the operator role (primordial.go's grantedBy step). Derived
+// from the same primordial ID variables the seeder itself derives them from,
+// so the kernel's grant topology has exactly one owner: a consumer that needs
+// to know which grant edges are kernel-authored (verify-kernel's key
+// enumeration, internal/pkgmgr's grant-link reconciler) asks here rather than
+// re-deriving the shape.
+//
+// The result is only meaningful once LoadOrGenerate or Load has populated the
+// primordial IDs — before that each entry carries empty id segments. The keys
+// are assembled by concatenation rather than substrate.LinkKey deliberately:
+// LinkKey panics on an id that is not a valid NanoID, and this is called from
+// readiness paths (PrimordialVertexKeys) that must be able to run and report
+// on an unloaded process rather than crash it.
+func KernelGrantLinkKeys() []string {
+	return []string{
+		"lnk.permission." + PermCreateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermUpdateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermTombstoneMetaVertexID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermInstallPackageID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermUpgradePackageID + ".grantedBy.role." + RoleOperatorID,
+	}
+}
+
 // PrimordialVertexKeys returns the kernel's top-level vertex keys — only
 // those entries the kernel itself seeds. Package-installed DDLs/Lenses/
 // permissions are addressed separately by `verify-package-*` gates.
 func PrimordialVertexKeys() []string {
-	return []string{
+	keys := []string{
 		// bootstrap op tracker
 		BootstrapOpKey,
 		// admin identity
@@ -681,13 +707,11 @@ func PrimordialVertexKeys() []string {
 		PermInstallPackageKey,
 		PermUninstallPackageKey,
 		PermUpgradePackageKey,
-		// 6 grantedBy links (meta-perm + install/upgrade perms → operator) + admin holdsRole link
-		"lnk.permission." + PermCreateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUpdateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermTombstoneMetaVertexID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermInstallPackageID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
-		"lnk.permission." + PermUpgradePackageID + ".grantedBy.role." + RoleOperatorID,
+	}
+	// 6 grantedBy links (meta-perm + install/upgrade perms → operator)
+	keys = append(keys, KernelGrantLinkKeys()...)
+	keys = append(keys,
+		// admin holdsRole link
 		BootstrapHoldsRoleLinkKey,
 		// service-actor holdsRole links (Loom + Weaver + Bridge + objmgr +
 		// privacy → operator)
@@ -702,7 +726,8 @@ func PrimordialVertexKeys() []string {
 		AspectTypeOutputSchemaKey,
 		AspectTypeFieldDescriptionKey,
 		AspectTypeExamplesKey,
-	}
+	)
+	return keys
 }
 
 // PrimordialVertexKeyCount is the count of TOP-LEVEL kernel keys (the
