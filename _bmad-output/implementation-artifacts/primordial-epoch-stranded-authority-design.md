@@ -105,14 +105,26 @@ not impossible.
 
 ### 3.2 What counts as a holder
 
-The current epoch's identity set is exactly the loaded primordial table — `BootstrapIdentityID` plus the
-Loom / Weaver / Bridge / objmgr / privacy / Gateway service actors (`nanoid.go:555-562`). A live
-`holdsRole` edge from one of those means a running actor really can reach the role, and the candidate is
-dropped. A live edge from anything else — a prior epoch's admin, a prior service actor — is **recorded in
-`Holders` and does not suppress**, because the rotation stranded the holder and the role together.
+The current epoch's identity set is the **six** operator-holding kernel identities of the loaded primordial
+table — `BootstrapIdentityID` plus the Loom / Weaver / Bridge / objmgr / privacy service actors
+(`nanoid.go:555-562`). A live `holdsRole` edge from one of those means a running actor really can reach the
+role, and the candidate **demotes to a notice naming the suppressing edge** — never vanishes: the
+suppressing input is an ordinary `AssignRole` link create that `rejectProtectedMutations` does not cover
+(`step8_commit.go:727-729` skips creates), so a silent `continue` would let one benign-looking grant
+permanently mute the gate while removing none of the residue. A live edge from anything else — a prior
+epoch's admin, a prior service actor — is **recorded in `Holders` and does not suppress**, because the
+rotation stranded the holder and the role together.
 
-This is also why the report carries `Holders` at all: an operator reading "role X, 21 grants, held by
-identity Y" needs Y to see that Y is itself residue. A bare count would hide the shape of the island.
+**The Gateway is deliberately NOT in that set.** Contract #7 §7.2 (`docs/contracts/07-primordial-bootstrap.md:51,53`):
+*"unlike the six above, it does **not** hold the operator role … it is internet-facing … deliberately scoped
+narrow instead of root-equivalent. Six of the seven hold the operator role; the Gateway is the one
+exception."* A `holdsRole` edge from the internet-facing identity into a stranded operator role is the worst
+escalation reachable here (§4.1) — treating it as proof of health would make the detector read its own
+worst-case input as a clean bill.
+
+This is also why the report carries `Holders` at all: they are what confers the capability (§4.1), and an
+operator reading "role X, held by identity Y" needs Y to see that Y is itself residue. A bare count would
+hide the shape of the island.
 
 ## 4. Surfacing — where the exit status moves, and where it must not
 
@@ -124,26 +136,63 @@ own reporter reads it — never a `return`."*
   `ReadKernelReport`'s returned error.
 - **Boot (`ReconcilePrimordial`) — advisory, always.** One `logger.Warn` per stranded epoch. A boot must
   not fail on a condition boot cannot fix.
-- **`VerifyKernel` + `verify-kernel` — this is where green stops lying.** A stranded epoch with
-  **≥1 live grant** is a **failure**. With zero live grants it is a notice. A scan error is a notice.
+- **`VerifyKernel` (the library) — notices only, never a failure.** §4.2 explains why this one cannot move
+  an exit status.
+- **`scripts/verify-kernel.go` (the operator + CI gate) — this is where green stops lying.** A stranded
+  epoch with **≥1 live holder** is a **failure**. With zero live holders it is a notice. A current-epoch
+  holder demotes it to a notice naming that edge (§3.2). A scan error is a notice.
 
-### 4.1 The fork: failure, or notice like a kernel orphan?
+### 4.1 The severity discriminator is `Holders`, not `GrantedBy`
 
-Resolved to **failure**, against the sibling design's precedent, on three grounds:
+> **Rewritten 2026-08-25 by the cold adversarial pass. The original ratified text had this exactly
+> backwards** and is preserved below only so the next reader can see which way the error ran.
 
-1. **A kernel orphan is inert; this is live authority.** An unbuilt DDL sits there. Twenty-one permission
-   vertices authorizing `AttachObject`, ledger creates and the erasure set, hanging off a role nobody
-   holds, are a live, unreachable authority island on the trust boundary.
-2. **The row's stated defect *is* the green.** "`bootstrap verify` passes green" is what makes the
-   condition invisible; a notice on a 30-line gate output does not end that.
-3. **A remedy already exists and is already printed.** `verify-kernel`'s failure path ends with *"run
-   `make down && make up` to re-bootstrap from clean state"*, which is precisely the fix for a bucket
-   carrying a stale epoch. A red gate with no remedy would be a bad gate; this one has the remedy in the
-   message.
+Capability is conferred by the `holdsRole` edge, not by the `grantedBy` edge, and the projections say so:
 
-Counter-argument, recorded: reconcile made a kernel *change* wipe-free, and this failure's only remedy is a
-wipe. True — and that is Fire 2's whole subject (§7). Until Fire 2 exists, "wipe" is the honest remedy, and
-saying so loudly beats saying nothing.
+- `CapabilityReadWildcardGrantsLensDefinition` (`internal/bootstrap/lenses.go:358-365`) is
+  `MATCH (identity)-[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator'` returning
+  `(actor_id, '*', 'cap-read.root')`. It matches by **canonicalName**, not by `RoleOperatorID`, and reads
+  **no `grantedBy` edge at all**. `internal/refractor/adapter/rls.go:198-201` matches that row with no
+  `grant_source` filter. So a stranded `operator`-named role with live holders and **zero grants** projects
+  installation-wide read of every RLS-protected table — for identities that are themselves residue.
+- The mirror state is inert. A stranded role with 21 `grantedBy` edges and **zero** live holders projects
+  nothing: every consumer requires the holder edge — the core write lens (`lenses.go:135`), the wildcard
+  read lens (above), and rbac's `capabilityRolesSpec` (`packages/rbac-domain/lenses.go:92-93`).
+
+So the gate keys on `len(Holders) >= 1`; the grant count rides along as detail.
+
+> **Struck.** The ratified text argued: *"A kernel orphan is inert; this is live authority. Twenty-one
+> permission vertices … hanging off a role nobody holds are a live, unreachable authority island."*
+> **Unreachable is precisely what makes them inert.** What makes the island live is that it *is* reachable
+> — by its own stranded epoch-mates, through `holdsRole`. The conclusion (this warrants a hard gate)
+> survives; the reason inverts, and the reason is what set the threshold.
+
+**The remedy is edge revocation, not a wipe.** The ratified text leaned on *"run `make down && make up`"*
+already being printed. That is the heaviest possible remedy and it is not the right one:
+`protectedRootKey` returns `""` for any key not starting `vtx.` (`step8_commit.go:1379-1385`), so the prior
+epoch's `holdsRole` and `grantedBy` edges are **not** anti-brick guarded and can be tombstoned through the
+Processor as ordinary link mutations. Revoking the stranded `holdsRole` edges alone kills every projection
+above, without touching a byte of graph data. The role *vertex* is `protected: true` (`primordial.go:711`)
+and so cannot be tombstoned — which is a fact about Fire 2, not about this remedy (§7).
+
+### 4.2 Why `VerifyKernel` itself must never fail on this
+
+`VerifyKernel` is not only a report surface. `cmd/lattice/bootstrap/bootstrap.go:134` calls it and `:165`
+exits 1 on any failure, and **`Makefile:202` uses that exit code as `make up`'s `FRESH` oracle**. On a
+stranded stack the chain runs: `bootstrap verify` exits 1 → `FRESH=0` → `Makefile:211` runs
+`bootstrap probe-empty`, which exits **1 on a populated bucket** (`bootstrap.go:47`) → `Makefile:213-214`
+**`rm -f lattice.bootstrap.json`** → `Makefile:233` re-seeds → **a third epoch is minted into the same
+bucket.**
+
+Firing on exactly the condition it detects would make the defect self-amplifying, once per `make up`,
+breaking every existing reference to the current epoch's NanoIDs — the thing Contract #7 §7.4's
+file-is-authoritative rule exists to prevent — with the verify output swallowed by `>/dev/null 2>&1`.
+
+This is not a retreat from "green stops lying". `bootstrap verify` prints notices before its pass/fail line
+(`bootstrap.go:147-154`), so the condition becomes **visible on that surface too**; what stays truthful is
+the oracle's answer to the question it actually asks, which is about *freshness*, not about residue. The
+hard gate lives in `scripts/verify-kernel.go`, whose only consumers are CI and an operator running
+`make verify-kernel` deliberately.
 
 **CI cannot redden on this.** `stack-gates` (`ci.yml:265`) runs `make verify-kernel` against a container
 that generated its id file and seeded an empty bucket in the same job: exactly one operator role, and it is
@@ -154,7 +203,32 @@ the current one. §6's first test pins that.
 - **No retirement, no re-pointing, no writes of any kind.** §7.
 - **The rest of the prior epoch** — stranded admin/service identities, the old meta-root, the old lenses —
   is the *same* root cause (one id-file rotation) and belongs to **this item's Fire 2**, not to a new board
-  row. Fire 1 reports the operator role because that is the authority-bearing half.
+  row. Fire 1 reports the operator role because it is the cheapest reliable **indicator** of a rotation.
+
+  > **Corrected 2026-08-25 by the cold pass.** This bullet originally justified the cut with *"Fire 1
+  > reports the operator role because that is the authority-bearing half."* **That is false, and the
+  > deferred half is the larger surface:**
+  >
+  > - **The prior epoch's four capability lens definitions are still running.** Refractor discovers
+  >   lenses by graph scan — it watches `vtx.meta.>` filtered on envelope class `meta.lens`
+  >   (`cmd/refractor/main.go:2042`, `internal/refractor/lens/corekv_source.go:596`), not by
+  >   bootstrap-file id, with no duplicate-`canonicalName` guard at load. So the prior `capability`,
+  >   `capabilityRead`, `capabilityReadGrants` and `capabilityReadWildcardGrants` lenses
+  >   (`primordial.go:641-696`) keep projecting into `capability-kv` and `actor_read_grants`. They are
+  >   also **immune to kernel reconcile**: the built-set comparison keys on the *current* epoch's ids, so
+  >   a future kernel change that narrows the capability cypher leaves the prior lens projecting the old,
+  >   broader rule forever — and the existing orphan census filters it out on
+  >   `CreatedByOp != BootstrapOpKey` (`reconcile.go:303`), exactly as §2 describes.
+  > - **The prior epoch's identities carry live projected residue** — `cap.roles.*` and
+  >   `actor_read_grants` rows — and are not in `SystemActorKeys`, which is id-pinned to `RoleOperatorID`
+  >   (`system_actors.go:66`), so the platform routes them as ordinary actors against a key full of grants.
+  >
+  > **The asymmetry underneath this whole board row:** *enforcement* matches the operator role by
+  > **canonicalName** (`lenses.go:135`, `:357`; `packages/rbac-domain/lenses.go:93`), while every *audit
+  > and inventory* surface matches it by **id** (`SystemActorKeys`, Loupe's review path, `console-operator`,
+  > `control-authz`, the `verify-package-*` gates). A second `operator`-named role is therefore fully
+  > load-bearing for authorization and invisible to everything that reports on authorization. Fire 2 is
+  > scoped against that sentence, not against "tidy up the old role".
 - No change to `reconcile.go`'s four outcomes, to the `vtx.meta.>` census, or to any seeding path.
 
 ## 6. Green checks
@@ -171,11 +245,21 @@ the current one. §6's first test pins that.
    outside the current epoch's set is **reported**, with that holder listed. This is the §3 step-3
    amendment's own pin: it fails against the pre-amendment predicate.
 4. `TestStrandedOperatorEpochs_TombstonedRoleAndTombstonedEdgesAreSilent` — soft-deleted role, and a
-   stranded role all of whose `grantedBy` edges are `isDeleted`, drop to zero-grant (notice, not failure).
+   stranded role all of whose edges are `isDeleted`, drop to the notice class.
 5. `TestStrandedOperatorEpochs_ForeignRoleNameIsSilent` — a holderless, granted `vtx.role.*` whose
    canonicalName is not `operator` is never reported.
-6. `TestVerifyKernel_StrandedEpochWithGrantsFails` / `_WithoutGrantsIsNotice` — the exit-status split.
-7. `TestReadKernelReport_StrandedScanErrNeverFailsTheBuiltSetComparison` — dossier entry 1's shape.
+6. The severity split at the gate, keyed on `Holders` (§4.1): **holders + zero grants → failure**
+   (the dangerous state), **grants + zero holders → notice** (the inert one), current-epoch holder →
+   notice naming the edge.
+7. `TestVerifyKernel_StrandedEpochReturnsNoFailures` — `VerifyKernel` must return **zero failures** on a
+   stranded bucket. This is the property `make up`'s `FRESH` oracle depends on (§4.2); without this pin,
+   a later fire promoting the notice back to a failure re-arms the discard-and-mint chain silently.
+8. `TestReadKernelReport_StrandedScanErrNeverFailsTheBuiltSetComparison` — dossier entry 1's shape, driven
+   through a stubbable scan seam rather than through the pure plan projection (a projection-only test
+   passes even if `planReconcile` is rewritten to return the scan error, which would fail every boot).
+9. A truncated or erroring per-key read must surface as `StrandedScanErr`, never as an empty result: the
+   gate printing "no stranded epochs" because its reads timed out is the same false green this fire exists
+   to end.
 
 Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
 ./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./internal/substrate/...`, full
@@ -194,6 +278,22 @@ It is also gated the same way its sibling is: Inc 2 there builds only on a **non
 long-lived deployment**. Fire 1 is that census. Building the verb first would be scaffolding with no
 measured demand — and here the measurement (21 grants) exists but the *fork* does not.
 
+**Three things the cold pass established that reshape the fork** — read these before choosing a direction:
+
+1. **The fork is narrower than "retire vs re-point", because the commit guard has already decided half of
+   it.** `protectedRootKey` returns `""` for any key not starting `vtx.` (`step8_commit.go:1379-1385`), so
+   the stranded `holdsRole` and `grantedBy` **edges are ordinary link mutations and can be tombstoned
+   today**. The role **vertex** carries `protected: true` (`primordial.go:711`) and `rejectProtectedMutations`
+   will refuse to tombstone it. So "revoke the edges" needs no new authority and is available now;
+   "tombstone the role" needs a guard exemption first, which is a larger ask than the design originally
+   implied.
+2. **Revoking the edges is sufficient for the live harm.** Every projection that makes the residue dangerous
+   — the wildcard read grant, the core write lens, rbac's `capabilityRoles` — requires the `holdsRole` edge
+   (§4.1). The role vertex left standing is inert.
+3. **Fire 2's real scope is the lens residue, not the role.** Per §5: the prior epoch's four capability lens
+   definitions keep projecting, are immune to kernel reconcile, and are invisible to the existing census.
+   That is the larger and longer-lived surface, and a Fire 2 that only tidied the role would leave it.
+
 **Nothing is blocked on this.** Fire 1 ships whole; Fire 2 needs a direction, not a design.
 
 ---
@@ -201,8 +301,10 @@ measured demand — and here the measurement (21 grants) exists but the *fork* d
 ### Fire 1 fire brief (build note, 2026-08-25)
 
 **1. Scope sentence.** `bootstrap verify` and `verify-kernel` learn to see a prior-epoch operator role that
-is still live, carries live grants, and has no holder — the cross-epoch orphan class `scanKernelOrphans`
-structurally cannot reach. Detection and reporting only; no writes. Green bar: §6.
+is still live and reachable from no current-epoch identity — the cross-epoch orphan class
+`scanKernelOrphans` structurally cannot reach. Detection and reporting only; no writes. Green bar: §6.
+*(Amended 2026-08-25: originally "carries live grants, and has no holder" — both halves were wrong, per
+§3 step 3 and §4.1.)*
 
 **2. Verified touch-list** (every anchor re-checked live against `d3ce34d`):
 
