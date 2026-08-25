@@ -1233,3 +1233,70 @@ func TestResetRetryBudget_RefusesACollapseOnlyGap(t *testing.T) {
 		t.Fatalf("external gap's budget = %d, want 0", got)
 	}
 }
+
+// TestResetRetryBudget_RefusesAnOrphanColumn pins the second shape the sweep's
+// re-arm declines, for the same reason the first one is refused: the leg's
+// orphan-column arm returns without dispatching, so writing a 0 here changes
+// nothing an operator can observe — the gap stays parked, and its standing
+// GapBudgetExhausted goes from true to a description of a budget it no longer
+// has. It is a DIFFERENT problem from a collapse-only action, with a different
+// fix (the package dropped the column), so it gets its own reason rather than
+// the collapse-only wording.
+//
+// Two distinctions the test holds apart, both of which the sweep already makes:
+// the control gap is on the SAME registered target, so what is pinned is the
+// orphaned column and not the target; and an UNREGISTERED target keeps its own
+// refusal, because replay lag is not evidence that a playbook dropped anything
+// — reporting it as an orphaned column would tell an operator to go and fix a
+// package that is fine.
+func TestResetRetryBudget_RefusesAnOrphanColumn(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureResetBudgetOrphanColumn"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_named": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	named, dropped := testNanoID(t), testNanoID(t)
+	h.seedCount(t, ctx, targetID, named, "missing_named", 2)
+	h.seedCount(t, ctx, targetID, dropped, "missing_dropped", 2)
+	for gap, entityID := range map[string]string{"missing_named": named, "missing_dropped": dropped} {
+		h.putRow(t, ctx, targetID, entityID, exhaustedRow(entityID, gap, 2))
+	}
+
+	// The control: a gap the playbook still names resets on the same target.
+	if previous, err := h.engine.ResetRetryBudget(ctx, targetID, named, "missing_named"); err != nil || previous != 2 {
+		t.Fatalf("a gap the playbook names must reset: got (%d, %v)", previous, err)
+	}
+
+	_, err := h.engine.ResetRetryBudget(ctx, targetID, dropped, "missing_dropped")
+	if err == nil {
+		t.Fatal("an orphaned column's budget must not be reset: the sweep's orphan arm never acts on it")
+	}
+	if !strings.Contains(err.Error(), "no gaps entry") {
+		t.Fatalf("error = %q, want it to name the playbook as the reason, not the action", err)
+	}
+	if strings.Contains(err.Error(), "collapse-only") {
+		t.Fatalf("error = %q, want the orphan-column reason and not the collapse-only wording — "+
+			"the two have different fixes", err)
+	}
+	if got := h.countValue(t, ctx, targetID, dropped, "missing_dropped"); got != 2 {
+		t.Fatalf("refused reset left the budget at %d, want 2 (nothing written)", got)
+	}
+
+	// An unregistered target is replay lag, not a dropped column, and keeps its
+	// own refusal.
+	_, err = h.engine.ResetRetryBudget(ctx, "fixtureNeverRegistered", named, "missing_named")
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unregistered target error = %v, want the not-registered refusal", err)
+	}
+	if strings.Contains(err.Error(), "no gaps entry") {
+		t.Fatalf("error = %q: a target mid-replay must never be reported as an orphaned column", err)
+	}
+}

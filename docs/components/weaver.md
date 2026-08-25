@@ -834,14 +834,25 @@ records. A successful reset therefore means the budget is re-armed, never that t
 again. One deterministic key, one writer, one path.
 
 It refuses — writing nothing — when the target is not registered, when the arguments are not the
-§10.2/§10.3 key shapes, when the gap's action is **collapse-only** (an `assignTask`, or a
-`triggerLoom` over a pattern that parks on a human: the sweep never re-arms one, because its task may
-still be open and a re-armed episode would mint a fresh `claimId` and duplicate it — so resetting
-would leave the gap parked with a fresh budget and a standing issue that no longer describes it),
+§10.2/§10.3 key shapes, when **the sweep's re-arm would decline the gap whatever its budget says**,
 when **no budget exists at that gap** (a count key exists only where a chain
 has actually dispatched, so inventing one would hand the sweep a gap nobody chose — this is the
 honest answer to a mistyped `entityId`), and when a dispatch bumped the count between the read and
 the write (the operator's intent is stale; re-running is the remedy).
+
+That third refusal covers the two shapes the count leg's re-arm arm declines, and each is reported
+with its own reason because each has a different fix:
+
+- **the action is collapse-only** — an `assignTask`, or a `triggerLoom` over a pattern that parks on a
+  human. Its task or Loom instance may still be open, so a re-armed episode would mint a fresh
+  `claimId` and duplicate it (an EXTERNAL gap, whose re-dispatch §10.3 calls for, is not refused);
+- **the playbook declares no `gaps` entry for the column** — the column is orphaned, so there is no
+  remediation to re-arm at all; a package re-author dropped it, and the budget expires with its TTL.
+
+In both cases writing the 0 would leave the gap parked with a fresh budget and turn its standing
+`GapBudgetExhausted` from a true statement into one describing a budget it no longer has. An
+unregistered target keeps its own refusal rather than being reported as an orphaned column: a
+replaying registry is not evidence that any package dropped anything.
 
 ### `resetConfidence`
 

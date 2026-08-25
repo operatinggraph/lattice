@@ -317,6 +317,8 @@ func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, err
 //     count leg's registry gate would refuse to act on it anyway);
 //   - the arguments are not the §10.2/§10.3 key shapes (a malformed argument
 //     must never reach the keyspace splitCountKey later reads);
+//   - the sweep's re-arm would decline the gap whatever its budget says — an
+//     orphaned column, or a collapse-only action (reArmDeclines);
 //   - there is no budget at this gap — a count key exists only where a chain
 //     has actually dispatched, so this is the honest answer to a typo'd
 //     entityId rather than a silent success;
@@ -338,17 +340,16 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 	if !ok {
 		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
 	}
-	if ga, planned := target.Gaps[gapColumn]; planned && e.reArmDeclines(ctx, targetID, entityID, gapColumn, ga) {
-		// The sweep's re-arm never dispatches a collapse-only gap: its task or
-		// Loom instance may still be open, and a re-armed episode would mint a
-		// fresh claimId and duplicate it. Re-arming the budget here would
-		// therefore change nothing an operator can observe — the gap would sit
-		// at a count of 0, still parked, still holding a GapBudgetExhausted
-		// that now describes a budget it no longer has. Refusing keeps the
-		// standing issue TRUE and says which authoring shape is in the way.
-		return 0, fmt.Errorf("weaver: target %q entity %q gap %q dispatches %q, whose artifact may still be open: "+
-			"the sweep never re-arms a collapse-only gap, so resetting its budget would leave it parked with a fresh budget",
-			targetID, entityID, gapColumn, ga.Action)
+	if reason := e.reArmDeclines(ctx, target, targetID, entityID, gapColumn); reason != "" {
+		// The sweep's re-arm will not act on this gap whatever the budget says,
+		// so writing a 0 would change nothing an operator can observe: the gap
+		// would sit at a count of 0, still parked, still holding a
+		// GapBudgetExhausted that now describes a budget it no longer has.
+		// Refusing keeps that standing issue TRUE and names which shape is in
+		// the way — an orphaned column and a collapse-only action are different
+		// problems with different fixes.
+		return 0, fmt.Errorf("weaver: target %q entity %q gap %q: %s; resetting its budget would leave it parked with a fresh budget",
+			targetID, entityID, gapColumn, reason)
 	}
 	previous, revision, found, err := e.budgets.dispatchCountEntry(ctx, targetID, entityID, gapColumn)
 	if err != nil {
@@ -375,27 +376,46 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 	return previous, nil
 }
 
-// reArmDeclines reports whether the reconciler's count-leg re-arm would refuse
-// to dispatch this gap because its action is collapse-only — the same
-// collapseOnlyReclaim-over-staleMark predicate the arm itself applies, read
-// over the gap's current row so an EXTERNAL gap (whose re-dispatch §10.3 says
-// to make) is not refused alongside the human ones. A row that is missing or
-// unreadable classifies as collapse-only for the three collapse-only actions,
-// which is the same answer the arm reaches: it does not dispatch a gap with no
-// row either.
+// reArmDeclines reports WHY the reconciler's count-leg re-arm would refuse to
+// dispatch this gap, or "" when nothing about the gap's own definition stands
+// in the way. Two shapes make the re-arm inert, and each mirrors an arm the leg
+// already applies rather than re-deriving one:
 //
-// It answers one question — does this gap's ACTION put it outside the re-arm —
-// and never "will this gap dispatch", which depends on gates (a freeze, the
-// registry, the row's own columns) that move independently of the operator's
-// decision and are the sweep's to apply, not this verb's to predict.
-func (e *Engine) reArmDeclines(ctx context.Context, targetID, entityID, gapColumn string, ga GapAction) bool {
+//   - the playbook no longer names the column (the leg's orphan-column arm).
+//     Weaver has no remediation to re-arm, and the arm cannot even retire the
+//     standing issue there, because lane 1 raises at the same latch for the
+//     same column;
+//   - the action is collapse-only (the arm's collapseOnlyReclaim over
+//     staleMark), read over the gap's current row so an EXTERNAL gap — whose
+//     re-dispatch §10.3 calls for — is not refused alongside the human ones. A
+//     row that is missing or unreadable classifies as collapse-only for the
+//     three collapse-only actions, which is the same answer the arm reaches: it
+//     does not dispatch a gap with no row either.
+//
+// It answers only what this gap's own definition decides, never "will this gap
+// dispatch" — that depends on gates (a freeze, the registry, the row's own
+// columns) which move independently of the operator's decision and are the
+// sweep's to apply, not this verb's to predict. An UNREGISTERED target is
+// likewise not this function's business: replay lag is not evidence a playbook
+// dropped anything, so the verb refuses that one check earlier, under its own
+// reason, and a target mid-replay is never reported as an orphaned column.
+func (e *Engine) reArmDeclines(ctx context.Context, target *Target, targetID, entityID, gapColumn string) string {
+	ga, planned := target.Gaps[gapColumn]
+	if !planned {
+		return fmt.Sprintf("its playbook declares no gaps entry for %q, so there is no remediation to re-arm — "+
+			"the column is orphaned (a package re-author dropped it) and its budget expires with its own TTL", gapColumn)
+	}
 	var row map[string]any
 	if entry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID); err == nil {
 		if uErr := json.Unmarshal(entry.Value, &row); uErr != nil {
 			row = nil
 		}
 	}
-	return collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga))
+	if collapseOnlyReclaim(ga.Action, e.staleMark(targetID, entityID, row, gapColumn, ga)) {
+		return fmt.Sprintf("it dispatches %q, whose artifact may still be open, and the sweep never re-arms a "+
+			"collapse-only gap — a fresh episode would mint a new claimId and duplicate it", ga.Action)
+	}
+	return ""
 }
 
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the
