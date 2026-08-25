@@ -881,7 +881,7 @@ func ReconcileGrantLinks(
 			})
 			continue
 		}
-		if false && d.Undecodable {
+		if d.Undecodable {
 			// The gatherer already reported this exact key as
 			// GrantFindingUndecodable — a document DOES exist there, just not
 			// one this pass could read. Reporting `missing` as well would be a

@@ -1197,13 +1197,14 @@ func writeForgedGrantLink(t *testing.T, ctx context.Context, conn *substrate.Con
 	}
 }
 
-// writeRawGrantLink writes an ARBITRARY raw body at a grant-edge key,
-// bypassing writeForgedGrantLink's typed document — the only way to construct
-// an envelope this pass cannot decode at all.
-func writeRawGrantLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, rawBody string) {
+// writeRawLink writes an ARBITRARY raw body at a link key, bypassing
+// writeForgedGrantLink's typed document and its grant-key check — the way to
+// construct an envelope this pass cannot decode at all, and the way to put a
+// non-grant `lnk.permission.*` key in its path.
+func writeRawLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key string, rawBody string) {
 	t.Helper()
 	if _, err := conn.KVPut(ctx, CoreBucket, key, []byte(rawBody)); err != nil {
-		t.Fatalf("KVPut raw grant link %s: %v", key, err)
+		t.Fatalf("KVPut raw link %s: %v", key, err)
 	}
 }
 
@@ -1614,7 +1615,7 @@ func TestLoadPermissionReconciliation_DetectsGrantEdgeUndecodable(t *testing.T) 
 	}
 
 	edge := substrate.LinkKey("permission", PermissionID("sample-pkg", "SampleOp", "any"), "grantedBy", "role", bootstrap.RoleOperatorID)
-	writeRawGrantLink(t, ctx, conn, edge, `not json at all {{{`)
+	writeRawLink(t, ctx, conn, edge, `not json at all {{{`)
 
 	got, err := LoadPermissionReconciliation(ctx, conn)
 	if err != nil {
@@ -1628,5 +1629,80 @@ func TestLoadPermissionReconciliation_DetectsGrantEdgeUndecodable(t *testing.T) 
 		if d.Key == edge && d.Class != GrantFindingUndecodable {
 			t.Errorf("the edge produced an extra drift finding %+v — should be undecodable alone; missing must not also fire for an occupied-but-unreadable key", d)
 		}
+	}
+}
+
+// TestGrantLinkKeyParts pins which `lnk.permission.*` keys this plane owns.
+// The prefix is shared with the `forOperation` edges an install also writes,
+// which express no grant at all — reading one as a grant would report a
+// legitimate install artifact as an unaccountable escalation.
+func TestGrantLinkKeyParts(t *testing.T) {
+	const permID = "SWZpB4hde9askSkMWU7s"
+	const roleID = "u3RxRfKybLhhhsLe3NiT"
+	cases := []struct {
+		name           string
+		key            string
+		wantOK         bool
+		wantPermission string
+		wantRole       string
+	}{
+		{
+			name: "a grant edge", key: substrate.LinkKey("permission", permID, "grantedBy", "role", roleID),
+			wantOK: true, wantPermission: "vtx.permission." + permID, wantRole: "vtx.role." + roleID,
+		},
+		{name: "a forOperation edge shares the prefix and is not a grant", key: "lnk.permission." + permID + ".forOperation.meta." + roleID},
+		{name: "a grant onto something that is not a role", key: "lnk.permission." + permID + ".grantedBy.identity." + roleID},
+		{name: "a holdsRole edge", key: "lnk.identity." + permID + ".holdsRole.role." + roleID},
+		{name: "a permission vertex", key: "vtx.permission." + permID},
+		{name: "empty", key: ""},
+		{name: "unresolved ids", key: "lnk.permission..grantedBy.role."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			permissionKey, roleKey, ok := grantLinkKeyParts(tc.key)
+			if ok != tc.wantOK {
+				t.Fatalf("grantLinkKeyParts(%q) ok = %v, want %v", tc.key, ok, tc.wantOK)
+			}
+			if permissionKey != tc.wantPermission || roleKey != tc.wantRole {
+				t.Errorf("grantLinkKeyParts(%q) = (%q, %q), want (%q, %q)", tc.key, permissionKey, roleKey, tc.wantPermission, tc.wantRole)
+			}
+		})
+	}
+}
+
+// TestLoadPermissionReconciliation_ForOperationEdgeIsNotAGrant puts a live,
+// perfectly decodable `lnk.permission.<id>.forOperation.meta.<id>` edge in the
+// enumeration's path. It shares the `lnk.permission.` prefix, carries no
+// origin, and is declared by nobody — everything an unaccountable grant looks
+// like — but it grants nothing, so this plane must not classify it at all.
+func TestLoadPermissionReconciliation_ForOperationEdgeIsNotAGrant(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	if _, err := inst.Install(ctx, sampleDef("0.1.0")); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	permID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	metaID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("NewNanoID: %v", err)
+	}
+	edge := "lnk.permission." + permID + ".forOperation.meta." + metaID
+	writeRawLink(t, ctx, conn, edge, `{"class":"forOperation","isDeleted":false,"data":{},`+
+		`"sourceVertex":"vtx.permission.`+permID+`","targetVertex":"vtx.meta.`+metaID+`","localName":"forOperation"}`)
+
+	got, err := LoadPermissionReconciliation(ctx, conn)
+	if err != nil {
+		t.Fatalf("LoadPermissionReconciliation: %v", err)
+	}
+	for _, f := range append(append([]GrantFinding{}, got.GrantDrift...), got.GrantNotices...) {
+		if f.Key == edge {
+			t.Errorf("forOperation edge %s produced a grant finding %+v — it expresses no grant", edge, f)
+		}
+	}
+	if len(got.GrantDrift) != 0 {
+		t.Errorf("GrantDrift = %+v, want none", got.GrantDrift)
 	}
 }
