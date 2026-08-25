@@ -72,13 +72,13 @@ func collapseOnlyReclaim(action string, confirmedConcluded bool) bool {
 // dispatch-skip marker — and each has its own leg (see pass): closed/orphaned
 // marks clear promptly and expired leases reclaim with a fresh dispatch
 // episode; an orphaned confidence window is deleted; a retry budget re-derives
-// its gap's standing §10.8 issue for as long as the budget suppresses
-// dispatch. The sweep is the primary reclaim lane; the mark's
-// per-key TTL is only the backstop, so the sweep must observe an expired lease
-// while the key still exists (TTL = markTTLBackstopFactor × lease plus the
-// withDefaults SweepInterval ≤ MarkLease clamp guarantee that window). There
-// is no watcher on the weaver-state backing stream — the sweep is
-// interval-cadence by design.
+// its gap's standing §10.8 issue for as long as the budget suppresses dispatch,
+// and re-dispatches the gap itself once it stops. The sweep is the primary
+// reclaim lane; the mark's per-key TTL is only the backstop, so the sweep must
+// observe an expired lease while the key still exists (TTL =
+// markTTLBackstopFactor × lease plus the withDefaults SweepInterval ≤ MarkLease
+// clamp guarantee that window). There is no watcher on the weaver-state backing
+// stream — the sweep is interval-cadence by design.
 type sweeper struct {
 	engine   *Engine
 	interval time.Duration
@@ -494,10 +494,27 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 //	    where the target escalates "exhausted", else the standing
 //	    GapBudgetExhausted issue;
 //	(m) gap suppressed with a call in flight (inflight_<g>) → return: the lens
-//	    re-projects when the call lands and lane-1 re-delivers.
+//	    re-projects when the call lands and lane-1 re-delivers;
+//	(n) NOT suppressed, and no mark → retire the standing issue, then DISPATCH.
+//	    Arms (c)–(l) have already established exactly the state lane-1 dispatches
+//	    on — registered, active, planned, violating, entityKey-echoed,
+//	    un-suppressed — and markless on top of it, so for a row that has gone
+//	    quiet there is no delivery coming to act on it. The leg fires the episode
+//	    itself, through the same planGap → fireEpisode path the mark leg's
+//	    leg-advance uses. This is the re-arm: it is how a budget that stops
+//	    suppressing (an operator raising maxretries_<g> without touching anything
+//	    else, or draining the count outright) turns back into a dispatch rather
+//	    than into a quieter park. A `surface` gap is the one shape excluded — FR29
+//	    says it never dispatches, and the latch at its key is lane-1's.
 //
-// A count standing over a violating, un-suppressed, markless gap falls through
-// untouched: its chain still has budget left.
+// The (n) dispatch is bounded by the MARK, not by the sweep cadence: fireEpisode
+// CAS-creates the gap's mark on every path that publishes an op, so the next
+// pass finds that mark listed and stops at (c), and the mark's lease hands the
+// retry chain back to the mark leg (which paces and caps it as it does for every
+// other episode). A path that publishes nothing — an unbuildable plan, admission
+// control, a lost CAS, a failed create — leaves no mark and is re-attempted next
+// pass: the same bounded, self-alerting retry a failed reclaim already has, and
+// no op reaches the world from it.
 //
 // The count read here is the only one the pass needs: its value feeds the
 // suppression gate directly (gapSuppressedWithCount), so the gate does not
@@ -613,9 +630,53 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		}
 		return
 	}
-	// The gap is open, violating and markless, and its chain still has budget:
-	// nothing about this count contradicts the row, so the leg leaves it — the
-	// suppression this leg exists to explain is not in force.
+
+	// The re-arm. The gap is open, violating and markless, and its chain still
+	// has budget — nothing suppresses it, so lane-1 would dispatch it on the
+	// next delivery, and for a row that has gone quiet no delivery is coming.
+	// This leg is the only one that still visits such a gap, so it dispatches.
+	if ga.Action == actionSurface {
+		// FR29's surface gap never dispatches — lane-1 returns before it ever
+		// builds a plan — so a count left behind by the column's previous action
+		// is not a re-arm to act on, and planning one would raise an
+		// `error`-severity PlaybookConfigError against a correctly-authored
+		// playbook, every pass. The latch at this key is lane-1's here: it holds
+		// the surface issue for as long as the column is true, so this leg leaves
+		// it exactly as it leaves the orphan column's (arm (j)).
+		return
+	}
+	// The standing GapBudgetExhausted claims this gap has no attempt left. The
+	// suppression verdict just taken says it has one — and says so whether or
+	// not the dispatch below can be planned, since an unresolved reference or an
+	// admission deferral means the gap is blocked or paced, never exhausted. So
+	// the fact is retired here, level-driven on the READ, rather than riding on
+	// planGap's own clear, which a plan that fails to build never reaches.
+	// Nothing else raises at this key for a planned, non-surface column:
+	// issueKeyGapEntity has exactly two raise sites (evaluator.go), lane-1's
+	// surface branch — excluded by the guard above — and escalateExhaustedGap,
+	// which raises only with the budget SPENT, which this arm has excluded.
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	pl, actionRef, dec := e.planGap(ctx, target, targetID, entityID, gapColumn, ga, row, rowEntry.Revision, "")
+	if pl == nil {
+		// planGap has already surfaced why (an unresolved reference, a template
+		// data error, a playbook config error) on its own issue keys; this only
+		// attributes the attempt to the sweep. Nothing was published and no mark
+		// was taken, so the next pass re-attempts.
+		e.logger.Debug("weaver sweep: re-armed gap has no dispatchable plan; leaving it for the next pass",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
+		return
+	}
+	// A genuinely fresh episode (no mark to pin an action from, nothing to
+	// reclaim), so the CAS-create is the OCC: a lane-1 delivery racing this pass
+	// collapses on it exactly as two evaluations already do, and the loser drops.
+	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
+		// Either the mark's CAS-create failed (still markless — the next pass
+		// retries this same arm) or the op publish failed with the mark taken
+		// (the lease/reclaim cycle retries it like any other stuck episode).
+		// Bounded either way, and the mark keeps the second case off this arm.
+		e.logger.Warn("weaver sweep: re-arm dispatch did not complete cleanly; will retry",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+	}
 }
 
 // deleteCount deletes one `…__count` retry-budget dispatch-count at the
