@@ -924,7 +924,7 @@ carrying it, repaired for that row alone by the next projection, so it is keyed 
 retirement**: a column that parses, or that the next projection drops, clears that row's entry.
 That covers a column every delivery reads (`violating`, the gap columns themselves), but not one
 the engine reads only while a gap is open — `inflight_<g>` and `maxretries_<g>` are read by the
-suppression terms, and `admissionPriority` by the admission gate, so a gap closing ends the read
+suppression terms, and the admission priority column by the admission gate, so a gap closing ends the read
 that would retire them. Those are retired by the gap close instead: the companion pair with their
 own gap, and the priority entry when the entity's last candidate column closes. Without a
 retirement that does not depend on a further read, the entries would stand one per `(row, column)`
@@ -948,7 +948,7 @@ not — so a repaired row retires its own entry. Read each entry as "this row pr
 
 | Family | Retired on revoke by | Why |
 |---|---|---|
-| `gap:`, `gapConfig:`, `data:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
+| `gap:`, `gapConfig:`, `data:`, `template:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
 | `consumer:`, `timer:`, `target:<ownerVertexId>` | key clear | keyed by target alone |
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |

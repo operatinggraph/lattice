@@ -979,12 +979,14 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 //
 // The read is level-driven, like every other Weaver issue: a column that parses
 // — or is absent, the retraction-tombstone shape — RETIRES this row's standing
-// error for it. The reader runs on every delivery, so the next projection that
-// carries a usable value is the retirement; without it the entry would stand
-// for the process's lifetime, one per (entity, column), for a lens fault that
-// has been fixed. No caller of this key clears it anywhere else: the columns
-// read here (violating, inflight_<g>, maxretries_<g>, admissionPriority) have
-// no gap-close or plan-success path of their own.
+// error for it. For a column every delivery reads (violating, a gap column
+// itself) that is the whole lifecycle: the next projection carrying a usable
+// value is the retirement, and without it the entry would stand for the
+// process's lifetime, one per (entity, column), for a lens fault that has been
+// fixed. The columns read only while some gap is open — inflight_<g>,
+// maxretries_<g> — get no such next read once that gap closes, so
+// clearClosedMarks retires theirs at the close instead; issueKeyDataEntity's
+// doc holds the whole family's teardown map.
 func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
@@ -1013,6 +1015,10 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 // value is the caller's "no usable value" signal (ok=false), never a silent 0.
 // entityID names the row the bad value is in, and a usable (or absent) value
 // retires this row's standing error for the column, exactly as in boolColumn.
+// The columns read here — maxretries_<g> and the admission priority column —
+// are read only while some gap of the entity is open, so this read is not their
+// only retirement: clearClosedMarks retires them at the close that ends the
+// read (issueKeyDataEntity's doc holds the family's whole teardown map).
 func (e *Engine) intColumn(targetID, entityID string, row map[string]any, col string) (int, bool) {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]

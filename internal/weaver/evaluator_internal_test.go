@@ -2078,7 +2078,7 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 	defer cancel()
 	h := newHandlerHarness(t, ctx)
 
-	const targetID = "fixtureTemplateSince"
+	const targetID = "fixtureTemplateFactSince"
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
@@ -2124,7 +2124,7 @@ func TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose(t *testing.T) {
 	defer cancel()
 	h := newHandlerHarness(t, ctx)
 
-	const targetID = "fixtureTemplateClose"
+	const targetID = "fixtureTemplateGapClose"
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
@@ -2352,7 +2352,7 @@ func TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily(t *testing.T) {
 	defer cancel()
 	h := newHandlerHarness(t, ctx)
 
-	const targetID = "fixtureGapColumnType"
+	const targetID = "fixtureGapColumnBoolType"
 	const col = "missing_x"
 	h.seedTarget(&Target{
 		TargetID: targetID,
