@@ -365,10 +365,14 @@ func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entity
 	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
-// deleteDispatchCount clears one gap's dispatch-count — the §E budget reset, run
-// from clearClosedMarks on gap-close (the same level-reconciled path that deletes
-// the mark). A missing key is success (idempotent): a closed gap with no prior
-// dispatch never had a count.
+// deleteDispatchCount clears one gap's dispatch-count — the §E budget reset on
+// gap-close, run from clearClosedMarks (the same level-reconciled path that
+// deletes the mark) when a row delivery observes the close. It is not the only
+// reset: the reconciler's count leg (sweeper.deleteCount) performs the same
+// reset, revision-conditioned, for a gap whose row has gone quiet and whose
+// close no delivery will ever announce. Both are level-reconciled reads of the
+// same fact, so either observing it first is correct. A missing key is success
+// (idempotent): a closed gap with no prior dispatch never had a count.
 func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) error {
 	err := m.conn.KVDelete(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
 	if err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {

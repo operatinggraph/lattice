@@ -517,43 +517,74 @@ func TestFormatISODuration(t *testing.T) {
 	}
 }
 
-// TestAlert_LogsTheArrivalLoudlyAndTheRepeatQuietly pins the split between the
-// two surfaces alert writes to. The Health issue is a LATCH: every raise is
-// level-driven — the sweep re-evaluates the same condition every pass and every
-// redelivery re-evaluates it too — so the same fact is re-raised for as long as
-// it holds, and the cache is deliberately idempotent about that (`since` is
-// preserved). The log is a STREAM, so a fact that is merely still true must not
-// write a fresh Error every pass: one parked gap would otherwise emit thousands
-// of identical Error lines over the life of its retry budget and bury the
-// arrivals an operator needs. A raise that CHANGES the standing fact's severity
-// or code is an arrival again.
+// TestAlert_LogsTheArrivalLoudlyAndTheRepeatQuietly pins the two logging
+// postures apart, and the boundary between them is the point.
+//
+// alert logs EVERY raise at Error. Several families raise the same
+// (key, severity, code) with a message that differs per occurrence — a dropped
+// fired timer names the timer it dropped — so for them the message is the only
+// thing telling two genuinely distinct faults apart, and damping by
+// severity+code would discard every fault after the first.
+//
+// alertStanding is the narrow seam for a raise the engine re-derives on a
+// CADENCE: the §10.8 exhausted-gap raise is re-evaluated by every sweep pass
+// for as long as the retry budget stands, so its continuation logs at Debug and
+// only its arrival is loud. A change of severity or code at that key is a
+// different fact and arrives loudly again. The Health issue is identical either
+// way — the latch is what carries the fact; the level only decides how loudly
+// the stream says it just happened.
 func TestAlert_LogsTheArrivalLoudlyAndTheRepeatQuietly(t *testing.T) {
 	t.Parallel()
-	logs := &logCapture{}
-	e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
 
-	e.alert("gap:t1.e1.missing_x", "warning", "GapBudgetExhausted", "budget spent for e1")
-	e.alert("gap:t1.e1.missing_x", "warning", "GapBudgetExhausted", "budget spent for e1")
-	e.alert("gap:t1.e1.missing_x", "warning", "GapBudgetExhausted", "budget spent for e1")
+	t.Run("alertStanding damps the continuation of one standing fact", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+		for i := 0; i < 3; i++ {
+			e.alertStanding("gap:t1.e1.missing_x", "warning", "GapBudgetExhausted", "budget spent for e1")
+		}
+		levels := logs.levelsContaining("budget spent for e1")
+		if len(levels) != 3 {
+			t.Fatalf("captured %d records, want 3 (every raise still logs SOMETHING)", len(levels))
+		}
+		if levels[0] != slog.LevelError {
+			t.Fatalf("first raise logged at %v, want Error (the arrival is the loud one)", levels[0])
+		}
+		if levels[1] != slog.LevelDebug || levels[2] != slog.LevelDebug {
+			t.Fatalf("repeat raises logged at %v/%v, want Debug", levels[1], levels[2])
+		}
+		if issues := e.issues.snapshot(); len(issues) != 1 || issues[0].Code != "GapBudgetExhausted" {
+			t.Fatalf("the standing issue must be unaffected by the log level choice, got %+v", issues)
+		}
+	})
 
-	levels := logs.levelsContaining("budget spent for e1")
-	if len(levels) != 3 {
-		t.Fatalf("captured %d records, want 3 (every raise still logs SOMETHING)", len(levels))
-	}
-	if levels[0] != slog.LevelError {
-		t.Fatalf("first raise logged at %v, want Error (the arrival is the loud one)", levels[0])
-	}
-	if levels[1] != slog.LevelDebug || levels[2] != slog.LevelDebug {
-		t.Fatalf("repeat raises logged at %v/%v, want Debug", levels[1], levels[2])
-	}
-	if issues := e.issues.snapshot(); len(issues) != 1 || issues[0].Code != "GapBudgetExhausted" {
-		t.Fatalf("the standing issue must be unaffected by the log level choice, got %+v", issues)
-	}
+	t.Run("alertStanding re-arrives when the fact itself changes", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+		e.alertStanding("gap:t1.e1.missing_x", "warning", "GapBudgetExhausted", "budget spent for e1")
+		e.alertStanding("gap:t1.e1.missing_x", "error", "GapBudgetExhausted", "budget spent for e1")
+		e.alertStanding("gap:t1.e1.missing_x", "error", "SomethingElse", "budget spent for e1")
+		levels := logs.levelsContaining("budget spent for e1")
+		for i, lv := range levels {
+			if lv != slog.LevelError {
+				t.Fatalf("raise %d logged at %v, want Error (severity/code changed — a new fact)", i, lv)
+			}
+		}
+	})
 
-	// A severity change at the same key is a new fact, not a repeat.
-	e.alert("gap:t1.e1.missing_x", "error", "GapBudgetExhausted", "budget spent for e1")
-	levels = logs.levelsContaining("budget spent for e1")
-	if levels[3] != slog.LevelError {
-		t.Fatalf("a severity change logged at %v, want Error", levels[3])
-	}
+	// The defect this boundary exists to prevent: a family that raises one key
+	// with a DISTINCT message per occurrence must not have those occurrences
+	// damped away. Each is its own fault, and the Health slot keeps only the
+	// last, so the log is the only place the earlier ones survive at all.
+	t.Run("alert keeps every distinct fault at one key loud", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+		e.alert("timer:t1", "warning", "TimerDataError", "dropped fired timer for entity aaa")
+		e.alert("timer:t1", "warning", "TimerDataError", "dropped fired timer for entity bbb")
+		for _, entity := range []string{"aaa", "bbb"} {
+			levels := logs.levelsContaining("entity " + entity)
+			if len(levels) != 1 || levels[0] != slog.LevelError {
+				t.Fatalf("the drop naming %s logged %v, want exactly one Error", entity, levels)
+			}
+		}
+	})
 }

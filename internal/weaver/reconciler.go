@@ -422,66 +422,78 @@ func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64,
 // leg cannot carry Contract #10 §10.8's "never a silent park" promise for as
 // long as the suppression it explains actually lasts.
 //
-// The arms run in the order sweepMark established — the level reconcile
-// UNCONDITIONALLY above the registry and freeze gates, because retiring a
-// satisfied gap's bookkeeping is cleanup, never new dispatch, and a frozen or
-// mid-replay target must still shed a budget its gap has already closed:
+// The arms are ordered by what each one NEEDS, not by how the leg reads. Every
+// arm that RETIRES a fact — a stale issue, a budget whose chain has ended —
+// sits above every gate that says this leg may not ACT, because a gate answers
+// "may this leg dispatch" while a retirement answers "does this fact still
+// hold", and a frozen or mid-replay target must still shed bookkeeping its row
+// has already contradicted (sweepMark's own posture: closing an
+// already-satisfied gap is cleanup, never new dispatch). Only the two
+// DESTRUCTIVE steps sit below the gates:
 //
 //	(a) corrupt KEY → alert + delete, ungated: a key that does not split names
-//	    no target, so no gate can decide it (weaver-state is weaver-private, so
-//	    garbage otherwise lives forever — sweepMark arm (a));
-//	(b) row gone → retire this gap's standing issue and LEAVE the count. A
+//	    no target, so no gate could decide it (sweepMark arm (a));
+//	(b) body parses → retire any CorruptMark issue standing at this key. Reading
+//	    is not acting, so this runs above every gate: the issue is about a VALUE
+//	    that no longer exists, it is `error`-severity, and any error pins the
+//	    whole component unhealthy — leaving one standing for the length of an
+//	    operator freeze would be a lie the operator cannot clear. A body that
+//	    does NOT parse defers its delete to (h);
+//	(c) the gap's own mark is listed in THIS pass → return, before the row is
+//	    ever read: the mark leg visits this gap with the same row and reaches
+//	    the same escalation site, so a read here would be a duplicate every pass
+//	    of every actively-remediating gap. Bookkeeping this leg would have done
+//	    waits one pass, which is right — the mark leg owns the gap while its
+//	    mark stands;
+//	(d) row gone → retire this gap's standing issue and LEAVE the count. A
 //	    Refractor lens rebuild purges and re-replays a target's rows, during
 //	    which every entity reads row-gone; the count is the retry BOUND, so
 //	    deleting it there would re-arm exactly the storm the budget exists to
 //	    stop. The 128 h TTL collects a genuinely orphaned count. A failed row
 //	    read, or a row this build cannot parse, acts on nothing at all — never
 //	    act on unreadable evidence (sweepMark's posture);
-//	(c) missing_<gapColumn> not currently true → delete the count and retire
-//	    the issue: a PRESENT row whose column reads false is positive evidence
-//	    that the chain this budget bounded has ended, and no mark exists to
-//	    carry that level reconcile;
-//	(d) the gap's own mark is listed in THIS pass → return: the mark leg owns
-//	    the gap and reaches the same escalation site, so no gap is ever
-//	    escalated twice in one pass;
-//	(e) target not registered → return, deleting NOTHING: the registry replays
-//	    asynchronously, so "not installed" may be replay lag rather than
-//	    absence;
-//	(f) target DISABLED (the `__control` marker) → return: an operator freeze
+//	(e) missing_<gapColumn> not currently true → delete the count and retire the
+//	    issue: a PRESENT row whose column reads false is positive evidence that
+//	    the chain this budget bounded has ended, and no mark exists to carry
+//	    that level reconcile;
+//	(f) target not registered → return: the registry replays asynchronously, so
+//	    "not installed" may be replay lag rather than absence;
+//	(g) target DISABLED (the `__control` marker) → return: an operator freeze
 //	    (or the oscillation auto-freeze) stops NEW dispatch, and an escalation
 //	    is dispatch — the gate sweepMark arm (d) and lane-1's Ack-skip apply;
-//	(g) count BODY unparseable → alert + delete, BELOW the registry and freeze
-//	    gates above, because unlike a corrupt key it destroys durable state and
-//	    stopping exactly that during replay lag or under an operator freeze is
-//	    what those two gates are for — a rolling upgrade writing a body an older
-//	    build cannot parse is the realistic trigger. A garbled body is not
-//	    cosmetic otherwise: getDispatchCount errors on it, so gapSuppressed
-//	    reads its safe (dispatchable) side and incrementDispatchCount's
-//	    read-modify-write fails the same way, leaving a directOp gap retrying
-//	    unbounded — the exact outcome defaultDirectOpRetryBudget exists to
-//	    prevent. The delete re-arms from 0 (what the garbled body already
-//	    yields) and leaves a key that can count again;
-//	(h) row carries no §10.2 entityKey echo → return: the escalation feeds
+//	(h) the body did not parse → alert + delete, BELOW the two gates above,
+//	    because unlike (b) it destroys durable state and stopping that during
+//	    replay lag or under an operator freeze is what those gates are for — a
+//	    rolling upgrade writing a body an older build cannot parse is the
+//	    realistic trigger. A garbled body is not cosmetic otherwise:
+//	    getDispatchCount errors on it, so gapSuppressed reads its safe
+//	    (dispatchable) side and incrementDispatchCount's read-modify-write fails
+//	    the same way, leaving a directOp gap retrying unbounded — the exact
+//	    outcome defaultDirectOpRetryBudget exists to prevent. The delete re-arms
+//	    from 0 (what the garbled body already yields) and leaves a key that can
+//	    count again;
+//	(i) row carries no §10.2 entityKey echo → return: the escalation feeds
 //	    entityKey to planGap to name its candidate, and lane 1 itself declines
 //	    to dispatch a violating row missing it. The mark leg reaches the
 //	    escalation only past the reclaim's non-empty entityKey guard; this leg
 //	    has no mark to have been guarded, so it guards itself;
-//	(i) the playbook no longer names gapColumn → retire the issue and return,
-//	    never escalate: Weaver does not manage this gap any more, so an
-//	    escalation would be a dispatch nothing asked for — and on an
-//	    augur-escalating target it would not even terminate, since the
-//	    escalation re-creates the mark and re-arms the count that the mark
-//	    leg's own orphan arm then deletes. The count is left for the TTL: a
-//	    partially replayed target carries an intermediate definition that may
-//	    not yet name the gap (reclaim's warm-up gate says so);
-//	(j) row not violating → return, mirroring lane-1's L1 gate and the
+//	(j) the playbook no longer names gapColumn → return, escalating NOTHING.
+//	    Weaver has no remediation to bound here, and on an augur-escalating
+//	    target an escalation would not even terminate: it re-creates the mark
+//	    and re-arms the count, the mark leg's own orphan arm deletes that mark,
+//	    and the next pass escalates again. The standing issue is left exactly as
+//	    found — lane 1 raises at this same latch for this same column
+//	    (openGapColumns enumerates every true missing_*, playbook or not), so a
+//	    clear here would fight that raise, flap the latch and re-stamp its
+//	    `since` on every round trip. The orphan column has its own diagnostic;
+//	(k) row not violating → return, mirroring lane-1's L1 gate and the
 //	    reclaim's own violating gate: this leg never acts where lane-1 would
 //	    not;
-//	(k) gap suppressed with its retry budget SPENT → escalate, through the same
+//	(l) gap suppressed with its retry budget SPENT → escalate, through the same
 //	    escalateExhaustedGap site the mark leg calls — a fresh Augur episode
 //	    where the target escalates "exhausted", else the standing
 //	    GapBudgetExhausted issue;
-//	(l) gap suppressed with a call in flight (inflight_<g>) → return: the lens
+//	(m) gap suppressed with a call in flight (inflight_<g>) → return: the lens
 //	    re-projects when the call lands and lane-1 re-delivers.
 //
 // A count standing over a violating, un-suppressed, markless gap falls through
@@ -505,6 +517,17 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	if !ok {
 		s.deleteCorrupt(ctx, key, entry.Revision, corruptShapeCount,
 			"dispatch-count key is not <targetId>.<entityId>.<gapColumn>.__count")
+		return
+	}
+	var count dispatchCount
+	bodyErr := json.Unmarshal(entry.Value, &count)
+	if bodyErr == nil {
+		s.retireCorrupt(key)
+	}
+
+	if _, marked := listed[markKey(targetID, entityID, gapColumn)]; marked {
+		// The mark leg visits this same gap in this same pass, from the same
+		// row, and reaches the same escalation site from its own evidence.
 		return
 	}
 
@@ -539,11 +562,6 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		return
 	}
 
-	if _, marked := listed[markKey(targetID, entityID, gapColumn)]; marked {
-		// The mark leg visits this same gap in this same pass and reaches the
-		// same escalation site from its own evidence.
-		return
-	}
 	target, installed := e.source.target(targetID)
 	if !installed {
 		return
@@ -553,18 +571,16 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return
 	}
-	var count dispatchCount
-	if err := json.Unmarshal(entry.Value, &count); err != nil {
+	if bodyErr != nil {
 		// No reader can parse this budget, so it can never accumulate. Delete
 		// it (the next dispatch creates a countable one) and retire the issue
 		// with it: the leg reaches this gap only through the key it is about to
 		// remove, so a latch left standing here would never be revisited.
 		s.deleteCorrupt(ctx, key, entry.Revision, corruptShapeCount,
-			"dispatch-count value unparseable: "+err.Error())
+			"dispatch-count value unparseable: "+bodyErr.Error())
 		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
 		return
 	}
-	s.retireCorrupt(key)
 	entityKey, _ := row["entityKey"].(string)
 	if entityKey == "" {
 		// Without the §10.2 entityKey echo the escalation's own plan cannot name
@@ -576,10 +592,9 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	}
 	ga, planned := target.Gaps[gapColumn]
 	if !planned {
-		// The playbook no longer names this column: Weaver has no remediation to
-		// bound and no escalation to make. Retire the alarm (arm 7 cannot — an
-		// orphan column stays true) and leave the count to the TTL.
-		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+		// A column the playbook no longer names: nothing here to bound and
+		// nothing to escalate. The latch at this key belongs to lane 1, which
+		// raises for exactly this column too — leave it alone (see arm (j)).
 		return
 	}
 	if !e.boolColumn(targetID, entityID, row, "violating") {
