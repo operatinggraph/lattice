@@ -367,12 +367,13 @@ func main() {
 	// lattice.bootstrap.json and minting yet another epoch into the same bucket.
 	// Nothing consumes this script's exit code that way.
 	//
-	// Severity keys on HOLDERS, never on grants. The wildcard read-grant lens
-	// selects holders of any role NAMED `operator` and reads no grantedBy edge,
-	// so a holder the primordial table does not name already has
-	// installation-wide read of every RLS-protected table — while grants on a
-	// role nobody holds are unreachable.
-	fmt.Println("Checking for stranded operator roles (fails on unaccounted-for holders)...")
+	// Severity ranks by consequence, across all three lenses that read a role's
+	// holders: the two name-matching ones make ANY holder of an
+	// `operator`-named role root-equivalent with no grant required, and
+	// rbac-domain's cap.roles lens matches ANY held role and walks grantedBy, so
+	// live grants become reachable the moment any holder exists. Only a role no
+	// live identity holds is inert.
+	fmt.Println("Checking for stranded operator roles (fails on live authority)...")
 	switch {
 	case reportErr != nil:
 		fmt.Printf("  INFO  cannot check for stranded operator roles: kernel content comparison itself failed: %v\n", reportErr)
@@ -382,7 +383,7 @@ func main() {
 		fmt.Printf("  OK  no stranded operator roles\n")
 	default:
 		for _, stranded := range report.StrandedOperatorEpochs {
-			if stranded.Severity() == bootstrap.StrandedSeverityUnreachableAuthority {
+			if stranded.Severity() == bootstrap.StrandedSeverityLiveAuthority {
 				failures = append(failures, stranded.Report())
 				continue
 			}

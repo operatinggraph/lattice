@@ -120,13 +120,22 @@ func holdsRoleKey(identityKey, roleID string) string {
 }
 
 // seedCurrentEpoch plants this deployment's own operator role exactly as
-// primordial.go seeds it — vertex, canonicalName, a holder from the primordial
-// table, one grant. Every test carries it, so a predicate that ever reported
-// the LIVE kernel role reddens broadly rather than in one dedicated case.
+// primordial.go seeds it: vertex, canonicalName, one grant, and a holdsRole
+// edge from each of the six primordial identities that Contract #7 §7.2 gives
+// the role to (primordial.go:800-809; the Gateway deliberately gets none).
+//
+// Seeding all six matters beyond realism — the accounted-for set is read from
+// these very edges, so a fixture that seeded only the admin would leave every
+// service actor looking unaccounted-for and quietly make the wrong tests pass.
 func seedCurrentEpoch(ctx context.Context, t *testing.T, kv jetstream.KeyValue) {
 	t.Helper()
 	seedRole(ctx, t, kv, RoleOperatorID, "operator")
-	seedHolder(ctx, t, kv, BootstrapIdentityID, RoleOperatorID, false)
+	for _, id := range []string{
+		BootstrapIdentityID, LoomIdentityID, WeaverIdentityID,
+		BridgeIdentityID, ObjmgrIdentityID, PrivacyIdentityID,
+	} {
+		seedHolder(ctx, t, kv, id, RoleOperatorID, false)
+	}
 	seedGrant(ctx, t, kv, RoleOperatorID, false)
 }
 
@@ -227,17 +236,20 @@ func TestStrandedOperatorEpochs_RotatedIdFileStrandsPriorRole(t *testing.T) {
 	require.Empty(t, stranded[0].ReachableVia)
 	require.Zero(t, stranded[0].UnreadableEdges)
 	require.True(t, stranded[0].Protected, "the report carries data.protected as a repairability signal")
-	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity())
 }
 
-// TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice pins the
-// reachability rule AND the decision not to suppress. An identity the
-// primordial table names really can reach the role, so the finding drops to the
-// benign rank — but it is still reported, and it names the edge, because the
-// holdsRole create that produces it is an ordinary link create that the
-// commit-time kernel guard does not cover. A single AssignRole must not be able
-// to switch this check off.
-func TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice(t *testing.T) {
+// TestStrandedOperatorEpochs_AccountedHolderWithGrantsIsLiveAuthority is the
+// escalation an "already root, so nothing new" premise misses. rbac-domain's
+// capabilityRolesSpec (packages/rbac-domain/lenses.go:91-104) matches
+// `(identity)-[:holdsRole]->(role)<-[:grantedBy]-(perm)` with NO canonicalName
+// and NO id filter, so a current-operator identity that also holds a stranded
+// `operator` role gets every permission THAT role grants materialized into its
+// cap.roles document — and those grants are by construction not a subset of the
+// current role's; that non-overlap is the board row's whole premise.
+//
+// One unprotected AssignRole reaches this state, so it must fail the gate.
+func TestStrandedOperatorEpochs_AccountedHolderWithGrantsIsLiveAuthority(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -253,21 +265,23 @@ func TestStrandedOperatorEpochs_CurrentEpochHolderDemotesToNotice(t *testing.T) 
 
 	stranded, err := StrandedOperatorEpochs(ctx, kv)
 	require.NoError(t, err)
-	require.Len(t, stranded, 1, "a reachable role is demoted, never dropped")
+	require.Len(t, stranded, 1)
 	require.Equal(t, priorKey, stranded[0].RoleKey)
-	require.Empty(t, stranded[0].Holders, "a current-epoch identity is not an unaccounted-for holder")
+	require.Empty(t, stranded[0].Holders, "a verified current-operator identity is accounted for")
 	require.Equal(t, []string{holdsRoleKey(holder, priorID)}, stranded[0].ReachableVia,
-		"the report must name the suppressing edge")
-	require.Equal(t, StrandedSeverityReachable, stranded[0].Severity())
+		"the report must name the edge")
+	require.Len(t, stranded[0].GrantedBy, 1)
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity(),
+		"grants reachable through cap.roles are live authority even for an accounted-for holder")
 }
 
-// TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability pins Contract #7
-// §7.2's one exception. Six of the seven primordial identities hold the
-// operator role; the Gateway deliberately does not, being internet-facing and
-// scoped narrow. A holdsRole edge from it into an `operator` role is therefore
-// the most serious finding available here — the wildcard lens would hand the
-// internet-facing actor installation-wide read — and must never read as health.
-func TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability(t *testing.T) {
+// TestStrandedOperatorEpochs_AccountedHolderWithoutGrantsIsNoAddedAuthority is
+// the surviving benign case, and the only thing keeping the middle rank
+// inhabited: a verified current-operator identity holding a stranded role that
+// confers nothing. Both name-matching lenses hand such a holder exactly what
+// its current role already does, and capabilityRolesSpec has no grantedBy edge
+// to walk. Still reported — an ordinary AssignRole must not silence the check.
+func TestStrandedOperatorEpochs_AccountedHolderWithoutGrantsIsNoAddedAuthority(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -277,6 +291,72 @@ func TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability(t *testing.T) {
 	seedCurrentEpoch(ctx, t, kv)
 
 	priorID := newNanoID(t)
+	priorKey := seedRole(ctx, t, kv, priorID, "operator")
+	holder := seedHolder(ctx, t, kv, WeaverIdentityID, priorID, false)
+
+	stranded, err := StrandedOperatorEpochs(ctx, kv)
+	require.NoError(t, err)
+	require.Len(t, stranded, 1, "a benign finding is demoted, never dropped")
+	require.Equal(t, priorKey, stranded[0].RoleKey)
+	require.Empty(t, stranded[0].Holders)
+	require.Empty(t, stranded[0].GrantedBy)
+	require.Equal(t, []string{holdsRoleKey(holder, priorID)}, stranded[0].ReachableVia)
+	require.Equal(t, StrandedSeverityNoAddedAuthority, stranded[0].Severity())
+}
+
+// TestStrandedOperatorEpochs_PrimordialIdentityWithoutCurrentRoleIsNotAccounted
+// pins that the accounted-for set is read from the GRAPH, not assumed from the
+// id file. A primordial identity's holdsRole edge is an ordinary link and can
+// be revoked like any other; one whose current-role edge is gone but which
+// holds a stranded `operator` role is ACQUIRING root through the name-matching
+// lenses, not retaining it, so it must rank as an unaccounted-for holder.
+func TestStrandedOperatorEpochs_PrimordialIdentityWithoutCurrentRoleIsNotAccounted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	seedCurrentEpoch(ctx, t, kv)
+	// Revoke Loom's edge into the CURRENT operator role, leaving the identity
+	// itself live and the other five untouched.
+	seedHolder(ctx, t, kv, LoomIdentityID, RoleOperatorID, true)
+
+	priorID := newNanoID(t)
+	seedRole(ctx, t, kv, priorID, "operator")
+	loom := seedHolder(ctx, t, kv, LoomIdentityID, priorID, false)
+
+	stranded, err := StrandedOperatorEpochs(ctx, kv)
+	require.NoError(t, err)
+	require.Len(t, stranded, 1)
+	require.Equal(t, []string{loom}, stranded[0].Holders,
+		"membership in the id table is not proof of holding the current role")
+	require.Empty(t, stranded[0].ReachableVia)
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity())
+}
+
+// TestStrandedOperatorEpochs_GatewayHolderIsNeverAccounted pins Contract #7
+// §7.2's one exception, in the state where it bites.
+//
+// Six of the seven primordial identities hold the operator role; the Gateway
+// deliberately does not, being internet-facing and scoped narrow
+// (primordial.go:492-502). The fixture gives it the CURRENT operator role
+// anyway — the "fix" an operator might reach for — and then a stranded one. If
+// the Gateway were a member of the primordial set, that current-role edge would
+// launder it into the accounted-for census and demote the finding. It must not:
+// the internet-facing actor holding an `operator`-named role is the most
+// serious finding this scan can make, never evidence of health.
+func TestStrandedOperatorEpochs_GatewayHolderIsNeverAccounted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	seedCurrentEpoch(ctx, t, kv)
+	seedHolder(ctx, t, kv, GatewayIdentityID, RoleOperatorID, false)
+
+	priorID := newNanoID(t)
 	seedRole(ctx, t, kv, priorID, "operator")
 	gateway := seedHolder(ctx, t, kv, GatewayIdentityID, priorID, false)
 
@@ -284,9 +364,9 @@ func TestStrandedOperatorEpochs_GatewayHolderIsNeverReachability(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stranded, 1)
 	require.Equal(t, []string{gateway}, stranded[0].Holders,
-		"the Gateway does not hold the operator role, so holding one is a finding")
+		"the Gateway can never account for a stranded role, even holding the current one")
 	require.Empty(t, stranded[0].ReachableVia)
-	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity())
 }
 
 // TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress is the focused
@@ -313,14 +393,14 @@ func TestStrandedOperatorEpochs_PriorEpochHolderDoesNotSuppress(t *testing.T) {
 	require.Len(t, stranded, 1)
 	require.Equal(t, priorKey, stranded[0].RoleKey)
 	require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
-	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity())
 }
 
-// TestStrandedOperatorEpochs_UnaccountedHolderOutranksAReachableOne pins the
-// rank ordering: a current-epoch holder alongside an unaccounted-for one must
+// TestStrandedOperatorEpochs_UnaccountedHolderOutranksAnAccountedOne pins the
+// rank ordering: an accounted-for holder alongside an unaccounted-for one must
 // not demote the finding, or the demotion path would be the silencer the
 // classification was introduced to prevent.
-func TestStrandedOperatorEpochs_UnaccountedHolderOutranksAReachableOne(t *testing.T) {
+func TestStrandedOperatorEpochs_UnaccountedHolderOutranksAnAccountedOne(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -339,8 +419,8 @@ func TestStrandedOperatorEpochs_UnaccountedHolderOutranksAReachableOne(t *testin
 	require.Len(t, stranded, 1)
 	require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
 	require.Len(t, stranded[0].ReachableVia, 1)
-	require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity(),
-		"an AssignRole to a current-epoch identity must not demote a live escalation")
+	require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity(),
+		"an AssignRole to an accounted-for identity must not demote a live escalation")
 }
 
 // TestStrandedOperatorEpochs_DeadEndpointsAreNotLiveEdges covers the liveness
@@ -420,7 +500,7 @@ func TestStrandedOperatorEpochs_DeadEndpointsAreNotLiveEdges(t *testing.T) {
 		require.Empty(t, stranded[0].ReachableVia,
 			"a tombstoned identity reaches nothing, so its surviving edge cannot demote")
 		require.Equal(t, []string{foreignHolder}, stranded[0].Holders)
-		require.Equal(t, StrandedSeverityUnreachableAuthority, stranded[0].Severity())
+		require.Equal(t, StrandedSeverityLiveAuthority, stranded[0].Severity())
 	})
 }
 
@@ -612,9 +692,9 @@ func TestStrandedOperatorEpochs_ReadFailureAbortsRatherThanReportingClean(t *tes
 
 // TestStrandedOperatorEpochs_UnreadableEdgeIsCountedNotDropped pins the
 // remaining silent-skip. An unparseable edge document cannot be classified, and
-// every such skip can only shrink the holder list severity keys on — so it is
-// surfaced as a count that marks the report a lower bound, rather than folded
-// into a clean-looking number.
+// every such skip can only shrink the holder list severity keys on — so it both
+// marks the report a lower bound AND lifts the finding off the inert rank. A
+// clean exit status over an unread fact is the failure mode this prevents.
 func TestStrandedOperatorEpochs_UnreadableEdgeIsCountedNotDropped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -635,8 +715,10 @@ func TestStrandedOperatorEpochs_UnreadableEdgeIsCountedNotDropped(t *testing.T) 
 	require.Len(t, stranded, 1)
 	require.Empty(t, stranded[0].Holders)
 	require.Equal(t, 1, stranded[0].UnreadableEdges)
-	require.Contains(t, stranded[0].Report(), "lower bound",
-		"a report built on an unreadable edge must say the counts are a lower bound")
+	require.Equal(t, StrandedSeverityNoAddedAuthority, stranded[0].Severity(),
+		"an unclassifiable holdsRole edge might be a holder — unknown must not rank as inert")
+	require.Contains(t, stranded[0].Report(), "LOWER BOUND",
+		"and the line must say so rather than reading as an all-clear")
 }
 
 // TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses pins the sharpest
@@ -665,35 +747,49 @@ func TestStrandedOperatorEpochs_UnloadedPrimordialTableRefuses(t *testing.T) {
 	require.Empty(t, strandedNilKV)
 }
 
-// TestStrandedOperatorEpoch_SeverityAndReport covers the classification and its
-// rendering without a bucket, including the property that made a bare count
-// wrong: the report has to name the keys an operator would act on.
+// TestStrandedOperatorEpoch_SeverityAndReport covers every rank boundary
+// without a bucket, and the property that made a bare count wrong: the report
+// has to name the keys an operator would act on.
 func TestStrandedOperatorEpoch_SeverityAndReport(t *testing.T) {
 	role := "vtx.role.aaaaaaaaaaaaaaaaaaaa"
 	holder := "vtx.identity.bbbbbbbbbbbbbbbbbbbb"
 	perm := "vtx.permission.cccccccccccccccccccc"
 	edge := "lnk.identity.dddddddddddddddddddd.holdsRole.role.aaaaaaaaaaaaaaaaaaaa"
 
-	severe := StrandedOperatorEpoch{RoleKey: role, Holders: []string{holder}}
-	require.Equal(t, StrandedSeverityUnreachableAuthority, severe.Severity(),
-		"a holder with no grants is the dangerous state — the wildcard lens needs no grant")
-	require.Contains(t, severe.Report(), holder, "the holder key is the remedy, not a statistic")
-	require.Contains(t, severe.Report(), "Remedy: tombstone")
+	unaccounted := StrandedOperatorEpoch{RoleKey: role, Holders: []string{holder}}
+	require.Equal(t, StrandedSeverityLiveAuthority, unaccounted.Severity(),
+		"an unaccounted-for holder is root-equivalent through the name-matching lenses, grants or not")
+	require.Contains(t, unaccounted.Report(), holder, "the holder key is the remedy, not a statistic")
+	require.Contains(t, unaccounted.Report(), "Remedy: tombstone")
 
-	inertWithGrants := StrandedOperatorEpoch{RoleKey: role, GrantedBy: []string{perm}}
-	require.Equal(t, StrandedSeverityInert, inertWithGrants.Severity(),
-		"grants with no holder are unreachable")
-	require.Contains(t, inertWithGrants.Report(), perm)
+	accountedWithGrants := StrandedOperatorEpoch{
+		RoleKey: role, ReachableVia: []string{edge}, GrantedBy: []string{perm},
+	}
+	require.Equal(t, StrandedSeverityLiveAuthority, accountedWithGrants.Severity(),
+		"cap.roles walks grantedBy for ANY held role, so grants are authority the current role lacks")
+	require.Contains(t, accountedWithGrants.Report(), perm)
+	require.Contains(t, accountedWithGrants.Report(), edge)
 
-	reachable := StrandedOperatorEpoch{RoleKey: role, ReachableVia: []string{edge}}
-	require.Equal(t, StrandedSeverityReachable, reachable.Severity())
-	require.Contains(t, reachable.Report(), edge, "the demoting edge must be named")
+	accountedNoGrants := StrandedOperatorEpoch{RoleKey: role, ReachableVia: []string{edge}}
+	require.Equal(t, StrandedSeverityNoAddedAuthority, accountedNoGrants.Severity(),
+		"an accounted-for holder of a role conferring nothing gains nothing")
+	require.Contains(t, accountedNoGrants.Report(), edge, "the demoting edge must be named")
+
+	unknown := StrandedOperatorEpoch{RoleKey: role, UnreadableEdges: 2}
+	require.Equal(t, StrandedSeverityNoAddedAuthority, unknown.Severity(),
+		"an unread edge might be a holder — unknown outranks inert")
+	require.Contains(t, unknown.Report(), "LOWER BOUND")
+
+	inert := StrandedOperatorEpoch{RoleKey: role, GrantedBy: []string{perm}}
+	require.Equal(t, StrandedSeverityInert, inert.Severity(),
+		"grants with no holder are unreachable — nothing walks grantedBy except through a holder")
+	require.Contains(t, inert.Report(), perm)
 
 	many := make([]string, strandedReportKeysShown+4)
 	for i := range many {
 		many[i] = perm
 	}
-	require.Contains(t, StrandedOperatorEpoch{RoleKey: role, GrantedBy: many}.Report(), "+4 more",
+	require.Contains(t, StrandedOperatorEpoch{RoleKey: role, Holders: many}.Report(), "+4 more",
 		"a long list must be elided by count, not printed whole")
 }
 

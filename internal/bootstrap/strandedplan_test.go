@@ -82,7 +82,7 @@ func TestReconcilePrimordial_StrandedEpochIsAdvisoryNotFatal(t *testing.T) {
 	report, err := ReadKernelReport(ctx, kv)
 	require.NoError(t, err)
 	require.Len(t, report.StrandedOperatorEpochs, 1, "fixture sanity: the scan must see it")
-	require.Equal(t, StrandedSeverityUnreachableAuthority, report.StrandedOperatorEpochs[0].Severity(),
+	require.Equal(t, StrandedSeverityLiveAuthority, report.StrandedOperatorEpochs[0].Severity(),
 		"fixture sanity: at the rank that fails verify-kernel")
 
 	second, err := seeder.ReconcilePrimordial(ctx)

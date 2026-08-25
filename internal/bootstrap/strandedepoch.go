@@ -13,9 +13,13 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// strandedScanPageSize bounds how many enumerated keys the scan holds in flight
-// per read pass, and gives the walk a place to re-check the context between
-// pages.
+// strandedScanPageSize is the granularity at which a walk hands enumerated keys
+// to its visitor and re-checks the context.
+//
+// It is not a bound on the enumeration: listDistinctKeys collects every
+// matching key before paging begins, and the pages are re-slices of that one
+// collection. Its only effect is that a long read pass notices an expired
+// deadline partway through rather than at the end.
 const strandedScanPageSize = 500
 
 // strandedReportKeysShown caps how many keys one report line names before it
@@ -34,53 +38,74 @@ const strandedReportKeysShown = 5
 // possible author — rbac-domain's CreateRole takes an arbitrary canonicalName
 // (packages/rbac-domain/ddls.go:263-269) — which is why the predicate claims
 // only what it proves: an `operator`-named role this table does not name.
+//
+// Three lenses decide what a finding means, and they read the graph three
+// different ways. Any claim here about consequence is grounded in all three:
+//
+//   - internal/bootstrap/lenses.go's CapabilityReadWildcardGrantsLens
+//     (lenses.go:353-366) matches holders of ANY role NAMED `operator` and
+//     projects ('*', 'cap-read.root') — installation-wide read, no grant
+//     required.
+//   - internal/bootstrap/lenses.go's CapabilityLens (lenses.go:135-148) also
+//     matches on the role NAME, and returns a fixed LITERAL kernel grant set,
+//     so it confers the same thing whichever `operator` role is held.
+//   - packages/rbac-domain/lenses.go's capabilityRolesSpec (lenses.go:91-104)
+//     matches on NOTHING — no canonicalName filter, no id filter — and walks
+//     `(identity)-[:holdsRole]->(role)<-[:grantedBy]-(perm)`, materializing
+//     every permission the held role grants into the actor's cap.roles.<actor>
+//     document. This is the one that makes a stranded role's GRANTS reachable
+//     by whoever holds it, and it is why grants are severity-bearing the moment
+//     any holder exists.
 type StrandedOperatorEpoch struct {
 	// RoleKey is the role's vertex key, vtx.role.<id>.
 	RoleKey string
 	// Holders holds the sorted vtx.identity.<id> keys of live identities that
-	// hold this role and that the current primordial table does not name.
+	// hold this role and are NOT verified holders of the current operator role.
 	//
-	// This is what decides severity. The wildcard read-grant lens
-	// (lenses.go:353-366) selects holders of ANY role whose canonicalName is
-	// `operator` — by NAME, reading no grantedBy edge at all — and projects
-	// ('*', 'cap-read.root'); the RLS policy accepts an anchor_id='*' row with
-	// no grant_source filter (internal/refractor/adapter/rls.go:198-201). So a
-	// single live holder here is installation-wide read of every RLS-protected
-	// table, held by an actor this deployment's id file does not name.
+	// Any entry here is a failure on its own. Through the two name-matching
+	// lenses above, such a holder has installation-wide read and the kernel
+	// meta-mutation grant set, and this deployment cannot account for it.
 	//
 	// The keys are reported, never just counted: each one names the holdsRole
-	// edge to tombstone, so they are the remedy, and an operator has to see that
-	// the holder is itself residue to understand the island.
+	// edge to tombstone, so they are the remedy.
 	Holders []string
-	// ReachableVia holds the sorted holdsRole link keys by which identities the
-	// current primordial table DOES name reach this role.
+	// ReachableVia holds the sorted holdsRole link keys by which identities
+	// VERIFIED to hold this deployment's current operator role reach this one.
 	//
-	// They demote an otherwise-inert finding to a notice — and are named in it
-	// rather than deleting it. The edge that produces one is an ordinary link
-	// create, which the commit-time kernel guard does not cover (it skips
-	// creates, step8_commit.go:728-729, and protectedRootKey returns "" for a
-	// link key anyway), so a single AssignRole could otherwise silence this scan
-	// permanently while removing none of the residue. A finding that still has
-	// live Holders stays severe regardless of what is recorded here.
+	// Verified means observed in the graph — a live holdsRole edge into the
+	// current role, both endpoints live — intersected with the primordial
+	// identity set. It is not inferred from the id file: a primordial identity
+	// whose current-role edge was revoked is an ordinary identity, and one
+	// holding a stranded `operator` role instead would be re-acquiring root
+	// through the name-matching lenses, not retaining it.
+	//
+	// These demote a finding only when the stranded role confers NO live
+	// grants. With grants present, capabilityRolesSpec materializes them into
+	// the holder's capability document — grants the current role does not
+	// carry, by construction — so the finding stays a failure.
+	//
+	// They are recorded rather than dropped because the edge that produces one
+	// is an ordinary link create, which the commit-time kernel guard does not
+	// cover (it skips creates, step8_commit.go:728-729, and protectedRootKey
+	// returns "" for a link key anyway). A single AssignRole must not be able
+	// to switch this check off.
 	ReachableVia []string
 	// GrantedBy holds the sorted vtx.permission.<id> keys this role still
 	// confers through a live grantedBy edge to a live permission vertex.
 	//
-	// Detail, never severity. Every consumer of a permission reaches it through
-	// the holder's holdsRole edge (lenses.go:136-137,
-	// packages/rbac-domain/lenses.go:92-93), so grants on a role no live
-	// identity holds authorize nothing: a long GrantedBy beside an empty
-	// Holders is inert residue, and the reverse — holders with no grants — is
-	// the dangerous state, because the wildcard lens above needs no grant.
+	// Severity-bearing whenever any holder exists, via capabilityRolesSpec
+	// above: those permissions land in the holder's capability document
+	// verbatim. Only with zero live holders are they inert — nothing walks a
+	// grantedBy edge except through a holder.
 	GrantedBy []string
 	// UnreadableEdges counts the link or endpoint documents that could not be
 	// classified while building the three lists above — a body that would not
 	// parse, or a link key that would not.
 	//
-	// It is surfaced because every such skip can only shrink Holders, and
-	// severity keys on Holders: an unreported drop would silently downgrade a
-	// failure to a notice. Non-zero means the counts are a lower bound and the
-	// report says so.
+	// Non-zero means the lists are a LOWER BOUND, and the finding is ranked at
+	// least NoAddedAuthority for that reason: an unparseable holdsRole edge
+	// might be a holder, and "unknown" ranked as "inert" would be a clean exit
+	// status over an unread fact.
 	UnreadableEdges int
 	// Protected mirrors the role vertex's data.protected, and predicts
 	// repairability rather than authority: with it set, rejectProtectedMutations
@@ -92,37 +117,45 @@ type StrandedOperatorEpoch struct {
 	Protected bool
 }
 
-// StrandedSeverity ranks one finding for the gates that report it.
+// StrandedSeverity ranks one finding by CONSEQUENCE — what holding this role
+// yields that its holders do not already have — rather than by who holds it.
 type StrandedSeverity int
 
 const (
-	// StrandedSeverityInert is a role no live identity holds. Its grants
-	// authorize nothing, because every path to a permission runs through a
-	// holder's holdsRole edge.
+	// StrandedSeverityInert is a role no live identity holds, whose edges were
+	// all readable. Nothing walks a grantedBy edge except through a holder, so
+	// its grants authorize nobody.
 	StrandedSeverityInert StrandedSeverity = iota
-	// StrandedSeverityReachable is a role held only by identities the current
-	// primordial table names. They already hold the current operator role, so
-	// the wildcard lens grants them nothing they did not have; the finding is
-	// still reported so that an ordinary AssignRole cannot silence the check.
-	StrandedSeverityReachable
-	// StrandedSeverityUnreachableAuthority is a role held by at least one
-	// identity the current primordial table does not name — live root-equivalent
-	// read access in the hands of an actor this deployment cannot account for.
-	StrandedSeverityUnreachableAuthority
+	// StrandedSeverityNoAddedAuthority is a role that confers nothing beyond
+	// what its holders already hold: held only by verified current-operator
+	// identities, and carrying no live grants. It is reported, never dropped,
+	// so that an ordinary AssignRole cannot silence the check. An
+	// unclassifiable edge also lands here — an unread fact is not an all-clear.
+	StrandedSeverityNoAddedAuthority
+	// StrandedSeverityLiveAuthority is a role that yields authority somebody
+	// does not otherwise have: a holder this deployment cannot account for, or
+	// any holder at all combined with live grants that capabilityRolesSpec
+	// materializes into that holder's capability document.
+	StrandedSeverityLiveAuthority
 )
 
-// Severity ranks the finding. It keys on HOLDERS, not on grants: the wildcard
-// read-grant lens selects on the role's canonicalName and reads no grantedBy
-// edge, so a holder with zero grants already has installation-wide read, while
-// grants with no holder are unreachable. An unaccounted-for holder outranks
-// any number of current-epoch ones — otherwise a single AssignRole would demote
-// a live escalation to a notice.
+// Severity ranks the finding.
+//
+// It keys on holders AND grants together, because the three lenses split the
+// question. The two name-matching lenses make ANY holder of an `operator`-named
+// role root-equivalent, which is why an unaccounted-for holder is a failure
+// with no grants at all. capabilityRolesSpec matches on nothing and walks
+// grantedBy, which is why grants become a failure the moment any holder exists
+// — including a verified current-operator one, whose current role by
+// construction does not carry the stranded role's accumulated grants.
 func (e StrandedOperatorEpoch) Severity() StrandedSeverity {
 	switch {
 	case len(e.Holders) > 0:
-		return StrandedSeverityUnreachableAuthority
-	case len(e.ReachableVia) > 0:
-		return StrandedSeverityReachable
+		return StrandedSeverityLiveAuthority
+	case len(e.ReachableVia) > 0 && len(e.GrantedBy) > 0:
+		return StrandedSeverityLiveAuthority
+	case len(e.ReachableVia) > 0, e.UnreadableEdges > 0:
+		return StrandedSeverityNoAddedAuthority
 	default:
 		return StrandedSeverityInert
 	}
@@ -132,22 +165,36 @@ func (e StrandedOperatorEpoch) Severity() StrandedSeverity {
 // an operator would act on rather than counting them.
 func (e StrandedOperatorEpoch) Report() string {
 	const preamble = "STRANDED OPERATOR ROLE: %s is named `operator` but is not this deployment's operator role"
+	const remedy = " Remedy: tombstone the holdsRole edge(s) into %s — link mutations are not kernel-protected, so this needs no wipe."
 	var b strings.Builder
-	switch e.Severity() {
-	case StrandedSeverityUnreachableAuthority:
+	switch {
+	case len(e.Holders) > 0:
 		fmt.Fprintf(&b, preamble+
-			", and is held by %d identity(ies) the primordial table does not name: %s."+
-			" The wildcard read-grant lens selects on the role NAME and needs no grant, so each holder has"+
-			" installation-wide read of every RLS-protected table. Live grants (%d): %s."+
-			" Remedy: tombstone those holdsRole edges into %s — link mutations are not kernel-protected,"+
-			" so this needs no wipe.",
-			e.RoleKey, len(e.Holders), summarizeKeys(e.Holders), len(e.GrantedBy), summarizeKeys(e.GrantedBy), e.RoleKey)
-	case StrandedSeverityReachable:
+			", and is held by %d identity(ies) this deployment cannot account for: %s."+
+			" Holding an `operator`-NAMED role is root-equivalent on both planes — the wildcard read-grant"+
+			" lens gives installation-wide read and the capability lens gives the kernel meta-grant set,"+
+			" neither of which reads a grantedBy edge. Live grants (%d): %s."+remedy,
+			e.RoleKey, len(e.Holders), summarizeKeys(e.Holders),
+			len(e.GrantedBy), summarizeKeys(e.GrantedBy), e.RoleKey)
+	case len(e.ReachableVia) > 0 && len(e.GrantedBy) > 0:
 		fmt.Fprintf(&b, preamble+
-			", and is held only by current-epoch identities, via %s. Live grants (%d): %s."+
+			", and is held by current-operator identities via %s while still conferring %d live grant(s): %s."+
+			" rbac-domain's cap.roles lens matches ANY held role and walks grantedBy, so those grants are"+
+			" materialized into the holders' capability documents — authority the current operator role"+
+			" does not carry."+remedy,
+			e.RoleKey, summarizeKeys(e.ReachableVia), len(e.GrantedBy), summarizeKeys(e.GrantedBy), e.RoleKey)
+	case len(e.ReachableVia) > 0:
+		fmt.Fprintf(&b, preamble+
+			", and is held only by verified current-operator identities, via %s, and confers no live grants."+
 			" Reported rather than dropped: the holdsRole create that produces this is not kernel-protected,"+
 			" so it must not be able to silence the check.",
-			e.RoleKey, summarizeKeys(e.ReachableVia), len(e.GrantedBy), summarizeKeys(e.GrantedBy))
+			e.RoleKey, summarizeKeys(e.ReachableVia))
+	case e.UnreadableEdges > 0:
+		fmt.Fprintf(&b, preamble+
+			", and no holder could be established — but %d edge document(s) would not parse, so this is"+
+			" a LOWER BOUND, not an all-clear. Live grants (%d): %s.",
+			e.RoleKey, e.UnreadableEdges, len(e.GrantedBy), summarizeKeys(e.GrantedBy))
+		return b.String()
 	default:
 		fmt.Fprintf(&b, preamble+
 			", and no live identity holds it. Live grants (%d): %s — unreachable without a holder.",
@@ -180,11 +227,16 @@ func summarizeKeys(keys []string) string {
 // vtx.role/vtx.permission carrying the PRIOR epoch's provenance (§2). Nothing
 // here writes.
 //
-// Every candidate that clears the predicate is REPORTED, including one a
-// current-epoch identity holds. Classification, not suppression, is what the
-// caller acts on: Holders drives severity, ReachableVia demotes. A scan that
-// silently dropped a candidate on the strength of one holdsRole edge could be
-// switched off for good by a single ordinary AssignRole.
+// Every candidate that clears the predicate is REPORTED, and the caller acts on
+// its Severity. Nothing is suppressed: a scan that dropped a candidate on the
+// strength of one holdsRole edge could be switched off for good by a single
+// ordinary AssignRole.
+//
+// The set of identities that count as accounted-for is read from the GRAPH, not
+// from the id file — one listing of live holdsRole edges into the current
+// operator role, intersected with the primordial identity set, exactly the
+// question SystemActorKeys asks. Built once, and only once a candidate exists,
+// so a single-epoch deployment never pays for it.
 //
 // Reachability is a question about the current epoch, not about holders in
 // general. A re-bootstrap on a regenerated id file deletes nothing — the seed
@@ -197,8 +249,8 @@ func summarizeKeys(keys []string) string {
 // Returns ErrPrimordialIDsUnloaded, before reading the graph at all, when the
 // primordial identifier table has not been loaded. Both halves of the predicate
 // are keyed on that table: an unloaded one (empty string) makes the id filter
-// match EVERY role and leaves the current-epoch identity set empty, so the live
-// kernel role would be reported with its own holders counted as strangers — the
+// match EVERY role and leaves the accounted-for set empty, so the live kernel
+// role would be reported with its own holders counted as strangers — the
 // inverse of the truth (§5 dossier). Mirrors SystemActorKeys.
 //
 // A read that fails for any reason other than "key absent" aborts the scan with
@@ -212,14 +264,13 @@ func summarizeKeys(keys []string) string {
 // silently. That direction is safe — a missed report, never an invented one,
 // the same posture scanKernelOrphans documents — and nothing here writes, so an
 // unreadable role cannot be made worse by being left alone. Unreadable EDGES of
-// a role that IS reported are counted instead of being dropped quietly, because
-// those can only shrink the holder list severity keys on.
+// a role that IS reported are counted instead, and raise its rank.
 func StrandedOperatorEpochs(ctx context.Context, kv jetstream.KeyValue) ([]StrandedOperatorEpoch, error) {
 	if RoleOperatorID == "" {
 		return nil, fmt.Errorf("%w: roleOperator", ErrPrimordialIDsUnloaded)
 	}
 
-	currentEpochIdentities := currentEpochIdentityKeys()
+	var accountedFor map[string]bool
 
 	var out []StrandedOperatorEpoch
 	err := walkDistinctKeys(ctx, kv, "vtx.role.*.canonicalName", func(page []string) error {
@@ -246,13 +297,20 @@ func StrandedOperatorEpochs(ctx context.Context, kv jetstream.KeyValue) ([]Stran
 				continue
 			}
 
+			if accountedFor == nil {
+				accountedFor, err = currentOperatorHolders(ctx, kv)
+				if err != nil {
+					return err
+				}
+			}
+
 			holdsRole, holderDrops, err := liveEdgesInto(ctx, kv, "lnk.identity.*.holdsRole.role."+roleID, "identity")
 			if err != nil {
 				return err
 			}
 			var holders, reachableVia []string
 			for _, edge := range holdsRole {
-				if currentEpochIdentities[edge.sourceKey] {
+				if accountedFor[edge.sourceKey] {
 					reachableVia = append(reachableVia, edge.linkKey)
 					continue
 				}
@@ -288,19 +346,54 @@ func StrandedOperatorEpochs(ctx context.Context, kv jetstream.KeyValue) ([]Stran
 	return out, nil
 }
 
-// currentEpochIdentityKeys returns the vertex keys of the identities this
-// deployment's loaded primordial table names as holders of the operator role.
+// currentOperatorHolders returns the identities that VERIFIABLY hold this
+// deployment's current operator role: a live holdsRole edge into it, both
+// endpoints live, from an identity the primordial table names.
 //
-// Contract #7 §7.2 fixes the membership at six: the primordial admin plus the
-// Loom, Weaver, Bridge, object-store-manager and privacy service actors. The
-// Gateway identity is deliberately excluded — the contract states it does NOT
-// hold the operator role and is scoped narrow precisely because it is
-// internet-facing, so a holdsRole edge from it into an `operator` role is the
-// most serious finding this scan can make, never evidence of health.
+// Read from the graph rather than assumed from the id table, because the
+// premise being tested is exactly the one an id table cannot answer. A
+// primordial identity's holdsRole edge is an ordinary link (§4.1) and can be
+// revoked like any other; an identity whose current-role edge is gone but which
+// holds a stranded `operator` role is ACQUIRING root through the name-matching
+// lenses, not retaining it, and must not be counted as accounted-for.
+//
+// The intersection with the primordial set is what keeps this from being
+// circular: a prior epoch's admin also holds an `operator` role, and only the
+// id table can say which identities this deployment is entitled to.
+//
+// Unreadable edges on this listing are not counted into any finding: a dropped
+// edge here can only SHRINK the accounted-for set, which promotes findings
+// rather than hiding them.
+func currentOperatorHolders(ctx context.Context, kv jetstream.KeyValue) (map[string]bool, error) {
+	edges, _, err := liveEdgesInto(ctx, kv, "lnk.identity.*.holdsRole.role."+RoleOperatorID, "identity")
+	if err != nil {
+		return nil, err
+	}
+	primordial := primordialIdentityKeys()
+	holders := make(map[string]bool, len(edges))
+	for _, edge := range edges {
+		if primordial[edge.sourceKey] {
+			holders[edge.sourceKey] = true
+		}
+	}
+	return holders, nil
+}
+
+// primordialIdentityKeys returns the vertex keys of the six identities this
+// deployment's primordial table seeds with a holdsRole edge into the operator
+// role: the admin plus the Loom, Weaver, Bridge, object-store-manager and
+// privacy service actors (primordial.go:800-809 and the link keys at
+// nanoid.go:620-625).
+//
+// The Gateway identity is deliberately absent. Contract #7 §7.2 states it does
+// NOT hold the operator role and is scoped narrow precisely because it is
+// internet-facing (primordial.go:492-502), so a holdsRole edge from it into an
+// `operator` role is the most serious finding this scan can make, never
+// evidence of health.
 //
 // Each id is re-checked before use because substrate.VertexKey panics on a
 // malformed NanoID, and a reporting scan must not be able to take a boot down.
-func currentEpochIdentityKeys() map[string]bool {
+func primordialIdentityKeys() map[string]bool {
 	ids := []string{
 		BootstrapIdentityID,
 		LoomIdentityID,
@@ -334,8 +427,8 @@ type liveEdge struct {
 // anything exists to exercise it. A grantedBy edge to a tombstoned permission
 // confers nothing, and a holdsRole edge from a tombstoned identity reaches
 // nothing — counting either would report authority that is not there. This is
-// also the single live set the current-epoch reachability test reads, so a
-// tombstoned service identity whose edge survived cannot suppress a finding.
+// also the single live set the accounted-for census reads, so a tombstoned
+// service identity whose edge survived cannot launder a finding.
 //
 // The source is derived from the link KEY, never from a body field: under
 // Contract #1 §1.1 the source is the key's first (type, id) pair, so the key is
@@ -384,8 +477,8 @@ func liveEdgesInto(ctx context.Context, kv jetstream.KeyValue, filter, sourceTyp
 
 // walkDistinctKeys enumerates the keys matching a KV subject filter and hands
 // them to visit in sorted, de-duplicated pages of at most strandedScanPageSize,
-// re-checking the context between pages so a long walk cannot run on past its
-// deadline and then be mistaken for a complete one.
+// re-checking the context between pages so a long read pass cannot run on past
+// its deadline and then be mistaken for a complete one.
 func walkDistinctKeys(ctx context.Context, kv jetstream.KeyValue, filter string, visit func(page []string) error) error {
 	keys, err := listDistinctKeys(ctx, kv, filter)
 	if err != nil {
