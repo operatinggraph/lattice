@@ -293,30 +293,31 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 			}
 		}
 
-		// Stranded primordial-epoch roles
-		// (primordial-epoch-stranded-authority-design.md §4). The split is on
-		// live grants, not on the role and never on its holders: an `operator`
-		// role from a prior epoch that still confers permissions is an
-		// authority island on the trust boundary that no current-epoch identity
-		// can reach and no census above can see, so it is a FAILURE — the green
-		// is the defect this row is about. With every grant revoked the same
-		// role is dead weight, which belongs with the orphans in notices. The
-		// prior-epoch holders are reported as detail because they are part of
-		// the island being described, and they move nothing.
+		// Stranded operator roles
+		// (primordial-epoch-stranded-authority-design.md §4) are NOTICES here,
+		// in both directions, however severe. `verify-kernel` is where this
+		// class moves an exit status; this function's failures slice must not,
+		// because it is not only a report.
+		//
+		// cmd/lattice/bootstrap calls VerifyKernel and exits 1 on any failure
+		// (bootstrap.go:134,165), and `make up` uses that exit code as its
+		// freshness oracle (Makefile:202). A failure here sends `make up` down
+		// the mismatch path, where `bootstrap probe-empty` exits 1 on a
+		// populated bucket and the recipe deletes lattice.bootstrap.json and
+		// mints a fresh primordial set into it (Makefile:211-214) — stranding
+		// the current epoch too, once per invocation, with the verify output
+		// discarded to /dev/null. A detector that makes the condition it
+		// detects worse on every run is worse than no detector.
+		//
+		// The silence this class is about still ends here: bootstrap verify
+		// prints every notice, before its pass/fail line, on both the text and
+		// JSON outputs (bootstrap.go:141-155).
 		switch {
 		case report.StrandedScanErr != nil:
-			notices = append(notices, fmt.Sprintf("CANNOT check for stranded primordial-epoch roles: %v", report.StrandedScanErr))
+			notices = append(notices, fmt.Sprintf("CANNOT check for stranded operator roles: %v", report.StrandedScanErr))
 		default:
 			for _, stranded := range report.StrandedOperatorEpochs {
-				if len(stranded.GrantedBy) == 0 {
-					notices = append(notices, fmt.Sprintf(
-						"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch and reachable from no current-epoch identity (no live grants, %d prior-epoch holder(s))",
-						stranded.RoleKey, len(stranded.Holders)))
-					continue
-				}
-				failures = append(failures, fmt.Sprintf(
-					"STRANDED OPERATOR ROLE: %s is from a prior bootstrap epoch, reachable from no current-epoch identity, and still confers %d live grant(s) (%d prior-epoch holder(s))",
-					stranded.RoleKey, len(stranded.GrantedBy), len(stranded.Holders)))
+				notices = append(notices, stranded.Report())
 			}
 		}
 	}

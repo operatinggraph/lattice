@@ -175,12 +175,19 @@ func planReconcile(ctx context.Context, kv jetstream.KeyValue) (reconcilePlan, e
 	plan.orphanedAspects = orphanedAspects
 	plan.orphanScanErr = orphanErr
 
-	strandedEpochs, strandedErr := StrandedOperatorEpochs(ctx, kv)
+	strandedEpochs, strandedErr := strandedScan(ctx, kv)
 	plan.strandedEpochs = strandedEpochs
 	plan.strandedScanErr = strandedErr
 
 	return plan, nil
 }
+
+// strandedScan is the stranded-epoch census planReconcile runs, indirected so a
+// test can substitute a failing one. The posture it exists to protect is not
+// visible in the projection alone: rewriting the two lines above to
+// `return plan, strandedErr` would turn every boot on a stranded bucket into a
+// failed boot, and no assertion over the report shape would notice.
+var strandedScan = StrandedOperatorEpochs
 
 // scanKernelOrphans enumerates every vtx.meta.* key Core KV holds that this
 // binary does not build, and classifies each against the
@@ -409,13 +416,14 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 	// moves an exit status.
 	switch {
 	case plan.strandedScanErr != nil:
-		s.logger.Warn("cannot scan for stranded primordial-epoch roles — kernel repair proceeds without that report",
+		s.logger.Warn("cannot scan for stranded operator roles — kernel repair proceeds without that report",
 			"error", plan.strandedScanErr)
 	default:
 		for _, stranded := range plan.strandedEpochs {
-			s.logger.Warn("operator role from a prior bootstrap epoch is live and reachable from no current-epoch identity — reported, not retired",
-				"key", stranded.RoleKey, "liveGrants", len(stranded.GrantedBy),
-				"priorEpochHolders", len(stranded.Holders), "protected", stranded.Protected)
+			s.logger.Warn("role named `operator` that this deployment's primordial table does not name — reported, not retired",
+				"key", stranded.RoleKey, "unaccountedHolders", stranded.Holders,
+				"reachableVia", stranded.ReachableVia, "liveGrants", len(stranded.GrantedBy),
+				"unreadableEdges", stranded.UnreadableEdges, "protected", stranded.Protected)
 		}
 	}
 
