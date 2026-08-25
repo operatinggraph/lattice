@@ -536,17 +536,30 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		}
 		var pl *plan
 		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
-			// A plan built and about to fire disproves BOTH standing facts: the
-			// playbook resolves (the config issue), and this entity's gap has an
+			// A plan built and about to fire disproves THREE standing facts: the
+			// playbook resolves (the config issue), this entity's gap has an
 			// attempt left after all (its GapBudgetExhausted, which a raised
 			// maxretries_<g> or an escalation can make stale without the gap ever
-			// having closed).
+			// having closed), and this row's template references resolve (the
+			// template issue — building the plan IS the resolution).
+			//
+			// The gap column's own `data:` entry is deliberately NOT cleared here:
+			// a built plan says nothing about whether missing_<g> carries a §10.2
+			// bool, and that entry is raised and retired by boolColumn's own read.
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
-			e.issues.clear(issueKeyDataEntity(targetID, entityID, col))
+			e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
 			return pl, actionRef, substrate.Ack
 		}
 	}
+	// Every arm below is re-derived on a CADENCE, not on an event: for a parked
+	// gap this switch runs once per sweep pass — from reclaim, the count leg's
+	// re-arm, the goal leg-advance and escalateExhaustedGap — for the whole life
+	// of the dispatch-count TTL. All three therefore log through alertPaced,
+	// which keeps the Health latch set on every pass and rations the loud
+	// records to one an hour per key. None of these faults is event-shaped: each
+	// message is a pure function of its key and the current failure, so nothing
+	// unique is lost to a damped pass.
 	switch perr.kind {
 	case errTransient:
 		// An unresolved reference may be replay lag or a permanent config
@@ -554,18 +567,22 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		// bounded redelivery cadence (never a hot loop) and surface to
 		// Health until it resolves; the issue clears on the first
 		// successful plan.
-		e.logger.Warn("weaver: gap dispatch deferred; nak with delay for redelivery",
-			"targetId", targetID, "entityId", entityID, "gap", col, "reason", perr.msg)
-		e.issues.set(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
-			"target "+targetID+" gap "+col+": "+perr.msg)
+		// The message names the entity even though the KEY does not. A gap's
+		// `pattern` / `operation` resolve through resolveStringParam, so a
+		// row.<column> template makes the unresolved reference genuinely
+		// per-row: two entities can reach this one target-scoped key with
+		// different unresolved refs. The latch keeps only the newest of them and
+		// the pacing damps the rest to Debug, so a record that did not name its
+		// row would leave neither surface able to say which row.
+		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "UnresolvedReference",
+			"target "+targetID+" entity "+entityID+" gap "+col+" dispatch deferred for redelivery: "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
-		msg := "target " + targetID + " entity " + entityID + " gap " + col + ": " + perr.msg
-		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "TemplateDataError", msg)
+		e.alertPaced(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError",
+			"target "+targetID+" entity "+entityID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.Ack
 	default:
-		e.alert(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
+		e.alertPaced(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
 		return nil, "", substrate.Ack
 	}
@@ -582,6 +599,13 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 // pending-admission entry across redeliveries.
 func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter string, row map[string]any) bool {
 	if target.Admission == nil {
+		// No policy means the priority column is never read again, so a standing
+		// data error for it describes a read that no longer happens — the same
+		// shape as boolColumn's absent-column clear, and the only site that can
+		// see it: clearClosedMarks retires that entry when no candidate column of
+		// the entity stayed open, and an entity whose gap never closes never
+		// reaches it. Idempotent when none stands.
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, admissionPriorityColumn))
 		return true
 	}
 	priority, _ := e.intColumn(targetID, entityID, row, admissionPriorityColumn)
@@ -815,27 +839,48 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	if row == nil {
-		// The entity is deleted: every data error its columns ever raised
-		// describes a row that no longer exists. The column readers retire
-		// those on a value that parses, but a deleted entity projects no
-		// values at all, so this is the only pass that can retire them —
-		// by prefix, since the set of columns that raised is not knowable
+		// The entity is deleted: every data and template error its columns ever
+		// raised describes a row that no longer exists. The column readers
+		// retire the data ones on a value that parses, but a deleted entity
+		// projects no values at all, so this is the only pass that can retire
+		// them — by prefix, since the set of columns that raised is not knowable
 		// from an empty body.
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
+		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
 	}
+	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
 		if row != nil && e.boolColumn(targetID, entityID, row, col) {
+			// anyOpen answers exactly one question — is any gap left that could
+			// READ the admission priority column — so only a gap that can reach
+			// the admission gate may hold it true. A `surface` gap cannot:
+			// dispatchGap returns at its own branch before planGap, so admitGap
+			// is never called for it. Letting one hold the answer open would pin
+			// an entry about a column nothing will read again. Every other
+			// candidate counts, including one the playbook does not name: an
+			// augur escalation plans those, and planning reaches the gate.
+			if !surfaceOnlyGap(target.Gaps[col]) {
+				anyOpen = true
+			}
 			continue
 		}
 		// A closed gap retires the standing issues at this column along with its
 		// bookkeeping — a row that stopped reporting the column closed it, a
 		// retraction tombstone included (its body carries no gap columns at
-		// all). Both scopes retire here, and the config one is not incidental:
-		// this is the ONLY clear site a GapWithoutPlaybook / UnresolvedReference
-		// / PlaybookConfigError can reach when the column simply stops being
-		// reported, since every other config clear requires the config to have
-		// been FIXED. Idempotent when neither stands.
-		e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
+		// all). retireClosedGapIssues carries the per-(entity, gap) set, shared
+		// with the sweep legs that observe the same end from a mark or a
+		// dispatch-count.
+		//
+		// The config scope retires here and only here, and that is not
+		// incidental: this is the ONLY clear site a GapWithoutPlaybook /
+		// UnresolvedReference / PlaybookConfigError can reach when the column
+		// simply stops being reported, since every other config clear requires
+		// the config to have been FIXED. It stays on this leg because it is a
+		// fact about the whole target, and only a walk of the candidate set —
+		// which the sweep, holding one mark, does not have — observes a column
+		// leaving rather than one entity's gap ending. Idempotent when none
+		// stands.
+		e.retireClosedGapIssues(targetID, entityID, col)
 		e.issues.clear(issueKeyGapConfig(targetID, col))
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
@@ -874,7 +919,85 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 			}
 		}
 	}
+	// The admission priority column is read once per gap DISPATCH (admitGap), so
+	// an entity with no dispatchable candidate still open has no read left to
+	// retire a malformed value's entry. It is scoped to the entity, not to any
+	// one gap, so the retirement is too: clearing it per closing gap would erase
+	// the entry a multi-gap entity's still-open gap keeps re-raising, and the two
+	// would flap. A clear can only flap against a leg that RE-RAISES, which is
+	// why anyOpen counts dispatchable candidates rather than open ones.
+	if !anyOpen {
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, admissionPriorityColumn))
+	}
 	return ok
+}
+
+// retireGapPlanIssues retires the facts that end when this gap stops being a
+// DISPATCHABLE candidate for this entity: the template fault at its plan, and
+// the two companion columns' data errors. All three are raised only on the way
+// to a dispatch — planGap's template resolution, and the suppression terms'
+// reads of inflight_<g> / maxretries_<g> — so once nothing will plan this gap
+// for this row again, nothing will read them again either.
+//
+// THREE legs can be the one that observes that end, and any of them can be the
+// only one that does. Lane-1's clearClosedMarks sees it when a delivery stops
+// reporting the column. The sweep's deleteMark sees it from a mark — gap closed,
+// playbook dropped the gap, or target gone — and its deleteCount sees the same
+// closed-column fact from a dispatch-count when no mark survives to carry the
+// reconcile. For a row that has gone QUIET the sweep legs are the only ones that
+// run at all; for a gap the playbook no longer names they are the only ones that
+// CAN (markCandidateColumns is the playbook's gaps keys unioned with the row's
+// missing_* columns, so a gap dropped from both is never walked again). One
+// function keeps a retirement added for one leg from silently missing the others.
+//
+// gapColumn is not assumed to carry the missing_ prefix. On the lane-1 leg the
+// candidate set guarantees it, but the sweep legs derive it from a weaver-state
+// KEY, and splitMarkKey validates the segment's token shape rather than the
+// column convention — so a key stranded by an earlier package version reaches
+// here with any legal token, and a gap column that is not missing_*-shaped
+// simply has no companions to name.
+//
+// Three things deliberately do NOT retire here. The gap column's own data entry
+// says "missing_<g> is not the §10.2 bool", and the read that decides that is
+// the same read that brought any of these legs to this point — it has just
+// settled the entry itself, so clearing it again would retire a fault the
+// current row is still carrying. The target-scoped config issue is one fact for
+// every row of the target, and one entity's gap ending is not evidence about the
+// playbook. The admission priority entry belongs to the ENTITY rather than to
+// any one gap: it may retire only when the entity has no DISPATCHABLE candidate
+// column still open, which a caller holding a single gap cannot see, and a
+// per-gap clear would erase an entry the entity's other open gap keeps
+// re-raising. That omission costs the sweep legs a retirement they could
+// otherwise make — a sweep-driven planGap reaches admitGap and raises it — and
+// it is kept anyway, because the no-flap rule outranks the extra coverage;
+// admitGap's own no-policy short-circuit and clearClosedMarks' walk of the
+// entity's whole candidate set are where that entry retires.
+func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
+	e.issues.clear(issueKeyTemplateEntity(targetID, entityID, gapColumn))
+	if g, isGapColumn := strings.CutPrefix(gapColumn, gapColumnPrefix); isGapColumn {
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, inflightColumnPrefix+g))
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, maxretriesColumnPrefix+g))
+	}
+}
+
+// retireClosedGapIssues retires everything a gap ACTUALLY ENDING retires: the
+// plan-side facts above, plus the gap's own entity-scoped latch (a `surface`
+// gap standing open, a spent retry budget).
+//
+// The split from retireGapPlanIssues is the difference between "this gap ended"
+// and "this gap is no longer dispatchable", and it is load-bearing. A gap the
+// playbook dropped is undispatchable but may still read TRUE in the row, and
+// lane-1 goes on raising at issueKeyGapEntity for exactly that column —
+// openGapColumns enumerates every true missing_* whether the playbook names it
+// or not, and escalateExhaustedGap raises there through alertStanding. Clearing
+// that latch from a leg that only knows the gap left the PLAYBOOK makes it flap:
+// the next delivery re-raises, the arrival test sees an empty latch and logs a
+// spurious Error, and the fresh stamp destroys the age of a fact that never
+// stopped holding. Only a leg that observed the column itself go false — or the
+// row cease to exist — may retire it.
+func (e *Engine) retireClosedGapIssues(targetID, entityID, gapColumn string) {
+	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	e.retireGapPlanIssues(targetID, entityID, gapColumn)
 }
 
 // releaseCompletedLeg reports whether gap col's currently-pinned goal-mode
@@ -951,12 +1074,14 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 //
 // The read is level-driven, like every other Weaver issue: a column that parses
 // — or is absent, the retraction-tombstone shape — RETIRES this row's standing
-// error for it. The reader runs on every delivery, so the next projection that
-// carries a usable value is the retirement; without it the entry would stand
-// for the process's lifetime, one per (entity, column), for a lens fault that
-// has been fixed. No caller of this key clears it anywhere else: the columns
-// read here (violating, inflight_<g>, maxretries_<g>, admissionPriority) have
-// no gap-close or plan-success path of their own.
+// error for it. For a column every delivery reads (violating, a gap column
+// itself) that is the whole lifecycle: the next projection carrying a usable
+// value is the retirement, and without it the entry would stand for the
+// process's lifetime, one per (entity, column), for a lens fault that has been
+// fixed. The columns read only while some gap is open — inflight_<g>,
+// maxretries_<g> — get no such next read once that gap closes, so
+// clearClosedMarks retires theirs at the close instead; issueKeyDataEntity's
+// doc holds the whole family's teardown map.
 func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
@@ -985,6 +1110,10 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 // value is the caller's "no usable value" signal (ok=false), never a silent 0.
 // entityID names the row the bad value is in, and a usable (or absent) value
 // retires this row's standing error for the column, exactly as in boolColumn.
+// The columns read here — maxretries_<g> and the admission priority column —
+// are read only while some gap of the entity is open, so this read is not their
+// only retirement: clearClosedMarks retires them at the close that ends the
+// read (issueKeyDataEntity's doc holds the family's whole teardown map).
 func (e *Engine) intColumn(targetID, entityID string, row map[string]any, col string) (int, bool) {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
@@ -1368,6 +1497,54 @@ func (e *Engine) alertStanding(key, severity, code, message string) {
 	e.issues.set(key, severity, code, message)
 }
 
+// alertPaced records a Health KV issue exactly as alert does, but rations its
+// LOUD log records to one per logPaceInterval per key — logging the rest at
+// Debug — and it rations them against a CLOCK rather than against the latch.
+// That is the whole difference from alertStanding, and it is what planGap's
+// failure switch needs. planGap re-derives its faults once per sweep pass for a
+// parked gap, and the keys it raises at are cleared by paths that are not
+// evidence the fault ended: issueKeyGapConfig is target-scoped, so one entity's
+// column closing retires the fact another entity's parked gap is still raising.
+// An arrival test built on latch presence therefore reports an arrival on
+// essentially every pass, which is no damping at all. A clock survives the
+// clear, so the pacing holds.
+//
+// The loud level is the caller's own severity — an `error` raise stays Error, a
+// `warning` raise stays Warn — so each arm of the switch keeps the loudness it
+// had; unlike alert, which is Error for every caller.
+//
+// The Health entry is set on EVERY call, carrying the newest message: latch
+// semantics are untouched, and only the log is paced. The consequence is that a
+// family varying its message at one key has the variants inside a window damped
+// to Debug, where only the newest survives in the latch — so every caller of
+// this seam must name its subject in the message it raises, since the log is
+// where a damped variant survives at all. Two rules bound the damping: a record
+// is never dropped, only lowered (an unrecoverable record is worse than a noisy
+// one — weaver-exhausted-gap-durable-stop-design.md §3.2b), and Message is never
+// the thing damped on, since an embedded count or timestamp would re-arrive
+// every pass and restore the flood. A change of severity or code is a different
+// fact and is loud immediately, whatever the window says.
+//
+// The pace entry also carries the fault's ARRIVAL, and that is what dates the
+// Health entry here (setSince) rather than the latch's own stamp. Making the log
+// quiet without this would leave an operator no surface at all from which to
+// recover how long a config fault has stood: clear deletes since, and the clears
+// this seam's target-scoped key sees are other entities' closes rather than
+// repairs, so a latch-borne stamp resets about once a pass. pacedRaise's doc
+// states what the pace-borne one can and cannot distinguish.
+func (e *Engine) alertPaced(key, severity, code, message string) {
+	loud, arrivedAt := e.issues.pacedRaise(key, severity, code, time.Now())
+	switch {
+	case !loud:
+		e.logger.Debug("weaver: " + message)
+	case severity == "error":
+		e.logger.Error("weaver: " + message)
+	default:
+		e.logger.Warn("weaver: " + message)
+	}
+	e.issues.setSince(key, severity, code, message, arrivedAt)
+}
+
 // The issue-key family prefixes. Every key constructor below and every
 // teardown prefix in issueKeyTargetPrefixes is built from these, so a key shape
 // and the prefix that retires it cannot drift apart.
@@ -1375,15 +1552,17 @@ const (
 	issuePrefixGapEntity = "gap:"
 	issuePrefixGapConfig = "gapConfig:"
 	issuePrefixData      = "data:"
+	issuePrefixTemplate  = "template:"
 )
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
-// teardown must retire wholesale (Engine.Revoke). These are the families whose
-// keys carry a segment below the target — a per-entity or per-gap one — so a
-// teardown has no single key to name and must clear by prefix; the families
-// keyed by targetID alone (consumer, timer, owner) are cleared by key at the
-// same site. Each prefix ends in the "." separator, which is what keeps "t1."
-// from matching a key under "t10.".
+// teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,
+// row-data and template families. These are the families whose keys carry a
+// segment below the target — a per-entity or per-gap one — so a teardown has no
+// single key to name and must clear by prefix; the families keyed by targetID
+// alone (consumer, timer, owner) are cleared by key at the same site. Each
+// prefix ends in the "." separator, which is what keeps "t1." from matching a
+// key under "t10.".
 //
 // Every family whose entries a revoke would otherwise strand belongs here: a
 // revoked target delivers no rows and keeps no marks, so each of these has no
@@ -1397,6 +1576,7 @@ func issueKeyTargetPrefixes(targetID string) []string {
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
 		issuePrefixData + targetID + ".",
+		issuePrefixTemplate + targetID + ".",
 	}
 }
 
@@ -1421,21 +1601,66 @@ func issueKeyGapConfig(targetID, col string) string {
 }
 
 // issueKeyDataEntity keys a per-ROW data error — a column whose value is not
-// the §10.2 type the reader expects, a template reference that resolves null, a
-// freshUntil that is not an RFC3339 string, a violating row carrying no
-// entityKey echo. Every one of these is a fact about the one projected row that
-// carries the bad value, fixed for that row alone by the next projection, so the
-// key carries the entity segment: N malformed rows are N independent issues, and
-// repairing one never retires another's. The entity the body may be missing is
-// always available from the row KEY (splitRowKey), so every member of the family
-// can be keyed this way. Three teardowns cover the whole family: the read that
-// raises an entry also retires it, clearClosedMarks prefix-clears the entity on
-// its deletion tombstone, and a target leaving by either route — Revoke or
-// registry removal (reconcileConsumers) — prefix-clears the target
-// (issueKeyTargetPrefixes). Between them no exit from handleRow leaves an entry
-// no later pass can reach.
+// the §10.2 type the reader expects, a freshUntil that is not an RFC3339
+// string, a violating row carrying no entityKey echo. Every one of these is a
+// fact about the one projected row that carries the bad value, fixed for that
+// row alone by the next projection, so the key carries the entity segment: N
+// malformed rows are N independent issues, and repairing one never retires
+// another's. The entity the body may be missing is always available from the
+// row KEY (splitRowKey), so every member of the family can be keyed this way.
+//
+// Retirement is per COLUMN, and which site owns it depends on whether the
+// column keeps being read. A column every delivery reads — violating, the
+// entityKey echo, a gap column itself, freshUntil — is retired by its own next
+// clean read, so the next projection carrying a usable value (or dropping the
+// column) is the retirement. The columns read only while some gap is open —
+// the per-gap companions inflight_<g> and maxretries_<g>, and the admission
+// priority column — have no such next read once that gap closes, so the close
+// retires them: the companions with their own gap (retireGapPlanIssues, called
+// by every leg that can observe a gap ending — lane-1's clearClosedMarks and
+// the sweep's deleteMark and deleteCount), and the priority entry from
+// clearClosedMarks once no candidate column of the entity stayed open, or from
+// admitGap when the target stops declaring an admission policy at all. Above those, two prefix teardowns
+// cover a subject that leaves entirely — clearClosedMarks prefix-clears the
+// entity on its deletion tombstone, and a target leaving by either route
+// (Revoke or registry removal via reconcileConsumers) prefix-clears the target
+// (issueKeyTargetPrefixes).
+//
+// Two exits from handleRow retire nothing, and neither strands an entry. A row
+// whose body does not parse returns before the reconcile: that is unreadable
+// evidence, not evidence of repair (the sweep takes the same posture on the same
+// input), and every retirement above stays reachable by the next delivery that
+// does parse — including the deletion tombstone, whose empty body needs no
+// parsing. A row for an unregistered target returns at the registry miss, and
+// its target's whole issue set is retired wholesale by the reconcileConsumers
+// teardown that made the registration go away.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
+}
+
+// issueKeyTemplateEntity keys a per-ROW PLAN-BUILD data error: a gap whose
+// action template references resolve null against this row, so no episode can
+// be built for it (planGap's TemplateDataError). Like the data family it is a
+// fact about one (target, entity, gap column) triple, and like it the fact is
+// repaired for that row alone by the next projection.
+//
+// It cannot share issueKeyDataEntity's key at the gap column, because that key
+// already latches a DIFFERENT fact about the same column — "missing_<g> is not
+// the §10.2 bool", raised and retired by boolColumn. Every delivery that
+// reaches planGap for a column has already read that column as a bool at least
+// twice (clearClosedMarks' candidate walk, then openGapColumns), and each read
+// retires whatever stands at the shared key. A template fault would therefore
+// be erased and re-raised on every single delivery, re-stamping its `since` to
+// now and reporting a week-old fault as seconds old (Contract #5 §5.5). Its own
+// prefix keeps the two facts on independent timelines.
+//
+// Its teardowns are the data family's without the "read is the retirement"
+// leg, which no column read can serve here: a successful plan retires it (that
+// IS the fact ending), retireGapPlanIssues retires it on whichever leg observes
+// the gap end, and the entity-tombstone and target prefix clears cover a subject
+// that leaves entirely.
+func issueKeyTemplateEntity(targetID, entityID, col string) string {
+	return issuePrefixTemplate + targetID + "." + entityID + "." + col
 }
 
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {

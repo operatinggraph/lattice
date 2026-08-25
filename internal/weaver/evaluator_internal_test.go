@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -306,7 +307,7 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		}
 		// A row's own template data is that row's fact: keyed per entity, so a
 		// sibling row resolving cleanly cannot retire it.
-		if _, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, "missing_onboarding")); !ok {
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, "missing_onboarding")); !ok {
 			t.Fatalf("the TemplateDataError must be keyed to the row that carries it, issues = %+v",
 				h.engine.issues.snapshot())
 		}
@@ -2030,4 +2031,636 @@ func TestHandleRow_NeverEscalatesASurfaceGap(t *testing.T) {
 		t.Fatalf("issue code = %q, want Surface: the escalation must not overwrite the latch this column's own action owns", issue.Code)
 	}
 	h.requireNoOp(t)
+}
+
+// templateFaultGap is the gap column the template-fault fixtures below open.
+const templateFaultGap = "missing_onboarding"
+
+// seedTemplateFaultTarget registers a target whose single gap resolves its Loom
+// subject from a row column, with the pattern installed, so the only dispatch
+// failure its rows can produce is planGap's TemplateDataError — isolated from
+// UnresolvedReference and from every config fault. The returned row is
+// violating with that gap open and carries no `applicant` column, so the
+// subject template resolves null.
+func seedTemplateFaultTarget(t *testing.T, h *handlerHarness, targetID string) (string, map[string]any) {
+	t.Helper()
+	h.seedPattern("onboardFlow", testNanoID(t))
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps: map[string]GapAction{
+			templateFaultGap: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.applicant"},
+		},
+	})
+	entityID := testNanoID(t)
+	return entityID, map[string]any{
+		"entityKey":      "vtx.leaseapp." + entityID,
+		"violating":      true,
+		templateFaultGap: true,
+	}
+}
+
+// TestPlanGap_TemplateFaultSinceSurvivesRedelivery pins the template fault's
+// `since` (Contract #5 §5.5 — an issue is open "since it first arose") across a
+// full delivery cycle of an UNREPAIRED row. Every delivery that reaches planGap
+// for a gap column has already read that column as a bool twice — the
+// clearClosedMarks candidate walk, then openGapColumns — and each of those reads
+// retires whatever stands at that column's `data:` key. A template fault latched
+// there is therefore erased and re-raised on the ordinary path, once per
+// delivery: `since` re-stamps to now, so a fault that has stood for a week reads
+// as one that arose seconds ago, and every raise looks like an ARRIVAL to
+// anything that damps its logging off the latch. Its own key family is what
+// keeps the two facts on independent timelines.
+func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureTemplateFactSince"
+	entityID, row := seedTemplateFaultTarget(t, h, targetID)
+	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
+
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	}
+	h.requireNoOp(t)
+	first, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("setup: the template fault must stand at its own key, issues = %+v", h.engine.issues.snapshot())
+	}
+	if first.Code != "TemplateDataError" {
+		t.Fatalf("issue code = %q, want TemplateDataError", first.Code)
+	}
+
+	// The same unrepaired row, delivered again: the fault is the same fault.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the redelivery must Ack, got %v", dec)
+	}
+	second, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("the template fault must still stand after a redelivery, issues = %+v",
+			h.engine.issues.snapshot())
+	}
+	if second.Since != first.Since {
+		t.Fatalf("the template fault's since moved %q -> %q across one delivery of the SAME unrepaired row; "+
+			"an unrepaired fault stays open since it first arose", first.Since, second.Since)
+	}
+}
+
+// TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose pins the template
+// family's live-path teardown. The fault says "this gap's plan cannot be built
+// for this row"; a gap that stops being reported has no plan left to build, and
+// no column read retires the entry — the gap column's own bool read settles a
+// different fact at a different key — so the close is the only live path that
+// reaches it.
+func TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureTemplateGapClose"
+	entityID, row := seedTemplateFaultTarget(t, h, targetID)
+	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
+
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, key); !ok {
+		t.Fatalf("setup: the template fault must stand, issues = %+v", h.engine.issues.snapshot())
+	}
+
+	closed := map[string]any{
+		"entityKey":      "vtx.leaseapp." + entityID,
+		"violating":      false,
+		templateFaultGap: false,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the gap-close row must Ack, got %v", dec)
+	}
+	if is, ok := issueAt(h.engine.issues, key); ok {
+		t.Fatalf("a closed gap has no plan left to build; its template fault must retire, still standing as %+v", is)
+	}
+}
+
+// TestHandleRow_EntityTombstoneRetiresTemplateFaults pins the template family's
+// entity teardown. A deleted entity projects no values at all, so nothing on the
+// live path names the columns that raised — including a column the playbook has
+// since stopped declaring, which the candidate walk cannot reach either. The
+// prefix clear is what covers those, and it is entity-scoped: a sibling row's
+// standing fault on the same target must survive.
+func TestHandleRow_EntityTombstoneRetiresTemplateFaults(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureTemplateTombstone"
+	entityID, row := seedTemplateFaultTarget(t, h, targetID)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	}
+	live := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
+	if _, ok := issueAt(h.engine.issues, live); !ok {
+		t.Fatalf("setup: the template fault must stand, issues = %+v", h.engine.issues.snapshot())
+	}
+	// A fault raised while the playbook still declared `missing_retired`: the
+	// candidate walk enumerates the playbook's gaps and the row's missing_*
+	// columns, and a tombstone body carries neither, so only a prefix clear
+	// reaches this one.
+	stale := issueKeyTemplateEntity(targetID, entityID, "missing_retired")
+	h.engine.issues.set(stale, "warning", "TemplateDataError", "a gap the playbook no longer declares")
+	sibling := issueKeyTemplateEntity(targetID, testNanoID(t), "missing_retired")
+	h.engine.issues.set(sibling, "warning", "TemplateDataError", "another row's fault")
+
+	tombstone := substrate.Message{
+		Subject:      h.engine.rowSubjectPrefix + targetID + "." + entityID,
+		Sequence:     2,
+		NumDelivered: 1,
+	}
+	if dec := h.engine.handleRow(ctx, tombstone); dec != substrate.Ack {
+		t.Fatalf("the entity-deletion tombstone must Ack, got %v", dec)
+	}
+	for _, key := range []string{live, stale} {
+		if is, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("the deleted entity's template fault %q must retire, still standing as %+v", key, is)
+		}
+	}
+	if _, ok := issueAt(h.engine.issues, sibling); !ok {
+		t.Fatalf("one entity's deletion retired another entity's template fault; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+}
+
+// TestClearClosedMarks_RetiresCompanionColumnDataErrors pins the re-pairing of
+// the two per-gap companion columns. inflight_<g> and maxretries_<g> are read
+// only while their gap is a live dispatch candidate — the candidate walk
+// enumerates missing_* columns alone, so no later pass reads a companion once
+// the gap closes. Their data errors would then stand for the process's lifetime,
+// one per (entity, column), for a gap nothing is dispatching. The close is what
+// ends the read, so the close is what retires them.
+//
+// The closing row still projects both malformed values, which is the case that
+// makes the assertion about the CLOSE and not about some later clean read: no
+// reader runs for a gap that is not open.
+func TestClearClosedMarks_RetiresCompanionColumnDataErrors(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureCompanionRetire"
+	const col = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	entityKey := "vtx.leaseApp." + entityID
+	malformed := map[string]any{
+		"entityKey": entityKey, "violating": true, col: true,
+		"inflight_x": "maybe", "maxretries_x": "three",
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, malformed, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a gap whose companions are malformed still dispatches; want Ack, got %v", dec)
+	}
+	h.nextOp(t)
+	companions := []string{
+		issueKeyDataEntity(targetID, entityID, "inflight_x"),
+		issueKeyDataEntity(targetID, entityID, "maxretries_x"),
+	}
+	for _, key := range companions {
+		if _, ok := issueAt(h.engine.issues, key); !ok {
+			t.Fatalf("setup: %q must carry a RowDataError, issues = %+v", key, h.engine.issues.snapshot())
+		}
+	}
+
+	closed := map[string]any{
+		"entityKey": entityKey, "violating": false, col: false,
+		"inflight_x": "maybe", "maxretries_x": "three",
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the gap-close row must Ack, got %v", dec)
+	}
+	for _, key := range companions {
+		if is, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("nothing reads %q once its gap closes; the close must retire it, still standing as %+v", key, is)
+		}
+	}
+}
+
+// TestClearClosedMarks_RetiresPriorityDataErrorOnTheLastClose pins the other
+// half of the re-pairing, and its scope. The admission priority column is read
+// once per gap DISPATCH (admitGap), so an entity with no dispatchable candidate
+// still open has no read left to retire a malformed value's entry — but the
+// column is the ENTITY's, not any one gap's, so retiring it per closing gap
+// would erase an entry the entity's still-open gap keeps re-raising, and the two
+// would flap.
+//
+// "Dispatchable" is the precise form of that rule, and the two subtests are its
+// two sides. A clear can only flap against a leg that RE-RAISES; a `surface` gap
+// re-raises nothing here, because dispatchGap returns at its own branch before
+// planGap and admitGap is never reached for it. So a second OPEN gap holds the
+// entry only when that gap can actually reach the gate.
+func TestClearClosedMarks_RetiresPriorityDataErrorOnTheLastClose(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const targetID = "fixturePriorityRetire"
+	// seed raises the priority data error through a real admitted dispatch of
+	// missing_a, with a second gap `other` left open alongside it, and returns
+	// the harness plus the entity and the entry's key.
+	seed := func(t *testing.T, other string, otherGap GapAction) (*handlerHarness, string, string) {
+		t.Helper()
+		h := newHandlerHarness(t, ctx)
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				"missing_a": {Action: actionDirectOp, Operation: "FixA"},
+				other:       otherGap,
+			},
+			Admission: &AdmissionPolicy{GlobalRate: 100},
+		})
+		entityID := testNanoID(t)
+		both := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true,
+			"missing_a": true, other: true,
+			admissionPriorityColumn: "high",
+		}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, both, 1, 1)); dec != substrate.Ack {
+			t.Fatalf("an admitted dispatch over a malformed priority must Ack, got %v", dec)
+		}
+		h.nextOp(t)
+		key := issueKeyDataEntity(targetID, entityID, admissionPriorityColumn)
+		if _, ok := issueAt(h.engine.issues, key); !ok {
+			t.Fatalf("setup: the priority column must carry a RowDataError, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+		return h, entityID, key
+	}
+	// stampOf reads the entry's first-arose stamp. Presence alone cannot pin the
+	// guard: on a pass where a dispatchable gap is still open, the dispatch that
+	// re-raises the entry runs AFTER the clear in the same pass, so a missing
+	// guard looks identical to a working one. What a missing guard actually does
+	// is FLAP — clear deletes since, the re-raise mints a fresh one — so the
+	// stamp is where its absence shows.
+	stampOf := func(t *testing.T, h *handlerHarness, key string) string {
+		t.Helper()
+		is, ok := issueAt(h.engine.issues, key)
+		if !ok {
+			t.Fatalf("the priority entry must stand here; issues = %+v", h.engine.issues.snapshot())
+		}
+		return is.Since
+	}
+	closeA := func(t *testing.T, h *handlerHarness, entityID, other string, otherOpen bool, seq uint64) {
+		t.Helper()
+		row := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": otherOpen,
+			"missing_a": false, other: otherOpen,
+			admissionPriorityColumn: "high",
+		}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, seq, 1)); dec != substrate.Ack {
+			t.Fatalf("the close row must Ack, got %v", dec)
+		}
+	}
+
+	// A second DISPATCHABLE gap is the only shape that can re-raise the entry,
+	// so it is the only shape the guard has to hold it open for. This vector is
+	// what makes the guard load-bearing: without it the clear would erase an
+	// entry missing_b's own next dispatch immediately re-raises.
+	t.Run("a dispatchable gap stays open", func(t *testing.T) {
+		const other = "missing_b"
+		h, entityID, key := seed(t, other, GapAction{Action: actionDirectOp, Operation: "FixB"})
+		h.nextOp(t) // missing_b dispatched in the setup pass too
+		arrival := stampOf(t, h, key)
+
+		// missing_b already holds a mark from the setup pass, so this delivery
+		// anti-storm drops at the fire — but planGap, and with it admitGap, has
+		// already run and re-read the malformed priority.
+		closeA(t, h, entityID, other, true, 2)
+		if _, ok := issueAt(h.engine.issues, key); !ok {
+			t.Fatalf("one gap of a multi-gap entity closing must not retire the entity's priority entry "+
+				"while a dispatchable gap is still open; issues = %+v", h.engine.issues.snapshot())
+		}
+		if held := stampOf(t, h, key); held != arrival {
+			t.Fatalf("the priority entry's since moved %q -> %q across a pass where a dispatchable gap "+
+				"stayed open: it was cleared and immediately re-raised by that gap's own dispatch, which "+
+				"is the flap the guard exists to prevent", arrival, held)
+		}
+
+		closeA(t, h, entityID, other, false, 3)
+		if is, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("no dispatchable candidate stayed open; the priority entry has no read left to retire "+
+				"it and must retire on the close, still standing as %+v", is)
+		}
+	})
+
+	// The opposite side of the same rule. A surface gap never reaches the
+	// admission gate, so it has no stake in this column and must not pin an
+	// entry about a value nothing will read again.
+	t.Run("only a surface gap stays open", func(t *testing.T) {
+		const other = "missing_s"
+		h, entityID, key := seed(t, other, GapAction{Action: actionSurface, IssueCode: "Surface", IssueSeverity: "warning"})
+
+		closeA(t, h, entityID, other, true, 2)
+		if is, ok := issueAt(h.engine.issues, key); ok {
+			t.Fatalf("a surface gap dispatches nothing and never reads the priority column; it must not hold "+
+				"this entry open, still standing as %+v", is)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, other)); !ok {
+			t.Fatalf("the surface gap's own issue is untouched by this — it is still open; issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+}
+
+// TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily is the leak guard between
+// the two facts one gap column carries: "missing_<g> is not the §10.2 bool"
+// (boolColumn's RowDataError) and "this row's plan cannot be built" (planGap's
+// TemplateDataError). They live in different families precisely so neither
+// retires the other, and the type fault is the one that must stay in the
+// `data:` family — keyed at the gap column, raised and retired by that column's
+// own read.
+func TestBoolColumn_GapColumnDataErrorKeepsItsOwnFamily(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureGapColumnBoolType"
+	const col = "missing_x"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	entityKey := "vtx.leaseApp." + entityID
+
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, map[string]any{
+		"entityKey": entityKey, "violating": true, col: "yes",
+	}, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a non-bool gap column must Ack, got %v", dec)
+	}
+	h.requireNoOp(t)
+	is, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, col))
+	if !ok {
+		t.Fatalf("a non-bool gap column is that ROW's data error and belongs in the data family; issues = %+v",
+			h.engine.issues.snapshot())
+	}
+	if is.Code != "RowDataError" {
+		t.Fatalf("issue code = %q, want RowDataError", is.Code)
+	}
+	if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, col)); ok {
+		t.Fatalf("a column type fault is not a template fault; issues = %+v", h.engine.issues.snapshot())
+	}
+
+	// The read is the retirement for this one: the next projection carrying a
+	// real bool clears it, and the gap dispatches.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, map[string]any{
+		"entityKey": entityKey, "violating": true, col: true,
+	}, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the repaired row must dispatch and Ack, got %v", dec)
+	}
+	h.nextOp(t)
+	if is, ok := issueAt(h.engine.issues, issueKeyDataEntity(targetID, entityID, col)); ok {
+		t.Fatalf("a gap column that parses retires its own data error, still standing as %+v", is)
+	}
+}
+
+// TestPlanGap_FailureArmsAreLogPaced pins the wiring of planGap's failure switch
+// to the paced seam, arm by arm. Each of these faults is re-derived on a
+// CADENCE, not on an event: for a parked gap the switch runs once per sweep
+// pass — from reclaim, the count leg's re-arm, the goal leg-advance and
+// escalateExhaustedGap — for the dispatch-count TTL's whole life, which is some
+// 7,680 identical records per parked (target, entity, gap). The arrival stays at
+// the arm's own loud level; the pass right behind it is Debug, so the record
+// still exists and the stream is still readable.
+func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// deliver drives the same unrepaired row twice and returns the levels of the
+	// records naming sub, in emission order.
+	deliver := func(t *testing.T, h *handlerHarness, targetID, entityID string, row map[string]any,
+		want substrate.Decision, sub string) []slog.Level {
+		t.Helper()
+		logs := &logCapture{}
+		h.engine.logger = slog.New(logs)
+		for i, seq := range []uint64{1, 2} {
+			if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, seq, 1)); dec != want {
+				t.Fatalf("delivery %d = %v, want %v", i+1, dec, want)
+			}
+		}
+		return logs.levelsContaining(sub)
+	}
+
+	t.Run("errTransient: an unresolved reference", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedTransient"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			Gaps: map[string]GapAction{
+				"missing_y": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"},
+			},
+		})
+		entityID := testNanoID(t)
+		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_y": true}
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithDelay, "gap missing_y dispatch deferred")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]: the arrival is loud, the re-derivation behind it is damped", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_y")); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+
+	t.Run("errConfig: an un-dispatchable action", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedConfig"
+		h.seedTarget(&Target{
+			TargetID: targetID,
+			// A candidates-only gap on a non-planned target: the unknown-action
+			// dead-end, which is the errConfig arm.
+			Gaps: map[string]GapAction{
+				"missing_z": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "SendReminder"}}},
+			},
+		})
+		entityID := testNanoID(t)
+		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_z": true}
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap missing_z:")
+		if len(levels) != 2 || levels[0] != slog.LevelError || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Error Debug]: an `error` raise keeps its own loud level", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+
+	t.Run("errData: a template reference that resolves null", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixturePacedTemplateGap"
+		entityID, row := seedTemplateFaultTarget(t, h, targetID)
+
+		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap "+templateFaultGap+":")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]", levels)
+		}
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, templateFaultGap)); !ok {
+			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
+				h.engine.issues.snapshot())
+		}
+	})
+}
+
+// TestPlanGap_PacingSurvivesTheLatchClear is the production interleave the
+// pacing exists for, and the one no cache-level test can stand in for. The key
+// planGap raises a config fault at is TARGET-scoped, and clearClosedMarks
+// retires it whenever ANY one entity's column stops being reported — so on a
+// mixed population the latch is empty again by the time the next parked pass
+// re-derives the same unrepaired fact. Damping on latch presence reports an
+// arrival there; damping on a clock does not, and the age survives with it.
+//
+// Two deliveries of one entity back to back cannot show this: the latch is still
+// standing, so latch-presence and clock agree and either implementation passes.
+// The clear between them is what makes the clock the deciding input.
+func TestPlanGap_PacingSurvivesTheLatchClear(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+	logs := &logCapture{}
+	h.engine.logger = slog.New(logs)
+
+	const targetID = "fixturePacedAcrossClear"
+	const col = "missing_y"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{col: {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"}},
+	})
+	parked, closing := testNanoID(t), testNanoID(t)
+	key := issueKeyGapConfig(targetID, col)
+	open := func(entityID string) map[string]any {
+		return map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true}
+	}
+
+	// The parked entity's pass: the pattern does not resolve, and the fault
+	// arrives loudly.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, parked, open(parked), 1, 1)); dec != substrate.NakWithDelay {
+		t.Fatalf("an unresolved reference must NakWithDelay, got %v", dec)
+	}
+	arrival, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("setup: the config fault must stand, issues = %+v", h.engine.issues.snapshot())
+	}
+
+	// A DIFFERENT entity's column closes. clearClosedMarks retires the
+	// target-scoped key on its behalf — the playbook is exactly as broken as it
+	// was a moment ago.
+	closed := map[string]any{"entityKey": "vtx.leaseApp." + closing, "violating": false, col: false}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, closing, closed, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("the gap-close row must Ack, got %v", dec)
+	}
+	if _, ok := issueAt(h.engine.issues, key); ok {
+		t.Fatalf("setup: the other entity's close must have emptied this latch — that is the state this "+
+			"test is about; issues = %+v", h.engine.issues.snapshot())
+	}
+
+	// The parked entity's next pass re-derives the same unrepaired fact.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, parked, open(parked), 3, 1)); dec != substrate.NakWithDelay {
+		t.Fatalf("the parked entity's next pass must NakWithDelay, got %v", dec)
+	}
+	// Only the parked entity reaches this arm — the closing row opens no gap at
+	// all — so the two records are that entity's two passes, side by side across
+	// the clear.
+	levels := logs.levelsContaining("gap " + col + " dispatch deferred")
+	if len(levels) != 2 || levels[0] != slog.LevelWarn {
+		t.Fatalf("levels = %v, want the arrival at Warn followed by one more record", levels)
+	}
+	if levels[1] != slog.LevelDebug {
+		t.Fatalf("the pass after another entity's close logged %v, want Debug: a clear that is not a repair "+
+			"must not buy a fresh loud arrival", levels[1])
+	}
+	// MAJOR: the record must name its ROW. A gap's pattern/operation resolve
+	// through resolveStringParam, so a row.<column> template makes the
+	// unresolved reference per-row while the KEY stays target-scoped — and with
+	// the latch keeping only the newest message and the pacing damping the rest
+	// to Debug, a record that did not name its entity would leave no surface
+	// able to say which row failed.
+	if n := logs.countContaining(parked); n < 2 {
+		t.Fatalf("only %d records name entity %s; every record this arm writes must identify its row", n, parked)
+	}
+	restated, ok := issueAt(h.engine.issues, key)
+	if !ok {
+		t.Fatalf("the re-derived fault must re-raise the latch, issues = %+v", h.engine.issues.snapshot())
+	}
+	if restated.Since != arrival.Since {
+		t.Fatalf("since moved %q -> %q across another entity's close; with the log damped this stamp is the "+
+			"only surface left that can date the fault", arrival.Since, restated.Since)
+	}
+}
+
+// TestAdmitGap_NoPolicyRetiresThePriorityDataError closes design §1.2's
+// Admission-removal strand at the read site. The priority column is read only by
+// the admission gate, so a target that stops declaring an `admission` block
+// stops reading it entirely — and a standing data error for it then describes a
+// read that no longer happens. clearClosedMarks cannot be relied on to reach it:
+// it retires the entry only when no candidate column of the entity stayed open,
+// and an entity holding a gap that never closes never gets there. The gate's own
+// no-policy short-circuit is the site that can see it, exactly as boolColumn's
+// absent-column branch is for the columns it reads.
+func TestAdmitGap_NoPolicyRetiresThePriorityDataError(t *testing.T) {
+	t.Parallel()
+	e := &Engine{issues: newIssueCache(), admission: newAdmissionScheduler(), logger: discardLogger()}
+	const targetID = "fixtureAdmissionRemoved"
+	entityID := testNanoID(t)
+	key := issueKeyDataEntity(targetID, entityID, admissionPriorityColumn)
+	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, admissionPriorityColumn: "high"}
+
+	// While the policy stands, the malformed value is read and surfaced.
+	policied := &Target{TargetID: targetID, Admission: &AdmissionPolicy{GlobalRate: 100}}
+	if !e.admitGap(policied, targetID, entityID, "missing_x", "", row) {
+		t.Fatal("setup: a fresh bucket at this rate must admit")
+	}
+	if _, ok := issueAt(e.issues, key); !ok {
+		t.Fatalf("setup: a non-integer priority must surface a RowDataError, issues = %+v", e.issues.snapshot())
+	}
+
+	// The package drops the admission block: nothing reads the column again.
+	if !e.admitGap(&Target{TargetID: targetID}, targetID, entityID, "missing_x", "", row) {
+		t.Fatal("a target with no admission policy must admit unconditionally")
+	}
+	if is, ok := issueAt(e.issues, key); ok {
+		t.Fatalf("with no policy the priority column is never read again; its data error must retire at the "+
+			"gate, still standing as %+v", is)
+	}
 }

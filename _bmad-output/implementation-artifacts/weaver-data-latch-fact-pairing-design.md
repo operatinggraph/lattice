@@ -88,6 +88,27 @@ reports an arrival every pass. The damping memory must therefore be a **clock** 
 2. **A companion column's data error is retired by the gap close**, because the close is what ends the
    read. `priority` is retired when the entity's last open gap closes (the same pass), never per-gap: a
    per-gap clear on a multi-gap entity would flap.
+
+   > **AMENDED 2026-08-25 (two cold reviews).** "The gap close" named one leg where there are **three**,
+   > and this section's §1.2 census listed the raise *sites* without asking which of them can run
+   > *after* a retirement. `clearClosedMarks` runs on a DELIVERY; the sweep observes the same ending at
+   > `deleteMark`'s gap-closed arm, at `deleteCount`, and at the row-gone arm — and for a row that has
+   > gone quiet the sweep is the only leg that ever runs at all. Two consequences, both shipped as
+   > fixes: a quiet row retired nothing, and a sweep holding a row at its own revision re-raised the
+   > companions *after* lane-1's clear, with nothing to retire them again.
+   >
+   > **The retirement set is not one set — that was a first-cut error, caught by the close pass.** Two
+   > helpers, split by which fact the leg has actually witnessed. `retireGapPlanIssues` (the template
+   > fact + the two companions) retires what is raised only on the way to a dispatch, and is what the
+   > ORPHAN routes (`orphanColumn`, `targetRemoved`) may retire: a playbook that drops a gap has not
+   > ended anything about the row. `retireClosedGapIssues` adds `issueKeyGapEntity` and belongs only to
+   > a leg that saw the column go false or the row vanish — clearing that latch on an orphan column
+   > fights lane 1, which keeps raising `GapBudgetExhausted` there for exactly that column
+   > (`openGapColumns` enumerates every true `missing_*`, playbook or not), making the latch flap and
+   > re-stamping the `since` of a fact that never stopped holding. `reconciler.go`'s count leg and
+   > `escalateExhaustedGap`'s surface arm both already said this in words; the first cut broke it
+   > anyway. The corrupt-count arm is excluded for the mirror reason: it sits below the column check,
+   > so the gap is still open there.
 3. **Log pacing is call-site scoped and clock-keyed.** A new `alertPaced` seam serves `planGap`'s failure
    switch only. `alert` and `alertStanding` are untouched — the shared-primitive edit was tried and
    reverted one item ago (`weaver-exhausted-gap-durable-stop-design.md` §3.2b), and the reason still
@@ -180,7 +201,47 @@ at `:1423` asserts a closed loop this fire proves open — amend it).
 
 ---
 
-## 6. Checkpoint
+## 6. Build note (2026-08-25)
+
+Increments 1–3 built, then a review round on the cold review of Inc 1+2, then a cumulative close pass.
+Deviations from §3, each argued at the code:
+
+- **Inc 1** removed `planGap`'s success-arm `data:` clear rather than re-pointing it. A built plan
+  disproves the template fact; it says nothing about whether the gap column carries a §10.2 bool, and
+  every path into `planGap` has already read that column through `boolColumn` on the same pass.
+- **Inc 3** ships **one** seam, not two: `alertPaced` derives its loud level from the caller's own
+  severity, so a `warning` cannot be logged at Error. The `errTransient` arm's structured log line
+  folded into its Health message, losing the `entityId` attribute — kept deliberately: under pacing one
+  pass in N logs loudly, so an entity attribute would name whichever row tripped the window rather than
+  the row at fault, on a fact that is target-scoped by construction.
+- **The review round** replaced the legs' inline clear-lists with the two shared helpers §2 decision 2's
+  amendment describes, reaching all three close-observing legs.
+- **§2 decision 4's damping cost more than the design priced.** Making the config fault's log quiet
+  without making its age true would have left an operator no surface at all for "how long has this
+  stood" — a regression on §1.1's own criterion at the one family the design chose not to split. The
+  pace entry is therefore the durable arrival stamp for the families `alertPaced` serves: a raise whose
+  clock still holds the same severity and code re-dates the issue from that arrival instead of minting
+  a fresh `since`. It carries `lastRaiseAt` (updated on every raise, loud or damped) so the continuity
+  only spans a gap shorter than one interval — the memory cannot tell a fault that never stopped from
+  one that stopped and restarted inside a single interval, and anything longer starts a fresh `since`.
+
+**Residuals, deliberate and named in the code rather than papered over.** A quiet row whose gap column
+holds a non-bool keeps that entry — a true statement about a row that still exists, retired by any later
+clean delivery or by the teardowns. The sweep legs do not retire the `priority` entry: they hold one
+mark and cannot see the entity's whole candidate set, which is what decision 2's no-flap rule requires;
+in practice a gap close is a row write, so lane 1 reaches it. On an orphan column whose row still
+projects malformed companions, the orphan delete clears those two entries once and lane 1's next read
+re-raises them with a fresh `since` — a single stamp reset on level-driven entries whose reader
+re-establishes truth immediately, and one that mints no spurious alert because nothing about them goes
+through an arrival test.
+
+**One discovery routes out** (`agents/steward/SKILL.md` §4's designer out): `issueKeyGapConfig` strands on
+the orphan-column route. It is target-scoped, and the sweep — which sees one entity — cannot tell "the
+column left the target" from "one entity's gap ended", so retiring it needs a primitive that does not
+exist: a per-target observed-column set (or a latch TTL). Filed on `backlog/lattice.md` as
+`📐 needs designer pass · no-pattern:`, not fixed here.
+
+## 7. Checkpoint
 
 Fire branch `claude/great-lamport-c6lifp`. Increments land as one merge to `main` when the whole item is
 green (a partial split would leave a raise and its teardown on different keys).

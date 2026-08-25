@@ -66,6 +66,39 @@ type healthIssue struct {
 	Since    string `json:"since"`
 }
 
+// logPaceInterval bounds how long one key's re-derived fault may go without a
+// loud log record. A parked gap's failure is re-derived once per
+// defaultSweepInterval (a minute) for the dispatch-count TTL's whole life
+// (dispatchCountTTLBackstopFactor × the lease, ~128h) — some 7,680 passes per
+// parked (target, entity, gap), each writing an identical record that buries
+// every genuine arrival around it. An hour turns that into ~128 loud records
+// while never letting a standing fault go quiet in the log for longer than an
+// hour; the passes in between log at Debug, so no record is ever dropped
+// outright.
+const logPaceInterval = time.Hour
+
+// pacedLog is one key's log-pacing and arrival memory for the families
+// Engine.alertPaced serves.
+//
+// arrivedAt is the durable answer to "how long has this fault stood". It cannot
+// come from the latch's own since, because clear deletes that and the clears
+// these families see are not repairs — clearClosedMarks empties the
+// target-scoped gapConfig latch whenever ANY one entity's column stops being
+// reported, so the stamp would reset roughly every pass and report a week-old
+// playbook fault as seconds old.
+//
+// lastLoudAt is the pacing clock, refreshed on every loud emission.
+// lastRaiseAt records every raise, loud or damped: it is what distinguishes a
+// fault that never stopped being re-derived from one that ended and came back,
+// and it is what bounds the map's age prune.
+type pacedLog struct {
+	severity    string
+	code        string
+	arrivedAt   time.Time
+	lastLoudAt  time.Time
+	lastRaiseAt time.Time
+}
+
 // issueCache holds the engine's active config/data-error alerts (rejected
 // targets, unknown gap columns, template data errors), keyed so a condition
 // that resolves clears its own entry. The heartbeater surfaces the snapshot as
@@ -73,21 +106,57 @@ type healthIssue struct {
 // each key's first-arose timestamp (Contract #5 §5.5) so it persists across
 // heartbeats while the issue stays open, and clears with the issue so a later
 // re-occurrence gets a fresh since rather than reusing the stale one.
+//
+// paced is the pacing-and-arrival memory behind Engine.alertPaced, and it is
+// deliberately NOT the latch. A fault the engine re-derives on a cadence cannot
+// be damped by the latch's presence, nor dated from it, because the clears that
+// empty the latch are not evidence the fault ended: issueKeyGapConfig is
+// target-scoped, so clearClosedMarks retires it as soon as ANY one entity's
+// column stops being reported, while another entity's parked gap goes on
+// raising it. Both the damping and the age therefore need a memory those clears
+// cannot reach, so the two maps have different lifetimes:
+//
+//	created                | the first paced raise at a key
+//	refreshed              | lastRaiseAt every raise; lastLoudAt every loud emission
+//	restamped              | arrivedAt only when the fact CHANGES (severity or code) or when
+//	                       | it stopped being raised for longer than one interval
+//	carried                | across clear: a clear is not evidence the fact ended, which is the whole point
+//	retired (subject gone) | clearPrefix, with the issue families it tears down (entity tombstone, Revoke, reconcileConsumers)
+//	retired (age)          | prunePaced at the heartbeat, past twice the interval since the last RAISE —
+//	                       | such an entry has already outlived the continuity window, so its next
+//	                       | raise would arrive fresh anyway, and the map stays bounded by
+//	                       | "keys raised in the last two intervals"
+//	restart                | empty, like the latch itself; the first raise after a restart is an arrival, which is correct
 type issueCache struct {
 	mu     sync.Mutex
 	issues map[string]healthIssue
 	since  map[string]string
+	paced  map[string]pacedLog
 }
 
 func newIssueCache() *issueCache {
-	return &issueCache{issues: make(map[string]healthIssue), since: make(map[string]string)}
+	return &issueCache{
+		issues: make(map[string]healthIssue),
+		since:  make(map[string]string),
+		paced:  make(map[string]pacedLog),
+	}
 }
 
+// set raises or refreshes the issue at key, stamping a key that carries no
+// since yet with the current instant.
 func (c *issueCache) set(key, severity, code, message string) {
+	c.setSince(key, severity, code, message, time.Now())
+}
+
+// setSince is set with the caller supplying the first-arose instant to stamp a
+// key that has none — for a caller holding better evidence of when the fault
+// arose than "now". A key that already carries a since keeps it: a standing
+// issue's age is never overwritten, exactly as under set.
+func (c *issueCache) setSince(key, severity, code, message string, arrivedAt time.Time) {
 	c.mu.Lock()
 	since, ok := c.since[key]
 	if !ok {
-		since = substrate.FormatTimestamp(time.Now())
+		since = substrate.FormatTimestamp(arrivedAt)
 		c.since[key] = since
 	}
 	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since}
@@ -115,11 +184,83 @@ func (c *issueCache) standingAs(key, severity, code string) bool {
 	return ok && is.Severity == severity && is.Code == code
 }
 
+// clear retires the issue at key. The pace memory at that key is deliberately
+// left in place: a clear says the latch is empty, not that the fault ended, and
+// for the families alertPaced serves it is routinely neither (a target-scoped
+// config fact is cleared by one entity's column closing while another entity's
+// parked gap still raises it). Erasing the clock here would make the very next
+// re-derivation an arrival and hand back the flood the pacing exists to stop.
 func (c *issueCache) clear(key string) {
 	c.mu.Lock()
 	delete(c.issues, key)
 	delete(c.since, key)
 	c.mu.Unlock()
+}
+
+// pacedRaise records a raise at key on the pace clock and reports how it must
+// be surfaced: whether the log record may be LOUD, and the instant this fact
+// first arose. now is a parameter so the whole decision is a pure function of
+// the caller's clock, mirroring tokenBucket.refill.
+//
+// A raise is loud on the fact's arrival (no entry), on a severity or code change
+// at that key (a different fact, which must never wait out another fact's
+// window), after a silence longer than one interval (nothing was re-deriving
+// this fault, so its return is an arrival), and once logPaceInterval has passed
+// since the last loud record. The interval is measured from the last LOUD
+// record, not the last raise, so a damped pass does not push the next loud one
+// further away.
+//
+// The returned instant is the durable arrival stamp the latch cannot keep. It
+// survives clear, which is the point — for these families a clear is routinely
+// another entity's close rather than a repair. What it cannot distinguish is a
+// fault that genuinely ended and re-arose within a single interval: that is
+// reported as one continuous fault, dated from the earlier arrival. A gap in the
+// raises longer than one interval starts a fresh stamp, so the bridging is
+// bounded by logPaceInterval — and the alternative it replaces is a stamp that
+// reset on essentially every pass.
+//
+// Message is not compared, for the reason standingAs gives: a message carrying
+// an embedded count or timestamp would re-arrive on every pass and bring the
+// flood straight back.
+func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud bool, arrivedAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	last, ok := c.paced[key]
+	if !ok || last.severity != severity || last.code != code ||
+		now.Sub(last.lastRaiseAt) > logPaceInterval {
+		c.paced[key] = pacedLog{
+			severity: severity, code: code,
+			arrivedAt: now, lastLoudAt: now, lastRaiseAt: now,
+		}
+		return true, now
+	}
+	loud = now.Sub(last.lastLoudAt) >= logPaceInterval
+	if loud {
+		last.lastLoudAt = now
+	}
+	last.lastRaiseAt = now
+	c.paced[key] = last
+	return loud, last.arrivedAt
+}
+
+// prunePaced drops every pace entry not raised for at least twice
+// logPaceInterval, returning how many it dropped. Such an entry has already
+// outlived the continuity window pacedRaise bridges, so its next raise would be
+// treated as a fresh arrival with or without it — pruning is behaviour-neutral
+// and bounds the map by "keys raised within the last two intervals" rather than
+// by "keys raised since this process started". Called from the heartbeat, which
+// already walks the cache on its own cadence.
+func (c *issueCache) prunePaced(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for k, p := range c.paced {
+		if now.Sub(p.lastRaiseAt) >= 2*logPaceInterval {
+			delete(c.paced, k)
+			n++
+		}
+	}
+	return n
 }
 
 // clearPrefix retires every issue whose key starts with prefix, returning how
@@ -133,10 +274,21 @@ func (c *issueCache) clear(key string) {
 // constructors use, so a key shape and its teardown cannot drift apart. That
 // trailing separator is what keeps "t1." from matching a key under "t10."
 // (markStore.deleteByTargetPrefix's rule, applied to the issue keyspace).
+//
+// Unlike clear, this takes the pace memory with it. A prefix clear is the
+// SUBJECT leaving — a deleted entity, a revoked or unregistered target — and a
+// subject that is gone raises nothing more, so there is no cadence left to pace
+// and no standing age to carry; if it ever comes back, its first raise is a
+// genuine arrival and belongs loud, dated from then.
 func (c *issueCache) clearPrefix(prefix string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := 0
+	for k := range c.paced {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.paced, k)
+		}
+	}
 	for k := range c.issues {
 		if strings.HasPrefix(k, prefix) {
 			delete(c.issues, k)
@@ -325,6 +477,11 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		}
 	}
 
+	// The log-pacing clock is bounded on the same walk that reads the cache: an
+	// entry past twice its interval would log loudly on its next raise anyway,
+	// so dropping it here costs nothing and keeps the map sized to what is
+	// actually being re-derived.
+	h.issues.prunePaced(now)
 	issues := append(h.issues.snapshot(), h.pausedIssues(states, now)...)
 
 	// Contract #5 §5.2/§5.3: a heartbeat carrying issues must not report

@@ -559,13 +559,13 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	rowEntry, err := e.conn.KVGet(ctx, e.cfg.WeaverTargetsBucket, targetID+"."+entityID)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// Absence is not evidence: the row may be mid-rebuild. Retire the
-			// standing issue — it states a fact about a row that is not there —
-			// and leave the bound itself to the TTL. The next pass re-raises if
-			// the row returns still exhausted.
-			e.logger.Debug("weaver sweep: row gone; retiring the gap issue, leaving the dispatch-count",
+			// Absence is not evidence: the row may be mid-rebuild. Retire this
+			// gap's standing issues — every one of them states a fact about a
+			// row that is not there — and leave the bound itself to the TTL. The
+			// next pass re-raises whatever still holds if the row returns.
+			e.logger.Debug("weaver sweep: row gone; retiring this gap's issues, leaving the dispatch-count",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-			e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+			e.retireClosedGapIssues(targetID, entityID, gapColumn)
 			return
 		}
 		e.logger.Warn("weaver sweep: row read failed; leaving dispatch-count", "key", key, "err", err)
@@ -754,17 +754,26 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 }
 
 // deleteCount deletes one `…__count` retry-budget dispatch-count at the
-// revision read this pass and retires the (target, entity, gap) standing issue
-// the budget's exhaustion raises. Its one caller is the gap-close level
-// reconcile: a present row whose gap column reads false. A revision conflict
-// means a dispatch bumped the count between the read and this delete — that
-// fresh budget stands and the delete is skipped (re-evaluated next pass); a key
-// that already vanished is already in the desired state.
+// revision read this pass and retires this (target, entity, gap)'s standing
+// issues. Its one caller is the gap-close level reconcile: a present row whose
+// gap column reads false. A revision conflict means a dispatch bumped the count
+// between the read and this delete — that fresh budget stands and the delete is
+// skipped (re-evaluated next pass); a key that already vanished is already in
+// the desired state.
 //
-// The issue retirement is driven by the ROW read that reached this call, not by
-// the delete's outcome, so the latch is retired by the same level reconcile
-// that observed the close — idempotent when none stands. A won delete counts on
-// the sweepOrphansDeleted metric, like every other key this sweep removes.
+// This is the THIRD leg that can observe a gap close, and on the count-only
+// path it is the only one that will: with no mark to sweep (its TTL collected
+// it, or an operator zeroed the budget) and a row that stopped being delivered,
+// neither lane-1's clearClosedMarks nor deleteMark ever runs for this gap. The
+// leg above it raises exactly what retireClosedGapIssues retires — the
+// suppression terms read both companion columns, and the re-arm's planGap can
+// raise the template fault — so retiring only the budget's own latch here would
+// strand the rest.
+//
+// The retirement is driven by the ROW read that reached this call, not by the
+// delete's outcome, so the latches are retired by the same level reconcile that
+// observed the close — idempotent when none stands. A won delete counts on the
+// sweepOrphansDeleted metric, like every other key this sweep removes.
 func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, targetID, entityID, gapColumn string) {
 	e := s.engine
 	if err := e.conn.KVDeleteRevision(ctx, e.cfg.WeaverStateBucket, key, revision); err != nil {
@@ -780,7 +789,7 @@ func (s *sweeper) deleteCount(ctx context.Context, key string, revision uint64, 
 			"reason", sweepReasonGapClosed)
 		s.bump(&s.orphansDeleted)
 	}
-	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	e.retireClosedGapIssues(targetID, entityID, gapColumn)
 }
 
 // reclaim handles an expired (or lease-less) mark whose column is still true:
@@ -1215,16 +1224,28 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
 		}
-		// This entity's standing GapBudgetExhausted retires with the close: the
-		// issue is keyed per (target, entity, gap), and this leg is whichever
-		// one observed the close first. Only the entity scope retires here — a
-		// mark close says nothing about the playbook, and lane-1's own delivery
-		// of the closed (or deleted) row is what retires the target-scoped
-		// config issues. Idempotent when none stands.
-		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+		// The delete won and the column itself read false, so this gap has
+		// ENDED for this entity — the same fact lane-1's clearClosedMarks acts
+		// on, through the same function, so the two legs cannot drift apart.
+		// This leg is not a duplicate of that one: for a row that has gone quiet
+		// lane-1 never runs again, and the sweep is the only leg that will ever
+		// observe the close.
+		e.retireClosedGapIssues(targetID, entityID, gapColumn)
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
+		// The orphan reasons say this gap is no longer DISPATCHABLE — the
+		// playbook dropped the column, or the target left — not that it ended.
+		// Nothing will plan it for this row again, so the plan-side facts retire
+		// here and nowhere else (once the playbook stops naming the column,
+		// lane-1's candidate walk never enumerates it again). The gap's own
+		// latch does NOT retire: the column may still read true, lane-1 goes on
+		// raising there for exactly this column, and a clear from here would
+		// make that latch flap — see retireClosedGapIssues.
+		e.retireGapPlanIssues(targetID, entityID, gapColumn)
 	}
+	// Only a won delete retires anything: a revision conflict means a fresh
+	// episode CAS-created the key between the read and the delete, and that gap
+	// is live again (both error paths above have already returned).
 	return true
 }
 

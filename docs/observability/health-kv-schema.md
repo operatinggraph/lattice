@@ -907,7 +907,8 @@ decides whose close retires the issue. The key never appears on the wire — it 
 |---|---|---|
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo), `TemplateDataError` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
+| `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
@@ -921,10 +922,35 @@ The same split governs `data:`. A malformed column value is a fact about the one
 carrying it, repaired for that row alone by the next projection, so it is keyed per
 `(target, entity, column)` and repairing one row never retires another's. **The read is the
 retirement**: a column that parses, or that the next projection drops, clears that row's entry.
-Most of the columns these readers surface — `violating`, `inflight_<g>`, `maxretries_<g>`,
-`admissionPriority` — have no gap-close or plan-success path of their own, so without that the
-entries would accumulate one per `(row, column)` for the process's lifetime. The listing cap below
-bounds the *document*, never the cache behind it.
+That covers a column every delivery reads (`violating`, the gap columns themselves), but not one
+the engine reads only while a gap is open — `inflight_<g>` and `maxretries_<g>` are read by the
+suppression terms, and the admission priority column by the admission gate, so a gap closing ends the read
+that would retire them. Those are retired by the close instead, on **whichever leg observes it**: a
+delivery that stops reporting the column, or — for a row that has gone quiet, where no delivery ever
+comes — the sweep's own mark or dispatch-count reconcile. The companion pair retires with its own gap.
+
+The priority entry is narrower, because it belongs to the *entity* rather than to any one gap: it
+retires when no **dispatchable** candidate column of the entity stayed open on a delivery, and when a
+target stops declaring an `admission` block at all (the gate then short-circuits without reading the
+column, and clears it there). Those are the only two sites — a per-gap clear would flap on a multi-gap
+entity, so no sweep leg retires it.
+
+"Dispatchable" is what makes that precise. A clear can only flap against a leg that re-raises, and a
+`surface` gap re-raises nothing here: it dispatches no op, so it never reaches the admission gate and
+never reads the column. An entity whose only remaining open gap is a `surface` one therefore *does*
+retire its priority entry — the entry describes a column nothing will read again.
+
+Without a retirement that does not depend on a further read, these entries would stand one per
+`(row, column)` for the process's lifetime. The listing cap below bounds the *document*, never the
+cache behind it.
+
+`template:` is a separate family for the same reason those retirements are separate. A gap's plan
+whose template references resolve null is a different fact from that gap column carrying a non-bool
+value, and the two would otherwise latch at one key — where the column's own parsing read (which
+runs before every planning attempt) would retire the template fact it knows nothing about, taking
+the entry's `since` with it and re-stamping it on the next raise. It is keyed per
+`(target, entity, gapColumn)`, retired by the plan that builds (the resolution), by the gap
+closing, and by the entity or target teardowns.
 
 The **missing-`entityKey` echo** is keyed the same way: the entity the body omits is supplied by the
 row *key*, and the raise/clear decision is taken on every delivery that reaches reconciliation (the
@@ -936,7 +962,7 @@ not — so a repaired row retires its own entry. Read each entry as "this row pr
 
 | Family | Retired on revoke by | Why |
 |---|---|---|
-| `gap:`, `gapConfig:`, `data:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
+| `gap:`, `gapConfig:`, `data:`, `template:` | **prefix clear** (also on registry removal — `reconcileConsumers` retires the same prefix set, so either teardown route leaves nothing standing) | keys carry a segment below the target, so there is no single key to name; a revoked or unregistered target delivers no rows and keeps no marks, so nothing on the live path would ever retire them |
 | `consumer:`, `timer:`, `target:<ownerVertexId>` | key clear | keyed by target alone |
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |

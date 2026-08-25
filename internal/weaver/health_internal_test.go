@@ -588,3 +588,375 @@ func TestAlert_LogsTheArrivalLoudlyAndTheRepeatQuietly(t *testing.T) {
 		}
 	})
 }
+
+// loudPacedRaise records a raise and reports only whether it was loud, for the
+// subtests whose subject is the pacing verdict rather than the arrival stamp.
+func loudPacedRaise(c *issueCache, key, severity, code string, now time.Time) bool {
+	loud, _ := c.pacedRaise(key, severity, code, now)
+	return loud
+}
+
+// TestPacedRaise_RationsLoudRecordsAgainstAClock pins the pacing decision at
+// the cache, where the clock is a parameter and two simulated hours cost
+// nothing. Every subtest here is about a boundary the LATCH cannot express —
+// which is why the memory is a separate map with its own lifetime.
+func TestPacedRaise_RationsLoudRecordsAgainstAClock(t *testing.T) {
+	t.Parallel()
+
+	const key = "gapConfig:t1.missing_x"
+	const sev, code = "warning", "UnresolvedReference"
+
+	// The shape of the flood this exists to stop: a parked gap re-derives its
+	// failure once per sweep pass — a minute — for the dispatch-count TTL's whole
+	// life. Two hours of that cadence is 120 records, of which exactly two may be
+	// loud: the arrival, and the one that opens the second interval.
+	t.Run("one loud record per interval at the sweep cadence", func(t *testing.T) {
+		c := newIssueCache()
+		start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+		loud, loudAt := 0, []int{}
+		for minute := 0; minute < 120; minute++ {
+			if loudPacedRaise(c, key, sev, code, start.Add(time.Duration(minute)*time.Minute)) {
+				loud++
+				loudAt = append(loudAt, minute)
+			}
+		}
+		if loud != 2 {
+			t.Fatalf("120 passes a minute apart produced %d loud records at minutes %v, want exactly 2 "+
+				"(one per %v)", loud, loudAt, logPaceInterval)
+		}
+		if loudAt[0] != 0 || loudAt[1] != 60 {
+			t.Fatalf("loud records at minutes %v, want the arrival and the interval boundary (0, 60)", loudAt)
+		}
+	})
+
+	// The defect the whole increment exists for. The keys this seam serves are
+	// cleared by paths that are not evidence the fault ended — issueKeyGapConfig
+	// is target-scoped, so one entity's column closing retires a fact another
+	// entity's parked gap is still raising. Damping on latch presence
+	// (alertStanding) reports an arrival on the very next pass, so a clock the
+	// clear cannot reach is the only memory that holds.
+	t.Run("an issues.clear between passes does not restore loudness", func(t *testing.T) {
+		c := newIssueCache()
+		start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+		if !loudPacedRaise(c, key, sev, code, start) {
+			t.Fatal("setup: the arrival must be loud")
+		}
+		c.set(key, sev, code, "the reference does not resolve")
+
+		// Another entity's column stops being reported: clearClosedMarks empties
+		// the target-scoped latch, but this target's playbook is no more fixed
+		// than it was a minute ago.
+		c.clear(key)
+		if loudPacedRaise(c, key, sev, code, start.Add(time.Minute)) {
+			t.Fatal("a clear is not evidence the fault ended; the next pass must stay damped")
+		}
+		if c.standingAs(key, sev, code) {
+			t.Fatal("setup check: the latch really is empty here — that is what makes this the interesting case")
+		}
+	})
+
+	t.Run("a different severity or code is loud at once", func(t *testing.T) {
+		c := newIssueCache()
+		start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+		if !loudPacedRaise(c, key, "warning", "UnresolvedReference", start) {
+			t.Fatal("setup: the arrival must be loud")
+		}
+		if !loudPacedRaise(c, key, "error", "UnresolvedReference", start.Add(time.Minute)) {
+			t.Fatal("a severity change at one key is a different fact and must not wait out the window")
+		}
+		if !loudPacedRaise(c, key, "error", "PlaybookConfigError", start.Add(2*time.Minute)) {
+			t.Fatal("a code change at one key is a different fact and must not wait out the window")
+		}
+		// The new fact resets the clock rather than exempting the key.
+		if loudPacedRaise(c, key, "error", "PlaybookConfigError", start.Add(3*time.Minute)) {
+			t.Fatal("the changed fact's own repeat must be damped like any other")
+		}
+	})
+
+	// A prefix clear is the SUBJECT leaving, which is the one clear that IS
+	// evidence there is no cadence left to pace. Its neighbour under a
+	// longer-named target must be untouched — the trailing separator rule.
+	t.Run("clearPrefix takes the pace entry with the issue", func(t *testing.T) {
+		c := newIssueCache()
+		start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+		const revoked, survivor = "gapConfig:t1.missing_x", "gapConfig:t10.missing_x"
+		for _, k := range []string{revoked, survivor} {
+			if !loudPacedRaise(c, k, sev, code, start) {
+				t.Fatalf("setup: %q must arrive loud", k)
+			}
+			c.set(k, sev, code, "the reference does not resolve")
+		}
+
+		c.clearPrefix("gapConfig:t1.")
+
+		if !loudPacedRaise(c, revoked, sev, code, start.Add(time.Minute)) {
+			t.Fatal("a revoked target's pace entry must go with its issue; a re-registration's first raise is an arrival")
+		}
+		if loudPacedRaise(c, survivor, sev, code, start.Add(time.Minute)) {
+			t.Fatalf("clearPrefix(%q) reached a key under t10.; the trailing separator is what keeps them apart", "gapConfig:t1.")
+		}
+	})
+
+	t.Run("prunePaced bounds the map and a pruned key re-arrives loud", func(t *testing.T) {
+		c := newIssueCache()
+		start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+		const stale, recent = "gapConfig:t1.missing_stale", "gapConfig:t1.missing_recent"
+		loudPacedRaise(c, stale, sev, code, start)
+		loudPacedRaise(c, recent, sev, code, start.Add(90*time.Minute))
+
+		// Twice the interval past the stale entry's last loud record, and half an
+		// interval past the recent one's.
+		if n := c.prunePaced(start.Add(2 * logPaceInterval)); n != 1 {
+			t.Fatalf("prunePaced dropped %d entries, want 1 (only the one past twice the interval)", n)
+		}
+		if n := len(c.paced); n != 1 {
+			t.Fatalf("pace map holds %d entries after the prune, want 1", n)
+		}
+		// Behaviour-neutral: the pruned key was already past its interval, so its
+		// next raise was going to be loud either way.
+		if !loudPacedRaise(c, stale, sev, code, start.Add(2*logPaceInterval)) {
+			t.Fatal("a pruned key's next raise must be loud")
+		}
+		if loudPacedRaise(c, recent, sev, code, start.Add(2*logPaceInterval)) {
+			t.Fatal("the prune must not touch an entry inside its window")
+		}
+	})
+}
+
+// TestAlertPaced_KeepsTheLatchWhileRationingTheLog pins the seam over the cache:
+// what alertPaced does with the pacing verdict, and what it does regardless of
+// it. The Health entry is not paced — only the log is — so every pass sets the
+// latch with the current message, and a damped pass moves nothing an operator
+// reads off Health.
+func TestAlertPaced_KeepsTheLatchWhileRationingTheLog(t *testing.T) {
+	t.Parallel()
+
+	const key = "gapConfig:t1.missing_x"
+
+	t.Run("the latch is set on every pass, damped or loud", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+
+		e.alertPaced(key, "warning", "UnresolvedReference", "pass 1: pattern ghostFlow does not resolve")
+		first, ok := issueAt(e.issues, key)
+		if !ok {
+			t.Fatalf("the arrival must raise the issue, issues = %+v", e.issues.snapshot())
+		}
+		// A second pass inside the window, with a DIFFERENT message: damped in the
+		// log (message is never compared — an embedded count would re-arrive every
+		// pass and bring the flood back) but fully current on Health.
+		e.alertPaced(key, "warning", "UnresolvedReference", "pass 2: pattern ghostFlow does not resolve")
+
+		second, ok := issueAt(e.issues, key)
+		if !ok {
+			t.Fatalf("a damped pass must still set the issue, issues = %+v", e.issues.snapshot())
+		}
+		if second.Message != "pass 2: pattern ghostFlow does not resolve" {
+			t.Fatalf("the latch carries %q, want the newest message — only the log is paced", second.Message)
+		}
+		if second.Since != first.Since {
+			t.Fatalf("the fault's since moved %q -> %q across a damped pass; pacing must not touch the latch",
+				first.Since, second.Since)
+		}
+		if lv := logs.levelsContaining("pass 1:"); len(lv) != 1 || lv[0] != slog.LevelWarn {
+			t.Fatalf("the arrival logged %v, want exactly one Warn", lv)
+		}
+		if lv := logs.levelsContaining("pass 2:"); len(lv) != 1 || lv[0] != slog.LevelDebug {
+			t.Fatalf("the damped pass logged %v, want exactly one Debug — a record is never dropped outright", lv)
+		}
+	})
+
+	// One seam serves both loud levels planGap's switch uses, so the loud level
+	// has to come from the raise itself: an `error` raise stays Error and a
+	// `warning` raise stays Warn. (alert, by contrast, is Error for every
+	// caller — which is why this is not alert with a clock bolted on.)
+	t.Run("the loud level is the caller's own severity", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+		e.alertPaced("gapConfig:t1.missing_warn", "warning", "UnresolvedReference", "a deferred reference")
+		e.alertPaced("gapConfig:t1.missing_err", "error", "PlaybookConfigError", "an un-dispatchable action")
+		if lv := logs.levelsContaining("a deferred reference"); len(lv) != 1 || lv[0] != slog.LevelWarn {
+			t.Fatalf("the warning raise logged %v, want exactly one Warn", lv)
+		}
+		if lv := logs.levelsContaining("an un-dispatchable action"); len(lv) != 1 || lv[0] != slog.LevelError {
+			t.Fatalf("the error raise logged %v, want exactly one Error", lv)
+		}
+	})
+
+	// The seam-level statement of the defect: the clear that empties this
+	// target-scoped latch says nothing about the playbook, so it must not buy the
+	// next pass a loud record.
+	t.Run("a clear between passes does not make the next one loud", func(t *testing.T) {
+		logs := &logCapture{}
+		e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+		e.alertPaced(key, "warning", "UnresolvedReference", "arrival: ghostFlow does not resolve")
+		e.issues.clear(key)
+		e.alertPaced(key, "warning", "UnresolvedReference", "after the clear: ghostFlow does not resolve")
+		if lv := logs.levelsContaining("after the clear:"); len(lv) != 1 || lv[0] != slog.LevelDebug {
+			t.Fatalf("the pass after a clear logged %v, want exactly one Debug — a clear is not evidence the fault ended", lv)
+		}
+		if _, ok := issueAt(e.issues, key); !ok {
+			t.Fatalf("the pass after a clear must re-raise the latch, issues = %+v", e.issues.snapshot())
+		}
+	})
+}
+
+// TestEmit_PrunesThePaceMemory pins the pace map's age bound to the pass that
+// actually runs it. The map is keyed per (target, entity, gap) like the issue
+// families it paces, and nothing on the live path deletes an entry for a fault
+// that simply stopped being re-derived — a gap that closed, a target that went
+// quiet. The heartbeat already walks the cache on its own cadence, so it is
+// where the bound is applied; without the call the map only ever grows, one
+// entry per key raised since the process started.
+func TestEmit_PrunesThePaceMemory(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const healthBucket = "health-kv"
+	if _, err := m.conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: healthBucket}); err != nil {
+		t.Fatalf("create %s: %v", healthBucket, err)
+	}
+	cache := newIssueCache()
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	h := &heartbeater{
+		conn:                  m.conn,
+		bucket:                healthBucket,
+		instance:              "unit-" + testNanoID(t),
+		startedAt:             time.Now(),
+		interval:              time.Second,
+		states:                healthkv.NewConsumerStateCache(),
+		issues:                cache,
+		source:                newTargetSource(nil, "core-kv", "test", cache, logger),
+		marks:                 m,
+		effectMismatchAlerted: make(map[string]struct{}),
+		consumerPausedSince:   make(map[string]string),
+		logger:                logger,
+	}
+
+	const aged, live = "gapConfig:t1.missing_aged", "gapConfig:t1.missing_live"
+	now := time.Now()
+	loudPacedRaise(cache, aged, "warning", "UnresolvedReference", now.Add(-3*logPaceInterval))
+	loudPacedRaise(cache, live, "warning", "UnresolvedReference", now)
+
+	h.emit(ctx, "healthy")
+
+	if _, ok := cache.paced[aged]; ok {
+		t.Fatalf("the heartbeat must bound the pace memory; %q survived past twice the interval", aged)
+	}
+	if _, ok := cache.paced[live]; !ok {
+		t.Fatalf("the heartbeat pruned %q, which is still inside its window; pace map = %+v", live, cache.paced)
+	}
+}
+
+// TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep pins the pace entry's
+// second job. `since` is Contract #5 §5.5's "open since it first arose", and for
+// the families alertPaced serves the latch cannot carry it: clear deletes the
+// stamp, and the clears these keys see are other entities' closes rather than
+// repairs — issueKeyGapConfig is target-scoped, so clearClosedMarks empties it
+// whenever ANY one entity's column stops being reported. Left to the latch the
+// stamp resets about once a pass, which with the log now damped to Debug would
+// leave no surface at all from which to recover a config fault's age.
+func TestPacedRaise_CarriesTheArrivalTheLatchCannotKeep(t *testing.T) {
+	t.Parallel()
+
+	const key = "gapConfig:t1.missing_x"
+	const sev, code = "warning", "UnresolvedReference"
+	start := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+
+	t.Run("a continuously re-derived fault keeps its first arrival", func(t *testing.T) {
+		c := newIssueCache()
+		_, arrived := c.pacedRaise(key, sev, code, start)
+		if !arrived.Equal(start) {
+			t.Fatalf("the arrival is the first raise, got %v want %v", arrived, start)
+		}
+		// Two hours of sweep passes, with another entity's close emptying the
+		// latch in the middle of them.
+		for minute := 1; minute <= 120; minute++ {
+			at := start.Add(time.Duration(minute) * time.Minute)
+			if minute == 30 {
+				c.clear(key)
+			}
+			_, arrived = c.pacedRaise(key, sev, code, at)
+			if !arrived.Equal(start) {
+				t.Fatalf("minute %d reported the arrival as %v; a fault re-derived every pass never stopped "+
+					"holding and keeps its first arrival %v", minute, arrived, start)
+			}
+		}
+	})
+
+	t.Run("a silence longer than one interval is a fresh arrival", func(t *testing.T) {
+		c := newIssueCache()
+		c.pacedRaise(key, sev, code, start)
+		// Nothing re-derived this fault for longer than the pacing window, so
+		// its return is a genuinely new one rather than a continuation. This is
+		// what bounds how far the stamp can reach back.
+		back := start.Add(logPaceInterval + time.Minute)
+		loud, arrived := c.pacedRaise(key, sev, code, back)
+		if !loud {
+			t.Fatal("a fault returning after a silence longer than the interval must arrive loudly")
+		}
+		if !arrived.Equal(back) {
+			t.Fatalf("arrival = %v, want the return instant %v", arrived, back)
+		}
+	})
+
+	t.Run("a different fact at one key restamps the arrival", func(t *testing.T) {
+		c := newIssueCache()
+		c.pacedRaise(key, "warning", "UnresolvedReference", start)
+		at := start.Add(time.Minute)
+		_, arrived := c.pacedRaise(key, "error", "PlaybookConfigError", at)
+		if !arrived.Equal(at) {
+			t.Fatalf("arrival = %v, want %v: a different severity or code is a different fault, "+
+				"and it did not arise when the previous one did", arrived, at)
+		}
+	})
+
+	t.Run("a subject that left starts over", func(t *testing.T) {
+		c := newIssueCache()
+		c.pacedRaise(key, sev, code, start)
+		c.clearPrefix("gapConfig:t1.")
+		at := start.Add(time.Minute)
+		_, arrived := c.pacedRaise(key, sev, code, at)
+		if !arrived.Equal(at) {
+			t.Fatalf("arrival = %v, want %v: a revoked target's return is a new fault, not a continuation",
+				arrived, at)
+		}
+	})
+}
+
+// TestAlertPaced_DatesTheIssueFromThePaceEntry is the seam-level statement of
+// the same fact: the Health entry an operator reads must keep its age across the
+// clear, or damping the log would have made the fault both quiet AND undatable.
+func TestAlertPaced_DatesTheIssueFromThePaceEntry(t *testing.T) {
+	t.Parallel()
+
+	const key = "gapConfig:t1.missing_x"
+	logs := &logCapture{}
+	e := &Engine{logger: slog.New(logs), issues: newIssueCache()}
+
+	e.alertPaced(key, "warning", "UnresolvedReference", "arrival: ghostFlow does not resolve")
+	first, ok := issueAt(e.issues, key)
+	if !ok {
+		t.Fatalf("the arrival must raise the issue, issues = %+v", e.issues.snapshot())
+	}
+
+	// Another entity's column stops being reported: clearClosedMarks empties the
+	// target-scoped latch. Nothing about the playbook changed.
+	e.issues.clear(key)
+	e.alertPaced(key, "warning", "UnresolvedReference", "next pass: ghostFlow does not resolve")
+
+	second, ok := issueAt(e.issues, key)
+	if !ok {
+		t.Fatalf("the pass after the clear must re-raise the issue, issues = %+v", e.issues.snapshot())
+	}
+	if second.Since != first.Since {
+		t.Fatalf("since moved %q -> %q across a clear that was another entity's close; the fault never "+
+			"stopped holding and its age must survive", first.Since, second.Since)
+	}
+	if lv := logs.levelsContaining("next pass:"); len(lv) != 1 || lv[0] != slog.LevelDebug {
+		t.Fatalf("the pass after the clear logged %v, want exactly one Debug", lv)
+	}
+}

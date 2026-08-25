@@ -346,15 +346,22 @@ func TestRevoke_RemovesDurableMarksAndStaysDisabled(t *testing.T) {
 	}
 }
 
-// TestRevoke_RetiresEveryPerEntityIssueFamily pins the teardown of the issue
-// families whose keys carry a segment below the target — gap (per entity), gap-
-// config (per gap column), data (per entity) and inflight-mismatch (per gap
-// column). A revoked target has no rows left to close and no marks left to
-// reclaim, so nothing on the live path will ever retire these: without the
-// prefix clear, one entry per (entity, column) stands for a target that no
-// longer exists until the process restarts. Another target's identically-shaped
-// entries must survive, which is what makes this a prefix clear rather than a
-// flush.
+// TestRevoke_RetiresEveryPerEntityIssueFamily pins the teardown of the four
+// issue families whose keys carry a segment below the target — gap (per entity
+// and gap column), gap-config (per gap column), data (per entity and column)
+// and template (per entity and gap column). Those four are exactly what
+// issueKeyTargetPrefixes lists, and the seeded set below covers each: a family
+// added there without a row here would go untested, and one added to the key
+// space but not there would strand. A revoked target has no rows left to close
+// and no marks left to reclaim, so nothing on the live path will ever retire
+// these: without the prefix clear, one entry per (entity, column) stands for a
+// target that no longer exists until the process restarts. Another target's
+// identically-shaped entries must survive, which is what makes this a prefix
+// clear rather than a flush.
+//
+// The effect family is deliberately absent from both: flagEffectMismatches
+// rebuilds its alert set from a scan every heartbeat, so its entries self-clear
+// once Revoke deletes the target's `__effect` windows.
 func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -374,6 +381,8 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyDataEntity("t1", entityA, "missing_x"),
 		issueKeyDataEntity("t1", entityB, freshUntilColumn),
 		issueKeyDataEntity("t1", entityB, "entityKey"),
+		issueKeyTemplateEntity("t1", entityA, "missing_x"),
+		issueKeyTemplateEntity("t1", entityB, "missing_x"),
 	}
 	for _, key := range revoked {
 		h.engine.issues.set(key, "warning", "Fixture", key)
@@ -384,6 +393,7 @@ func TestRevoke_RetiresEveryPerEntityIssueFamily(t *testing.T) {
 		issueKeyGapEntity("t10", entityA, "missing_x"),
 		issueKeyGapConfig("t10", "missing_x"),
 		issueKeyDataEntity("t10", entityA, "missing_x"),
+		issueKeyTemplateEntity("t10", entityA, "missing_x"),
 	}
 	for _, key := range survivors {
 		h.engine.issues.set(key, "warning", "Fixture", key)

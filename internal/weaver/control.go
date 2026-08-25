@@ -227,12 +227,12 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 
 	e.issues.clear(issueKeyConsumer(targetID))
 	e.issues.clear(issueKeyTimer(targetID))
-	// The gap and data families are keyed per (entity, column) below the
-	// target, so a revoked target's standing entries have no single key to
-	// name: retire each family by prefix, exactly as the weaver-state teardown
-	// above retires the target's keys by prefix. Without this, one issue per
-	// (entity, column) stands for a target that no longer exists until the
-	// process restarts.
+	// The gap, gap-config, data and template families are keyed per
+	// (entity, column) below the target, so a revoked target's standing entries
+	// have no single key to name: retire each family by prefix, exactly as the
+	// weaver-state teardown above retires the target's keys by prefix. Without
+	// this, one issue per (entity, column) stands for a target that no longer
+	// exists until the process restarts.
 	for _, prefix := range issueKeyTargetPrefixes(targetID) {
 		e.issues.clearPrefix(prefix)
 	}

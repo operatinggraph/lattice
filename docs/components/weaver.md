@@ -1067,11 +1067,29 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `entityKey` guard sat above an orphan-column arm. Check: label every arm guard / act / retire, then
   assert each retire is still reachable with every guard's condition true — destruction is an act and
   stays below the gates, reading is not.
-- **A target leaves the registry by more routes than the teardown verb, and each must retire the whole
-  family** — the issue families are prefix-keyed below the target, so a route that clears only the key it
-  owns strands every per-entity entry: once the registration is gone, `handleRow` returns at its registry
-  miss and no live path can ever reach a clear. Minted: `reconcileConsumers`' removal branch retired
-  `issueKeyConsumer` alone while `Revoke` prefix-cleared, so a spec deletion or a `targetId` rename stranded
-  the set that `Revoke` would have swept (2026-08-23). Check: enumerate every route by which a target stops
-  being registered — revoke, spec delete, vertex remove, rename — and assert each retires
-  `issueKeyTargetPrefixes`, not just its own key.
+- **A fact ends by more routes than the one you are editing — enumerate the LEGS, not just the verb** —
+  and the leg you are not looking at is usually the only one that runs for a quiet row. Two levels of the
+  same class. *Teardown routes:* the issue families are prefix-keyed below the target, so a route that
+  clears only the key it owns strands every per-entity entry — once the registration is gone `handleRow`
+  returns at its registry miss and no live path reaches a clear (minted 2026-08-23: `reconcileConsumers`'
+  removal branch retired `issueKeyConsumer` alone while `Revoke` prefix-cleared, so a spec delete or a
+  `targetId` rename stranded the set). *Close-observing legs:* `clearClosedMarks` runs on a DELIVERY, and
+  the sweep observes the identical ending at `deleteMark`'s gap-closed arm, at `deleteCount`, and at the
+  row-gone arm — a row that stops being delivered is retired by the sweep or by nothing (minted 2026-08-25:
+  the `data:`/`template:` split added four retirements to lane 1 and none to the sweep, and a sweep holding
+  a row at its own revision re-raised what lane 1 had just cleared). **The retirement set is not one set:**
+  split it by which fact the leg has actually witnessed — a playbook dropping a gap (`orphanColumn`) has
+  ended nothing about the row, so it must not clear a latch lane 1 keeps raising at. Check: for every clear
+  you add, enumerate every leg that can observe the same fact ending and every leg that can RE-RAISE at
+  that key; put the shared part in one helper both call, and name what each leg witnessed.
+- **A presence assertion cannot pin a clear whose caller re-raises in the same pass — the STAMP is the
+  observable** — `clearClosedMarks` runs before the dispatch that re-raises, so removing a guard clears the
+  entry and the next read re-raises it microseconds later: the test sees an entry either way and greens
+  under the reverted line. What a missing guard actually produces is the flap — `clear` deletes `since`, the
+  re-raise mints a fresh one — so capture the arrival stamp and assert it is unchanged. Minted 2026-08-25,
+  twice in one item (the priority guard, and an orphan fixture that reached the wrong sweep arm entirely);
+  both were caught by the revert proof, neither by reading the test. Check: for any assertion about a clear,
+  ask what the same pass does next — if it re-raises, assert on `since`, not on membership. **Related
+  fixture trap:** a weaver `targetId` is free-form, not a NanoID, but `lint-conventions` reads any 20-char
+  value on an `…ID` identifier as one — keep fixture target ids under 20 characters (three renames in one
+  fire).
