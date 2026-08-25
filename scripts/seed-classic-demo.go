@@ -340,6 +340,10 @@ func main() {
 	fmt.Printf("==> session:         %s (%s, capacity 12)\n", sessionKey, sessionStart.Format(time.RFC3339))
 	reapVerifyLitter(ctx, conn, adminKey)
 
+	// --- Café front desk: a live class + visit badge for an already-tenanted resident ---
+
+	backfillCafeFrontDeskBadges(ctx, conn, adminKey, sessionKey, providerKey)
+
 	fmt.Println()
 	fmt.Println("==> classic vertical demo data seeded.")
 	fmt.Printf("    resident:    %s\n", consumerKey)
@@ -798,6 +802,167 @@ func backfillBareListings(ctx context.Context, conn *substrate.Conn, adminKey st
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> backfilled listing: %s (available)\n", key)
 	}
+}
+
+// backfillCafeFrontDeskBadges books a fresh forward-dated wellness class and
+// clinic visit for one already-tenanted resident so the café front desk's two
+// P5 lens buckets (front-desk-bookings, front-desk-visits —
+// packages/front-desk/lenses.go) carry at least one live row each
+// (verticals.md "Every resident's class + visit badge on the café front desk
+// is blank"): live-stack census found every existing residentRate booking and
+// residentVisit appointment had already gone noShow or been tombstoned, so
+// the front-desk "class + visit badge" composition surface rendered nothing
+// even though the underlying confinement plumbing is sound.
+//
+// Rather than mint a brand-new resident/lease/patient world, this converges
+// on the FIRST live leaseapp already carrying a signed tenancy (a live
+// .tenancy aspect — CreateOnly, stamped on a lease's first
+// DecideLeaseApplication approve) whose applicationFor identity is ALSO the
+// identifiedBy target of some already-live clinic patient — the exact
+// precondition wellness-domain's CreateBooking and clinic-domain's
+// CreateAppointment each check before writing a residentRate / residentVisit
+// link (packages/wellness-domain/ddls.go prepare_booking_common;
+// packages/clinic-domain/ddls.go's CreateAppointment resident-visit branch).
+// The booking targets the wellness session this file's own Wellness section
+// just ensured is live and forward-dated (sessionKey); the visit picks its
+// own day-derived slot against the canonical provider, walked forward a few
+// days if the resident or provider already holds a claim there.
+func backfillCafeFrontDeskBadges(ctx context.Context, conn *substrate.Conn, adminKey, sessionKey, providerKey string) {
+	leaseKey, patientKey, identityKey, found := findTenantedLeaseWithLinkedPatient(ctx, conn)
+	if !found {
+		fmt.Println("==> café front-desk badges: no live tenanted-lease + identified-patient resident found, skipping")
+		return
+	}
+	fmt.Printf("==> front-desk resident: %s (lease %s, patient %s)\n", identityKey, leaseKey, patientKey)
+
+	_, bookerID, _ := substrate.ParseVertexKey(identityKey)
+	_, leaseID, _ := substrate.ParseVertexKey(leaseKey)
+	bookID := substrate.DeriveNanoID("cafe-frontdesk-badge-booking", sessionKey)
+	bookKey := "vtx.booking." + bookID
+	if !alive(ctx, conn, bookKey) {
+		submitOp(ctx, conn, adminKey, "CreateBooking", "booking",
+			map[string]any{"session": sessionKey, "booker": identityKey, "leaseAppKey": leaseKey, "bookingId": bookID},
+			&processor.ContextHint{
+				Reads: []string{sessionKey, sessionKey + ".schedule", identityKey},
+				OptionalReads: append(bookingSeatKeys(sessionKey, 20),
+					sessionKey+".bkr"+bookerID,
+					leaseKey, leaseKey+".tenancy",
+					"lnk.leaseapp."+leaseID+".applicationFor.identity."+bookerID),
+			})
+	}
+	fmt.Printf("==> booking:         %s (residentRate, session %s)\n", bookKey, sessionKey)
+
+	start, end, foundSlot := findOpenApptSlot(ctx, conn, providerKey, patientKey)
+	if !foundSlot {
+		fmt.Println("==> café front-desk badges: no open appointment slot found for the resident visit, skipping visit backfill")
+		return
+	}
+	apptID := substrate.DeriveNanoID("cafe-frontdesk-badge-visit", start.Format("2006-01-02"))
+	apptKey := "vtx.appointment." + apptID
+	if !alive(ctx, conn, apptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": patientKey, "provider": providerKey, "appointmentId": apptID,
+				"startsAt": start.Format(time.RFC3339), "endsAt": end.Format(time.RFC3339),
+				"reason": "Front desk badge check", "leaseAppKey": leaseKey,
+			},
+			&processor.ContextHint{
+				Reads: []string{patientKey, providerKey},
+				OptionalReads: append(
+					append(slotClaimKeys(providerKey, start, end), slotClaimKeys(patientKey, start, end)...),
+					leaseKey, leaseKey+".tenancy"),
+			})
+	}
+	fmt.Printf("==> visit:           %s (residentVisit, %s)\n", apptKey, start.Format(time.RFC3339))
+}
+
+// findTenantedLeaseWithLinkedPatient scans live vtx.leaseapp.* root vertices
+// for one carrying a live .tenancy aspect (an approved, signed lease, not
+// merely applied) whose applicationFor identity is ALSO the identifiedBy
+// target of some already-live clinic patient — the precise resident-rate /
+// resident-visit precondition (see backfillCafeFrontDeskBadges' doc comment).
+// Sorted so the choice is deterministic across reruns on an unchanged stack.
+// Direct Core KV reads, sanctioned here for the same reason every other reap/
+// backfill helper in this file uses them (dev/ops loader, not a P5 read path).
+func findTenantedLeaseWithLinkedPatient(ctx context.Context, conn *substrate.Conn) (leaseKey, patientKey, identityKey string, found bool) {
+	leaseKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.leaseapp.")
+	must(err, "list vtx.leaseapp. keys")
+	sort.Strings(leaseKeys)
+	for _, lk := range leaseKeys {
+		if strings.Count(lk, ".") != 2 || !alive(ctx, conn, lk) || !alive(ctx, conn, lk+".tenancy") {
+			continue
+		}
+		leaseID := strings.TrimPrefix(lk, "vtx.leaseapp.")
+		appForPrefix := "lnk.leaseapp." + leaseID + ".applicationFor.identity."
+		appForKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, appForPrefix)
+		must(err, "list "+appForPrefix+" keys")
+		var identID string
+		for _, k := range appForKeys {
+			if alive(ctx, conn, k) {
+				identID = strings.TrimPrefix(k, appForPrefix)
+				break
+			}
+		}
+		if identID == "" {
+			continue
+		}
+
+		patSuffix := ".identifiedBy.identity." + identID
+		patKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.patient.")
+		must(err, "list lnk.patient. keys")
+		sort.Strings(patKeys)
+		for _, pk := range patKeys {
+			if !strings.HasSuffix(pk, patSuffix) || !alive(ctx, conn, pk) {
+				continue
+			}
+			patID := strings.TrimSuffix(strings.TrimPrefix(pk, "lnk.patient."), patSuffix)
+			candidatePatientKey := "vtx.patient." + patID
+			if !alive(ctx, conn, candidatePatientKey) {
+				continue
+			}
+			return lk, candidatePatientKey, "vtx.identity." + identID, true
+		}
+	}
+	return "", "", "", false
+}
+
+// findOpenApptSlot walks a handful of day-offsets 30+ days out (well clear of
+// every other date this file's own idioms derive appointments/sessions at,
+// which stay within a day or two of time.Now()) looking for a 30-minute,
+// 15-minute-grid-aligned slot where NEITHER providerKey nor patientKey
+// already holds a slot claim — clinic-domain's CreateAppointment rejects a
+// covered cell either side already holds with SlotConflict/PatientDoubleBook.
+// Fixed at 10:00 UTC, comfortably inside the canonical provider's 08:00-18:00
+// hours (SetProviderHours above).
+func findOpenApptSlot(ctx context.Context, conn *substrate.Conn, providerKey, patientKey string) (start, end time.Time, found bool) {
+	for _, days := range []int{30, 31, 32, 33, 34, 35, 36, 37, 38, 39} {
+		day := time.Now().UTC().Add(time.Duration(days) * 24 * time.Hour).Truncate(24 * time.Hour)
+		candidateStart := day.Add(10 * time.Hour)
+		candidateEnd := candidateStart.Add(30 * time.Minute)
+		occupied := false
+		for _, key := range append(slotClaimKeys(providerKey, candidateStart, candidateEnd), slotClaimKeys(patientKey, candidateStart, candidateEnd)...) {
+			if alive(ctx, conn, key) {
+				occupied = true
+				break
+			}
+		}
+		if !occupied {
+			return candidateStart, candidateEnd, true
+		}
+	}
+	return time.Time{}, time.Time{}, false
+}
+
+// bookingSeatKeys enumerates a session's seat-claim aspect keys 1..n,
+// mirroring wellness-domain integration_test.go's wdSeatKeys (claim_first_free_seat's
+// bounded loop, ddls.go) — n=20 covers this file's own session capacity (12)
+// with headroom, the same fixed bound that suite's createBooking helper uses.
+func bookingSeatKeys(sessionKey string, n int) []string {
+	keys := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		keys = append(keys, sessionKey+".seat"+fmt.Sprint(i))
+	}
+	return keys
 }
 
 // reapGhostLeases withdraws every live leaseapp whose applicant is the
