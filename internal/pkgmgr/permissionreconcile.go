@@ -1304,9 +1304,13 @@ func LoadPermissionReconciliation(ctx context.Context, conn *substrate.Conn) (Pe
 func kernelPermissionKeySet(keys []string) (map[string]bool, error) {
 	set := make(map[string]bool, len(keys))
 	for _, k := range keys {
-		// "" is the unloaded zero value; "vtx.permission." is what
-		// substrate.VertexKey("permission", "") produces from it — both mean
-		// the same thing: nothing was ever loaded into bootstrap's globals.
+		// "" is the unloaded zero value of a key variable; "vtx.permission."
+		// is the shape a caller gets by concatenating a prefix onto an
+		// unloaded ID variable. Both mean the same thing: nothing was ever
+		// loaded into bootstrap's globals. (substrate.VertexKey cannot
+		// produce the second — it validates its id segment and panics on an
+		// empty one, so a key that reaches here empty-id was built by
+		// concatenation.)
 		if k == "" || k == "vtx.permission." {
 			return nil, fmt.Errorf("pkgmgr: kernel permission keys unresolved — bootstrap.Load(BOOTSTRAP_JSON_PATH) must run before LoadPermissionReconciliation")
 		}
@@ -1344,9 +1348,11 @@ func kernelPermissionKeys() (map[string]bool, error) {
 // caller-supplied keys.
 //
 // A key is accepted only as a complete
-// `lnk.permission.<id>.grantedBy.role.<id>`: "" and the empty-id shape
-// substrate.LinkKey derives from unloaded globals both fail it, and so does
-// anything that is not a grant edge at all.
+// `lnk.permission.<id>.grantedBy.role.<id>`: "" and the empty-id shape a
+// caller gets by concatenating around unloaded ID variables both fail it, and
+// so does anything that is not a grant edge at all. (substrate.LinkKey cannot
+// produce that shape — it validates its id segments and panics on an empty
+// one, which is why KernelGrantLinkKeys concatenates instead.)
 func kernelGrantLinkKeySet(keys []string) (map[string]bool, error) {
 	set := make(map[string]bool, len(keys))
 	for _, k := range keys {
