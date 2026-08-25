@@ -907,7 +907,8 @@ decides whose close retires the issue. The key never appears on the wire — it 
 |---|---|---|
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo), `TemplateDataError` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
+| `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
@@ -921,10 +922,21 @@ The same split governs `data:`. A malformed column value is a fact about the one
 carrying it, repaired for that row alone by the next projection, so it is keyed per
 `(target, entity, column)` and repairing one row never retires another's. **The read is the
 retirement**: a column that parses, or that the next projection drops, clears that row's entry.
-Most of the columns these readers surface — `violating`, `inflight_<g>`, `maxretries_<g>`,
-`admissionPriority` — have no gap-close or plan-success path of their own, so without that the
-entries would accumulate one per `(row, column)` for the process's lifetime. The listing cap below
-bounds the *document*, never the cache behind it.
+That covers a column every delivery reads (`violating`, the gap columns themselves), but not one
+the engine reads only while a gap is open — `inflight_<g>` and `maxretries_<g>` are read by the
+suppression terms, and `admissionPriority` by the admission gate, so a gap closing ends the read
+that would retire them. Those are retired by the gap close instead: the companion pair with their
+own gap, and the priority entry when the entity's last candidate column closes. Without a
+retirement that does not depend on a further read, the entries would stand one per `(row, column)`
+for the process's lifetime. The listing cap below bounds the *document*, never the cache behind it.
+
+`template:` is a separate family for the same reason those retirements are separate. A gap's plan
+whose template references resolve null is a different fact from that gap column carrying a non-bool
+value, and the two would otherwise latch at one key — where the column's own parsing read (which
+runs before every planning attempt) would retire the template fact it knows nothing about, taking
+the entry's `since` with it and re-stamping it on the next raise. It is keyed per
+`(target, entity, gapColumn)`, retired by the plan that builds (the resolution), by the gap
+closing, and by the entity or target teardowns.
 
 The **missing-`entityKey` echo** is keyed the same way: the entity the body omits is supplied by the
 row *key*, and the raise/clear decision is taken on every delivery that reaches reconciliation (the

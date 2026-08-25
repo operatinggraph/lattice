@@ -536,14 +536,19 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		}
 		var pl *plan
 		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
-			// A plan built and about to fire disproves BOTH standing facts: the
-			// playbook resolves (the config issue), and this entity's gap has an
+			// A plan built and about to fire disproves THREE standing facts: the
+			// playbook resolves (the config issue), this entity's gap has an
 			// attempt left after all (its GapBudgetExhausted, which a raised
 			// maxretries_<g> or an escalation can make stale without the gap ever
-			// having closed).
+			// having closed), and this row's template references resolve (the
+			// template issue — building the plan IS the resolution).
+			//
+			// The gap column's own `data:` entry is deliberately NOT cleared here:
+			// a built plan says nothing about whether missing_<g> carries a §10.2
+			// bool, and that entry is raised and retired by boolColumn's own read.
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
-			e.issues.clear(issueKeyDataEntity(targetID, entityID, col))
+			e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
 			return pl, actionRef, substrate.Ack
 		}
 	}
@@ -562,7 +567,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 	case errData:
 		msg := "target " + targetID + " entity " + entityID + " gap " + col + ": " + perr.msg
 		e.logger.Warn("weaver: " + msg)
-		e.issues.set(issueKeyDataEntity(targetID, entityID, col), "warning", "TemplateDataError", msg)
+		e.issues.set(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError", msg)
 		return nil, "", substrate.Ack
 	default:
 		e.alert(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
@@ -815,28 +820,43 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	if row == nil {
-		// The entity is deleted: every data error its columns ever raised
-		// describes a row that no longer exists. The column readers retire
-		// those on a value that parses, but a deleted entity projects no
-		// values at all, so this is the only pass that can retire them —
-		// by prefix, since the set of columns that raised is not knowable
+		// The entity is deleted: every data and template error its columns ever
+		// raised describes a row that no longer exists. The column readers
+		// retire the data ones on a value that parses, but a deleted entity
+		// projects no values at all, so this is the only pass that can retire
+		// them — by prefix, since the set of columns that raised is not knowable
 		// from an empty body.
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
+		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
 	}
+	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
 		if row != nil && e.boolColumn(targetID, entityID, row, col) {
+			anyOpen = true
 			continue
 		}
 		// A closed gap retires the standing issues at this column along with its
 		// bookkeeping — a row that stopped reporting the column closed it, a
 		// retraction tombstone included (its body carries no gap columns at
-		// all). Both scopes retire here, and the config one is not incidental:
-		// this is the ONLY clear site a GapWithoutPlaybook / UnresolvedReference
-		// / PlaybookConfigError can reach when the column simply stops being
-		// reported, since every other config clear requires the config to have
-		// been FIXED. Idempotent when neither stands.
+		// all). All three scopes retire here, and the config one is not
+		// incidental: this is the ONLY clear site a GapWithoutPlaybook /
+		// UnresolvedReference / PlaybookConfigError can reach when the column
+		// simply stops being reported, since every other config clear requires
+		// the config to have been FIXED. Idempotent when none stands.
 		e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
 		e.issues.clear(issueKeyGapConfig(targetID, col))
+		e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
+		// The gap's two companion columns are read only while the gap is a live
+		// dispatch candidate — markCandidateColumns enumerates missing_* alone,
+		// so nothing reads inflight_<g> or maxretries_<g> again once this column
+		// stops being true. The close is therefore what ends the read, and the
+		// only site that can retire a malformed value's entry for them. A
+		// candidate that is not missing_*-shaped (a target.Gaps key the package
+		// authored without the prefix) has no companions to name.
+		if g, isGapColumn := strings.CutPrefix(col, gapColumnPrefix); isGapColumn {
+			e.issues.clear(issueKeyDataEntity(targetID, entityID, inflightColumnPrefix+g))
+			e.issues.clear(issueKeyDataEntity(targetID, entityID, maxretriesColumnPrefix+g))
+		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column.
@@ -873,6 +893,14 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 					"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
 			}
 		}
+	}
+	// The admission priority column is read once per gap DISPATCH (admitGap), so
+	// an entity with no candidate column still open has no read left to retire a
+	// malformed value's entry. It is scoped to the entity, not to any one gap, so
+	// the retirement is too: clearing it per closing gap would erase the entry a
+	// multi-gap entity's still-open gap keeps re-raising, and the two would flap.
+	if !anyOpen {
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, admissionPriorityColumn))
 	}
 	return ok
 }
@@ -1375,15 +1403,17 @@ const (
 	issuePrefixGapEntity = "gap:"
 	issuePrefixGapConfig = "gapConfig:"
 	issuePrefixData      = "data:"
+	issuePrefixTemplate  = "template:"
 )
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
-// teardown must retire wholesale (Engine.Revoke). These are the families whose
-// keys carry a segment below the target — a per-entity or per-gap one — so a
-// teardown has no single key to name and must clear by prefix; the families
-// keyed by targetID alone (consumer, timer, owner) are cleared by key at the
-// same site. Each prefix ends in the "." separator, which is what keeps "t1."
-// from matching a key under "t10.".
+// teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,
+// row-data and template families. These are the families whose keys carry a
+// segment below the target — a per-entity or per-gap one — so a teardown has no
+// single key to name and must clear by prefix; the families keyed by targetID
+// alone (consumer, timer, owner) are cleared by key at the same site. Each
+// prefix ends in the "." separator, which is what keeps "t1." from matching a
+// key under "t10.".
 //
 // Every family whose entries a revoke would otherwise strand belongs here: a
 // revoked target delivers no rows and keeps no marks, so each of these has no
@@ -1397,6 +1427,7 @@ func issueKeyTargetPrefixes(targetID string) []string {
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
 		issuePrefixData + targetID + ".",
+		issuePrefixTemplate + targetID + ".",
 	}
 }
 
@@ -1421,21 +1452,55 @@ func issueKeyGapConfig(targetID, col string) string {
 }
 
 // issueKeyDataEntity keys a per-ROW data error — a column whose value is not
-// the §10.2 type the reader expects, a template reference that resolves null, a
-// freshUntil that is not an RFC3339 string, a violating row carrying no
-// entityKey echo. Every one of these is a fact about the one projected row that
-// carries the bad value, fixed for that row alone by the next projection, so the
-// key carries the entity segment: N malformed rows are N independent issues, and
-// repairing one never retires another's. The entity the body may be missing is
-// always available from the row KEY (splitRowKey), so every member of the family
-// can be keyed this way. Three teardowns cover the whole family: the read that
-// raises an entry also retires it, clearClosedMarks prefix-clears the entity on
-// its deletion tombstone, and a target leaving by either route — Revoke or
-// registry removal (reconcileConsumers) — prefix-clears the target
-// (issueKeyTargetPrefixes). Between them no exit from handleRow leaves an entry
-// no later pass can reach.
+// the §10.2 type the reader expects, a freshUntil that is not an RFC3339
+// string, a violating row carrying no entityKey echo. Every one of these is a
+// fact about the one projected row that carries the bad value, fixed for that
+// row alone by the next projection, so the key carries the entity segment: N
+// malformed rows are N independent issues, and repairing one never retires
+// another's. The entity the body may be missing is always available from the
+// row KEY (splitRowKey), so every member of the family can be keyed this way.
+//
+// Retirement is per COLUMN, and which site owns it depends on whether the
+// column keeps being read. A column every delivery reads — violating, the
+// entityKey echo, a gap column itself, freshUntil — is retired by its own next
+// clean read, so the next projection carrying a usable value (or dropping the
+// column) is the retirement. The columns read only while some gap is open —
+// the per-gap companions inflight_<g> and maxretries_<g>, and the admission
+// priority column — have no such next read once that gap closes, so
+// clearClosedMarks retires them at the close: the companions with their own
+// gap, the priority entry once no candidate column of the entity stayed open.
+// Above those, two prefix teardowns cover a subject that leaves entirely —
+// clearClosedMarks prefix-clears the entity on its deletion tombstone, and a
+// target leaving by either route (Revoke or registry removal via
+// reconcileConsumers) prefix-clears the target (issueKeyTargetPrefixes).
+// Between them no exit from handleRow leaves an entry no later pass can reach.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
+}
+
+// issueKeyTemplateEntity keys a per-ROW PLAN-BUILD data error: a gap whose
+// action template references resolve null against this row, so no episode can
+// be built for it (planGap's TemplateDataError). Like the data family it is a
+// fact about one (target, entity, gap column) triple, and like it the fact is
+// repaired for that row alone by the next projection.
+//
+// It cannot share issueKeyDataEntity's key at the gap column, because that key
+// already latches a DIFFERENT fact about the same column — "missing_<g> is not
+// the §10.2 bool", raised and retired by boolColumn. Every delivery that
+// reaches planGap for a column has already read that column as a bool at least
+// twice (clearClosedMarks' candidate walk, then openGapColumns), and each read
+// retires whatever stands at the shared key. A template fault would therefore
+// be erased and re-raised on every single delivery, re-stamping its `since` to
+// now and reporting a week-old fault as seconds old (Contract #5 §5.5). Its own
+// prefix keeps the two facts on independent timelines.
+//
+// Its teardowns mirror the data family's, minus the "read is the retirement"
+// leg that the split exists to remove: a successful plan retires it (that IS
+// the fact ending), the gap-close arm of clearClosedMarks retires it when the
+// column stops being reported, and the entity-tombstone and target prefix
+// clears cover a subject that leaves entirely.
+func issueKeyTemplateEntity(targetID, entityID, col string) string {
+	return issuePrefixTemplate + targetID + "." + entityID + "." + col
 }
 
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
