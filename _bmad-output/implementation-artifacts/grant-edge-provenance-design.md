@@ -115,10 +115,19 @@ rewritten in this increment's commit — it is the falsified claim.
 *Green:* `go test ./internal/pkgmgr/...`, with each class proven by reverting its arm.
 
 **Inc 3 — the gate** *(mechanical)*. `scripts/verify-permission-provenance.go` reports link findings and
-exits non-zero on link drift; `checkRegistryAnchor` gains the link pass — for every registered
-`pkgmgr.Definition`, the `(permission, role)` pairs it declares derive the exact set of package-origin
-grant edges that may exist under its name.
+exits non-zero on link drift; `checkRegistryAnchor` gains the link pass.
 *Green:* `make verify-permission-provenance` against a live stack; planted forgery reds, removal greens.
+
+**What the registry anchor can and cannot pin (settled at build, 2026-08-25).** The permission-side
+anchor is exact: a declared grant edge's `lnk.permission.<permID>` must name a permission the package's
+compiled Definition derives, and the edge count per permission must equal that spec's `len(GrantsTo)`.
+**The role side is not pinnable from source** — a `PermissionSpec` names its target by *canonical name*
+(`packages/rbac-domain/permissions.go:31`, `GrantsTo: []string{"operator"}`), which `cmd/lattice-pkg`
+resolves to a role id at install time, so the binary never holds the id the edge points at. The anchor
+therefore verifies *which permission* a declared edge may grant and *how many* edges may exist, and
+accepts whichever role the declared key names. Resolving role ids from Core KV would put the writer on
+both sides of the comparison — the echo-not-a-check class in `docs/components/pkgmgr.md`'s dossier — so
+it is stated as a residual rather than closed with a false anchor.
 
 **Review depth:** capability-plane, so **full 3-layer adversarial** over the item's whole diff at close,
 plus a full pass on Inc 2.
@@ -180,8 +189,20 @@ tombstone-state alone* (→ the `isDeleted` filter is not the classification). F
 filter `isDeleted` and the revive arm must re-stamp; **#6 precedent may carry debt** — verify the vertex
 plane's own residuals (its doc comment names three) before copying its posture wholesale.
 
-**6. Adjacent finds.** None so far; the four-writer census (G1) and the declaredKeys shape (G3) were
-re-run live and matched.
+**6. Adjacent finds, and what this run did with each.**
+- *The four-writer census (G1) and the declaredKeys shape (G3)* were re-run live and matched.
+- *The version gate's directory-level trigger.* `scripts/lint-package-version.go`'s `walkGeneratorDir`
+  treats any non-comment `.go` change under `internal/pkgmgr/` as a possible change to the read-grant
+  producer compiler, so Inc 1 made `packages/edge-manifest` (the one package declaring `ReadGrantDomains`)
+  need a version bump. The gate's coarseness is deliberate — its own doc comment says the whole directory
+  is the trigger so that splitting the generator across files cannot reopen the gap — and the repo's
+  standing convention is to bump (`dbe783f`, `b9121e8`). **Fixed this run** (`e2b20ba`), not filed: left
+  alone it would have reddened `main`.
+- *Committing from a tree a builder is still mutating.* A staged commit captured a revert-proof mutation
+  (a constant-false conjunct disabling the double-diagnosis guard) that was live in the tree for the
+  seconds between the builder planting it and restoring it. **Fixed this run** (`936b4fd`). The lesson is
+  a lead-side one and belongs in the dossier: a green bar is not a safe commit point while a builder is
+  running revert-proofs — only the builder's *report* is.
 
 **7. Non-goals.** Enforcement on edge origin (§3 — needs relationship-property projection, a designer
 pass if and when a driver appears); `holdsRole` (§3 — no declared side); any `docs/contracts/*` edit (§4);
