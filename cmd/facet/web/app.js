@@ -2795,13 +2795,14 @@ async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, con
     const v = payload[op.dispatchTargetField];
     if (v && !reads.includes(v)) reads.push(v);
   }
-  // The submitting identity's own key is read-free per Contract #2's model
-  // (op.actor is always available to the script) in principle, but a script
-  // that additionally validates the actor vertex itself needs it declared.
-  // Over-reading is harmless; under-reading fails the request, so include it
-  // unconditionally.
-  const selfKey = me() && me().identityKey;
-  if (selfKey && !reads.includes(selfKey)) reads.push(selfKey);
+  // Nothing else is added. A client declares what the descriptor names and
+  // stops there, because the two directions are not symmetric: a declared key
+  // the descriptor does not name REFUSES a closed-set operation outright
+  // (internal/processor/descriptor_floor.go's refuseUndeclaredContextHint,
+  // which ClaimIdentity and CompleteCredentialLink are held to), while a key
+  // the script reads without a declaration still resolves — an undeclared
+  // kv.Read falls through to a live on-demand GET, so the whole cost of
+  // omitting one is that key's latency.
   // The absence-tolerant half (Contract #2 §2.5 class-(d)): a uniqueness
   // guard whose prior claim was released, an ownership link that may not
   // exist for this caller. An entry that failed to substitute is dropped

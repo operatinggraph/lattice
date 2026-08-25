@@ -365,6 +365,16 @@ type DDLCache struct {
 type DispatchTemplates struct {
 	Reads         []string
 	OptionalReads []string
+	// Claimants counts the op-meta roots whose templates went into this entry.
+	// One for the ordinary case; more where floorsByOpType unioned two roots
+	// claiming the same operationType. It travels with the lists because the
+	// union is the SAFE direction for a floor and the DANGEROUS one for a closed
+	// declared-read set, so the two consumers must be able to answer differently
+	// — descriptor_floor.go's resolveAdmitted admits nothing from a union it
+	// cannot attribute, while the floor arm keeps demoting every key any
+	// claimant declares optional. Zero on a PER-ROOT descriptor
+	// (loadOpMetaDispatch), where the question has no subject.
+	Claimants int
 }
 
 // opMetaDescriptor is one op-meta root's own contribution to an operation's
@@ -1341,6 +1351,14 @@ func unionTemplates(a, b []string) []string {
 // collision check) and validateOpMetas refuses one within a single package, so
 // the union is a recovery from state that predates those gates or was written
 // around them, not a supported way to express two descriptors for one op.
+//
+// The claimant COUNT rides on the entry (DispatchTemplates.Claimants) rather
+// than being inferred from it, because the union erases the one fact a consumer
+// that must fail closed on a union needs. For a floor the union is a widening
+// and needs no attribution; for a closed declared-read set it is an ADMISSION,
+// and a second claimant's templates would enlarge the set the closure exists to
+// pin. descriptor_floor.go's resolveAdmitted reads this count and admits
+// nothing above one.
 func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logger) map[string]DispatchTemplates {
 	out := make(map[string]DispatchTemplates, len(byOpMetaRoot))
 	claimedBy := make(map[string]string, len(byOpMetaRoot))
@@ -1348,7 +1366,9 @@ func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logge
 		d := byOpMetaRoot[rootKey]
 		prior, dup := out[d.operationType]
 		if !dup {
-			out[d.operationType] = d.templates
+			entry := d.templates
+			entry.Claimants = 1
+			out[d.operationType] = entry
 			claimedBy[d.operationType] = rootKey
 			continue
 		}
@@ -1361,6 +1381,7 @@ func floorsByOpType(byOpMetaRoot map[string]opMetaDescriptor, logger *slog.Logge
 		out[d.operationType] = DispatchTemplates{
 			Reads:         unionTemplates(prior.Reads, d.templates.Reads),
 			OptionalReads: unionTemplates(prior.OptionalReads, d.templates.OptionalReads),
+			Claimants:     prior.Claimants + 1,
 		}
 	}
 	return out

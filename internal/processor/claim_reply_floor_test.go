@@ -395,6 +395,20 @@ func TestClaimRejectionFloor_CoversTheNFRS6OperationSet(t *testing.T) {
 	// wrap does. Nothing of it may reach the caller.
 	const probedKey = "vtx.identity.AbCdEfGhJjKmNpQrStUv.claimKey"
 	hydrateFault := errors.New("step4: decrypt " + probedKey + ": vault: decrypt failed")
+	// The closed declared-read set's refusal (descriptor_floor.go), minted by
+	// the production function rather than hand-rolled: a submitter naming a key
+	// its operation's descriptor does not is refused at the head of step 4, and
+	// that refusal owes the SAME answer as every other cause. A distinct wire
+	// code here would tell a caller its probe was a probe — a new oracle, and a
+	// Contract #9 §9.3 violation, not a new feature.
+	closedSetRefusal := refuseUndeclaredContextHint(&OperationEnvelope{
+		RequestID:     testNanoID1,
+		OperationType: "ClaimIdentity",
+		ContextHint:   &ContextHint{OptionalReads: []string{probedKey}},
+	}, nil, testLogger())
+	if closedSetRefusal == nil {
+		t.Fatal("the closed declared-read set admitted a key no descriptor names")
+	}
 
 	arms := []struct {
 		name string
@@ -403,8 +417,10 @@ func TestClaimRejectionFloor_CoversTheNFRS6OperationSet(t *testing.T) {
 	}{
 		{"ClaimIdentity, script refusal at step 5", "ClaimIdentity", floorPipelineOpts{quantum: quantum}},
 		{"ClaimIdentity, step-4 decrypt fault", "ClaimIdentity", floorPipelineOpts{quantum: quantum, hydrateErr: hydrateFault}},
+		{"ClaimIdentity, step-4 closed-set refusal", "ClaimIdentity", floorPipelineOpts{quantum: quantum, hydrateErr: closedSetRefusal}},
 		{"CompleteCredentialLink, script refusal at step 5", "CompleteCredentialLink", floorPipelineOpts{quantum: quantum}},
 		{"CompleteCredentialLink, step-4 decrypt fault", "CompleteCredentialLink", floorPipelineOpts{quantum: quantum, hydrateErr: hydrateFault}},
+		{"CompleteCredentialLink, step-4 closed-set refusal", "CompleteCredentialLink", floorPipelineOpts{quantum: quantum, hydrateErr: closedSetRefusal}},
 	}
 	for _, arm := range arms {
 		t.Run(arm.name, func(t *testing.T) {

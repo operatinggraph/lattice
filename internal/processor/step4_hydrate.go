@@ -211,6 +211,24 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		floor = newDescriptorFloorResolver(templates, env, h.Logger)
 		declared = applyDescriptorFloor(declared, floor)
 	}
+	// For the operations whose rejections must be indistinguishable
+	// (claim_reply_floor.go's nfrS6Operations) the declared set is CLOSED, not
+	// merely floored: the submitter may name only what the descriptor names,
+	// and anything else faults here rather than being hydrated inside the
+	// rejection quantum.
+	//
+	// The subject is env.ContextHint — the submitter's own declaration — and
+	// the check runs BEFORE derive_reads and before the first Core KV GET.
+	// Derived keys are the DDL's own, authored by the package rather than
+	// priced by the caller, so they are outside the closure; running this after
+	// the merge would refuse the package's own derived probe. An operation with
+	// no descriptor admits nothing and so refuses every declared key — see
+	// refuseUndeclaredContextHint for why that direction is the safe one.
+	if isNFRS6Operation(env.OperationType) {
+		if err := refuseUndeclaredContextHint(env, floor, h.Logger); err != nil {
+			return HydratedState{}, err
+		}
+	}
 	if prog, ok := compiled.deriveReadsProgram(); ok {
 		derived, err := deriveReads(ctx, prog, env, declared, floor, h.deriveBudget(), h.PrimordialActors)
 		if err != nil {

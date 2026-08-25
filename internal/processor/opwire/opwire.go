@@ -71,12 +71,14 @@ type ContextHint struct {
 }
 
 // MaxDeclaredReads bounds `Reads` + `OptionalReads` + `EgressReads` summed
-// across the three classes (Contract #2 §2.5). Step 4 resolves each distinct
-// declared key with its own sequential Core KV GET, whether it hydrates or is
-// recorded absent, so the declared set sizes the hydration round trips an
-// envelope buys before a script runs. `contextHint` is client-supplied and step
-// 3 authorizes on `operationType + actor + authContext` without inspecting it,
-// which leaves that count unpriced for any actor holding any operation grant.
+// across the three classes (Contract #2 §2.5). Step 4 resolves every distinct
+// declared key from ONE batched Core KV snapshot (`KVGetMulti`), whether a key
+// hydrates or is recorded absent — so the declared set does not size the round
+// trips, it sizes that one batch: the keys matched under the stream's read lock,
+// the documents materialized, and the per-key disposition work that follows.
+// `contextHint` is client-supplied and step 3 authorizes on `operationType +
+// actor + authContext` without inspecting it, which leaves that count unpriced
+// for any actor holding any operation grant.
 // The bound is on the sum because the cost is the sum of the three lists; a
 // per-class limit would be cleared by spreading the keys across them.
 //
@@ -293,10 +295,11 @@ func ParseEnvelope(data []byte) (*OperationEnvelope, error) {
 		return nil, fmt.Errorf("envelope: payload is required (use {} for empty)")
 	}
 	if env.ContextHint != nil {
-		// The three read classes are bounded together because step 4 pays one
-		// sequential Core KV GET per declared key regardless of which list it
-		// came from. Rejecting here is terminal by design: a redelivery
-		// reproduces the identical over-limit envelope.
+		// The three read classes are bounded together because step 4 resolves
+		// them from one batched Core KV snapshot whose cost scales with the
+		// SUM, regardless of which list a key came from. Rejecting here is
+		// terminal by design: a redelivery reproduces the identical
+		// over-limit envelope.
 		declared := len(env.ContextHint.Reads) + len(env.ContextHint.OptionalReads) + len(env.ContextHint.EgressReads)
 		if declared > MaxDeclaredReads {
 			return nil, fmt.Errorf("envelope: contextHint declares %d reads across reads/optionalReads/egressReads, exceeding the %d ceiling", declared, MaxDeclaredReads)

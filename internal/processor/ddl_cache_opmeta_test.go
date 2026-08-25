@@ -275,11 +275,18 @@ type cacheIndexes struct {
 }
 
 func cloneTemplates(t DispatchTemplates) DispatchTemplates {
-	return DispatchTemplates{Reads: slices.Clone(t.Reads), OptionalReads: slices.Clone(t.OptionalReads)}
+	return DispatchTemplates{
+		Reads: slices.Clone(t.Reads), OptionalReads: slices.Clone(t.OptionalReads), Claimants: t.Claimants,
+	}
 }
 
+// sameTemplates compares the claimant count alongside the lists, because that
+// count is what the closed declared-read set fails closed on — an invalidate
+// that rebuilt the same union under a different count would answer differently
+// for an NFR-S6 operation while looking identical here.
 func sameTemplates(a, b DispatchTemplates) bool {
-	return slices.Equal(a.Reads, b.Reads) && slices.Equal(a.OptionalReads, b.OptionalReads)
+	return slices.Equal(a.Reads, b.Reads) && slices.Equal(a.OptionalReads, b.OptionalReads) &&
+		a.Claimants == b.Claimants
 }
 
 func snapshotIndexes(c *DDLCache) cacheIndexes {
@@ -519,7 +526,7 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	if !ok {
 		t.Fatalf("descriptor not found")
 	}
-	assertUnionedTemplates(t, got, wantReads, wantOptional, "two live claimants")
+	assertUnionedTemplates(t, got, wantReads, wantOptional, 2, "two live claimants")
 
 	// Edit A to drop its EXCLUSIVE required template while keeping the shared
 	// one: the arm where a rebuild reading the stale aggregate re-adds exactly
@@ -538,7 +545,7 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	}
 	assertUnionedTemplates(t, got,
 		[]string{"{payload.sharedRequired}", "{payload.bRequired}"}, wantOptional,
-		"after editing one of two claimants' required list")
+		2, "after editing one of two claimants' required list")
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after editing one of two claimants' required list")
 
 	// Withdraw A entirely: A's exclusive templates leave, and the shared one
@@ -563,7 +570,7 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 	assertUnionedTemplates(t, got,
 		[]string{"{payload.sharedRequired}", "{payload.bRequired}"},
 		[]string{"{payload.sharedOptional}", "{payload.bOptional}"},
-		"after withdrawing one of two claimants")
+		1, "after withdrawing one of two claimants")
 	assertMatchesFullRefresh(t, ctx, conn, cache, "after withdrawing one of two claimants")
 }
 
@@ -573,8 +580,14 @@ func TestDDLCache_TwoClaimantsUnionBothTemplateLists(t *testing.T) {
 // appearing once — and the count check that follows names the duplicate case
 // directly, because "the list is longer than expected" is the report a reader
 // most needs spelled out.
-func assertUnionedTemplates(t *testing.T, got DispatchTemplates, wantReads, wantOptional []string, stage string) {
+func assertUnionedTemplates(t *testing.T, got DispatchTemplates, wantReads, wantOptional []string, wantClaimants int, stage string) {
 	t.Helper()
+	// The claimant count is asserted beside the lists because it is what the
+	// closed declared-read set decides on (descriptor_floor.go's
+	// resolveAdmitted): a union the index cannot attribute admits no key.
+	if got.Claimants != wantClaimants {
+		t.Fatalf("%s: claimants = %d, want %d", stage, got.Claimants, wantClaimants)
+	}
 	for _, list := range []struct {
 		name string
 		got  []string

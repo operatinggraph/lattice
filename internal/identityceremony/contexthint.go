@@ -1,7 +1,7 @@
 // Package identityceremony holds the declared read sets the identity claim
 // and credential-link ceremonies submit, shared by every client that
 // dispatches them: Facet, the LoftSpace app, the `lattice identity` CLI and
-// the verify-claim-ceremony harness.
+// the claim- and erasure-ceremony verification harnesses.
 //
 // It exists because the declaration is a SECURITY property of these
 // ceremonies, not a per-client convenience. Both are NFR-S6 paths: every
@@ -11,20 +11,45 @@
 // that declares the target under `reads` instead of `optionalReads`, or that
 // declares a malformed key at all, gets a DIFFERENT wire code back for the
 // "no such identity" case, which is an enumeration oracle over the identity
-// keyspace. Keeping the rule in one place is what stops four dispatchers from
-// each having their own answer.
+// keyspace. Keeping the rule in one place is what stops the six dispatch sites
+// across the two ceremonies from each having their own answer.
 //
-// What this package does NOT do is enforce anything. Contract #2 §2.5 makes
-// the read disposition a client declaration: the Gateway copies contextHint
-// from the request body verbatim (internal/gateway/gateway.go), step 3 never
-// inspects it, mergeDerivedReads lets the envelope's disposition stand over a
-// derived one (internal/processor/derive_reads.go), and step 4 honours what it
-// is handed. ClaimIdentity and CompleteCredentialLink are both granted to
-// every consumer, so any holder of an ordinary consumer credential can submit
-// a hand-rolled envelope that re-opens the oracle for itself. These builders
-// close the shipped clients; the envelope surface stays open until the
-// Processor can pin a declared key's disposition against a client override,
-// which is a Contract #2 §2.5 amendment rather than a code change here.
+// What this package does NOT do is enforce anything itself, and for the two
+// ceremonies in the NFR-S6 set it does not need to. Contract #2 §2.5 makes the
+// read disposition a client declaration — the Gateway copies contextHint from
+// the request body verbatim (internal/gateway/gateway.go), step 3 never
+// inspects it, and mergeDerivedReads lets the envelope's disposition stand over
+// a derived one (internal/processor/derive_reads.go) — but for ClaimIdentity
+// and CompleteCredentialLink the Processor holds a CLOSED declared set at the
+// head of step 4: an envelope naming a key the operation's own op-meta
+// descriptor does not name, or naming any egressReads key or any enumeration,
+// is refused before hydration
+// (internal/processor/descriptor_floor.go, refuseUndeclaredContextHint). A
+// hand-rolled envelope from an ordinary consumer credential therefore cannot
+// re-open the oracle for itself, and cannot price the hydration work inside the
+// rejection quantum: MEMBERSHIP of the declared set — and so the KV work it
+// buys — is the descriptor's to fix, not the submitter's.
+//
+// That closure covers the DECLARATION and nothing else. The PAYLOAD is still
+// submitter-priced work inside the same window: its bytes are deep-decoded by
+// the guard itself (payloadMap, before it can answer), again by the
+// `derive_reads` pre-pass that ClaimIdentity runs (deriveReadsOpValue →
+// goValueToStarlark), and again by step 5's runner — and nothing bounds a
+// payload below the Gateway's 1 MiB body cap or enforces InputSchema
+// server-side. The declared-read channel into the quantum is closed; the
+// payload-sized one is open.
+//
+// What the builders below owe that mechanism is the other half: each emits
+// EXACTLY the template set its op's descriptor declares
+// (packages/identity-domain/opmetas.go), which is what keeps the shipped
+// clients on the admitted side of a rule that refuses everything else. A
+// builder that grew a key the descriptor does not carry would fail every
+// submission through it, so that correspondence is asserted key for key in this
+// package's own tests.
+//
+// InitiateCredentialLink is outside the NFR-S6 set and carries no descriptor,
+// so its envelope surface is the ordinary open one and its builder is the only
+// thing holding its disposition.
 package identityceremony
 
 import (
