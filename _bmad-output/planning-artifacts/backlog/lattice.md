@@ -126,7 +126,8 @@ but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **`internal/refractor`'s claim-ceremony e2e family is non-deterministic at head** | Membership rotates over the three claim-ceremony e2es: `cap.roles.<target>` never gains the role-derived grant from the real `ClaimIdentity` op's `holdsRole` write within 25s. The test never waits for the adjacency edge the reprojection walks (the sweep e2e beside it does), so a lens pass can precede it. | ★★ | S–M | 📋 ready · owner: Whetstone · no repro on a quiet 4-core box · tighten, never loosen · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §19.5 |
 | **Suite reddens under parallel load, in packages the change never touched** | Rotating membership across unit-1, unit-2 and the convergence job. THREE mechanisms open: (a) `substrate.Connect`'s 2s no-retry handshake, ~45 sites remain; (b) a starvation signature (`found=map[]`); (c) a wall-clock DEADLINE read as correctness — specimen: `TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns` (20s lens activation, unit-1, green on re-run). (d) `privacy-pii-key-envelopes` race in `internal/leaseconvergence` FIXED. | ★★★ | M | 🏗️ owner: Whetstone · next: root-cause (b) |
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Ten parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` carved out with its own `-parallel`; lease-convergence's async trio parallelized as its own group. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · unit-1 pole cut 277s→170s, shard-1/3 rebalanced (ad15f91) · next: lint-build/unit-1/unit-4 now tied ~170-195s |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Eleven parallel jobs; unit sharded 4 ways by measured `go test` time, `internal/natsperm` now its own job (was a unit-4 step). | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · unit-1 pole cut 277s→170s (ad15f91); natsperm→own job (b558d16), unproven — CI never ran, see row below · next: measure once unblocked |
+| **Bot pushes to `main` don't trigger the `push` CI workflow** | Every sampled Whetstone/Steward-authored commit shows zero GitHub Actions runs minutes after push (real-code and CI-config edits alike), while human-authored pushes trigger normally. Blocks every role's CI-proof step fleet-wide. | ★★★ | ? | 🔭 flagged for Andrew — needs org/App Actions-permission access this session lacks |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -135,6 +136,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-08-26 · `b558d163` · [CI] natsperm carved out of unit-4 into its own job — local build/vet/test green, CI-unproven (see flagged row)
 - 2026-08-26 · `b153d120` · [Bootstrap] re-bootstrap-stranded-grants CLOSED — revocation CLI + reserved-name guards (both mint paths); lens residue detect-only; 4 cold reviews, one HIGH found+fixed
 - 2026-08-26 · `8d039bdb` · [Contracts] six 🔭 contract-text flags adjudicated — #2 + #10 amendments ratified as public contracts; #9 timing + three #2 clauses rejected as implementation prose
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
