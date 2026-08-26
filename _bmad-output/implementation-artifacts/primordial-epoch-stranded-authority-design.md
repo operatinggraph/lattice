@@ -3,8 +3,8 @@
 **Status:** ✅ **Fire 1 SHIPPED 2026-08-25** (detector + verify gate) — Winston-ratified, three cold
 adversarial reviews plus a cumulative close pass, which between them overturned two ratified claims (§3
 step 3, §4.1) before it landed.
-**Fire 2 is 🔭 awaiting Andrew's direction** — the reconciliation verb *and* the prior epoch's
-still-projecting capability lenses (§5, §7). It is the board row's live state, not a note here.
+**Fire 2 ✅ Andrew-ratified 2026-08-25: edge revocation, lens residue included** (§7) — build-ready for
+the Steward.
 
 **Component:** `internal/bootstrap` (+ `scripts/verify-kernel.go`).
 
@@ -323,36 +323,44 @@ Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
 ./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./internal/substrate/...`, full
 `go test ./...` with `POSTGRES_TEST_DSN` set (REMOTE.md §3).
 
-## 7. 🔭 For Andrew — Fire 2 is not built, deliberately
+## 7. Fire 2 — ✅ direction ratified (Andrew, 2026-08-25): edge revocation, lens residue included
 
-Fire 2 is the reconciliation verb: either **retire** the stranded epoch (tombstone the role, its grants and
-its edges) or **re-point** the surviving grants at the current operator role. Both are **destructive verbs
-over kernel authority state**, and the sibling design already flagged its own equivalent as *"the call in
-this tranche most likely to be worth taking back."* Re-pointing is strictly worse than it looks: it would
-*grant* the current role every permission the dead one accumulated, which is an escalation path wearing a
-cleanup's clothes.
+Andrew picked **edge revocation** over re-pointing and over a role-vertex tombstone, with the prior
+epoch's lens residue in scope. What Fire 2 builds:
 
-It is also gated the same way its sibling is: Inc 2 there builds only on a **non-empty census from a
-long-lived deployment**. Fire 1 is that census. Building the verb first would be scaffolding with no
-measured demand — and here the measurement (21 grants) exists but the *fork* does not.
+1. **Revoke the stranded epoch's edges.** Tombstone the stranded role's inbound `holdsRole` and
+   `grantedBy` links via ordinary Processor link mutations — `protectedRootKey` returns `""` for any key
+   not starting `vtx.` (`step8_commit.go:1379-1385`), so no guard exemption is needed. This alone kills
+   every dangerous projection (§4.1): the wildcard read grant, the core write lens, and rbac's
+   `capabilityRoles` all require the `holdsRole` edge.
+2. **Retire the prior epoch's four capability lens definitions** (`capability`, `capabilityRead`,
+   `capabilityReadGrants`, `capabilityReadWildcardGrants` — §5). The larger, longer-lived surface:
+   Refractor discovers lenses by graph scan with no duplicate-canonicalName guard, and kernel reconcile
+   cannot reach a prior epoch's ids. Refractor removes a lens on its `.spec` tombstone
+   (`lens/corekv_source.go:519-528`) — the granularity every consumer honours, per the sibling
+   kernel-orphan-retirement design's census.
+3. **Restore the stranded grants against the CURRENT role via the package plane.** Revocation removes
+   the hazard; it does not give current actors the 40 permissions back. Packages declare grants by role
+   canonicalName (`GrantsTo: ["operator"]`) and the installer resolves that to the current role id at
+   apply (`installer.go:262`, `resolveGrants` `:597`), and `PermissionProvenanceUnstamped`'s own doc
+   comment names "upgrading the declaring package" as the healing verb — so re-applying the owning
+   packages re-mints the grants where they belong. **Fire 2's Phase-0 grounds the exact vehicle** (a
+   version-bump re-apply per package, vs. driving `permissionreconcile`'s machinery) — a same-version
+   plain install no-ops by design, so the vehicle question is real and is build-note scope, not a fork.
+   This arm is what unblocks the two verticals rows riding this item (café `CreateAccount`, LoftSpace
+   `AttachObject`).
+4. **What deliberately stays:** the stranded role vertex and its permission vertices. The role carries
+   `protected: true` (`primordial.go:711`) and tombstoning it needs a guard exemption Andrew did not
+   grant; unheld and grant-less it is inert, and the Fire 1 gate keeps reporting it as a **notice**
+   (never a failure) — an honest record of the residue, not a defect.
 
-**Three things the cold pass established that reshape the fork** — read these before choosing a direction:
+Also consolidated into Fire 2 (per the build note's §6): the end-to-end rotation test vector (§6.2's
+scope note — rotate the id file, run the seeder twice against one bucket) and the §3.1
+`CreateRole`-may-name-`operator` prevention.
 
-1. **The fork is narrower than "retire vs re-point", because the commit guard has already decided half of
-   it.** `protectedRootKey` returns `""` for any key not starting `vtx.` (`step8_commit.go:1379-1385`), so
-   the stranded `holdsRole` and `grantedBy` **edges are ordinary link mutations and can be tombstoned
-   today**. The role **vertex** carries `protected: true` (`primordial.go:711`) and `rejectProtectedMutations`
-   will refuse to tombstone it. So "revoke the edges" needs no new authority and is available now;
-   "tombstone the role" needs a guard exemption first, which is a larger ask than the design originally
-   implied.
-2. **Revoking the edges is sufficient for the live harm.** Every projection that makes the residue dangerous
-   — the wildcard read grant, the core write lens, rbac's `capabilityRoles` — requires the `holdsRole` edge
-   (§4.1). The role vertex left standing is inert.
-3. **Fire 2's real scope is the lens residue, not the role.** Per §5: the prior epoch's four capability lens
-   definitions keep projecting, are immune to kernel reconcile, and are invisible to the existing census.
-   That is the larger and longer-lived surface, and a Fire 2 that only tidied the role would leave it.
-
-**Nothing is blocked on this.** Fire 1 ships whole; Fire 2 needs a direction, not a design.
+**Rejected at ratification:** re-pointing the surviving grants at the current role — it would *grant*
+the current role every permission the dead one accumulated, an escalation path wearing a cleanup's
+clothes — and the role-vertex tombstone, a guard exemption spent for zero live-harm reduction.
 
 ---
 
