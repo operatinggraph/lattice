@@ -27,6 +27,10 @@
 // in design §22.
 
 // NANOID_ALPHABET/NANOID_LENGTH mirror internal/substrate (Contract #1) exactly.
+// derived-key: a Contract #4 requestId (deriveNanoID below), never a declared
+// read — it is the dedup id the AttachObject envelope is SENT with, so no
+// package's derive_reads could supply it: it has to exist before the operation
+// the derivation would run inside.
 const NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789";
 const NANOID_LENGTH = 20;
 
@@ -47,6 +51,9 @@ export async function deriveNanoID(namespace, input) {
       digest = new Uint8Array(await crypto.subtle.digest("SHA-256", digest));
       di = 0;
     }
+    // derived-key: the requestId expansion itself — see deriveNanoID's contract
+    // above. Not a declared read: no derive_reads could supply an id the
+    // envelope must already carry when it is submitted.
     out.push(NANOID_ALPHABET[digest[di] % NANOID_ALPHABET.length]);
     di++;
   }
