@@ -554,3 +554,13 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-22 · `0f202d5e` · [bridge/capability-author] NL edit of an installed weaver target — contextRef names the target, adapter files upgradeExisting (first producer); admissible only where the proposal covers the whole package, every silent-change class refused before a vendor call
 - 2026-08-21 · `ea28627` · [Pkgmgr] install-path double bucket-list CLOSED — checkCoreBucketExists → KVStatus probe; findInstalledPackage → `vtx.package.` prefix-list + batched KVGetMulti; cold review clean
 - 2026-08-21 · `814e4c8` · [CI] substrate backfill ack-floor race CLOSED — `Ack()`→`DoubleAck(ctx)`; async-ack raced the before-snapshot, not a handler reattach
+- 2026-08-23 · `ac7cd921` · [Weaver] per-subject gap-issue key CLOSED — issueKeyGap split entity/config, every clear re-paired, heartbeat listing bounded; 13 per-line revert proofs, 3 needed isolation vectors
+- 2026-08-23 · `fac3e381` · [identity-domain] the sweep's owner-array rewrite pins its read — precedent debt the mirror exposed, proven lossy then fixed
+- 2026-08-23 · `6ebf0e83` · [identity-domain] erased credential leaves a live owner's sign-in list CLOSED — outbound-arm rewrite, per-arm sensitive declare, expectedRevision pin
+- 2026-08-23 · `0d3c841c` · [Loom/Weaver/pkgmgr/bridge] enumeration delivering-lines proven — cold review reverted the guard + JSON tag green; bridge mirror, engine-load validation, candidate/catalog surfaces
+- 2026-08-23 · `48957677` · [Loom/Weaver] dispatcher class-(e) enumerations CLOSED — Contract #2 already defined the field, nothing had populated it; five erasure walks declared at both dispatchers
+- 2026-08-22 · `de193db` · [natsperm] `DeliverSubject` row GROUNDED + REFUTED — the real primitive is server-published bytes; folded into the ★★★ row
+- 2026-08-22 · `a70fb07a` · [Contract #1] §1.5 "default class from localName" DELETED — clause was implemented nowhere and asserted key-decides-class against document-is-source-of-truth
+- 2026-08-22 · `1509cd1` · [Core] capability-kv single read path CLOSED — 4 restatements of §6.1 routing folded in + a 2-check lint gate; 3 cold reviews + close pass
+- 2026-08-22 · `9c24c918` · [natsperm] ack-plane read primitive CLOSED — registry covers both wire forms owner-scoped, app tier loses the grant, LEADER.STEPDOWN closed; 3 cold reviews, MAJOR was a false KNOWN LIMIT claim
+- 2026-08-22 · `0e4db7d` · [Edge] first-paint gate identity CLOSED — a per-cycle level gate on the burst's end position; 3 cold reviews found 2 blocking defects + the blocker's own untested guard; 14 mutations pinned
