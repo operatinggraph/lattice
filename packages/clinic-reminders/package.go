@@ -70,12 +70,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.10.1",
+	Version: "0.10.2",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
 		"(freshUntil = the .schedule.remindAt / .documentation.followUpDate deadline arms the @at timer; the gap opens " +
-		"at the deadline); the visitseries vertex type + Start/Pause/Resume/AdvanceVisitSeries ops + the " +
+		"at the deadline); the visitseries vertex type + Start/Pause/Resume/End/AdvanceVisitSeries ops + the " +
 		"visitSeriesDue rolling convergence lens (freshUntil re-arms forward on every advance instead of clearing " +
 		"to a permanent close); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +
 		"clinic-domain's .schedule.endsAt (no derived deadline) and dispatches clinic-domain's MarkPastDueNoShow " +

@@ -26,6 +26,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	op StartVisitSeries{patientKey, providerKey, intervalDays, startAt, activeUntil?}
 //	  rejects ActiveVisitSeriesExists if the pair already holds an unexpired guard
 //	op PauseVisitSeries{seriesKey} / ResumeVisitSeries{seriesKey}
+//	op EndVisitSeries{seriesKey}  writes .series.activeUntil = op.submittedAt (write-once
+//	  in this direction too — rejects VisitSeriesAlreadyEnded if already set); the same
+//	  "clean termination" activeUntil StartVisitSeries can seed up front, now reachable
+//	  after the fact so a series need not be given an end date at booking time to ever get one
 //	op AdvanceVisitSeries{seriesKey, dueFor, intervalDays, occurrenceCount?}  (the directOp the playbook dispatches)
 //	lens visitSeriesDue (weaver-target, full)   (freshUntil = .progress.nextDueAt; rolls forward on each advance)
 //	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
@@ -47,6 +51,7 @@ const (
 	startVisitSeriesOp   = "StartVisitSeries"
 	pauseVisitSeriesOp   = "PauseVisitSeries"
 	resumeVisitSeriesOp  = "ResumeVisitSeries"
+	endVisitSeriesOp     = "EndVisitSeries"
 	advanceVisitSeriesOp = "AdvanceVisitSeries"
 
 	// VisitSeriesDueTarget is the §10.8 TargetID == the visitSeriesDue lens's
@@ -72,7 +77,7 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 		CanonicalName: visitSeriesVertexDDL,
 		Class:         "meta.ddl.vertexType",
 		PermittedCommands: []string{
-			startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, advanceVisitSeriesOp,
+			startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, endVisitSeriesOp, advanceVisitSeriesOp,
 		},
 		Description: "Clinic recurring visit series DDL. Vertex shape: vtx.visitseries.<NanoID>, class=visitseries, " +
 			"root data = {} (minimal, D5). StartVisitSeries validates patientKey/providerKey are alive + correctly " +
@@ -82,11 +87,14 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"withProvider links (Contract #1 §1.1 — the series is the later-arriving source). PauseVisitSeries / " +
 			"ResumeVisitSeries toggle the .paused {value} aspect (absent = not paused) — a paused series still holds " +
 			"its patient+provider pair (resume it; StartVisitSeries will not treat the pair as free). " +
+			"EndVisitSeries writes .series.activeUntil = op.submittedAt, rejecting VisitSeriesAlreadyEnded if a " +
+			"cutoff is already set — the same clean-termination field StartVisitSeries can seed up front, now " +
+			"settable after the fact so a series left open-ended can still be given an end date. " +
 			"AdvanceVisitSeries is the directOp the visitSeriesDue §10.8 " +
 			"playbook dispatches when missing_series_advance opens: it rolls .progress forward — lastOccurrenceAt = dueFor (the " +
 			"deadline just serviced, NOT $now — keeps the cadence on a fixed grid), nextDueAt = dueFor + " +
 			"intervalDays·days, occurrenceCount + 1 — re-arming the next occurrence. Reads [seriesKey] to " +
-			"liveness-guard the parent for all four commands.",
+			"liveness-guard the parent for all five commands.",
 		Script: visitSeriesScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> the series is for (StartVisitSeries; required, validated alive). The caller MUST list it in ContextHint.Reads."},` +
@@ -132,6 +140,13 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Upserts .paused {value:false}; the series resumes rolling from its current nextDueAt.",
 			},
 			{
+				Name:    "EndVisitSeries — give an open-ended series a stop date",
+				Payload: map[string]any{"seriesKey": "vtx.visitseries.<NanoID>"},
+				ExpectedOutcome: "Sets .series.activeUntil = op.submittedAt (rejects VisitSeriesAlreadyEnded if a cutoff " +
+					"is already set). A currently-due occurrence still gets serviced once more, exactly as a cutoff " +
+					"given at StartVisitSeries time would — clean termination, no cancel-in-flight special case.",
+			},
+			{
 				Name: "AdvanceVisitSeries — roll the series forward one occurrence",
 				Payload: map[string]any{
 					"seriesKey": "vtx.visitseries.<NanoID>", "dueFor": "2026-08-01T09:00:00Z",
@@ -146,19 +161,23 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 }
 
 // visitSeriesDefinitionAspectTypeDDL declares the .series cadence definition —
-// written once by StartVisitSeries, never edited (no SetVisitSeries op; changing a
-// cadence is pause + start a new series). NON-sensitive: dates + an interval, no PHI
-// (the clinical reason a series exists is out of scope here, same posture as
-// followUpReminder's non-PHI marker).
+// written once by StartVisitSeries (intervalDays, startAt never change after: no
+// SetVisitSeries op; changing the cadence is pause + start a new series) and, for
+// activeUntil ONLY, once more by EndVisitSeries (write-once in that direction too —
+// EndVisitSeries rejects VisitSeriesAlreadyEnded if a cutoff is already set, so
+// intervalDays/startAt are re-written unchanged rather than partially updated).
+// NON-sensitive: dates + an interval, no PHI (the clinical reason a series exists is
+// out of scope here, same posture as followUpReminder's non-PHI marker).
 func visitSeriesDefinitionAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     visitSeriesAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{startVisitSeriesOp},
+		PermittedCommands: []string{startVisitSeriesOp, endVisitSeriesOp},
 		Description: "Visit-series cadence definition aspect (clinic-reminders). Stored as " +
 			"vtx.visitseries.<NanoID>.series (class visitSeriesDefinition) = {intervalDays, startAt, activeUntil?}. " +
-			"Non-sensitive. Written ONLY by StartVisitSeries (whose visitseries vertexType DDL owns the script); " +
-			"this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
+			"Non-sensitive. Written by StartVisitSeries (mints intervalDays/startAt, optionally activeUntil) and, " +
+			"for activeUntil alone, EndVisitSeries (rejects VisitSeriesAlreadyEnded if already set — write-once each " +
+			"way); this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"intervalDays":{"type":"integer","description":"Days between occurrences."},` +
@@ -737,6 +756,30 @@ def execute(state, op):
         events = [{"class": "clinic.visitSeriesPausedChanged", "data": {"seriesKey": series_key, "paused": paused}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": series_key}}
 
+    if ot == "EndVisitSeries":
+        series_key = required_string(p, "seriesKey")
+        parts_of(series_key, "seriesKey", "visitseries")
+        if not vertex_alive(state, series_key):
+            fail("UnknownVisitSeries: " + series_key + " is absent or tombstoned")
+        # Staff-standing workplace confinement, same as Pause/Resume: resolved off
+        # the series' OWN withProvider link (EndVisitSeries carries no provider
+        # payload). No-op for operator (root is exempt).
+        enforce_workplace(sites_for_provider(series_provider(series_key)), "cannot end visit series " + series_key)
+
+        series_aspect_key = series_key + ".series"
+        if not vertex_alive(state, series_aspect_key):
+            fail("UnknownVisitSeries: " + series_key + " has no cadence definition")
+        series_doc = state[series_aspect_key]
+        series_data = series_doc.data
+        if series_data.get("activeUntil") != None:
+            fail("VisitSeriesAlreadyEnded: " + series_key + " already has an end date")
+
+        ended_at = time.rfc3339_utc(op.submittedAt)
+        new_series_data = {"intervalDays": series_data.get("intervalDays"), "startAt": series_data.get("startAt"), "activeUntil": ended_at}
+        mutations = [make_aspect_upsert_occ(series_key, "series", "visitSeriesDefinition", new_series_data, series_doc.revision)]
+        events = [{"class": "clinic.visitSeriesEnded", "data": {"seriesKey": series_key, "activeUntil": ended_at}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": series_key}}
+
     if ot == "AdvanceVisitSeries":
         series_key = required_string(p, "seriesKey")
         parts_of(series_key, "seriesKey", "visitseries")
@@ -884,6 +927,7 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 			{Name: "next_due_at", Type: "text"},
 			{Name: "occurrence_count", Type: "integer"},
 			{Name: "series_status", Type: "text"},
+			{Name: "series_endable", Type: "boolean"},
 		},
 		// The patient's name lives on their identity's sensitive .name aspect
 		// (clinic-domain's CreatePatient, retention-class-key-custody-design.md
@@ -915,6 +959,13 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 // still reads "paused" even if activeUntil has since passed, because
 // "ended" only ever tests the NOT PAUSED branch — matching the intent "did
 // this run its course on its own", not "is today past the cutoff".
+//
+// series_endable is the EndVisitSeries op-meta's VisibleWhen gate (visitSeriesOpMetas
+// below) — offer the "End series" affordance whenever series_status is NOT already
+// "ended", active or paused alike (OpVisibleWhenSpec is single-condition equality
+// only, so a positive "endable" flag stands in for the "not ended" test the button
+// actually needs — the descriptor's Facet/edge-manifest consumer, unlike this hand-
+// authored cmd/clinic-app, gates purely off the row's own columns).
 const visitSeriesReadSpec = `MATCH (s:visitseries)
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
@@ -936,6 +987,8 @@ RETURN
     WHEN (s.paused.data.value <> true) THEN "active"
     ELSE "paused"
   END AS series_status,
+  NOT ((s.paused.data.value <> true) AND (s.series.data.activeUntil <> null) AND (s.progress.data.nextDueAt > s.series.data.activeUntil))
+                                 AS series_endable,
   [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
                                  AS authz_anchors
 `
@@ -966,10 +1019,10 @@ func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 	}
 }
 
-// visitSeriesPermissions grants the four visit-series ops at scope=any.
-// StartVisitSeries / PauseVisitSeries / ResumeVisitSeries — the three ops the
-// front-desk Follow-ups tab submits (cmd/clinic-app/web/app.js) — also grant
-// `frontOfHouse`: the script's standing workplace guard confines a non-operator
+// visitSeriesPermissions grants the five visit-series ops at scope=any.
+// StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / EndVisitSeries — the
+// four ops the front-desk Follow-ups tab submits (cmd/clinic-app/web/app.js) —
+// also grant `frontOfHouse`: the script's standing workplace guard confines a non-operator
 // caller to a series whose provider practises at a building it worksAt (mirrors
 // clinic-domain's CreateAppointment / RescheduleAppointment). Unlike those, the
 // guard here is OPERATOR-EXEMPT ONLY — these ops carry no consumer/scope=self
@@ -979,8 +1032,8 @@ func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 // under the operator service-actor (the reminder-op idiom), never a front-desk
 // action.
 func visitSeriesPermissions() []pkgmgr.PermissionSpec {
-	frontDeskOps := map[string]bool{startVisitSeriesOp: true, pauseVisitSeriesOp: true, resumeVisitSeriesOp: true}
-	ops := []string{startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, advanceVisitSeriesOp}
+	frontDeskOps := map[string]bool{startVisitSeriesOp: true, pauseVisitSeriesOp: true, resumeVisitSeriesOp: true, endVisitSeriesOp: true}
+	ops := []string{startVisitSeriesOp, pauseVisitSeriesOp, resumeVisitSeriesOp, endVisitSeriesOp, advanceVisitSeriesOp}
 	perms := make([]pkgmgr.PermissionSpec, 0, len(ops))
 	for _, op := range ops {
 		if frontDeskOps[op] {
@@ -1004,8 +1057,8 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 	return perms
 }
 
-// visitSeriesOpMetas makes the four visit-series ops forOperation-resolvable and
-// gives the three a human triggers a full descriptor — the form, the field help,
+// visitSeriesOpMetas makes the five visit-series ops forOperation-resolvable and
+// gives the four a human triggers a full descriptor — the form, the field help,
 // and the submission recipe (edge-showcase-app-design.md §3.3).
 //
 // Complete metadata is not the same as a rendered button: a client also has to
@@ -1016,7 +1069,7 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // (cmd/facet/staff.go's /api/staff/worklist, reading visitSeriesRead below),
 // never from a manifest.ent row.
 //
-// All three are AuthContext "standing": permissions.go grants them scope=any to
+// All four are AuthContext "standing": permissions.go grants them scope=any to
 // operator + frontOfHouse, so the caller's authority is a standing role rather
 // than a relationship to the target, and the client sends no authContext object
 // at all (OpDispatchSpec.AuthContext's fourth case). Idiom: clinic-domain's
@@ -1029,7 +1082,13 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // Reads declare exactly what the script hydrates from `state` and no more.
 // StartVisitSeries names both endpoint vertices because its own field
 // documentation makes them mandatory; Pause/Resume rely on the targetField
-// fallback for the series vertex, which is the only key they read. Everything
+// fallback for the series vertex, which is the only key they read.
+// EndVisitSeries additionally declares its own `.series` cadence-definition
+// aspect: unlike Pause/Resume it must READ before it writes (the write-once
+// VisitSeriesAlreadyEnded guard, and preserving intervalDays/startAt across the
+// upsert), so that key is a class-(a) declared read, not a class-(e) live one —
+// its suffix off the already-target seriesKey is deterministic, unlike the
+// data-derived keys below. Everything
 // else these scripts reach — enforce_workplace's site walk, the dedup guard's
 // prior-series .series/.paused follow-ups — is a class-(e) read off a key the
 // caller cannot know in advance, which is why the read posture sanctions it
@@ -1119,6 +1178,30 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
 				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_status", Equals: "paused"},
+			},
+		},
+		{
+			OperationType: endVisitSeriesOp,
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "End visit series",
+				Description: "Give an open-ended visit series a stop date, so it stops re-arming.",
+				Icon:        "stop-circle",
+				Tone:        "destructive",
+				SubmitLabel: "End series",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> to end — auto-filled from the series being viewed."}},` +
+				`"required":["seriesKey"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The series being ended — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. Once ended, a currently-due occurrence still gets serviced once more before the series goes quiet for good.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       visitSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  visitSeriesVertexDDL,
+				Reads:       []string{"{payload.seriesKey}.series"},
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_endable", Equals: true},
 			},
 		},
 		{OperationType: advanceVisitSeriesOp},

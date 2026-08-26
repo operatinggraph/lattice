@@ -1,6 +1,6 @@
 // Front-desk (frontOfHouse) write confinement for the staff visit-series ops
-// StartVisitSeries / PauseVisitSeries / ResumeVisitSeries — the three ops the
-// clinic front-desk Follow-ups tab submits (persona-worlds-design.md §7.1 grants
+// StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / EndVisitSeries — the
+// four ops the clinic front-desk Follow-ups tab submits (persona-worlds-design.md §7.1 grants
 // audit). The capability plane cannot tell a frontOfHouse actor from operator
 // (scope is only `any` or `self`, Contract #6), so confinement lives in the op
 // script: a front-desk caller may act only on a series whose provider practises
@@ -73,6 +73,7 @@ func fdrCapDoc() *processor.CapabilityDoc {
 			{OperationType: "StartVisitSeries", Scope: "any"},
 			{OperationType: "PauseVisitSeries", Scope: "any"},
 			{OperationType: "ResumeVisitSeries", Scope: "any"},
+			{OperationType: "EndVisitSeries", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -253,5 +254,35 @@ func TestFrontDesk_VisitSeries_PauseResumeConfined(t *testing.T) {
 	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrpauseB1", "PauseVisitSeries", "",
 		`{"seriesKey":"`+seriesBKey+`"}`, fdrActorKey, "", []string{seriesBKey}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk PauseVisitSeries on a building-B series = %v, want Rejected — the multi-org gate", got)
+	}
+}
+
+// TestFrontDesk_VisitSeries_EndConfined mirrors PauseResumeConfined for the new
+// EndVisitSeries op: a front-desk actor may end a series whose provider is at its
+// workplace and is rejected for one that is not. EndVisitSeries additionally
+// declares its own .series aspect as a read (unlike Pause/Resume), so both
+// vectors carry it in ContextHint.Reads.
+func TestFrontDesk_VisitSeries_EndConfined(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, fdrCapDoc())
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fdrend", Instance: "cr-fdrend"})
+	seedRemFrontDeskTopology(t, ctx, conn)
+
+	seriesAID := crSubmit(t, ctx, conn, cp, cons, "fdreseedA", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderAKey), []string{fdrPatientKey, fdrProviderAKey}, processor.OutcomeAccepted)
+	seriesAKey := "vtx.visitseries." + seriesAID
+	seriesBID := crSubmit(t, ctx, conn, cp, cons, "fdreseedB", "StartVisitSeries", "visitseries",
+		startSeriesPayload(fdrProviderBKey), []string{fdrPatientKey, fdrProviderBKey}, processor.OutcomeAccepted)
+	seriesBKey := "vtx.visitseries." + seriesBID
+
+	// Front-desk may end the building-A series (its workplace)...
+	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrendA1", "EndVisitSeries", "",
+		`{"seriesKey":"`+seriesAKey+`"}`, fdrActorKey, "", []string{seriesAKey, seriesAKey + ".series"}); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk EndVisitSeries on a building-A series = %v, want Accepted", got)
+	}
+	// ...but not the building-B series.
+	if got := crDriveAs(t, ctx, conn, cp, cons, "fdrendB1", "EndVisitSeries", "",
+		`{"seriesKey":"`+seriesBKey+`"}`, fdrActorKey, "", []string{seriesBKey, seriesBKey + ".series"}); got != processor.OutcomeRejected {
+		t.Fatalf("front-desk EndVisitSeries on a building-B series = %v, want Rejected — the multi-org gate", got)
 	}
 }

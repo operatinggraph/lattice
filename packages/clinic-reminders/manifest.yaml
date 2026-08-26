@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.10.1
+version: 0.10.2
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -10,7 +10,7 @@ description: |
   .followUpReminder aspect + RecordFollowUpReminder op, the followUpReminders
   weaver-target lens (freshUntil = the .documentation.followUpDate a documented visit
   requested); (3) a rolling recurring visit series over its own visitseries vertex
-  type — StartVisitSeries / PauseVisitSeries / ResumeVisitSeries /
+  type — StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / EndVisitSeries /
   AdvanceVisitSeries ops, the visitSeriesDue weaver-target lens (freshUntil =
   .progress.nextDueAt, re-armed forward on every advance instead of clearing to a
   permanent close); and (4) pastDueAppointments — closes a past-due, still-open
@@ -100,6 +100,9 @@ declares:
     - operationType: ResumeVisitSeries
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: EndVisitSeries
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: AdvanceVisitSeries
       scope: any
       grantsTo: [operator]
@@ -120,4 +123,5 @@ declares:
     - operationType: StartVisitSeries
     - operationType: PauseVisitSeries
     - operationType: ResumeVisitSeries
+    - operationType: EndVisitSeries
     - operationType: AdvanceVisitSeries

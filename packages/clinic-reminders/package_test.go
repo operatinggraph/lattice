@@ -38,12 +38,12 @@ func TestPackage_DDLs(t *testing.T) {
 	if got := len(Package.DDLs); got != 13 {
 		t.Fatalf("expected 13 DDLs, got %d", got)
 	}
-	// Eight op-metas: the three visit-series ops a human triggers carry a full
+	// Nine op-metas: the four visit-series ops a human triggers carry a full
 	// descriptor, the rest stay bare for forOperation resolution alone. A
 	// dropped meta would surface only as an op that quietly stops being
 	// offerable, so the count is what catches it.
-	if got := len(Package.OpMetas); got != 8 {
-		t.Fatalf("expected 8 opMetas, got %d", got)
+	if got := len(Package.OpMetas); got != 9 {
+		t.Fatalf("expected 9 opMetas, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -90,7 +90,7 @@ func TestPackage_DDLs(t *testing.T) {
 	if series.Class != "meta.ddl.vertexType" {
 		t.Fatalf("visitseries class = %q, want meta.ddl.vertexType", series.Class)
 	}
-	wantCmds := map[string]bool{"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "AdvanceVisitSeries": false}
+	wantCmds := map[string]bool{"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "EndVisitSeries": false, "AdvanceVisitSeries": false}
 	if len(series.PermittedCommands) != len(wantCmds) {
 		t.Fatalf("visitseries permittedCommands = %v, want %d entries", series.PermittedCommands, len(wantCmds))
 	}
@@ -156,8 +156,8 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the eight ops at scope=any. Five are operator-only;
-// the three front-desk Follow-ups-tab ops (Start/Pause/ResumeVisitSeries) grant
+// TestPackage_Permissions pins the nine ops at scope=any. Five are operator-only;
+// the four front-desk Follow-ups-tab ops (Start/Pause/Resume/EndVisitSeries) grant
 // {operator, frontOfHouse} — the script's workplace guard confines the front-desk
 // leg. AdvanceVisitSeries stays operator-only (Weaver's directOp).
 func TestPackage_Permissions(t *testing.T) {
@@ -170,6 +170,7 @@ func TestPackage_Permissions(t *testing.T) {
 		"StartVisitSeries":                      {"operator", "frontOfHouse"},
 		"PauseVisitSeries":                      {"operator", "frontOfHouse"},
 		"ResumeVisitSeries":                     {"operator", "frontOfHouse"},
+		"EndVisitSeries":                        {"operator", "frontOfHouse"},
 		"AdvanceVisitSeries":                    {"operator"},
 	}
 	seen := map[string]bool{}

@@ -165,7 +165,8 @@ const staffWorklistSections = `[
         {"name": "provider_specialty", "kind": "text", "role": "subtitle"},
         {"name": "interval_days", "label": "Every", "kind": "number", "role": "meta", "default": 0, "suffix": "d"},
         {"name": "next_due_at", "label": "Next due", "kind": "datetime", "role": "meta"},
-        {"name": "series_status", "kind": "badge", "role": "state", "default": "ended"}
+        {"name": "series_status", "kind": "badge", "role": "state", "default": "ended"},
+        {"name": "series_endable", "kind": "boolean", "role": "hidden", "default": false}
       ],
       "orderBy": {"column": "next_due_at", "nullsLast": true, "tieBreak": "entity_key"},
       "limit": 200

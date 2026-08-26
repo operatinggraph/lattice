@@ -3229,9 +3229,10 @@ function renderMySeriesCard(s) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
   // A series that ran its own course (never paused, but past its own
-  // activeUntil) offers neither toggle: Pause makes no sense on a series that
-  // is not running, and Resume would submit and change nothing observable —
-  // the exact bug this three-state read exists to close (verticals.md).
+  // activeUntil) offers no lifecycle button at all: Pause makes no sense on a
+  // series that is not running, Resume would submit and change nothing
+  // observable (the exact bug this three-state read exists to close —
+  // verticals.md), and End makes no sense on one already ended.
   if (s.seriesStatus !== "ended") {
     const btns = document.createElement("span");
     btns.className = "card-btns";
@@ -3240,6 +3241,11 @@ function renderMySeriesCard(s) {
     toggle.textContent = s.seriesStatus === "active" ? "Pause" : "Resume";
     toggle.addEventListener("click", () => toggleSeries(s));
     btns.append(toggle);
+    const end = document.createElement("button");
+    end.className = "ghost danger";
+    end.textContent = "End series";
+    end.addEventListener("click", () => endSeries(s));
+    btns.append(end);
     actions.append(btns);
   }
 
@@ -3266,6 +3272,28 @@ async function toggleSeries(s) {
     loadSeries();
   } catch (e) {
     toast("Could not update series: " + e.message, "err");
+  }
+}
+
+// endSeries submits EndVisitSeries for one series and reloads. Only ever wired
+// for an "active" or "paused" series (renderMySeriesCard offers no End button
+// once a series has ended). Declares the series' own .series cadence-definition
+// aspect as a read — unlike Pause/Resume, the op must read it (the write-once
+// VisitSeriesAlreadyEnded guard, and preserving intervalDays/startAt across the
+// upsert), so the caller has to name it (Contract #2 §2.5's declared read
+// posture — the op cannot see keys the submitter did not list).
+async function endSeries(s) {
+  try {
+    const reply = await submitOp("EndVisitSeries", "", { seriesKey: s.entityKey }, [s.entityKey, s.entityKey + ".series"]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast(msg, "err");
+      return;
+    }
+    toast("Series ended.", "ok");
+    loadSeries();
+  } catch (e) {
+    toast("Could not end series: " + e.message, "err");
   }
 }
 

@@ -43,7 +43,7 @@ const (
 var crOps = []string{
 	"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder",
 	"RecordAppointmentReminderNotification", "RecordFollowUpReminderNotification",
-	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "AdvanceVisitSeries",
+	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "EndVisitSeries", "AdvanceVisitSeries",
 }
 
 func crStaffCapDoc() *processor.CapabilityDoc {
@@ -618,6 +618,64 @@ func TestPauseResumeVisitSeries_TogglesPaused(t *testing.T) {
 	if v, _ := rd["value"].(bool); v {
 		t.Fatalf("paused.value = %v, want false after ResumeVisitSeries", rd["value"])
 	}
+}
+
+// TestEndVisitSeries_SetsActiveUntilAndRejectsDouble proves EndVisitSeries closes
+// the reported gap: an open-ended series (activeUntil absent) gets one set — equal
+// to op.submittedAt — and a second EndVisitSeries on the now-ended series is
+// Rejected (VisitSeriesAlreadyEnded), leaving the first cutoff and the cadence
+// fields (intervalDays/startAt) undisturbed, proving the rejected attempt left no
+// trace (the make_aspect_upsert_occ guard, mirroring StartVisitSeries's own
+// write-once discipline on the same field).
+func TestEndVisitSeries_SetsActiveUntilAndRejectsDouble(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsend", Instance: "cr-vsend"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsepat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvseprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsestart", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	crSubmit(t, ctx, conn, cp, cons, "crvse0001", "EndVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`,
+		[]string{seriesKey, seriesKey + ".series"}, processor.OutcomeAccepted)
+	ended := crReadDoc(t, ctx, conn, seriesKey+".series")
+	ed, _ := ended["data"].(map[string]any)
+	if got, _ := ed["activeUntil"].(string); got != crSubmittedAnchor {
+		t.Fatalf("series.activeUntil = %q, want %q (op.submittedAt) after EndVisitSeries", got, crSubmittedAnchor)
+	}
+	if got, _ := ed["intervalDays"].(float64); got != 30 {
+		t.Fatalf("series.intervalDays = %v, want unchanged 30 after EndVisitSeries", ed["intervalDays"])
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crvse0002", "EndVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`,
+		[]string{seriesKey, seriesKey + ".series"}, processor.OutcomeRejected)
+	stillEnded := crReadDoc(t, ctx, conn, seriesKey+".series")
+	sd, _ := stillEnded["data"].(map[string]any)
+	if got, _ := sd["activeUntil"].(string); got != crSubmittedAnchor {
+		t.Fatalf("series.activeUntil = %q after a rejected second EndVisitSeries, want unchanged %q", got, crSubmittedAnchor)
+	}
+}
+
+// TestEndVisitSeries_RejectsTombstonedSeries mirrors
+// TestAdvanceVisitSeries_RejectsTombstonedSeries's liveness-guard proof for the
+// new op.
+func TestEndVisitSeries_RejectsTombstonedSeries(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsenddead", Instance: "cr-vsenddead"})
+
+	dead := "vtx.visitseries.CRVSEDEADHJKMNPQRSTV"
+	doc := map[string]any{"class": "visitseries", "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, dead, b); err != nil {
+		t.Fatalf("seed tombstoned series: %v", err)
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsedead001", "EndVisitSeries", "", `{"seriesKey":"`+dead+`"}`,
+		[]string{dead, dead + ".series"}, processor.OutcomeRejected)
 }
 
 // crGuardDoc reads the per-(patient,provider) active-visit-series guard aspect

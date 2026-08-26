@@ -215,10 +215,11 @@ var appOpDebt = map[string]string{
 // census of every possible hand-wired op.
 var appOpCeilings = map[string]int{
 	"cmd/cafe-app": 6,
-	// 15: SetAppointmentSite (verticals.md "27 already-booked appointments
-	// still carry no site") — a new staff-hand-wired op, same shape as its
-	// 14 predecessors; no op-catalog rendering exists for this app yet.
-	"cmd/clinic-app":    15,
+	// 16: EndVisitSeries (verticals.md "A recurring visit series started
+	// without an end date can never be ended") — a new staff-hand-wired op,
+	// same shape as its 15 predecessors; no op-catalog rendering exists for
+	// this app yet.
+	"cmd/clinic-app":    16,
 	"cmd/loftspace-app": 20,
 	"cmd/wellness-app":  12,
 }

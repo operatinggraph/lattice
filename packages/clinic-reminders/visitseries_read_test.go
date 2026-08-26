@@ -210,6 +210,45 @@ func TestVisitSeriesRead_NoActiveUntilNeverEnds(t *testing.T) {
 	require.Equal(t, "active", rows[0].Values["series_status"])
 }
 
+// TestVisitSeriesRead_SeriesEndableTracksNotEnded — series_endable is the
+// EndVisitSeries op-meta's VisibleWhen gate (OpVisibleWhenSpec is single-
+// condition equality, so a positive "endable" flag stands in for "series_status
+// <> ended"): true for both "active" and "paused" (only "ended" ever disables
+// it), and it flips false the moment the same clean-termination condition that
+// derives "ended" is met — never a second, independently-drifting predicate.
+func TestVisitSeriesRead_SeriesEndableTracksNotEnded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	yes := true
+	cases := []struct {
+		name        string
+		paused      *bool
+		activeUntil string
+		nextDueAt   string
+		wantStatus  string
+		wantEndable bool
+	}{
+		{"active", nil, "", "2026-08-01T09:00:00Z", "active", true},
+		{"paused", &yes, "", "2026-08-01T09:00:00Z", "paused", true},
+		{"ended", nil, "2026-07-01T09:00:00Z", "2026-08-01T09:00:00Z", "ended", false},
+		{"pausedPastItsEnd", &yes, "2026-07-01T09:00:00Z", "2026-08-01T09:00:00Z", "paused", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkVisitSeries(t, "series", 30, c.activeUntil, c.nextDueAt, 0, c.paused)
+			f.vtx(t, "alice", "patient")
+			f.edge(t, "forPatient", "series", "alice")
+
+			rows := f.project(t, visitSeriesReadSpec)
+			require.Len(t, rows, 1)
+			require.Equal(t, c.wantStatus, rows[0].Values["series_status"])
+			require.Equal(t, c.wantEndable, rows[0].Values["series_endable"])
+		})
+	}
+}
+
 // TestVisitSeriesRead_AnchorsProviderWorkplace — authz_anchors carries the
 // patient's own NanoID PLUS the workplace token (the building the series'
 // provider practises at), mirroring clinicAppointmentsReadSpec exactly. This
