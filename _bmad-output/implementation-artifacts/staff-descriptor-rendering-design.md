@@ -1329,8 +1329,45 @@ test-descriptorform` (46/46, node --test) all green. Review depth: lead review o
 sizing per §7 — a mechanical extraction of already-shipped, already-reviewed logic, no new grant, no
 new trust boundary; `operator`'s existing `AttachObject`/`DetachObject` scope:any is unchanged).
 
-**Checkpoint for the next fire (Inc-B):** no worktree held (this fire built in the main checkout per
-docs-and-small-package-edit convention — no code-in-worktree isolation was needed since no concurrent
-stream fire touched these files). Next step: decide the owner-anchored lens shape (per-owner-type vs.
-a filed engine primitive) grounded against loftspace's + wellness's actual current AttachObject
-callers, then ship it + DetachObject's full `Dispatch`. `verticals.md`'s row carries the pointer.
+### Inc-B outcome — the self-scoped owner-anchored lens (Vertical Steward)
+
+Grounded against loftspace's actual live `AttachObject` callers (wellness has none yet, `cmd/wellness-app`
+never calls it): three owner types — `identity` (applicant document uploads), `leaseapp` (per-application
+document uploads), `unit` (landlord listing photos) — each `object -[linkName]-> owner`. The shape decision:
+**anchor stays on `object`** (not the owner), mirroring `identityCredentialBindingsRead`
+(identity-domain/lenses.go), not a reversed owner-anchored actorAggregate — a flat Postgres row per
+(object, owner, slot) triple is what an edge-manifest pane section needs (one row per dispatch-target
+candidate), and `objects-base`'s own architecture rule ("it never learns concrete owner types") means a
+lens naming a concrete owner type belongs in the owning vertical's package, not `objects-base` — the same
+split `applicantRosterRead`/`landlordUnitsRead` already draw.
+
+**Shipped this fire:** `objectIdentityAttachmentsRead` (`packages/loftspace-domain/lenses.go`) — the
+self-view case only (`owner:identity`, unambiguous authz: an identity always sees its own documents).
+`leaseapp` and `unit` are NOT shipped: each raises its own open authz question this fire's scope didn't
+need to answer — does a landlord see an applicant's PII at decide-time (leaseapp), and are listing photos
+RLS-scoped at all or public like `availableListings` (unit) — real product/security decisions, not
+mechanical mirrors, so guessing at them here would have been exactly the risk the no-paper-over rule warns
+against. `DetachObject`'s `OpMetaSpec.Dispatch` is **NOT wired** — see the Inc-C gap below, discovered while
+grounding the wiring, which blocks it independent of how many owner-type lenses exist.
+
+**A second, independent blocker (Inc-C): the Reads-template vocabulary can't express a type-agnostic link
+key.** `DetachObject`'s declared read must include the tombstoned link's own key,
+`lnk.object.<oid>.<linkName>.<ownerType>.<ownerId>` — Contract #2 §2.5's declared-reads discipline requires
+it. `internal/processor/descriptor_floor.go`'s `expandDescriptorTemplate` resolves `{payload.<field>}` two
+ways only: bare (`:id`) yields the Contract #1 id, whole yields the FULL `vtx.<type>.<id>` value (own dots
+and all) — there is no operator that yields just `<type>`, the segment a link key needs mid-template. Every
+existing `TargetField`/`Reads` precedent (wellness-domain's `ReassignSession`, clinic-domain's
+appointment/provider ops) declares reads against a FIXED type, because every existing type-agnostic op
+(`AttachObject`/`DetachObject`, D7) has stayed undispatchable until now — this is the first time the gap
+was reached, not a known, deferred one. No established pattern to mirror exists for it (a candidate — adding
+a redundant `ownerType` payload field solely so `{payload.ownerType}` can supply a literal segment, unused
+by the DDL script itself — has no precedent either way). Flagged to the Lattice stream (not filed directly —
+the Vertical Steward's run scope is `verticals.md` only) under `📐 needs designer pass · no-pattern:
+type-agnostic link-key Reads-template segment`, since it is a Processor/descriptor-floor capability question
+(an engine primitive), not a package-level pattern to extend, and it also gates `leaseapp`/`unit` even once
+their own authz questions are answered.
+
+**Checkpoint for the next fire (Inc-C):** no worktree held (docs-and-small-package-edit convention). Next
+steps, independent of each other: (1) the Reads-template gap once it lands in `lattice.md`, Lattice-lane
+work; (2) once answered, ground+ship the `leaseapp` and `unit` lenses (their own authz decisions, see
+above) + wire `DetachObject`'s `Dispatch` against all three. `verticals.md`'s row carries the pointer.

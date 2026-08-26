@@ -169,14 +169,16 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends [location-domain], got %v", Package.Depends)
 	}
 
-	// Three projection lenses (availableListings — the P5 read model for listed
+	// Four projection lenses (availableListings — the P5 read model for listed
 	// units; applicantRosterRead — the PROTECTED Postgres identity roster,
 	// D1.5, and a SECURE LENS: the sensitive identity name decrypts at
 	// projection time, so no unprotected roster surface exists; landlordUnitsRead
-	// — the PROTECTED, landlord-anchored occupancy model, portfolio-pulse Inc 2);
-	// no role, weaver target, or loom pattern; one op-meta (pinned below).
-	if got := len(Package.Lenses); got != 3 {
-		t.Fatalf("expected 3 lenses, got %d", got)
+	// — the PROTECTED, landlord-anchored occupancy model, portfolio-pulse Inc 2;
+	// objectIdentityAttachmentsRead — the PROTECTED, identity-owner-anchored
+	// read model of objects-base's object/AttachObject vertices); no role,
+	// weaver target, or loom pattern; one op-meta (pinned below).
+	if got := len(Package.Lenses); got != 4 {
+		t.Fatalf("expected 4 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -213,6 +215,18 @@ func TestPackage_Permissions(t *testing.T) {
 	}
 	if !strings.Contains(units.Spec, "<-[:manages]-(landlord:identity)") {
 		t.Fatalf("landlordUnitsRead must walk the manages link from unit to landlord, got: %s", units.Spec)
+	}
+	attachments, ok := lensByName["objectIdentityAttachmentsRead"]
+	if !ok || attachments.Adapter != "postgres" || attachments.Table != "read_object_identity_attachments" ||
+		!attachments.Protected || !attachments.DiffRetraction {
+		t.Fatalf("unexpected objectIdentityAttachmentsRead shape: %+v", attachments)
+	}
+	if len(attachments.IntoKey) != 3 || attachments.IntoKey[0] != "oid_id" ||
+		attachments.IntoKey[1] != "owner_id" || attachments.IntoKey[2] != "link_name" {
+		t.Fatalf("objectIdentityAttachmentsRead IntoKey = %v, want [oid_id owner_id link_name]", attachments.IntoKey)
+	}
+	if !strings.Contains(attachments.Spec, "(o:object)-[r]->(owner:identity)") {
+		t.Fatalf("objectIdentityAttachmentsRead must walk from object to identity owner, got: %s", attachments.Spec)
 	}
 	if got := len(Package.WeaverTargets); got != 0 {
 		t.Fatalf("expected 0 weaverTargets, got %d", got)

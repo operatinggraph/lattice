@@ -122,6 +122,66 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "unit_currency", Type: "text"},
 			},
 		},
+		{
+			// objectIdentityAttachmentsRead — the owner-anchored read
+			// surface objects-base's own objectAttachments lens cannot be:
+			// that lens is anchored on the OBJECT (right for "resolve this
+			// oid's metadata", wrong for "list what X has attached"), and
+			// objects-base itself must stay type-agnostic (package.go: "it
+			// never learns concrete owner types") — so a lens naming a
+			// concrete owner type lives in the owning vertical's package,
+			// not objects-base, the same split applicantRosterRead /
+			// landlordUnitsRead already draw for identity/unit-specific
+			// reads. This is the self-view half only (owner:identity — an
+			// applicant's own uploaded documents); leaseapp (an
+			// application's documents) and unit (listing photos) each raise
+			// a distinct open authz question (does a landlord see an
+			// applicant's PII at decide-time; are listing photos RLS-scoped
+			// at all, or public like availableListings) — see the
+			// DetachObject OpMetas doc comment in objects-base/ddls.go.
+			//
+			// Anchored on the LINK, mirroring identityCredentialBindingsRead
+			// (identity-domain/lenses.go): (o:object)-[r]->(owner:identity),
+			// one row per (object, owner, slot) triple, authz_anchors = the
+			// owner's own bare NanoID (self-view only, no fan-out). Same
+			// structural-walk DIFF RETRACTION as landlordUnitsRead: a
+			// DetachObject tombstones the `r` link this MATCH requires, so
+			// the row needs target-diff retraction, not anchor-self.
+			//
+			// Content columns mirror objectAttachmentsSpec's own null-safe
+			// `.content.data.<field>` reads verbatim (including the
+			// sensitive/governingIdentity/encryption crypto-shred
+			// envelope); `filename` is read off the LINK, not the vertex,
+			// for the same reason objectAttachments documents (one
+			// object, two slots, one vertex — the filename is a fact
+			// about the edge). `link_name` is exposed as its own column
+			// because it is DetachObject's required `linkName` argument,
+			// doubling as an IntoKey component (the composite unique key
+			// for a co-slotted object).
+			CanonicalName:  "objectIdentityAttachmentsRead",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			Table:          "read_object_identity_attachments",
+			Engine:         "full",
+			Spec:           objectIdentityAttachmentsReadSpec,
+			Protected:      true,
+			DiffRetraction: true,
+			IntoKey:        []string{"oid_id", "owner_id", "link_name"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "oid", Type: "text"},
+				{Name: "owner_key", Type: "text"},
+				{Name: "link_name", Type: "text"},
+				{Name: "filename", Type: "text"},
+				{Name: "store_name", Type: "text"},
+				{Name: "content_type", Type: "text"},
+				{Name: "size", Type: "double precision"},
+				{Name: "digest", Type: "text"},
+				{Name: "sensitive", Type: "boolean"},
+				{Name: "governing_identity", Type: "text"},
+				{Name: "encryption", Type: "jsonb"},
+			},
+		},
 	}
 }
 
@@ -217,4 +277,34 @@ RETURN
   u.listing.data.rentAmount     AS unit_rent,
   u.listing.data.rentCurrency   AS unit_currency,
   [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
+`
+
+// objectIdentityAttachmentsReadSpec — see the Lenses() declaration above for
+// the shape rationale. Anchored on the object→identity link (mirroring
+// identityCredentialBindingsReadSpec's credential→owner walk): a MATCH
+// naming `owner:identity` requires the link to exist, so a detached or
+// never-attached object projects no row for that owner (the same fail-closed
+// absence every self-anchored Protected lens here has). authz_anchors carries
+// only the owner's own bare NanoID — self-view, no staff fan-out, mirroring
+// identityCredentialsRead's single-element anchor. Content columns are the
+// same null-safe `.content.data.<field>` reads objectAttachmentsSpec
+// (objects-base) already proved against the real on-wire AttachObject shape,
+// including the sensitive/governingIdentity/encryption crypto-shred envelope.
+const objectIdentityAttachmentsReadSpec = `MATCH (o:object)-[r]->(owner:identity)
+RETURN
+  nanoIdFromKey(o.key)              AS oid_id,
+  nanoIdFromKey(owner.key)          AS owner_id,
+  type(r)                           AS link_name,
+  o.key                             AS entity_key,
+  nanoIdFromKey(o.key)              AS oid,
+  owner.key                         AS owner_key,
+  r.data.filename                   AS filename,
+  o.content.data.storeName          AS store_name,
+  o.content.data.contentType        AS content_type,
+  o.content.data.size               AS size,
+  o.content.data.digest             AS digest,
+  o.content.data.sensitive          AS sensitive,
+  o.content.data.governingIdentity  AS governing_identity,
+  o.content.data.encryption         AS encryption,
+  [nanoIdFromKey(owner.key)]        AS authz_anchors
 `
