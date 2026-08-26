@@ -144,6 +144,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"menuCatalog":                       {"p", 0},
 	"myTasks":                           {"key(actorKey)", 0},
 	"objectAttachments":                 {"key(contentType digest encryption entityKey governingIdentity sensitive size storeName) p", 0},
+	"objectIdentityAttachmentsRead":     {"p", 0},
 	"objectLiveness":                    {"key(entityKey linkEpoch liveLinks storeName) p!liveLinks", 0},
 	"oneBillCafeEntries":                {"p", 0},
 	"oneBillClinicEntries":              {"p", 0},

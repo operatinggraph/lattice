@@ -273,16 +273,17 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// a live link naming the erased person remains, and the completion seal would
 	// be written over it. The reprojection cost is bounded by the anchor
 	// predicate: only erasure-requested identities have a row at all.
-	"identityErasureResidue":   {broad, "identity", modeBroad},
-	"leaseApplicationComplete": {broad, "identity leaseapp object service task unit", modeBroad},
-	"menuCatalog":              {broad, "menuitem", modeBroad},
-	"myTasks":                  {broad, "identity role task", modeBroad},
-	"objectAttachments":        {broad, "object", modeBroad},
-	"objectLiveness":           {broad, "object", modeBroad},
-	"orphanedTaskGrants":       {broad, "task", modeBroad},
-	"wellnessIdentitiesRead":   {broad, "identity leaseapp", modeBroad},
-	"wellnessMembers":          {broad, "identity leaseapp", modeBroad},
-	"wellnessSessions":         {broad, "instructor session studio", modeBroad},
+	"identityErasureResidue":        {broad, "identity", modeBroad},
+	"leaseApplicationComplete":      {broad, "identity leaseapp object service task unit", modeBroad},
+	"menuCatalog":                   {broad, "menuitem", modeBroad},
+	"myTasks":                       {broad, "identity role task", modeBroad},
+	"objectAttachments":             {broad, "object", modeBroad},
+	"objectIdentityAttachmentsRead": {narrow, "identity object", modeLabel},
+	"objectLiveness":                {broad, "object", modeBroad},
+	"orphanedTaskGrants":            {broad, "task", modeBroad},
+	"wellnessIdentitiesRead":        {broad, "identity leaseapp", modeBroad},
+	"wellnessMembers":               {broad, "identity leaseapp", modeBroad},
+	"wellnessSessions":              {broad, "instructor session studio", modeBroad},
 }
 
 // consumerFilterMode runs a compiled cypher through the SAME

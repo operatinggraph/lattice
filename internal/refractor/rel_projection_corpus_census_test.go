@@ -12,10 +12,6 @@
 // stops projecting entirely; that is exactly why the whole corpus is run
 // through it here rather than the two lenses anyone expects to be involved.
 //
-// The design's own census said two lenses in the whole repo bind a
-// relationship variable, both in packages/objects-base, both untyped `-[r]->`.
-// This is that claim, executed.
-//
 // The pinned table carries only the lenses that BIND a relationship, because
 // every other lens's verdict is the same empty one — and the population
 // assertion below is what keeps that from being a hole: it names the binders
@@ -51,8 +47,9 @@ import (
 // one Core-KV point-read per traversed edge. A lens acquiring `data` is a lens
 // whose read surface grew, and this is where that shows up.
 var corpusRelBindings = map[string]string{
-	"objectAttachments": "r:*[data type]",
-	"objectLiveness":    "r:*[]",
+	"objectAttachments":             "r:*[data type]",
+	"objectIdentityAttachmentsRead": "r:*[data type]",
+	"objectLiveness":                "r:*[]",
 }
 
 // corpusRelBindingVerdicts derives the verdict for every executable cypher the
@@ -123,6 +120,7 @@ func TestCorpusRelBindings_BindingLensesAreTheKnownPopulation(t *testing.T) {
 	sort.Strings(binders)
 	require.Equal(t, []string{
 		"objectAttachments",
+		"objectIdentityAttachmentsRead",
 		"objectLiveness",
 	}, binders,
 		"the population of lenses that bind a relationship variable has changed. A lens joining this list "+

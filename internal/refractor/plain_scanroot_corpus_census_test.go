@@ -143,6 +143,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"menuCatalog":                    {hasNeighbour: true, reason: rootVarLengthHop},
+	"objectIdentityAttachmentsRead":  {hasNeighbour: true, reason: rootUntypedHop},
 	"oneBillCafeEntries":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"oneBillClinicEntries":           {hasNeighbour: true, reason: rootUngrounded},
 	"oneBillRentEntries":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
