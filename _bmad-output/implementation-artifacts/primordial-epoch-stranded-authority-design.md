@@ -3,9 +3,12 @@
 **Status:** ✅ **Fire 1 SHIPPED 2026-08-25** (detector + verify gate) — Winston-ratified, three cold
 adversarial reviews plus a cumulative close pass, which between them overturned two ratified claims (§3
 step 3, §4.1) before it landed.
-**Fire 2 🏗️ building 2026-08-25** (edge revocation + reserved-name guard + rotation e2e test; lens
-residue **descoped from destroy to detect+report** during Phase-0 grounding — §7 item 2's correction) —
-see the Fire 2 fire brief at the end of this doc for the build note.
+**Fire 2 ✅ SHIPPED 2026-08-26** (edge revocation + reserved-name guard, both mint AND package-declared
+paths + rotation e2e test; lens residue **descoped from destroy to detect+report**, with a cypher-diverged
+twin ranked a failure) — three more cold adversarial reviews found the "provably inert" lens claim false
+(a real historical counter-example, `c9a80312`), a missing precondition that could have bricked the
+current epoch on a mismatched id file, and several other defects — all fixed before merge. See the Fire 2
+fire brief + its close-pass amendment at the end of this doc.
 
 **Component:** `internal/bootstrap` (+ `scripts/verify-kernel.go`).
 
@@ -603,7 +606,7 @@ Green bar: §6 below.
 | `internal/bootstrap/verify.go` | the `ReadKernelReport` switch (§4.2 of this doc) | print `StrandedCapabilityLenses` findings as notices, never a failure |
 | `scripts/verify-kernel.go` | the report + orphan blocks | same notice-only treatment |
 | `packages/rbac-domain/ddls.go` | `261-269` `CreateRole` branch | one guard: `name == "operator"` → `fail("ReservedRoleName: ...")`, before the existing NanoID mint |
-| `cmd/lattice/bootstrap/retire.go` | new | `newRetireStrandedEpochCommand` — calls `StrandedOperatorEpochs`, submits `PlanStrandedEpochRetirement`'s ops via `output.SubmitOp` (treating `Error.Code == "UnknownLink"` as already-satisfied), then reads `declaredBy` off each revoked `GrantedBy` permission and prints de-duplicated `make reinstall-package PKG=packages/<name>` lines |
+| `cmd/lattice/bootstrap/retire.go` | new | `newRetireStrandedEpochCommand` — verifies `CurrentEpochOperatorReachable` first, calls `StrandedOperatorEpochs`, submits `PlanStrandedEpochRetirement`'s ops via `output.SubmitOp` after a pre-submit `linkIsLive` check (the close pass below corrects this cell's original `Error.Code == "UnknownLink"` claim — that code never appears on the wire), then reads `declaredBy` off each revoked `GrantedBy` permission, validates it against `pkgregistry`, and prints de-duplicated `make reinstall-package PKG=packages/<name>` lines |
 | `cmd/lattice/bootstrap/bootstrap.go` | `16-30` `NewCommand` | add `defaultActor *string` param (mirrors `op.NewCommand`'s signature) and register the new subcommand |
 | `cmd/lattice/root.go` | `81` `bootstrap.NewCommand(&flagNATSURL, &flagOutput)` | add `&flagActorKey`, matching `op.NewCommand`'s call one line above |
 | `internal/bootstrap/strandedretire_test.go` | new | §6.11–6.13 |
@@ -666,9 +669,11 @@ Green bar: §6 below.
   MUST name that exact key or the op fails, and the failure mode (a script reading an undeclared key)
   is a Processor-level rejection, not a silent no-op — verify this against a real submission in
   increment 6, not just a unit test of the planning function.
-- *This fire's own, new*: **`UnknownLink` is this op family's idempotency signal, not an error** — a
-  re-run of the retirement tool against an already-revoked edge must treat `Error.Code == "UnknownLink"`
-  as success, or the tool cannot be safely re-run after a partial failure.
+- *This fire's own, new*: **a re-run against an already-revoked edge must not report failure** — but
+  `Error.Code == "UnknownLink"` is not how to detect it: a generic Starlark `fail()` collapses to the
+  generic `ErrCodeScriptFailed` on the wire (`commit_path.go`'s `classifyStepError`), with the specific
+  reason buried in a details map no consumer in this repo parses. The shipped mechanism checks the link's
+  own live state via a direct KV read BEFORE submitting, never after a rejection.
 
 Standing checklist, the ones that bite this fire: **(1) new state needs a lifetime** — `RevocationOp`
 carries no state of its own (it's a pure derivation, re-run idempotently), so this is N/A by construction,
@@ -695,3 +700,137 @@ recommendation, the CreateRole guard, the rotation test, or lens-residue reporti
 protected vertex. Dependencies re-verified both ways: `substrate.LinkKey`/`ParseLinkKey` round-trip
 confirmed against `strandedepoch.go`'s own use; `RevokeRole`/`RevokePermission`'s `ContextHint.Reads`
 requirement confirmed by reading the scripts, not assumed.
+
+### Fire 2 close pass — three cold adversarial reviews, before admit (2026-08-26)
+
+Three independent, cold reviewers (security/threat-completeness, edge-cases/failure-modes,
+conventions/design-fidelity) found real defects in the shape described above, before it ever merged. Their
+findings and the resulting fixes, ranked by what they actually changed:
+
+1. **The lens-residue "provably inert" claim (item 2's correction, above) was wrong, with a real
+   precedent.** A stranded lens's stored cypher is frozen at ITS seeder's version; commit `c9a80312`
+   (2026-07-02) rewrote exactly `CapabilityLensDefinition`/`CapabilityReadWildcardGrantsLensDefinition`'s
+   cypher from matching `identity.data.protected` directly to matching via `holdsRole`→`operator`
+   topology. A lens stranded by a pre-`c9a80312` binary reads no `holdsRole`/`grantedBy` edge at all and is
+   untouched by item 1's revocation — it keeps projecting installation-wide root to every
+   `data.protected` identity regardless. **Fix:** `StrandedCapabilityLenses` now reads the twin's stored
+   `.cypherRule` aspect and compares it to the CURRENT definition's; a mismatch (or an unreadable cypher)
+   ranks `StrandedLensSeverityDiverged`, which `scripts/verify-kernel.go` escalates to a failure — an
+   identical cypher stays the inert notice the original argument correctly described for THAT case only.
+   `internal/bootstrap.VerifyKernel` itself stays notice-only in every case (§4.2's `make up` FRESH-oracle
+   reasoning applies to lenses exactly as it does to the role: a failure there cannot be repaired by
+   discard-and-remint and would only strand a second epoch).
+2. **No check that the loaded `lattice.bootstrap.json` corresponds to the target deployment.** A
+   mismatched id file (wrong deployment, stale copy, wrong `--nats-url`) makes the scan see the
+   deployment's real, live, CURRENT operator role as "stranded" — indistinguishable from a genuine one
+   from inside the scan alone — and the tool would have revoked every current holdsRole/grantedBy edge
+   into it. **Fix:** new `internal/bootstrap.CurrentEpochOperatorReachable(ctx, kv)`, run as the tool's
+   first check; refuses outright if the loaded table's own role is not verifiably live and held.
+3. **`epoch.UnreadableEdges` was read by nothing.** Per `strandedepoch.go`'s own doc comment this means
+   the edge lists are a lower bound, yet the tool revoked what it could see and exited 0. **Fix:** a
+   non-zero count is now printed and marks the run failed — it can revoke everything it read, but it can
+   no longer claim the epoch is fully neutralized.
+4. **The 30s scan timeout was reused as the whole run's budget**, including every per-op liveness check
+   and the reinstall-recommendations pass, while each submission already had its own 10s. On the
+   deployment this item's own board row measured (dozens of ops), the shared budget could expire mid-run,
+   turning healthy checks into `failed` and silently dropping the ENTIRE reinstall-recommendations output
+   — the arm that unblocks the two vertical rows riding this item. **Fix:** every phase (each liveness
+   check, each submission, the final re-scan, the recommendations pass) now gets its own fresh timeout, and
+   a recommendations-read failure marks the run failed rather than exiting silently.
+5. **The originally-planned idempotency mechanism (`Error.Code == "UnknownLink"`) does not exist on the
+   wire.** Grounded before this close pass, not after: a generic Starlark `fail()` collapses to the
+   generic `ErrCodeScriptFailed` (`internal/processor/commit_path.go`'s `classifyStepError`), with the
+   specific reason buried in a details map no consumer in this repo parses. What shipped instead — a
+   pre-submit `linkIsLive` check against Core KV directly — was the corrected design throughout; this
+   entry documents it explicitly since an earlier revision of this table described the disproved
+   approach. The pre-check has its own TOCTOU window (a concurrent revoker, or a reply timeout on an op
+   that actually committed — `output.SubmitOp` publishes before it waits); a submission error is now
+   followed by a re-read of the same link before it is called a failure, and the whole run re-scans for
+   remaining live authority at the end rather than trusting submission replies alone.
+6. **Revoking the submitting actor's own edge first could deny every submission after it.** An operator
+   whose credential predates the rotation is themself one of the stranded epoch's `Holders`. **Fix:**
+   `orderSubmittingActorLast` reorders each epoch's planned ops so the actor's own `RevokeRole` (if
+   present) runs last.
+7. **The runtime `CreateRole` guard covers one of two live role-mint paths.** A package's OWN
+   `Definition.Roles` mints a role with no reserved-name check at all (`validateCanonicalNameUniqueness`
+   deliberately excludes roles), and `resolveGrants`'s `i.RoleIDs` map keys by canonical name — a package
+   declaring a role named `operator` would both mint a second root-equivalent role AND hijack that same
+   install's own `GrantsTo: ["operator"]` resolution onto it. **Fix:** `internal/pkgmgr`'s
+   `validateNoReservedRoleName`, wired into `validateAll` (Install/Upgrade/Apply's shared pre-flight,
+   pure, pre-KV) alongside `validateCanonicalNameUniqueness`. Editing `internal/pkgmgr/definition.go`
+   tripped `lint-package-version.go`'s conservative `ReadGrantDomains` heuristic for one package
+   (`edge-manifest`, the only one declaring it) even though this specific change cannot alter a generated
+   read-grant walk; version-bumped it (`0.17.3`→`0.17.4`) rather than override a gate built to fail closed
+   on exactly this kind of "probably inert" call.
+8. **Unvalidated graph data (`declaredBy`) was printed as a copy-pasteable shell command.** `declaredBy`
+   is ordinary, rewritable permission data, not a value this tool minted. **Fix:** every recommended
+   package name is checked against `pkgregistry` (the same compiled, trusted registry `lattice-pkg
+   install` itself is bound to) before it is printed.
+9. **`StrandedCapabilityLenses`'s own listing (`vtx.meta.*.canonicalName`) enumerates the WHOLE meta-root
+   population** — hundreds, growing with every installed package — not the tens-sized `vtx.role.*`
+   population its role-plane sibling bounds itself to, and it had been wired into `planReconcile`, i.e.
+   onto every process boot. This is docs/components/bootstrap.md's own dossier entry 2's regression,
+   reintroduced by a sibling scan in the same fire that documented it. **Fix:** removed from
+   `reconcilePlan`/`ReconcilePrimordial`'s boot path entirely; it now runs only where its callers already
+   accept a slower, occasional check — `scripts/verify-kernel.go` directly, and `VerifyKernel` (used by
+   `bootstrap verify` / `make up`, never by boot itself) — each via its own standalone call, not through
+   `KernelReport`.
+10. Also fixed from the same passes: a stale pre-existing `packages/rbac-domain/ddls.go` comment claiming
+    `RevokeRole`/`RevokePermission` read their actor/role vertices (they read only the link key);
+    `StrandedCapabilityLenses` did not check the candidate vertex's `class`, so a non-lens `vtx.meta.*`
+    sharing a reserved canonicalName could in principle be misreported; a `dryRun` early-return could
+    swallow a plan-error `failed` flag and exit 0.
+
+Not fixed, by the reviewers' own assessment: an ordinary `AssignRole` can re-grant the SURVIVING stranded
+role after this tool runs (the role vertex deliberately stays, per item 4) — a package script cannot read
+`RoleOperatorID` to guard against this itself, so it remains a detection-and-re-run matter, not a
+prevention one; and the holder census's `identity`-only source-type filter (Fire 1's own scope, not
+widened here) has no constructed exploit but rests entirely on the capability lenses' own type filter.
+
+### Fire 2 close pass, round two — a fourth cold verification pass, before admit (2026-08-26)
+
+A fourth cold reviewer was asked to VERIFY the ten fixes above rather than re-discover findings from
+scratch. Nine verified clean. One did not — proven with a working exploit against the shipped code, fixed
+before merge, together with everything else the verification pass raised:
+
+1. **HIGH — item 2's fix (`CurrentEpochOperatorReachable`) was self-validating and did not stop the
+   brick.** The check asked "is MY loaded role live, and does at least one of MY loaded table's own six
+   identities hold it" — both halves keyed on the SAME loaded file. A deployment's own PRIOR epoch's
+   `lattice.bootstrap.json` is an equally self-consistent answer to that question FOREVER: the seed path
+   is create-only, so the prior role stays live and the prior epoch's own primordial identities still hold
+   it — that is the literal definition of a stranded epoch with holders, not a distinguishing feature of a
+   current one. The reviewer proved this by loading the immediately-prior id file against an unwiped
+   bucket (arguably the single most likely mistake in practice, since an operator running this tool
+   typically still has both files on hand) and showing the check passed while `StrandedOperatorEpochs`
+   then named the deployment's REAL, current epoch's role as stranded. **Fix:** the check now also asks
+   "does any OTHER live role named `operator` exist that is NEWER than mine" — and "newer" cannot be read
+   from the envelope's own `createdAt` field (every primordial entry in every epoch is stamped with the
+   same fixed `BootstrapTime` constant, deliberately, so a reconcile comparison is not defeated by
+   wall-clock noise — investigated and ruled out before landing on the real fix). It reads the NATS
+   JetStream KV entry's own server-assigned `Created()` time instead — set at the moment each key was
+   actually appended to THIS bucket's stream, never controlled by the application layer and therefore not
+   reproducible by replaying an old envelope. `anyNewerLiveOperatorRole` mirrors `StrandedOperatorEpochs`'s
+   own bounded `vtx.role.*.canonicalName` listing to ask it. Proven against both a hand-seeded two-role
+   fixture and — the stronger proof — the real `LoadOrGenerate`+`SeedPrimordial` path run twice
+   (`TestRotation_SecondSeedAfterIDFileRotationStrandsThePriorRole`): epoch B reads reachable; loading
+   epoch A's own real, still-live id file back does not. This is not an absolute guarantee (two epochs
+   written within the same clock resolution, or a bucket whose only live epoch is already the wrong one,
+   are not caught) — it closes the proven, practical mistake without an oracle Core KV does not have today
+   (confirmed: no running component's Health KV heartbeat carries an epoch identifier either).
+2. **LOW — self-revoke ordering was per-epoch, not across the whole run.** With two or more stranded
+   epochs live at once and a submitting actor whose authority derives from one of them, that epoch's
+   self-revoke could still fire before a later epoch's ops were processed. **Fix:** every epoch's ops are
+   now collected before `orderSubmittingActorLast` runs once, over the combined list.
+3. **LOW — an unknown-registry `declaredBy` name warned but did not mark the run's recommendations
+   incomplete**, the opposite posture from an unreadable `declaredBy` three lines below it. **Fix:** both
+   causes now count toward the same "recommendations may be incomplete" returned error.
+4. **LOW — `validateNoReservedRoleName` had no test proving it is reached from `validateAll`**, only that
+   the function rejects the name in isolation. **Fix:**
+   `TestValidateAll_RejectsReservedRoleName`, mirroring `packagename_test.go`'s own `validateAll()`-level
+   proof for `validatePackageName`.
+
+The reviewer also flagged that this close-pass section did not exist in the git WORKTREE it was told to
+check — correct, and expected: design docs are edited directly in `main`, never in a fire's worktree (this
+repo's own isolation rule), so a worktree's copy of a design doc is a point-in-time snapshot from
+whenever the fire branched, not a live view of Winston's concurrent doc edits in `main`. Not a defect in
+the shipped code; noted here only so the next reader of this doc's history understands the artifact.
