@@ -3,8 +3,9 @@
 **Status:** ✅ **Fire 1 SHIPPED 2026-08-25** (detector + verify gate) — Winston-ratified, three cold
 adversarial reviews plus a cumulative close pass, which between them overturned two ratified claims (§3
 step 3, §4.1) before it landed.
-**Fire 2 ✅ Andrew-ratified 2026-08-25: edge revocation, lens residue included** (§7) — build-ready for
-the Steward.
+**Fire 2 🏗️ building 2026-08-25** (edge revocation + reserved-name guard + rotation e2e test; lens
+residue **descoped from destroy to detect+report** during Phase-0 grounding — §7 item 2's correction) —
+see the Fire 2 fire brief at the end of this doc for the build note.
 
 **Component:** `internal/bootstrap` (+ `scripts/verify-kernel.go`).
 
@@ -319,9 +320,43 @@ failures; §6.1 pins the scanner, one layer below.
 10. `ReconcilePrimordial` stays advisory — seed a prior epoch, reconcile, `require.NoError`, four outcomes
    unchanged. §4's headline promise is otherwise unpinned, and §4.2 is why that matters.
 
+**Fire 2's own green checks:**
+
+11. `TestPlanStrandedEpochRetirement_HoldersAndGrants` — a `StrandedOperatorEpoch` fixture with entries in
+    all three of `Holders`/`ReachableVia`/`GrantedBy` produces exactly one `RevokeRole` op per `Holders`
+    entry, one `RevokeRole` op per `ReachableVia` entry (actor key correctly parsed back out of the link
+    key), and one `RevokePermission` op per `GrantedBy` entry — no more, no fewer.
+12. `TestPlanStrandedEpochRetirement_ReachableViaMustBeAHoldsRoleLinkIntoTheRole` — a malformed or
+    mistargeted `ReachableVia` entry (wrong relation, wrong target role) is a hard error, never a silent
+    skip — the invariant `StrandedOperatorEpochs` establishes must not be trusted blindly across the
+    package's own internal boundary.
+13. `TestPlanStrandedEpochRetirement_EmptyEpochProducesNoOps` — an epoch with all three lists empty
+    (the `StrandedSeverityInert` case) produces zero ops, not an error.
+14. `TestStrandedCapabilityLenses_SingleEpochBucketIsSilent` — the no-false-red pin, mirroring §6.1.
+15. `TestStrandedCapabilityLenses_PriorEpochLensIsReported` — a hand-planted prior-epoch lens vertex
+    (any one of the four canonicalNames) alongside the real current-epoch four is reported; the current
+    four are never reported (excluded by id, mirroring `StrandedOperatorEpochs`' `RoleOperatorID` exclusion).
+16. `TestStrandedCapabilityLenses_ForeignCanonicalNameIsSilent` — a `meta.lens` vertex with a canonicalName
+    outside the four is never reported, mirroring §6.5's `ForeignRoleNameIsSilent`.
+17. `TestStrandedCapabilityLenses_UnloadedPrimordialTableRefuses` — mirrors §6.9: an unloaded table must
+    refuse before scanning, or the exclusion-by-id matches nothing and every live capability lens —
+    including the current epoch's own — reports as stranded.
+17b. `TestVerifyKernel_StrandedCapabilityLensReturnsNoFailures` — mirrors §6.6/#7: a stranded lens is a
+    notice, never a failure, in `VerifyKernel`'s output.
+18. `TestRotation_SecondSeedAfterIDFileRotationStrandsThePriorRole` — the real end-to-end vector Fire 1's
+    §6.2 scope note deferred: `LoadOrGenerate` a fresh id file, seed; `LoadOrGenerate` a SECOND fresh id
+    file (simulating a regenerated `lattice.bootstrap.json`) against the SAME bucket, seed again (no
+    wipe); `StrandedOperatorEpochs` finds exactly the first epoch's role, with its holders and grants,
+    using the real seed path rather than a hand-planted fixture.
+19. `TestStarlark_Rbac_CreateRole_RejectsOperatorName` — `CreateRole{name: "operator"}` fails with
+    `ReservedRoleName`, proven by reverting the guard and watching the test fail (the standing checklist's
+    #3): a `CreateRole{name: "operator"}` call must otherwise succeed (the positive vector, already pinned
+    by an existing test) before the negative one means anything.
+
 Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
-./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./internal/substrate/...`, full
-`go test ./...` with `POSTGRES_TEST_DSN` set (REMOTE.md §3).
+./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./internal/substrate/...
+./packages/rbac-domain/... ./cmd/lattice/...`, full `go test ./...` with `POSTGRES_TEST_DSN` set
+(REMOTE.md §3).
 
 ## 7. Fire 2 — ✅ direction ratified (Andrew, 2026-08-25): edge revocation, lens residue included
 
@@ -339,6 +374,53 @@ epoch's lens residue in scope. What Fire 2 builds:
    cannot reach a prior epoch's ids. Refractor removes a lens on its `.spec` tombstone
    (`lens/corekv_source.go:519-528`) — the granularity every consumer honours, per the sibling
    kernel-orphan-retirement design's census.
+
+   > **Corrected 2026-08-25 by Fire 2's Phase-0 grounding — this item does not ship as written; it is
+   > infeasible under the kernel's own protection guard, not merely undesigned.** All four capability
+   > lenses seed with `data.protected: true`
+   > (`primordial.go:643,656,672,691` — `MakeVertexEnvelope(<Lens>Key, "meta.lens", map[string]any{"protected": true})`).
+   > `rejectProtectedMutations` (`internal/processor/step8_commit.go:721-742`) is "the AUTHORITATIVE
+   > commit-time kernel-protection guard": for every update/tombstone mutation it derives the 3-segment
+   > root and refuses the WHOLE operation with `*ProtectedKeyError` if that root carries
+   > `data.protected == true` — no `force` parameter bypasses it, and `protectedRootKey` maps
+   > `vtx.meta.<id>.spec` back to `vtx.meta.<id>`, so tombstoning the `.spec` aspect is refused exactly
+   > like tombstoning the root. The Starlark `TombstoneMetaVertex` op (`meta_ddl.go:386-445`) — which
+   > DOES cascade a tombstone across the root plus every aspect suffix including `.spec` for a
+   > `meta.lens`, and would otherwise be the exact mechanism — carries its own `is_protected` check
+   > first (`meta_ddl.go:114-129,390-391`) for the identical reason. This is not a gap in Refractor's
+   > removal mechanism (confirmed live and correct:
+   > `TestCoreKVSource_SpecTombstone_FiresRemoveCallback`); it is that **nothing can ever submit the
+   > tombstone mutation this design called for**, for a protected lens, current epoch or prior, without
+   > a guard exemption.
+   >
+   > This is the SAME situation §7 item 4 already names for the stranded role vertex ("the role carries
+   > `protected: true` and tombstoning it needs a guard exemption Andrew did not grant") — extended here
+   > to a class Andrew was not asked about explicitly, because Phase-0 grounding is what surfaces it.
+   > Applying his own stated reasoning for the role vertex ("a guard exemption spent for zero
+   > live-harm reduction") to the lens case: **once item 1 ships, a stranded lens's live-harm
+   > reduction is ALSO zero, not merely small.** All three consumer lenses this doc's §4.1 traces
+   > (`CapabilityLens`, `CapabilityReadWildcardGrantsLens`, rbac-domain's `capabilityRolesSpec`) reach
+   > the stranded role's authority only THROUGH a live `holdsRole` or `grantedBy` edge into it — item 1
+   > tombstones every one of those. With zero live edges into the stranded role, the stranded epoch's
+   > copy of each lens computes the cypher rule over the SAME graph as the current epoch's copy and
+   > returns the IDENTICAL result set (neither cypher rule is scoped to a specific role id — both match
+   > by canonicalName, `lenses.go:135,358-365` — so "which lens vertex answers" is not observable in the
+   > output once no holder or grant distinguishes them). Redundant compute, not a security gap.
+   >
+   > **The one residual risk is prospective, not present:** a FUTURE change that narrows one of the
+   > CURRENT epoch's capability-lens cypher rules leaves an un-narrowed stranded twin projecting the
+   > OLD, broader rule forever, since kernel reconcile cannot reach a prior epoch's meta ids (§2, §5).
+   > That is real but conditional — it only bites a future kernel-cypher change, and only if that
+   > change's author does not know to check for a surviving twin. **Resolution: this item ships as
+   > detect-and-report, not destroy** — `StrandedCapabilityLenses` (new, mirroring
+   > `StrandedOperatorEpochs`'s shape) reports any live `vtx.meta.*` vertex named by one of the four
+   > capability-lens canonicalNames whose id this deployment's primordial table does not name, as a
+   > NOTICE (never a failure — it is provably inert post-item-1) in `verify-kernel`'s output. The
+   > destructive half (a guard exemption for `rejectProtectedMutations`/`is_protected` scoped to
+   > provably-non-current-epoch protected meta-vertices) is `🔭 flag-for-Andrew` on the board row,
+   > exactly like the role-vertex tombstone — a genuine security-posture spend, not build-note scope.
+   > The dossier note for "anyone narrowing a capability-lens cypher" (docs/components/bootstrap.md)
+   > is this fire's mechanized memory of the residual risk.
 3. **Restore the stranded grants against the CURRENT role via the package plane.** Revocation removes
    the hazard; it does not give current actors the 40 permissions back. Packages declare grants by role
    canonicalName (`GrantsTo: ["operator"]`) and the installer resolves that to the current role id at
@@ -349,10 +431,41 @@ epoch's lens residue in scope. What Fire 2 builds:
    plain install no-ops by design, so the vehicle question is real and is build-note scope, not a fork.
    This arm is what unblocks the two verticals rows riding this item (café `CreateAccount`, LoftSpace
    `AttachObject`).
-4. **What deliberately stays:** the stranded role vertex and its permission vertices. The role carries
-   `protected: true` (`primordial.go:711`) and tombstoning it needs a guard exemption Andrew did not
-   grant; unheld and grant-less it is inert, and the Fire 1 gate keeps reporting it as a **notice**
-   (never a failure) — an honest record of the residue, not a defect.
+
+   > **Grounded 2026-08-25.** `internal/pkgmgr/permissionreconcile.go` is PURE classification — it
+   > reads a live/declared population and returns findings; it holds no write or repair path of its
+   > own (confirmed by full read: `ReconcilePermissions`/`ReconcileGrantLinks` are functions of their
+   > arguments, no I/O). "Driving `permissionreconcile`'s machinery" is therefore not an available
+   > vehicle at all — there is nothing there to drive. **A version bump is also not the right shape**:
+   > the affected packages' OWN declared content (their Go source, DDLs, `GrantsTo` canonical names)
+   > has not changed — what changed is external, kernel-side (the epoch rotated underneath them) — so
+   > bumping `Version` would be a false claim about why the package is being re-applied, and would
+   > trip `lint-package-version.go` for a commit that edits no package semantics. The actual vehicle:
+   > **`lattice-pkg install --force <path>`** (no version bump), the exact "same-version edit lands via
+   > `--force`" case the Makefile's own `reinstall-package` target documents — `--force` reaches
+   > `resolveGrants`, which reads the CURRENTLY LOADED primordial table's `RoleOperatorID` fresh on
+   > every invocation, so the resulting `grantedBy` edge key (which embeds the role id) is necessarily
+   > NEW and gets created regardless of whether any byte of the package changed.
+   >
+   > **Which packages to reinstall is derived from the stranded finding itself, not hardcoded.** Each
+   > `vtx.permission.*` vertex in a `StrandedOperatorEpoch.GrantedBy` list carries `data.declaredBy`
+   > when it is package-origin (the same field `permissionreconcile.go`'s `LivePermission.DeclaredBy`
+   > classifies on) — reading it directly names the owning package with no registry cross-reference
+   > needed. The retirement tool prints the derived, de-duplicated `make reinstall-package
+   > PKG=packages/<name>` line(s) for the operator to run, rather than shelling out to a sibling binary
+   > itself — mirroring the existing `bootstrap verify` convention of diagnosing precisely and
+   > printing the exact remedy command (`cmd/lattice/bootstrap/bootstrap.go:164`,
+   > `"Suggestion: run \`make down && make up\`..."`) rather than a CLI tool executing another program.
+   > On the deployment the board row measured, this resolves to `packages/cafe-ledger`,
+   > `packages/objects-base`, `packages/privacy-operator-grant`, `packages/identity-domain` — but the
+   > tool derives that set live, so it stays correct if a different package set is affected elsewhere.
+4. **What deliberately stays:** the stranded role vertex and its permission vertices, **and (added by
+   item 2's correction above) the stranded epoch's four capability lens vertices.** All carry
+   `protected: true` and tombstoning any of them needs a guard exemption Andrew did not grant; each is
+   inert once item 1 ships (the role: unheld and grant-less; the lenses: computing the same result the
+   current epoch's own lenses already compute — item 2's correction), and `verify-kernel` keeps
+   reporting all of them as **notices** (never a failure) — an honest record of the residue, not a
+   defect.
 
 Also consolidated into Fire 2 (per the build note's §6): the end-to-end rotation test vector (§6.2's
 scope note — rotate the id file, run the seeder twice against one bucket) and the §3.1
@@ -467,3 +580,118 @@ census, or any seeding path. No new board row.
 **Scope-diff gate:** parts 2–4 traced item-by-item to part 1; every touch is detection or reporting. No
 adjacent mechanism substituted. Dependencies re-verified both ways: `ListKeysFiltered` wildcard support is
 load-bearing and confirmed against the pin; nothing listed proved inert.
+
+---
+
+### Fire 2 fire brief (build note, 2026-08-25)
+
+**1. Scope sentence.** Revoke a stranded epoch's `holdsRole`/`grantedBy` edges (§7 item 1), restore the
+permissions those edges carried against the CURRENT operator role via the package plane (§7 item 3),
+prevent a future `CreateRole` from ever minting a second `operator`-named role (§7's consolidated §3.1
+item), prove the real end-to-end rotation vector (§7's consolidated §6.2 scope note), and — per item 2's
+correction above — REPORT (never destroy) the prior epoch's four capability lens vertices as residue.
+Green bar: §6 below.
+
+**2. Verified touch-list** (every anchor re-checked live 2026-08-25):
+
+| File | Anchor | Edit |
+|---|---|---|
+| `internal/bootstrap/strandedepoch.go` | `59-118` `StrandedOperatorEpoch` fields | none — `Holders`/`ReachableVia`/`GrantedBy` already carry everything a plan needs (vertex keys for the first and third, holdsRole LINK keys for the second) |
+| `internal/bootstrap/strandedretire.go` | new | `RevocationOp`, `PlanStrandedEpochRetirement(epoch) ([]RevocationOp, error)` — pure, no I/O |
+| `internal/bootstrap/lensresidue.go` | new | `StrandedCapabilityLens`, `StrandedCapabilityLenses(ctx, kv)` — mirrors `strandedepoch.go`'s shape, reuses its unexported `walkDistinctKeys`/`readDocument`/`docState` helpers (same package) |
+| `internal/bootstrap/reconcile.go` | `42-81` `reconcilePlan` · `107-183` `planReconcile` · `373-483` `ReconcilePrimordial` · `490-509` `KernelReport` · `516-522` `ReadKernelReport` | add `strandedLenses`/`strandedLensScanErr` alongside the existing `strandedEpochs`/`strandedScanErr` fields, same advisory wiring |
+| `internal/bootstrap/verify.go` | the `ReadKernelReport` switch (§4.2 of this doc) | print `StrandedCapabilityLenses` findings as notices, never a failure |
+| `scripts/verify-kernel.go` | the report + orphan blocks | same notice-only treatment |
+| `packages/rbac-domain/ddls.go` | `261-269` `CreateRole` branch | one guard: `name == "operator"` → `fail("ReservedRoleName: ...")`, before the existing NanoID mint |
+| `cmd/lattice/bootstrap/retire.go` | new | `newRetireStrandedEpochCommand` — calls `StrandedOperatorEpochs`, submits `PlanStrandedEpochRetirement`'s ops via `output.SubmitOp` (treating `Error.Code == "UnknownLink"` as already-satisfied), then reads `declaredBy` off each revoked `GrantedBy` permission and prints de-duplicated `make reinstall-package PKG=packages/<name>` lines |
+| `cmd/lattice/bootstrap/bootstrap.go` | `16-30` `NewCommand` | add `defaultActor *string` param (mirrors `op.NewCommand`'s signature) and register the new subcommand |
+| `cmd/lattice/root.go` | `81` `bootstrap.NewCommand(&flagNATSURL, &flagOutput)` | add `&flagActorKey`, matching `op.NewCommand`'s call one line above |
+| `internal/bootstrap/strandedretire_test.go` | new | §6.11–6.13 |
+| `internal/bootstrap/lensresidue_test.go` | new | §6.14–6.17 |
+| `internal/bootstrap/rotation_e2e_test.go` | new | §6.18 — the real `LoadOrGenerate`+seed-twice vector |
+| `packages/rbac-domain/starlark_test.go` | alongside `TestStarlark_Rbac_RevokeRole` (`306`) | `TestStarlark_Rbac_CreateRole_RejectsOperatorName` |
+| `docs/components/bootstrap.md` | the dossier (§4.2 cites it) | new entry: a future capability-lens cypher narrowing must check `StrandedCapabilityLenses`' report for a surviving twin |
+
+**3. Precedents to mirror.**
+
+- Tombstone-by-known-key, revive-aware grant/revoke shape — `packages/rbac-domain/ddls.go:387-400`
+  (`RevokeRole`) and `:433-446` (`RevokePermission`) — ALREADY the exact ops this fire needs; no new
+  Starlark verb. Both require the link key declared in `ContextHint.Reads` (read-posture, Contract #2
+  §2.5), computed identically to the script's own construction via `substrate.LinkKey(type1, id1,
+  linkName, type2, id2)` (`internal/substrate/keys.go:50`) — never hand-formatted, so the CLI's declared
+  read cannot drift from what the script actually looks up.
+- Generic op submission from a CLI — `cmd/lattice/op/op.go`'s `newSubmitCommand` /
+  `output.SubmitOp(ctx, conn, env)` (`cmd/lattice/output/submit.go:27`) — reused directly, not
+  reimplemented; `flagActorKey` (root.go:33, loaded from a credential file) is the existing mechanism for
+  an authenticated, sufficiently-privileged caller.
+- Bounded target-reverse-link enumeration — `StrandedOperatorEpochs` itself (already shipped) is the
+  precedent `StrandedCapabilityLenses` mirrors one level up (subject wildcard `vtx.meta.*.canonicalName`
+  instead of `vtx.role.*.canonicalName`), reusing the same package-private helpers.
+- Diagnose-and-print-the-remedy-command, never auto-exec another binary —
+  `cmd/lattice/bootstrap/bootstrap.go:164` (`verify`'s `"Suggestion: run \`make down && make up\`..."`).
+- Real two-epoch seeding for the e2e test — `internal/bootstrap/reconcile_test.go:31`
+  `newReconcileSeeder` over `natsfixture.Server(t)`, calling `LoadOrGenerate` + the seed path twice
+  against one bucket, no wipe between (Fire 1's §6.2 scope note names exactly this gap).
+
+**4. Increment order.**
+
+1. `strandedretire.go` + unit tests (§6.11–6.13, pure — no NATS). Green: `go test ./internal/bootstrap/
+   -run TestPlanStrandedEpochRetirement -count=1`.
+2. `lensresidue.go` + unit tests (§6.14–6.17, mirrors Fire 1's own natsfixture shape). Green: `go test
+   ./internal/bootstrap/ -run TestStrandedCapabilityLenses -count=1`.
+3. `reconcile.go`/`verify.go`/`verify-kernel.go` wiring for the lens-residue notice (§6.17b). Green:
+   `go test ./internal/bootstrap/ -count=1` + `go vet ./scripts/...`.
+4. `packages/rbac-domain/ddls.go` CreateRole guard + its test. Green: `go test ./packages/rbac-domain/
+   -run TestStarlark_Rbac_CreateRole -count=1`.
+5. `rotation_e2e_test.go` — the real rotation vector. Green: `go test ./internal/bootstrap/ -run
+   TestRotation -count=1`.
+6. `cmd/lattice/bootstrap/retire.go` + wiring into `bootstrap.NewCommand`/`root.go`. Green: `go build
+   ./...` + any CLI-level test this increment adds.
+7. Full gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+   ./scripts/lint-conventions.go`, `go test ./internal/bootstrap/... ./packages/rbac-domain/...
+   ./cmd/lattice/...`, full `go test ./...`.
+
+**5. In-scope gotchas — `docs/components/bootstrap.md` dossier, copied verbatim, plus this fire's own.**
+
+- *A read-only computation added to `planReconcile` inherits the failure posture of the repair path it
+  shares* → §4: the lens-residue scan is advisory exactly like the role scan; its error carries in the
+  plan, never a `return`.
+- *`BootstrapOpKey` identifies the deployment, not the binary generation* → not triggered by this fire's
+  edits (no provenance-keyed verb added), but the CreateRole guard's own behaviour under a rollback is
+  worth stating: an older binary lacking the guard would accept a second `operator` role again — this
+  fire does not attempt to close that gap (it is a binary-version question, out of scope per §12.4 of
+  the sibling design), only to close the gap for a binary that HAS the fix.
+- *This fire's own, new*: **a Starlark op's read posture is a correctness error, not a style
+  preference** — `RevokeRole`/`RevokePermission` read `state[lnk_key]`; the CLI's `ContextHint.Reads`
+  MUST name that exact key or the op fails, and the failure mode (a script reading an undeclared key)
+  is a Processor-level rejection, not a silent no-op — verify this against a real submission in
+  increment 6, not just a unit test of the planning function.
+- *This fire's own, new*: **`UnknownLink` is this op family's idempotency signal, not an error** — a
+  re-run of the retirement tool against an already-revoked edge must treat `Error.Code == "UnknownLink"`
+  as success, or the tool cannot be safely re-run after a partial failure.
+
+Standing checklist, the ones that bite this fire: **(1) new state needs a lifetime** — `RevocationOp`
+carries no state of its own (it's a pure derivation, re-run idempotently), so this is N/A by construction,
+which is itself worth confirming rather than assuming. **(2) every census is a premise** — the "40
+permissions" / "21 grants" figures are the board's live measurement on a specific deployment; no test
+pins those numbers, only the mechanism. **(5) one deterministic key, one writer** — `RevokeRole` and a
+package's own `--force` reinstall both eventually touch the SAME grantedBy edge key space but never the
+SAME key: revoke targets the STRANDED role's edge, reinstall creates the CURRENT role's edge — different
+role ids, different keys, no collision.
+
+**6. Adjacent finds.** (a) The protected-lens infeasibility (§7 item 2's correction) — absorbed as a
+scope correction in this same brief, not filed separately. (b) `permissionreconcile.go` having no write
+path — absorbed the same way (it changes the vehicle, not the scope). (c) The guard exemption needed to
+ever retire a protected meta-vertex (lens OR the role vertex) generically — this is the SAME `🔭
+flag-for-Andrew` the role vertex already carries (§7 item 4); not a new row.
+
+**7. Non-goals.** No guard exemption to `rejectProtectedMutations`/`is_protected` (flagged for Andrew,
+not built). No automatic package reinstall (the tool prints the command; an operator runs it). No change
+to `reconcile.go`'s four outcomes for the role/grant scan, the `vtx.meta.>` orphan census, or any seeding
+path.
+
+**Scope-diff gate:** parts 2–4 traced item-by-item to part 1; every touch is revocation, restoration
+recommendation, the CreateRole guard, the rotation test, or lens-residue reporting — none destroys a
+protected vertex. Dependencies re-verified both ways: `substrate.LinkKey`/`ParseLinkKey` round-trip
+confirmed against `strandedepoch.go`'s own use; `RevokeRole`/`RevokePermission`'s `ContextHint.Reads`
+requirement confirmed by reading the scripts, not assumed.
