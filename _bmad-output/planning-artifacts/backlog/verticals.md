@@ -33,7 +33,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **45 already-wrongly-charged auto-no-show fees ($1,125) need waiving on the live stack** | The sweep no longer bills going forward (Done log `5aa287b0`) — this row is only the historical cleanup, via the existing `ClinicCreditAccount{reason:"waiver"}` tool. | Clinic | platform (Andrew/interactive) | ★ | XS | 🚧 blocked-on: an interactive session — unattended financial-ledger writes are refused by design |
 | **A settled café tab can never post to the resident's house account** | Weaver's `cafeTabSettlement` `missing_account` gap dispatches `CreateAccount`; the Processor rejects it `AuthDenied: no matching platformPermission` — cafe-ledger's operator grants hang off a stranded prior-epoch `operator` role, the Weaver actor holds the current one. Verified live: an $8.00 tab settled, gap open, ledger empty. | Café | platform | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Bootstrap] re-bootstrap strands operator grants` |
 | **A café front-desk staffer sees every resident as a raw NanoID** | The app grants the staff hat on `worksAt` alone ([readauth.go:137](../../../cmd/cafe-app/readauth.go:137)); `cap-read.staff`, which unlocks `cafeIdentitiesRead`'s workplace fan-out, needs `worksAt` AND `holdsRole frontOfHouse` ([lenses.go:199](../../../packages/service-location/lenses.go:199)). 3 of 10 live `worksAt` identities hold the POS/Front Desk surface with a roster of themselves alone. | Café | pkg | ★★ | S | 📐 needs designer pass · no-pattern: one definition of front-desk staff |
-| **A verify artifact holds a lease in the café front-desk roster** | "Verify LandlordKey Tenant" is 1 of the 6 identities a front-desk staffer's workplace covers, and holds lease `sNAfGKPBtkK5YGscCTRR` in the resident list — the litter class already reaped for clinic and wellness, unreaped here. | Café | pkg | ★ | XS | 📋 ready · [seed-classic-demo.go](../../../scripts/seed-classic-demo.go) reap idiom |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -73,6 +72,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-25 · `14581239` · A verify-fire lease no longer litters the café front-desk roster — reapLeasesByApplicant generalizes reapGhostLeases past the fixed admin-applicant case.
 - 2026-08-25 · `0b1a60ab` · A recurring visit series can finally be ended after the fact — `EndVisitSeries` mirrors Pause/Resume's confinement. clinic-reminders 0.10.2, edge-manifest 0.17.3
 - 2026-08-25 · `54a5fedc` · A café resident's front-desk class + visit badge finally renders — backfillCafeFrontDeskBadges converges on a tenanted lease + linked patient, booking + appointment now live in front-desk-bookings/front-desk-visits.
 - 2026-08-25 · `5aa287b0` · `MarkPastDueNoShow` stops billing the automated no-show sweep — only staff-observed no-shows charge now. clinic-domain 0.34.6
