@@ -136,39 +136,12 @@ func main() {
 	// DecideLeaseApplication's self-scoped grant is authorized off the
 	// landlord's `manages` link (require_manages) — with no landlord persona
 	// this world's application can never be decided outside Loupe/operator.
-	// Mirrors seed-showcase.go's seedLandlord — but CreateUnclaimedIdentity
-	// mints a fresh vtx.identity on every call (no client-supplied id, unlike
-	// CreateLocation's locationId), so a landlord can't be pinned by const the
-	// way unitID/studioID are. findManagingLandlord instead converges on the
-	// `manages` link itself, mirroring seed-showcase.go's ensureLandlord —
-	// this seed's own prior comment claimed the same precedent but dropped
-	// exactly that guard, so every rerun minted and co-managed a fresh
-	// landlord (verticals.md: 10 co-managers accrued on the pinned unit).
-	landlordKey, foundLandlord := findManagingLandlord(ctx, conn, unitKey)
-	if !foundLandlord {
-		landlordSalt, err := substrate.NewNanoID()
-		must(err, "generate landlord email salt")
-		landlordReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-			map[string]any{
-				"name":         "Classic Demo Landlord " + landlordSalt[:8],
-				"email":        "landlord-" + landlordSalt[:8] + "@dev.lattice.local",
-				"claimKeyHash": mustSHA256Hex("classic-demo-landlord-" + landlordSalt),
-			}, nil)
-		landlordKey = landlordReply.PrimaryKey
-		submitOp(ctx, conn, adminKey, "AssignRole", "",
-			map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
-			&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
-		submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
-			map[string]any{"landlord": landlordKey, "unit": unitKey},
-			&processor.ContextHint{
-				Reads:         []string{landlordKey, unitKey},
-				OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
-			})
-	}
+	landlordKey := ensureLandlord(ctx, conn, adminKey, unitKey, consumerRoleKey)
 	fmt.Printf("==> landlord:        %s manages %s\n", landlordKey, unitKey)
 	reapExcessCoManagers(ctx, conn, adminKey, unitKey, landlordKey)
 	reapDuplicateListings(ctx, conn, adminKey, unitKey)
 	backfillBareListings(ctx, conn, adminKey)
+	backfillUnownedListings(ctx, conn, adminKey, consumerRoleKey)
 
 	salt, err := substrate.NewNanoID()
 	must(err, "generate consumer email salt")
@@ -772,6 +745,63 @@ func reapDuplicateListings(ctx context.Context, conn *substrate.Conn, adminKey, 
 			map[string]any{"locationKey": key},
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate listing: %s (12 Classic Demo Ave)\n", key)
+	}
+}
+
+// ensureLandlord converges unitKey onto a live `manages` link, minting a new
+// unclaimed landlord identity only if none is found. Mirrors
+// seed-showcase.go's seedLandlord/ensureLandlord — CreateUnclaimedIdentity
+// mints a fresh vtx.identity on every call (no client-supplied id, unlike
+// CreateLocation's locationId), so a landlord can't be pinned by const the
+// way unitID/studioID are; findManagingLandlord converges on the `manages`
+// link itself instead, so a rerun never mints and co-manages a second
+// landlord onto a unit that already has one.
+func ensureLandlord(ctx context.Context, conn *substrate.Conn, adminKey, unitKey, consumerRoleKey string) string {
+	if landlordKey, found := findManagingLandlord(ctx, conn, unitKey); found {
+		return landlordKey
+	}
+	landlordSalt, err := substrate.NewNanoID()
+	must(err, "generate landlord email salt")
+	landlordReply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+		map[string]any{
+			"name":         "Classic Demo Landlord " + landlordSalt[:8],
+			"email":        "landlord-" + landlordSalt[:8] + "@dev.lattice.local",
+			"claimKeyHash": mustSHA256Hex("classic-demo-landlord-" + landlordSalt),
+		}, nil)
+	landlordKey := landlordReply.PrimaryKey
+	submitOp(ctx, conn, adminKey, "AssignRole", "",
+		map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
+		&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
+	submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
+		map[string]any{"landlord": landlordKey, "unit": unitKey},
+		&processor.ContextHint{
+			Reads:         []string{landlordKey, unitKey},
+			OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+		})
+	return landlordKey
+}
+
+// backfillUnownedListings gives every live vtx.unit.* that already has a
+// `.listing` aspect but no live `manages` link a landlord (verticals.md
+// "Every unit an applicant can browse is unowned, so no landlord can ever
+// decide the application"): DecideLeaseApplication's landlord path walks
+// appliesToUnit -> manages, so a listed-but-unowned unit's applications can
+// only ever be decided by an operator, never a landlord. Runs after
+// backfillBareListings so a unit it just gave a listing to is covered in the
+// same pass.
+func backfillUnownedListings(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.unit.")
+	must(err, "list vtx.unit. keys")
+	sort.Strings(keys)
+	for _, key := range keys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) || !alive(ctx, conn, key+".listing") {
+			continue
+		}
+		if _, found := findManagingLandlord(ctx, conn, key); found {
+			continue
+		}
+		landlordKey := ensureLandlord(ctx, conn, adminKey, key, consumerRoleKey)
+		fmt.Printf("==> backfilled owner: %s manages %s\n", landlordKey, key)
 	}
 }
 
