@@ -4,7 +4,9 @@
 // implementation of the op-catalog descriptor vocabulary — schema-to-field-
 // kind detection, template substitution, and authContext assembly — so a
 // staff app's server stops re-declaring op shapes the owning package already
-// declares.
+// declares. attachments.mjs (§22) is the same idea for the AttachObject/
+// DetachObject client ceremony, which stays hand-built by design (§2.3) but
+// need not be re-derived per app.
 package descriptorform
 
 import (
@@ -12,7 +14,7 @@ import (
 	"net/http"
 )
 
-//go:embed form.mjs
+//go:embed form.mjs attachments.mjs
 var formFS embed.FS
 
 // FS serves the module at its own root — form.mjs sits directly under this

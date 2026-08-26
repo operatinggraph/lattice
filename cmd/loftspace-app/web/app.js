@@ -684,38 +684,19 @@ async function linkNewCredential() {
 // the Gateway via submitOp(...), the same path SignLease already uses.
 // operator already holds AttachObject/DetachObject scope:any (objects-base
 // permissions.go) — no new grant needed.
+//
+// The actual ceremony (upload, derive the Contract #4 requestId, assemble the
+// AttachObject/DetachObject envelope) lives in the shared
+// internal/descriptorform/attachments.mjs module (staff-descriptor-rendering-
+// design.md §22) — extracted so café/clinic/wellness can mount the same,
+// reviewed implementation instead of re-deriving it. These two wrappers supply
+// this app's own upload transport + submit path and keep every existing call
+// site's signature unchanged.
 
-// NANOID_ALPHABET/NANOID_LENGTH mirror internal/substrate (Contract #1) exactly.
-// derived-key: a Contract #4 requestId (deriveNanoID below), never a declared
-// read — it is the dedup id the AttachObject envelope is SENT with, so no
-// package's derive_reads could supply it: it has to exist before the operation
-// the derivation would run inside.
-const NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789";
-const NANOID_LENGTH = 20;
-
-// deriveNanoID mirrors substrate.DeriveNanoID byte-for-byte (a SHA-256 expansion
-// across the canonical alphabet, re-hashing as the digest is exhausted), so an
-// AttachObject submitted here collapses on the Contract #4 tracker exactly like
-// a server-derived requestId would — load-bearing for object-store-manager's
-// never-attached reconcile grace window (internal/objectmanager), which assumes
-// a retried attach of the same bytes+slot reuses the same requestId.
-async function deriveNanoID(namespace, input) {
-  const enc = new TextEncoder();
-  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(namespace + input)));
-  let di = 0;
-  const out = [];
-  for (let i = 0; i < NANOID_LENGTH; i++) {
-    if (di >= digest.length) {
-      digest = new Uint8Array(await crypto.subtle.digest("SHA-256", digest));
-      di = 0;
-    }
-    // derived-key: the requestId expansion itself — see deriveNanoID's contract
-    // above. Not a declared read: no derive_reads could supply an id the
-    // envelope must already carry when it is submitted.
-    out.push(NANOID_ALPHABET[digest[di] % NANOID_ALPHABET.length]);
-    di++;
-  }
-  return out.join("");
+let attachmentsPromise = null;
+function loadAttachments() {
+  if (!attachmentsPromise) attachmentsPromise = import("/shared/attachments.mjs");
+  return attachmentsPromise;
 }
 
 // ATTACH_REQ_NAMESPACE mirrors loftspace-app's Go-side attachReqNamespace
@@ -723,72 +704,44 @@ async function deriveNanoID(namespace, input) {
 // which side submits the op.
 const ATTACH_REQ_NAMESPACE = "loftspace:object:attach:";
 
-// objectLinkKey mirrors objects.go's helper: lnk.object.<oid>.<linkName>.<type>.<id>.
-function objectLinkKey(oid, targetKey, linkName) {
-  const parts = targetKey.split(".");
-  if (parts.length !== 3 || parts[0] !== "vtx") {
-    throw new Error("targetKey must be vtx.<type>.<id>: " + targetKey);
-  }
-  return "lnk.object." + oid + "." + linkName + "." + parts[1] + "." + parts[2];
-}
-
-// attachObject uploads bytes to this app's byte-plane helper, then submits
-// AttachObject browser-direct through the Gateway. Throws on a rejected op (or
-// a transport error) so callers can count/report; the byte-plane response's oid
-// is returned so the caller doesn't need to recompute it.
-//
 // sensitiveOpts (object-store-crypto-shred-design.md §9 Fire 4 Increment 2):
 // pass { governingIdentity } to upload a crypto-shreddable PII document (e.g.
 // an ID scan / proof-of-income) — the server seals the bytes under a per-object
 // CEK and returns the encryption envelope alongside the usual byte-plane
-// metadata; this function folds it into the AttachObject payload unchanged
+// metadata; attachments.mjs folds it into the AttachObject payload unchanged
 // (the app itself never sees key material, only the already-wrapped
 // envelope). Omit for an ordinary (unencrypted) attach.
 async function attachObject(file, targetKey, linkName, sensitiveOpts) {
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("targetKey", targetKey);
-  fd.append("linkName", linkName);
-  if (sensitiveOpts && sensitiveOpts.governingIdentity) {
-    fd.append("sensitive", "true");
-    fd.append("governingIdentity", sensitiveOpts.governingIdentity);
-  }
-  const uploaded = await appPost("/api/objects", fd);
-  const { oid, digest, storeName, size, contentType, sensitive, governingIdentity, encryption } = uploaded;
-  const payload = { digest, size, contentType, storeName, targetKey, linkName };
-  if (file.name) payload.filename = file.name;
-  if (sensitive) {
-    payload.sensitive = true;
-    payload.governingIdentity = governingIdentity;
-    payload.encryption = encryption;
-  }
-  const requestId = await deriveNanoID(ATTACH_REQ_NAMESPACE, [digest, targetKey, linkName].join("\x00"));
-  const reply = await submitOp({
-    requestId,
-    operationType: "AttachObject",
-    class: "object",
-    reads: [targetKey],
-    payload,
-  });
-  if (reply && reply.status === "rejected") {
-    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
-    throw new Error(msg);
-  }
-  return { oid, linkName, targetKey, size, contentType };
+  const mod = await loadAttachments();
+  return mod.attachObject(
+    {
+      upload: async (f, opts) => {
+        const fd = new FormData();
+        fd.append("file", f);
+        fd.append("targetKey", targetKey);
+        fd.append("linkName", linkName);
+        if (opts && opts.governingIdentity) {
+          fd.append("sensitive", "true");
+          fd.append("governingIdentity", opts.governingIdentity);
+        }
+        return appPost("/api/objects", fd);
+      },
+      submit: submitOp,
+      namespace: ATTACH_REQ_NAMESPACE,
+    },
+    file,
+    targetKey,
+    linkName,
+    sensitiveOpts,
+  );
 }
 
 // detachObject submits DetachObject browser-direct, mirroring attachObject.
 // Does NOT throw on a rejected reply — callers branch on reply.status like the
 // old DELETE /api/objects response did.
 async function detachObject(oid, targetKey, linkName) {
-  const linkKey = objectLinkKey(oid, targetKey, linkName);
-  const objKey = "vtx.object." + oid;
-  return submitOp({
-    operationType: "DetachObject",
-    class: "object",
-    reads: [linkKey, objKey],
-    payload: { oid, targetKey, linkName },
-  });
+  const mod = await loadAttachments();
+  return mod.detachObject(submitOp, oid, targetKey, linkName);
 }
 
 // openDocument fetches a D1.5-protected object's bytes over the session cookie

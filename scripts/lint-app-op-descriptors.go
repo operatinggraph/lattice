@@ -150,19 +150,18 @@ func registeredOps() map[string]*opStatus {
 // appOpDebt is the shrink-only baseline: ops the vertical apps already wire
 // screens to that carry no descriptor and no exemption, enumerated at the
 // gate's birth (2026-08-20 audit). Each is real descriptor work in the OWNING
-// package — the descriptor sweep closes an entry by shipping the OpMetaSpec
-// (or a coded exemption where a mechanism is genuinely missing, e.g. the
-// object-attach pair's client-minted object id) and DELETING it here. Same
-// discipline as lint-package-standard's s1Debt: an entry that stops violating
-// fails the gate too, so the baseline cannot become an amnesty. S1's own
-// census could not see these — they are operator-granted, and S1 treats
-// `operator` as a trusted admin tool that hardcodes its own dispatch — but a
-// shipped staff FORM is proof a person triggers the op, and the staff-worlds
-// catalog (edgeCatalog's held-role walk) cannot render what nothing describes.
-var appOpDebt = map[string]string{
-	"AttachObject": "objects-base", // inputs are the byte-plane upload response (digest/size/contentType), producible by no template
-	"DetachObject": "objects-base", // oid names an entity no owner-anchored lens projects; the fix is a read surface, not a marker
-}
+// package — the descriptor sweep closes an entry by shipping the OpMetaSpec,
+// a coded exemption where a mechanism is genuinely missing, or (the
+// AttachObject/DetachObject pair, staff-descriptor-rendering-design.md §22)
+// moving the hand-built ceremony off the per-app literal this scan matches
+// and onto a shared, reviewed module — and DELETING it here. Same discipline
+// as lint-package-standard's s1Debt: an entry that stops violating fails the
+// gate too, so the baseline cannot become an amnesty. S1's own census could
+// not see these — they are operator-granted, and S1 treats `operator` as a
+// trusted admin tool that hardcodes its own dispatch — but a shipped staff
+// FORM is proof a person triggers the op, and the staff-worlds catalog
+// (edgeCatalog's held-role walk) cannot render what nothing describes.
+var appOpDebt = map[string]string{}
 
 // appOpCeilings is the number of DISTINCT hardcoded operationType literals each
 // vertical app is known to still reference — the ratchet on the
@@ -219,8 +218,13 @@ var appOpCeilings = map[string]int{
 	// without an end date can never be ended") — a new staff-hand-wired op,
 	// same shape as its 15 predecessors; no op-catalog rendering exists for
 	// this app yet.
-	"cmd/clinic-app":    16,
-	"cmd/loftspace-app": 20,
+	"cmd/clinic-app": 16,
+	// 18: AttachObject/DetachObject moved off this app's own hardcoded
+	// literals onto internal/descriptorform/attachments.mjs (design §22) —
+	// the shared ceremony module lives outside this gate's cmd/*-app scan
+	// scope, same as form.mjs. appOpDebt's two entries for them are deleted
+	// in the same diff.
+	"cmd/loftspace-app": 18,
 	"cmd/wellness-app":  12,
 }
 

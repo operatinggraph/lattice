@@ -39,6 +39,24 @@ func TestMountPattern(t *testing.T) {
 	}
 }
 
+// TestMountPattern_Attachments proves attachments.mjs (§22) serves through
+// the same mount as form.mjs — both share one embed.FS, so a regression that
+// dropped the second //go:embed pattern argument would 404 here while
+// TestMountPattern still passed.
+func TestMountPattern_Attachments(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/shared/", http.StripPrefix("/shared/", http.FileServer(FS())))
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/shared/attachments.mjs", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /shared/attachments.mjs = %d, want 200 (body: %q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "export async function attachObject") {
+		t.Fatalf("GET /shared/attachments.mjs did not serve the real module; body:\n%s", rec.Body.String())
+	}
+}
+
 // TestMountPattern_NoStripPrefixIs404 documents (and pins) the exact failure
 // this package's own FS() doc comment warns against — proof the bug is
 // real, not a hypothetical.

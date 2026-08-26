@@ -1262,3 +1262,75 @@ AI-authored package proposing a multi-DDL create is exactly the kind of judgment
 (sensitive-read-adjacent, needs a human to pick the DDL boundary) the existing narrower vocabulary
 routes to human authoring by omission — consistent with, not a regression from, the standing
 posture. No row filed.
+
+## 22. AttachObject/DetachObject residual — decomposition + Inc-A outcome (Vertical Steward)
+
+`verticals.md`'s own row for this residual quotes §7's original call almost verbatim: "the fix is
+an upload-ceremony affordance plus an owner-anchored attachments read surface, the `signInMethods`-
+pane precedent — not an exemption marker." Grounding before building found the row understated the
+gap's two halves as one unit; they decompose cleanly and carry different risk, so this residual
+builds as two increments, self-ratified per §0 (both are execution-level — mirroring an established
+pattern, not a new architectural fork):
+
+- **Inc-A (this fire) — extract the ceremony into a shared module.** `cmd/loftspace-app` already had
+  a full, working, well-documented AttachObject/DetachObject client implementation (Fire 2b, #75) —
+  crypto-derived Contract #4 requestId, envelope assembly, the browser-direct submit. `appOpDebt`'s
+  own comment (`ddls.go` OpMetas(), pre-fire) named the real gap correctly: not that this mechanism
+  is wrong, but that it existed exactly once, in one app, unavailable to café/clinic/wellness without
+  each re-deriving ~100 lines of crypto/dedup logic by hand. That is a mechanical extraction, not new
+  design — moving working, reviewed code into `internal/descriptorform/attachments.mjs` (mounted
+  at `/shared/attachments.mjs`, the same pattern `form.mjs` already established) and migrating
+  loftspace-app's two wrappers onto it, parameterizing only what genuinely differs per app (the
+  upload transport, the submit path, the dedup namespace).
+- **Inc-B (checkpoint, not started) — the owner-anchored lens.** `objectAttachments` (this package's
+  existing lens) is anchored on the OBJECT, the wrong direction for a generic op-catalog `Dispatch`
+  pointing DetachObject at "the attachments owned by X": every `AnchorType` in this codebase is a
+  single fixed vertex label (`internal/pkgmgr/anchorwalk.go`), and AttachObject's targets are
+  type-agnostic (D7) — identity, unit, and whatever else a future caller names. A single reversed-
+  direction lens can't express that without either enumerating one lens per concrete owner type
+  loftspace actually uses (small, mirrors `objectAttachments` almost exactly, just the anchor and
+  walk direction swapped) or a genuinely type-agnostic anchor (an engine capability with no
+  precedent — would need `lattice.md` filing under the no-paper-over rule, §2). Which shape to build
+  is a real but bounded decision, deferred rather than guessed at under this fire's scope. Until it
+  ships, DetachObject cannot carry a full `OpMetaSpec` `Dispatch` and stays a client-mechanism op —
+  which Inc-A already makes an honest, shared one instead of a bespoke, undocumented one.
+
+### Inc-A outcome — shipped (this commit)
+
+Built exactly as scoped: `internal/descriptorform/attachments.mjs` (deriveNanoID — cross-checked
+byte-for-byte against `internal/substrate`'s `TestDeriveNanoID_Golden` vectors, `EjraDYAJJPP3GXkv8ooM`
+and `5CYJnWeWpVNco5MnqAH6`, both reproduced exactly — objectLinkKey, attachObject, detachObject) +
+`attachments.test.mjs` (9 vectors: the golden cross-check, determinism/namespace isolation, envelope
+assembly incl. the sensitive-fields fold, requestId retry-stability, rejected-reply throw/no-throw
+per function). `embed.go` embeds both `.mjs` files under one `FS()`; `mount_test.go` gained a
+same-mount serving proof for `attachments.mjs` mirroring the existing `form.mjs` one.
+`cmd/loftspace-app/web/app.js`'s `attachObject`/`detachObject` become thin wrappers supplying this
+app's own upload transport (`appPost("/api/objects", …)`) and submit path (`submitOp`) — every
+existing call site (listing photos, the Documents tab, the PII upload ceremony) is unchanged, since
+both wrappers kept their exact prior signature. `deriveNanoID`/`NANOID_ALPHABET`/`NANOID_LENGTH`/
+`objectLinkKey` deleted from `app.js` (no longer duplicated).
+
+**Gate mechanics, verified rather than assumed:** `lint-app-op-descriptors`'s R1/R2 scan is scoped to
+`cmd/*-app` sources only (the same carve-out `form.mjs` already relies on) — moving the
+`operationType: "AttachObject"`/`"DetachObject"` literals into `internal/descriptorform` took them
+out of that scope, which STRICT-mode re-run confirmed mechanically: loftspace-app's measured distinct
+op-literal count dropped from 20 to 18, and `appOpDebt`'s two entries became dangling ("no app still
+violates — delete the entry"). Fixed in the same diff: `appOpCeilings["cmd/loftspace-app"]` lowered
+20→18 (comment explains why, mirroring the `EndVisitSeries` precedent already in the map), both
+`appOpDebt` entries deleted (map now empty), and `packages/objects-base/ddls.go`'s `OpMetas()`
+comment amended in place (the falsified-claim-gets-amended-where-it-stands rule) to record Inc-A
+shipped and point at Inc-B as the remaining gap — not a bare "fixed" claim with no citation.
+
+Green bar: `go build ./...`, `make vet`, `golangci-lint run ./...` (repo-wide), `STRICT=1 go run
+./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-package-standard.go`, `STRICT=1 go run
+./scripts/lint-app-op-descriptors.go` (0 issues, was 3 before the ceiling/debt fix), `go test
+./internal/descriptorform/... ./packages/objects-base/... ./cmd/loftspace-app/...`, and `make
+test-descriptorform` (46/46, node --test) all green. Review depth: lead review only (Steward's own
+sizing per §7 — a mechanical extraction of already-shipped, already-reviewed logic, no new grant, no
+new trust boundary; `operator`'s existing `AttachObject`/`DetachObject` scope:any is unchanged).
+
+**Checkpoint for the next fire (Inc-B):** no worktree held (this fire built in the main checkout per
+docs-and-small-package-edit convention — no code-in-worktree isolation was needed since no concurrent
+stream fire touched these files). Next step: decide the owner-anchored lens shape (per-owner-type vs.
+a filed engine primitive) grounded against loftspace's + wellness's actual current AttachObject
+callers, then ship it + DetachObject's full `Dispatch`. `verticals.md`'s row carries the pointer.

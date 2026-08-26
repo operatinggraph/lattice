@@ -72,7 +72,8 @@ func DDLs() []pkgmgr.DDLSpec {
 // AttachObject and DetachObject stay bare despite real staff forms
 // (cmd/loftspace-app, cmd/wellness-app browser-direct through the Gateway) —
 // the app-seam audit (docs/reviews/vertical-app-descriptor-audit-2026-08-20.md)
-// found no descriptor and no exemption for either, and neither closes cleanly:
+// found no descriptor and no exemption for either, and neither closes cleanly
+// onto a full OpMetaSpec:
 //   - AttachObject's digest/size/contentType/storeName carry no pre-existing
 //     entity for a lens to project at all — they are the RESPONSE of the
 //     app's own byte-plane upload endpoint (POST /api/objects, streaming to
@@ -84,14 +85,21 @@ func DDLs() []pkgmgr.DDLSpec {
 //   - DetachObject's oid identifies an existing object, but no lens
 //     enumerates "objects attached to owner X" (objectAttachments.go's
 //     objectAttachments lens is anchored on the OBJECT, the wrong direction
-//     for this); the vertical apps bridge the gap with their own bespoke
-//     backend filtering (loftspace-app's GET /api/objects?owner=), not a
-//     descriptor-driven mechanism. The closest platform precedent —
-//     identity-domain's UnlinkCredential, permissions.go, once in the same
-//     spot — was resolved by shipping a signInMethods PANE
-//     (edge-manifest/panes.go, PaneSpec's dispatch-target column), not an
-//     exemption code; the same fix here would need an owner-anchored
-//     attachments read surface objects-base does not have.
+//     for this) — a fully descriptor-driven Dispatch (the signInMethods PANE
+//     precedent, edge-manifest/panes.go's dispatch-target column) still
+//     needs that owner-anchored lens. Open follow-up, staff-descriptor-
+//     rendering-design.md §22 Inc-B.
+//
+// staff-descriptor-rendering-design.md §22 Inc-A (shipped) closed the other
+// half of the gap: the hand-built ceremony itself (upload → derive the
+// Contract #4 requestId → assemble the envelope) is no longer re-derived per
+// app — it lives once in internal/descriptorform/attachments.mjs, which
+// cmd/loftspace-app now mounts. That module's operationType literals sit
+// outside lint-app-op-descriptors' cmd/*-app scan scope (the same carve-out
+// form.mjs already has), so appOpDebt's two entries for these ops were
+// deleted rather than exempted — the fix `descriptorform` names is a shared,
+// reviewed implementation, not a marker asserting one app is a sanctioned
+// bespoke consumer.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "AttachObject"},
