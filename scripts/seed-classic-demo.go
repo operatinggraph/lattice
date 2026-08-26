@@ -280,6 +280,7 @@ func main() {
 		})
 	fmt.Printf("==> tab:             %s (open)\n", tabReply.PrimaryKey)
 	reapGhostLeases(ctx, conn, adminKey)
+	reapVerifyTenantLease(ctx, conn)
 
 	// Both items are served at the demo unit, which is where the resident
 	// lives — the residence chain a Facet browse walk descends binds the unit
@@ -978,8 +979,32 @@ func bookingSeatKeys(sessionKey string, n int) []string {
 // ID rather than two hardcoded lease keys, so any future admin-applicant
 // litter (this script or another verify tool) is caught the same way.
 func reapGhostLeases(ctx context.Context, conn *substrate.Conn, adminKey string) {
-	adminID := strings.TrimPrefix(adminKey, "vtx.identity.")
-	appForSuffix := ".applicationFor.identity." + adminID
+	reapLeasesByApplicant(ctx, conn, adminKey)
+}
+
+// reapVerifyTenantLease withdraws the one leaseapp a "LandlordKey"-scoped
+// verify fire left applied for by a fresh throwaway identity of its own
+// minting (never the admin — reapGhostLeases' pattern doesn't match this
+// one), which surfaced in the café front-desk resident roster
+// (verticals.md "A verify artifact holds a lease in the café front-desk
+// roster") the same way an admin-applicant ghost lease would. Named by the
+// one instance a live PO drive found rather than a name-pattern sweep: the
+// applicant identity's `.name` aspect is privacy-encrypted, so this script
+// (a bare Core KV scanner, no decrypt path) cannot resolve "starts with
+// Verify" itself the way reapNonCanonicalPatients/reapVerifyLitter compare
+// plaintext demographic/session names.
+func reapVerifyTenantLease(ctx context.Context, conn *substrate.Conn) {
+	reapLeasesByApplicant(ctx, conn, "vtx.identity.4zt8PDpgwUQYqUYPXZeb")
+}
+
+// reapLeasesByApplicant withdraws every live leaseapp whose applicant is
+// applicantKey, submitting WithdrawLeaseApplication as that same identity
+// (the consumer scope=self grant — the applicant withdrawing its own
+// application — never scope=any, since a verify-litter applicant holds no
+// operator role).
+func reapLeasesByApplicant(ctx context.Context, conn *substrate.Conn, applicantKey string) {
+	applicantID := strings.TrimPrefix(applicantKey, "vtx.identity.")
+	appForSuffix := ".applicationFor.identity." + applicantID
 	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
 	must(err, "list lnk.leaseapp. keys")
 	for _, link := range links {
@@ -998,22 +1023,17 @@ func reapGhostLeases(ctx context.Context, conn *substrate.Conn, adminKey string)
 		}
 		unitID := strings.TrimPrefix(unitLinks[0], unitPrefix)
 		unitKey := "vtx.unit." + unitID
-		// The admin identity holds no `operator` role link in this topology
-		// (it is used here purely as the applicant), so the scope=any grant
-		// doesn't apply — withdraw via the consumer scope=self grant instead,
-		// which is in fact the semantically correct path: the applicant is
-		// withdrawing its OWN application.
-		submitSelfOp(ctx, conn, adminKey, "WithdrawLeaseApplication", "leaseapp",
-			map[string]any{"leaseAppKey": leaseKey, "unit": unitKey, "applicant": adminKey},
+		submitSelfOp(ctx, conn, applicantKey, "WithdrawLeaseApplication", "leaseapp",
+			map[string]any{"leaseAppKey": leaseKey, "unit": unitKey, "applicant": applicantKey},
 			&processor.ContextHint{
 				Reads: []string{
 					leaseKey,
 					unitPrefix + unitID,
 					link,
 				},
-				OptionalReads: []string{"lnk.identity." + adminID + ".appliedToUnit.unit." + unitID},
+				OptionalReads: []string{"lnk.identity." + applicantID + ".appliedToUnit.unit." + unitID},
 			})
-		fmt.Printf("==> reaped ghost lease: %s (applicant=admin, verify-fire litter)\n", leaseKey)
+		fmt.Printf("==> reaped ghost lease: %s (applicant=%s, verify-fire litter)\n", leaseKey, applicantKey)
 	}
 }
 
