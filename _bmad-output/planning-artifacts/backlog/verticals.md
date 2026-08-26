@@ -33,6 +33,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **45 already-wrongly-charged auto-no-show fees ($1,125) need waiving on the live stack** | The sweep no longer bills going forward (Done log `5aa287b0`) — this row is only the historical cleanup, via the existing `ClinicCreditAccount{reason:"waiver"}` tool. | Clinic | platform (Andrew/interactive) | ★ | XS | 🚧 blocked-on: an interactive session — unattended financial-ledger writes are refused by design |
 | **A settled café tab can never post to the resident's house account** | Weaver's `cafeTabSettlement` `missing_account` gap dispatches `CreateAccount`; the Processor rejects it `AuthDenied: no matching platformPermission` — cafe-ledger's operator grants hang off a stranded prior-epoch `operator` role, the Weaver actor holds the current one. Verified live: an $8.00 tab settled, gap open, ledger empty. | Café | platform | ★★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Bootstrap] re-bootstrap strands operator grants` |
 | **A café front-desk staffer sees every resident as a raw NanoID** | The app grants the staff hat on `worksAt` alone ([readauth.go:137](../../../cmd/cafe-app/readauth.go:137)); `cap-read.staff`, which unlocks `cafeIdentitiesRead`'s workplace fan-out, needs `worksAt` AND `holdsRole frontOfHouse` ([lenses.go:199](../../../packages/service-location/lenses.go:199)). 3 of 10 live `worksAt` identities hold the POS/Front Desk surface with a roster of themselves alone. | Café | pkg | ★★ | S | 📐 needs designer pass · no-pattern: one definition of front-desk staff |
+| **A wellness class's resident price can be charged but never set or seen** | `CreateSession`/`ReassignSession` accept `residentPriceCents` and the settlement cypher charges it ([lenses.go:250](../../../packages/wellness-ledger/lenses.go:250)), but neither FE form sends it ([app.js:2416](../../../cmd/wellness-app/web/app.js:2416)) and no read lens projects it ([lenses.go:320](../../../packages/wellness-domain/lenses.go:320)) — live, 0 of 57 sessions carry one, so all 12 resident-rate bookings pay the standard price the card shows. | Wellness | pkg + FE | ★★ | S | 📋 ready |
+| **A member with no ledger account is never charged and the gap reports converged** | Both settlement cyphers make `accountKey <> null` a precondition of the charge instead of a `missing_account` gap ([lenses.go:196](../../../packages/wellness-ledger/lenses.go:196)), so only the FE's post-booking `WellnessCreateAccount` ever opens one. Live: 14 rows / $320.00 across 2 of 4 members, every one `violating:false`. `clinicNoShowSettlement` closed the identical shape. | Wellness | pkg | ★★ | S | 📋 ready |
+| **A charge for a called-off class loses the class it was for** | `wellnessLedgerHistory` resolves `className`/`classStartsAt` by walking `settles`→`forSession`→session ([lenses.go:340](../../../packages/wellness-ledger/lenses.go:340)), which stops matching once `TombstoneSession` kills it, and covers only `settles` — a class-price charge or refund credit carries no booking at all. Live: 2 of 11 posted transactions render as a bare amount. | Wellness | pkg | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -52,10 +55,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×24, Clinic ×23, Café ×14, Wellness ×10.
+- **Rotation to date:** LoftSpace ×24, Clinic ×23, Café ×14, Wellness ×11.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-06:** LoftSpace — drove applicant + landlord hats live; the applicant lens is paused dead, the health signal can't fire, renewals never opened; filed 4 + 2 platform.
 - **2026-08-06:** Clinic — drove patient, provider + front-desk hats live; no visit says which site, a $750 bill is 28 identical lines, no patient can pay; filed 4.
 - **2026-08-07:** Café — drove resident self-order→settle + front-desk hats live; no resident pays their own tab, no line names its orderer; filed 3 + 1 platform.
 - **2026-08-07:** Wellness — drove member + front-desk hats live through schedule/book/bill; a retired studio strands its classes, no member self-pays, no fee names its class; filed 4.
@@ -66,7 +68,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-23:** LoftSpace — drove applicant + landlord hats live through apply/profile/PII/sign/approve; 13 rivals still asked to sign a leased unit, the executed lease never attaches, the storefront is empty; filed 3 + 1 platform.
 - **2026-08-23:** Clinic — drove patient + operator hats live through book/site/series/ledger; 29 appointments have no site and none can converge, a series can never end, a sweep bills $1,125 unasked; filed 3.
 - **2026-08-25:** Café — drove resident open→self-order→settle live + the front-desk hat; the settled tab can never post, the front desk resolves no name, the class/visit badges are blank; filed 4.
-- **Next:** Wellness.
+- **2026-08-25:** Wellness — drove member/instructor/staff hats live through schedule/book/bill; the resident rate is unsettable and unseen, $320 of charges are silently forgone, a called-off class unnames its charge; filed 3.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
