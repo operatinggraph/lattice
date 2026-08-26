@@ -246,22 +246,34 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   `instanceId` ⇒ a genuinely new instance and a new vendor call — the "re-call a dead vendor / mint a
   fresh service instance" this same bullet already sanctions — gated on `inflight_<g>` reading false
   and hard-bounded by `maxretries_<g>`. **A gap that declares `inflight_<g>` MUST declare
-  `maxretries_<g>`:** the fresh-`claimId` path has no collapse to pace it, so the budget is its only
-  bound. Which class a `triggerLoom` falls in is read from the pattern's own step kinds, never from
-  the playbook action name.
+  `maxretries_<g>` when it is an External gap — `directOp`, or a `triggerLoom` whose pattern is
+  externalTask-only; the requirement never binds a userTask gap.** Only an External reclaim mints a
+  **fresh** `claimId` with nothing downstream to collapse a duplicate onto, so `maxretries_<g>` is the
+  reclaim's *only* bound: declaring `inflight_<g>` without it makes §10.8's `GapBudgetExhausted` — a
+  loud stop, never a silent park — unreachable, and the gap re-dispatches indefinitely (backoff-paced
+  but never bounded, never escalated). A **userTask** gap (`assignTask`; `triggerLoom` of a
+  userTask-containing pattern) preserves its `claimId` **verbatim** across every reclaim instead
+  (above), so the consumer is already the idempotency authority for it — `CreateTask`'s
+  read-before-create, `StartLoomPattern`'s instance `CreateOnly` — and may declare `inflight_<g>`
+  alone, for suppression only (§10.2), with no `maxretries_<g>` companion: the bound the MUST protects
+  is one the consumer already holds. Which class a `triggerLoom` falls in is read from the pattern's
+  own step kinds, never from the playbook action name.
 - `entityKey` carries the full `vtx.<type>.<id>` (doc-is-truth); the key holds only the ID.
 
 #### Reserved (non-mark) `weaver-state` key shapes
 
 The mark shape above shares the bucket with reserved engine keys. All are structurally disjoint from
 marks: `entityId`s are NanoIDs (`substrate.Alphabet` contains no underscore) and gap columns carry the
-`missing_` prefix, so a reserved `__`-token can never collide with a mark segment. The reconciler sweep
-skips all three (never enumerated as `CorruptMark`).
+`missing_` prefix, so a reserved `__`-token can never collide with a mark segment. **A reserved key is
+never parsed as a mark, and only `__control` is exempt from collection.** `__effect` and `__count` are
+level-reconciled and garbage-collected by the reconciler; an unreadable reserved key or body raises
+`CorruptMark` and may be deleted. Weaver-state is weaver-private, so garbage in any reserved shape must
+be collectable rather than immortal.
 
 | Key shape | Role |
 |---|---|
 | `<targetId>.__control` | Durable dispatch-disable marker; authority for the control plane's `disable`/`enable`/`revoke` remediation-skip (`docs/components/weaver.md`). |
-| `<targetId>.<entityId>.<gapColumn>.__count` | The retry-budget dispatch-count bounded by the lens's `maxretries_<g>` column; incremented on both dispatch legs, deleted on gap-close, long-TTL orphan backstop. |
+| `<targetId>.<entityId>.<gapColumn>.__count` | The retry-budget dispatch-count bounded by the lens's `maxretries_<g>` column; incremented on both dispatch legs, deleted on gap-close, long-TTL orphan backstop. It is also the durable anchor from which the reconciler re-derives an exhausted gap's standing `GapBudgetExhausted` issue, so §10.8's "a loud stop, never a silent park" survives a mark's expiry and a Weaver restart — the alert that explains a suppression must be re-derivable for as long as that suppression lasts. The reconciler also level-reconciles the budget: deleted promptly when the row is gone or the gap has closed, rather than waiting out the TTL backstop. |
 | `<targetId>.__effect.<gapColumn>.<actionRef>` | Per-(gap, action) effect bookkeeping (§10.8 planner extension): dispatch/close counters over a sliding window of the last K episodes (K = 20, compile-time; event-keyed ring, no clock sampling). Written on the two real dispatch legs and the level-reconciled gap-close path; GC'd by the sweep's orphan legs when the target/gap/action leaves the registry. |
 
 ### `weaver-claims` — retired

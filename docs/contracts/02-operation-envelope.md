@@ -1,6 +1,6 @@
 # Contract #2 — Operation Envelope
 
-The operation envelope is the message format a client publishes to `core-operations` JetStream. It is the only way to introduce state changes into Core KV (no exceptions — see architectural principle P2). This contract defines its shape, lane semantics, reply contract, and implementation requirements.
+The operation envelope is the message format a client publishes to `core-operations` JetStream. It is the only way to introduce state changes into Core KV (no exceptions — see architectural principle P2). This contract defines its shape, lane semantics, reply contract, and processing requirements.
 
 ### 2.1 Envelope Shape
 
@@ -34,19 +34,19 @@ The operation envelope is the message format a client publishes to `core-operati
 | `actor` | yes | string (full vertex key, e.g., `vtx.identity.<NanoID>`) | immutable | Identity vertex submitting the operation. Used for Capability KV auth lookup (commit step 3) and provenance fields on resulting documents. |
 | `submittedAt` | yes | string (ISO 8601) | immutable | Client-side submission timestamp. Useful for debugging and audit. **NOT** used by the Processor for ordering — JetStream sequence is authoritative. |
 | `payload` | yes | object | immutable | Operation-specific data. Shape varies by `operationType`. Schema validated by Starlark dispatch (not by envelope schema; envelope is type-agnostic). May be empty `{}` for parameterless operations. |
-| `contextHint` | optional | object with `reads: string[]`, optional `optionalReads: string[]`, optional `egressReads: string[]`, and optional `enumerations: {hub, relation, direction}[]` | immutable | JIT Hydration directive — declared read set. `reads` lists Core KV keys the script reads whose **absence is a correctness error** (a missing key faults `HydrationMiss`, fail-closed). `optionalReads` lists declared keys whose **absence is a legitimate branch** (read-before-create / dedup) — hydrated if present, recorded as the absent sentinel if missing (never `HydrationMiss`). `egressReads` lists keys read **for external egress** — hydrated fail-closed like `reads`, except a `sensitive: true` aspect (Contract #3 §3.10) hydrates as a **sensitive-ref** (its at-rest ciphertext + the aspect key, Processor-authenticated per the §3.10 ref-provenance rule — never the key envelope, per the §3.10 live-envelope rule), never decrypted plaintext; a non-sensitive key hydrates normally; a key in both `reads` and `egressReads` is an envelope validation error. `enumerations` declares `kv.Links` link-enumerations (§2.5.1) as **metadata** — bounded, paged, **not** hydrated — for the Edge mirror-coverage gate + static classification. Processor pre-fetches `reads`/`optionalReads`/`egressReads` at commit step 4, one Core KV GET per distinct key; their **summed** length MUST NOT exceed **1000** (§2.5 "Declared-read ceiling") or the envelope is rejected `EnvelopeMalformed`. If a read is absent from `contextHint`, the Processor falls back to lazy on-demand reads (latency penalty under load, and not Edge-predictable). See §2.5. |
+| `contextHint` | optional | object with `reads: string[]`, optional `optionalReads: string[]`, optional `egressReads: string[]`, and optional `enumerations: {hub, relation, direction}[]` | immutable | JIT Hydration directive — declared read set. `reads` lists Core KV keys the script reads whose **absence is a correctness error** (a missing key faults `HydrationMiss`, fail-closed). `optionalReads` lists declared keys whose **absence is a legitimate branch** (read-before-create / dedup) — hydrated if present, recorded as the absent sentinel if missing (never `HydrationMiss`). `egressReads` lists keys read **for external egress** — hydrated fail-closed like `reads`, except a `sensitive: true` aspect (Contract #3 §3.10) hydrates as a **sensitive-ref** (its at-rest ciphertext + the aspect key, Processor-authenticated per the §3.10 ref-provenance rule — never the key envelope, per the §3.10 live-envelope rule), never decrypted plaintext; a non-sensitive key hydrates normally; a key in both `reads` and `egressReads` is an envelope validation error. `enumerations` declares `kv.Links` link-enumerations (§2.5.1) as **metadata** — bounded, paged, **not** hydrated — for the Edge mirror-coverage gate + static classification. The `reads`/`optionalReads`/`egressReads` **summed** length MUST NOT exceed **1000** (§2.5 "Declared-read ceiling") or the envelope is rejected `EnvelopeMalformed`. If a read is absent from `contextHint`, the Processor falls back to lazy on-demand reads (not Edge-predictable). See §2.5. |
 
 **`actor` form:** Full vertex key including the `vtx.` prefix. Short forms (`identity.<id>`) are reserved for HTTP headers in Phase 2 (Gateway translates to full key before envelope submission).
 
 **Optional field — `class` (optional, `omitempty`):**
 
-When an envelope omits `class`, the Hydrator resolves the operation's DDL from `operationType` via the DDL cache's operationType→class reverse index (`byCommand`) — the single **vertexType** DDL whose `permittedCommands` admit it. The index is integrity-safe by two disciplines: it is built from **vertexType (script-bearing) DDLs only** (an aspectType DDL lists an op in `permittedCommands` purely as a step-6 write gate, never as the executing script, so it is never a class-inference target), and a **global ambiguity guard** drops any op admitted by more than one vertexType DDL (such an op still requires an explicit `class` — the inference never guesses). Resolution is **auth-neutral**: authorization (step 3) precedes class resolution and keys on `operationType` + actor + authContext, never on `class`. `class` is therefore **engine-optional**; an explicit `class` (or `payload.class`) takes precedence when supplied.
+When an envelope omits `class`, the Processor resolves the operation's DDL from `operationType`: the single **vertexType** (script-bearing) DDL whose `permittedCommands` admit it. The inference never guesses — an op admitted by more than one vertexType DDL, or by none, still requires an explicit `class`; and an aspectType DDL listing an op in `permittedCommands` is a write gate, never the executing script, so it is never an inference target. Resolution is **auth-neutral**: authorization (step 3) precedes class resolution and keys on `operationType` + actor + authContext, never on `class`. `class` is therefore **engine-optional**; an explicit `class` (or `payload.class`) takes precedence when supplied.
 
 **Discriminator class vs. script-authority DDL (the `instanceOf` type model).** The envelope `class` selects the operation's **script DDL** (which Starlark runs) — resolved here from `operationType`. The **resulting vertex's** stored `class` is its **type/subtype discriminator** (P7), which may be a fine-grained dotted string (`service.backgroundCheck.instance`) that is *not* itself a registered DDL. These are legitimately distinct: an op may write a vertex whose class differs from the op's resolved script-DDL canonical name. The **write-gate** (`permittedCommands`, commit step 6) resolves *that vertex's* governing DDL by its own class — by exact lookup, falling back to its `instanceOf` type authority per Contract #1 §1.5 step 5. Authorization (step 3) keys on `operationType` + actor + `authContext` and is unaffected by either class, so the discriminator never enters the auth path.
 
 | Field | Required | Type | Mutability | Purpose |
 |-------|----------|------|------------|---------|
-| `class` | optional | string (DDL canonical name, e.g., `"identity"`) | immutable | Tells the Hydrator/Validator which DDL meta-vertex applies to this operation. Precedence: top-level `class` → `payload.class` → derived from `operationType` via the DDL cache's operationType→class reverse index (the single vertexType DDL that admits it; ambiguous/unindexed ops still require an explicit `class`). The field is `omitempty` in the wire format. |
+| `class` | optional | string (DDL canonical name, e.g., `"identity"`) | immutable | Names which DDL applies to this operation. Precedence: top-level `class` → `payload.class` → derived from `operationType` (the single vertexType DDL that admits it; ambiguous or unresolvable ops still require an explicit `class`). The field is `omitempty` in the wire format. |
 
 ### 2.3 Lanes and JetStream Subject Mapping
 
@@ -108,7 +108,7 @@ For dedup-detected resubmits:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `requestId` | yes | Echo of submitted requestId |
-| `opTrackerKey` | yes for `accepted`/`duplicate`; null for `rejected` | Vertex key of the idempotency tracker. Client polls this for Read-Your-Own-Writes convergence (per architecture's MVP RYOW mitigation). |
+| `opTrackerKey` | yes for `accepted`/`duplicate`; null for `rejected` | Vertex key of the idempotency tracker. Client polls this for Read-Your-Own-Writes convergence. |
 | `status` | yes | `accepted` (committed), `duplicate` (already committed via prior submission), `rejected` (validation/auth failure — no commit) |
 | `committedAt` | for `accepted` | Timestamp of step 8 commit |
 | `originalCommittedAt` | for `duplicate` | Timestamp of original commit |
@@ -132,13 +132,13 @@ Write-path Starlark execution is, **to the extent its reads are declared, a pure
 | Class | Description | Disposition |
 |---|---|---|
 | **(a) declared exact-key** | the key is known at submit time and declared in `reads`/`optionalReads`; `kv.Read` serves it from the step-4 hydrated cache | **the norm** — replay-stable, OCC-snapshotted, Edge-predictable |
-| **(b) declarable-but-undeclared** | a lazy on-demand `kv.Read` of a knowable key for no reason | **deprecated debt** — should move to (a); subject to a `lint-conventions` flag |
+| **(b) declarable-but-undeclared** | a lazy on-demand `kv.Read` of a knowable key for no reason | **deprecated debt** — should move to (a) |
 | **(c) deliberately unsnapshotted** | a knowable key read live **on purpose** to keep it *out* of the OCC condition set (e.g. config the op must not falsely conflict on) | **sanctioned, but must be an explicit author choice** (annotated), not a slip |
 | **(d) read-before-create / dedup** | a knowable key whose absence is a legitimate branch | declare in **`optionalReads`** (folds into (a) — declared, snapshotted, Edge-predictable) |
 | **(e) enumeration + follow-up** | `kv.Links` (§2.5.1) and the data-dependent per-element `kv.Read`s keyed off its results — the key set is data-derived and **unbounded**, so never hydrated | **bounded paged live read, declared as *metadata*** (`contextHint.enumerations`) — the declaration gives the Edge a mirror-coverage gate + the lint a classification; it is **not** a hydration directive. Enumerate-then-write concurrency is best-effort (a companion serialization epoch, class-a); the invariant-enforcer is Weaver detect+recover. |
 | **(f) egress read** | a key read **for external egress** (an externalTask param template, §10.5) — declared in **`egressReads`** | hydrated fail-closed like (a), **except** a `sensitive: true` aspect (Contract #3 §3.10) hydrates as a **sensitive-ref** (at-rest ciphertext, Processor-authenticated — MAC'd per the §3.10 ref-provenance rule — never decrypted plaintext; the script cannot leak what it never saw); a non-sensitive key hydrates normally (ref-if-sensitive, so declarers need no sensitivity knowledge). A key in both `reads` and `egressReads` is an envelope validation error. Strictly *less* information than (a) — a self-restriction, not a privilege. |
 
-| **(g) script-derived exact-key** | a key that is a deterministic function of the op payload under *package* semantics (a normalized-contact index hash, a credential index), so the **submitter cannot express it** — declaring it would require the package's derivation and normalization in every client language | **declared by the owning DDL's `derive_reads(op)`**, resolved Processor-side at the head of step 4 before hydration. **Folds into (a)/(d)** — declared, snapshotted, Edge-predictable — and counts toward the declared-read ceiling. |
+| **(g) script-derived exact-key** | a key that is a deterministic function of the op payload under *package* semantics (a normalized-contact index hash, a credential index), so the **submitter cannot express it** — declaring it would require the package's derivation and normalization in every client language | **declared by the owning DDL's `derive_reads(op)`**, resolved by the Processor before hydration. **Folds into (a)/(d)** — declared, snapshotted, Edge-predictable — and counts toward the declared-read ceiling. |
 
 A script reading only class-(a)/(d)/(g) keys is **replay-stable**. A script performing any (b)/(c)/(e) read is **not** replay-stable — it reads live state and may branch differently on replay; for those, the Processor (deterministic id + OCC + the `CreateOnly` backstop), not replay determinism, is the idempotency authority. The posture does not eliminate non-stable reads; it keeps them **few, named, and statically visible**.
 
@@ -146,69 +146,37 @@ A script reading only class-(a)/(d)/(g) keys is **replay-stable**. A script perf
 
 The `contextHint.reads` array declares Core KV keys the Starlark script will read. At commit step 4 (Hydrate), the Processor pre-fetches these into the working set cache.
 
-**When provided:** the Processor fetches every declared key into the working set — one Core KV GET per
-key, issued sequentially (the declared set's size is the step-4 round-trip count; see the ceiling
-below) — before Starlark execution begins; script reads hit the cache. A key NOT declared still reads
-(lazy on-demand fallthrough) but pays a live round trip during execution.
-
 **`optionalReads` (absence-tolerant declared reads — class (d)).** A key in `optionalReads` is hydrated exactly like a `reads` key, **except** a not-found is **not** a `HydrationMiss`: the key is recorded as *known-absent*, so `kv.Read(key)` returns `None` from the cache (no live GET). This lets the read-before-create / dedup pattern — "does this entity already exist? if not, create it" — be a **declared** read (replay-stable, OCC-snapshotted, Edge-predictable) rather than a lazy live one. The absent key resolves at the step-4 snapshot and is conditioned create-able; a concurrent create that wins between step 4 and step 8 is caught by the `CreateOnly` backstop (RevisionConflict → re-hydrate → now present → no-op).
 
 **Authoring rule (fail-closed discipline).** A key whose **absence is a correctness error** MUST go in `reads` (fail-closed `HydrationMiss`). `optionalReads` is **only** for a read whose absence is a *legitimate branch*. `optionalReads` must never be used to soften a read the operation's correctness depends on being present.
 
-**When the fail-closed fault is raised (first use, not step 4).** A declared `reads` / `egressReads` key that is absent at the step-4 snapshot is **recorded**, not faulted; the `HydrationMiss` is raised at the first point the operation **depends** on that key — a `kv.Read`, any `state` access that NAMES it (subscript, `in`, `.get()`), or a mutation naming it — with the same error code and `details.missingKey`. An operation that never touches the key is unaffected by its absence. **Enumerating `state` is deliberately not a dependence** (`for k in state`, `keys()`, `items()`, `values()`): it names no key; a scan that comes up short gets the truthful answer and handling it is the script's own job. (The step-4-fault existence-oracle exposure this rule closes is recorded in `docs/components/processor.md`, declared-read posture.) This refines *when* the fault fires; it does **not** relax the authoring rule above.
+**When the fail-closed fault is raised (first use, not step 4).** A declared `reads` / `egressReads` key that is absent at the step-4 snapshot is **recorded**, not faulted; the `HydrationMiss` is raised at the first point the operation **depends** on that key — a `kv.Read`, any `state` access that NAMES it (subscript, `in`, `.get()`), or a mutation naming it — with the same error code and `details.missingKey`. An operation that never touches the key is unaffected by its absence. **Enumerating `state` is deliberately not a dependence** (`for k in state`, `keys()`, `items()`, `values()`): it names no key; a scan that comes up short gets the truthful answer and handling it is the script's own job. This refines *when* the fault fires; it does **not** relax the authoring rule above.
 
 **The descriptor's disposition is a floor the envelope cannot raise (weakest wins, applied to `Dispatch`).** Where an operation's descriptor declares a key under `optionalReads`, a submitter-supplied `contextHint` naming that same key under `reads` MUST NOT harden it: the merged disposition is the **weaker** of the two, exactly as it already is for a derived key against the envelope (see *Weakest wins* below). Without this the disposition is purely a client choice, and on an anti-enumeration path that is the whole exposure: an operation whose script is written to adjudicate an absent target generically — rendering one indistinguishable rejection for "no such entity" and "wrong secret" — is re-opened as an existence oracle by any caller who declares that key `reads` and reads `HydrationMiss`'s `details.missingKey`. The authoring rule above binds the *package author*; this binds the *submitter*, and only the second is a security boundary. A descriptor that declares a key under `reads` is unaffected — hardening is already its default, and softening by the envelope remains forbidden.
 
 **`derive_reads` (script-derived declared reads — class (g)).** A DDL script MAY define a top-level
 `derive_reads(op)` taking `{operationType, actor, payload}` and returning `{"reads": [...], "optionalReads":
-[...]}` (both optional). The Processor runs it at the **head of step 4**, after step-3 authorization and
-before the first Core KV GET, and merges the returned keys into the declared set. It exists for the one
-class of declarable key a submitter cannot express: a key derived from the payload by the *package's* own
-semantics. Its contract:
+[...]}` (both optional). The Processor runs it after authorization and before hydration, and merges the
+returned keys into the declared set. It exists for the one class of declarable key a submitter cannot
+express: a key derived from the payload by the *package's* own semantics. The derivation MUST be **pure** —
+it reads no state, emits no mutations, and mints no ids (an attempt fails the operation closed); its return
+value is its entire output, so it recomputes an identical set on every retry. Every returned entry MUST
+match the Contract #1 key grammar or the operation fails closed. A derived entry that collides with a key
+the envelope already declared keeps the **envelope's** disposition (weakest wins — a derived `reads` entry
+never hardens a declared `optionalReads` key); a derived key MUST NOT collide with an `egressReads` key; and
+derived keys count toward the declared-read ceiling below — a merged set over the ceiling is a runtime
+fault, not `EnvelopeMalformed`, since the keys are not envelope-supplied. An operation whose owning DDL
+defines no `derive_reads` is unaffected.
 
-- **Deterministic.** It runs in the step-5 sandbox with the impure modules bound as **fail-closed stubs**
-  that error when called — `kv` (a derivation that reads state is a read, and must be declared as one) and
-  `nanoid` (whose PCG is requestId-seeded, so a call here would collide with the main pass's first id).
-  Stubs, not unbound names: the sandbox resolves globals at **compile** time, and the pre-pass compiles the
-  same module the main pass does. No mutations are emitted; the return value is the entire output. Step 4
-  sits inside the OCC retry loop, so a pure derivation recomputes an identical set on every attempt.
-- **Validated.** Every returned entry MUST match the Contract #1 key grammar (3-segment vertex, 4-segment
-  aspect, 6-segment link); anything else fails the operation closed, naming the derivation.
-- **Weakest wins.** A derived entry that collides with a key the envelope already declared keeps the
-  **envelope's** disposition — a derived `reads` entry never hardens a declared `optionalReads` key into a
-  fail-closed one (that would fault `HydrationMiss` on exactly the dedup branch class (d) exists for).
-- **`egressReads` exclusion is re-checked over the merged set.** The parse-time mutual exclusion runs before
-  derivation, so the Processor MUST re-check at step 4 and fault closed naming the derivation — otherwise a
-  derived key collides with an `egressReads` key, hydrates plaintext, and silently demotes its egress
-  disposition.
-- **Counted, then faulted at runtime.** Derived keys count toward the declared-read ceiling below; a merged
-  set over the ceiling is a **step-4 runtime fault**, not `EnvelopeMalformed` — the keys are not
-  envelope-supplied, the same reasoning the live-read budget follows.
+**Declared-read ceiling (envelope validation).** `reads` + `optionalReads` + `egressReads`, **summed across the three classes**, MUST NOT exceed **1000** keys; an envelope over the ceiling is rejected at parse with `EnvelopeMalformed` (terminal — a redelivery reproduces it).
 
-An operation whose owning DDL defines no `derive_reads` is unaffected — no invocation, no cost.
+**What the ceiling does not cover.** It caps the hydration one envelope can demand. It is **not** a general per-operation read budget: a script's class-(e) `kv.Links` enumerations and the `kv.Read`s that follow them are live reads issued during execution, outside envelope validation. `enumerations` is likewise outside the sum, since a declared enumeration is metadata and hydrates nothing.
 
-**Declared-read ceiling (envelope validation).** `reads` + `optionalReads` + `egressReads`, **summed across the three classes**, MUST NOT exceed **1000** keys (`opwire.MaxDeclaredReads`); an envelope over the ceiling is rejected at parse with `EnvelopeMalformed` (terminal — a redelivery reproduces it). The bound is on the sum because the cost is the sum: step 4 pays one sequential Core KV GET per declared key whether it resolves or is recorded absent, so the declared set alone decides how many round trips an envelope buys before a script runs. `contextHint` is client-supplied and step 3 authorizes on `operationType + actor + authContext` without inspecting it, which leaves that count unpriced for any actor holding any operation grant; a per-class limit would be cleared by spreading the keys across classes.
+**Live-read budget (execution-time, not envelope validation).** A script execution's live Core KV reads are bounded by a per-execution budget, checked at each read and never reset mid-execution: a breach aborts the script rather than issuing the read. Unlike the declared-read ceiling this is a runtime fault, not an envelope-validation rejection, since the cost is only known as the script enumerates. The budget charges each `kv.Links` page slot (at the requested `limit`) and each lazy `kv.Read` — including any class-resolution reads that lazy read forces (a key resolving through the Contract #1 §1.5 `instanceOf` walk charges each hop). The units count **reads examined**: they bound work, not elapsed time — the NFR-P4 script wall remains the only bound on elapsed time, and neither substitutes for the other.
 
-A key repeated in a list resolves once, so the ceiling bounds round trips and not merely mentions. The value clears the largest read set the platform produces with roughly a factor of two to spare; an operation genuinely needing more declared reads should be decomposed, exactly as §3.9.1 already requires of an over-large cascade.
+**Convention:** SDK tools and AI agent integrations SHOULD populate `contextHint` whenever the read set is determinable at submission time, declaring class-(d) reads in `optionalReads`. Per the read posture above, declaring every *declarable* read (classes a/d) is the norm; an undeclared knowable read (class b) is deprecated debt, and a deliberately-unsnapshotted read (class c) must be an explicit author choice. Undeclared reads still execute (lazy on-demand), so presence is not hard-enforced at the envelope layer — but it is the expected posture.
 
-**What the ceiling does not cover.** It caps the hydration one envelope can demand — enough to keep a hostile envelope's step 4 inside the consumer's `AckWait` rather than timing out and re-paying the same hydration on every redelivery. It is **not** a general per-operation read budget: a script's class-(e) `kv.Links` enumerations and the `kv.Read`s that follow them are live reads issued during execution, invisible to envelope validation and unbounded by it. `enumerations` is likewise outside the sum, since a declared enumeration is metadata and hydrates nothing.
-
-**Live-read budget (execution-time, not envelope validation).** A script execution's live Core KV reads are bounded by a shared per-execution counter, checked at each read and never reset mid-execution: a breach aborts the script rather than issuing the read. Unlike the declared-read ceiling this is a runtime fault, not an envelope-validation rejection, since the cost is only known as the script enumerates. The default budget (`DefaultLiveReadBudget`, `internal/processor/live_read_budget.go`) is sized with headroom above the platform's own worst-case enumeration fan-out; the two ceilings police different costs (envelope-supplied keys vs execution-time fan-out) and are not meant to match.
-
-What the counter charges, per read:
-
-- **`kv.Links`** — its list call plus one unit per page slot (§2.5.1), charged at the clamped `limit` rather than the returned link count, so a page racing a concurrent hard-delete cannot under-charge its real cost. The page's link envelopes are read in **one batched multi-subject call**, not one call per key, so the charged units bound the links *examined*, not the round trips issued.
-- **`kv.Read`'s lazy fallthrough** — one read for the key itself, **plus the governing-DDL resolution that read may require**. A key whose class is not a registered DDL resolves through the Contract #1 §1.5 `instanceOf` walk (bounded at four hops), and each hop is a further live read of the vertex's `instanceOf` edges. A lazy read is therefore **not** a single round trip in the general case; it is one plus the walk its class forces, and every part of it is charged.
-
-*Transitional: the batched multi-subject page read above ships with the
-script-live-read-round-trip-collapse design's Fire 1 — until it lands, a page's envelopes are read one
-call per key (the charged units are identical either way). This note dies with that fire.*
-
-**Denomination.** These units count **reads examined**, which bounds work but is not proportional to wall time — a batched call reads many keys in one round trip. A budget denominated in units is therefore not a latency bound, and the NFR-P4 script wall (`PROCESSOR_SCRIPT_WALL_MS`, 250ms in production) remains the only bound on elapsed time. The two police different quantities and neither substitutes for the other.
-
-**Convention:** SDK tools and AI agent integrations SHOULD populate `contextHint` whenever the read set is determinable at submission time, declaring class-(d) reads in `optionalReads`. Per the read posture above, declaring every *declarable* read (classes a/d) is the norm; an undeclared knowable read (class b) is deprecated debt, and a deliberately-unsnapshotted read (class c) must be an explicit author choice. Undeclared reads still execute (lazy on-demand), so presence is not hard-enforced at the envelope layer — but it is the expected posture and is `lint-conventions`-checkable.
-
-**`enumerations` (declared link-enumeration — class (e); metadata, not hydration).** An op that calls `kv.Links` (§2.5.1) declares each enumeration as `{ hub, relation, direction }` in `contextHint.enumerations`. This is **metadata, not a hydration directive** — a high-degree hub's link-set is *never* materialised (that would be unbounded); the enumeration still executes paged and live in the sandbox. The declaration buys (1) the **Edge mirror-coverage gate** — an op is Edge-predictable iff the declared relation is fully in the local mirror, else it degrades to pending — and (2) **static classification** for the read-posture lint. An enumerate-**then-write** should additionally declare a **companion serialization epoch** (a class-(a) scalar every mutator of the relation bumps) in `reads`: this is **best-effort contention reduction**, not a guarantee — the actual double-write invariant-enforcer is **Weaver detect + recover**, not a write-time lock.
+**`enumerations` (declared link-enumeration — class (e); metadata, not hydration).** An op that calls `kv.Links` (§2.5.1) declares each enumeration as `{ hub, relation, direction }` in `contextHint.enumerations`. This is **metadata, not a hydration directive** — a high-degree hub's link-set is *never* materialised (that would be unbounded); the enumeration still executes paged and live in the sandbox. The declaration buys (1) the **Edge mirror-coverage gate** — an op is Edge-predictable iff the declared relation is fully in the local mirror, else it degrades to pending — and (2) **static classification** of the op's read posture. An enumerate-**then-write** should additionally declare a **companion serialization epoch** (a class-(a) scalar every mutator of the relation bumps) in `reads`: this is **best-effort contention reduction**, not a guarantee — the actual double-write invariant-enforcer is **Weaver detect + recover**, not a write-time lock.
 
 ### 2.5.1 Bounded Link Enumeration (`kv.Links`)
 
@@ -227,10 +195,10 @@ This is the **one sanctioned relaxation** of the otherwise known-key-reads-only 
 - **Bound to the hub's vertex id in BOTH directions — a server-side subject-filtered list.** The canonical link key is `lnk.<sourceType>.<sourceId>.<relation>.<targetType>.<targetId>` (Contract #1 §1.1; source first). The hub's vertex id is a **fixed token** in either direction, so the read is bounded by the hub's degree *in that direction*, never the link space:
   - `direction:"out"` (hub is the source) → key filter `lnk.<hubType>.<hubId>.<relation>.>` (hub id in the prefix; `>` matches `<targetType>.<targetId>`).
   - `direction:"in"` (hub is the target) → key filter `lnk.*.*.<relation>.<hubType>.<hubId>` (hub id in the suffix; the two `*` wildcard `<sourceType>.<sourceId>`, one token each; `<relation>` fixed).
-  Both are evaluated by NATS as a server-side subject filter (`$KV.<core-kv>.<keyFilter>`) — the server returns only matching keys, so **neither direction scans the keyspace**. The link keeps its natural §1.1 direction; the guard chooses the `direction` matching where the hub sits in that link (the inbound filter relies on NATS subject `*` wildcards being valid at any token position).
+  Both filters are evaluated server-side — only matching keys are returned, so **neither direction scans the keyspace**. The link keeps its natural §1.1 direction; the guard chooses the `direction` matching where the hub sits in that link.
 - **Paged, not fail-closed-capped.** A high-degree hub (e.g. a service template with many `instanceOf` instances pointing back) is enumerated **page by page** via the opaque `cursor`/`nextCursor` — the call **never silently truncates** and **never fail-closes a legitimately high-degree hub**. `limit` bounds each page; the guard pages until `nextCursor` is `None`. (A guard that must page a very-high-degree hub bears that cost explicitly — a visible authoring choice, not a hidden cap.)
 - **Lazy.** The enumeration + per-key reads happen **only when the script calls `kv.Links`**, and only for the pages it pulls — never eagerly pre-hydrated (a wildcard/prefix filter has no exact-key form to pre-declare in `contextHint.reads`). Reads run under the per-invocation wall-budget context and count against the script timeout (NFR-P4).
-- **Core KV links only.** `kv.Links` reads **only** the Core KV canonical link keyspace. It never reads the Refractor Adjacency KV (which remains Refractor-private — `lattice-architecture.md`) and never a lens/read-model (P5: applications read lenses; the write path reads its own Core KV). `hubKey` must be a 3-segment vertex key; the constructed filter is always under `lnk.` — no `vtx.`/aspect prefixes, no other bucket.
+- **Core KV links only.** `kv.Links` reads **only** the Core KV canonical link keyspace. It never reads the Refractor Adjacency KV (Refractor-private) and never a lens/read-model (P5: applications read lenses; the write path reads its own Core KV). `hubKey` must be a 3-segment vertex key; the constructed filter is always under `lnk.` — no `vtx.`/aspect prefixes, no other bucket.
 - **Not a serialization point.** `kv.Links` returns the **currently-committed** matching links; it is **not** snapshot-isolated and does **not** itself serialize concurrent writers, and a paged enumeration may observe an add/remove between pages. A guard enforcing a constraint over the returned set **MUST** additionally contend a shared OCC-guarded key (a per-hub scalar epoch both concurrent writers bump) for correctness: a concurrent mutation bumps the epoch, the step-8 OCC CAS fails, and the op re-hydrates and re-enumerates. The enumeration recovers the *set*; the OCC-guarded scalar recovers the *lock*.
 - **Live read, not replay-stable.** Like `kv.Read`, `kv.Links` reads live Core KV — two runs of the same `requestId` may observe different sets. The deterministic id + the step-8 OCC commit are the idempotency authority, not replay determinism.
 
@@ -238,7 +206,7 @@ This is the **one sanctioned relaxation** of the otherwise known-key-reads-only 
 
 ### 2.6 Error Code Enumeration (Initial Set)
 
-The reply envelope's `error.code` is one of a closed enumeration (the `ErrorCode` type in `package envelope`). The shipped set, by commit step:
+The reply envelope's `error.code` is one of a closed enumeration. The shipped set, by commit step:
 
 | Code | Meaning | Commit Step |
 |------|---------|-------------|
@@ -257,9 +225,7 @@ The reply envelope's `error.code` is one of a closed enumeration (the `ErrorCode
 | `InternalError` | Unrecoverable Processor failure not covered by above codes | Any step |
 | `CellMoved` | **Reserved (Multi-cell, Phase 3 — not yet emitted):** the target vertex has migrated to another cell and this cell has drained it; the write was not applied. `details.newCell` carries the cell the caller must re-route through — a `410 Gone`-equivalent stray-write rejection (no data lost; the caller re-submits to the correct cell). | Pre-step-1 (cell-router check) |
 
-> The closed set is enforced by a conformance test (`internal/processor`
-> `TestConformance_ErrorCodeTable_MatchesWire`), which parses this table and fails if it drifts from
-> the emitted `ErrorCode` set. `CellMoved` is documented but reserved (not yet emitted).
+`CellMoved` is documented but reserved (not yet emitted).
 
 Each code is paired with a human-readable `message` and structured `details` appropriate to the failure mode. The enumeration is extensible — Phase 2+ may add codes; a shipped (wire-emitted) code is immutable contract.
 
@@ -279,7 +245,7 @@ key is `primaryKey` (a string).
   `primaryKey`).
 
 This makes the synchronous reply incapable of carrying arbitrary or sensitive
-data. Claim secrets follow Option C: the **client** mints the secret, submits
+data. Claim secrets are client-minted: the **client** mints the secret, submits
 only its `sha256` hash (`claimKeyHash`) in the op payload, and Lattice stores the
 hash verbatim — the plaintext never enters Lattice and is never returned.
 
@@ -326,7 +292,7 @@ Service-scoped operations and task-derived operations require auth information b
 
 All three fields are optional. `null`, omitted, or the entire `authContext` block absent all mean "not applicable for that path."
 
-`authContext.target` is a **client-supplied** field the Processor forwards unexamined on the paths that do not check it (`scope: "any"` and the service path), so an op script must never treat its mere presence as proof of anything. The Processor therefore derives a read-only boolean the script sees as **`op.authTargetValidated`**: true exactly when the auth path that matched *validated* the target — `scope: "self"` (target proven `== actor`) or the task path (target proven `==` the matched `ephemeralGrant.target`) — and false everywhere else, including the service path and the stub authorizer. It is not an envelope input: a client-supplied value is dropped, and the Processor sets it after step 3. A guard that exempts a caller from a confinement rule keys on `op.authTargetValidated`; a guard that merely needs to know which entity the caller named may still read `op.authContextTarget`.
+`authContext.target` is a **client-supplied** field the Processor forwards unexamined on the paths that do not check it (`scope: "any"` and the service path), so an op script must never treat its mere presence as proof of anything. The Processor therefore derives a read-only boolean the script sees as **`op.authTargetValidated`**: true exactly when the auth path that matched *validated* the target — `scope: "self"` (target proven `== actor`) or the task path (target proven `==` the matched `ephemeralGrant.target`) — and false everywhere else, including the service path. It is not an envelope input: a client-supplied value is dropped, and the Processor sets it after step 3. A guard that exempts a caller from a confinement rule keys on `op.authTargetValidated`; a guard that merely needs to know which entity the caller named may still read `op.authContextTarget`.
 
 **Processor dispatch at step 3:**
 
@@ -362,10 +328,9 @@ Task auth takes precedence over service auth, which takes precedence over platfo
 - **A package declares, as install-time data**, which matcher kind authorizes its grant type and which
   **disjoint Capability-KV key** that path reads (+ the field mapping). The dispatch table is data,
   not a `switch` naming grant types.
-- **One-key-per-path invariant (preserves the single-GET hot path):** path selection happens
-  **before** the read, and each path maps to **exactly one** disjoint key — exactly one GET per
-  `Authorize` call. **Two packages contributing the same path is a config error**; the dispatcher
-  never fans a single path into N reads. The one bounded exception is the **system-actor platform
+- **One-key-per-path invariant:** path selection happens **before** the read, and each path maps to
+  **exactly one** disjoint Capability-KV key. **Two packages contributing the same path is a config
+  error**; a single path never fans into N reads. The one bounded exception is the **system-actor platform
   path** — the deny-closed `cap.<actor>` ∪ `cap.roles.<actor>` union of Contract #6 §6.1 ("Step-3 key
   derivation"); it is core-internal to the platform path, never a package-contributed fan-out, and
   the ordinary-actor and scoped paths remain strictly one-key.
@@ -376,7 +341,7 @@ reads the path-specific disjoint key via the registered hook (Contract #6 §6.1/
 
 **Forgery resistance:**
 
-`authContext` is a *hint about which auth path to check*, not a claim of authorization. An actor can submit any value in `authContext.service` — but unless that service appears in their actual `serviceAccess[]` projection (produced by the Capability Lens), the check fails. The routing-via-`authContext` does not grant access; it only selects which subsection of the capability projection to consult. Bypass test suite (Story 1.11 / Story 3.x) MUST include test cases proving that mismatched `authContext` values are rejected.
+`authContext` is a *hint about which auth path to check*, not a claim of authorization. An actor can submit any value in `authContext.service` — but unless that service appears in their actual `serviceAccess[]` projection (produced by the Capability Lens), the check fails. The routing-via-`authContext` does not grant access; it only selects which subsection of the capability projection to consult. Mismatched `authContext` values MUST be rejected.
 
 **Worked example (task path):**
 
