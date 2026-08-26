@@ -987,7 +987,13 @@ greenfield redesign. Cover, as the feature warrants:
   taxonomy item 3: a ratified "four equality sites" was six). §2's census reflexes say how to *derive* one;
   this is the doc obligation that keeps the derivation **re-runnable** after the doc ships.
 - **Contract surface:** exactly which `docs/contracts/*` sections it touches (if any) and whether it needs a
-  *change* vs. just *building to* them. **If an existing convention/constraint creates friction, question
+  *change* vs. just *building to* them. **Contract prose is a PUBLIC contract of a PRIVATE codebase**
+  (Andrew, repeated 2026-08-25): it states observable promises — wire shapes, invariants, refusal
+  semantics — never the mechanism. No internal file/function/constant names, no step-internals, no cost
+  anecdotes; that detail lives in `docs/components/<c>.md` and the design doc. The tell: a contract
+  sentence that a pure refactor would falsify is implementation detail — cut it. When a sub-agent drafts
+  an amendment, the brief must say this explicitly (briefs that ask for file:line citations *in the
+  amendment text* produce exactly the paragraphs Andrew deletes). **If an existing convention/constraint creates friction, question
   whether the convention deserves to exist** — flag it for Andrew with a proposed touch-up — rather than
   contorting the design around it (trialed 2026-06-27: the §6.4 "PascalCase" prescription was unenforced and
   silly; the right move was to relax it, not work around it).
