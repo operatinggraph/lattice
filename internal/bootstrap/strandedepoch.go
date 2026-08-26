@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -379,6 +380,146 @@ func currentOperatorHolders(ctx context.Context, kv jetstream.KeyValue) (map[str
 	return holders, nil
 }
 
+// CurrentEpochOperatorReachable reports whether THIS process's loaded
+// primordial table is the NEWEST live epoch in the bucket it is about to act
+// on — RoleOperatorID's role vertex is live, at least one of the six
+// primordial identities verifiably holds it (currentOperatorHolders's own
+// question), AND no OTHER live role named `operator` was written to this
+// bucket more recently.
+//
+// A destructive tool built on StrandedOperatorEpochs must run this FIRST.
+// Checking only "is my role live and held" is NOT enough — it is
+// self-validating on the exact input this exists to catch: a deployment's
+// own PRIOR epoch's lattice.bootstrap.json is an equally self-consistent
+// snapshot forever. The seed path is create-only and nothing wipes a
+// retired epoch, so the prior role stays live and the prior epoch's OWN
+// primordial identities still hold it — that is the literal definition of
+// a stranded epoch with holders, not a distinguishing feature of a current
+// one. A cold review proved this: loading the immediately-prior id file
+// against an unwiped bucket — arguably the single most likely mistake,
+// since an operator running this tool typically still has both files —
+// passed a live+held check while the tool then revoked the deployment's
+// REAL, current epoch's edges.
+//
+// The application-level `createdAt` envelope field cannot tell epochs apart
+// either, for a different and sharper reason than "no oracle exists": EVERY
+// primordial entry, in EVERY epoch, is stamped with the same fixed
+// BootstrapTime constant (envelope.go — deliberate, so a reconcile
+// comparison of built-vs-stored envelopes is not defeated by wall-clock
+// noise). Two roles minted months apart carry byte-identical `createdAt`
+// values. What does differ is the NATS JetStream KV entry's own `Created()`
+// timestamp — server-assigned at the moment each key was actually appended
+// to THIS bucket's stream, never controlled by the application layer and
+// therefore not reproducible by replaying an old envelope. Epochs are only
+// ever added, never revised, so a genuinely current epoch's role entry is
+// never older, by that stamp, than every other live `operator`-named role's.
+//
+// This still is not an absolute guarantee — two epochs written within the
+// same clock's resolution, or a bucket whose only live epoch happens to be
+// the wrong one with nothing newer to compare against, are not caught. It
+// closes the proven, practical mistake without requiring an oracle that
+// does not exist in this system today.
+//
+// Returns ErrPrimordialIDsUnloaded before touching the graph if the table is
+// unloaded, mirroring StrandedOperatorEpochs's own guard.
+func CurrentEpochOperatorReachable(ctx context.Context, kv jetstream.KeyValue) (bool, error) {
+	if RoleOperatorID == "" {
+		return false, fmt.Errorf("%w: roleOperator", ErrPrimordialIDsUnloaded)
+	}
+	// Derived from RoleOperatorID directly, never the separately-cached
+	// RoleOperatorKey global: both are set together by populate() in real
+	// use and never desync there, but deriving keeps this function's only
+	// dependency the one variable it already checked above, matching
+	// StrandedOperatorEpochs's own convention of never reading a cached
+	// "Key" global.
+	myEntry, state, err := readEntry(ctx, kv, substrate.VertexKey("role", RoleOperatorID))
+	if err != nil {
+		return false, err
+	}
+	if state != docLive {
+		return false, nil
+	}
+	holders, err := currentOperatorHolders(ctx, kv)
+	if err != nil {
+		return false, err
+	}
+	if len(holders) == 0 {
+		return false, nil
+	}
+
+	newerExists, err := anyNewerLiveOperatorRole(ctx, kv, RoleOperatorID, myEntry.Created())
+	if err != nil {
+		return false, err
+	}
+	return !newerExists, nil
+}
+
+// anyNewerLiveOperatorRole reports whether any live vtx.role.* vertex named
+// `operator`, OTHER than excludeRoleID, has a NATS KV entry Created() time
+// strictly after since. Mirrors StrandedOperatorEpochs's own
+// vtx.role.*.canonicalName listing (same bounded population — tens of
+// roles) but reads each candidate's KV-assigned write time instead of its
+// holders/grants, since this question is about recency, not reachability.
+func anyNewerLiveOperatorRole(ctx context.Context, kv jetstream.KeyValue, excludeRoleID string, since time.Time) (bool, error) {
+	found := false
+	err := walkDistinctKeys(ctx, kv, "vtx.role.*.canonicalName", func(page []string) error {
+		for _, aspectKey := range page {
+			roleKey, _, roleID, _, ok := substrate.ParseAspectKey(aspectKey)
+			if !ok || roleID == excludeRoleID {
+				continue
+			}
+			aspect, state, err := readDocument(ctx, kv, aspectKey)
+			if err != nil {
+				return err
+			}
+			if state != docLive {
+				continue
+			}
+			if name, _ := aspect.Data["value"].(string); name != "operator" {
+				continue
+			}
+			entry, state, err := readEntry(ctx, kv, roleKey)
+			if err != nil {
+				return err
+			}
+			if state != docLive {
+				continue
+			}
+			if entry.Created().After(since) {
+				found = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
+// readEntry is readDocument's sibling for callers that need the KV entry's
+// own server-assigned metadata (Created()) rather than just its decoded
+// body. Duplicates readDocument's absent/tombstoned/unreadable
+// classification exactly, rather than layering a second read on top of it,
+// so the two never disagree about what one key's state is.
+func readEntry(ctx context.Context, kv jetstream.KeyValue, key string) (entry jetstream.KeyValueEntry, state docState, err error) {
+	stored, getErr := kv.Get(ctx, key)
+	if getErr != nil {
+		if errors.Is(getErr, jetstream.ErrKeyNotFound) {
+			return nil, docAbsent, nil
+		}
+		return nil, docUnreadable, fmt.Errorf("read %s: %w", key, getErr)
+	}
+	var doc storedDocument
+	if json.Unmarshal(stored.Value(), &doc) != nil {
+		return nil, docUnreadable, nil
+	}
+	if doc.IsDeleted {
+		return stored, docTombstoned, nil
+	}
+	return stored, docLive, nil
+}
+
 // primordialIdentityKeys returns the vertex keys of the six identities this
 // deployment's primordial table seeds with a holdsRole edge into the operator
 // role: the admin plus the Loom, Weaver, Bridge, object-store-manager and
@@ -554,9 +695,15 @@ const (
 	docUnreadable
 )
 
-// storedDocument is the slice of a stored envelope this scan reads: whether it
-// carries a soft tombstone, and its data payload.
+// storedDocument is the slice of a stored envelope this scan reads: its
+// class, whether it carries a soft tombstone, and its data payload. The
+// envelope's OWN `createdAt` field is deliberately not parsed here — every
+// primordial entry in every epoch carries the same fixed BootstrapTime
+// constant (envelope.go), so it cannot distinguish epochs; readEntry reads
+// the NATS KV entry's server-assigned Created() instead, for exactly that
+// question.
 type storedDocument struct {
+	Class     string         `json:"class"`
 	IsDeleted bool           `json:"isDeleted"`
 	Data      map[string]any `json:"data"`
 }

@@ -330,6 +330,33 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) (failures, notices 
 				notices = append(notices, stranded.Report())
 			}
 		}
+
+		// Stranded capability lenses are ALWAYS a notice here, in every
+		// direction and unconditionally, EVEN a cypher-diverged one — the
+		// same reason stranded roles are: cmd/lattice/bootstrap calls
+		// VerifyKernel and exits 1 on any failure, and `make up` uses that
+		// exit code as its freshness oracle (Makefile:202). A failure here
+		// sends `make up` down the discard-and-remint path, which cannot
+		// remove a protected lens and would only strand a second epoch on
+		// top of the first. scripts/verify-kernel.go is where a diverged
+		// lens's severity moves an exit status, exactly as it already is for
+		// stranded roles.
+		//
+		// A SEPARATE call, not routed through ReadKernelReport's plan: its
+		// listing enumerates the whole vtx.meta.* population, not the
+		// tens-sized vtx.role.* one the report's other checks bound
+		// themselves to (strandedScan's own doc comment). Confining the cost
+		// to VerifyKernel's callers, not planReconcile's, keeps it off
+		// ReconcilePrimordial's boot path.
+		strandedLenses, lensErr := StrandedCapabilityLenses(ctx, coreKV)
+		switch {
+		case lensErr != nil:
+			notices = append(notices, fmt.Sprintf("CANNOT check for stranded capability lenses: %v", lensErr))
+		default:
+			for _, stranded := range strandedLenses {
+				notices = append(notices, stranded.Report())
+			}
+		}
 	}
 
 	return failures, notices

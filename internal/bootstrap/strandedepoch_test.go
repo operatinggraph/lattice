@@ -800,3 +800,108 @@ func TestSortedUnique_DoesNotMutateItsInput(t *testing.T) {
 	require.Equal(t, []string{"a", "b", "c"}, sortedUnique(input))
 	require.Equal(t, []string{"c", "a", "b", "a"}, input, "sortedUnique must leave its argument alone")
 }
+
+func TestCurrentEpochOperatorReachable_SeededEpochIsReachable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+	seedCurrentEpoch(ctx, t, kv)
+
+	reachable, err := CurrentEpochOperatorReachable(ctx, kv)
+	require.NoError(t, err)
+	require.True(t, reachable)
+}
+
+// TestCurrentEpochOperatorReachable_WrongIDFileIsNotReachable pins the guard
+// a cold adversarial review found missing: loading a lattice.bootstrap.json
+// that does not correspond to the bucket being acted on must be detectable
+// BEFORE a destructive tool trusts StrandedOperatorEpochs's report. A live
+// role with real holders, addressed by an id this deployment's table does
+// not name, is exactly what "the wrong id file" looks like from inside the
+// graph — indistinguishable from a genuinely stranded epoch by the scan
+// alone.
+func TestCurrentEpochOperatorReachable_WrongIDFileIsNotReachable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	liveRoleID := newNanoID(t)
+	seedRole(ctx, t, kv, liveRoleID, "operator")
+	seedHolder(ctx, t, kv, BootstrapIdentityID, liveRoleID, false)
+
+	loaded := RoleOperatorID
+	t.Cleanup(func() { RoleOperatorID = loaded })
+	RoleOperatorID = newNanoID(t) // a different id: simulates a mismatched file
+
+	reachable, err := CurrentEpochOperatorReachable(ctx, kv)
+	require.NoError(t, err)
+	require.False(t, reachable, "an id file naming a role this bucket never seeded must not read as reachable")
+}
+
+// TestCurrentEpochOperatorReachable_PriorEpochsOwnFileIsNotReachable proves
+// the exploit a cold review demonstrated against the first version of this
+// guard: loading THIS SAME DEPLOYMENT's own prior epoch's
+// lattice.bootstrap.json — not a foreign or nonexistent role, but a real,
+// live one, held by its own (also-real) primordial identities, exactly the
+// state an unwiped rotation leaves behind. A "is my role live and held"
+// check alone passes here, which is precisely why it is not the shipped
+// check: RoleOperatorID naming the OLDER of two live `operator` roles must
+// read as unreachable once a newer one exists, and naming the newer one
+// must still read as reachable.
+func TestCurrentEpochOperatorReachable_PriorEpochsOwnFileIsNotReachable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+
+	// currentOperatorHolders only counts a holder that is one of the six
+	// PRIMORDIAL identities (primordialIdentityKeys) — using BootstrapIdentityID
+	// for both fixtures models "this deployment's admin identity", the one
+	// constant a real rotation carries forward in spirit even though the
+	// real seed path mints it a fresh id per epoch (internal/bootstrap's own
+	// rotation_e2e_test.go exercises that fuller shape); a randomly-generated
+	// holder here would never satisfy the accounted-for check at all, which
+	// is a different property than the one this test is about.
+	olderRoleID := newNanoID(t)
+	seedRole(ctx, t, kv, olderRoleID, "operator")
+	seedHolder(ctx, t, kv, BootstrapIdentityID, olderRoleID, false)
+
+	newerRoleID := newNanoID(t)
+	seedRole(ctx, t, kv, newerRoleID, "operator")
+	seedHolder(ctx, t, kv, BootstrapIdentityID, newerRoleID, false)
+
+	loaded := RoleOperatorID
+	t.Cleanup(func() { RoleOperatorID = loaded })
+
+	RoleOperatorID = olderRoleID
+	reachable, err := CurrentEpochOperatorReachable(ctx, kv)
+	require.NoError(t, err)
+	require.False(t, reachable,
+		"the older of two live operator roles must not read as reachable once a newer one exists")
+
+	RoleOperatorID = newerRoleID
+	reachable, err = CurrentEpochOperatorReachable(ctx, kv)
+	require.NoError(t, err)
+	require.True(t, reachable, "the newer role, live and held, with nothing newer than it, must read as reachable")
+}
+
+func TestCurrentEpochOperatorReachable_UnloadedPrimordialTableRefuses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := strandedTestContext(t)
+	_, kv := newReconcileSeeder(ctx, t)
+	seedCurrentEpoch(ctx, t, kv)
+
+	loaded := RoleOperatorID
+	t.Cleanup(func() { RoleOperatorID = loaded })
+	RoleOperatorID = ""
+
+	_, err := CurrentEpochOperatorReachable(ctx, kv)
+	require.ErrorIs(t, err, ErrPrimordialIDsUnloaded)
+}

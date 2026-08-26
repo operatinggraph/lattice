@@ -270,6 +270,62 @@ func seedPriorEpochOperatorRole(ctx context.Context, t *testing.T, conn *substra
 	return roleKey, holderKey
 }
 
+// seedPriorEpochCapabilityLens plants a stranded capability lens: a
+// vtx.meta.* vertex of class meta.lens named by one of the four reserved
+// canonicalNames, carrying cypherRule. divergedCypher seeds a rule that
+// differs from the current definition's — the dangerous case — when true;
+// the current, identical rule — the inert case — when false.
+func seedPriorEpochCapabilityLens(ctx context.Context, t *testing.T, conn *substrate.Conn, canonicalName string, divergedCypher bool) (lensKey string) {
+	t.Helper()
+	put := func(key string, raw []byte, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		_, putErr := conn.KVPut(ctx, bootstrap.CoreKVBucket, key, raw)
+		require.NoError(t, putErr)
+	}
+	lensID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	lensKey = substrate.VertexKey("meta", lensID)
+	lensVal, lensErr := bootstrap.MakeVertexEnvelope(lensKey, "meta.lens", map[string]any{"protected": true})
+	put(lensKey, lensVal, lensErr)
+
+	cnKey := substrate.AspectKey(lensKey, "canonicalName")
+	cnVal, cnErr := bootstrap.MakeAspectEnvelope(cnKey, lensKey, "canonicalName", "canonicalName",
+		map[string]any{"value": canonicalName})
+	put(cnKey, cnVal, cnErr)
+
+	rule := "MATCH (identity:identity) WHERE identity.data.protected = true RETURN identity.id AS actor_id"
+	if !divergedCypher {
+		rule = bootstrap.CapabilityReadWildcardGrantsLensDefinition().CypherRule
+	}
+	crKey := substrate.AspectKey(lensKey, "cypherRule")
+	crVal, crErr := bootstrap.MakeAspectEnvelope(crKey, lensKey, "cypherRule", "cypherRule",
+		map[string]any{"rule": rule})
+	put(crKey, crVal, crErr)
+	return lensKey
+}
+
+// TestVerifyKernel_StrandedCapabilityLensReturnsNoFailures pins the same
+// property TestVerifyKernel_StrandedEpochReturnsNoFailures pins for the role
+// plane, over the lens plane: EVEN a cypher-diverged stranded lens — the
+// dangerous case scripts/verify-kernel.go escalates to a failure — must
+// never fail VerifyKernel itself, because `make up`'s FRESH oracle reads
+// this function's exit code and cannot repair a protected, un-tombstonable
+// lens by discarding and re-minting the id file — it would only strand a
+// second epoch on top of the first.
+func TestVerifyKernel_StrandedCapabilityLensReturnsNoFailures(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	lensKey := seedPriorEpochCapabilityLens(ctx, t, conn, "capabilityReadWildcardGrants", true)
+
+	failures, notices := bootstrap.VerifyKernel(ctx, conn)
+	require.Empty(t, failures,
+		"a stranded capability lens — even a cypher-diverged one — must never fail bootstrap verify")
+	require.Condition(t, containsSubstring(notices, "STRANDED CAPABILITY LENS: "+lensKey))
+}
+
 // TestVerifyKernel_StrandedEpochReturnsNoFailures is the property `make up`
 // depends on, and it must not regress silently.
 //

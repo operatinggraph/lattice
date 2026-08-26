@@ -78,7 +78,7 @@ func init() {
 	rootCmd.AddCommand(candidates.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(capability.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(authtrace.NewCommand(&flagNATSURL, &flagOutput))
-	rootCmd.AddCommand(bootstrap.NewCommand(&flagNATSURL, &flagOutput))
+	rootCmd.AddCommand(bootstrap.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(weaver.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(loom.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 }

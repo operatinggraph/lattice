@@ -391,6 +391,37 @@ func main() {
 		}
 	}
 
+	// Stranded capability lenses — a SEPARATE scan, not part of the plan
+	// above: its listing enumerates the whole vtx.meta.* population, not the
+	// tens-sized vtx.role.* one the stranded-role scan bounds itself to
+	// (bootstrap.StrandedCapabilityLenses's own doc comment), so it is never
+	// wired into planReconcile/ReconcilePrimordial's boot path — only here
+	// and in bootstrap.VerifyKernel, both already slower, occasional checks.
+	//
+	// A cypher-DIVERGED twin fails this gate — a stranded lens seeded by a
+	// binary predating a since-narrowed cypher rule (e.g. c9a80312's
+	// 2026-07-02 holdsRole->operator re-convergence) reads no
+	// holdsRole/grantedBy edge at all and is untouched by edge revocation, so
+	// it stays live authority regardless of what this deployment's current
+	// operator role holds. A confirmed-identical twin is a notice, exactly
+	// like the stranded role's own inert case.
+	fmt.Println("Checking for stranded capability lenses (fails on a cypher-diverged twin)...")
+	strandedLenses, lensErr := bootstrap.StrandedCapabilityLenses(ctx, coreKV)
+	switch {
+	case lensErr != nil:
+		fmt.Printf("  INFO  cannot check for stranded capability lenses: %v\n", lensErr)
+	case len(strandedLenses) == 0:
+		fmt.Printf("  OK  no stranded capability lenses\n")
+	default:
+		for _, stranded := range strandedLenses {
+			if stranded.Severity() == bootstrap.StrandedLensSeverityDiverged {
+				failures = append(failures, stranded.Report())
+				continue
+			}
+			fmt.Printf("  INFO  %s\n", stranded.Report())
+		}
+	}
+
 	fmt.Println()
 	if len(failures) == 0 {
 		fmt.Printf("verify-kernel: ALL ASSERTIONS PASSED\n")

@@ -13,7 +13,11 @@ import (
 )
 
 // NewCommand returns the cobra.Command for the bootstrap command group.
-func NewCommand(natsURL, outputFmt *string) *cobra.Command {
+// defaultActor mirrors op.NewCommand's own parameter (root.go's
+// flagActorKey, loaded from a credential file) — retire-stranded-epoch is the
+// one subcommand in this group that submits operations rather than only
+// reading.
+func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var bootstrapJSONPath string
 
 	cmd := &cobra.Command{
@@ -26,6 +30,7 @@ func NewCommand(natsURL, outputFmt *string) *cobra.Command {
 	cmd.AddCommand(newVerifyCommand(natsURL, outputFmt, &bootstrapJSONPath))
 	cmd.AddCommand(newInspectCommand(natsURL, outputFmt, &bootstrapJSONPath))
 	cmd.AddCommand(newProbeEmptyCommand(natsURL, outputFmt))
+	cmd.AddCommand(newRetireStrandedEpochCommand(natsURL, &bootstrapJSONPath, defaultActor))
 	return cmd
 }
 

@@ -118,6 +118,21 @@ func TestStarlark_Rbac_CreateRole(t *testing.T) {
 	}
 }
 
+// TestStarlark_Rbac_CreateRole_RejectsOperatorName proves the reserved-name
+// guard (primordial-epoch-stranded-authority-design.md §3.1/§7's
+// consolidated CreateRole prevention). Written against
+// TestStarlark_Rbac_CreateRole immediately above as its positive vector: that
+// test already proves an ordinary name mints a role, so this one isolates the
+// single reserved name that must not.
+func TestStarlark_Rbac_CreateRole_RejectsOperatorName(t *testing.T) {
+	runner := processor.NewStarlarkRunner(0, 0)
+	sc := makeRbacScriptContext("CreateRole", `{"name":"operator","description":"smoke"}`, nil)
+	_, err := runner.Run(context.Background(), sc)
+	if err == nil || !strings.Contains(err.Error(), "ReservedRoleName") {
+		t.Fatalf("Run: err = %v, want a ReservedRoleName failure", err)
+	}
+}
+
 func TestStarlark_Rbac_UpdateRole(t *testing.T) {
 	runner := processor.NewStarlarkRunner(0, 0)
 	roleKey := "vtx.role." + starlarkRoleID

@@ -28,17 +28,27 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - Canonical-name uniqueness for new role/permission vertices is NOT
 //     enforced here — that's an upstream concern. The script assigns a
 //     fresh NanoID and writes; duplicate-name gates are the caller's
-//     responsibility.
+//     responsibility. The one exception is CreateRole's reserved-name
+//     check (canonicalName "operator" — Contract #7 §7.2's "the only
+//     primordial role is operator"): that name is rejected unconditionally,
+//     not checked for uniqueness against the live graph, because the
+//     primordial operator role is seeded outside this op entirely
+//     (bootstrap's own atomic seed batch) and a live-graph check here would
+//     need the enumeration this op's read posture deliberately does not do.
 //
 // Caller's ContextHint.Reads MUST include:
 //   - CreateRole / CreatePermission: nothing (script generates the new NanoID)
 //   - UpdateRole / UpdatePermission: the existing vertex key
 //   - TombstoneRole / TombstonePermission: the existing vertex key
-//   - AssignRole / RevokeRole: actorKey, roleKey, and the deterministic
-//     holdsRole link key (computed from actorKey + roleKey by the caller
-//     — see comments below for the shape)
-//   - GrantPermission / RevokePermission: permKey, roleKey, and the
-//     deterministic grantedBy link key
+//   - AssignRole: actorKey, roleKey, and the deterministic holdsRole link key
+//     (computed from actorKey + roleKey by the caller — see comments below
+//     for the shape) — vertex_alive checks both endpoints before granting.
+//   - RevokeRole: only the deterministic holdsRole link key — the branch
+//     reads state[lnk_key] alone, no endpoint vertex check.
+//   - GrantPermission: permKey, roleKey, and the deterministic grantedBy
+//     link key — vertex_alive checks both endpoints before granting.
+//   - RevokePermission: only the deterministic grantedBy link key — same
+//     shape as RevokeRole, no endpoint vertex check.
 //
 // Link key shapes:
 //
@@ -260,6 +270,8 @@ def execute(state, op):
 
     if ot == "CreateRole":
         name = required_string(p, "name")
+        if name == "operator":
+            fail("ReservedRoleName: \"operator\" is the primordial role name and cannot be minted at runtime")
         desc = ""
         if hasattr(p, "description") and p.description != None and type(p.description) == type(""):
             desc = p.description

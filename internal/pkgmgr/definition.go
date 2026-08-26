@@ -47,6 +47,7 @@ func (def Definition) validateAll() error {
 		def.validateCustodyScope,
 		def.validateAbstractDDLScope,
 		def.validateCanonicalNameUniqueness,
+		def.validateNoReservedRoleName,
 		def.validatePermissionIdentityUniqueness,
 		def.validateRetiredSecureColumns,
 	} {
@@ -122,6 +123,35 @@ func (def Definition) validateCanonicalNameUniqueness() error {
 	for _, o := range def.OpMetas {
 		if err := check(o.OperationType, "op-meta"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateNoReservedRoleName rejects a package that declares a Roles entry
+// canonically named "operator" — the second, package-plane mint path a cold
+// adversarial review of primordial-epoch-stranded-authority-design.md found
+// packages/rbac-domain's runtime CreateRole guard does not cover.
+// validateCanonicalNameUniqueness deliberately excludes roles from its own
+// check ("a separate, deliberately shared namespace"), and this repo's kernel
+// seeds the ONE primordial "operator" role outside any package's install
+// batch entirely (Contract #7 §7.2: "the only primordial role is operator").
+// A package minting a second live role of that name is root-equivalent
+// through both name-matching capability lenses (lenses.go:135,358-365, which
+// match by canonicalName, not by id) — and, worse, resolveGrants's
+// installer.go:603-628 i.RoleIDs map keys on canonical name, so that SAME
+// install's own GrantsTo: ["operator"] permissions would resolve onto the
+// package's freshly-minted role instead of the kernel's, silently hijacking
+// grant resolution for that install. Checked here, pre-flight and pure (no
+// I/O), so it runs before any KV operation on Install AND Upgrade AND Apply
+// alike, exactly like validateCanonicalNameUniqueness.
+func (def Definition) validateNoReservedRoleName() error {
+	for _, r := range def.Roles {
+		if r.CanonicalName == "operator" {
+			return fmt.Errorf(
+				"pkgmgr: package %q declares a Roles entry named %q — reserved for the kernel's primordial"+
+					" operator role; no package may mint a role of that name",
+				def.Name, r.CanonicalName)
 		}
 	}
 	return nil

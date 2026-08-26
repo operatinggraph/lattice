@@ -187,6 +187,14 @@ func planReconcile(ctx context.Context, kv jetstream.KeyValue) (reconcilePlan, e
 // visible in the projection alone: rewriting the two lines above to
 // `return plan, strandedErr` would turn every boot on a stranded bucket into a
 // failed boot, and no assertion over the report shape would notice.
+//
+// StrandedCapabilityLenses is deliberately NOT alongside it here: its listing
+// enumerates the whole vtx.meta.* population (hundreds, growing with every
+// installed package), not the tens-sized vtx.role.* one this scan bounds
+// itself to, so it does not belong on ReconcilePrimordial's boot path or any
+// other planReconcile caller. ReadKernelReport runs it separately, below —
+// its callers (scripts/verify-kernel.go, `bootstrap verify`) already accept a
+// slower, occasional check; a boot does not.
 var strandedScan = StrandedOperatorEpochs
 
 // scanKernelOrphans enumerates every vtx.meta.* key Core KV holds that this
@@ -409,11 +417,12 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 	}
 
 	// A stranded prior-epoch operator role is advisory at boot and never fatal:
-	// boot cannot fix it (the remedy is a re-bootstrap from clean state, or the
-	// reconciliation verb that does not exist yet), and a boot that refused to
-	// come up over a condition it cannot repair would take the deployment down
-	// without moving it any closer to repaired. verify-kernel is where this
-	// moves an exit status.
+	// boot cannot fix it (the remedy is a re-bootstrap from clean state, or
+	// `lattice bootstrap retire-stranded-epoch` — cmd/lattice/bootstrap/retire.go,
+	// an operator-invoked verb, deliberately never wired into boot itself), and
+	// a boot that refused to come up over a condition it cannot repair would
+	// take the deployment down without moving it any closer to repaired.
+	// verify-kernel is where this moves an exit status.
 	switch {
 	case plan.strandedScanErr != nil:
 		s.logger.Warn("cannot scan for stranded operator roles — kernel repair proceeds without that report",
@@ -426,6 +435,11 @@ func (s *Seeder) ReconcilePrimordial(ctx context.Context) (ReconcileResult, erro
 				"unreadableEdges", stranded.UnreadableEdges, "protected", stranded.Protected)
 		}
 	}
+
+	// Stranded capability lenses are NOT scanned at boot — see strandedScan's
+	// own doc comment for why (the listing's cost scales with the whole
+	// meta-root population, not the tens-sized role population). verify-kernel
+	// and `bootstrap verify` carry that check instead.
 
 	steps := plan.steps()
 	if len(steps) == 0 {

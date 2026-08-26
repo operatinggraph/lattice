@@ -215,3 +215,22 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   review time). Check: a predicate over residue names which edge actually **projects** the capability —
   read the lens cypher, not the topology's shape — and scopes reachability to the *current* generation's
   actor set, never to "any actor at all".
+- **A stranded meta-vertex's stored RULE is frozen at the seeding binary's version — "the edge shape is the
+  same" does not mean "the projection is the same".** A stranded capability lens carries the cypher its own
+  seeder wrote; commit `c9a80312` (2026-07-02) rewrote the two name-matching capability lenses' cypher from
+  matching `identity.data.protected` directly to matching via `holdsRole`->`operator` topology, so a lens
+  stranded by a pre-`c9a80312` binary reads no `holdsRole`/`grantedBy` edge at all and is untouched by any
+  edge-revocation remedy — "revoke the edges, the twin then computes what the current lens computes" is
+  false for exactly that twin. Minted: stranded-epoch Fire 2 — the ratified design argued the twin
+  "provably inert" from the edge topology alone, and a cold review found the counter-example already
+  existed in this repo's own history. Check: a residue-inertness claim about a stored RULE (a cypher, a
+  script body, a schema) must diff the STORED text against the CURRENT one — never infer equivalence from
+  a structural property (which edges it reads) that itself could differ between the two versions.
+- **A boot-time-cost lesson does not transfer to a NEW scan just because the OLD one already paid it down —
+  each scan's own listing is a fresh premise.** `StrandedOperatorEpochs` (Fire 1) bounds itself to
+  `vtx.role.*` (tens); its lens-plane sibling, drafted in the same fire that shipped it, enumerated
+  `vtx.meta.*.canonicalName` instead — the exact population the entry above this one already named the
+  cost of. Minted: stranded-epoch Fire 2 — caught before merge by a cold review, not by the dossier itself,
+  because the fire brief's own gotcha copy did not re-run the check on the NEW scan it was adding. Check:
+  every new listing this component adds gets its OWN live candidate count and its OWN boot-path placement
+  decision — a sibling scan inherits nothing from its neighbor's prior cost analysis.
