@@ -135,7 +135,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-08-26 · `af73d38f` · [Bootstrap] re-bootstrap-stranded-grants CLOSED — revocation CLI + reserved-name guards (both mint paths); lens residue detect-only; 4 cold reviews, one HIGH found+fixed
+- 2026-08-26 · `b153d120` · [Bootstrap] re-bootstrap-stranded-grants CLOSED — revocation CLI + reserved-name guards (both mint paths); lens residue detect-only; 4 cold reviews, one HIGH found+fixed
 - 2026-08-26 · `8d039bdb` · [Contracts] six 🔭 contract-text flags adjudicated — #2 + #10 amendments ratified as public contracts; #9 timing + three #2 clauses rejected as implementation prose
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
