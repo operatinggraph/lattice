@@ -86,9 +86,20 @@ func DDLs() []pkgmgr.DDLSpec {
 //     enumerates "objects attached to owner X" (objectAttachments.go's
 //     objectAttachments lens is anchored on the OBJECT, the wrong direction
 //     for this) — a fully descriptor-driven Dispatch (the signInMethods PANE
-//     precedent, edge-manifest/panes.go's dispatch-target column) still
-//     needs that owner-anchored lens. Open follow-up, staff-descriptor-
-//     rendering-design.md §22 Inc-B.
+//     precedent, edge-manifest/panes.go's dispatch-target column) needs that
+//     owner-anchored lens. loftspace-domain's objectIdentityAttachmentsRead
+//     (staff-descriptor-rendering-design.md §22 Inc-B) supplies the
+//     self-view (owner:identity) half; leaseapp and unit remain open (each
+//     needs its own authz-walk decision — see that lens's doc comment). A
+//     second, independent gap blocks wiring Dispatch even once every owner
+//     type has a lens: DetachObject's declared Reads must include the
+//     6-segment link key `lnk.object.<oid>.<linkName>.<ownerType>.<ownerId>`,
+//     but the ownerType segment varies by which lens surfaced the row and
+//     the Reads-template vocabulary (descriptor_floor.go) has no operator
+//     that extracts a key's type segment for mid-template splicing — every
+//     `{payload.<field>}`/`:id` combination yields either the bare id or the
+//     whole `vtx.<type>.<id>` value, never just `<type>`. Open follow-up,
+//     staff-descriptor-rendering-design.md §22 Inc-C.
 //
 // staff-descriptor-rendering-design.md §22 Inc-A (shipped) closed the other
 // half of the gap: the hand-built ceremony itself (upload → derive the
