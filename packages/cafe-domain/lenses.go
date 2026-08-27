@@ -203,6 +203,16 @@ RETURN
 // inside it. The comprehension yields an empty list when `loc` never
 // matched (no servedAt link) — an unlinked item is covered by nobody,
 // mirroring leaseWorkplacesSpec's own empty-covering denial.
+//
+// `missingLocation` names the "outlived its place" gap explicitly, mirroring
+// wellness-domain's wellnessSessionsSpec missingStudio: TombstoneLocation
+// (location-domain) doesn't cascade onto a menu item's servedAt link, and an
+// item minted with no locationKey is impossible today but not provable so
+// from this lens — both land here as `loc.key = null`, which is also true
+// the instant a rewire drops SetMenuItemLocation's old link and before it
+// claims the new one, same as the OPTIONAL MATCH above. verticals.md "a menu
+// item outlives the place that served it, with no flag and no way back" —
+// SetMenuItemLocation (ddls.go) is the way back.
 const menuCatalogSpec = `MATCH (m:menuitem)
 OPTIONAL MATCH (m)-[:servedAt]->(loc)
 RETURN
@@ -211,6 +221,7 @@ RETURN
   m.price.data.name AS name,
   m.price.data.priceCents AS priceCents,
   loc.key AS servedAt,
+  (loc.key = null) AS missingLocation,
   [(m)-[:servedAt]->(sloc)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // tabSettlementSpec is the one-row-per-tab convergence cypher: a settled tab

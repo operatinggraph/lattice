@@ -107,5 +107,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator and front-of-house staff the right to remove an item from the self-order menu catalog, confined to the item's own served-at workplace.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
+		{
+			OperationType: "SetMenuItemLocation",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to relocate a menu item to a new place, confined to the NEW workplace (the item's own served-at link may already be dead — this op's repair case).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 	}
 }

@@ -248,5 +248,30 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Reads:       []string{"{payload.menuItemKey}"},
 			},
 		},
+		{
+			OperationType: "SetMenuItemLocation",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Relocate a catalog item",
+				Description: "Move a catalog item to a new place — the repair for one whose place was retired.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Relocate item",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the item to relocate — auto-filled from the item being viewed."},` +
+				`"newLocation":{"type":"string","description":"vtx.<locationType>.<NanoID> the item should now be served at — must be a location you worksAt (or an ancestor of it)."}},` +
+				`"required":["menuItemKey","newLocation"]}`,
+			FieldDescriptions: map[string]string{
+				"menuItemKey": "The catalog item being relocated — auto-filled by the client from the item being viewed (dispatch.targetField), not user-entered.",
+				"newLocation": "The item's new place. Confined to a location you worksAt (or an ancestor of it) unless you are the operator — the item's OLD place may already be gone, so it cannot anchor this check the way RetireMenuItem's does.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "menuitem",
+				AuthContext: "standing",
+				TargetField: "menuItemKey",
+				TargetType:  "menuitem",
+				Reads:       []string{"{payload.menuItemKey}", "{payload.newLocation}"},
+			},
+		},
 	}
 }

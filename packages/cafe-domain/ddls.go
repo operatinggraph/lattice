@@ -335,7 +335,7 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "menuitem",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem"},
+		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem", "SetMenuItemLocation"},
 		Description: "Café self-order menu-item catalog DDL. Vertex shape: vtx.menuitem.<NanoID>, class=menuitem, " +
 			"root data = {} (D5 — name/price live on the .price aspect). CreateMenuItem{name, priceCents, locationKey} " +
 			"(operator-only) mints a catalog item + its .price {name, priceCents} aspect + the servedAt link " +
@@ -344,16 +344,24 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			"edge-manifest browse lens walks a resident's residence chain down to the items served where they live, " +
 			"so an unlinked item is one no client can offer. RetireMenuItem{menuItemKey} " +
 			"(operator-only) tombstones a live item, self-OCC'd on its hydrated revision (mirrors service-domain's " +
-			"RetireServiceTemplate). Charge (tab vertexType DDL, above) reads a menu item's .price aspect by known " +
-			"key when a self-service caller submits menuItemKey, deriving amountCents from priceCents rather than " +
-			"trusting a caller-supplied number — the catalog this DDL exists to provide.",
+			"RetireServiceTemplate). SetMenuItemLocation{menuItemKey, newLocation} (staff-standing, confined to the " +
+			"NEW location — the item's own servedAt may already be tombstoned, so unlike RetireMenuItem's " +
+			"confinement the OLD location cannot anchor the check) is the repair path for an item whose place was " +
+			"tombstoned out from under it (menuCatalog's missingLocation, lenses.go — the wellness-domain " +
+			"ReassignSession/newStudio idiom, applied to a menu item's single servedAt link instead of a session's " +
+			"atStudio): tombstones the item's current servedAt link if it still has one, then creates-or-revives " +
+			"the new one (revive, not plain create, so moving an item BACK to a location it served before doesn't " +
+			"CreateOnly-reject on the dead old link). Charge (tab vertexType DDL, above) reads a menu item's .price " +
+			"aspect by known key when a self-service caller submits menuItemKey, deriving amountCents from " +
+			"priceCents rather than trusting a caller-supplied number — the catalog this DDL exists to provide.",
 		Script: menuItemDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem; required, non-empty)."},` +
 			`"priceCents":{"type":"number","description":"Price in integer cents; required, must be > 0 (CreateMenuItem)."},` +
 			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment)."},` +
 			`"menuItemId":{"type":"string","description":"Optional bare NanoID for the new item (CreateMenuItem); absent → minted."},` +
-			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem; required, validated alive)."}},` +
+			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem / SetMenuItemLocation; required, validated alive)."},` +
+			`"newLocation":{"type":"string","description":"vtx.<locationType>.<NanoID> the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.menuitem.<NanoID> the operation wrote."}}}`,
@@ -362,7 +370,8 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem).",
 			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
 			"menuItemId":  "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
-			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem; required, validated alive + class=menuitem).",
+			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemLocation; required, validated alive + class=menuitem).",
+			"newLocation": "Full vtx.<locationType>.<NanoID> key (unit|building|property) the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment). Replaces the item's servedAt link.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -378,6 +387,15 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"menuItemKey": "vtx.menuitem.<NanoID>"},
 				ExpectedOutcome: "Tombstones the item (self-OCC'd on its hydrated revision). Returns primaryKey. " +
 					"Rejects UnknownMenuItem if already retired or absent.",
+			},
+			{
+				Name:    "SetMenuItemLocation — relocate an item whose place was retired",
+				Payload: map[string]any{"menuItemKey": "vtx.menuitem.<NanoID>", "newLocation": "vtx.unit.<NanoID>"},
+				ExpectedOutcome: "Tombstones the item's current servedAt link (if still live) and creates-or-revives " +
+					"one to newLocation, returning primaryKey as that NEW link key (the item vertex itself is never " +
+					"mutated, so it carries no write-footprint standing of its own — the AssignProviderSite " +
+					"convention, clinic-domain). Rejects UnknownMenuItem if menuItemKey is absent or tombstoned, " +
+					"UnknownLocation / NotALocation if newLocation is absent, tombstoned, or not a location.",
 			},
 		},
 	}
@@ -1429,6 +1447,35 @@ def make_link(key, source, target, cls, local_name, data):
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
 
+def make_tombstone(key):
+    return {"op": "tombstone", "key": key}
+
+def make_link_revive_occ(key, source, target, cls, local_name, expected_revision):
+    # A Lattice tombstone is soft — the link key still occupies its subject,
+    # so make_link's CreateOnly write (expectedRevision 0) rejects
+    # RevisionConflict against a key that has EVER been minted before, even
+    # long-dead. SetMenuItemLocation can land back on a location an item
+    # served at before (park it while that place is retired, un-retire it
+    # later), so it needs this OCC-conditioned revive instead — mirrors
+    # wellness-domain's ReassignSession (atStudio) / clinic-domain's
+    # AssignProviderSite exactly.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": {}},
+            "expectedRevision": expected_revision}
+
+def make_link_create_or_revive(key, source, target, cls, local_name):
+    # read-posture: (d) declared optionalReads at SetMenuItemLocation dispatch
+    # — the create/revive idempotency branch; an absent link is the common
+    # case for a never-before-used pairing, never a required read.
+    existing = kv.Read(key)
+    if existing != None and not existing.isDeleted:
+        fail("InvalidState: " + key + " is already live — this should have been tombstoned first")
+    if existing != None:
+        return make_link_revive_occ(key, source, target, cls, local_name, existing.revision)
+    return make_link(key, source, target, cls, local_name, {})
+
 def required_string(p, name):
     if not hasattr(p, name):
         fail("InvalidArgument: " + name + ": required")
@@ -1706,6 +1753,56 @@ def execute(state, op):
         events = [{"class": "menuItem.retired", "data": {"menuItemKey": item_key}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": item_key}}
+
+    if ot == "SetMenuItemLocation":
+        # The repair path for verticals.md "a menu item outlives the place
+        # that served it, with no flag and no way back": TombstoneLocation
+        # (location-domain) doesn't cascade onto a menu item's servedAt link,
+        # same gap as wellness-domain's studio/session (ReassignSession).
+        item_key = required_string(p, "menuItemKey")
+        item_type, item_id = parts_of(item_key, "menuItemKey", "menuitem")
+        if not vertex_alive(state, item_key):
+            fail("UnknownMenuItem: " + item_key)
+
+        # Declared-read (Contract #2 §2.5), mirrors CreateMenuItem's
+        # locationKey: the submitter lists newLocation in contextHint.reads.
+        new_location = required_string(p, "newLocation")
+        require_live_location(state, new_location, "newLocation")
+
+        # Staff-standing confinement against the NEW location only. The
+        # item's CURRENT servedAt may already be dead — this op exists
+        # precisely for that case — so unlike RetireMenuItem's confinement
+        # the old location cannot anchor the check.
+        # workplace-exempt: (no-validated-path) SetMenuItemLocation is
+        # granted scope=any to operator + frontOfHouse only (permissions.go)
+        # and no task mints it, so op.authTargetValidated is never
+        # legitimately true and only the operator escape reaches the
+        # exemption.
+        if not workplace_exempt():
+            require_workplace([new_location], "cannot serve menu item " + item_key + " at " + new_location)
+
+        mutations = []
+        # menu_item_served_at is the same live kv.Links follow-up
+        # RetireMenuItem's confinement above already uses (read-posture (e),
+        # no caller declaration needed) — the item's current servedAt link,
+        # or None if it's already gone.
+        old_location = menu_item_served_at(item_key)
+        if old_location != None:
+            old_type, old_id = parts_of(old_location, "servedAt", "")
+            mutations.append(make_tombstone("lnk." + item_type + "." + item_id + ".servedAt." + old_type + "." + old_id))
+
+        new_type, new_id = parts_of(new_location, "newLocation", "")
+        new_lnk = "lnk." + item_type + "." + item_id + ".servedAt." + new_type + "." + new_id
+        mutations.append(make_link_create_or_revive(new_lnk, item_key, new_location, "servedAt", "servedAt"))
+
+        events = [{"class": "menuItem.relocated", "data": {"menuItemKey": item_key, "newLocation": new_location}}]
+        # primaryKey names the LINK key itself (the AssignProviderSite idiom,
+        # clinic-domain site.go) rather than the item vertex: the write-
+        # footprint reply constraint (commit_path.go) accepts a mutation's own
+        # key or its 3-segment vertex root, and this op never mutates the
+        # item vertex or an aspect rooted on it — only its servedAt link(s).
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": new_lnk}}
 
     fail("menuItem DDL: unknown operationType: " + ot)
 `
