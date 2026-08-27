@@ -127,7 +127,7 @@ func main() {
 	// walks containedIn) covers this unit's leases too. A standalone run of
 	// this seed (no seed-showcase) leaves the unit unwired, same as today.
 	riversideBuildingKey := "vtx.building." + riversideBuildingID
-	if alive(ctx, conn, riversideBuildingKey) {
+	if alive(ctx, conn, riversideBuildingKey) && !alive(ctx, conn, linkKey(unitKey, "containedIn", riversideBuildingKey)) {
 		submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 			map[string]any{"child": unitKey, "parent": riversideBuildingKey},
 			&processor.ContextHint{Reads: []string{unitKey, riversideBuildingKey}})
@@ -258,6 +258,8 @@ func main() {
 			})
 	}
 	fmt.Printf("==> appointment:     %s (%s)\n", apptKey, startsAt.Format(time.RFC3339))
+	backfillClinicForwardSchedule(ctx, conn, adminKey, patientKey, providerKey)
+	reapClinicVerifyLitterAppointments(ctx, conn, adminKey)
 
 	// --- Café: tab opened against the same lease ------------------------------
 
@@ -447,6 +449,131 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate provider: %s (%s)\n", key, aspect.Data.FullName)
 	}
+}
+
+// backfillClinicForwardSchedule mints a handful of additional future
+// appointments for the same patient/provider (verticals.md "the clinic has
+// no forward schedule, so the front desk's day view is permanently empty":
+// every appointment any script has ever seeded eventually falls into the
+// past and MarkPastDueNoShow ages it into noShow, and /api/staff/appointments
+// applies no server-side time filter — cmd/clinic-app/web/app.js's
+// day/week calendar view renders nothing once the last forward-dated
+// appointment ages out). Four separate days, well clear of the single 24h-out
+// appointment above, so none collide with it or each other. Day-derived
+// deterministic ids, like that appointment, so a rerun converges on the same
+// four instead of piling up a fresh set each time.
+func backfillClinicForwardSchedule(ctx context.Context, conn *substrate.Conn, adminKey, patientKey, providerKey string) {
+	for _, offsetDays := range []int{3, 5, 8, 12} {
+		day := time.Now().UTC().Add(time.Duration(offsetDays) * 24 * time.Hour).Truncate(24 * time.Hour)
+		startsAt := day.Add(10 * time.Hour)
+		endsAt := startsAt.Add(30 * time.Minute)
+		apptID := substrate.DeriveNanoID("classic-demo-appointment-forward", day.Format("2006-01-02"))
+		apptKey := "vtx.appointment." + apptID
+		if alive(ctx, conn, apptKey) {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient":       patientKey,
+				"provider":      providerKey,
+				"appointmentId": apptID,
+				"startsAt":      startsAt.Format(time.RFC3339),
+				"endsAt":        endsAt.Format(time.RFC3339),
+				"reason":        "Follow-up visit",
+			},
+			&processor.ContextHint{
+				Reads: []string{patientKey, providerKey},
+				OptionalReads: append(
+					slotClaimKeys(providerKey, startsAt, endsAt),
+					slotClaimKeys(patientKey, startsAt, endsAt)...),
+			})
+		fmt.Printf("==> forward appointment: %s (%s)\n", apptKey, startsAt.Format(time.RFC3339))
+	}
+}
+
+// clinicVerifyLitterReasons is the exact set of .schedule.reason values a
+// live-stack sweep found on ad hoc verify-*.go / PO-discovery appointments
+// (verticals.md "5 also carry agent-verify reasons") — an allowlist rather
+// than a substring marker like isVerifyLitterName's, because these five don't
+// share one naming convention ("PO site-projection probe" contains neither
+// "Verify" nor "Discovery").
+var clinicVerifyLitterReasons = map[string]bool{
+	"staff-worlds F3 workplace-anchor vector": true,
+	"inc2a live verify":                       true,
+	"PO discovery self-book":                  true,
+	"PO site-projection probe":                true,
+}
+
+// reapClinicVerifyLitterAppointments tombstones every live appointment whose
+// visit reason matches clinicVerifyLitterReasons. TombstoneAppointment
+// requires the appointment's own patient/provider (to release their held
+// slot-claim cells), read off its forPatient/withProvider links — mirroring
+// findSessionStudio's link-scan shape below.
+func reapClinicVerifyLitterAppointments(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.appointment.")
+	must(err, "list vtx.appointment. keys")
+	for _, key := range keys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) {
+			continue
+		}
+		reason, ok := readAspectReason(ctx, conn, key+".schedule")
+		if !ok || !clinicVerifyLitterReasons[reason] {
+			continue
+		}
+		patientKey, providerKey, found := findAppointmentPatientProvider(ctx, conn, key)
+		if !found {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneAppointment", "appointment",
+			map[string]any{"appointmentKey": key, "patient": patientKey, "provider": providerKey},
+			&processor.ContextHint{Reads: []string{key, patientKey, providerKey}})
+		fmt.Printf("==> reaped verify-litter appointment: %s (%s)\n", key, reason)
+	}
+}
+
+// readAspectReason reads a {isDeleted, data:{reason}} aspect and returns its
+// reason when the aspect is alive — the appointmentSchedule shape's sibling
+// to readAspectName's {data:{name}} shape below.
+func readAspectReason(ctx context.Context, conn *substrate.Conn, aspectKey string) (string, bool) {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, aspectKey)
+	if err != nil {
+		return "", false
+	}
+	var aspect struct {
+		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			Reason string `json:"reason"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+		return "", false
+	}
+	return aspect.Data.Reason, true
+}
+
+// findAppointmentPatientProvider resolves an appointment's live forPatient /
+// withProvider link targets, mirroring findSessionStudio's atStudio scan
+// below (Contract #1 §1.1: the appointment is the later-arriving source).
+func findAppointmentPatientProvider(ctx context.Context, conn *substrate.Conn, apptKey string) (patientKey, providerKey string, found bool) {
+	patientPrefix := "lnk." + strings.TrimPrefix(apptKey, "vtx.") + ".forPatient.patient."
+	patientKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, patientPrefix)
+	must(err, "list "+patientPrefix+" keys")
+	for _, k := range patientKeys {
+		if alive(ctx, conn, k) {
+			patientKey = "vtx.patient." + strings.TrimPrefix(k, patientPrefix)
+			break
+		}
+	}
+	providerPrefix := "lnk." + strings.TrimPrefix(apptKey, "vtx.") + ".withProvider.provider."
+	providerKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, providerPrefix)
+	must(err, "list "+providerPrefix+" keys")
+	for _, k := range providerKeys {
+		if alive(ctx, conn, k) {
+			providerKey = "vtx.provider." + strings.TrimPrefix(k, providerPrefix)
+			break
+		}
+	}
+	return patientKey, providerKey, patientKey != "" && providerKey != ""
 }
 
 // reapNonCanonicalPatients tombstones every live vtx.patient.* not in keep
