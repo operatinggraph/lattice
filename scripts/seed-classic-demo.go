@@ -78,7 +78,7 @@ const (
 
 	// rileyPatientID / riversideBuildingID are seed-showcase.go's own pinned
 	// ids (transcribed, not imported — each seed script is a standalone `go
-	// run` file), needed here only as the OTHER entries in
+	// run` file). rileyPatientID is needed only as the OTHER entry in
 	// reapNonCanonicalPatients'/reapNonCanonicalSites' keep-allowlists: the
 	// live clinic roster/site directory (verticals.md "the patient-facing
 	// site picker offers a verify artifact as a clinic") has accrued
@@ -88,6 +88,9 @@ const (
 	// so reaping by name would miss rows a naming sweep can't predict.
 	// Reaping by allowlist instead only requires knowing every checked-in
 	// script's canonical id, which is already this file's own convention.
+	// riversideBuildingID doubles as that allowlist entry and as the parent
+	// this seed's own unit wires containedIn into (below), so leases on it
+	// are covered by any front-desk staffer whose worksAt anchors there.
 	rileyPatientID      = "w5sDPrw4eraPfUHk96wo"
 	riversideBuildingID = "A9jnKK2bGwZNrfHHkLme"
 )
@@ -117,6 +120,19 @@ func main() {
 				"presentation": map[string]any{"name": "Unit 1", "icon": "door"}}, nil)
 	}
 	fmt.Printf("==> unit:            %s\n", unitKey)
+
+	// Best-effort: wires the unit into seed-showcase.go's Riverside Building
+	// if that world has already been seeded, so a front-desk staffer whose
+	// worksAt anchor sits at the building (cafe-domain's coveringLocations
+	// walks containedIn) covers this unit's leases too. A standalone run of
+	// this seed (no seed-showcase) leaves the unit unwired, same as today.
+	riversideBuildingKey := "vtx.building." + riversideBuildingID
+	if alive(ctx, conn, riversideBuildingKey) {
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
+			map[string]any{"child": unitKey, "parent": riversideBuildingKey},
+			&processor.ContextHint{Reads: []string{unitKey, riversideBuildingKey}})
+		fmt.Println("==> wired:           unit containedIn " + riversideBuildingKey)
+	}
 
 	if !alive(ctx, conn, unitKey+".address") {
 		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
