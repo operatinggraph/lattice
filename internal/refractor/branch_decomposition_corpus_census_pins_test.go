@@ -38,7 +38,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"clinicPatientAccounts":             {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicPatientReadGrants":           {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicPatients":                    {"g0/o0!no-aggregating-item", 0, 0},
-	"clinicPatientsRead":                {"g2/o2[a,b,pr] g0/o0!no-aggregating-item", 1, 2},
+	"clinicPatientsRead":                {"g2/o4[a,b,b2,pr] g0/o0!no-aggregating-item", 1, 2},
 	"clinicProviderReadGrants":          {"g0/o0!no-aggregating-item", 0, 0},
 	"clinicProviders":                   {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicSiteBackfill":                {"g1/o1!no-aggregating-item", 0, 1},
