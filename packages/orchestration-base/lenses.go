@@ -79,6 +79,22 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			CanonicalName:  "staleAssignedTasks",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           staleAssignedTasksSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "task",
+				OutputKeyPattern: "staleAssignedTasks.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_completion", "entityKey", "assignee", "expiresAt", "freshUntil", "maxretries_completion"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
 			CanonicalName:  "orphanedTaskGrants",
 			Class:          "meta.lens",
 			Adapter:        "nats-kv",
@@ -208,6 +224,34 @@ RETURN
   %d AS maxretries_claim
 `, maxClaimRetries)
 
+// staleAssignedTasksSpec is unroutedTasksSpec's mirror for the OTHER half of
+// task routing: a direct assignment (`-[:assignedTo]->`, not `queuedFor`)
+// past its own expiresAt. unroutedTasksSpec's required match structurally
+// excludes this case (a direct-assigned task has no queuedFor link), and
+// nothing else surfaces it — a directly assigned task has no queue to fall
+// back into, so there is no FR29-equivalent auto-recovery, only an operator
+// to notify (myTasksSpec, lenses.go above, deliberately keeps the row
+// visible to the assignee too — this target is the OPERATOR-facing half,
+// not a substitute for it). Same surface-only, no-remediation posture as
+// unroutedTasks (Contract #10 §10.8): an open task the assignee has not
+// completed past its deadline is flagged, not auto-cancelled — CompleteTask
+// stays legal and still the assignee's to call at any time (scope=self,
+// permissions.go, independent of expiresAt).
+var staleAssignedTasksSpec = fmt.Sprintf(`
+MATCH (t:task {key: $actorKey})-[:assignedTo]->(assignee:identity)
+WHERE t.data.status = 'open'
+RETURN
+  t.key AS actorKey,
+  t.key AS entityKey,
+  nanoIdFromKey(t.key) AS entityId,
+  assignee.key AS assignee,
+  t.data.expiresAt AS expiresAt,
+  ($now > t.data.expiresAt) AS missing_completion,
+  ($now > t.data.expiresAt) AS violating,
+  (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil,
+  %d AS maxretries_completion
+`, maxCompletionRetries)
+
 // orphanedTaskGrantsSpec is the convergence target for a task whose granted
 // operation died out from under it: `forOperation` is REQUIRED at CreateTask
 // (ddls.go — "required":["forOperation","scopedTo","expiresAt"]), so an open
@@ -279,14 +323,13 @@ const MyTasksBucket = "my-tasks"
 // assignee's inbox is a "what am I on the hook for" view, and a directly
 // assigned task with no queuedFor link has no FR29 unroutedTasks backstop
 // (that convergence target's own required -[:queuedFor]-> match never fires
-// on one) and no other reap/escalation path — the task stays 'open'
-// indefinitely regardless of expiresAt. Excluding it here would make it
-// invisible while still blocking MergeIdentity (`identity_has_open_tasks`)
-// and still completable via CompleteTask's scope=self grant, which is worse
-// than showing it with a lapsed grant. See backlog/verticals.md for the
-// still-open follow-up (an assignedTo-side reap/escalation mechanism,
-// mirroring unroutedTasksSpec for the queued case) this lens does not
-// attempt to solve.
+// on one) — the task stays 'open' indefinitely regardless of expiresAt.
+// Excluding it here would make it invisible to its own assignee while still
+// blocking MergeIdentity (`identity_has_open_tasks`) and still completable
+// via CompleteTask's scope=self grant, which is worse than showing it with a
+// lapsed grant. staleAssignedTasksSpec below is the OPERATOR-facing half —
+// it surfaces the same stuck task as a Health-KV issue — not a substitute
+// for keeping it in the assignee's own inbox.
 //
 // operationName reads the op meta-vertex's root `operationType`, the field every
 // op DDL carries (Contract #10 §10.1: "UI finds the bound op by walking

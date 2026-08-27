@@ -1,5 +1,5 @@
 name: orchestration-base
-version: 0.7.12
+version: 0.7.13
 description: |
   Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability,
   FR28 role-queue + fallback: assignee-or-queue routing gated on the
@@ -7,10 +7,11 @@ description: |
   the package-owned capabilityEphemeral/myTasks lenses that re-source FR56
   ephemeral task grants + the task inbox out of the bootstrap god-cypher,
   including the FR28 role-queue fan-out (Contract #6 §6.6 / Contract #10
-  §10.1 / §10.7), plus the FR29 unroutedTasks Weaver convergence target
-  (surface-only — an unclaimed role-queued task past its own expiresAt rolls
-  a Health-KV issue, no remediation dispatched), plus the orphanedTaskGrants
-  Weaver convergence target (directOp — CancelTask on an open task whose
+  §10.1 / §10.7), plus the FR29 unroutedTasks + staleAssignedTasks Weaver
+  convergence targets (surface-only — an unclaimed role-queued task, or an
+  unfinished directly assigned one, past its own expiresAt rolls a Health-KV
+  issue, no remediation dispatched), plus the orphanedTaskGrants Weaver
+  convergence target (directOp — CancelTask on an open task whose
   forOperation meta was tombstoned out from under it), plus the Chronicler's
   loomFlowHistory event-sourced lens — a durable read model of every Loom
   flow's lifecycle (status/reason/timestamps), projected from
@@ -41,6 +42,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: staleAssignedTasks
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
     - canonicalName: orphanedTaskGrants
       adapter: nats-kv
       bucket: weaver-targets
@@ -51,6 +56,8 @@ declares:
   weaverTargets:
     - targetId: unroutedTasks
       lensRef: unroutedTasks
+    - targetId: staleAssignedTasks
+      lensRef: staleAssignedTasks
     - targetId: orphanedTaskGrants
       lensRef: orphanedTaskGrants
   permissions:

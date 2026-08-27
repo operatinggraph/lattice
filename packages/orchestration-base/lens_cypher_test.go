@@ -282,3 +282,80 @@ func TestCapabilityEphemeral_OpenAndLive_StillProjected(t *testing.T) {
 	}
 	require.True(t, found, "an open, not-yet-expired direct assignment must still grant")
 }
+
+// projectStaleAssignedAt runs staleAssignedTasksSpec (task-anchored, like
+// unroutedTasksSpec) with an INJECTED $now, mirroring projectAt above.
+func (f *unrFixture) projectStaleAssignedAt(t *testing.T, taskName, now string) []ruleengine.ProjectionResult {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(staleAssignedTasksSpec)
+	require.NoError(t, err, "staleAssignedTasks cypher must parse on the full engine")
+	taskKey := "vtx.task." + f.ids[taskName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    taskKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+func TestStaleAssignedTasks_AssignedNotYetExpired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-07-01T12:00:00Z"})
+	f.vtx(t, "bob", "identity", nil)
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	rows := f.projectStaleAssignedAt(t, "task1", unrNow)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_completion"], "expiresAt is still in the future — not stale")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, "2026-07-01T12:00:00Z", v["freshUntil"])
+	require.Equal(t, "vtx.identity."+f.ids["bob"], v["assignee"])
+}
+
+func TestStaleAssignedTasks_AssignedExpired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-06-29T12:00:00Z"})
+	f.vtx(t, "bob", "identity", nil)
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	v := f.projectStaleAssignedAt(t, "task1", unrNow)[0].Values
+	require.Equal(t, true, v["missing_completion"], "expiresAt passed while still open and unfinished")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"])
+	requireIntColumn(t, v, "maxretries_completion", maxCompletionRetries)
+}
+
+func TestStaleAssignedTasks_QueuedNeverMatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-06-29T12:00:00Z"})
+	f.vtx(t, "queueRole", "role", nil)
+	f.edge(t, "queuedFor", "task1", "queueRole")
+
+	rows := f.projectStaleAssignedAt(t, "task1", unrNow)
+	require.Empty(t, rows, "a role-queued task carries no assignedTo link, so the required MATCH never fires — unroutedTasksSpec covers this case")
+}
+
+func TestStaleAssignedTasks_CompletedNeverMatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "task1", "task", map[string]any{"status": "complete", "expiresAt": "2026-06-29T12:00:00Z"})
+	f.vtx(t, "bob", "identity", nil)
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	rows := f.projectStaleAssignedAt(t, "task1", unrNow)
+	require.Empty(t, rows, "a completed task is excluded by the status='open' gate")
+}

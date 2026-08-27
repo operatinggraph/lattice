@@ -10,12 +10,13 @@ package orchestrationbase
 // gap closes, so a later re-open starts a fresh budget.
 //
 // orphanedTaskGrants dispatches directOp(CancelTask) against maxretries_operation.
-// unroutedTasks' one gap is Action:"surface" (never dispatched, so its
-// weaver-state dispatch-count never advances past zero), but maxretries_claim
-// is declared here too — every §10.2 target that carries a gap column is
-// capped uniformly, ready the moment any target's playbook action changes to
-// a real dispatch.
+// unroutedTasks and staleAssignedTasks are both Action:"surface" (never
+// dispatched, so their weaver-state dispatch-count never advances past
+// zero), but maxretries_claim / maxretries_completion are declared on them
+// too — every §10.2 target that carries a gap column is capped uniformly,
+// ready the moment any target's playbook action changes to a real dispatch.
 const (
-	maxOperationRetries = 3
-	maxClaimRetries     = 3
+	maxOperationRetries  = 3
+	maxClaimRetries      = 3
+	maxCompletionRetries = 3
 )
