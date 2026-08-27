@@ -226,6 +226,8 @@ func TestLeaseApplicationsRead_ProjectsGapState(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.edge(t, "applicationFor", "app", "alice")
 
 	rows := f.projectRead(t)
@@ -375,6 +377,8 @@ func TestLeaseApplicationsRead_EscalatedProjectsPerGap(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.seedAugurEscalation(t, "prop1", "app", "missing_bgcheck")

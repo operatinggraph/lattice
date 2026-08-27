@@ -128,6 +128,8 @@ func TestLeaseApplicationComplete_ProjectsOneRowPerAnchor(t *testing.T) {
 	f := newLensFixture(t)
 	appKey := f.vtx(t, "app", "leaseapp")
 	idKey := f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	// TWO service instances providedTo alice (one bgcheck, one payment), no
 	// outcome yet — the multi-instance fan-out case.
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
@@ -164,6 +166,8 @@ func TestLeaseApplicationComplete_OutcomeFlipsGap_DirectWrite(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"}) // onboarded
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	// A FRESH completed bgcheck: validUntil far in the future (time-independent).
@@ -854,16 +858,23 @@ func TestLeaseApplicationComplete_NoUnit_NullUnitColumns(t *testing.T) {
 }
 
 // bgFreshnessFixture builds a one-applicant fixture (onboarded, signed,
-// landlord-approved, no unit) with a completed payment (ever-completed, no
-// validUntil) and a completed bgcheck whose validUntil is the caller's choice — the
-// multi-instance fan-out the freshness tests share. All gaps but bgcheck are closed
-// and the landlord has approved (so missing_decision is closed), so missing_bgcheck
-// alone decides `violating`. There is no unit, so missing_listingLeased never opens.
+// landlord-approved, a live MANAGED unit with no listing) with a completed
+// payment (ever-completed, no validUntil) and a completed bgcheck whose
+// validUntil is the caller's choice — the multi-instance fan-out the
+// freshness tests share. All gaps but bgcheck are closed and the landlord has
+// approved (so missing_decision is closed), so missing_bgcheck alone decides
+// `violating`. The unit carries no .listing aspect, so missing_listingLeased
+// never opens; the manages link keeps missing_manager closed (a landlord who
+// already approved this application manages the unit it applies to).
 // Returns the app name for projection.
 func bgFreshnessFixture(t *testing.T, f *lensFixture, bgValidUntil string) string {
 	t.Helper()
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
+	f.vtx(t, "landlord1", "identity")
+	f.edge(t, "manages", "landlord1", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	f.aspect(t, "app", "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
@@ -1072,6 +1083,8 @@ func TestLeaseApplicationComplete_NoCompletedBgcheck(t *testing.T) {
 	const now = "2026-06-18T00:00:00Z"
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
@@ -1106,6 +1119,8 @@ func TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop(t *testing.T) 
 	const now = "2026-06-18T00:00:00Z"
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	// Only a COMPLETED payment instance providedTo alice — NO bgcheck instance.
 	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
@@ -1225,6 +1240,8 @@ func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.edge(t, "applicationFor", "app", "alice")
 
 	rows := f.project(t, "app")
@@ -1247,6 +1264,8 @@ func inflightBgFixture(t *testing.T, f *lensFixture, withDispatch bool, outcomeS
 	t.Helper()
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
@@ -1349,6 +1368,8 @@ func humanGapFixture(t *testing.T, f *lensFixture) string {
 	t.Helper()
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	f.edge(t, "applicationFor", "app", "alice")
 	return "app"
 }

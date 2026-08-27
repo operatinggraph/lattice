@@ -310,11 +310,24 @@ func Lenses() []pkgmgr.LensSpec {
 //   - missing_signature — the application has no .signature aspect. SignLease
 //     writes it, flipping this false.
 //
-// All four applicant gaps ALSO require ((unitStatus <> 'leased') OR
-// (landlordDecision = 'approved')): once this application's unit has leased TO
-// SOMEONE ELSE (unitStatus = 'leased' AND this row's own landlordDecision is
-// NOT 'approved'), none of the four remediations is still wanted. Without the
-// term a losing rival's still-open gaps kept re-dispatching
+// All four applicant gaps ALSO require (unitKey <> null) AND ((unitStatus <>
+// 'leased') OR (landlordDecision = 'approved')). A null unitKey means the
+// appliesToUnit target itself is tombstoned (the OPTIONAL MATCH drops it, so
+// unitKey / unitStatus both project null): there is no unit left to lease, so
+// none of the four remediations (RecordIdentityPII, a bgcheck, a payment,
+// SignLease) is still wanted — the application is terminal-not-violating, the
+// same shape as a landlord decline. This mirrors missing_listingLeased /
+// missing_manager's own (unitKey <> null) gate below. A null unitStatus WITH a
+// non-null unitKey is the distinct, still-open case — a live unit that has no
+// .listing aspect yet — and `unitStatus <> 'leased'` evaluates true for it
+// (full engine's `<>` — values.go equalsAny/evalBinary: nil <> "leased" is
+// true), keeping the gaps reachable: the applicant may still end up leasing
+// that unit once a listing exists.
+//
+// Independently, once this application's unit HAS leased TO SOMEONE ELSE
+// (unitStatus = 'leased' AND this row's own landlordDecision is NOT
+// 'approved'), none of the four remediations is still wanted either. Without
+// the term a losing rival's still-open gaps kept re-dispatching
 // RecordIdentityPII/SignLease (userTasks asking a real person for their SSN and
 // a signature) against a unit they can no longer get, indefinitely, because
 // nothing in the applicant's own journey ever closes those gaps once someone
@@ -329,9 +342,6 @@ func Lenses() []pkgmgr.LensSpec {
 // which drives a full approve→lease→lapse→reopen cycle). A rival's own
 // landlordDecision is null or 'declined', never 'approved' for THIS row, so the
 // escape hatch never re-opens a rival's gaps once their unit is gone.
-// `unitStatus <> 'leased'` evaluates true (gap stays reachable) for both a null
-// unitStatus (no unit / no listing yet) and any non-'leased' status (full
-// engine's `<>` — values.go equalsAny/evalBinary: nil <> "leased" is true).
 //
 // violating is the explicit OR of the four applicant gaps PLUS missing_decision
 // PLUS missing_listingLeased (Contract #10 §10.2: violating is lens-projected, not
@@ -773,10 +783,10 @@ RETURN
   signedAt,
   landlordDecision,
   declineReason,
-  ((ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))        AS missing_onboarding,
-  ((ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))  AS missing_bgcheck,
-  ((payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_payment,
-  ((signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_signature,
+  ((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))        AS missing_onboarding,
+  ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))  AS missing_bgcheck,
+  ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_payment,
+  ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_signature,
   (bgInflight > 0)       AS inflight_bgcheck,
   (payInflight > 0)      AS inflight_payment,
   (docGenInflight > 0)   AS inflight_docGen,
@@ -802,7 +812,7 @@ RETURN
   ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) AS missing_manager,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  (((ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
+  (((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
@@ -947,10 +957,10 @@ RETURN
   docStoreName                   AS doc_store_name,
   docFilename                    AS doc_filename,
   docContentType                 AS doc_content_type,
-  ((ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                  AS missing_onboarding,
-  ((ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_bgcheck,
-  ((payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_payment,
-  ((signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_signature,
+  ((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                  AS missing_onboarding,
+  ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_bgcheck,
+  ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_payment,
+  ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_signature,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) AS missing_decision,
   (bgInflight > 0)                                  AS inflight_bgcheck,
   (payInflight > 0)                                 AS inflight_payment,

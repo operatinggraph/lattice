@@ -206,6 +206,8 @@ func TestLeaseApplicationComplete_DocGenIsolatedFromIdentityFamilies(t *testing.
 	}
 	f := newLensFixture(t)
 	signedApp(t, f)
+	f.vtx(t, "unit1", "unit")
+	f.edge(t, "appliesToUnit", "app", "unit1")
 	// A fresh completed bgcheck providedTo the APPLICANT.
 	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
