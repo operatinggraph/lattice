@@ -134,7 +134,20 @@ set. State keys demote from enumeration source to memory. What the design fire s
 for a markless population an order of magnitude larger than today's (the `SweepOrphanWarmup` gate
 is the precedent), soft-tombstone filtering on the prefix list, and a live check of the four
 candidate reasons lane 1 missed the 26 entities originally (unregistered-at-delivery, `__control`
-disabled, non-bool column → RowDataError, `planGap` Nak cycle). Board: one row, ★★★ M, 📐 kept
+disabled, non-bool column → RowDataError, `planGap` Nak cycle).
+
+**A third symptom of the same root, verified post-triage (folded from an agent chip):** the
+contraction monitor's doc comment (`contraction.go:20-26`) claims a restart re-derives its
+violating-row counts from lane-1's `DeliverLastPerSubject` replay — false for a warm restart:
+lane-1 durables have stable names and `Stop()` never deletes them, and the same package's own
+`registry.go:27-34` documents the JetStream behavior ("CreateOrUpdateConsumer against an EXISTING
+durable resumes from its persisted ack floor regardless of the DeliverPolicy requested") — it made
+a per-boot nonce load-bearing on the registry source for exactly this reason, a nonce lane-1 does
+not have. So the in-memory counts reset on restart and nothing replays them: the trajectory metric
+reads ~0 after every restart for precisely the standing-violation population it exists to expose.
+Observability-only. The fix belongs to this fire, not a point patch: either the new row leg
+re-derives the counts, or lane-1 durables get the nonce treatment — the latter makes every boot
+re-evaluate every row, which is a dispatch-pacing decision this design already owns. Board: one row, ★★★ M, 📐 kept
 (`no-pattern: sweep work derived from declared gap columns × projected rows`). The independent
 `GapActionSpec.OptionalReads` row stays its own S (all downstream plumbing already ships; five
 touch points: `definition.go` field, `build.go` emit, `registry.go` parse, `strategist.go` resolve,
