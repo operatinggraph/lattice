@@ -154,10 +154,13 @@ func Lenses() []pkgmgr.LensSpec {
 			// envelope); `filename` is read off the LINK, not the vertex,
 			// for the same reason objectAttachments documents (one
 			// object, two slots, one vertex — the filename is a fact
-			// about the edge). `link_name` is exposed as its own column
-			// because it is DetachObject's required `linkName` argument,
-			// doubling as an IntoKey component (the composite unique key
-			// for a co-slotted object).
+			// about the edge). `link_name` is DetachObject's required
+			// `linkName` argument — it is an IntoKey component only (the
+			// composite unique key for a co-slotted object), never also a
+			// body column: BuildProtectedTableDDL already emits every
+			// IntoKey entry as a real, selectable table column (rls.go),
+			// so redeclaring it under Columns is the exact duplicate the
+			// RLS emitter rejects ("body column ... duplicates a key column").
 			CanonicalName:  "objectIdentityAttachmentsRead",
 			Class:          "meta.lens",
 			Adapter:        "postgres",
@@ -171,7 +174,6 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "entity_key", Type: "text"},
 				{Name: "oid", Type: "text"},
 				{Name: "owner_key", Type: "text"},
-				{Name: "link_name", Type: "text"},
 				{Name: "filename", Type: "text"},
 				{Name: "store_name", Type: "text"},
 				{Name: "content_type", Type: "text"},
