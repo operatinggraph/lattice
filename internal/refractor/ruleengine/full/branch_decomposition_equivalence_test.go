@@ -561,6 +561,29 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 		}
 	}
 
+	// An appointment whose provider practises NOWHERE, booked at a building
+	// nothing else in the corpus reaches. Every appointment above hangs off a
+	// provider with practicesAt links, so the roster's atSite arm would bind
+	// null on every row the corpus draws and its half of the deferred subtree
+	// would fold empty in BOTH execution orders — a differential comparing two
+	// empty folds, which is the reading this file's own evidence guards refuse
+	// elsewhere. This row makes that arm carry a value, and retiredSite being
+	// unreachable any other way is what makes the value observable: were the arm
+	// dropped, authz_anchors would lose an entry rather than stay identical.
+	// (A live provider at zero sites is the same null-`b` shape a tombstoned one
+	// produces — Contract #1 filters the dead vertex out of the walk — and is
+	// the shape RemoveProviderSite leaves behind, so it needs no tombstone to
+	// reach the branch.)
+	retired := name("retired")
+	putVertex(t, reg, coreKV, retired, "provider", nil)
+	retiredSite := name("retiredsite")
+	putVertex(t, reg, coreKV, retiredSite, "building", nil)
+	retiredVisit := name("retiredvisit")
+	putVertex(t, reg, coreKV, retiredVisit, "appointment", nil)
+	putEdge(t, reg, adjKV, "forPatient", retiredVisit, patient)
+	putEdge(t, reg, adjKV, "withProvider", retiredVisit, retired)
+	putEdge(t, reg, adjKV, "atSite", retiredVisit, retiredSite)
+
 	// objectAttachments anchors on ONE object, so the corpus always carries one
 	// with an owner link whatever the random shape drew.
 	obj := name("attachment")

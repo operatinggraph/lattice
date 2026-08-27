@@ -13,6 +13,8 @@ package clinicdomain
 // cypher's anchor derivation is proven here.
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,6 +57,26 @@ func (f *lensFixture) seedAppointment(t *testing.T, apptName, patientName, provi
 	f.aspect(t, apptName, "documentation", "appointmentDocumentation", map[string]any{"documentedAt": "2026-07-01T15:35:00Z", "followUpRequested": true, "followUpDate": "2026-08-01"})
 	f.edge(t, "forPatient", apptName, patientName)
 	f.edge(t, "withProvider", apptName, providerName)
+}
+
+// tombstoneVertex soft-deletes a seeded vertex by rewriting its body with
+// isDeleted: true and leaving every link it carries live — the exact shape
+// TombstoneProvider leaves behind, which cascades to no practicesAt or
+// withProvider link (ddls.go's sites_for_provider documents that non-cascade as
+// the reason it gates on the provider VERTEX). Contract #1 filters such a vertex
+// out of every graph walk (internal/refractor/ruleengine/full/executor.go's
+// fetchNode), so a lens that reached a building THROUGH it now reaches nothing —
+// which is what makes the atSite arm of the anchor expression load-bearing.
+func (f *lensFixture) tombstoneVertex(t *testing.T, name string) {
+	t.Helper()
+	id := f.ids[name]
+	key := "vtx." + f.types[id] + "." + id
+	raw, err := json.Marshal(map[string]any{
+		"key": key, "class": f.types[id], "isDeleted": true, "data": map[string]any{},
+	})
+	require.NoError(t, err)
+	_, err = f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
 }
 
 // TestClinicAppointmentsRead_ProjectsPatientSelfAnchor — the protected read model
@@ -170,6 +192,169 @@ func TestClinicAppointmentsRead_NoProviderLinkStillProjects(t *testing.T) {
 	require.Nil(t, v["provider_key"], "no withProvider link → null provider_key")
 	require.Nil(t, v["provider_name"], "no withProvider link → null provider_name")
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]))
+}
+
+// seedSitedAppointment mints an appointment for a patient + provider, gives the
+// provider its practicesAt sites, and books the appointment atSite the FIRST of
+// them — the only shape the write path can produce, since CreateAppointment /
+// SetAppointmentSite / BackfillAppointmentSite all validate the site is one the
+// provider practicesAt before writing the atSite link.
+func (f *lensFixture) seedSitedAppointment(t *testing.T, apptName, patientName, providerName string, siteNames ...string) {
+	t.Helper()
+	f.seedAppointment(t, apptName, patientName, providerName)
+	for _, s := range siteNames {
+		f.vtx(t, s, "building")
+		f.edge(t, "practicesAt", providerName, s)
+	}
+	if len(siteNames) > 0 {
+		f.edge(t, "atSite", apptName, siteNames[0])
+	}
+}
+
+// TestClinicAppointmentsRead_LiveProviderAnchorsOnPracticesAtWithoutDuplicate —
+// the healthy path is untouched by the atSite arm. A live provider practising at
+// two buildings anchors the row on BOTH, and the atSite building — necessarily
+// one of those two, since the write path only ever records a site the provider
+// practicesAt — appears exactly ONCE, not twice: the CASE selects one arm or the
+// other, never unions them. Without this, every appointment in a healthy corpus
+// would carry a duplicate token that an RLS `unnest` pays for on every read.
+func TestClinicAppointmentsRead_LiveProviderAnchorsOnPracticesAtWithoutDuplicate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedSitedAppointment(t, "appt", "alice", "drsam", "riverside", "downtown")
+
+	rows := f.project(t, clinicAppointmentsReadSpec)
+	require.Len(t, rows, 1)
+	anchors := anchorStrings(t, rows[0].Values["authz_anchors"])
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
+		"a live provider anchors the row on every building it practises at")
+	require.Len(t, anchors, 3, "the atSite building must not be counted a second time alongside the practicesAt walk")
+}
+
+// TestClinicAppointmentsRead_TombstonedProviderFallsBackToAtSiteAnchor — the
+// headline of the atSite arm. TombstoneProvider cascades to neither the
+// withProvider nor the practicesAt link, but Contract #1 filters the dead
+// provider out of every walk, so the practicesAt comprehension yields [] and the
+// row would keep only its patient self-anchor — dropping a still-open
+// appointment out of every front-desk world, readable then only by the reserved
+// WildcardAnchor holder. The appointment's own atSite link carries it instead,
+// exactly as ddls.go's appointment_sites carries the matching WRITE.
+//
+// The provider practises at TWO buildings and the appointment is booked at one
+// of them, so the assertion cannot pass by accident: were the practicesAt walk
+// still reaching the tombstoned provider, downtown would appear too.
+func TestClinicAppointmentsRead_TombstonedProviderFallsBackToAtSiteAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedSitedAppointment(t, "appt", "alice", "drsam", "riverside", "downtown")
+	f.tombstoneVertex(t, "drsam")
+
+	rows := f.project(t, clinicAppointmentsReadSpec)
+	require.Len(t, rows, 1, "a tombstoned provider costs the row visibility, never existence")
+	v := rows[0].Values
+	require.Nil(t, v["provider_key"], "the tombstoned provider is filtered out of the walk, so its display columns are null")
+	require.Equal(t, "vtx.building."+f.ids["riverside"], v["site_key"], "the appointment's own site is unaffected by the provider's status")
+
+	anchors := anchorStrings(t, v["authz_anchors"])
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]}, anchors,
+		"the appointment's own atSite building must anchor the row once the provider's practicesAt walk yields nothing")
+	require.NotContains(t, anchors, f.ids["downtown"],
+		"only the appointment's OWN site falls back — a tombstoned provider must not keep conferring every building it practised at")
+}
+
+// TestClinicAppointmentsRead_UnassignedLiveProviderFallsBackToAtSiteAnchor —
+// the tombstone is not the only way the practicesAt walk empties out. A LIVE
+// provider whose sites were all withdrawn by RemoveProviderSite reaches no
+// building either, and the CASE gates on the WALK rather than on the provider's
+// liveness precisely so this shape falls back too — the same condition
+// appointment_sites tests before falling back. The site the appointment was
+// booked at was a legitimate one when CreateAppointment validated it, and
+// withdrawing the provider from it afterwards does not move where the visit
+// happens.
+//
+// This is a deliberate behaviour change beyond the tombstone case, pinned here
+// so it stands as a decision rather than a side effect: before, such a row
+// anchored on its patient alone.
+func TestClinicAppointmentsRead_UnassignedLiveProviderFallsBackToAtSiteAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.vtx(t, "riverside", "building")
+	// The provider is alive and its profile still projects; it simply practises
+	// nowhere — no practicesAt link at all, which is what RemoveProviderSite
+	// leaves behind once the last one is withdrawn.
+	f.edge(t, "atSite", "appt", "riverside")
+
+	rows := f.project(t, clinicAppointmentsReadSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.provider."+f.ids["drsam"], v["provider_key"], "the provider is LIVE — this is not the tombstone vector")
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]}, anchorStrings(t, v["authz_anchors"]),
+		"a live provider that practises nowhere empties the walk exactly as a tombstoned one does, so the atSite arm carries the row")
+}
+
+// TestClinicAppointmentsRead_LiveProviderAtSiteOutsidePracticesAtIsNotUnioned —
+// the security-relevant non-regression. The anchor is a FALLBACK, never a union:
+// while the provider's practicesAt walk yields anything, the appointment's own
+// atSite building must NOT be folded in on top of it. The shape is reachable —
+// RemoveProviderSite can withdraw the provider from the site an appointment was
+// booked at while leaving it assigned elsewhere — and a union would hand staff
+// at that withdrawn building a read the write path (whose appointment_sites
+// returns the provider's CURRENT sites, never the stale atSite) would refuse.
+func TestClinicAppointmentsRead_LiveProviderAtSiteOutsidePracticesAtIsNotUnioned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.vtx(t, "riverside", "building") // where the visit was booked
+	f.vtx(t, "downtown", "building")  // where the provider practises now
+	f.edge(t, "atSite", "appt", "riverside")
+	f.edge(t, "practicesAt", "drsam", "downtown")
+
+	rows := f.project(t, clinicAppointmentsReadSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.building."+f.ids["riverside"], v["site_key"], "the display column still reports where the visit is booked")
+
+	anchors := anchorStrings(t, v["authz_anchors"])
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["downtown"]}, anchors,
+		"while the practicesAt walk yields a building, that arm alone anchors the row")
+	require.NotContains(t, anchors, f.ids["riverside"],
+		"the atSite building must NOT be unioned in alongside a live practicesAt walk — "+
+			"appointment_sites returns the provider's CURRENT sites there, so a union would grant a read the write path denies")
+}
+
+// TestClinicAppointmentsRead_TombstonedProviderWithNoAtSiteKeepsSelfAnchorOnly —
+// the still-open residual, pinned so it is not mistaken for a regression. An
+// appointment behind a tombstoned provider AND carrying no atSite link has no
+// surviving path to any building, so it anchors on its patient alone: readable
+// by that patient and by the WildcardAnchor holder, by no front-desk world. It
+// still PROJECTS — a missing building costs a row its staff visibility, never
+// its existence, and never a null anchor element (both arms are comprehensions,
+// so the empty walk yields [] rather than the [null] ProtectedAdapter rejects).
+func TestClinicAppointmentsRead_TombstonedProviderWithNoAtSiteKeepsSelfAnchorOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.vtx(t, "riverside", "building")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+	f.tombstoneVertex(t, "drsam")
+
+	rows := f.project(t, clinicAppointmentsReadSpec)
+	require.Len(t, rows, 1, "existence is never conditional on a reachable building")
+	v := rows[0].Values
+	require.Nil(t, v["site_key"], "no atSite link — the fallback arm has nothing to offer")
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
+		"no live provider and no atSite leaves the patient self-anchor alone — the known residual, not a null element")
 }
 
 // TestProviderAppointmentsRead_ProjectsProviderSelfAnchor mirrors
@@ -424,6 +609,86 @@ func TestClinicPatientsRead_WorkplaceAnchorDedupesAcrossAppointments(t *testing.
 	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
 		"three appointments at riverside collapse to one anchor, but the distinct downtown building must still survive DISTINCT")
 	require.Len(t, anchors, 3, "authz_anchors must not grow by one entry per appointment, and must not collapse a genuinely distinct building")
+}
+
+// TestClinicPatientsRead_TombstonedProviderFallsBackToAtSiteAnchor — the roster
+// half of the atSite fallback, and the proof that it resolves PER APPOINTMENT
+// rather than per patient. Alice has two appointments: one through a live
+// provider at riverside, one through a since-tombstoned provider booked at
+// downtown. The live appointment must not suppress the dead one's site (a
+// patient-level "provider sites, else atSite" fallback would do exactly that,
+// since the provider arm is non-empty), so BOTH buildings anchor the roster row
+// and front desk at either one still sees Alice.
+//
+// The tombstoned provider also practises at a THIRD building it never saw Alice
+// at, which must NOT appear: a retired provider stops conferring the buildings
+// it practised at, and only the appointment's own recorded site survives it.
+func TestClinicPatientsRead_TombstonedProviderFallsBackToAtSiteAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+	f.vtx(t, "riverside", "building")
+	f.vtx(t, "downtown", "building")
+	f.vtx(t, "uptown", "building")
+
+	// Live provider, seen at riverside.
+	f.vtx(t, "appt1", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt1", "alice")
+	f.edge(t, "withProvider", "appt1", "drsam")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+	f.edge(t, "atSite", "appt1", "riverside")
+
+	// Retired provider, seen at downtown; it also practised at uptown.
+	f.vtx(t, "appt2", "appointment")
+	f.vtx(t, "drgone", "provider")
+	f.edge(t, "forPatient", "appt2", "alice")
+	f.edge(t, "withProvider", "appt2", "drgone")
+	f.edge(t, "practicesAt", "drgone", "downtown")
+	f.edge(t, "practicesAt", "drgone", "uptown")
+	f.edge(t, "atSite", "appt2", "downtown")
+	f.tombstoneVertex(t, "drgone")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "exactly one roster row per patient regardless of appointment count")
+
+	anchors := anchorStrings(t, rows[0].Values["authz_anchors"])
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"], f.ids["downtown"]}, anchors,
+		"a live appointment's provider building and a tombstoned appointment's own atSite building must BOTH anchor the roster row")
+	require.NotContains(t, anchors, f.ids["uptown"],
+		"a tombstoned provider must not keep conferring a building this patient was never seen at")
+	require.Len(t, anchors, 3,
+		"riverside is named by both the live provider's practicesAt walk and its appointment's atSite link — the single collect(DISTINCT) must fold that to one token")
+}
+
+// TestClinicPatientsRead_TombstonedProviderWithNoAtSiteKeepsSelfAnchorOnly — the
+// roster's half of the still-open residual, pinned so it is not mistaken for a
+// regression. A patient whose ONLY appointment is behind a tombstoned provider
+// with no atSite link has no surviving path to any building, so the roster row
+// anchors on the patient alone. It still projects: collect() drops nulls, so
+// buildingAnchors is [] and never the [null] element ProtectedAdapter rejects.
+func TestClinicPatientsRead_TombstonedProviderWithNoAtSiteKeepsSelfAnchorOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+	f.vtx(t, "riverside", "building")
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "drgone", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drgone")
+	f.edge(t, "practicesAt", "drgone", "riverside")
+	f.tombstoneVertex(t, "drgone")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "existence is never conditional on a reachable building")
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, rows[0].Values["authz_anchors"]),
+		"no live provider and no atSite leaves the patient self-anchor alone — the known residual, not a null element")
 }
 
 // TestClinicPatientReadGrants_SelfAnchorsEachPatient — the cap-read.clinic.patient

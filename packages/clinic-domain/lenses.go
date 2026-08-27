@@ -780,12 +780,11 @@ RETURN
 // added the identifiedBy contact columns). Same WHERE guard as
 // clinicPatientsSpec (only NAMED patients project). authz_anchors carries the
 // row's own patient NanoID plus the WORKPLACE token of every DISTINCT building
-// a provider practises at, for a provider this patient has an appointment
-// with — the same self-plus-workplace anchor concept clinicAppointmentsReadSpec
-// establishes with its own `[(pr)-[:practicesAt]->(b) | ...]` comprehension,
-// one hop further out (patient -> appointment -> provider -> building), though
-// this query folds that fan-out through WITH + collect(DISTINCT) rather than
-// projecting a comprehension directly (see below) — so a front-desk actor's
+// one of this patient's appointments is held at — the same self-plus-workplace
+// anchor concept clinicAppointmentsReadSpec establishes per appointment, one hop
+// further out (patient -> appointment -> {provider -> building | building}),
+// though this query folds that fan-out through WITH + collect(DISTINCT) rather
+// than projecting a comprehension directly (see below) — so a front-desk actor's
 // cap-read.staff grant (service-location's staffReadGrants, anchored on the
 // building it worksAt) now matches every patient whose care touches that
 // building, not only the reserved WildcardAnchor holder. Three kinds of actor
@@ -817,6 +816,29 @@ RETURN
 // authz_anchors grows by one entry per appointment forever (an RLS array
 // `unnest` on every staff roster read pays the cost of every duplicate).
 //
+// The appointment hop is bound by its own OPTIONAL MATCH so the two ways an
+// appointment names a building both hang off THAT appointment: the provider's
+// practicesAt sites, and the appointment's own atSite. coalesce picks per fanned
+// row — the provider site when that walk matched, the atSite building when it
+// did not — the order ddls.go's appointment_sites resolves for WRITE
+// confinement, evaluated per appointment rather than per patient (and carrying
+// the same one-way divergence clinicAppointmentsReadSpec's own comment records:
+// a decommissioned building drops out of this walk but not out of
+// sites_for_provider, so this side can only ever fall back where that side does
+// not). That
+// per-appointment granularity is the point: a patient with one appointment
+// through a live provider and another behind a tombstoned one keeps BOTH
+// buildings, where a patient-level fallback would let the live appointment
+// suppress the dead one's site. Contract #1 filters a tombstoned vertex out of
+// every walk, so a tombstoned provider yields no practicesAt row at all and the
+// atSite arm is what keeps that patient inside the front-desk world of the
+// building they are actually seen at; CreateAppointment / SetAppointmentSite /
+// BackfillAppointmentSite each validate atSite alive AND practicesAt-assigned to
+// the provider at write time, so it names a real site independent of the
+// provider's current status. One collect(DISTINCT) over the coalesced value —
+// not one per arm concatenated — is what makes the dedup hold ACROSS the two
+// ways of naming a building, not just within each.
+//
 // identifiedBy is OPTIONAL — a patient created before its contact was minted,
 // or one with no contact at all, has no linked identity, so identityKey /
 // emailEnv / phoneEnv all project null together (the Secure-Lens decryptor's
@@ -828,8 +850,10 @@ RETURN
 const clinicPatientsReadSpec = `MATCH (p:patient)
 WHERE p.demographics.data.registeredAt <> null
 OPTIONAL MATCH (p)-[:identifiedBy]->(id:identity)
-OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)
-WITH p, id, collect(DISTINCT nanoIdFromKey(b.key)) AS buildingAnchors
+OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)
+OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)
+OPTIONAL MATCH (a)-[:atSite]->(b2:building)
+WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) AS buildingAnchors
 RETURN
   nanoIdFromKey(p.key)         AS patient_id,
   p.key                        AS entity_key,
@@ -852,17 +876,44 @@ RETURN
 // migrated "My Appointments" view keeps full display parity.
 //
 // authz_anchors carries the patient's own NanoID plus the WORKPLACE token — the
-// building the appointment's provider practises at — so front-desk staff working
-// that building read the row through service-location's staffReadGrants
+// building the appointment is held at — so front-desk staff working that
+// building read the row through service-location's staffReadGrants
 // (facet-staff-worlds-design.md §3.5). Declaring a building token IS the
 // declaration that these rows are workplace-readable.
 //
-// The workplace half is a pattern COMPREHENSION, not a second array element, and
-// the difference is load-bearing: a walk that finds no building yields a NULL
+// The workplace half resolves the same edges ddls.go's appointment_sites
+// resolves for WRITE confinement, in the same order: the provider's practicesAt
+// sites when that walk yields any, and OTHERWISE the appointment's own atSite
+// building. The two are not identical, and the difference runs one way only —
+// this walk additionally drops a tombstoned BUILDING, which sites_for_provider
+// does not (it screens each practicesAt LINK's isDeleted, and the provider
+// vertex, but never the link's target), so a live provider whose sites have all
+// been decommissioned yields sites there and nothing here, and this side falls
+// back where that side does not. What the extra sites confer there is nothing:
+// worksAt_covers re-tests every location VERTEX before granting, precisely so a
+// dead one cannot "grant a write the reader would never show". So the fallback
+// can only widen who may SEE an appointment relative to who may act on it,
+// never the converse — a staffer entitled to act on an appointment is always
+// entitled to see it. The fallback is what carries an
+// appointment whose provider was later tombstoned (or unassigned from every
+// site, via RemoveProviderSite): Contract #1 filters a tombstoned vertex out of
+// every graph walk, so pr binds null and the practicesAt walk yields nothing —
+// with no fallback the row would keep only its patient self-anchor and drop out
+// of every front-desk world. atSite is trustworthy on its own account:
+// CreateAppointment / SetAppointmentSite / BackfillAppointmentSite each write it
+// only after validating the building alive AND practicesAt-assigned to the
+// provider at write time, so it names a real site independent of the provider's
+// current status. The CASE picks one arm or the other, never both, so an
+// appointment whose live provider practises at the very site it is booked at
+// carries that building's token once.
+//
+// Each arm is a pattern COMPREHENSION, not a bare array element, and the
+// difference is load-bearing: a walk that finds no building yields a NULL
 // element, which ProtectedAdapter.toStringSlice rejects — failing the whole row's
-// upsert, so an appointment whose provider practises nowhere would vanish for its
-// own patient too. The comprehension yields [] instead. A missing building must
-// cost a row its staff visibility, never its existence.
+// upsert, so an appointment reaching neither a practicesAt site nor an atSite
+// building would vanish for its own patient too. A comprehension yields []
+// instead. A missing building must cost a row its staff visibility, never its
+// existence.
 const clinicAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
@@ -889,7 +940,10 @@ RETURN
   a.documentation.data.documentedAt      AS documented_at,
   a.documentation.data.followUpRequested AS follow_up_requested,
   a.documentation.data.followUpDate      AS follow_up_date,
-  [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+  [nanoIdFromKey(p.key)]
+    + (CASE WHEN (pr)-[:practicesAt]->(pb:building)
+            THEN [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+            ELSE [(a)-[:atSite]->(sb:building) | nanoIdFromKey(sb.key)] END)
                                          AS authz_anchors
 `
 
