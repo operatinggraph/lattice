@@ -199,6 +199,8 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	idID := stableNanoID("lease-conv-applicant")
 	bgID := stableNanoID("lease-conv-bg")
 	payID := stableNanoID("lease-conv-pay")
+	unitID := stableNanoID("lease-conv-unit")
+	mgrID := stableNanoID("lease-conv-manager")
 	appKey := substrate.VertexKey("leaseapp", appID)
 	idKey := substrate.VertexKey("identity", idID)
 
@@ -244,9 +246,23 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	// inst.class to bucket the family.
 	writeVertex(substrate.VertexKey("service", bgID), "service.backgroundCheck.instance", map[string]any{})
 	writeVertex(substrate.VertexKey("service", payID), "service.payment.instance", map[string]any{})
+	// A live unit the application applies to — required since the four applicant
+	// gaps (missing_onboarding/bgcheck/payment/signature) additionally gate on
+	// (unitKey <> null) AND ((unitStatus <> 'leased') OR (landlordDecision =
+	// 'approved')), added to stop nagging a tombstoned/unleased unit forever
+	// (lease-signing 0.31.8). No .listing aspect is written, so unitStatus
+	// projects null — null <> 'leased' is true, same as an explicitly
+	// available unit — satisfying the gate without a display-column fixture.
+	writeVertex(substrate.VertexKey("unit", unitID), "unit", map[string]any{})
+	// A manager identity, live from the start — missing_manager ((unitKey <> null)
+	// AND (landlordDecision = 'approved') AND (managerCount = 0)) folds into
+	// violating too, and a real unit is never manager-less once a decision is made.
+	writeVertex(substrate.VertexKey("identity", mgrID), "identity", map[string]any{"name": "landlord"})
+	buildEdge("manages", "identity", mgrID, "unit", unitID)
 	buildEdge("providedTo", "service", bgID, "identity", idID)
 	buildEdge("providedTo", "service", payID, "identity", idID)
 	buildEdge("applicationFor", "leaseapp", appID, "identity", idID)
+	buildEdge("appliesToUnit", "leaseapp", appID, "unit", unitID)
 	// Write the anchor LAST so its CDC event reprojects with links + neighbors in place.
 	writeVertex(appKey, "leaseapp", map[string]any{})
 
@@ -315,9 +331,14 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	writeAspect(substrate.VertexKey("service", payID), "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	writeAspect(appKey, "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	// The landlord's decision is the human gate the convergence waits behind: a
-	// qualified application without it stays violating (missing_decision). There is no
-	// unit here, so an approval closes missing_decision and leaves no listing flip.
+	// qualified application without it stays violating (missing_decision). Approving
+	// it closes missing_decision but OPENS missing_listingLeased (unitKey <> null AND
+	// the four applicant conjuncts AND landlordDecision = 'approved' AND unitStatus <>
+	// 'leased') until the unit's listing actually flips to leased — so the listing
+	// flip below is required to reach the fully non-violating steady state, standing
+	// in for the real ListingFlip directOp this lens-only fixture never dispatches.
 	writeAspect(appKey, "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
+	writeAspect(substrate.VertexKey("unit", unitID), "listing", "listing", map[string]any{"status": "leased"})
 	// The executed-lease document chain: a SIGNED application converges only once
 	// the document is produced (a docGen claim providedTo the APP with a completed
 	// pointer-carrying .outcome) and anchored (the signedLease object link) --
