@@ -16,8 +16,15 @@ type sessionProjection struct {
 	EndsAt     string   `json:"endsAt"`
 	Capacity   *float64 `json:"capacity"`
 	PriceCents *float64 `json:"priceCents"`
-	StudioKey  string   `json:"studioKey"`
-	StudioName string   `json:"studioName"`
+	// ResidentPriceCents is nil when the session declares no override (a
+	// resident pays PriceCents like a standard booker), distinct from an
+	// explicit 0 (a resident class, wellness-domain ddls.go) — the reassign
+	// form's diff-only-if-changed edit needs that distinction preserved
+	// through to the FE, so it stays a pointer all the way to sessionRow
+	// rather than collapsing to 0 the way PriceCents does.
+	ResidentPriceCents *float64 `json:"residentPriceCents"`
+	StudioKey          string   `json:"studioKey"`
+	StudioName         string   `json:"studioName"`
 	// MissingStudio names the gap StudioKey/StudioName being empty otherwise
 	// leaves ambiguous: CreateSession always writes a live atStudio link, so
 	// an empty StudioKey here means the studio was later TombstoneStudio'd
@@ -39,18 +46,21 @@ type sessionProjection struct {
 // it here from the wellnessBookings lens, the same client-of-the-lens
 // aggregation idiom cmd/cafe-app's computeTabs uses for its posted-total.
 type sessionRow struct {
-	SessionKey     string `json:"sessionKey"`
-	Name           string `json:"name"`
-	StartsAt       string `json:"startsAt"`
-	EndsAt         string `json:"endsAt"`
-	Capacity       int64  `json:"capacity"`
-	PriceCents     int64  `json:"priceCents"`
-	StudioKey      string `json:"studioKey"`
-	StudioName     string `json:"studioName"`
-	MissingStudio  bool   `json:"missingStudio"`
-	InstructorKey  string `json:"instructorKey"`
-	InstructorName string `json:"instructorName"`
-	BookedCount    int    `json:"bookedCount"`
+	SessionKey string `json:"sessionKey"`
+	Name       string `json:"name"`
+	StartsAt   string `json:"startsAt"`
+	EndsAt     string `json:"endsAt"`
+	Capacity   int64  `json:"capacity"`
+	PriceCents int64  `json:"priceCents"`
+	// ResidentPriceCents mirrors sessionProjection's own field — nil (omitted
+	// from the JSON response) when the session declares no override.
+	ResidentPriceCents *int64 `json:"residentPriceCents,omitempty"`
+	StudioKey          string `json:"studioKey"`
+	StudioName         string `json:"studioName"`
+	MissingStudio      bool   `json:"missingStudio"`
+	InstructorKey      string `json:"instructorKey"`
+	InstructorName     string `json:"instructorName"`
+	BookedCount        int    `json:"bookedCount"`
 }
 
 // computeSessions decodes every wellnessSessions row, joins each to its
@@ -77,19 +87,25 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 		if p.PriceCents != nil {
 			priceCents = int64(*p.PriceCents)
 		}
+		var residentPriceCents *int64
+		if p.ResidentPriceCents != nil {
+			v := int64(*p.ResidentPriceCents)
+			residentPriceCents = &v
+		}
 		rows = append(rows, sessionRow{
-			SessionKey:     p.SessionKey,
-			Name:           p.Name,
-			StartsAt:       p.StartsAt,
-			EndsAt:         p.EndsAt,
-			Capacity:       capacity,
-			PriceCents:     priceCents,
-			StudioKey:      p.StudioKey,
-			StudioName:     p.StudioName,
-			MissingStudio:  p.MissingStudio,
-			InstructorKey:  p.InstructorKey,
-			InstructorName: p.InstructorName,
-			BookedCount:    bookedCounts[p.SessionKey],
+			SessionKey:         p.SessionKey,
+			Name:               p.Name,
+			StartsAt:           p.StartsAt,
+			EndsAt:             p.EndsAt,
+			Capacity:           capacity,
+			PriceCents:         priceCents,
+			ResidentPriceCents: residentPriceCents,
+			StudioKey:          p.StudioKey,
+			StudioName:         p.StudioName,
+			MissingStudio:      p.MissingStudio,
+			InstructorKey:      p.InstructorKey,
+			InstructorName:     p.InstructorName,
+			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -191,19 +207,25 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 		if p.PriceCents != nil {
 			priceCents = int64(*p.PriceCents)
 		}
+		var residentPriceCents *int64
+		if p.ResidentPriceCents != nil {
+			v := int64(*p.ResidentPriceCents)
+			residentPriceCents = &v
+		}
 		rows = append(rows, sessionRow{
-			SessionKey:     p.SessionKey,
-			Name:           p.Name,
-			StartsAt:       p.StartsAt,
-			EndsAt:         p.EndsAt,
-			Capacity:       capacity,
-			PriceCents:     priceCents,
-			StudioKey:      p.StudioKey,
-			StudioName:     p.StudioName,
-			MissingStudio:  p.MissingStudio,
-			InstructorKey:  p.InstructorKey,
-			InstructorName: p.InstructorName,
-			BookedCount:    bookedCounts[p.SessionKey],
+			SessionKey:         p.SessionKey,
+			Name:               p.Name,
+			StartsAt:           p.StartsAt,
+			EndsAt:             p.EndsAt,
+			Capacity:           capacity,
+			PriceCents:         priceCents,
+			ResidentPriceCents: residentPriceCents,
+			StudioKey:          p.StudioKey,
+			StudioName:         p.StudioName,
+			MissingStudio:      p.MissingStudio,
+			InstructorKey:      p.InstructorKey,
+			InstructorName:     p.InstructorName,
+			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

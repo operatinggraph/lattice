@@ -25,8 +25,13 @@ type bookingProjection struct {
 	StartsAt     string   `json:"startsAt"`
 	EndsAt       string   `json:"endsAt"`
 	PriceCents   *float64 `json:"priceCents"`
-	StudioKey    string   `json:"studioKey"`
-	StudioName   string   `json:"studioName"`
+	// ResidentPriceCents is read here only to resolve computeBookings' single
+	// effective PriceCents on the row it emits (Rate == "resident" charges
+	// this instead, mirroring wellness-ledger's wellnessClassPriceSettlement
+	// CASE WHEN) — it is not itself part of bookingRow's JSON shape.
+	ResidentPriceCents *float64 `json:"residentPriceCents"`
+	StudioKey          string   `json:"studioKey"`
+	StudioName         string   `json:"studioName"`
 	// MissingStudio mirrors sessionProjection's own column (sessions.go): the
 	// booking's session lost its studio to a TombstoneStudio call after the
 	// booking was made.
@@ -80,6 +85,14 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 		var priceCents int64
 		if p.PriceCents != nil {
 			priceCents = int64(*p.PriceCents)
+		}
+		// A resident-rate booking is charged ResidentPriceCents instead, when
+		// the session declares one — same fallback as an absent
+		// ResidentPriceCents (standard price), mirroring
+		// wellnessClassPriceSettlement's CASE WHEN exactly, so My Classes shows
+		// the price the member will actually be charged, not the sticker price.
+		if p.Rate == "resident" && p.ResidentPriceCents != nil {
+			priceCents = int64(*p.ResidentPriceCents)
 		}
 		rows = append(rows, bookingRow{
 			BookingKey:    p.BookingKey,

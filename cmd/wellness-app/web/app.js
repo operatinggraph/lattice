@@ -1585,6 +1585,7 @@ async function renderReassignControl(se, generation) {
     '<div class="field"><label>Name</label><input type="text" id="reassign-name" /></div>' +
     '<div class="field"><label>Capacity</label><input type="number" id="reassign-capacity" min="1" max="200" step="1" /></div>' +
     '<div class="field"><label>Price ($)</label><input type="number" id="reassign-price" min="0" step="0.01" /></div>' +
+    '<div class="field"><label>Resident price ($)</label><input type="number" id="reassign-resident-price" min="0" step="0.01" placeholder="same as Price" /></div>' +
     '<button id="reassign-submit">Save</button>' +
     "</div>";
   document.getElementById("roster-body").appendChild(wrap);
@@ -1596,6 +1597,11 @@ async function renderReassignControl(se, generation) {
   document.getElementById("reassign-name").value = se.name || "";
   document.getElementById("reassign-capacity").value = se.capacity || "";
   document.getElementById("reassign-price").value = se.priceCents ? (se.priceCents / 100).toFixed(2) : "";
+  // ResidentPriceCents is null/absent when the session declares no override
+  // (sessions.go), which must prefill blank, not "0.00" — a blank field is
+  // what lets Save below keep sending no override at all.
+  document.getElementById("reassign-resident-price").value =
+    se.residentPriceCents != null ? (se.residentPriceCents / 100).toFixed(2) : "";
 
   document.getElementById("reassign-toggle").addEventListener("click", () => {
     const form = document.getElementById("reassign-form");
@@ -1633,6 +1639,7 @@ async function reassignSession(se) {
   const nameInput = document.getElementById("reassign-name").value.trim();
   const capacityInput = document.getElementById("reassign-capacity").value;
   const priceInput = document.getElementById("reassign-price").value;
+  const residentPriceInput = document.getElementById("reassign-resident-price").value;
   const studioSelect = document.getElementById("reassign-studio");
   const studioPicked = studioSelect.value;
 
@@ -1671,6 +1678,18 @@ async function reassignSession(se) {
     if (!Number.isFinite(priceDollars) || priceDollars < 0) throw new Error("Price must be a non-negative number.");
     const priceCents = Math.round(priceDollars * 100);
     if (priceCents !== (se.priceCents || 0)) payload.priceCents = priceCents;
+  }
+  // Resident price mirrors Price above, except its blank prefill (set just
+  // above) already means "no override" — se.residentPriceCents is null/absent
+  // in exactly that case, so an untouched blank field naturally diffs to no
+  // change, same as an edited one diffing back to the session's current value.
+  if (residentPriceInput !== "") {
+    const residentPriceDollars = parseFloat(residentPriceInput);
+    if (!Number.isFinite(residentPriceDollars) || residentPriceDollars < 0) {
+      throw new Error("Resident price must be a non-negative number.");
+    }
+    const residentPriceCents = Math.round(residentPriceDollars * 100);
+    if (residentPriceCents !== se.residentPriceCents) payload.residentPriceCents = residentPriceCents;
   }
   const reads = [se.sessionKey, se.sessionKey + ".schedule"];
   // The atStudio link is required on every branch — require_matching_studio
@@ -1740,7 +1759,8 @@ async function reassignSession(se) {
     payload.startsAt === undefined &&
     payload.name === undefined &&
     payload.capacity === undefined &&
-    payload.priceCents === undefined
+    payload.priceCents === undefined &&
+    payload.residentPriceCents === undefined
   ) {
     throw new Error("Pick a new instructor, a new studio, a new time, or edit the name/capacity/price.");
   }
@@ -2120,6 +2140,7 @@ function studioCard(s) {
     '<div class="field"><label>Ends</label><input type="datetime-local" id="sess-ends-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Capacity</label><input type="number" id="sess-cap-' + id + '" min="1" max="200" value="20" /></div>' +
     '<div class="field"><label>Price ($, optional)</label><input type="number" id="sess-price-' + id + '" min="0" step="0.01" placeholder="Free" /></div>' +
+    '<div class="field"><label>Resident price ($, optional)</label><input type="number" id="sess-resident-price-' + id + '" min="0" step="0.01" placeholder="same as Price" /></div>' +
     '<div class="field"><label>Led by</label><select id="sess-instr-' + id + '"></select></div>' +
     '<div class="field"><label>Repeat every (days)</label><input type="number" id="sess-interval-' + id + '" min="1" max="365" value="7" /></div>' +
     '<div class="field"><label>Number of classes</label><input type="number" id="sess-repeat-' + id + '" min="1" max="52" value="1" /></div>' +
@@ -2162,6 +2183,7 @@ function wireStudioCard(s) {
       ends: document.getElementById("sess-ends-" + id),
       capacity: document.getElementById("sess-cap-" + id),
       price: document.getElementById("sess-price-" + id),
+      residentPrice: document.getElementById("sess-resident-price-" + id),
       instructor: instrSelect,
       intervalDays: document.getElementById("sess-interval-" + id),
       repeatCount: document.getElementById("sess-repeat-" + id),
@@ -2428,6 +2450,19 @@ async function createSession(studioKey, els) {
   // "no price set" instead of a confusing NaN/negative op rejection.
   const priceDollars = els.price ? Number(els.price.value) : NaN;
   const priceCents = Number.isFinite(priceDollars) && priceDollars > 0 ? Math.round(priceDollars * 100) : 0;
+  // Resident price is optional too, but unlike Price an explicit 0 is a real,
+  // distinct value (a free class for residents, wellness-domain ddls.go) from
+  // a blank field (no override — a resident pays Price like anyone else), so
+  // a blank field must stay OMITTED from the payload rather than coerced to
+  // 0 the way Price's own blank field is.
+  const residentPriceRaw = els.residentPrice ? els.residentPrice.value.trim() : "";
+  let residentPriceCents;
+  if (residentPriceRaw !== "") {
+    const residentPriceDollars = Number(residentPriceRaw);
+    if (Number.isFinite(residentPriceDollars) && residentPriceDollars >= 0) {
+      residentPriceCents = Math.round(residentPriceDollars * 100);
+    }
+  }
   const instructor = els.instructor ? els.instructor.value : "";
   // repeatCount 1 (the default) is a plain single CreateSession, unchanged.
   // > 1 schedules the whole run as one CreateSessionSeries batch instead —
@@ -2444,6 +2479,7 @@ async function createSession(studioKey, els) {
     const isSeries = repeatCount > 1;
     const payload = { studio: studioKey, name, startsAt, endsAt, capacity };
     if (priceCents > 0) payload.priceCents = priceCents;
+    if (residentPriceCents !== undefined) payload.residentPriceCents = residentPriceCents;
     // The instructor endpoint is validated alive + typed by the script
     // (require_live_typed), so it is an (a)-declared REQUIRED read whenever
     // one is named — omitted entirely when the class has no instructor.
@@ -2488,6 +2524,7 @@ async function createSession(studioKey, els) {
     toast(isSeries ? repeatCount + " classes scheduled." : "Class scheduled.", true);
     els.name.value = "";
     if (els.price) els.price.value = "";
+    if (els.residentPrice) els.residentPrice.value = "";
     if (els.repeatCount) els.repeatCount.value = "1";
     staffSessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";

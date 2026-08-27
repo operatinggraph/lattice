@@ -242,6 +242,46 @@ func TestWellnessSessions_ProjectsPriceCents(t *testing.T) {
 	require.Equal(t, 1500.0, rows[0].Values["priceCents"])
 }
 
+// TestWellnessSessions_ProjectsResidentPriceCents proves residentPriceCents
+// is projected off the .schedule aspect alongside priceCents — the FE gap
+// this closes: neither the create nor reassign form could set/see a
+// session's resident rate because this lens never carried the column
+// (verticals.md "a wellness class's resident price can be charged but never
+// set or seen").
+func TestWellnessSessions_ProjectsResidentPriceCents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "residentpriced", "session")
+	f.aspect(t, "residentpriced", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+		"priceCents": 1500.0, "residentPriceCents": 1000.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, 1000.0, rows[0].Values["residentPriceCents"])
+}
+
+// TestWellnessSessions_NoResidentPriceCentsNullSafe proves a session with no
+// residentPriceCents projects a null column, not a decode error — the common
+// case (most sessions declare no resident override).
+func TestWellnessSessions_NoResidentPriceCentsNullSafe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "noresidentprice", "session")
+	f.aspect(t, "noresidentprice", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0, "priceCents": 1500.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["residentPriceCents"])
+}
+
 // TestWellnessBookings_JoinsSessionAndBooker proves the roster / my-classes
 // join: one row per booking, with both the session neighbour (sessionName,
 // startsAt/endsAt) and booker neighbour (bookerKey) resolved.
@@ -292,6 +332,30 @@ func TestWellnessBookings_ProjectsPriceCents(t *testing.T) {
 	rows := f.project(t, wellnessBookingsSpec)
 	require.Len(t, rows, 1)
 	require.Equal(t, 1500.0, rows[0].Values["priceCents"])
+}
+
+// TestWellnessBookings_ProjectsResidentPriceCents proves residentPriceCents
+// is projected off the joined session's .schedule aspect too — cmd/wellness-app's
+// computeBookings resolves this against the booking's own rate to show the
+// member the price they'll actually be charged (bookings.go), the same
+// resolution wellnessClassPriceSettlement's CASE WHEN performs server-side.
+func TestWellnessBookings_ProjectsResidentPriceCents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "booking3", "booking")
+	f.vtx(t, "residentpriced2", "session")
+	f.aspect(t, "residentpriced2", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+		"priceCents": 1500.0, "residentPriceCents": 1000.0,
+	})
+	f.aspect(t, "booking3", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "seat": 1.0})
+	f.edge(t, "forSession", "booking3", "residentpriced2")
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, 1000.0, rows[0].Values["residentPriceCents"])
 }
 
 // TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor
