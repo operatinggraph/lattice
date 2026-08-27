@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-21 · `fc15558f` · Staff descriptor rendering closes its Inc 1-4 decomposition — lint-app-op-descriptors gains the per-app op-literal ceiling ratchet. Residuals filed above.
 - 2026-08-07 · `130d3958` · A wellness member can finally pay down their own balance — WellnessCreditAccount gains a consumer scope=self grant, ownership + amount capped server-side. wellness-ledger 0.2.6
 - 2026-08-07 · `15209753` · A shared café house tab finally names who ordered what — Charge stamps orderedBy (op.actor) on each .status.lines entry, distinguishing a resident's self-order from a staff ring-up on the receipt. cafe-domain 0.11.18
 - 2026-08-07 · `80a1f76c` · A café resident can finally pay down their own house tab — CreditCafeAccount gains a consumer scope=self grant, ownership + amount capped server-side. cafe-ledger 0.3.9
