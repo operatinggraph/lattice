@@ -169,6 +169,43 @@ func TestObject_DuplicateRequestCollapses(t *testing.T) {
 	}
 }
 
+// TestObject_DetachObject_DeriveReadsSuppliesLinkKey proves the class-(g)
+// contract (staff-descriptor-rendering-design.md §22 Inc-C): a submitter that
+// declares NO ContextHint.Reads at all still succeeds, because the DDL's own
+// derive_reads computes the link key (fail-closed) and the object vertex
+// (absence-tolerant) from oid/targetKey/linkName before hydration. Without
+// derive_reads this would HydrationMiss on the undeclared link key.
+func TestObject_DetachObject_DeriveReadsSuppliesLinkKey(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objderive", Instance: "objderive-1"})
+
+	id := "vtx.identity.AAuserHJKMNPQRSTUVW9"
+	seedIdentity(t, ctx, conn, id, false)
+	digest := "SHA-256=deriveTESTdigestExampleA"
+	oid := substrate.SHA256NanoID("object:" + digest)
+	objKey := "vtx.object." + oid
+	link := "lnk.object." + oid + ".photoOf.identity.AAuserHJKMNPQRSTUVW9"
+	attachPayload := map[string]any{"digest": digest, "size": 10, "contentType": "image/png",
+		"storeName": "s-derive", "targetKey": id, "linkName": "photoOf"}
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("deriveattach"), "AttachObject",
+		attachPayload, []string{id}, processor.OutcomeAccepted)
+	if !liveExists(ctx, conn, link) {
+		t.Fatalf("attach did not create %s", link)
+	}
+
+	// No declared reads at all — derive_reads must supply the link key and
+	// the object vertex, or this HydrationMisses on the undeclared link.
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("derivedetach"), "DetachObject",
+		map[string]any{"oid": oid, "targetKey": id, "linkName": "photoOf"},
+		nil, processor.OutcomeAccepted)
+	if !isDeleted(t, ctx, conn, link) {
+		t.Fatalf("link %s should be tombstoned after detach with no declared reads", link)
+	}
+	if ll := liveLinksOf(t, ctx, conn, objKey); ll != 0 {
+		t.Fatalf("liveLinks after derive_reads-backed detach = %d want 0", ll)
+	}
+}
+
 // TestObject_ReattachAlreadyAlive_IsAcceptedNoOp proves the CC5 layer-2
 // graph idempotency contract: re-attaching the SAME target+linkName+digest
 // under a FRESH requestId (the >24h-past-the-requestId-tracker case the

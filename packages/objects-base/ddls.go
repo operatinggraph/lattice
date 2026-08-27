@@ -58,7 +58,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     already exist, vtx.object.<oid> + vtx.object.<oid>.content + the link key
 //     (so dedup / revive / collision / idempotent-relink branch correctly); and,
 //     for a replace, the old link + old object vertex.
-//   - DetachObject: the link key (must be live) + the object vertex.
+//   - DetachObject: nothing — the link key (fail-closed) and the object vertex
+//     (absence-tolerant) are both class-(g) `derive_reads` keys (below), so no
+//     caller declares them.
 //   - TombstoneObject: the object vertex + its .content aspect.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{objectDDL()}
@@ -69,42 +71,40 @@ func DDLs() []pkgmgr.DDLSpec {
 // manager's owner-tombstone cascade submits it directly) and is also resolvable
 // for that binding.
 //
-// AttachObject and DetachObject stay bare despite real staff forms
-// (cmd/loftspace-app, cmd/wellness-app browser-direct through the Gateway) —
-// the app-seam audit (docs/reviews/vertical-app-descriptor-audit-2026-08-20.md)
-// found no descriptor and no exemption for either, and neither closes cleanly
-// onto a full OpMetaSpec:
-//   - AttachObject's digest/size/contentType/storeName carry no pre-existing
-//     entity for a lens to project at all — they are the RESPONSE of the
-//     app's own byte-plane upload endpoint (POST /api/objects, streaming to
-//     core-objects), computed only once the bytes are already sent. No
-//     exemption code names "value is the output of a client-side upload
-//     transport step no template can trigger" (closest, unprojected-input,
-//     is about an entity a lens fails to project — there is no entity here
-//     before the upload completes).
-//   - DetachObject's oid identifies an existing object, but no lens
-//     enumerates "objects attached to owner X" (objectAttachments.go's
-//     objectAttachments lens is anchored on the OBJECT, the wrong direction
-//     for this) — a fully descriptor-driven Dispatch (the signInMethods PANE
-//     precedent, edge-manifest/panes.go's dispatch-target column) needs that
-//     owner-anchored lens. loftspace-domain's objectIdentityAttachmentsRead
-//     (staff-descriptor-rendering-design.md §22 Inc-B) supplies the
-//     self-view (owner:identity) half; leaseapp and unit remain open (each
-//     needs its own authz-walk decision — see that lens's doc comment). A
-//     second, independent gap blocks wiring Dispatch even once every owner
-//     type has a lens: DetachObject's declared Reads must include the
-//     6-segment link key `lnk.object.<oid>.<linkName>.<ownerType>.<ownerId>`,
-//     but the ownerType segment varies by which lens surfaced the row and
-//     the Reads-template vocabulary (descriptor_floor.go) has no operator
-//     that extracts a key's type segment for mid-template splicing — every
-//     `{payload.<field>}`/`:id` combination yields either the bare id or the
-//     whole `vtx.<type>.<id>` value, never just `<type>`. Open follow-up,
-//     staff-descriptor-rendering-design.md §22 Inc-C.
+// AttachObject stays bare despite real staff forms (cmd/loftspace-app,
+// cmd/wellness-app browser-direct through the Gateway) — the app-seam audit
+// (docs/reviews/vertical-app-descriptor-audit-2026-08-20.md) found no
+// descriptor and no exemption for it, and it does not close cleanly onto a
+// full OpMetaSpec: its digest/size/contentType/storeName carry no
+// pre-existing entity for a lens to project at all — they are the RESPONSE of
+// the app's own byte-plane upload endpoint (POST /api/objects, streaming to
+// core-objects), computed only once the bytes are already sent. No exemption
+// code names "value is the output of a client-side upload transport step no
+// template can trigger" (closest, unprojected-input, is about an entity a
+// lens fails to project — there is no entity here before the upload
+// completes).
 //
-// staff-descriptor-rendering-design.md §22 Inc-A (shipped) closed the other
-// half of the gap: the hand-built ceremony itself (upload → derive the
-// Contract #4 requestId → assemble the envelope) is no longer re-derived per
-// app — it lives once in internal/descriptorform/attachments.mjs, which
+// DetachObject now carries a full OpMetaSpec (staff-descriptor-rendering-
+// design.md §22 Inc-C): loftspace-domain's objectIdentityAttachmentsRead
+// (§22 Inc-B) supplies the row a descriptor-driven client dispatches
+// DetachObject from (self-view, owner:identity — leaseapp and unit remain
+// open, each its own authz-walk decision; see that lens's doc comment), and
+// this op's Dispatch reads the three payload fields straight off that row's
+// columns via ContextParams. The independent blocker Inc-B found — the
+// tombstoned link's 6-segment key `lnk.object.<oid>.<linkName>.<ownerType>.
+// <ownerId>` has no Reads-template operator that can splice a mid-key type
+// segment — turned out not to need one: `derive_reads(op)` below computes
+// the link key (and the object vertex read) from the payload server-side
+// (Contract #2 §2.5 class (g), objectDDLScript), so no client — descriptor-
+// driven or hand-rolled — ever has to declare it. The Lattice-designer triage
+// (docs/reviews/lattice-designer-triage-2026-08-27.md §8) retired the
+// `:type` template-operator row on this basis: DetachObject was its only
+// consumer.
+//
+// staff-descriptor-rendering-design.md §22 Inc-A (shipped) closed the third
+// piece: the hand-built ceremony itself (upload → derive the Contract #4
+// requestId → assemble the envelope) is no longer re-derived per app — it
+// lives once in internal/descriptorform/attachments.mjs, which
 // cmd/loftspace-app now mounts. That module's operationType literals sit
 // outside lint-app-op-descriptors' cmd/*-app scan scope (the same carve-out
 // form.mjs already has), so appOpDebt's two entries for these ops were
@@ -114,7 +114,59 @@ func DDLs() []pkgmgr.DDLSpec {
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "AttachObject"},
-		{OperationType: "DetachObject"},
+		{
+			OperationType: "DetachObject",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Remove this attachment",
+				ShortLabel:  "Remove",
+				Description: "Detach this file from its owner. The bytes are reclaimed only once nothing else references them.",
+				Icon:        "trash",
+				Tone:        "danger",
+				SubmitLabel: "Remove",
+				Group:       "Attachments",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"oid":{"type":"string","title":"Object","description":"The attached object's id. Filled from the row you chose; you never type it."},` +
+				`"targetKey":{"type":"string","title":"Owner","description":"The full vtx.<type>.<NanoID> key of the owner the object is attached to. Filled from the row you chose."},` +
+				`"linkName":{"type":"string","title":"Slot","description":"The attachment slot (photoOf, signedLeaseOf, …). Filled from the row you chose."}},` +
+				`"required":["oid","targetKey","linkName"]}`,
+			FieldDescriptions: map[string]string{
+				"oid":       "The attached object's id — the row's own oid column. You never type it.",
+				"targetKey": "The owner's full vtx.<type>.<NanoID> key — the row's own owner_key column.",
+				"linkName":  "The attachment slot the row's link_name column names.",
+			},
+			// standing, not self: the grant is operator scope:any
+			// (permissions.go), the same "every operator/staff FE has always
+			// submitted" idiom UnlinkCredential's own comment names — there
+			// is no self-scoped consumer grant on this op yet (deferred to
+			// the real-actor write migration, permissions.go).
+			//
+			// All three payload fields are ContextParams, not a TargetField/
+			// TargetType pair: every one of them is a column ON THE ROW the
+			// client dispatches from (objectIdentityAttachmentsRead today;
+			// any future owner-anchored lens tomorrow), not a value resolved
+			// from ambient session context the way TargetField's docstring
+			// describes — the same shape wellness-domain's ReassignSession
+			// and cafe-domain's SetMenuItemLocation already use for a
+			// same-row auxiliary field, just for every field here instead of
+			// one.
+			//
+			// No Reads/OptionalReads: the link key this op tombstones and
+			// the object vertex it OCC-touches are both class-(g)
+			// script-derived (objectDDLScript's derive_reads, Contract #2
+			// §2.5) — declaring them here would just be a submitter
+			// reproducing the DDL's own key grammar by hand, the exact
+			// thing class (g) exists to make unnecessary.
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "object",
+				AuthContext: "standing",
+				ContextParams: map[string]string{
+					"oid":       "{entity.oid}",
+					"targetKey": "{entity.owner_key}",
+					"linkName":  "{entity.link_name}",
+				},
+			},
+		},
 		{OperationType: "TombstoneObject"},
 	}
 }
@@ -458,6 +510,48 @@ def write_vertex(state, obj_key, live_links):
             "document": {"class": "object", "isDeleted": False,
                          "data": {"linkEpoch": next_epoch(state, obj_key),
                                   "liveLinks": live_links}}}
+
+def derive_reads(op):
+    # Contract #2 sec 2.5 class (g). DetachObject's script needs two keys it
+    # never gets from the payload directly: the link it tombstones (fail-
+    # closed -- UnknownLink if absent) and the object vertex it OCC-touches
+    # (absence-tolerant -- a caller may name an object with no vertex left,
+    # e.g. after a prior GC reap). Both are a deterministic function of
+    # payload.oid/targetKey/linkName under this DDL's own key grammar
+    # (Contract #1 sec 1.1: object -<linkName>-> owner) -- exactly the class
+    # a submitter cannot express without reproducing that grammar itself, and
+    # the reason DetachObject's OpMetaSpec.Dispatch declares neither key
+    # (staff-descriptor-rendering-design.md sec 22 Inc-C).
+    #
+    # AttachObject and TombstoneObject need no entry here: every key their
+    # script reads is either payload-supplied directly (targetKey) or a
+    # function of digest/oid the client already computes itself
+    # (internal/descriptorform/attachments.mjs mirrors crypto.sha256NanoID
+    # byte-for-byte, sec 22 Inc-A) -- nothing package-specific for a
+    # submitter to get wrong.
+    if op.operationType != "DetachObject":
+        return {}
+    p = op.payload
+    oid = optional_string(p, "oid")
+    target_key = optional_string(p, "targetKey")
+    link_name = optional_string(p, "linkName")
+    if oid == None or target_key == None or link_name == None:
+        return {}
+    if not valid_link_name(link_name):
+        return {}
+    for bad in [".", "*", ">", " ", "\t", "\n", "/"]:
+        if bad in oid:
+            return {}
+    tparts = target_key.split(".")
+    if len(tparts) != 3 or tparts[0] != "vtx" or tparts[1] == "" or tparts[2] == "":
+        # Malformed targetKey: derive nothing and let execute()'s own
+        # required_string/parts_of validation raise the real InvalidArgument.
+        return {}
+    tgt_type = tparts[1]
+    tgt_id = tparts[2]
+    obj_key = "vtx.object." + oid
+    link_key = "lnk.object." + oid + "." + link_name + "." + tgt_type + "." + tgt_id
+    return {"reads": [link_key], "optionalReads": [obj_key]}
 
 def execute(state, op):
     ot = op.operationType
