@@ -1350,24 +1350,46 @@ mechanical mirrors, so guessing at them here would have been exactly the risk th
 against. `DetachObject`'s `OpMetaSpec.Dispatch` is **NOT wired** — see the Inc-C gap below, discovered while
 grounding the wiring, which blocks it independent of how many owner-type lenses exist.
 
-**A second, independent blocker (Inc-C): the Reads-template vocabulary can't express a type-agnostic link
-key.** `DetachObject`'s declared read must include the tombstoned link's own key,
-`lnk.object.<oid>.<linkName>.<ownerType>.<ownerId>` — Contract #2 §2.5's declared-reads discipline requires
-it. `internal/processor/descriptor_floor.go`'s `expandDescriptorTemplate` resolves `{payload.<field>}` two
-ways only: bare (`:id`) yields the Contract #1 id, whole yields the FULL `vtx.<type>.<id>` value (own dots
-and all) — there is no operator that yields just `<type>`, the segment a link key needs mid-template. Every
-existing `TargetField`/`Reads` precedent (wellness-domain's `ReassignSession`, clinic-domain's
-appointment/provider ops) declares reads against a FIXED type, because every existing type-agnostic op
-(`AttachObject`/`DetachObject`, D7) has stayed undispatchable until now — this is the first time the gap
-was reached, not a known, deferred one. No established pattern to mirror exists for it (a candidate — adding
-a redundant `ownerType` payload field solely so `{payload.ownerType}` can supply a literal segment, unused
-by the DDL script itself — has no precedent either way). Flagged to the Lattice stream (not filed directly —
-the Vertical Steward's run scope is `verticals.md` only) under `📐 needs designer pass · no-pattern:
-type-agnostic link-key Reads-template segment`, since it is a Processor/descriptor-floor capability question
-(an engine primitive), not a package-level pattern to extend, and it also gates `leaseapp`/`unit` even once
-their own authz questions are answered.
+**A second, independent blocker found at the time (RESOLVED, see Inc-C outcome below): the Reads-template
+vocabulary can't express a type-agnostic link key.** `DetachObject`'s declared read must include the
+tombstoned link's own key, `lnk.object.<oid>.<linkName>.<ownerType>.<ownerId>` — Contract #2 §2.5's
+declared-reads discipline requires it. `internal/processor/descriptor_floor.go`'s `expandDescriptorTemplate`
+resolves `{payload.<field>}` two ways only: bare (`:id`) yields the Contract #1 id, whole yields the FULL
+`vtx.<type>.<id>` value (own dots and all) — there is no operator that yields just `<type>`, the segment a
+link key needs mid-template. Flagged to the Lattice stream as `📐 needs designer pass · no-pattern:
+type-agnostic link-key Reads-template segment`; the Lattice-designer triage
+(`docs/reviews/lattice-designer-triage-2026-08-27.md` §8) retired that row without adding the operator — the
+sole consumer (this op) doesn't need it, because `derive_reads` computes the whole key server-side instead
+of asking any client to splice one (Contract #2 §2.5 class (g), already precedented in
+identity-domain/identity-hygiene). This also means no redundant `ownerType` payload field was ever added —
+the candidate the row considered and correctly left unbuilt.
 
-**Checkpoint for the next fire (Inc-C):** no worktree held (docs-and-small-package-edit convention). Next
-steps, independent of each other: (1) the Reads-template gap once it lands in `lattice.md`, Lattice-lane
-work; (2) once answered, ground+ship the `leaseapp` and `unit` lenses (their own authz decisions, see
-above) + wire `DetachObject`'s `Dispatch` against all three. `verticals.md`'s row carries the pointer.
+### Inc-C outcome — DetachObject's Dispatch, via `derive_reads` (Vertical Steward)
+
+Shipped without the Reads-template operator the checkpoint below expected to need: `objectDDLScript` gains a
+top-level `derive_reads(op)` (Contract #2 §2.5 class (g)) that computes the tombstoned link key (fail-closed
+`reads`) and the object vertex key (absence-tolerant `optionalReads`) from `payload.oid`/`targetKey`/
+`linkName` under the DDL's own key grammar — no submitter, descriptor-driven or hand-rolled, ever declares
+either. `DetachObject`'s `OpMetaSpec` now carries a full `Presentation`/`InputSchema`/`Dispatch`:
+`AuthContext: "standing"` (the grant is operator scope:any, the same "every operator/staff FE has always
+submitted" idiom `UnlinkCredential` uses) and all three payload fields via `ContextParams` reading straight
+off `objectIdentityAttachmentsRead`'s row columns (`{entity.oid}`, `{entity.owner_key}`,
+`{entity.link_name}`) rather than a `TargetField`/`TargetType` pair, since every field here is a column on
+the dispatching row, not a value resolved from ambient session context. `leaseapp`/`unit` stay unshipped —
+their own open authz questions (§22 Inc-B) are unchanged by this increment and gate only THEIR lenses, not
+this Dispatch wiring, which is generic across whichever owner-anchored lens a row comes from.
+
+Package-only: no engine, lint, or client change (`derive_reads` is a generic Processor entrypoint every DDL
+may define; no Go/JS code reads the new fields yet since no client dispatches this op today). `objects-base`
+0.3.7 → 0.3.8. New regression test: `TestObject_DetachObject_DeriveReadsSuppliesLinkKey` submits DetachObject
+with `ContextHint.Reads` empty and asserts it still succeeds — the case that would `HydrationMiss` without
+`derive_reads`. Review depth: lead review only (mechanical DDL/OpMeta addition mirroring an established
+class-(g) + Dispatch pattern, no new grant, no new trust boundary — `DetachObject`'s existing operator
+scope:any permission is unchanged).
+
+This closes the residual `verticals.md` filed for AttachObject/DetachObject at its ratified scope (Inc-A the
+shared ceremony, Inc-B the self-view lens, Inc-C this wiring) — DetachObject is no longer merely
+client-mechanism, hand-built-with-a-fix-path-unbuilt, for the identity-owner case. `leaseapp`/`unit`
+attachments are a distinct, later PO-scoped ask (each needs its own authz decision Inc-B already declined
+to guess at), so the item moves to the Done log rather than staying `🏗️` on a checkpoint pointing at a
+now-resolved gap.
