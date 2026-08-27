@@ -218,6 +218,7 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-entry { font-size: 12px; font-family: var(--mono); }
 .ledger-entry.debit { color: var(--red); }
 .ledger-entry.credit { color: var(--green); }
+.ledger-entry.credit.waiver { color: var(--text-dim); }
 .ledger-record-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ledger-record-form input { flex: 1; min-width: 100px; }
 .ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }

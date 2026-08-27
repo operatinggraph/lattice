@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.2.13
+version: 0.2.14
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
@@ -8,7 +8,8 @@ description: |
   postedTo, WellnessDebitAccount independently taking optional bookingRef (no-show
   settlement, writes settles) and priceBookingRef (class-price settlement,
   writes settlesClassPrice) back-refs; WellnessCreditAccount independently
-  taking optional refundRef, writes settlesRefund) + the wellnessLedgerHistory
+  taking optional refundRef (writes settlesRefund) and optional reason
+  (payment|waiver, default payment) + the wellnessLedgerHistory
   read-model lens (one row per transaction) + the wellnessMemberAccounts lens
   (member identity -> account key lookup) + the wellnessNoShowSettlement
   Weaver playbook (lazily opens the member's account via WellnessCreateAccount,
@@ -17,6 +18,10 @@ description: |
   unconditional on attendance) + the wellnessRefundSettlement Weaver playbook
   (reverses a class-price charge already posted before its booking was
   cancelled, anchored on wellness-domain's wellnessrefund marker vertex).
+  WellnessCreditAccount ALSO grants a member scope=self (pay down their own
+  balance, never waive it — reason:"waiver" is rejected server-side for a
+  self-scoped submit), ownership + amount proven server-side against the
+  account's own heldFor->identity topology and postedTo history.
   Depends wellness-domain.
 depends:
   - wellness-domain

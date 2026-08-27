@@ -14,7 +14,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // separate marker needed).
 //
 //	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND endsAt<=$now gate)
-//	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow")
+//	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow", noShowFeeCents: "0")
 //
 // Unlike clinic's MarkPastDueNoShow, this dispatches wellness-domain's own
 // SetBookingAttendance directly rather than through a dedicated op:
@@ -25,10 +25,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // `waitlisted` booker never held a confirmed seat, so there is no attendance
 // to record once the class ends (mirroring wellnessBookingRemindersSpec's
 // same status='booked' restriction); `attended`/`noShow` are already
-// terminal. Once dispatched, wellness-ledger's existing wellnessNoShowSettlement
-// lens (unchanged by this package) reads the resulting noShowFeeCents to post
-// the account charge — this closes only the missing status transition, not
-// the billing gate, which already converges on its own.
+// terminal. Because this playbook shares SetBookingAttendance with the staff
+// path rather than getting its own dedicated op (clinic's MarkPastDueNoShow
+// vs SetAppointmentStatus split), it must explicitly route
+// noShowFeeCents:"0" — a caller-supplied 0 is SetBookingAttendance's signal
+// for "documentation lapse, not a billable no-show" (ddls.go), so this sweep
+// never bills the default $25; a staff-observed SetBookingAttendance call
+// (which omits the field) still does. Once dispatched, wellness-ledger's
+// existing wellnessNoShowSettlement lens (unchanged by this package) reads
+// noShowFeeCents when present and positive to post the account charge — this
+// closes only the missing status transition, not the billing gate, which
+// already converges on its own.
 const (
 	// PastDueBookingsTarget is the §10.8 TargetID == the pastDueBookings
 	// lens's OutputKeyPattern prefix (the §10.2↔§10.8 binding Weaver reads).
@@ -109,14 +116,16 @@ func pastDueBookingsTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: PastDueBookingsTarget,
 		Description: "No confirmed booking stays unresolved once its class has ended. A seat still marked booked " +
-			"after the class finishes is recorded as a no-show, which in turn puts any no-show fee on the " +
-			"member's account.",
+			"after the class finishes is recorded as a no-show — a documentation lapse (nobody at the desk " +
+			"checked the member in), not a staff-observed missed visit, so this sweep marks the booking noShow " +
+			"WITHOUT billing a fee (explicit noShowFeeCents:0); only a staff-observed SetBookingAttendance call " +
+			"bills the default $25.",
 		LensRef: "pastDueBookings",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_noshow_transition": {
 				Action:    "directOp",
 				Operation: "SetBookingAttendance",
-				Params:    map[string]string{"bookingKey": "row.entityKey", "session": "row.sessionKey", "status": "noShow"},
+				Params:    map[string]string{"bookingKey": "row.entityKey", "session": "row.sessionKey", "status": "noShow", "noShowFeeCents": "0"},
 				Reads:     []string{"row.entityKey", "row.sessionKey"},
 			},
 		},

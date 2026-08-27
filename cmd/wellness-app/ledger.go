@@ -31,9 +31,13 @@ type ledgerEntryProjection struct {
 	BookingKey     string   `json:"bookingKey"`
 	ClassName      string   `json:"className"`
 	ClassStartsAt  string   `json:"classStartsAt"`
+	Reason         string   `json:"reason"`
 }
 
-// ledgerEntryRow is the billing-history row the FE renders.
+// ledgerEntryRow is the billing-history row the FE renders. Reason is empty
+// for a debit (charge-only rows never carry it) and "payment"/"waiver" for a
+// credit — the FE labels a waiver distinctly so forgiven debt is never
+// mistaken for cash collected.
 type ledgerEntryRow struct {
 	TransactionKey string `json:"transactionKey"`
 	Type           string `json:"type"`
@@ -42,6 +46,7 @@ type ledgerEntryRow struct {
 	PostedAt       string `json:"postedAt"`
 	ClassName      string `json:"className,omitempty"`
 	ClassStartsAt  string `json:"classStartsAt,omitempty"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 // memberAccountProjection is one row of the wellness-ledger `wellnessMemberAccounts`
@@ -85,6 +90,7 @@ func computeLedgerHistory(keys []string, get kvGetter, identityKey string) ([]le
 			PostedAt:       p.PostedAt,
 			ClassName:      p.ClassName,
 			ClassStartsAt:  p.ClassStartsAt,
+			Reason:         p.Reason,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

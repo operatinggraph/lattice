@@ -372,6 +372,7 @@ RETURN
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
+  t.entry.data.reason AS reason,
   bk.key AS bookingKey,
   sess.schedule.data.name AS className,
   sess.schedule.data.startsAt AS classStartsAt`

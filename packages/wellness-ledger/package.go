@@ -21,16 +21,20 @@
 //
 //   - The `wellnesstransaction` vertex type (DDL `wellnesstransaction`) —
 //     WellnessDebitAccount (a charge: a no-show fee and/or a class-price charge) and
-//     WellnessCreditAccount (a payment received) each mint vtx.wellnesstransaction.<NanoID>
-//     (root data {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
-//     linked to the account via postedTo. WellnessDebitAccount independently accepts
-//     bookingRef (no-show settlement, writes settles) and priceBookingRef
-//     (class-price settlement, writes settlesClassPrice) — either, both, or
-//     neither, two distinct relations so the two settlement gaps never
+//     WellnessCreditAccount (a payment received, or reason:"waiver" a charge
+//     forgiven) each mint vtx.wellnesstransaction.<NanoID>
+//     (root data {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt,
+//     reason? (credit only)}, linked to the account via postedTo. WellnessDebitAccount
+//     independently accepts bookingRef (no-show settlement, writes settles) and
+//     priceBookingRef (class-price settlement, writes settlesClassPrice) — either,
+//     both, or neither, two distinct relations so the two settlement gaps never
 //     collide in a count(). The ledger is append-only: a balance is derived
 //     by summing entries (the wellnessLedgerHistory lens), never stored as a
 //     mutable aspect — so concurrent debits/credits never race a
-//     read-modify-write.
+//     read-modify-write. A waiver reduces the balance identically to a
+//     payment but reason keeps the two distinguishable in the history; only
+//     the operator/frontOfHouse scope=any grant may waive — a self-scoped
+//     member credit is rejected.
 //
 //   - The `wellnessLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
@@ -96,13 +100,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.13",
+	Version: "0.2.14",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
 		"independently taking optional bookingRef (no-show settlement, writes settles) and priceBookingRef (class-price " +
 		"settlement, writes settlesClassPrice) back-refs; WellnessCreditAccount independently taking optional refundRef, " +
-		"writes settlesRefund) + the wellnessLedgerHistory read-model lens (one row per " +
+		"writes settlesRefund, and optional reason to waive a charge instead of recording cash collected) + the " +
+		"wellnessLedgerHistory read-model lens (one row per " +
 		"transaction) + the wellnessMemberAccounts lens (member identity -> account key lookup) + the " +
 		"wellnessNoShowSettlement Weaver playbook (lazily opens the member's account via WellnessCreateAccount, then " +
 		"auto-charges the no-show fee) + the wellnessClassPriceSettlement Weaver playbook (same lazy account-open relay, " +

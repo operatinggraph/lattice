@@ -605,6 +605,105 @@ func TestSetBookingAttendance_RejectsAnUnknownStatus(t *testing.T) {
 	}
 }
 
+// TestSetBookingAttendance_NoShowFeeCents pins the three-way noShowFeeCents
+// contract the automated pastDueBookings sweep depends on: omitted still
+// defaults to 2500 (unchanged staff behavior), a caller-supplied positive
+// value is stored as-is, a caller-supplied 0 (the sweep's "documentation
+// lapse, not a billable no-show" signal) leaves the field off .status
+// entirely rather than writing 0, and a negative value is rejected
+// InvalidArgument.
+func TestSetBookingAttendance_NoShowFeeCents(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendfee")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendstudio000005", "Flow Room")
+
+	feeAttendanceEnv := func(label, bookingKey, sessionKey, submittedAt string, feeCents *float64) *processor.OperationEnvelope {
+		_, bookID, _ := substrate.ParseVertexKey(bookingKey)
+		_, sessID, _ := substrate.ParseVertexKey(sessionKey)
+		payloadMap := map[string]any{"bookingKey": bookingKey, "session": sessionKey, "status": "noShow"}
+		if feeCents != nil {
+			payloadMap["noShowFeeCents"] = *feeCents
+		}
+		payload, _ := json.Marshal(payloadMap)
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "SetBookingAttendance",
+			Actor:         domainActorKey,
+			SubmittedAt:   submittedAt,
+			Class:         "booking",
+			Payload:       payload,
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
+				OptionalReads: []string{"lnk.booking." + bookID + ".forSession.session." + sessID},
+			},
+		}
+	}
+
+	// Omitted: still defaults to 2500 — the unchanged staff-observed path.
+	// Each sub-case gets its own non-overlapping time slot in the same
+	// studio (a shared start/end would StudioConflict — the double-session
+	// lock is scoped per covered 15-minute cell, not per booking).
+	sessionKey1, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000005", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey1 := seedIdentity(t, ctx, conn, "BBWELLATTNDFEEDEFMNP")
+	bookingKey1, outcome1 := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000005", sessionKey1, bookerKey1, "")
+	if outcome1 != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking (default-fee case) outcome = %v, want Accepted", outcome1)
+	}
+	testutil.PublishOp(t, conn, feeAttendanceEnv("wdattendfeedef00001", bookingKey1, sessionKey1, "2026-07-08T09:05:00Z", nil))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey1)["noShowFeeCents"].(float64); got != 2500 {
+		t.Fatalf("omitted noShowFeeCents = %v, want default 2500", attendanceStatus(t, ctx, conn, bookingKey1)["noShowFeeCents"])
+	}
+
+	// A caller-supplied positive value is stored as-is.
+	sessionKey2, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000006", studioKey, "Vinyasa Flow", "2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", 20)
+	bookerKey2 := seedIdentity(t, ctx, conn, "BBWELLATTNDFEEPSTMNP")
+	bookingKey2, outcome2 := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000006", sessionKey2, bookerKey2, "")
+	if outcome2 != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking (positive-fee case) outcome = %v, want Accepted", outcome2)
+	}
+	positiveFee := 1500.0
+	testutil.PublishOp(t, conn, feeAttendanceEnv("wdattendfeepos00001", bookingKey2, sessionKey2, "2026-07-08T10:05:00Z", &positiveFee))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey2)["noShowFeeCents"].(float64); got != 1500 {
+		t.Fatalf("caller-supplied noShowFeeCents = %v, want 1500", attendanceStatus(t, ctx, conn, bookingKey2)["noShowFeeCents"])
+	}
+
+	// An explicit 0 (the automated sweep's signal) leaves the field off
+	// .status entirely — never written as 0.
+	sessionKey3, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000007", studioKey, "Vinyasa Flow", "2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", 20)
+	bookerKey3 := seedIdentity(t, ctx, conn, "BBWELLATTNDFEEZRSMNP")
+	bookingKey3, outcome3 := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000007", sessionKey3, bookerKey3, "")
+	if outcome3 != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking (zero-fee case) outcome = %v, want Accepted", outcome3)
+	}
+	zeroFee := 0.0
+	testutil.PublishOp(t, conn, feeAttendanceEnv("wdattendfeezer00001", bookingKey3, sessionKey3, "2026-07-08T11:05:00Z", &zeroFee))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if _, present := attendanceStatus(t, ctx, conn, bookingKey3)["noShowFeeCents"]; present {
+		t.Fatalf("explicit noShowFeeCents:0 must never be written to .status (no-fee signal), got %v", attendanceStatus(t, ctx, conn, bookingKey3)["noShowFeeCents"])
+	}
+
+	// A negative value is rejected InvalidArgument, distinct from the "no
+	// fee" meaning of an explicit 0.
+	sessionKey4, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000008", studioKey, "Vinyasa Flow", "2026-07-08T12:00:00Z", "2026-07-08T12:30:00Z", 20)
+	bookerKey4 := seedIdentity(t, ctx, conn, "BBWELLATTNDFEENEGMP1")
+	bookingKey4, outcome4 := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000008", sessionKey4, bookerKey4, "")
+	if outcome4 != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking (negative-fee case) outcome = %v, want Accepted", outcome4)
+	}
+	negativeFee := -100.0
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, feeAttendanceEnv("wdattendfeeneg00001", bookingKey4, sessionKey4, "2026-07-08T12:05:00Z", &negativeFee))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("negative noShowFeeCents outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument") || !strings.Contains(reply.Error.Message, "noShowFeeCents") {
+		t.Fatalf("rejection should be InvalidArgument naming noShowFeeCents, got %+v", reply.Error)
+	}
+}
+
 // TestSetBookingAttendance_InstructorConfinedToTheirOwnClass: every bound
 // instructor in the deployment holds the same standing scope=any grant, so the
 // capability plane cannot tell one from another — the script's two-hop binder

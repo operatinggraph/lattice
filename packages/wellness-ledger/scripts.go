@@ -126,8 +126,12 @@ def execute(state, op):
 // race a read-modify-write — the balance is derived by the
 // wellnessLedgerHistory lens summing entries. Unlike clinic-ledger's
 // transaction DDL, there is no billedTo/insurance payer dimension — wellness
-// billing has no insurance concept, so the entry stays the plain
-// {type, amountCents, memo?, postedAt} shape.
+// billing has no insurance concept, so a debit entry stays the plain
+// {type, amountCents, memo?, postedAt} shape. A credit entry additionally
+// carries reason (payment|waiver, default payment) — a waiver forgives debt
+// (e.g. a waived no-show fee) rather than recording cash collected; rejected
+// on a debit, and rejected on a self-scoped (member) credit, which may only
+// pay down a balance, mirroring clinic-ledger exactly.
 const transactionDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -249,6 +253,21 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
 
+    # reason distinguishes a credit that is cash actually collected from one
+    # that forgives debt (a waived no-show fee) -- both reduce the derived
+    # balance identically (owed_cents -= amount_cents above, and the
+    # ledgerHistory lens's sum(debits)-sum(credits)), but the lens projects
+    # reason so a reader never mistakes forgiven debt for money received.
+    # Credit-only, mirroring clinic-ledger's post_entry.
+    reason = optional_string(p, "reason")
+    if entry_type == "credit":
+        if reason == None:
+            reason = "payment"
+        if reason != "payment" and reason != "waiver":
+            fail("InvalidArgument: reason: must be \"payment\" or \"waiver\", got " + reason)
+    elif reason != None:
+        fail("InvalidArgument: reason: only valid on a credit (payment/waiver), not a debit (charge)")
+
     # Member-self ownership + amount trust (WellnessCreditAccount only —
     # permissions.go grants no self-scope WellnessDebitAccount), mirroring
     # clinic-ledger's post_entry. The mere PRESENCE of authContextTarget
@@ -265,6 +284,8 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
     if op.authContextTarget != "":
         if entry_type != "credit":
             fail("AuthDenied: a member may only credit (pay down) their own account, not charge it")
+        if reason == "waiver":
+            fail("AuthDenied: a member may only pay down their own account, not waive a charge")
         # authcontext-target: (ownership) unlike clinic-ledger's account→
         # patient→identifiedBy chain, a wellnessaccount's heldFor link
         # targets the IDENTITY directly (accountDDLScript above), so
@@ -333,6 +354,8 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
     entry_data = {"type": entry_type, "amountCents": amount_cents, "postedAt": posted_at}
     if memo != None:
         entry_data["memo"] = memo
+    if entry_type == "credit":
+        entry_data["reason"] = reason
 
     # postedTo: the transaction (later-arriving) is the source, the
     # pre-existing account is the target (Contract #1 §1.1). Reads as

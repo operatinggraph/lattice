@@ -882,11 +882,12 @@ async function renderMyBalance() {
     empty.hidden = true;
     for (const t of txs) {
       const li = document.createElement("li");
-      li.className = "ledger-entry " + t.type;
+      const isWaiver = t.type === "credit" && t.reason === "waiver";
+      li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "");
       const sign = t.type === "debit" ? "+" : "−";
       const d = new Date(t.postedAt);
       const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
+      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
       list.append(li);
     }
   } catch (_) {
@@ -1928,11 +1929,12 @@ function renderBillingBody(data) {
   empty.hidden = true;
   for (const t of txs) {
     const li = document.createElement("li");
-    li.className = "ledger-entry " + t.type;
+    const isWaiver = t.type === "credit" && t.reason === "waiver";
+    li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "");
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
+    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + t.memo : "") + (t.className ? " (" + t.className + ")" : "");
     list.append(li);
   }
 }
@@ -1942,15 +1944,21 @@ function renderBillingBody(data) {
 // (ensureLedgerAccount, best-effort, mirrors the post-booking call site,
 // left exactly as-is) if this is its first-ever charge or payment.
 //
-// The two ops share ONE visible amount/memo field pair behind two buttons
-// (charge vs payment), and the target account may not exist until this
+// The two ops share ONE visible amount/memo field pair behind their buttons
+// (charge, payment, waive), and the target account may not exist until this
 // call opens it — so, unlike the other migrated forms, this renders the
 // descriptor form into a detached mount that is never shown, purely to
 // assemble the envelope (payload, reads, authContext per dispatch — both
 // ops are AuthContext "standing", so no context.me/selfVoice is needed)
 // from what was already typed into the visible fields. Mirrors
 // clinic-app/web/app.js's own submitLedgerEntry.
-async function submitBillingEntry(opType, what) {
+//
+// reason (optional, "waiver" for the waive button) prefills
+// WellnessCreditAccount's reason field — omitted (the charge/payment
+// buttons) it defaults server-side to "payment". The billing panel is
+// already staff-only at the panel level (loadRosterBilling above), so no
+// per-button hat-gating is needed for the waive button.
+async function submitBillingEntry(opType, what, reason) {
   const memberKey = document.getElementById("billing-member").value;
   if (!memberKey) {
     toast("Select a member first.", false);
@@ -1967,7 +1975,9 @@ async function submitBillingEntry(opType, what) {
   const memo = memoInput.value.trim();
   const chargeBtn = document.getElementById("billing-charge");
   const paymentBtn = document.getElementById("billing-payment");
+  const waiveBtn = document.getElementById("billing-waive");
   chargeBtn.disabled = paymentBtn.disabled = true;
+  if (waiveBtn) waiveBtn.disabled = true;
   try {
     let accountKey = billingCache && billingCache.identityKey === memberKey ? billingCache.accountKey : "";
     if (!accountKey) {
@@ -1981,7 +1991,7 @@ async function submitBillingEntry(opType, what) {
     const { renderOpForm } = await loadDescriptorform();
     const row = opCatalogCache && opCatalogCache[opType];
     if (!row) throw new Error("this action is unavailable");
-    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined } };
+    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined, reason } };
     const handle = renderOpForm(row, context, document.createElement("div"));
     if (!handle) throw new Error("this action is unavailable");
     const envelope = handle.submit();
@@ -1994,6 +2004,7 @@ async function submitBillingEntry(opType, what) {
     toast(e.message, false);
   } finally {
     chargeBtn.disabled = paymentBtn.disabled = false;
+    if (waiveBtn) waiveBtn.disabled = false;
   }
 }
 
@@ -2562,6 +2573,7 @@ function init() {
   document.getElementById("billing-member").addEventListener("change", renderBilling);
   document.getElementById("billing-charge").addEventListener("click", () => submitBillingEntry("WellnessDebitAccount", "record the charge"));
   document.getElementById("billing-payment").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "record the payment"));
+  document.getElementById("billing-waive").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "waive the charge", "waiver"));
   document.getElementById("studios-refresh").addEventListener("click", () => {
     studiosCache = null; instructorsCache = null;
     renderStudiosAdmin();

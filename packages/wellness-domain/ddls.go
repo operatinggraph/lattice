@@ -789,9 +789,13 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"attended or noShow, carrying rate / seat / booker forward unchanged (an OCC upsert on the aspect's " +
 			"own revision) — those fields now only matter for ReleaseOrphanedBooking, since a marked booking is " +
 			"no longer CancelBooking-eligible. Transitioning to noShow also stores a noShowFeeCents amount on " +
-			".status — caller-supplied (must be positive) or a 2500 default when omitted, the same idiom " +
-			"clinic-domain's SetAppointmentStatus uses — that wellness-ledger's wellnessNoShowSettlement lens " +
-			"reads to post a DebitAccount charge against the booker's ledger account. It is re-markable — " +
+			".status — caller-supplied or a 2500 default when omitted, the staff-observed default (the same idiom " +
+			"clinic-domain's SetAppointmentStatus uses). A caller-supplied 0 is the one exception: it means no fee " +
+			"at all, and the field is left off .status entirely rather than written as 0 — that's how the " +
+			"automated pastDueBookingsTarget sweep marks a documentation lapse (nobody at the desk checked the " +
+			"member in) as distinct from a staff-observed no-show; a negative value is rejected. When present and " +
+			"positive, wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge " +
+			"against the booker's ledger account. It is re-markable — " +
 			"attended and noShow correct each other — and noShowFeeCents is NOT in the carry-forward field set " +
 			"(only rate/seat/booker/session are), so re-marking a noShow booking back to attended silently drops " +
 			"it; a charge already posted before that re-mark stands (the settles audit link makes it permanent " +
@@ -824,7 +828,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking / SetBookingAttendance / ReleaseOrphanedBooking; required, validated alive)."},` +
 			`"status":{"type":"string","description":"attended | noShow (SetBookingAttendance; required). Re-markable — either value corrects the other."},` +
 			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."},` +
-			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetBookingAttendance; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the booker's ledger account."}},` +
+			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetBookingAttendance; optional). 0 means no fee is charged (used by the automated pastDueBookings sweep to mark a documentation lapse rather than a billable no-show); any other supplied value must be positive. Defaults to 2500 when omitted. Stored on .status; wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the booker's ledger account."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote."}}}`,
@@ -836,7 +840,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"bookingKey":     "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":         "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
 			"instructor":     "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
-			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session are).",
+			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show; any other supplied value must be positive. Defaults to 2500 when omitted. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -3838,20 +3842,29 @@ def execute(state, op):
                 merged[field] = carried
 
         # No-show fee (billing consequence for a missed class): only meaningful
-        # when transitioning TO noShow. Caller-supplied noShowFeeCents (must be
-        # positive) or a default placeholder (2500) when omitted — mirrors
-        # clinic-domain's SetAppointmentStatus exactly. Deliberately NOT in the
-        # carry-forward loop above: a later re-mark to attended drops it (the
-        # field only matters while the booking IS a noShow), and a charge
-        # already posted before that re-mark stands regardless (the settles
-        # audit link makes it permanent, wellness-ledger-design.md).
+        # when transitioning TO noShow. Caller-supplied noShowFeeCents or a
+        # default placeholder (2500) when omitted — mirrors clinic-domain's
+        # SetAppointmentStatus in spirit, but unlike clinic (which splits the
+        # automated sweep and the staff path into two separate ops) wellness
+        # dispatches both through this one SetBookingAttendance op, so the
+        # "no fee" signal has to be a value, not the absence of a call: an
+        # explicit noShowFeeCents:0 means the automated pastDueBookings sweep
+        # marked a documentation lapse (nobody at the desk checked the member
+        # in), not a real no-show, so no fee is written at all; an omitted
+        # value still defaults to 2500, the staff-observed default. Negative
+        # values are rejected; positive values are stored as-is. Deliberately
+        # NOT in the carry-forward loop above: a later re-mark to attended
+        # drops it (the field only matters while the booking IS a noShow),
+        # and a charge already posted before that re-mark stands regardless
+        # (the settles audit link makes it permanent, wellness-ledger-design.md).
         if value == "noShow":
             fee_cents = optional_number(p, "noShowFeeCents")
             if fee_cents == None:
                 fee_cents = 2500
-            elif fee_cents <= 0:
-                fail("InvalidArgument: noShowFeeCents: must be a positive number")
-            merged["noShowFeeCents"] = fee_cents
+            elif fee_cents < 0:
+                fail("InvalidArgument: noShowFeeCents: must not be negative")
+            if fee_cents > 0:
+                merged["noShowFeeCents"] = fee_cents
 
         # The OCC upsert is keyed on the status aspect's own revision, so two
         # markers racing the same booking commit exactly one. Either value
