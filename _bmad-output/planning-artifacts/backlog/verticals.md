@@ -78,7 +78,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-27 · `<pending>` · 12 Riverside Walk's 7 co-managers reap to 1 — reapExcessCoManagersLive generalizes reapExcessCoManagers past the seed's pinned unit to every live `manages` link; 6 reaped live.
+- 2026-08-27 · `587f06f6` · 12 Riverside Walk's 7 co-managers reap to 1 — reapExcessCoManagersLive generalizes reapExcessCoManagers past the seed's pinned unit to every live `manages` link; 6 reaped live.
 - 2026-08-27 · `cba0f5c4` · A café menu item can finally be relocated instead of stranded — SetMenuItemLocation + menuCatalog's missingLocation flag; 10 broken items converged live. cafe-domain 0.11.23
 - 2026-08-27 · `8b024aae` · The clinic front desk finally has a forward schedule — 4 future appointments backfilled, 5 named agent-verify litter appointments reaped; also fixes a `640b97d1` rerun regression.
 - 2026-08-27 · `640b97d1` · 26 café leases finally have a staffer — seed-classic-demo's bare unit joins Riverside Building via WireContainedIn (best-effort); all pre-existing leases re-projected live, no backfill needed.
