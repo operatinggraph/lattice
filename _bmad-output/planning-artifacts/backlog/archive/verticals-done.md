@@ -2,6 +2,17 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-22 · `be2588d8` · A wellness class whose studio was retired finally has a way out — ReassignSession gains an operator-only newStudio repair path; orphaned classes flag `missingStudio` instead of a blank location. wellness-domain 0.22.3
+- 2026-08-22 · `f6734e6c` · Two café ghost leases held by the admin identity finally drop out of the POS lease picker — reapGhostLeases withdraws verify-fire litter live.
+- 2026-08-22 · `4a16fa22` · A clinic patient's RLS anchor array stops growing by one entry per visit — clinicPatientsRead's workplace fan-out now folds via WITH+collect(DISTINCT). clinic-domain 0.34.3
+- 2026-08-22 · `7d8ba666` · A café self-order no longer flashes $0.00 — renderResident overlays a pending charge until the cafeTabs projection catches up.
+- 2026-08-22 · `8dea6284` · Three Protected authz lenses drop their unbounded containedIn walk for a single fixed hop (typed-relation-signatures' zero-platform replacement). loftspace-domain 0.11.1, lease-signing 0.31.5
+- 2026-08-22 · `cca9b4d4` · A landlord setting renewal terms finally sees the tenant's name, not a raw key — renewalsRead gains a SECURE tenant_name column. lease-signing 0.31.4
+- 2026-08-22 · `b757bab0` · Clinic's front-desk header and 7 toasts stop showing raw keys; loftspace drops 3 unlabeled reference codes. clinic-domain 0.34.1
+- 2026-08-22 · `cde1826b` · A wellness no-show fee finally names its class — wellnessLedgerHistory walks settles→forSession to the session's display name, mirroring clinic-ledger's `15f628f4`. wellness-ledger 0.2.10
+- 2026-08-21 · `89802f62` · A wellness member's account row finally retracts after their last booking is deleted — wellnessMemberAccounts gains DiffRetraction, mirroring landlordUnitsRead's structural-walk shape. wellness-ledger 0.2.9
+- 2026-08-21 · `300ed530` · The foreground `run-{cafe,wellness,loftspace}-app` targets can finally see Postgres — mirrored `run-clinic-app`'s env wiring; `loadIdentities` no longer swallows a roster failure silently.
+- 2026-08-21 · `15c46beb` · Self-credit no longer `ScriptTimeout`s — Fire 1's live-read collapse already fixed it; row closed by live re-verification (café + wellness, real 7/8-row accounts), no new code.
 - 2026-08-21 · `fc15558f` · Staff descriptor rendering closes its Inc 1-4 decomposition — lint-app-op-descriptors gains the per-app op-literal ceiling ratchet. Residuals filed above.
 - 2026-08-07 · `130d3958` · A wellness member can finally pay down their own balance — WellnessCreditAccount gains a consumer scope=self grant, ownership + amount capped server-side. wellness-ledger 0.2.6
 - 2026-08-07 · `15209753` · A shared café house tab finally names who ordered what — Charge stamps orderedBy (op.actor) on each .status.lines entry, distinguishing a resident's self-order from a staff ring-up on the receipt. cafe-domain 0.11.18
