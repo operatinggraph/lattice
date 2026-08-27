@@ -155,6 +155,7 @@ func main() {
 	landlordKey := ensureLandlord(ctx, conn, adminKey, unitKey, consumerRoleKey)
 	fmt.Printf("==> landlord:        %s manages %s\n", landlordKey, unitKey)
 	reapExcessCoManagers(ctx, conn, adminKey, unitKey, landlordKey)
+	reapExcessCoManagersLive(ctx, conn, adminKey)
 	reapDuplicateListings(ctx, conn, adminKey, unitKey)
 	backfillBareListings(ctx, conn, adminKey)
 	backfillUnownedListings(ctx, conn, adminKey, consumerRoleKey)
@@ -887,6 +888,46 @@ func reapExcessCoManagers(ctx context.Context, conn *substrate.Conn, adminKey, u
 				OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
 			})
 		fmt.Printf("==> reaped excess co-manager: %s no longer manages %s\n", landlordKey, unitKey)
+	}
+}
+
+// reapExcessCoManagersLive generalizes reapExcessCoManagers past the seed's
+// own pinned unit: it scans every live `manages` link on Core KV, groups by
+// target unit, and on any unit carrying more than one keeps only the
+// alphabetically-first landlord key — the same canonicality findManagingLandlord
+// already uses (NanoIDs sort by creation order, so this keeps the oldest).
+// By the time this runs the pinned unit is already narrowed to keepLandlordKey
+// by the call above, so this is a no-op there; every OTHER live unit that
+// accrued co-managers across a decade of unguarded prior runs (12 Riverside
+// Walk carried 7, verticals.md) converges here instead.
+func reapExcessCoManagersLive(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.identity.")
+	must(err, "list lnk.identity. keys")
+	byUnit := map[string][]string{}
+	for _, key := range keys {
+		idx := strings.Index(key, ".manages.unit.")
+		if idx < 0 || !alive(ctx, conn, key) {
+			continue
+		}
+		unitID := key[idx+len(".manages.unit."):]
+		byUnit[unitID] = append(byUnit[unitID], key)
+	}
+	for unitID, links := range byUnit {
+		if len(links) < 2 {
+			continue
+		}
+		sort.Strings(links)
+		unitKey := "vtx.unit." + unitID
+		for _, key := range links[1:] {
+			landlordKey := "vtx.identity." + landlordIDFromManagesLink(key)
+			submitOp(ctx, conn, adminKey, "RemoveUnitOwner", "loftspaceOwnership",
+				map[string]any{"landlord": landlordKey, "unit": unitKey},
+				&processor.ContextHint{
+					Reads:         []string{landlordKey, unitKey},
+					OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
+				})
+			fmt.Printf("==> reaped excess co-manager: %s no longer manages %s\n", landlordKey, unitKey)
+		}
 	}
 }
 
