@@ -217,6 +217,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"retentionKeyStatus":                {narrow, "retentionclass", modeRelation},
 	"shredStatus":                       {narrow, "identity", modeRelation},
 	"staffReadGrants":                   {narrow, "building identity role", modeRelation},
+	"staleAssignedTasks":                {narrow, "identity task", modeRelation},
 	"unroutedTasks":                     {narrow, "role task", modeRelation},
 	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},

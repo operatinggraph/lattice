@@ -164,6 +164,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"retentionKeyStatus":                {"p", 0},
 	"shredStatus":                       {"p", 0},
 	"staffReadGrants":                   {"p", 0},
+	"staleAssignedTasks":                {"p", 0},
 	"unroutedTasks":                     {"p", 0},
 	"visitSeriesDue":                    {"p", 0},
 	"visitSeriesRead":                   {"p", 0},
