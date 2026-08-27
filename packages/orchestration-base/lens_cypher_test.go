@@ -187,3 +187,98 @@ func TestUnroutedTasks_CancelledWhileQueuedNeverMatches(t *testing.T) {
 	rows := f.projectAt(t, "task1", unrNow)
 	require.Empty(t, rows, "a cancelled task is excluded by the status='open' gate even if queuedFor lingers")
 }
+
+// projectIdentitySpec runs an identity-anchored spec (myTasksSpec /
+// capabilityEphemeralSpec) with an INJECTED $now, mirroring projectAt above
+// for the task-anchored unroutedTasksSpec.
+func (f *unrFixture) projectIdentitySpec(t *testing.T, spec, identityName, now string) map[string]any {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "spec must parse on the full engine")
+	actorKey := "vtx.identity." + f.ids[identityName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    actorKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "the identity anchor always yields exactly one row")
+	return out[0].Values
+}
+
+// TestMyTasks_ExpiredButOpen_StillProjected pins the deliberate choice
+// documented on myTasksSpec: an assignedTo task past its expiresAt keeps
+// rendering in the inbox, because there is no other path (no queuedFor link
+// for FR29's unroutedTasks to catch, no reap/escalation mechanism) that
+// would ever surface it to the assignee otherwise. Regressing this back to a
+// status+expiresAt gate — the same shape capabilityEphemeral now correctly
+// uses — would make the task invisible while it still blocks MergeIdentity
+// and stays completable.
+func TestMyTasks_ExpiredButOpen_StillProjected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "bob", "identity", nil)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-06-29T12:00:00Z"})
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	v := f.projectIdentitySpec(t, myTasksSpec, "bob", unrNow)
+	open, _ := v["openTasks"].([]any)
+	var found bool
+	for _, row := range open {
+		m, _ := row.(map[string]any)
+		if m["taskKey"] == "vtx.task."+f.ids["task1"] {
+			found = true
+		}
+	}
+	require.True(t, found, "an expired-but-still-open direct assignment must keep rendering — see myTasksSpec's doc comment")
+}
+
+// TestCapabilityEphemeral_CompletedTask_NotProjected proves
+// capabilityEphemeralSpec's liveness gate: a task's operationType/target
+// grant must not survive the task's own completion, even though
+// transition_task (ddls.go) carries expiresAt forward unchanged on
+// CompleteTask/CancelTask — expiresAt alone is not a valid liveness proxy
+// once status has moved off 'open'.
+func TestCapabilityEphemeral_CompletedTask_NotProjected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "bob", "identity", nil)
+	f.vtx(t, "task1", "task", map[string]any{"status": "complete", "expiresAt": "2026-09-05T12:00:00Z"})
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	v := f.projectIdentitySpec(t, capabilityEphemeralSpec, "bob", unrNow)
+	grants, _ := v["ephemeralGrants"].([]any)
+	for _, row := range grants {
+		m, _ := row.(map[string]any)
+		require.NotEqual(t, "vtx.task."+f.ids["task1"], m["taskKey"],
+			"a completed task's grant must not survive its own completion")
+	}
+}
+
+// TestCapabilityEphemeral_OpenAndLive_StillProjected is the happy-path
+// sanity check: an open, not-yet-expired direct assignment still grants.
+func TestCapabilityEphemeral_OpenAndLive_StillProjected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newUnrFixture(t)
+	f.vtx(t, "bob", "identity", nil)
+	f.vtx(t, "task1", "task", map[string]any{"status": "open", "expiresAt": "2026-07-01T12:00:00Z"})
+	f.edge(t, "assignedTo", "task1", "bob")
+
+	v := f.projectIdentitySpec(t, capabilityEphemeralSpec, "bob", unrNow)
+	grants, _ := v["ephemeralGrants"].([]any)
+	var found bool
+	for _, row := range grants {
+		m, _ := row.(map[string]any)
+		if m["taskKey"] == "vtx.task."+f.ids["task1"] {
+			found = true
+		}
+	}
+	require.True(t, found, "an open, not-yet-expired direct assignment must still grant")
+}

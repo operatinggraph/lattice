@@ -275,6 +275,19 @@ const MyTasksBucket = "my-tasks"
 //	expiresAt    ← task.data.expiresAt (scalar on the task root)
 //	status       ← task.data.status (always 'open' here; the WHERE filters it)
 //
+// Deliberately NOT gated on expiresAt (unlike capabilityEphemeral): an
+// assignee's inbox is a "what am I on the hook for" view, and a directly
+// assigned task with no queuedFor link has no FR29 unroutedTasks backstop
+// (that convergence target's own required -[:queuedFor]-> match never fires
+// on one) and no other reap/escalation path — the task stays 'open'
+// indefinitely regardless of expiresAt. Excluding it here would make it
+// invisible while still blocking MergeIdentity (`identity_has_open_tasks`)
+// and still completable via CompleteTask's scope=self grant, which is worse
+// than showing it with a lapsed grant. See backlog/verticals.md for the
+// still-open follow-up (an assignedTo-side reap/escalation mechanism,
+// mirroring unroutedTasksSpec for the queued case) this lens does not
+// attempt to solve.
+//
 // operationName reads the op meta-vertex's root `operationType`, the field every
 // op DDL carries (Contract #10 §10.1: "UI finds the bound op by walking
 // forOperation to the operation meta-vertex"). A dispatched userTask's
@@ -348,8 +361,16 @@ RETURN
 // This replaces the bootstrap cypher's old field reads
 // (task.data.grantedOperationType / task.data.targetKey — the corrected
 // anti-pattern). The grant *field shape* {source, taskKey, operationType,
-// target, expiresAt} is unchanged (Contract #6 §6.6). Only live grants are
-// projected (`task.data.expiresAt > $now`).
+// target, expiresAt} is unchanged (§6.6's table lists no status field, and
+// this lens's WHERE narrowing which rows exist to match against does not
+// widen or alter §6.6's own Processor-side check — `expiresAt > now` at
+// lookup time stays literally true unmodified). Only live grants are
+// projected: `task.data.status = 'open' AND task.data.expiresAt > $now`.
+// Both terms are load-bearing: CompleteTask/CancelTask (ddls.go
+// transition_task) flip status but deliberately carry expiresAt forward
+// unchanged (so a completed task's original grant window stays legible for
+// audit), which makes status the only signal that actually tells a closed
+// task apart from an open one — expiresAt alone cannot.
 //
 // The RETURN produces `actorKey` (so the envelope wrapper can derive the
 // `cap.ephemeral.<actor>` key) and the `ephemeralGrants` array. Anchored on
@@ -360,7 +381,7 @@ MATCH (identity:identity {key: $actorKey})
 
 // --- direct assignments ---
 OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
-  WHERE task.data.expiresAt > $now
+  WHERE task.data.status = 'open' AND task.data.expiresAt > $now
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 
@@ -368,7 +389,7 @@ OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 // identity is the manager; each report reportsTo identity, so identity
 // inherits the tasks assigned to its reports (downward delegation).
 OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)<-[:assignedTo]-(task2:task)
-  WHERE task2.data.expiresAt > $now
+  WHERE task2.data.status = 'open' AND task2.data.expiresAt > $now
 OPTIONAL MATCH (task2)-[:forOperation]->(op2)
 OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 
@@ -381,7 +402,7 @@ OPTIONAL MATCH (task2)-[:scopedTo]->(tgt2)
 // up via the direct assignedTo branch above -- the grant narrows through
 // ordinary reprojection, no bespoke revocation.
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)
-  WHERE task3.data.expiresAt > $now
+  WHERE task3.data.status = 'open' AND task3.data.expiresAt > $now
 OPTIONAL MATCH (task3)-[:forOperation]->(op3)
 OPTIONAL MATCH (task3)-[:scopedTo]->(tgt3)
 
