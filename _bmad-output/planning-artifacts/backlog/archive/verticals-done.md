@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-22 · `18c867d1` · The LoftSpace storefront's 8 duplicate listings reap to one — the landlord converges on its existing link instead of co-manager-minting a fresh one per rerun (12 accrued → 1). seed-classic-demo.go
 - 2026-08-22 · `be2588d8` · A wellness class whose studio was retired finally has a way out — ReassignSession gains an operator-only newStudio repair path; orphaned classes flag `missingStudio` instead of a blank location. wellness-domain 0.22.3
 - 2026-08-22 · `f6734e6c` · Two café ghost leases held by the admin identity finally drop out of the POS lease picker — reapGhostLeases withdraws verify-fire litter live.
 - 2026-08-22 · `4a16fa22` · A clinic patient's RLS anchor array stops growing by one entry per visit — clinicPatientsRead's workplace fan-out now folds via WITH+collect(DISTINCT). clinic-domain 0.34.3
