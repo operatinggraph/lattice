@@ -46,8 +46,11 @@
 //     WellnessDebitAccount{accountKey, amountCents, bookingRef} once the booker's
 //     account exists — WellnessDebitAccount's optional bookingRef writes the settles
 //     audit link (transaction→booking) the lens reads to detect the gap is
-//     closed. Mirrors clinic-ledger/clinic-domain's identical no-show-fee
-//     shape (clinicNoShowSettlement), self-contained in this one package (no
+//     closed. If the booker has no wellnessaccount yet, a directOp
+//     WellnessCreateAccount{identityKey} opens one first, lazily, so a booker
+//     who has never been billed before is never permanently stranded.
+//     Mirrors clinic-ledger/clinic-domain's identical no-show-fee shape
+//     (clinicNoShowSettlement), self-contained in this one package (no
 //     new cross-package dependency, same rationale as clinic-ledger's own
 //     placement — clinic-noshow-fee-design.md §"Package boundary").
 //
@@ -61,11 +64,13 @@
 //     converges via a directOp WellnessDebitAccount{accountKey, amountCents,
 //     priceBookingRef} once the booker's account exists, UNCONDITIONAL on
 //     attendance (a class price is owed for the seat, not for showing up).
-//     WellnessDebitAccount's optional priceBookingRef writes the settlesClassPrice
-//     audit link (transaction→booking, a relation distinct from the
-//     no-show settlement's settles) the lens reads to detect the gap is
-//     closed — so the two settlement gaps never collide in a count() or
-//     double-charge each other.
+//     Same lazy-open relay as wellnessNoShowSettlement: a directOp
+//     WellnessCreateAccount{identityKey} opens the booker's account first when
+//     it doesn't exist yet. WellnessDebitAccount's optional priceBookingRef
+//     writes the settlesClassPrice audit link (transaction→booking, a
+//     relation distinct from the no-show settlement's settles) the lens
+//     reads to detect the gap is closed — so the two settlement gaps never
+//     collide in a count() or double-charge each other.
 //
 // Mirrors packages/clinic-ledger, with the account held for the booker's
 // identity directly rather than a domain-specific patient/lease vertex —
@@ -91,7 +96,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.12",
+	Version: "0.2.13",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
@@ -99,8 +104,9 @@ var Package = pkgmgr.Definition{
 		"settlement, writes settlesClassPrice) back-refs; WellnessCreditAccount independently taking optional refundRef, " +
 		"writes settlesRefund) + the wellnessLedgerHistory read-model lens (one row per " +
 		"transaction) + the wellnessMemberAccounts lens (member identity -> account key lookup) + the " +
-		"wellnessNoShowSettlement Weaver playbook (no-show fee auto-charge) + the wellnessClassPriceSettlement Weaver " +
-		"playbook (class-price auto-charge, unconditional on attendance) + the wellnessRefundSettlement Weaver playbook " +
+		"wellnessNoShowSettlement Weaver playbook (lazily opens the member's account via WellnessCreateAccount, then " +
+		"auto-charges the no-show fee) + the wellnessClassPriceSettlement Weaver playbook (same lazy account-open relay, " +
+		"then auto-charges the class price, unconditional on attendance) + the wellnessRefundSettlement Weaver playbook " +
 		"(reverses a class-price charge already posted before its booking was cancelled, anchored on wellness-domain's " +
 		"wellnessrefund marker vertex rather than the already-tombstoned booking). Depends wellness-domain.",
 	Depends:       []string{"wellness-domain"},

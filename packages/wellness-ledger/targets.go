@@ -3,17 +3,27 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): three independent missing_* → directOp gaps, mirroring
-// clinic-domain/clinic-ledger's identical shape but self-contained inside
-// wellness-ledger — it already depends on wellness-domain (for
+// #10 §10.8): NoShowSettlementTarget's and ClassPriceSettlementTarget's two
+// independent missing_account/missing_charge (resp. missing_price_charge)
+// gaps each, plus RefundSettlementTarget's single missing_refund gap —
+// mirroring clinic-domain/clinic-ledger's identical shape but self-contained
+// inside wellness-ledger — it already depends on wellness-domain (for
 // bookingRef/priceBookingRef/refundRef validation) and can read
 // booking/session/wellnessrefund data directly, so no separate domain-side
 // package or cross-package dependency is needed.
 //
-//   - NoShowSettlementTarget's missing_charge — a noShow booking's fee.
-//   - ClassPriceSettlementTarget's missing_price_charge — a priced session's
-//     booking price, unconditional on attendance. Independent of the first:
-//     each dispatches WellnessDebitAccount with a DIFFERENT ref param (bookingRef vs.
+//   - NoShowSettlementTarget's missing_account → directOp(WellnessCreateAccount),
+//     opening the booker's account lazily on first no-show rather than
+//     requiring a booking identity's account to pre-exist (previously the
+//     only route: wellness's standing front-desk CreateAccount flow, which
+//     silently starved unopened bookers' no-show fees of ever converging).
+//     missing_charge → directOp(WellnessDebitAccount) over the now-real
+//     account, same as before.
+//   - ClassPriceSettlementTarget's missing_account → the identical lazy-open
+//     relay, independently, for a priced session's booking price
+//     (unconditional on attendance). missing_price_charge → directOp
+//     (WellnessDebitAccount) once the account exists. Both targets dispatch
+//     WellnessDebitAccount with a DIFFERENT ref param (bookingRef vs.
 //     priceBookingRef), writing a DIFFERENT settles/settlesClassPrice link, so
 //     the two never converge (or double-charge) each other's gap.
 //   - RefundSettlementTarget's missing_refund — reverses a class-price charge
@@ -21,13 +31,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     WellnessCreditAccount (not WellnessDebitAccount) with refundRef,
 //     anchored on wellness-domain's wellnessrefund marker vertex rather than
 //     the booking, which CancelBooking has already tombstoned by the time
-//     the marker exists.
-//
-// No missing_account gap on the first two targets: wellness's existing billing (any
-// front-desk-driven charge) already assumes a member's wellnessaccount exists
-// via the standing CreateAccount flow; a booker with no account yet simply
-// doesn't converge until one is opened, same as today's billing (mirrors
-// clinic's identical rationale, targets.go's doc comment).
+//     the marker exists. No missing_account gap here: a wellnessrefund only
+//     ever exists because CancelBooking already resolved a live accountKey
+//     off the original charge's postedTo link before minting it — unlike the
+//     two targets above, there is no "account might not exist yet" case here.
 //
 // A booking re-marked away from noShow (SetBookingAttendance is re-markable,
 // unlike clinic's terminal appointment status) drops noShowFeeCents from its
@@ -42,17 +49,38 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: NoShowSettlementTarget,
-			Description: "Every no-show booking carrying a fee is charged once to the member's wellness account. A " +
-				"member with no account open yet is skipped until one exists.",
+			Description: "Every no-show booking carrying a fee is charged once to the member's wellness account. " +
+				"If the member has no account yet, one is opened first and the fee is then posted against " +
+				"the booking.",
 			LensRef: NoShowSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_account": {
+					Action:    "directOp",
+					Operation: "WellnessCreateAccount",
+					// WellnessCreateAccount is claimed by wellness-ledger's
+					// wellnessaccount vertexType DDL alone (the sibling
+					// wellnessLedgerAccountGuard aspectType DDL also lists it in
+					// PermittedCommands, but only as a step-6 write gate —
+					// aspectType DDLs are excluded from the operationType->class
+					// reverse index, internal/processor/ddl_cache.go's
+					// commandIndexEligible, so they never make an op ambiguous).
+					// Pin Class explicitly anyway, mirroring clinic-ledger's
+					// identical ClinicCreateAccount pin (MissingClass otherwise
+					// if ever a second vertexType DDL claims it).
+					Class:  "wellnessaccount",
+					Params: map[string]string{"identityKey": "row.identityKey"},
+					Reads:  []string{"row.identityKey"},
+				},
 				"missing_charge": {
 					Action:    "directOp",
 					Operation: "WellnessDebitAccount",
-					// WellnessDebitAccount is claimed by multiple installed ledger DDLs
-					// (clinic-ledger, cafe-ledger, loftspace-ledger, this one) —
-					// pin the vertexType DDL this target dispatches to
-					// (MissingClass otherwise).
+					// WellnessDebitAccount is claimed by wellness-ledger's
+					// wellnesstransaction DDL alone — no other installed package
+					// declares this operationType (each vertical prefixes its
+					// own, e.g. clinic-ledger's ClinicDebitAccount). Pin Class
+					// explicitly anyway, mirroring clinic-ledger's identical
+					// ClinicDebitAccount pin (MissingClass otherwise if ever
+					// shared).
 					Class:  "wellnesstransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "bookingRef": "row.bookingKey", "memo": "row.memo"},
 					// memo excluded from Reads deliberately — it's free text
@@ -68,12 +96,17 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			Description: "Every booking on a paid class is charged its class price once to the member's account, " +
 				"whether or not the member ends up attending.",
 			LensRef: ClassPriceSettlementTarget,
-			// No missing_account gap here either — same rationale as
-			// NoShowSettlementTarget above: a member's billing already assumes
-			// a wellnessaccount exists via the standing CreateAccount flow, so
-			// a booker with no account yet simply doesn't converge until one is
-			// opened.
 			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_account": {
+					Action:    "directOp",
+					Operation: "WellnessCreateAccount",
+					// Pin the vertexType DDL this target dispatches to
+					// (MissingClass otherwise) — same rationale as
+					// NoShowSettlementTarget's gap above.
+					Class:  "wellnessaccount",
+					Params: map[string]string{"identityKey": "row.identityKey"},
+					Reads:  []string{"row.identityKey"},
+				},
 				"missing_price_charge": {
 					Action:    "directOp",
 					Operation: "WellnessDebitAccount",
@@ -82,7 +115,13 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// NoShowSettlementTarget's Class field above.
 					Class:  "wellnesstransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.priceCents", "priceBookingRef": "row.bookingKey", "memo": "row.sessionName"},
-					Reads:  []string{"row.accountKey", "row.bookingKey", "row.sessionName"},
+					// sessionName excluded from Reads deliberately — it's free
+					// text (a class name like 'Vinyasa Flow', never a vtx.* key)
+					// used only as the memo Param value; declaring it here fails
+					// step4 hydrate the same way clinic-ledger's identical memo
+					// field already hit (see clinic-ledger/targets.go's doc
+					// comment, and this file's own missing_charge gap above).
+					Reads: []string{"row.accountKey", "row.bookingKey"},
 				},
 			},
 		},

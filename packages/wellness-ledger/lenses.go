@@ -55,11 +55,12 @@ const RefundSettlementTarget = "wellnessRefundSettlement"
 // debit, negative for credit, over rows for a given identityKey/accountKey;
 // the ledger itself never stores a mutable running total), wellnessMemberAccounts
 // (the member -> account key lookup, since the account key is no longer
-// derivable), wellnessNoShowSettlement (the missing_charge convergence
-// lens targets.go's WeaverTargets dispatches WellnessDebitAccount over), and
-// wellnessClassPriceSettlement (the missing_price_charge convergence lens —
-// the OTHER wellness billing gap, a class's booking price, converged
-// unconditionally on attendance rather than gated on a noShow), and
+// derivable), wellnessNoShowSettlement (the missing_account/missing_charge
+// convergence lens targets.go's WeaverTargets dispatches
+// WellnessCreateAccount/WellnessDebitAccount over), and
+// wellnessClassPriceSettlement (the missing_account/missing_price_charge
+// convergence lens — the OTHER wellness billing gap, a class's booking price,
+// converged unconditionally on attendance rather than gated on a noShow), and
 // wellnessRefundSettlement (the missing_refund convergence lens — reverses a
 // class-price charge already posted before its booking was cancelled,
 // anchored on wellness-domain's wellnessrefund marker vertex rather than the
@@ -103,7 +104,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "memo", "maxretries_charge"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "memo", "maxretries_charge"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -120,7 +121,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: ClassPriceSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price_charge"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price_charge"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -148,11 +149,13 @@ func Lenses() []pkgmgr.LensSpec {
 
 // noShowSettlementSpec is the one-row-per-booking convergence cypher: a
 // noShow booking carrying a positive noShowFeeCents needs its charge posted
-// onto the booker's wellness-ledger account, once. missing_charge only (no
-// missing_account gap, mirroring clinic-ledger's identical rationale): the
-// booking's booker must already have a wellnessaccount, matching wellness'
-// existing (front-desk-driven) billing assumption.
+// onto the booker's wellness-ledger account, once — two independent gaps,
+// mirroring clinic-ledger's identical clinicNoShowSettlement shape:
 //
+//   - `missing_account` — the booking is a noShow, carries a fee, and the
+//     booker has no wellnessaccount yet (accountKey null). Weaver dispatches
+//     WellnessCreateAccount{identityKey} (targets.go), opening the account
+//     lazily on first no-show rather than requiring it pre-exist.
 //   - `missing_charge` — the booking is a noShow, carries a fee, the booker
 //     has a ledger account, and no wellnesstransaction `settles` this
 //     booking yet (count(tx.key) collapses the fan to a single existence
@@ -165,10 +168,12 @@ func Lenses() []pkgmgr.LensSpec {
 //     re-mark to attended is the mirror correction — see targets.go's doc
 //     comment on that edge).
 //
-// A booking whose booker has no wellnessaccount yet never violates
-// (accountKey null); one with no noShowFeeCents (a noShow set before this
-// lens existed) never violates either — both are non-goals for v1, not a
-// gap this lens is meant to converge.
+// Once missing_account converges (WellnessCreateAccount writes the identity's
+// .wellnessLedgerAccount guard aspect), the next lens tick reads the now-real
+// accountKey and missing_charge takes over — the same lazy account-open relay
+// clinicNoShowSettlement uses. A booking with no noShowFeeCents (a noShow set
+// before this lens existed) never violates either gap — a non-goal for v1,
+// not a gap this lens is meant to converge.
 // noShowSettlementSpec is built once at package init: the retry cap
 // (maxChargeRetries) bakes into the constant maxretries_charge column, the
 // §10.2 "the policy lives in the cypher" convention lease-signing's
@@ -193,8 +198,12 @@ RETURN
   feeCents,
   status,
   'No-show fee' AS memo,
+  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null)) AS missing_account,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
-  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
+  (
+    ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null))
+    OR ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0))
+  ) AS violating,
   %d AS maxretries_charge
 `, maxChargeRetries)
 
@@ -205,7 +214,14 @@ RETURN
 // noShowSettlementSpec, this is UNCONDITIONAL on booking .status: a class
 // price is owed for booking the seat, not for showing up or not, so there is
 // no status filter here at all (the mirror omission of noShowSettlementSpec's
-// `status = 'noShow'` clause).
+// `status = 'noShow'` clause). Two independent gaps, mirroring
+// noShowSettlementSpec's own missing_account/missing_charge split:
+//
+//   - `missing_account` — the booking's session carries an effective price >
+//     0, and the booker has no wellnessaccount yet (accountKey null). Weaver
+//     dispatches WellnessCreateAccount{identityKey} (targets.go), opening the
+//     account lazily on first priced booking rather than requiring it
+//     pre-exist.
 //
 //   - `missing_price_charge` — the booking's session carries an effective
 //     price > 0, the booker has a ledger account, and no wellnesstransaction
@@ -228,14 +244,18 @@ RETURN
 //     wellness-domain/ddls.go). The CASE WHEN idiom mirrors
 //     orchestration-base's unroutedTasksSpec (lenses.go).
 //
+// Once missing_account converges (WellnessCreateAccount writes the identity's
+// .wellnessLedgerAccount guard aspect), the next lens tick reads the now-real
+// accountKey and missing_price_charge takes over — the same lazy account-open
+// relay noShowSettlementSpec uses.
+//
 // `MATCH (bk:booking {key: $actorKey})` alone (no isDeleted clause) is enough
 // to exclude a cancelled/soft-deleted booking — the full engine's Core-KV
 // reads filter isDeleted per Contract #1 (executor.go), so a tombstoned
 // booking simply stops matching, mirroring noShowSettlementSpec's identical
 // MATCH. A booking whose effective price is null/0 (no priceCents on the
-// session, or a free class) never violates; one whose booker has no
-// wellnessaccount yet never violates either (accountKey null) — same
-// non-goals as noShowSettlementSpec, not gaps this lens converges.
+// session, or a free class) never violates either gap — a non-goal for v1,
+// not a gap this lens is meant to converge.
 // classPriceSettlementSpec is built once at package init: the retry cap
 // (maxPriceChargeRetries) bakes into the constant maxretries_price_charge column,
 // the same §10.2 "the policy lives in the cypher" convention
@@ -260,8 +280,12 @@ RETURN
   accountKey,
   priceCents,
   sessionName,
+  ((priceCents <> null) AND (priceCents > 0) AND (accountKey = null)) AS missing_account,
   ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_price_charge,
-  ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
+  (
+    ((priceCents <> null) AND (priceCents > 0) AND (accountKey = null))
+    OR ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0))
+  ) AS violating,
   %d AS maxretries_price_charge
 `, maxPriceChargeRetries)
 

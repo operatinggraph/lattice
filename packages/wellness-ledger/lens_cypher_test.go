@@ -11,8 +11,8 @@ package wellnessledger
 //   - NOSHOW_NO_FEE: a noShow booking with no noShowFeeCents (set before this
 //     lens existed) never violates.
 //   - NOSHOW_NO_ACCOUNT: noShow, carries a fee, the booker has no
-//     wellness-ledger account yet — never violates (no missing_account gap;
-//     this lens only converges once an account exists).
+//     wellness-ledger account yet — missing_account true (Weaver opens one
+//     via WellnessCreateAccount).
 //   - NOSHOW_ACCOUNT_NO_CHARGE: noShow, carries a fee, account exists, no
 //     wellnesstransaction settles this booking yet — missing_charge true.
 //   - NOSHOW_CHARGED: noShow, carries a fee, account exists, a
@@ -23,8 +23,8 @@ package wellnessledger
 //   - NO_PRICE: a booking whose session carries no priceCents (or 0) never
 //     violates, regardless of attendance/account state.
 //   - PRICED_NO_ACCOUNT: session priced, the booker has no wellness-ledger
-//     account yet — never violates (no missing_account gap, mirrors the
-//     no-show lens's identical rationale).
+//     account yet — missing_account true (Weaver opens one via
+//     WellnessCreateAccount, mirroring the no-show lens's identical shape).
 //   - PRICED_ACCOUNT_NO_CHARGE: session priced, account exists, no
 //     wellnesstransaction settlesClassPrice this booking yet —
 //     missing_price_charge true.
@@ -192,7 +192,7 @@ func TestWellnessNoShowSettlement_NoShowNoFee_NotViolating(t *testing.T) {
 	require.Equal(t, false, v["violating"])
 }
 
-func TestWellnessNoShowSettlement_NoShowNoAccount_NotViolating(t *testing.T) {
+func TestWellnessNoShowSettlement_NoShowNoAccount_MissingAccount(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -201,8 +201,9 @@ func TestWellnessNoShowSettlement_NoShowNoAccount_NotViolating(t *testing.T) {
 
 	v := f.projectAt(t, "noacctbkg")[0].Values
 	require.Nil(t, v["accountKey"], "booker has no wellness-ledger account yet")
-	require.Equal(t, false, v["missing_charge"], "no account to charge yet — this gap doesn't gate (no missing_account gap)")
-	require.Equal(t, false, v["violating"])
+	require.Equal(t, true, v["missing_account"], "no account yet — Weaver opens one via WellnessCreateAccount")
+	require.Equal(t, false, v["missing_charge"], "cannot charge before the account exists")
+	require.Equal(t, true, v["violating"])
 }
 
 func TestWellnessNoShowSettlement_NoShowWithAccountNoCharge_MissingCharge(t *testing.T) {
@@ -218,6 +219,7 @@ func TestWellnessNoShowSettlement_NoShowWithAccountNoCharge_MissingCharge(t *tes
 	v := f.projectAt(t, "unchargedbkg")[0].Values
 	require.Equal(t, "vtx.wellnessaccount."+f.ids["unchargedbkg_acct"], v["accountKey"])
 	require.Equal(t, 2500.0, v["feeCents"])
+	require.Equal(t, false, v["missing_account"], "the account already exists — only missing_charge should gate")
 	require.Equal(t, true, v["missing_charge"], "no wellnesstransaction settles this booking yet — violating")
 	require.Equal(t, true, v["violating"])
 	requireIntColumn(t, v, "maxretries_charge", maxChargeRetries)
@@ -287,7 +289,7 @@ func TestWellnessClassPriceSettlement_ZeroPrice_NotViolating(t *testing.T) {
 	require.Equal(t, false, v["violating"])
 }
 
-func TestWellnessClassPriceSettlement_PricedNoAccount_NotViolating(t *testing.T) {
+func TestWellnessClassPriceSettlement_PricedNoAccount_MissingAccount(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -296,8 +298,9 @@ func TestWellnessClassPriceSettlement_PricedNoAccount_NotViolating(t *testing.T)
 
 	v := f.projectClassPriceAt(t, "noacctpbkg")[0].Values
 	require.Nil(t, v["accountKey"], "booker has no wellness-ledger account yet")
-	require.Equal(t, false, v["missing_price_charge"], "no account to charge yet — this gap doesn't gate (no missing_account gap)")
-	require.Equal(t, false, v["violating"])
+	require.Equal(t, true, v["missing_account"], "no account yet — Weaver opens one via WellnessCreateAccount")
+	require.Equal(t, false, v["missing_price_charge"], "cannot charge before the account exists")
+	require.Equal(t, true, v["violating"])
 }
 
 func TestWellnessClassPriceSettlement_PricedWithAccountNoCharge_MissingPriceCharge(t *testing.T) {
@@ -313,6 +316,7 @@ func TestWellnessClassPriceSettlement_PricedWithAccountNoCharge_MissingPriceChar
 	require.Equal(t, "vtx.wellnessaccount."+f.ids["unchargedpbkg_acct"], v["accountKey"])
 	require.Equal(t, 1500.0, v["priceCents"])
 	require.Equal(t, "Vinyasa Flow", v["sessionName"])
+	require.Equal(t, false, v["missing_account"], "the account already exists — only missing_price_charge should gate")
 	require.Equal(t, true, v["missing_price_charge"], "no wellnesstransaction settlesClassPrice this booking yet — violating")
 	require.Equal(t, true, v["violating"])
 	requireIntColumn(t, v, "maxretries_price_charge", maxPriceChargeRetries)
