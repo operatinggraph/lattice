@@ -290,6 +290,7 @@ func main() {
 	}
 	fmt.Printf("==> menu item:       %s (Croissant, $3.50)\n", croissantKey)
 	reapDuplicateMenuItems(ctx, conn, adminKey, unitKey, map[string]bool{latteKey: true, croissantKey: true})
+	backfillMenuItemLocations(ctx, conn, adminKey, unitKey)
 
 	// --- Wellness: studio + bookable session ---------------------------------
 
@@ -411,6 +412,45 @@ func reapDuplicateMenuItems(ctx context.Context, conn *substrate.Conn, adminKey,
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate menu item: %s (%s)\n", key, aspect.Data.Name)
 	}
+}
+
+// backfillMenuItemLocations relocates every live menu item whose servedAt
+// link is dead or absent onto the live canonical unitKey, using the new
+// SetMenuItemLocation op (verticals.md "a menu item outlives the place that
+// served it, with no flag and no way back": TombstoneLocation doesn't
+// cascade onto a menu item's servedAt link, so retiring a unit strands every
+// item still pointed at it — the same gap the studio-side ReassignSession
+// closes, wellness-domain). Idempotent: an item already served at a live
+// location, unitKey or otherwise, is untouched.
+func backfillMenuItemLocations(ctx context.Context, conn *substrate.Conn, adminKey, unitKey string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.menuitem.")
+	must(err, "list vtx.menuitem. keys")
+	for _, key := range keys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) || servedAtIsLive(ctx, conn, key) {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "SetMenuItemLocation", "menuitem",
+			map[string]any{"menuItemKey": key, "newLocation": unitKey},
+			&processor.ContextHint{
+				Reads:         []string{key, unitKey},
+				OptionalReads: []string{linkKey(key, "servedAt", unitKey)},
+			})
+		fmt.Printf("==> relocated menu item: %s -> %s\n", key, unitKey)
+	}
+}
+
+// servedAtIsLive reports whether a menu item carries a live servedAt link to
+// a still-alive location.
+func servedAtIsLive(ctx context.Context, conn *substrate.Conn, menuItemKey string) bool {
+	prefix := "lnk." + strings.TrimPrefix(menuItemKey, "vtx.") + ".servedAt."
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, prefix)
+	must(err, "list "+prefix+" keys")
+	for _, k := range keys {
+		if alive(ctx, conn, k) && alive(ctx, conn, "vtx."+strings.TrimPrefix(k, prefix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // reapDuplicateProviders tombstones every live "Dr. Classic Demo" provider
