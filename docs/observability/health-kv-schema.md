@@ -921,13 +921,24 @@ decides whose close retires the issue. The key never appears on the wire — it 
 
 | Key shape | Scope | Codes |
 |---|---|---|
-| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
+| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted`; `GapEscalatedToAugur` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` — all three `warning` |
 | `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo, a row body that does not parse as JSON) |
 | `data:<targetId>.__capped` | the target's per-ROW issue budget | `RowIssuesCapped` |
 | *(not latched — rebuilt from live consumer state each heartbeat)* | one lane-1 consumer | `ConsumerPaused`, `ConsumerSaturated` |
 | `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
+
+`GapBudgetExhausted` and `GapEscalatedToAugur` are the two mutually-exclusive outcomes of one spent
+retry budget, and they share that latch deliberately. A gap whose budget is spent with no augur
+policy for `exhausted` raises the first (`warning`: a loud stop, never a silent park). One whose
+target does escalate raises the second (`warning` too — the row is on the reasoning tier because
+conventional remediation ran out, which is degraded service for that row while every other row still
+remediates) and, because it is a level fact rather than an event, the escalation arm reads it back:
+while it stands, a re-derivation of the same exhaustion — a decline-floor redelivery, a sweep pass,
+an operator `replayTarget` — does NOT dispatch a second reasoning episode. Both retire on the same
+event, the gap actually ending, so a fresh exhaustion afterwards raises whichever branch applies
+again.
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within

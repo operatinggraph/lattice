@@ -164,6 +164,14 @@ Two consequences worth holding:
 - **Admission control paces a plan that would actually fire.** The gate runs *after* the plan builds,
   so a row whose plan can never build never draws a token, and a deferral (which is the 5 s transient
   class) can never be handed to a row whose own class is the long floor.
+- **An ACKED decline is reachable only by a replay.** Nothing owes an acked message a redelivery, and
+  a `DeliverLastPerSubject` durable with a stable name never re-presents it — so a row acked while
+  still violating (the *Data error* and *Nothing owed* classes above, and every row acked before the
+  Nak floors existed) stays undispatched until its key is written again. The
+  [`replayTarget`](#replaytarget) operator verb is what reaches that population: it recreates one
+  target's lane-1 durable, so the target's whole current row set runs the ladder again. That is also
+  why `Enable` needs no replay of its own — a frozen target's declines are Nak'd-*pending*, and
+  Resume redelivers those on their own timestamps with no rebuild.
 
 ---
 
@@ -693,8 +701,14 @@ non-goal-authored gap).
 
 Cross-row / cross-target diagnostics (Contract #10 §10.8 Planner extension design §3.4) — purely
 in-memory, heartbeat-surfaced, and **never** alter what dispatches. Both mirror the existing
-`shadowStats` pattern (Fire 4): a process restart resets them, and lane-1's `DeliverLastPerSubject`
-replay of every current row re-derives true state from scratch.
+`shadowStats` pattern (Fire 4): a process restart empties them, and what rebuilds them is whatever
+lane 1 delivers afterwards. A lane-1 durable that SURVIVES the restart resumes from its persisted ack
+floor, so a violating row already acked and not since re-projected is not re-counted — the count is a
+lower bound on the true one until every violating row projects again. Two things re-derive it in
+full: a durable created from scratch (a cold boot, a newly registered target) and
+[`replayTarget`](#replaytarget). That is the right posture because nothing gates on the number — it
+feeds a trajectory metric and no decision — and making it exact would mean a per-target enumeration
+paid on every boot, which is exactly the cost the replay verb exists to pay only on demand.
 
 **Contraction monitor** (`contraction.go`) tracks, per target, the CURRENT count of rows this engine
 instance has observed violating — incremental, updated on every lane-1 delivery from the same
@@ -783,10 +797,19 @@ Services responder (`internal/weaver/control`), mirroring Refractor's control pl
 | `lattice.ctrl.weaver.<targetId>.revoke` | `revoke` — immediate cleanup + disable for `<targetId>` |
 | `lattice.ctrl.weaver.<targetId>.resetConfidence` | `resetConfidence` — drain `<targetId>`'s `__effect` confidence windows; returns `windowsDeleted` |
 | `lattice.ctrl.weaver.<targetId>.resetBudget` | `resetBudget` — re-arm ONE gap's §10.8 retry budget; `entityId` + `gapColumn` ride the request **body** (the subject carries only `targetId`); returns `previousCount` |
+| `lattice.ctrl.weaver.<targetId>.replayTarget` | `replayTarget` — recreate `<targetId>`'s lane-1 durable so its current row set is re-delivered through the evaluation ladder; returns `rowsQueued` |
 
 The mutating verbs form one operator-severity ladder: `disable` (pause, delete nothing) ·
+`replayTarget` (re-deliver the target's current rows; deletes only the durable, and recreates it) ·
 `resetBudget` (re-arm one gap's retry budget) · `resetConfidence` (delete advisory confidence
 only) · `revoke` (delete everything under the target prefix + disable).
+
+**Where each verb is reachable from.** All of them over NATS and through the `lattice weaver` CLI.
+Loupe's component page surfaces `disable`/`enable`, `replayTarget` and `resetConfidence` as per-row
+buttons, plus `revoke` behind an arm-then-confirm click. `resetBudget` is deliberately **not** a
+Loupe button: it is per-(target, entity, gap) and carries its `entityId` + `gapColumn` in the request
+body, while Loupe's control proxy forwards a bodyless request for every op — a button for it would
+return the plane's body-parse error every time. It stays a CLI verb until that proxy forwards a body.
 
 `TargetSummary.state` is a 2-value enum — there is no durable "revoked" state; `revoke` is a
 strict superset of `disable` (see below) and reports `"disabled"`.
@@ -949,6 +972,61 @@ through the existing reconciliation loop; windows rebuild honestly from the next
 A window that legitimately refills to capacity with zero closes is the alert telling the truth —
 the remedy there is on the data side, not another reset.
 
+### `replayTarget`
+
+`replayTarget <targetId>` recreates the target's lane-1 durable — a delete-then-create under the
+supervisor's per-consumer `resetMu` — so `DeliverLastPerSubject` re-delivers the target's **current**
+row set through the unchanged evaluation ladder, and every row still violating dispatches again. It
+returns how many rows the recreated durable had queued when it answered: a snapshot taken while the
+pump is already draining, so a busy target replays more than it reports.
+
+Why it exists: a row **acked** while still violating is owed a redelivery by nothing, and the durable
+never re-presents it. Two populations land there. Every row declined-and-acked before the lane-1 Nak
+floors existed is one; a target whose declined rows are Nak'd-*pending* is not, because those
+redeliver on their own. The verb is the re-enumeration those first rows need, and the general
+"reconsider this target from scratch" repair for any narrow window that acked a row on a premise that
+later proved wrong.
+
+The durable's **name is stable** across the recreate. It is per-target and keys that consumer's
+health-sink entry, so a nonce would churn those keys and need a prune pass of its own; what the
+recreate is for is the DeliverPolicy, which JetStream fixes at first create and no update can move.
+
+It is manual, and that is a design decision rather than an omission. One invocation costs
+O(the target's current rows) through the full lane-1 preamble and re-fires the episode of every
+violating row whose mark has aged past its lease — so paying it automatically (every boot, every
+reconnect, every target update) would be a standing burst on events that are not evidence anything
+needs re-enumerating, while the Nak loop already takes a config fix up within one floor for every
+row it holds. The verb pays that cost exactly when an operator has evidence.
+
+**Refusals.** The verb's whole effect is what the ladder does with the replayed rows, so it refuses
+the shapes that ladder permanently declines — accepting one would recreate the durable, re-deliver
+every row, report success, and change nothing an operator can observe:
+
+- **the target is not registered** — `handleRow` returns at the registry miss for every one of its
+  rows (mirrors `disable`/`enable`);
+- **the target is disabled** — its pump is paused and every row it delivers acks at the dispatch-skip
+  without remediating. Only an operator `enable` lifts either, and `enable` already resumes
+  remediation for every row still violating, so the refusal names it: enable, then replay. A
+  **revoked** target refuses here too, `revoke` being a strict superset of `disable`;
+- **the lane-1 consumer is not managed by this instance** — a revoke removed the durable, or its add
+  failed and the target carries a standing `ConsumerReconcileError`. There is nothing to recreate,
+  and `enable` is what re-adds it.
+
+Transient declines are the opposite case and are all accepted: a row not yet projected, an unresolved
+reference mid-convergence, an admission deferral, a live mark taking the anti-storm ack, a spent
+retry budget. Each lifts or is owed on its own, and re-presenting the row is exactly the point. A
+pump paused by the supervisor's own failure-class probe loop is likewise not refused — that pause
+lifts when the probe succeeds.
+
+**What a replay must not re-pay.** A replayed row whose mark has aged past its lease reaches the
+exhausted-gap arm, which would otherwise clear the mark and fire a fresh Augur reasoning episode —
+a real per-call cost, paid again on every replay. A gap that has already escalated records a standing
+`GapEscalatedToAugur` at `gap:<targetId>.<entityId>.<gapColumn>`, and the escalation arm checks that
+latch before firing: re-deriving a standing fact never re-asks the model. The latch retires where the
+fact ends — the column going false, the row leaving, a plan building for the gap again (which is what
+an operator's `resetBudget` reaches through the sweep's re-arm), or the target's teardown — and a
+fresh exhaustion after any of those escalates afresh.
+
 ### Capability authorization
 
 `internal/weaver/control` ships a `StubCapabilityChecker` (allow-all, logs every call) — mirroring
@@ -964,9 +1042,9 @@ it reuses.
 | Path | Role |
 |------|------|
 | `internal/weaver/` | Engine: Sensorium, 3-lane work stream, Evaluator tiers, Strategist dispatcher, Actuator |
-| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` NATS Services responder |
+| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget`/`replayTarget` NATS Services responder |
 | `cmd/weaver/` | Binary entry point (extractable; shares only `substrate/*`) — starts the control-plane listener alongside the engine |
-| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke\|reset-confidence\|reset-budget` CLI command group |
+| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke\|reset-confidence\|reset-budget\|replay-target` CLI command group |
 
 **Package data:** target Lens cypher, playbook definitions, gap→action mappings (`lease-signing`).
 
@@ -982,7 +1060,7 @@ it reuses.
 | Out | ops via `core-operations` (`ops.<lane>`) | fire-and-forget; OCC `expectedRevision` payload; trigger-Loom |
 | Out | `@at` schedules via `core-schedules` (`schedule.weaver.timer.<targetId>.<entityId>`) | lane 3 scheduling leg; replace-on-reschedule (one schedule per subject) |
 | Out (own) | `weaver-state` bucket | in-flight convergence marks (anti-storm); per-key TTL backstop (2× lease) + reconciler sweep |
-| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` — see "Control plane" below |
+| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget`/`replayTarget` — see "Control plane" below |
 
 ---
 
@@ -1020,7 +1098,7 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Actions** | `triggerLoom` (→ `StartLoomPattern` op, never a Go call), `assignTask` (→ `CreateTask` with episode-deterministic `taskId`), `directOp` ✅. External idempotent I/O is `triggerLoom` of a Loom `externalTask` pattern — the **bridge** executes the call (`docs/components/bridge.md`); Weaver never holds an adapter. `proposedOp` ✅ (the Augur's Fire 2b "Augur dispatch") sources its op + params from the ROW — not playbook config — for the primordial `augurDispatch` target only: it materialises an approved proposal's `proposedAction`/`proposedParams` after a dispatch-time re-validation (action vocabulary + default-deny scope to the TRUSTED candidate + live-registry resolution), fires it under a **proposal-scoped deterministic `requestId`** (collapse-only under a sweep reclaim, unlike every other action's episode-scoped id), then submits `RecordProposalDispatch` as a same-dispatch follow-up (a failed follow-up publish self-heals on the next sweep, never Naks the episode). `surface` ✅ (FR29 — `orchestration-base`'s `unroutedTasks` target) dispatches **no op and creates no mark**: while the gap column stays true it raises a named `IssueCode`/`IssueSeverity` Health-KV issue (default severity `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column (`clearClosedMarks` special-cases it — a surface gap never had a mark to clean up). Manual-intervention-only; unlike every other action it never touches `ops.<lane>`. An action the playbook names outside this set fails closed (a loud `PlaybookConfigError` Health issue), never a silent skip. |
 | **Health** | ✅ Contract #5 heartbeat at `health.weaver.<instance>` (metrics: `consumers`, `targets`, `marksInFlight`, `sweepReclaims`, `sweepReclaimsSuppressed`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepReArms`, `sweepLastRunAt`, `timersScheduled`, `timersFired`) + per-consumer pause-state docs at `health.weaver.consumer-state.<name>` (consumer-scoped, not instance-scoped — survives a restart under a new instance); config/data errors surface as issues. |
 | **Lane 3 (temporal)** | ✅ Shipped (Contract #10 §10.4). One **fixed supervised durable** `weaver-temporal` on `core-schedules` filtered `schedule.weaver.timer.fired.>`; the lane-1 row handler's **scheduling leg** re-arms `@at(freshUntil)` per delivery (level-driven, replace-on-reschedule); the fired→op conversion submits `MarkExpired` under the **deterministic timer `requestId`** (schedule subject + fire instant) with **no weaver-state mark**. See "Temporal lane" above for the convention column and the accepted Phase 2 bounds. |
-| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
+| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke`/`resetConfidence`/`resetBudget`/`replayTarget` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
 | **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fire 5 ✅: `mode:"planned"` candidate selection actually dispatches (see above) — the first fire that changes a real decision; mark-pinned across reclaim, byte-identical for every other mode/explicit-action gap. Fire 6 Increments 1–3 ✅: the runtime op-effects catalog, the goal-regression State-schema (row↔aspect) bridge, and the per-gap `actions` planning-catalog parse/install-validation (see above) — all zero dispatch-decision change. Fire 6 R1 ✅: `resolveGoalAction`'s dispatch wiring — `planner.Synthesize` over a gap's `actions` catalog, per-leg dispatch + pin, and `releaseCompletedLeg`'s effects-hold leg-advance (see "Goal-regression dispatch + per-leg pin/release" above) — the first fire a `goal` gap actually dispatches. Fire 6 R1 pkgmgr ✅: `pkgmgr` authoring fields for `mode`/`goal`/`goalColumns`/`actions` (see "pkgmgr authoring" above) — a package now authors a goal-mode target directly; `Candidates` (Fire 5) authoring remains a separate, unbuilt pkgmgr surface. Fire 7 ✅: the contraction monitor + oscillation detector (see above) — heartbeat-surfaced diagnostics only, zero dispatch-decision change (a goal leg's own ref→effects oscillation bridge is unwired follow-up polish). Fire 8 ✅: admission control (dispatch-pacing token bucket + §10.2 `priority` column). Fire 9 (Augur floor) remains: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |

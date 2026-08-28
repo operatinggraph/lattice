@@ -1,7 +1,7 @@
 // Package weaver implements the lattice weaver command group: operator
-// list/disable/enable/revoke/reset-confidence/reset-budget controls for Weaver
-// convergence targets (FR30), via the lattice.ctrl.weaver.* NATS Services
-// control plane.
+// list/disable/enable/revoke/reset-confidence/reset-budget/replay-target
+// controls for Weaver convergence targets (FR30), via the
+// lattice.ctrl.weaver.* NATS Services control plane.
 package weaver
 
 import (
@@ -67,7 +67,7 @@ func validateGapColumn(gapColumn string) error {
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "weaver",
-		Short: "Operate Weaver convergence targets (list/disable/enable/revoke/reset-confidence/reset-budget)",
+		Short: "Operate Weaver convergence targets (list/disable/enable/revoke/reset-confidence/reset-budget/replay-target)",
 	}
 	cmd.AddCommand(newListCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newDisableCommand(natsURL, outputFmt, defaultActor))
@@ -75,6 +75,7 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd.AddCommand(newRevokeCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newResetConfidenceCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newResetBudgetCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newReplayTargetCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 
@@ -375,6 +376,63 @@ func newResetBudgetCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comm
 			}
 			fmt.Printf("target %q entity %q gap %q retry budget re-armed (was %d); the next sweep pass dispatches the gap if it is still dispatchable\n",
 				targetID, entityID, gapColumn, previous)
+			return nil
+		},
+	}
+	output.AddActorFlags(cmd, &actor, &actorToken)
+	return cmd
+}
+
+// newReplayTargetCommand builds `lattice weaver replay-target <targetId>` — the
+// re-enumeration verb. It recreates the target's lane-1 durable so
+// DeliverLastPerSubject re-delivers the target's CURRENT row set through the
+// unchanged evaluation ladder, and every row still violating dispatches again.
+//
+// It is for the rows the standing decline loop cannot reach: a row that was
+// declined and ACKED (nothing owes it a redelivery), and a target whose
+// Nak'd-pending set outlived a NATS restart with no armed redelivery timer and
+// no traffic of its own to re-arm one. Ordinary operation needs it for neither.
+//
+// One invocation costs O(the target's current rows) and re-fires the episode of
+// every violating row whose mark has aged past its lease, so it is manual by
+// design: run it holding evidence. The reported count is how many rows the
+// recreated durable had queued when the engine answered — a snapshot taken
+// while the pump is already draining, not a total.
+func newReplayTargetCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+	var actor string
+	var actorToken string
+	cmd := &cobra.Command{
+		Use:   "replay-target <targetId>",
+		Short: "Re-deliver a target's current rows through the evaluation ladder (recreates its lane-1 durable)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if actor == "" {
+				actor = *defaultActor
+			}
+			targetID := args[0]
+			if err := validateTargetID(targetID); err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+			resp, err := request(*natsURL, control.TargetSubject(targetID, "replayTarget"), output.ResolveActorHeader(actor, actorToken))
+			if err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+
+			if *outputFmt == "json" {
+				return output.PrintJSON(resp.ReplayTarget)
+			}
+			queued := 0
+			if resp.ReplayTarget != nil {
+				queued = resp.ReplayTarget.RowsQueued
+			}
+			fmt.Printf("target %q replayed (%d row(s) queued at the durable when it answered); every row still violating dispatches again\n",
+				targetID, queued)
 			return nil
 		},
 	}

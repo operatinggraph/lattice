@@ -111,7 +111,7 @@ does the thing. NATS paths are in `nats-server@v2.14.0/server/`.
 | V13 | `clearClosedMarks` runs in the preamble on **every** delivery; per **closed** (non-surface) candidate column it pays `marks.get` + a mark delete + `deleteDispatchCount` — and both deletes are **unconditional KV publishes** (DEL markers even when nothing was there). Open columns cost zero | `evaluator.go:56`, `:869-919`; `state.go:225-232`, `:445-452` |
 | V14 | `issues.set` preserves an existing `since`; a clear-then-set mints a fresh one — but `alertPaced`'s pace memory **survives `clear`**, so the paced codes keep their original onset across flaps. The heartbeat **document** is already bounded severity-first with an overflow entry (`boundIssues`, cap 50) over a status computed on the full set; what is unbounded is the in-memory `issues` **map** and `snapshot()`'s per-heartbeat sort | `health.go:155-165`, `:196-200`, `:253`, `:302-315`, `:35`, `:485-501`, `:616-682` |
 | V15 | `escalateExhaustedGap` raises its standing issue and returns Ack on the raise path (no pending slot held) — but its stale-mark arm **clears the stale mark and fires a fresh Augur reasoning episode** (a paid model call), and `fireEpisode`'s stale-mark arm re-publishes an episode: a replay re-fires these for every violating row whose mark has aged past its lease (§3.3 prices and bounds it for the verb) | `evaluator.go:1325-1398`, `:1362-1385`, `:643-700` |
-| V16 | **A NATS restart strands a quiet Nak'd population.** The redelivery timer (`o.ptmr`) is not persisted; on consumer recovery `setLeader → checkPending` bails at `o.ptmr == nil`, and the only arming sites are `trackPending` (an actual delivery — **one delivery re-arms the timer for the whole pending set**) and `processNak`. `o.rdq` is not persisted either. A lane-1 consumer whose pending set is entirely long-Nak'd rows and which receives no new delivery is never redelivered again until some row under its prefix projects, or the durable is recreated | `consumer.go:5895-5898` (the bail), `:1777`, `:5771-5772`, `:3178`, `:7034` |
+| V16 | ~~A NATS restart strands a quiet Nak'd population.~~ **FALSIFIED AT BUILD, 2026-08-28 — this row is WRONG and every claim resting on it is withdrawn.** The row's citation list misses the arming site: `setLeader` calls `readStoredState()` (`consumer.go:1678`) **before** the `checkPending()` it cites (`:1777`), and `readStoredState → applyState` arms the timer whenever restored pending is non-empty — *"Setup tracking timer if we have restored pending"*, `o.resetPtmr(500ms–1.5s)` at `:3297-3311`. `checkPending` then re-derives each message's remaining delay from the `p.Timestamp` the delayed Nak persisted via `updateDelivered` (`:3170-3178`). So a restarted consumer with a restored long-Nak'd pending set **redelivers on its original schedule, with no traffic and no operator action**. Measured twice against the pinned server: with a 20 s floor and a full restart 2.1 s after the Nak, redelivery arrived at 19.35 s. | `consumer.go:1678`, `:3297-3311`, `:3170-3178` |
 | V17 | The supervisor pump prefetches **one message** (`pumpPullMaxMessages = 1`, with the buffered-AckWait concern stated as the reason) and heartbeats `InProgress()` every AckWait/2 for the whole handler run — so neither a replay burst nor a slow handler can age a delivered row out of AckWait | `consumer_supervisor_pump.go:28-58`, `:669`, `:719-770` |
 | V18 | `fire`'s publish failure returns **Nak** — *"the mark already exists, so the redelivery re-derives the SAME requestId and re-publishes"* — i.e. the `NumDelivered != 1` re-fire branch is the **only** thing that makes that guaranteed immediate redelivery do work; `reclaim`'s own comment also leans on it. Retiring the branch without replacing this leg swallows every publish failure until reclaim, whose repeat backoff ladder is `base × 2^(count−1)` capped at 24 h | `evaluator.go:776-778`, `:795-800`, `:190-193`; `reconciler.go:993`, `:1126-1128`, `:30`; `engine.go:185-186` |
 | V19 | `boolColumn` raises `RowDataError` only for a **present, non-bool** value and returns the zero bool; `scheduleFreshness` raises `RowDataError` at three sites and deliberately **returns true (→ Ack)**, with the anti-Nak reasoning in its own comment; `intColumn` raises for `maxretries_<g>`/priority | `evaluator.go:1085-1101`, `:1117-1145`; `temporal.go:120`, `:137`, `:154-158` |
@@ -228,11 +228,12 @@ no nonce, no prune, stable health keys (§4.3).
 1. **The pre-existing Acked-decline residue** — every row declined-and-Acked before this ships
    (the clinic 26). One verb invocation per affected target after deploy; C2's census names the
    targets. (A cold boot — `make down && make up` — also replays everything, as today.)
-2. **The V16 strand** — a NATS-only restart leaves a quiet target's Nak'd-pending set with no
-   armed redelivery timer. Any single delivery under the target's prefix re-arms the whole set
-   (V16), so an active lens heals itself; a fully-quiet target is repaired by the verb. The
-   operator signal: a target whose consumer shows `num_ack_pending > 0` with no redeliveries
-   after a server restart — a Lamplighter surface, named here, not built here.
+2. ~~**The V16 strand**~~ — **WITHDRAWN 2026-08-28: V16 is falsified (see the ledger).** A restarted
+   consumer re-arms its own redelivery timer from restored pending, so there is no quiet-target strand
+   for the verb to repair and no "named Lamplighter signal" needed for one. T10 pins the true
+   behaviour instead of the strand, and its doc says that if it ever reds, the strand has become real
+   and this verb is the repair to run per affected target.
+
 3. **Acked residue of the narrow windows** — the Disable marker-write window, a class the table
    leaves at Ack whose premise later proves wrong. The verb is the general "re-enumerate this
    target" repair.
@@ -384,7 +385,7 @@ DeliverPolicy-at-first-create.
 | State | Scope | Created / reset / carried |
 |---|---|---|
 | The republish set (§3.4b) | process, in-memory, per (target, entity, col) — the key is `markKey`, so it cannot drift from the identity the §10.3 mark owns | **Amended at build, 2026-08-28** (this row was right but incomplete in three ways the build found). **Added** by `fire`, and only on a **PRIMARY-op** publish failure — a `followUp` failure deliberately does not add, because it does not Nak the episode and its loss self-heals on the sweep; the original "a `fire` publish failure" was too broad. **Removed** on that key's next successful primary publish, by `clearClosedMarks`' mark clear (the same not-currently-open condition as the mark and count deletes, so it covers a closed gap, a dropped column and a deleted entity alike), and by `clearTarget` at **two** teardown sites — `reconcileConsumers`' removal branch and `control.go`'s `Revoke`, the same pair that walk `issueKeyTargetPrefixes`. **Refused** past a per-target cap (256), which degrades that key to exactly the restart behaviour. **Lost on restart → the reclaim ladder is the backstop** (≤ one `MarkLease`). **Inert strand, named rather than left to be rediscovered:** the sweep's own `deleteMark` legs remove a mark without touching the set, leaving an entry — it can never cause a wrong action, because the only reader sits behind `found && !stale` and an entry whose mark is gone is never consulted; it occupies a slot until that key's next successful publish, the target teardown, or a restart |
-| Nak'd-pending set + delay timestamps | JetStream consumer (server-side) | the substrate's own machinery — created by the Nak, freed by ack/Term (V1, V3), discarded whole by the verb's durable delete (§3.3); the V16 restart-strand is repaired by the verb or any fresh delivery; no engine mirror exists |
+| Nak'd-pending set + delay timestamps | JetStream consumer (server-side) | the substrate's own machinery — created by the Nak, freed by ack/Term (V1, V3), discarded whole by the verb's durable delete (§3.3); a restart re-arms the timer from restored pending and redelivery resumes on the original schedule (V16, falsified 2026-08-28); no engine mirror exists |
 | The per-row issue-cache budget (§3.6) — `issueCache.rowIssues` (tracked count) + `refused` (raises turned away), one pair per target | process, in-memory, per target | **created** lazily at the target's first `data:`/`template:` per-row raise. **Incremented**: `rowIssues` on each newly-tracked per-row key; `refused` on each raise past `rowIssueCapPerTarget` (500), which is also what maintains the single overflow entry at `data:<targetId>.__capped` in place. **Decremented** on each per-row key's `clear` / `clearPrefix` removal. **Reset**: `refused` and its overflow entry retire as soon as `rowIssues` falls back under the cap — every untracked fact is level-driven and re-raised by its own row's next delivery, so a carried total would state a backlog nothing can retire. **Ordering**: none is promised — the cap admits whichever keys raise first, so the tracked set is a SAMPLE, not a ranking, and the overflow entry is what says so. **Crash / restart**: empty, like the latch it counts; the cache is rebuilt from redeliveries, so the cap re-fills in delivery order and the overflow entry re-arrives when it is re-reached. **Replay** (`ReplayTarget`, cold boot): identical to restart for a fresh process, and for a live one the replay's raises simply re-enter the same budget — the cap is exactly what bounds a replay of a systemically-broken lens. **Reconnect**: untouched (in-memory, no substrate dependency). **Tombstone**: the entity's `data:`/`template:` prefix clears free that entity's slots. **Target unregister / revoke**: the `issueKeyTargetPrefixes` walk frees the target's whole set — the overflow entry included, since it sits inside the `data:<targetId>.` prefix — and drops both counters. Loss of the pair degrades to an unbounded cache until the next raise re-derives it, never to a wrong verdict: `aggregateStatus` and `boundIssues` are computed over whatever the cache holds |
 
 No cursor, no cycle set, no observed-column set, no budget, no eviction sweep, no boot-phase
@@ -498,7 +499,7 @@ Inc 2, with the raise-site change and its lane-1 effect covered by T3.
   either dispatchable or exhausted-escalated, and the Nak loop guarantees a next delivery for
   every declined row.
 - **"New state — do we keep that state somewhere already?"** The retry state IS JetStream's
-  pending set (§5) — with its two real limits (V16's restart strand, V7's history pin) named and
+  pending set (§5) — with its one real limit (V7's history pin) named and
   owned rather than discovered.
 - **"Does anything else read `NumDelivered`?"** Held census C3 re-verified: post-preamble message
   reads are `msg.Sequence` and `msg.NumDelivered` only, the latter at exactly the retiring
@@ -547,7 +548,7 @@ every automatic trigger is an O(all rows) burst with stale-mark episode re-fires
 (boots, deploys, reconnects) that are not evidence anything needs re-enumeration — while the Nak
 loop already delivers automatic fix-uptake for every declined row. The manual verb pays the same
 cost exactly when an operator has evidence. Residue the automatic variants uniquely covered: the
-pre-design Acked population (one-time; the verb), and V16 strands on fully-quiet targets (the
+pre-design Acked population (one-time; the verb). ~~And V16 strands on fully-quiet targets~~ — withdrawn 2026-08-28, V16 falsified (the
 verb, with a named Lamplighter signal).
 
 **Row 4 — a durable "declined" marker** (held §11 C, re-priced). Edge-triggered state about a
@@ -664,7 +665,7 @@ draft; all findings folded. Andrew then corrected the replay scope live (automat
 manual verb), which resolved several findings by removal. The load-bearing ones and where they
 landed:
 
-- NATS-restart strands the Nak'd population (`o.ptmr` never re-armed) → V16; repaired by the verb
+- NATS-restart strands the Nak'd population (`o.ptmr` never re-armed) → V16 — **the finding itself was WRONG; V16 is falsified at build (2026-08-28)**; was to be repaired by the verb
   + the one-delivery re-arm, with a named Lamplighter signal (§3.3, T10). (The draft's automatic
   reconnect-replay answer was withdrawn with the rest of the automatic rebuilds.)
 - Retiring the re-fire branch silently broke `fire`'s publish-failure retry → the **republish
@@ -739,12 +740,13 @@ that branch is precisely the harm:
   `inflight_`/`maxretries_` companion) is exactly this shape — the motivating case is the victim.
   §7 already credits the op-traffic *reduction* to §3.4a, so Inc 2 alone ships a regression this
   design asserts cannot happen.
-- **The V16 remedy gap.** Inc 2 creates the first routinely long-Nak'd population, and V16's
-  restart-strand has no operator remedy until Inc 4's `ReplayTarget`. Worse than the design admits:
-  if the stranded pending set has reached `MaxAckPending`, `getNextMsg` returns `errMaxAckPending`
-  for every new message, and a new delivery is the only thing that re-arms `o.ptmr` — so the
-  consumer wedges for **new rows too**, silently and totally. Before Inc 2 those rows Acked and a
-  cold boot recovered them; between Inc 2 and Inc 4 there is no remedy short of `make down && up`.
+- ~~**The V16 remedy gap.**~~ **WITHDRAWN 2026-08-28 — V16 is falsified** (see the ledger row and
+  §3.3). A restarted consumer re-arms its own redelivery timer from restored pending, so there is no
+  strand, and the cold reviewer's escalation of it — that a stranded set at `MaxAckPending` would wedge
+  the consumer for new rows too — does not follow, because its premise was V16. **The joint-landing
+  decision does not change:** the converged op-republish finding above is on its own sufficient, and by
+  the time V16 was falsified all four increments were built, so the merge is joint regardless. Recorded
+  because a decision defended by two reasons, one of which turns out false, must not keep quoting both.
 
 So the increments stay sequenced for *build and review* (each still gets its own commit, gates and
 review pass on the branch) but land together. §4's other sanctioned shape — "hold and merge once
@@ -1072,3 +1074,34 @@ that the clinic 26 are **already Acked**, so the Nak loop cannot reach them. Inc
 accumulating; only **`ReplayTarget clinicSiteBackfill`, actually RUN against a live stack**, heals
 the existing population and unblocks the `verticals.md` clinic row. This container has no such
 stack, so that run is Mac/live work regardless of how far the code gets here.
+
+### Inc 4 adjudications (Winston, 2026-08-28)
+
+**1. `GapEscalatedToAugur` — a new standing Health fact, accepted.** §3.3 asks the verb not to re-pay
+Augur, "with the Augur arm **suppressed when the escalation issue already stands** (a level check at
+the raise site)". The design assumed a standing issue to check. **There isn't one:**
+`escalateExhaustedGap`'s escalated path *clears* `issueKeyGapEntity` and fires the episode, so after a
+successful escalation nothing stands and the level check the design specifies has no fact to read.
+Implementing T11 as ratified therefore requires minting that fact. Accepted, and the shape is right:
+a `warning` at `gap:<t>.<e>.<col>`, raised only on an episode that actually fired (below `fireEpisode`,
+not above `planGap` — a plan disproves the park and would erase it), so an unfired escalation records
+nothing. The posture change is real and stated: a gap escalated to Augur now leaves a standing
+`warning` — component `degraded` — for the life of the escalation, where it previously cleared its
+exhaustion issue and left nothing. That is the honest reading of §10.8's "loud stop, never a silent
+park": an escalated gap is precisely a fact an operator should still see. It is `warning`, not `error`,
+so it pins nothing `unhealthy`.
+
+**2. `resetBudget` stays OFF Loupe's allow-list — the Phase-0 adjacent find is answered, not shipped.**
+The find was that `resetConfidence` and `resetBudget` are unreachable from Loupe. `resetConfidence` is
+now surfaced. `resetBudget` is **structurally** unreachable: Loupe's `controlMutate` →
+`controlRequest(ctx, conn, subject)` sends **no body for any op**, and `resetBudget`'s `entityId` +
+`gapColumn` ride the body — so an allow-listed button would return the plane's body-parse error on
+every click. Allow-listing it would have shipped a button that 400s, which is worse than the gap.
+The omission is made a *decision* rather than an oversight: a `wantErr` row in `cmd/loupe/control_test.go`
+pins the exclusion, and `weaver.md` gains a "where each verb is reachable from" paragraph stating the
+true per-surface split. The real fix — forward the POST body through the proxy, plus a two-field UI —
+is a Loupe item, not this fire's.
+
+**3. `weaver.md` never carried the false "surfaced in Loupe" sentence.** That claim lives in this
+design and in the fire brief, not the component doc. Corrected here; the component doc gained the
+accurate per-surface paragraph instead.

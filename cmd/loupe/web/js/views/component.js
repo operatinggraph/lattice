@@ -513,6 +513,17 @@ function renderControlLists(rowsBox, page, out, refresh) {
   const comp = page.component;
   // Shown-state logic keeps resume visible when paused, pause when running
   // (same for enable/disable).
+  //
+  // The weaver row's buttons run left to right up the operator-severity ladder:
+  // the enable/disable toggle (pauses, deletes nothing) · replayTarget
+  // (re-delivers the target's current rows) · resetConfidence (deletes advisory
+  // confidence windows) · revoke (deletes everything under the target prefix,
+  // and arms-then-confirms in controlRow). replayTarget is offered only on an
+  // ACTIVE target: the engine refuses it on a disabled one, whose pump is
+  // paused and whose rows all skip remediation, so a button there would only
+  // ever return that refusal. resetBudget has no button at all — it is
+  // per-gap and carries its arguments in a request body this proxy does not
+  // forward (see cmd/loupe/control.go's weaver entry).
   const listsByComp = {
     loom: [
       { read: "list", rowsField: "instances", idField: "instanceId", title: "Instances",
@@ -522,7 +533,9 @@ function renderControlLists(rowsBox, page, out, refresh) {
     ],
     weaver: [
       { read: "list", rowsField: "targets", idField: "targetId", title: "Targets",
-        actions: (row) => [String(row.state || "") === "disabled" ? "enable" : "disable", "revoke"] },
+        actions: (row) => (String(row.state || "") === "disabled"
+          ? ["enable", "resetConfidence", "revoke"]
+          : ["disable", "replayTarget", "resetConfidence", "revoke"]) },
     ],
   };
   const control = page.control || {};

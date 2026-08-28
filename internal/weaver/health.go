@@ -25,7 +25,8 @@ const defaultHeartbeatEvery = 10 * time.Second
 // The whole document is a single Health-KV value, and two of the issue classes
 // Weaver raises are per-ENTITY: a `surface` gap standing open (one per
 // violating subject — every unrouted task past its expiresAt, every erasure
-// stuck mid-flight) and GapBudgetExhausted. Both are unbounded in entity count,
+// stuck mid-flight) and the spent-budget pair (GapBudgetExhausted, or
+// GapEscalatedToAugur where a policy escalates). Both are unbounded in entity count,
 // so an unbounded issues[] would grow the value without limit. The listing is
 // bounded instead; the aggregate status is computed over EVERY open issue
 // before the cut, so truncation never makes the heartbeat read healthier than

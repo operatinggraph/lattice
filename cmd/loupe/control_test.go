@@ -16,6 +16,15 @@ func TestMutateSubject(t *testing.T) {
 		{name: "loom redrive", comp: "loom", ctlName: "inst1", op: "redrive", want: "lattice.ctrl.loom.inst1.redrive"},
 		{name: "weaver disable", comp: "weaver", ctlName: "t1", op: "disable", want: "lattice.ctrl.weaver.t1.disable"},
 		{name: "weaver revoke", comp: "weaver", ctlName: "t1", op: "revoke", want: "lattice.ctrl.weaver.t1.revoke"},
+		{name: "weaver resetConfidence", comp: "weaver", ctlName: "t1", op: "resetConfidence", want: "lattice.ctrl.weaver.t1.resetConfidence"},
+		{name: "weaver replayTarget", comp: "weaver", ctlName: "t1", op: "replayTarget", want: "lattice.ctrl.weaver.t1.replayTarget"},
+		// resetBudget is a real weaver control op, deliberately NOT allow-listed
+		// here: its entityId + gapColumn ride the request body, and controlMutate
+		// forwards no body, so every proxied invocation would come back as the
+		// plane's body-parse error. It stays CLI-only until the proxy forwards a
+		// body — this row is what makes that omission a decision rather than a
+		// gap someone closes by reflex.
+		{name: "weaver resetBudget is body-carrying and not proxied", comp: "weaver", ctlName: "t1", op: "resetBudget", wantErr: true},
 		{name: "refractor rebuild", comp: "refractor", ctlName: "lensA", op: "rebuild", want: "lattice.ctrl.refractor.lensA.rebuild"},
 		{name: "refractor validate", comp: "refractor", ctlName: "lensA", op: "validate", want: "lattice.ctrl.refractor.lensA.validate"},
 		{name: "refractor delete (the lens page's typed-confirm surface)", comp: "refractor", ctlName: "lensA", op: "delete", want: "lattice.ctrl.refractor.lensA.delete"},

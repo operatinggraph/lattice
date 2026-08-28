@@ -1164,14 +1164,16 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 
 // retireClosedGapIssues retires everything a gap ACTUALLY ENDING retires: the
 // plan-side facts above, plus the gap's own entity-scoped latch (a `surface`
-// gap standing open, a spent retry budget).
+// gap standing open, a spent retry budget, a budget spent and escalated to the
+// reasoning tier).
 //
 // The split from retireGapPlanIssues is the difference between "this gap ended"
 // and "this gap is no longer dispatchable", and it is load-bearing. A gap the
 // playbook dropped is undispatchable but may still read TRUE in the row, and
 // lane-1 goes on raising at issueKeyGapEntity for exactly that column —
 // openGapColumns enumerates every true missing_* whether the playbook names it
-// or not, and escalateExhaustedGap raises there through alertStanding. Clearing
+// or not, and escalateExhaustedGap raises there on both its arms (an
+// un-escalated budget, and an escalation dispatched). Clearing
 // that latch from a leg that only knows the gap left the PLAYBOOK makes it flap:
 // the next delivery re-raises, the arrival test sees an empty latch and logs a
 // spurious Error, and the fresh stamp destroys the age of a fact that never
@@ -1532,12 +1534,13 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		// A surface gap has no remediation chain, so it has no budget to have
 		// spent: the count that reached this call is stranded from the action
 		// the package replaced (surfaceOnlyGap). Both branches below would be
-		// wrong for it. The un-escalated one raises GapBudgetExhausted at
-		// issueKeyGapEntity — the SAME latch lane-1 holds this column's surface
-		// issue on, so the two would overwrite each other and re-stamp `since`
-		// on every round trip, the flap the orphan-column arm was amended to
-		// stop. The escalated one dispatches a real Augur reasoning episode for
-		// a gap whose whole contract is that Weaver never dispatches for it.
+		// wrong for it. Both write issueKeyGapEntity — GapBudgetExhausted on the
+		// un-escalated arm, GapEscalatedToAugur on the escalated one — and that
+		// is the SAME latch lane-1 holds this column's surface issue on, so
+		// either would overwrite it and re-stamp `since` on every round trip,
+		// the flap the orphan-column arm was amended to stop. The escalated one
+		// also dispatches a real Augur reasoning episode for a gap whose whole
+		// contract is that Weaver never dispatches for it.
 		// Ack: nothing to do, and nothing to redeliver for.
 		//
 		// The latch is left exactly as found. It is lane-1's here, and a clear
@@ -1548,6 +1551,27 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	}
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)
+	if escalated && e.issues.standingAs(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur) {
+		// The level check that keeps a re-derivation from re-paying the model.
+		// The fact "this gap spent its budget and was handed to Augur" is
+		// already recorded and still standing, and this call is another
+		// derivation of it — a redelivery on the decline floor, a sweep pass, an
+		// operator replay of the whole target. Firing again would mint a second
+		// reasoning episode for a question already asked, at a real per-call
+		// cost, as often as the gap is re-derived.
+		//
+		// It cannot swallow a FIRST escalation: the latch is written below, only
+		// after an episode actually fired, so an unfired gap never matches here.
+		// Nor can it strand one — the latch retires exactly where the fact ends:
+		// the column going false or the row leaving (retireClosedGapIssues), a
+		// plan that BUILDS for this gap again (planGap's "a plan disproves the
+		// park" clear, which is what an operator's `resetBudget` reaches through
+		// the sweep's re-arm), and the target's own teardown. After any of those
+		// a fresh exhaustion escalates afresh.
+		e.logger.Debug("weaver: exhausted-gap escalation suppressed; the Augur episode for this gap already stands",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
+		return substrate.Ack
+	}
 	if !escalated {
 		budget := "its declared retry budget"
 		if budgetIsDefault {
@@ -1606,7 +1630,35 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	if pl == nil {
 		return dec
 	}
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
+	dec = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
+	if dec != substrate.Ack {
+		// The episode did not fire (a publish failure, a mint failure) and the
+		// redelivery it asked for is the retry. Recording the escalation now
+		// would suppress that retry against an episode that never ran.
+		return dec
+	}
+	// The escalation is now a standing FACT about this gap, and it is recorded
+	// as one so the next derivation of the same exhaustion can see it rather
+	// than re-ask the model (the level check above). It replaces, at the same
+	// latch, the GapBudgetExhausted the un-escalated branch raises: both state
+	// what a spent budget led to for this one row, they are mutually exclusive,
+	// and sharing the latch is what puts them on the same retirement machinery.
+	//
+	// The raise sits BELOW planGap, which clears this latch for any gap whose
+	// plan builds — including this escalation's own. Written above the plan it
+	// would be erased on the way out and suppress nothing.
+	//
+	// `warning`, not `error`: an escalated gap is one Weaver could not remediate
+	// conventionally and has handed to the reasoning tier, which is degraded
+	// service for that row, not a Weaver that cannot fulfil its responsibility
+	// (Contract #5 §5.2) — every other row still remediates. It is set rather
+	// than alerted because the dispatch this line follows is already logged, and
+	// alertStanding's arrival level is Error, which no successful escalation
+	// deserves.
+	e.issues.set(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur,
+		"target "+targetID+" entity "+entityID+": row column "+gapColumn+" exhausted its retry budget and was "+
+			"escalated to Augur reasoning; no further escalation fires for it while this stands")
+	return substrate.Ack
 }
 
 // markCandidateColumns is the union of the playbook's gaps keys and the row's
@@ -1757,6 +1809,14 @@ const (
 	issuePrefixData      = "data:"
 	issuePrefixTemplate  = "template:"
 )
+
+// codeGapEscalatedToAugur is the issueKeyGapEntity code recording that one
+// row's gap spent its retry budget and was handed to the Augur reasoning tier.
+// It is named rather than inlined because it is read as well as written: the
+// escalation's own level check consults the latch for exactly this code before
+// deciding whether the episode has already been dispatched, so a drift between
+// the raise and the check would re-pay the model on every re-derivation.
+const codeGapEscalatedToAugur = "GapEscalatedToAugur"
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
 // teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,

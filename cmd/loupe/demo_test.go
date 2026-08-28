@@ -215,8 +215,8 @@ func TestDemoAllowsControlPlaneReads(t *testing.T) {
 		}
 	}
 
-	// Every op the classification does not name stays denied — including all
-	// three weaver ops, which mutate without exception.
+	// Every op the classification does not name stays denied — including every
+	// weaver op, which mutate without exception.
 	for _, p := range []string{
 		"/api/control/loom/main/pause",
 		"/api/control/loom/main/resume",
@@ -224,6 +224,8 @@ func TestDemoAllowsControlPlaneReads(t *testing.T) {
 		"/api/control/weaver/t1/disable",
 		"/api/control/weaver/t1/enable",
 		"/api/control/weaver/t1/revoke",
+		"/api/control/weaver/t1/resetConfidence",
+		"/api/control/weaver/t1/replayTarget",
 		"/api/control/refractor/abc/rebuild",
 		"/api/control/refractor/abc/pause",
 		"/api/control/refractor/abc/resume",
