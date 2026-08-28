@@ -170,7 +170,12 @@ taxonomy is three-way:
   (`temporal.go:154-156`, V19), and the same footing as exhausted rows: the standing issue IS
   the invariant's *escalated* branch. Residual, named: the in-memory issue is lost at a Weaver
   restart and not re-derived for a quiet row until re-projection or `ReplayTarget` — unchanged
-  from today.
+  from today. **`Term` considered and rejected for this class** (Andrew's ratification
+  question): delivery-wise it is identical to Ack (per-message; the fresh revision delivers
+  either way), its only delta is a best-effort terminated *advisory* — lost unless new capture
+  infrastructure subscribes, and unable to express the fix's *clear* — and its substrate
+  meaning ("poison, event-loss-accepting") mislabels a row whose next revision is the retry.
+  The Health issue is the honest "acked but declined" ledger.
 
 The per-row table, outcome decided per row. "Long" = `NakWithLongDelay`. Scope: `handleRow`,
 `dispatchGap`, `planGap`, `escalateExhaustedGap`, `fireEpisode` — the full 21-site Ack census is
