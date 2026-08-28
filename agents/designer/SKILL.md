@@ -1167,6 +1167,32 @@ greenfield redesign. Cover, as the feature warrants:
     a real consumer. Caught three times in one session (control-plane "self-asserted interim," Vault
     "Phase A now," Personal Lens "build dark now") — all the same reflex. There is rarely pressure to ship
     dead scaffolding; "the design is ready and sequenced" is the correct output, not "we started building."
+- **The alternatives table's FIRST row is always "do not have this thing" — write it before the
+    others, every time.** §2 already carries a reflex to re-run the table "starting with delete the
+    component," and a reflex is not enough: it is recalled when the design feels finished, by which
+    point the table has been built forward from the mechanism and deletion reads as out of scope.
+    Make it a **doc obligation** instead, like the state-lifetime table — row one names what the
+    world looks like with the machinery removed, and either prices the removal or says which
+    invariant forbids it. (Trialed 2026-08-27, NFR-S6: I wrote seven alternatives about how to
+    *defend* a 277-line masking mechanism and none about deleting it, on an item whose filed row was
+    Andrew asking to consider exactly that. He had to point at the gap. The deletion turned out to be
+    the design: the timing difference it masks is 18+15 early returns in the package's own script,
+    equalizable with builtins that already exist, and the answer was −277 lines and no new mechanism —
+    strictly better than everything in the table I did write.) The tell that you have skipped it: an
+    alternatives table where every row adds something.
+
+  - **When the demand is a DIRECT ask from the principal, quote it verbatim in the design and answer
+    it clause by clause.** A filed row is usually a symptom report you are free to re-frame. A row
+    that records what Andrew asked for is not — and the failure mode is silent, because paraphrasing
+    it into your own words is indistinguishable from understanding it. (Same fire: his row read
+    "de-hardcode by SIMPLIFYING — net reduction in lines, no new machinery," which carries two
+    clauses — *consider removing the code*, and *make it a lint violation for `internal/` to
+    reference package-specific information*. I compressed it to "de-hardcode," answered that the
+    membership set cannot dissolve, and delivered neither clause. Both were live: one became the
+    design, the other became its own board row.) **The check:** paste the principal's sentence into
+    the design, split it at every conjunction, and put a named section against each half — including
+    the halves you intend to decline, with the reason.
+
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly. Two obligations: **every test the
   design prescribes is OWNED by a named increment** (an unowned test is built by nobody — trialed 2026-08-09:
