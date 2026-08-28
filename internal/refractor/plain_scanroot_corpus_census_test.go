@@ -54,7 +54,6 @@ const (
 	rootKeyPinned      = "the anchor pattern is pinned by its own key"
 	rootExpandedAnchor = "taxonomy-expansion sigil"
 	rootUntypedHop     = "pattern carries an untyped relationship"
-	rootVarLengthHop   = "pattern carries a variable-length relationship"
 	rootWithDropped    = "a WITH dropped"
 	rootWithUnmodelled = "the WITH scope walk cannot model"
 	rootUngrounded     = "not reached from the anchor"
@@ -62,7 +61,7 @@ const (
 
 var scanRootConjuncts = []string{
 	rootNoLabel, rootKeyPinned, rootExpandedAnchor, rootUntypedHop,
-	rootVarLengthHop, rootWithDropped, rootWithUnmodelled, rootUngrounded,
+	rootWithDropped, rootWithUnmodelled, rootUngrounded,
 }
 
 // The closure verdict — AnchorProjectionKey's ok contract (§5.1) — for a lens
@@ -103,12 +102,19 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	// `containedIn*1..` hop that declined ScanRootHopIndex was rewritten to a
 	// fixed single hop (typed-relation-signatures-design.md §9), so all three
 	// are now indexed (derived, not asserted — see the design doc's §9.3 note).
-	"applicantRosterRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"augurProposals":                 {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"availableListings":              {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	"cafeIdentitiesRead":             {hasNeighbour: true, reason: rootVarLengthHop},
-	"cafeLeaseAccounts":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootVarLengthHop},
+	"applicantRosterRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"augurProposals":      {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	"availableListings":   {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	// A complete ScanRootHopIndex that the plain arm never acts on: the plain
+	// licence refuses this lens on `secureDecryptor == nil`, because it declares
+	// SecureColumns (cafe-domain/lenses.go). Indexed is the index's verdict, not
+	// a statement about what the pipeline does with the lens.
+	"cafeIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"cafeLeaseAccounts":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	// One of the four plain lenses the derivation acts on: its neighbour events
+	// narrow to the derived anchors rather than rescanning the corpus. Its
+	// `containedIn` range is a ranged hop the walk steps.
+	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"cafeLedgerHistory":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"capabilityAuthorContext":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"capabilityAuthorPackages":       {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
@@ -142,12 +148,13 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"leaseAccounts":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"menuCatalog":                    {hasNeighbour: true, reason: rootVarLengthHop},
-	"objectIdentityAttachmentsRead":  {hasNeighbour: true, reason: rootUntypedHop},
-	"oneBillCafeEntries":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"oneBillClinicEntries":           {hasNeighbour: true, reason: rootUngrounded},
-	"oneBillRentEntries":             {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"oneBillWellnessEntries":         {hasNeighbour: true, reason: rootUngrounded},
+	// Acted on — see cafeLeaseWorkplaces.
+	"menuCatalog":                   {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"objectIdentityAttachmentsRead": {hasNeighbour: true, reason: rootUntypedHop},
+	"oneBillCafeEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"oneBillClinicEntries":          {hasNeighbour: true, reason: rootUngrounded},
+	"oneBillRentEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"oneBillWellnessEntries":        {hasNeighbour: true, reason: rootUngrounded},
 	// closureRefused is the PROBE's answer, not the lens's: its key column is
 	// the anchor's own root `data.operationType`, which the empty synthetic
 	// body cannot carry — see structuralClosureDivergence, and the live
@@ -164,13 +171,16 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"visitSeriesRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessBookings":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessIdentitiesRead":     {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessInstructors":        {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessLedgerHistory":      {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"wellnessMemberAccounts":     {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"wellnessMembers":            {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessSessions":           {hasNeighbour: true, reason: rootVarLengthHop},
-	"wellnessStudios":            {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
+	// SecureColumns, licence-held — see cafeIdentitiesRead.
+	"wellnessIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessInstructors":    {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessLedgerHistory":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessMemberAccounts": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	// Acted on — see cafeLeaseWorkplaces.
+	"wellnessMembers": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	// Acted on — see cafeLeaseWorkplaces.
+	"wellnessSessions": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"wellnessStudios":  {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 }
 
 // threadsForClosure mirrors cmd/refractor/main.go's threadsKeyColumns /

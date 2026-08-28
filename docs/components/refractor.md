@@ -357,6 +357,30 @@ validation. The full openCypher engine is the only rule engine Refractor runs.
 - **Canonical engine for new lenses.** The bootstrap-seeded Capability Lens uses `engine: "full"`.
 - **Wiring**: `cmd/refractor/main.go` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+#### The pattern graph steps a ranged hop
+
+`AnchorHopIndex`/`ScanRootHopIndex` (`hopindex.go`) index a **variable-length** relationship
+rather than refusing it: `PatternHop`/`PatternStep` carry the hop's `[Min, Max]` range, clamped at
+index-build time by the same `maxVarLengthHops` the executor's own `traverseRel` applies
+(`executor.go`, `rel_traverse.go`). The derivation walk
+(`pipeline.walkToAnchors`) answers such a step with a bounded frontier expansion — the zero-hop
+admission when `Min == 0`, a closure-local cycle guard, and the far-end label prune applied **only at
+admission**, never to intermediates, because the executor filters intermediates by nothing either.
+Every read still goes through the walk's one `edgesOf` closure, so `DefaultDerivationReadCap` bounds
+it and a breach returns `ok == false` and runs the shipped `ActorEnumerator` BFS: no new budget, no
+truncation.
+
+The soundness statement is narrower than it looks and is what makes the shared clamp load-bearing:
+**the derivation is complete with respect to what the executor will evaluate, not with respect to the
+graph.** An anchor whose path crosses more than `maxVarLengthHops` of a ranged hop cannot produce a
+row, because the executor's walk stops there too.
+
+A ranged hop's distance is an interval, so it contributes no `HopIndex.Dist`. `Dist` is computed over
+binding hops, and any position the anchor can reach across a ranged **binding** hop takes the
+incomparable `-1` sentinel — `AnchorSideSeeds` then seeds **both** endpoints, which only widens the
+derived set. An over-stated distance would be the unsound direction: `consider` drops the endpoint
+whose distance is larger.
+
 #### `OPTIONAL MATCH … WHERE` null-restore semantics
 
 When an `OPTIONAL MATCH` pattern matches real neighbors but a `WHERE` then excludes
@@ -1218,9 +1242,16 @@ rows.
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
   opposite directions. Minted: dynamic-type-taxonomy B1 (`capabilityServiceAccess`'s `exLoc`, which mints
-  `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
-  (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
-  second sighting.
+  `cap.svc.<actor>`; reproduced as a failing test before removal). **Second sighting: the RANGE BOUND, one
+  level up from the label** — once the pattern graph steps a bounded ranged hop, "bound your `*0..` to gain
+  indexing" is an attractive package edit that is fail-closed on a positive arm (a too-shallow bound drops a
+  service) and fail-OPEN on a negated one (it drops an exclusion, granting access). Same edit, opposite
+  directions. Check: that half is **MECHANIZED** — `scripts/lint-lens-anchors.go` refuses a finite upper
+  bound below the engine's own `maxVarLengthHops` clamp inside a negated extent, and runs its own
+  positive-and-negative vectors on every invocation because the corpus ships no violating lens for it to
+  catch. The **sigil** half still has only the per-lens string pin (`service-location/package_test.go`) — the
+  entry retires when that one is mechanized too. Generalize before writing either: ask which direction the
+  edit fails in on each arm, not whether it is "tighter".
 - **A two-layer seam can be green at each layer and broken across it — the interposed step is where it dies**
   — a restored structural pause's diagnosis was stashed by the health sink and read back at the announcement,
   and both halves had passing tests: the substrate side drove `Load → probe → announce`, the Refractor side

@@ -1,9 +1,12 @@
 package full
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
 func parseFull(t *testing.T, body string) *CompiledRule {
@@ -156,12 +159,17 @@ func TestAnchorHopIndex_CapabilityEphemeral(t *testing.T) {
 	require.True(t, sawReportSide, "the reportsTo delegation branch must be indexed")
 }
 
-// The shipped capabilityServiceAccess (packages/service-location/lenses.go).
+// The shipped capabilityServiceAccess, copied VERBATIM from
+// packages/service-location/lenses.go's capabilityServiceAccessSpec — the
+// `:location*` sigils included, because they are what make this lens the only
+// one in the corpus whose index carries a taxonomy expansion, and a fixture that
+// drops them cannot exercise the conjunct that governs it.
+//
 // Its hops live in a WHERE NOT and a RETURN pattern-comprehension, which is the
 // adversarial finding §11.2 records; it also carries `containedIn*0..`.
 const shippedCapabilityServiceAccess = `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc:service)
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0:location*)-[:containedIn*0..]->(loc:location*)<-[:availableAt]-(svc:service)
 WHERE NOT (svc)-[:instanceOf]->(svcTpl:service)
   AND NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)
 RETURN
@@ -173,14 +181,30 @@ RETURN
   }) AS serviceAccess
 `
 
-// TestAnchorHopIndex_ServiceAccessFallsBack pins the expected NON-answer. The
-// variable-length containedIn hop makes the index incomplete, so this lens
-// keeps the shipped BFS on every event — recorded as the design's own
-// prediction, not discovered as a defect later.
-func TestAnchorHopIndex_ServiceAccessFallsBack(t *testing.T) {
+// TestAnchorHopIndex_ServiceAccessIndexesItsRangedHops pins the shipped
+// auth-plane lens whose containment walks are variable-length: both of its
+// `containedIn*0..` hops are recorded as ranged hops carrying the executor's own
+// clamp, and the index is authoritative.
+//
+// It is the whole-lens vector behind the mechanism tests: the positive arm's
+// hop and the exclusion arm's hop are separate `containedIn` occurrences, and an
+// index that recorded only one of them would look complete while the walk lost
+// the exclusion — an unavailableAt that stops revoking.
+func TestAnchorHopIndex_ServiceAccessIndexesItsRangedHops(t *testing.T) {
 	ix := indexOf(t, shippedCapabilityServiceAccess)
-	require.False(t, ix.Complete)
-	require.Contains(t, ix.Incomplete, "variable-length")
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+
+	var ranged []PatternHop
+	for _, h := range ix.Hops {
+		if h.Rel == "containedIn" {
+			ranged = append(ranged, h)
+		}
+	}
+	require.Len(t, ranged, 2, "the positive chain and the exclusion chain each carry one containedIn hop")
+	for _, h := range ranged {
+		require.Equal(t, 0, h.Min, "`*0..` admits the standing node itself")
+		require.Equal(t, maxVarLengthHops, h.Max, "an open range takes the executor's own clamp")
+	}
 }
 
 // TestAnchorHopIndex_WalksEveryPatternSource is the adversarial finding §11.2
@@ -229,11 +253,6 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			name: "an untyped relationship cannot be indexed by relation name",
 			body: `MATCH (i:identity {key: $actorKey})-[]->(x:role) RETURN i.key AS k, x.key AS r`,
 			want: "untyped relationship",
-		},
-		{
-			name: "a variable-length hop cannot be stepped hop-by-hop",
-			body: `MATCH (i:identity {key: $actorKey})-[:containedIn*0..]->(x:location) RETURN i.key AS k, x.key AS r`,
-			want: "variable-length relationship",
 		},
 		{
 			// The adversarial case: a scan-seeded position RESCUED by a hop
@@ -514,6 +533,215 @@ RETURN op.key AS anchor, role.key AS viaRole`)
 	}
 }
 
+// TestAnchorHopIndex_RangedBindingHopSeedsBothEndpoints is the ranged-hop
+// counterpart of the assertion directly above, and the two stand together: that
+// fixture carries no ranged hop, so every position it seeds holds a finite
+// distance, while a ranged BINDING hop makes a distance an INTERVAL and the
+// position takes HopIndex.Dist's incomparable sentinel instead.
+//
+// Why the sentinel and not a number: AnchorSideSeeds' `consider` drops the
+// endpoint whose distance is the LARGER, so a position whose true distance is a
+// range must be allowed neither to win nor to lose that comparison. The
+// sentinel's branch seeds BOTH endpoints, and seeding both only widens the
+// derived set — the safe direction for a walk whose invariant is a superset.
+//
+// The fixed-hop vector runs first. Without it, "both endpoints are seeded"
+// would be indistinguishable from a `consider` that seeds both for every shape.
+func TestAnchorHopIndex_RangedBindingHopSeedsBothEndpoints(t *testing.T) {
+	fixed := indexOf(t, `MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0:location)-[:containedIn]->(loc:location)
+RETURN identity.key AS actorKey, loc.key AS lk`)
+	require.True(t, fixed.Complete, "%s", fixed.Incomplete)
+	require.Equal(t, []int{0, 1, 2}, fixed.Dist, "identity → loc0 → loc, one edge per hop")
+	fixedSeeds := fixed.AnchorSideSeeds("location", "containedIn", "location")
+	require.Len(t, fixedSeeds, 1, "loc0 is provably nearer, so the far endpoint's seed is dropped")
+	require.True(t, fixedSeeds[0].SrcIsAnchorSide)
+	require.Equal(t, 1, fixed.Dist[fixedSeeds[0].Pos])
+
+	ranged := indexOf(t, `MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0:location)-[:containedIn*0..]->(loc:location)
+RETURN identity.key AS actorKey, loc.key AS lk`)
+	require.True(t, ranged.Complete, "a ranged binding hop is indexed, not refused: %s", ranged.Incomplete)
+
+	// The anchor keeps 0 — it is pinned to one vertex by `{key: $actorKey}`, so
+	// it is never the endpoint a comparison has to place. Both other positions
+	// are poisoned: loc across the ranged hop itself, and loc0 because the
+	// undirected binding walk reaches it again THROUGH that same ranged hop.
+	// Over-poisoning is deliberate (a position holding both a fixed path and a
+	// possibly-shorter ranged one would otherwise keep an OVER-stated distance,
+	// and an over-stated distance is what drops a seed).
+	require.Equal(t, []int{0, -1, -1}, ranged.Dist)
+
+	rangedSeeds := ranged.AnchorSideSeeds("location", "containedIn", "location")
+	require.Len(t, rangedSeeds, 2, "an incomparable distance seeds BOTH endpoints")
+	require.True(t, rangedSeeds[0].SrcIsAnchorSide)
+	require.False(t, rangedSeeds[1].SrcIsAnchorSide)
+	for _, s := range rangedSeeds {
+		require.Equal(t, -1, ranged.Dist[s.Pos],
+			"both seeds are here BECAUSE the distance is the incomparable sentinel, not by accident")
+	}
+
+	// The fixed residesIn hop on the same pattern seeds both endpoints too,
+	// because its far endpoint is one of the poisoned positions. That is the
+	// widening the sentinel licenses, stated rather than left to be discovered.
+	residesSeeds := ranged.AnchorSideSeeds("identity", "residesIn", "location")
+	require.Len(t, residesSeeds, 2)
+}
+
+// TestAnchorHopIndex_OpenRangeMaxIsTheExecutorsOwnClamp is the shared-clamp
+// proof, MEASURED rather than restated. Asserting the stored bound against the
+// constant alone would be a tautology — the builder reads that same identifier —
+// so the executor is driven over a chain LONGER than the clamp and the depth it
+// actually reaches is what the index's stored Max is compared against.
+//
+// The claim this carries is the soundness argument itself: the derivation is
+// complete with respect to what the EXECUTOR will evaluate, not with respect to
+// the graph. A path crossing more of this relation than traverseRel walks
+// produces no row at all, so a derivation that stops at the same depth misses
+// nothing that could have changed.
+func TestAnchorHopIndex_OpenRangeMaxIsTheExecutorsOwnClamp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+
+	// A containment chain three links longer than any clamp the executor could
+	// be reading, so the depth it stops at is a measurement and not the length
+	// of the fixture.
+	const chain = maxVarLengthHops + 3
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+	prev := "alice"
+	for i := 1; i <= chain; i++ {
+		name := fmt.Sprintf("clamp%02d", i)
+		putVertex(t, reg, coreKV, name, "location", nil)
+		putEdge(t, reg, adjKV, "containedIn", prev, name)
+		prev = name
+	}
+
+	const body = `MATCH (identity:identity {key: $actorKey})-[:containedIn*0..]->(loc)
+RETURN loc.key AS lkey`
+	results := parseExec(t, body,
+		ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
+		adjKV, coreKV,
+	)
+	// One row per admitted endpoint: the zero-hop admission of `alice` itself,
+	// plus one chain node per hop the frontier actually took.
+	walked := len(results) - 1
+	require.Equal(t, maxVarLengthHops, walked,
+		"traverseRel's own frontier stops here, on a chain that goes further")
+
+	ix := indexOf(t, body)
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+	require.Len(t, ix.Hops, 1)
+	require.Equal(t, 0, ix.Hops[0].Min, "`*0..` keeps its zero-hop admission")
+	require.Equal(t, walked, ix.Hops[0].Max,
+		"the stored bound IS the depth the executor walked — one clamp, read at one site")
+}
+
+// TestAnchorHopIndex_RangeBoundsPassThroughUnderTheClamp is the other half of
+// the clamp's contract: it BOUNDS, it does not rewrite. A range the executor
+// would honour verbatim is stored verbatim, so a lens that deliberately bounds
+// its own walk keeps the bound it wrote — and only an open or over-long one is
+// pulled down to what traverseRel will actually walk.
+func TestAnchorHopIndex_RangeBoundsPassThroughUnderTheClamp(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		rel              string
+		wantMin, wantMax int
+	}{
+		{name: "a bounded range under the clamp is stored verbatim", rel: "containedIn*1..4", wantMin: 1, wantMax: 4},
+		{name: "a bound equal to the clamp is stored verbatim", rel: "containedIn*0..10", wantMin: 0, wantMax: maxVarLengthHops},
+		{name: "a bound past the clamp is pulled down to it", rel: "containedIn*0..99", wantMin: 0, wantMax: maxVarLengthHops},
+		{name: "an open range takes the clamp", rel: "containedIn*1..", wantMin: 1, wantMax: maxVarLengthHops},
+		{name: "a fixed single hop is the degenerate range", rel: "containedIn", wantMin: 1, wantMax: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ix := indexOf(t, `MATCH (identity:identity {key: $actorKey})-[:`+tc.rel+`]->(loc:location)
+RETURN identity.key AS actorKey, loc.key AS lk`)
+			require.True(t, ix.Complete, "%s", ix.Incomplete)
+			require.Len(t, ix.Hops, 1)
+			require.Equal(t, tc.wantMin, ix.Hops[0].Min)
+			require.Equal(t, tc.wantMax, ix.Hops[0].Max)
+
+			// StepsFrom carries the range through unchanged in BOTH readings —
+			// a bounded reachability relation is symmetric, and edgeDirFor has
+			// already flipped the direction the walk reads.
+			for pos := range ix.Labels {
+				for _, s := range ix.StepsFrom(pos) {
+					require.Equal(t, tc.wantMin, s.Min, "position %d", pos)
+					require.Equal(t, tc.wantMax, s.Max, "position %d", pos)
+				}
+			}
+		})
+	}
+}
+
+// TestAnchorHopIndex_EmptyExpansionIsUnresolved pins the conjunct that stands
+// between an indexable `capabilityServiceAccess` and a silently dropped
+// revocation.
+//
+// A `*` label resolving to a present-but-EMPTY concrete set is a real state, not
+// an error: ruleinstall.go warns and degrades the lens to its broad consumer
+// filter. But admitsType then admits no type at either expanded position, so a
+// walk over such an index builds ZERO seeds and returns an empty derived set —
+// which a caller holding a Complete index reads as "no anchor can change" and
+// acts on by reprojecting nobody. This lens mints `cap.svc.<actor>`, so the
+// event that gets dropped is a revocation.
+//
+// The empty set therefore has to answer the same way a missing one does. The
+// positive vector comes first, or the assertion pins nothing: the SAME index
+// with the expansion actually resolved must report -1 and seed both endpoints.
+func TestAnchorHopIndex_EmptyExpansionIsUnresolved(t *testing.T) {
+	ix := indexOf(t, shippedCapabilityServiceAccess)
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+
+	resolved := ix.WithLabelExpansion(map[string]map[string]struct{}{
+		"location": {"unit": {}, "building": {}, "property": {}},
+	})
+	require.Equal(t, -1, resolved.UnresolvedExpansionPosition(),
+		"a resolved expansion is answerable, or the empty-set assertion below pins nothing")
+	require.NotEmpty(t, resolved.AnchorSideSeeds("unit", "containedIn", "building"),
+		"the resolved index must seed the containment hop it indexes")
+
+	empty := ix.WithLabelExpansion(map[string]map[string]struct{}{"location": {}})
+	require.GreaterOrEqual(t, empty.UnresolvedExpansionPosition(), 0,
+		"an expansion resolving to nothing admits nothing, so the index must decline rather than derive the empty set")
+	require.Empty(t, empty.AnchorSideSeeds("unit", "containedIn", "building"),
+		"the empty expansion really does seed nothing — which is why declining is the only safe answer")
+}
+
+// TestAnchorHopIndex_RefusesALowerBoundAboveOneHop pins the seeding limit that
+// bounds which ranged shapes may be indexed at all.
+//
+// AnchorSideSeeds seeds the two endpoints of the CHANGED LINK. On a ranged hop
+// that link is an intermediate edge of the expansion, so the nodes really bound
+// at the From position are every node reaching it within Max-1 steps. Those are
+// recovered by the walk bouncing back across the hop from the To seed, which
+// covers From-offsets [1-Max, 1-Min]; with the direct seed at offset 0 that
+// covers the required [1-Max, 0] only while Min <= 2. Above that the offset -1
+// binding needs a second bounce, and a node near the edge of its component has
+// nowhere to bounce from — so the derivation would answer ok == true having
+// dropped an anchor, which on the auth plane is a revocation that never fires.
+//
+// The positive vector comes first: the same pattern at Min == 1 indexes, so the
+// refusal is the lower bound talking and not the range.
+func TestAnchorHopIndex_RefusesALowerBoundAboveOneHop(t *testing.T) {
+	const body = `MATCH (identity:identity {key: $actorKey})-[:containedIn*%s]->(loc:location)
+RETURN identity.key AS actorKey, loc.key AS lk`
+
+	indexed := indexOf(t, fmt.Sprintf(body, "1..4"))
+	require.True(t, indexed.Complete, "%s", indexed.Incomplete)
+
+	for _, rel := range []string{"2..4", "3..", "5..5"} {
+		t.Run(rel, func(t *testing.T) {
+			ix := indexOf(t, fmt.Sprintf(body, rel))
+			require.False(t, ix.Complete)
+			require.Contains(t, ix.Incomplete, "lower bound exceeds one hop")
+		})
+	}
+}
+
 // TestAnchorHopIndex_WithClauseCarriesItsOwnPatterns covers the half of a WITH
 // that is not a scope question at all: the clause's items and its WHERE are
 // general expressions, and a pattern living in either one is a pattern the
@@ -643,15 +871,15 @@ func TestAnchorHopIndex_DirectionMapping(t *testing.T) {
 	out := indexOf(t, `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(x:role) RETURN i.key AS k, x.key AS r`)
 	require.True(t, out.Complete, "%s", out.Incomplete)
 	far := 1 - out.Anchor
-	require.Equal(t, []PatternStep{{ToPos: out.Anchor, Rel: "holdsRole", EdgeDir: "in", ToLabel: "identity"}}, out.StepsFrom(far))
-	require.Equal(t, []PatternStep{{ToPos: far, Rel: "holdsRole", EdgeDir: "out", ToLabel: "role"}}, out.StepsFrom(out.Anchor))
+	require.Equal(t, []PatternStep{{ToPos: out.Anchor, Rel: "holdsRole", EdgeDir: "in", ToLabel: "identity", Min: 1, Max: 1}}, out.StepsFrom(far))
+	require.Equal(t, []PatternStep{{ToPos: far, Rel: "holdsRole", EdgeDir: "out", ToLabel: "role", Min: 1, Max: 1}}, out.StepsFrom(out.Anchor))
 
 	// Inbound as written: (anchor)<-[:r]-(x). Standing at x, the anchor is
 	// reached by x's OUTBOUND r edges.
 	in := indexOf(t, `MATCH (i:identity {key: $actorKey})<-[:assignedTo]-(x:task) RETURN i.key AS k, x.key AS r`)
 	require.True(t, in.Complete, "%s", in.Incomplete)
 	far = 1 - in.Anchor
-	require.Equal(t, []PatternStep{{ToPos: in.Anchor, Rel: "assignedTo", EdgeDir: "out", ToLabel: "identity"}}, in.StepsFrom(far))
+	require.Equal(t, []PatternStep{{ToPos: in.Anchor, Rel: "assignedTo", EdgeDir: "out", ToLabel: "identity", Min: 1, Max: 1}}, in.StepsFrom(far))
 }
 
 // TestAnchorHopIndex_LabelIsNeverUpgraded is the regression for the unsoundest
@@ -730,15 +958,6 @@ RETURN identity.key AS actorKey, o.key AS ok
 `,
 			wantDeclared:   true,
 			wantIncomplete: "pattern carries an untyped relationship",
-		},
-		{
-			name: "variable-length relationship — capabilityServiceAccess' shape",
-			body: `
-MATCH (identity:identity {key: $actorKey})-[:memberOf*1..3]->(s:site)
-RETURN identity.key AS actorKey, s.key AS sk
-`,
-			wantDeclared:   true,
-			wantIncomplete: "pattern carries a variable-length relationship",
 		},
 		{
 			name: "pattern head the anchor never reaches — the ungrounded refusal",
@@ -889,12 +1108,6 @@ func TestScanRootHopIndex_Refusals(t *testing.T) {
 			refused:  `MATCH (pr:provider)-[]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
 			positive: positive,
 			want:     "untyped relationship",
-		},
-		{
-			name:     "a variable-length hop cannot be stepped hop-by-hop",
-			refused:  `MATCH (pr:provider)-[:identifiedBy*0..]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
-			positive: positive,
-			want:     "variable-length relationship",
 		},
 		{
 			// The conjunct AnchorHopIndex's own `b.anchor < 0` early-out
