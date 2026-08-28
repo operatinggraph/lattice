@@ -958,6 +958,84 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   the fire. **Add the dirty tree to that grep**: a contract edit or design staged for the principal is, by
   construction, the newest and most load-bearing thing in flight, and it is invisible to `git log`.
 
+- **An EXCLUSION is a claim about a DIFFERENT mechanism's coverage — go read whether that mechanism
+  actually covers the set you are excluding, at the granularity you are excluding it at.** Every
+  reflex above interrogates what a design *does*; this one interrogates what it *skips*. A skip
+  predicate always carries an unstated sentence — *"I don't handle these because X already does"* —
+  and X is code you did not open, whose own early returns you did not enumerate, keyed at a
+  granularity you did not check. The failure is silent and it is the worst kind: the design preserves
+  the exact hole it was written to close, inside the guard that was supposed to make it efficient.
+  (Trialed 2026-08-27, the Weaver row sweep; both independent adversarial passes returned it as their
+  first blocker. I skipped any row carrying a `weaver-state` key, on the sentence *"a mark, count or
+  effect key means `sweepMark`/`sweepCount`/`reclaim` already owns it."* Three ways wrong:
+  `sweepCount` **explicitly declines** the case (`count != 0` returns, handing it to `reclaim`) and
+  `reclaim` requires a mark, so a `__count` outliving its mark — **2xlease vs 256xlease, a 127-hour
+  window** — is owned by *nobody*, which is verbatim the permanent silence the design existed to
+  close; the skip was per-`(target,entity)` while the state is per-`(target,entity,gap)`, so a stale
+  count at gap A hid a newly-violating gap B; and `__effect` keys carry no entity segment at all, so
+  that clause described a membership that cannot occur. Narrowing the predicate to **mark presence** —
+  the thing that actually means "an episode is in flight" — fixed all three and *revived* an outcome
+  row I had written as unreachable.) **The checks:** write the skip's unstated sentence out loud; open
+  the leg it names and enumerate **its** early returns, not just its entry condition; and compare the
+  key granularity of the evidence against the granularity of the thing you are excluding. Corollary —
+  **a TTL asymmetry between two state families is a coverage-gap generator**: whenever two keys about
+  the same fact expire on different clocks, the window between them is owned by whichever leg keys on
+  the *shorter*-lived one, which is to say by nobody. Grep the two factors and multiply.
+
+- **New work added to an existing handler inherits that consumer's deadline — and the deadline lives
+  in the ConsumerSpec, not in the handler you are reading.** "Add a leg to the existing sweep" /
+  "extend the existing projector" / "do it in the same pass" is a sentence about code structure that
+  is silently also a sentence about a **timeout you have not opened**. Read the spec: `AckWait`
+  (unset ⇒ the vendor default, 30s for JetStream), `MaxAckPending`, and whether anything invokes the
+  same handler *outside* that consumer. (Trialed in the same fire: `sweepSpec` sets
+  `MaxAckPending: 1` and **no `AckWait`**, and `consumer.go`'s own doc comment says a handler
+  exceeding it *"is redelivered WHILE STILL RUNNING"* — my leg added 26 filtered lists, 26 batched
+  multi-gets and a thousand serialized round-trips inside it. And `MaxAckPending: 1` did not buy
+  serialization anyway, because `warmPass` runs the same pass as an in-process goroutine **outside
+  the durable**. The fix was to give the new work its own schedule and durable with an explicit
+  `AckWait` — which also decoupled its cadence from a 1-minute loop it does not belong in.) **The
+  check:** for any "add it to the existing X", name X's timeout, X's concurrency bound, and every
+  caller of X's handler that bypasses both. Corollary — **cross-pass in-memory state is safe in a
+  handler only if nothing can run two of them**; the existing legs may be stateless-within-a-pass,
+  which is exactly why nobody ever had to answer the question you are now creating.
+
+- **A clear/write you are REPLACING must be removed in the same design — a better one added beside it
+  is inert, because the old one fires first and far more often.** The retraction reflexes above ask
+  whether a transport exists, survives, or is observed at the right granularity. This asks the
+  cheapest question of all: *is the thing I am fixing still there?* A design that adds a
+  correctly-scoped retirement and leaves the wrongly-scoped one in place ships a no-op with a success
+  story attached. (Trialed in the same fire: I specified a target-scoped `gapConfig:` retirement at
+  the cycle boundary and never said to remove the per-entity clear inside `clearClosedMarks` — which
+  retires the same latch the instant *any one* entity's column closes, on every delivery. The new
+  clear would have been near-inert and the symptom uncorrected, while the increment reported it
+  closed.) **The tell:** a section that says "this closes symptom N" by *adding* a mechanism, without
+  naming the line the old behaviour lives on. And when you go read that line, **read its doc
+  comment** — in this codebase it often names the precondition your design supplies (*"only a walk of
+  the candidate set — which the sweep does not have — observes a column leaving"*, which is exactly
+  what the design was building), and that sentence is both the licence for the removal and the proof
+  it is the right one.
+
+- **Making a fault STANDING changes its severity semantics — a level-driven `error` is a permanent
+  `unhealthy`.** Converting a once-raised diagnostic into one re-derived every cycle is usually the
+  whole point of a liveness design, and it silently promotes every `error` in that set from
+  "self-clears on restart" to "pins the component until a human edits a package." Check what the
+  status aggregator does with the severity you are about to make immortal, and re-ask whether the
+  Contract #5 §5.2 verdict is still honest — *"cannot fulfil its primary responsibility"* is rarely
+  true of one target's authoring bug among twenty-six. (Same fire; it became the design's one
+  question for Andrew, because the severity is shipped and deliberate and the fix reaches the other
+  caller too.) Corollary: an issue family bounded by *what got delivered* becomes bounded by *what
+  exists* the moment a sweep raises it — so price the **cache**, not only the emitted document.
+
+- **Price the per-item round-trips inside the function you are CALLING, not only the batched reads you
+  are adding.** A cost table that lists your own new I/O and stops there is an assertion that the
+  callee is free. (Same fire: I priced the leg at "one filtered list + one batched multi-get" per
+  target and shipped a cost arithmetic wrong by two orders of magnitude on the dominant term —
+  `gapSuppressed` and `dispatchGap` each do a serialized `KVGet` *per open gap per row*, so a 512-row
+  page is >1,000 round-trips, not one. The corrected number is what justified moving the work off a
+  1-minute cadence.) **The check:** for the function your new loop calls N times, grep its body for
+  I/O and multiply by N before the cost table hardens — the same list-then-per-key-get shape
+  `lint-conventions`' `checkListThenGet` already gates elsewhere.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
