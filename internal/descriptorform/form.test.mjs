@@ -660,17 +660,105 @@ test("submit() refuses a contextParams template with no companion row at all", a
   await assert.rejects(() => handle.submit(), /leaseApp/);
 });
 
-// The `?` OPTIONAL marker is real descriptor vocabulary this module does not
-// implement. What matters is that NOT implementing it fails loud rather than
-// silently filling the wrong value: the `?` survives into the placeholder
-// name, nothing answers to it, and the refusal above fires.
-test("an unadopted `?` optional marker refuses rather than resolving to nothing", async () => {
+// The `?` OPTIONAL marker (definition.go's OpDispatchSpec doc) is real
+// descriptor vocabulary this module adopts: an optional contextParams
+// template that does not resolve is silently OMITTED from the payload — no
+// throw, no rendered field — and the op still submits. Contrast with the
+// required-template refusal test above (no `?`): same missing companion-row
+// column, opposite outcome, which is the whole point of the marker.
+test("an optional `?` contextParams template that doesn't resolve is silently omitted, not refused", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.contextParams = { leaseApp: "{context.leaseApp?}" };
 
-  const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: LEASE_APP } }, new FakeElement("div"));
-  await assert.rejects(() => handle.submit(), /leaseApp/);
+  const handle = renderOpForm(row, { target: TARGET, row: {} }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.equal("leaseApp" in envelope.payload, false, "the field is absent, not sent as \"\"");
+});
+
+// ---- {me.<type>} — the typed self-anchor (definition.go's OpDispatchSpec
+// doc, cmd/facet/web/app.js's selfAnchorKey) ----
+
+const LEASE_APP_ANCHOR = "vtx.leaseapp.EEEEEEEEEEEEEEEEEEEE";
+
+test("{me.<type>} resolves to the single matching context.selfAnchors entry and fills a contextParams field", async () => {
+  const schema = {
+    type: "object",
+    properties: { renewalKey: { type: "string" }, leaseAppKey: { type: "string" } },
+    required: ["renewalKey"],
+  };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseAppKey: "{me.leaseapp}" };
+
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {
+    target: TARGET,
+    selfAnchors: [{ type: "leaseapp", key: LEASE_APP_ANCHOR }],
+  }, mount);
+  assert.equal(controlByName(mount, "leaseAppKey"), undefined,
+    "a contextParams field is excluded from the form the same way any other one is");
+
+  const envelope = (await handle.submit()).envelope;
+  assert.equal(envelope.payload.leaseAppKey, LEASE_APP_ANCHOR);
+});
+
+test("a required {me.<type>} throws the could-not-fill error when zero or several anchors match", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" }, leaseAppKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseAppKey: "{me.leaseapp}" };
+
+  const zero = renderOpForm(row, { target: TARGET, selfAnchors: [] }, new FakeElement("div"));
+  await assert.rejects(() => zero.submit(), /leaseAppKey/, "no matching anchor is not a value to guess at");
+
+  const ambiguous = renderOpForm(row, {
+    target: TARGET,
+    selfAnchors: [
+      { type: "leaseapp", key: LEASE_APP_ANCHOR },
+      { type: "leaseapp", key: "vtx.leaseapp.FFFFFFFFFFFFFFFFFFFF" },
+    ],
+  }, new FakeElement("div"));
+  await assert.rejects(() => ambiguous.submit(), /leaseAppKey/, "two matches is exactly as ungoverned as zero");
+});
+
+test("an optional {me.<type>?} silently omits the field on zero or several matches, and fills it on exactly one", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" }, leaseAppKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseAppKey: "{me.leaseapp?}" };
+
+  const zero = renderOpForm(row, { target: TARGET, selfAnchors: [] }, new FakeElement("div"));
+  const zeroEnvelope = (await zero.submit()).envelope;
+  assert.equal("leaseAppKey" in zeroEnvelope.payload, false, "no match ⇒ silently omitted, never thrown");
+
+  const several = renderOpForm(row, {
+    target: TARGET,
+    selfAnchors: [
+      { type: "leaseapp", key: LEASE_APP_ANCHOR },
+      { type: "leaseapp", key: "vtx.leaseapp.FFFFFFFFFFFFFFFFFFFF" },
+    ],
+  }, new FakeElement("div"));
+  const severalEnvelope = (await several.submit()).envelope;
+  assert.equal("leaseAppKey" in severalEnvelope.payload, false, "ambiguous ⇒ silently omitted, never thrown");
+
+  const one = renderOpForm(row, {
+    target: TARGET,
+    selfAnchors: [{ type: "leaseapp", key: LEASE_APP_ANCHOR }],
+  }, new FakeElement("div"));
+  const oneEnvelope = (await one.submit()).envelope;
+  assert.equal(oneEnvelope.payload.leaseAppKey, LEASE_APP_ANCHOR, "exactly one match still fills the field normally");
+});
+
+test("{me.<type>:id} composes: resolves the self-anchor's key, then substitutes the bare NanoID", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.contextParams = { leaseAppId: "{me.leaseapp:id}" };
+
+  const handle = renderOpForm(row, {
+    target: TARGET,
+    selfAnchors: [{ type: "leaseapp", key: LEASE_APP_ANCHOR }],
+  }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.equal(envelope.payload.leaseAppId, "EEEEEEEEEEEEEEEEEEEE",
+    "the bare id, not the full vtx.leaseapp.<id> key");
 });
 
 test("an op declaring no contextParams renders and submits exactly as before", async () => {

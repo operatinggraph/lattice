@@ -34,20 +34,24 @@
 // schema-driven fields so the caller picks which DDL the submission targets
 // — the picked value is what `submit()` sends as the envelope's `class`.
 //
-// `context` is `{ target, me, taskKey, workplace, row, prefill, selfVoice }`
-// — `target` is the resolved subject key the caller already knows (a task's
-// `scopedTo`, or an explicit entity key for a non-task surface); `taskKey`
-// names a task-voice submission; `row` backs every `{context.<field>}`
-// template — in a read declaration and in a `dispatch.contextParams` entry
-// alike — while `prefill` backs pre-filled values; `me` is the signed-in
-// identity key — never a target fallback (see the anti-fallback rule below),
-// but whenever it is set, `submit()` auto-pushes it onto `reads` (mirroring
-// Facet's own renderer) since a script gating on the caller's own hub commonly
-// needs it in state regardless of authContext kind. `selfVoice` gates WHETHER a
-// `self`-authContext op actually sends `{target: me}` at all (see
-// buildAuthContext) — it is not itself the value sent, and a caller in no
-// self-voiced surface at all simply never sets it (undefined is falsy, so
-// this defaults closed).
+// `context` is `{ target, me, taskKey, workplace, row, prefill, selfVoice,
+// selfAnchors }` — `target` is the resolved subject key the caller already
+// knows (a task's `scopedTo`, or an explicit entity key for a non-task
+// surface); `taskKey` names a task-voice submission; `row` backs every
+// `{context.<field>}` template — in a read declaration and in a
+// `dispatch.contextParams` entry alike — while `prefill` backs pre-filled
+// values; `me` is the signed-in identity key — never a target fallback (see
+// the anti-fallback rule below), but whenever it is set, `submit()`
+// auto-pushes it onto `reads` (mirroring Facet's own renderer) since a script
+// gating on the caller's own hub commonly needs it in state regardless of
+// authContext kind. `selfVoice` gates WHETHER a `self`-authContext op
+// actually sends `{target: me}` at all (see buildAuthContext) — it is not
+// itself the value sent, and a caller in no self-voiced surface at all simply
+// never sets it (undefined is falsy, so this defaults closed). `selfAnchors`
+// is the signed-in identity's own `{type, key}` set (edge-manifest's
+// edgeIdentity lens) that `{me.<type>}` resolves against — absent for a
+// caller with no such projection to hand, in which case every `{me.<type>}`
+// template resolves to nothing, the same as zero matching entries.
 //
 // An op whose dispatch carries no `targetField` (a free-choice create, or an
 // op with no single pre-existing "entity in view" to derive a subject from —
@@ -566,20 +570,66 @@ function keyType(key) {
   return typeof key === "string" && key.startsWith("vtx.") ? key.split(".")[1] : undefined;
 }
 
+// templateIsOptional reports whether a `dispatch.contextParams` template
+// closes with the `?` OPTIONAL marker (`{me.leaseapp?}`, `{me.leaseapp:id?}`
+// — definition.go's OpDispatchSpec doc). The marker is ContextParams-only
+// (Reads/OptionalReads have no equivalent — see the loop below), so this is
+// only ever asked of a contextParams template, never of a read.
+function templateIsOptional(template) {
+  return typeof template === "string" && template.includes("?}");
+}
+
+// stripOptionalMarkers removes `?` markers so the placeholder grammar
+// substituteTemplate parses is the same with or without one
+// (`{me.leaseapp:id?}` → `{me.leaseapp:id}`) — the marker is a
+// contextParams-loop concern, not something substituteTemplate itself needs
+// to know about.
+function stripOptionalMarkers(template) {
+  return typeof template === "string" ? template.replace(/\?\}/g, "}") : template;
+}
+
+// selfAnchorKey answers "the signed-in identity's own vertex of this
+// Contract #1 type" — and only when that is unambiguous. `context.selfAnchors`
+// is the `{type, key}` set edge-manifest's edgeIdentity lens projects (absent
+// entirely for a caller with no such projection to hand, treated as empty);
+// zero matches or several is not a value to guess at, so this returns
+// `undefined` either way and lets the caller degrade — a required
+// `{me.<type>}` refuses at the contextParams loop below, an optional one
+// omits the field, exactly per definition.go's rationale.
+function selfAnchorKey(context, type) {
+  const anchors = (context && context.selfAnchors) || [];
+  const keys = anchors
+    .filter((a) => a && a.type === type && typeof a.key === "string" && a.key !== "")
+    .map((a) => a.key);
+  return keys.length === 1 ? keys[0] : undefined;
+}
+
 // substituteTemplate resolves one declared template — a read, or a
 // `dispatch.contextParams` entry — against the assembled payload and the
-// caller-supplied context. Five forms: `{me}` / `{actor}`
+// caller-supplied context. Six forms: `{me}` / `{actor}`
 // (aliases — both read straight off `context.me`) / `{taskKey}` (bare
-// tokens), `{payload.<field>}` (the payload just assembled), and
+// tokens), `{payload.<field>}` (the payload just assembled),
 // `{context.<field>}` / `{entity.<field>}` (aliases — both read a column of
 // the caller's companion row via `context.row`; the packages that declare
 // these templates spell it both ways today — Facet-facing packages write
 // `{entity.<column>}`, lease-signing/clinic-reminders write
 // `{context.<field>}` — so the module accepts either rather than forcing one
-// spelling on packages that already ship the other). Any of the five may
-// carry a trailing `:id` modifier (`{payload.renewalKey:id}`) to substitute
-// the bare NanoID instead of the full key — what makes a 6-segment link key
-// expressible as a declared read.
+// spelling on packages that already ship the other), and `{me.<type>}` (the
+// submitting identity's own vertex of that type, per selfAnchorKey above).
+// Any of the six may carry a trailing `:id` modifier (`{payload.renewalKey:id}`,
+// `{me.leaseapp:id}`) to substitute the bare NanoID instead of the full key —
+// what makes a 6-segment link key expressible as a declared read. `:id` is
+// stripped from `rawExpr` below BEFORE the `me.` prefix is even looked at, so
+// `{me.leaseapp:id}` resolves the `leaseapp` anchor and then truncates it —
+// the `:id` modifier composes with `{me.<type>}` exactly like it does with
+// every other form here. The `?` OPTIONAL marker is deliberately NOT handled
+// in this function: it never appears in a read template (Reads/OptionalReads
+// have no marker equivalent), and for a contextParams template it is the
+// caller's job to strip it first (see the contextParams loop below) — by the
+// time a `?`-bearing template would reach here, `?}` is not a value this
+// function's placeholder regex closes on, so leaving the marker in would
+// simply fail to match `{me.leaseapp?}` as a placeholder at all and pass it
+// through unresolved.
 //
 // A placeholder this function does not recognize at all — a typo, or a
 // vocabulary form this module has not adopted — throws rather than
@@ -603,6 +653,8 @@ function substituteTemplate(str, context, payload) {
     } else if (expr.startsWith("context.") || expr.startsWith("entity.")) {
       const field = expr.startsWith("context.") ? expr.slice("context.".length) : expr.slice("entity.".length);
       value = context.row ? context.row[field] : undefined;
+    } else if (expr.startsWith("me.")) {
+      value = selfAnchorKey(context, expr.slice("me.".length));
     } else {
       throw new Error("descriptorform: unrecognized read template " + whole);
     }
@@ -839,13 +891,27 @@ export function renderOpForm(catalogRow, context, mount) {
       // than merely missing (wholeKey's own rationale, reused here because a
       // contextParam's value IS a key by the vocabulary's definition).
       //
-      // The `?` OPTIONAL marker (`{me.leaseapp?}`, definition.go) is real
-      // vocabulary this module does not adopt: no descriptor it renders
-      // declares one, and an unbuilt branch would ship untested. It fails LOUD
-      // rather than silently, which is why leaving it out is safe — the `?`
-      // survives into the placeholder name, resolves to nothing, and refuses
-      // here.
+      // The `?` OPTIONAL marker (`{me.leaseapp?}`, `{me.leaseapp:id?}` —
+      // definition.go) inverts that refusal, and only for the template it
+      // closes: fill the param silently when it resolves, OMIT the whole
+      // param silently when it doesn't — never throw, never render a field,
+      // the op stays offered either way. It exists for rate/eligibility
+      // params whose ABSENCE is a designed script branch ("your own X, if you
+      // have one"); a required key never carries it, which is exactly why the
+      // non-optional branch below keeps refusing loud — a person filling out
+      // a form for an op that NEEDS this key has no way to discover a silent
+      // omission except a Processor rejection with nothing in the UI to
+      // explain it. The marker is general contextParams vocabulary, not
+      // special to `{me.<type>}` — any placeholder may close with it — so the
+      // branch below is keyed on templateIsOptional(template), not on which
+      // expression the template names.
       for (const [field, template] of Object.entries(contextParams)) {
+        if (templateIsOptional(template)) {
+          const value = substituteTemplate(stripOptionalMarkers(template), context, payload);
+          if (!wholeKey(value)) continue;
+          payload[field] = value;
+          continue;
+        }
         const value = substituteTemplate(template, context, payload);
         if (!wholeKey(value)) {
           throw new Error("This action could not fill in its " + field + ". Reload and try again.");
