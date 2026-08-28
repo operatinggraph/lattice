@@ -656,7 +656,7 @@ var (
 	// opNamePinField captures the value of a (policy) declaration's `pin=`
 	// sub-field — the token naming the test or gate that catches drift between
 	// the core's set and the package's own declaration.
-	opNamePinField = regexp.MustCompile(`pin=(\S*)`)
+	opNamePinField = regexp.MustCompile(`\bpin=(\S*)`)
 	// goTestFuncName captures the name of a top-level Go test function, the
 	// index a `pin=Test…` value is resolved against.
 	goTestFuncName = regexp.MustCompile(`(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(`)
@@ -1221,6 +1221,31 @@ var platformCmds = map[string]bool{
 	"processor": true, "refractor": true, "weaver": true,
 }
 
+// opLiteralsGatedElsewhere reports whether another gate already owns the
+// operation-name literals in this cmd/ tree, and the op-name rule therefore
+// leaves it alone.
+//
+// Two trees qualify, each held to something stricter than a declaration.
+// cmd/<x>-app is ratcheted by lint-app-op-descriptors against a pinned per-app
+// ceiling on distinct hardcoded op literals, and cmd/facet is held by
+// lint-facet-discovery, which BANS them beyond five ceremony ops. Asking for a
+// declaration on a literal another rule is driving to zero would legitimise the
+// literal in the same breath as the other gate is removing it.
+//
+// This is deliberately not verticalAppCmd: that answers a different question
+// (is this an application query surface bound by P5), and its platform-binary
+// list would hand cmd/gateway and cmd/edge an exemption no gate backs.
+func opLiteralsGatedElsewhere(slash string) bool {
+	parts := strings.Split(slash, "/")
+	for i, p := range parts {
+		if p == "cmd" && i+1 < len(parts) {
+			name := parts[i+1]
+			return name == "facet" || strings.HasSuffix(name, "-app")
+		}
+	}
+	return false
+}
+
 // verticalAppCmd returns the app name when path is a non-test .go file under a
 // cmd/<name> that is NOT a platform binary, else "". Such a cmd is an
 // application query surface bound by P5.
@@ -1553,17 +1578,30 @@ func scanSource(path string, data []byte) []finding {
 	// weaver/loom state scans, the rule-engine anchor scans): that is the
 	// standing `[Perf]` row's own migration to do before this gate could
 	// widen (design §10).
-	// op-name scope: non-test internal/** engine files. cmd/** is out — a binary
-	// that submits operations is doing its whole job — and the hazard the rule
-	// names is engine policy keyed on a name the core does not own.
+	// op-name scope: non-test internal/** engine files, plus the cmd/ trees no
+	// other gate covers.
+	//
+	// The cmd/ tier is split by which gate already owns it. cmd/*-app is
+	// ratcheted by lint-app-op-descriptors (a pinned per-app ceiling on distinct
+	// hardcoded op literals) and cmd/facet is held by lint-facet-discovery
+	// (op literals banned beyond five ceremony ops), so both stay out — a second
+	// gate over them would demand a declaration for a literal a stricter rule is
+	// already driving to zero. What that leaves — cmd/lattice, cmd/lattice-pkg,
+	// cmd/loupe — was covered by nothing, and it is not only submitters: the
+	// stranded-grant retirement tool branches on RevokeRole / RevokePermission,
+	// which is the same policy shape as its own internal/bootstrap half. Leaving
+	// cmd/ out entirely split that one coupling across the boundary with only
+	// one side declared, which is the invisibility this gate exists to end.
+	//
 	// internal/spike/ is out because it holds standalone benchmark harnesses
 	// (already excluded from this file's embedded-NATS gate for the same reason);
 	// its one hit is a literal PermittedCommands fixture — a declaration, not a
-	// use. The internal/ prefix also keeps this file's own self-test fixtures out
-	// of scope, which carry the banned shape as string literals; that is the same
-	// exemption derivedKeyScoped and historyScoped make explicitly.
-	opNameScoped := !isTest && strings.HasPrefix(slash, "internal/") &&
-		!strings.HasPrefix(slash, "internal/spike/")
+	// use. Neither prefix reaches this file's own self-test fixtures, which carry
+	// the banned shape as string literals; that is the same exemption
+	// derivedKeyScoped and historyScoped make explicitly.
+	opNameScoped := !isTest &&
+		((strings.HasPrefix(slash, "internal/") && !strings.HasPrefix(slash, "internal/spike/")) ||
+			(isUnderCmd(slash) && !opLiteralsGatedElsewhere(slash)))
 	var opNameAt map[int]annotation
 	var opNameUniverse map[string]string
 	if opNameScoped {
