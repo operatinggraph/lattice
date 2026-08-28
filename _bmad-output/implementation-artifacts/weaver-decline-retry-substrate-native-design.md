@@ -193,7 +193,7 @@ C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops,
 | 7 | Row-data errors blocking evaluation — non-bool `violating`; a violating row's missing `entityKey` echo (`:131`); a non-bool `missing_*` read | Ack (issues already level-raised, V19) | **Ack — unchanged** | Data errors: every fix is a re-projection, which delivers (V3). The raises stay level-driven at their existing sites; `scheduleFreshness`'s and `intColumn`'s raisers keep their shipped posture for the same reason |
 | 8 | `GapWithoutPlaybook` (`:231`) | error alert + Ack | **error alert + Long** | Config error — a playbook fix produces **no new delivery**, so the loop is the only automatic uptake: picked up within one floor (§3.3). The standing re-raise also survives clear-races (§3.5) |
 | 9 | `UnresolvedReference` (`:579`) | paced warning + NakWithDelay | **unchanged** | Genuinely transient mid-convergence; the 5 s class is deliberate |
-| 10 | `TemplateDataError` (`:583`) | paced warning + **Ack** | **paced warning + Long** | Sits on the boundary — the fault is template × row, and one of its fix paths (a template/playbook edit) produces **no new delivery** — so the fix-path rule puts it in the config class. Plausibly the clinic class itself; today it Acks once and is never revisited |
+| 10 | `TemplateDataError` (`:583`) | paced warning + **Ack** | **paced warning + Long** | Sits on the boundary — the fault is template × row, and one of its fix paths (a template/playbook edit) produces **no new delivery** — so the fix-path rule puts it in the config class. Today it Acks once and is never revisited. (~~Plausibly the clinic class itself~~ — struck 2026-08-28: Phase 0's static C2 rules `TemplateDataError` out for `clinicSiteBackfill`, whose `row.entityKey` always resolves; the row's decision is unaffected) |
 | 11 | `PlaybookConfigError` (`:587`) | paced error + Ack | **paced error + Long** | Config error — same as row 8 |
 | 12 | Seq-0 metadata defer (`:273`) | NakWithDelay | **unchanged** | Metadata arrives on redelivery |
 | 13 | Suppressed in-flight (`inflight_<g>`) | skip | **unchanged** | The mark owns it; `reclaim` is the authority |
@@ -861,3 +861,67 @@ correction. No row sweep / declared-work enumerator (the shelved fallback). No `
 data-error class (§3.2 rejects it). No `AckWait` change (§6 withdrew it). No `MaxDeliver` bound
 (V5's posture). `Enable` stays plain Resume. The unregistered-target exit stays Ack (§4.2). No
 change to marks / OCC / idempotency / the sweep's legs.
+
+### §12 Phase-0 censuses — run 2026-08-28, and C2's stop-rule adjudicated
+
+**C1 — 26 production weaver targets.** Exact (`grep -rn 'TargetID:' --include='*.go' packages/ |
+grep -v _test | wc -l`). **C6 — 21 `substrate.Ack` sites**, at the 21 line numbers §12 lists, zero
+drift. **C3** narrows as predicted. All three re-run live against `c9a7df1`; the V8 switch count did
+not hold (§16 part 2).
+
+**C2 and C5 name a LIVE STACK this fire does not have.** The fire ran in a Claude Code remote
+container (`agents/steward/REMOTE.md`): the stack there is fresh and empty, so no read of it can see
+the production corpus C2 and C5 are about. C2 was therefore answered **statically, from the code and
+the packages** — which turns out to answer it *better* than the live read would have, because the
+question is which code path the rows took, and that path is in the repo.
+
+**C2's answer: today's evaluator declines a `clinicSiteBackfill` violating row at NO exit — it
+dispatches.** Traced end to end:
+
+- `internal/refractor/ruleengine/full` does **not** implement three-valued `NULL` for `=`:
+  `visitor.go:745-746` parses the `null` literal to a Go `nil`, and `values.go:117-120`, `:143-146`
+  route `=` through `equalsAny`, which special-cases a nil on either side into equality-of-nilness.
+  So `(site.key = null)` is an `IS NULL` check returning a **genuine Go bool** — `true` on the
+  OPTIONAL MATCH miss, `false` when the link is there. Never `nil`.
+- `adapter/natskv.go`'s `upsert`/`guardedBody` (`:218`, `:470-484`) marshal the row map flat, so the
+  bool lands in the KV row JSON as `true`/`false` under its own key.
+- Therefore `boolColumn` (`evaluator.go:1085-1102`) always takes its genuine-bool branch for
+  `violating` and `missing_site` — neither the absent/nil clear-to-false branch nor the
+  `RowDataError` branch is reachable for this lens.
+- `entityKey` comes off the mandatory `MATCH` anchor (`lenses.go:770-771`), so `:131` cannot fire;
+  `targets.go:17-40` declares `Gaps["missing_site"]` today, so `:231` cannot fire;
+  `strategist.go:610-675` resolves `row.entityKey` cleanly, so neither `:583` nor `:587` can fire;
+  `package.go:144` wires `WeaverTargets()` unconditionally, so `:34` cannot fire.
+
+**So the 26-of-28 fact is not a live decline branch at all — it is a HISTORICAL decline made
+permanent by the Ack.** Lane-1's durable is stable-named `DeliverLastPerSubject` with no per-boot
+nonce, so an Acked row is never redelivered; the KV row's content has not changed since (no
+re-projection ⇒ no new CDC message), and it has sat unevaluated ever since — regardless of the
+playbook now being correct. The leading class for that one-time decline is `GapWithoutPlaybook`
+under a package version predating `targets.go`'s `Gaps["missing_site"]` entry, which is exactly
+what the held design's post-review note already recorded
+([weaver-sweep-declared-work-enumeration-design.md](weaver-sweep-declared-work-enumeration-design.md):44-46).
+
+**Stop-rule verdict: PASS, and the reading matters.** `GapWithoutPlaybook` is §3.2 **row 8**, which
+this design moves to Long — not a row the table leaves at Ack (1/2/4/5/6), so Phase 0 does not stop.
+But the corollary is sharper than the census expected: the Nak loop **cannot** reach this
+population, because these rows are already Acked and will never be delivered again. §3.3's first
+named job — *"the pre-existing Acked-decline residue … one verb invocation per affected target after
+deploy"* — is therefore not a nice-to-have tail of this item. **It is the only thing that heals the
+clinic 26, and the verticals row this item blocks stays blocked until `ReplayTarget clinicSiteBackfill`
+is actually RUN against the live stack.** Incs 1–3 make the class never accumulate again; Inc 4 plus
+that one operator run is what closes the existing damage. The run is live-stack work and this
+container has no such stack — it is the item's one carried-forward action, and the board row says so.
+
+**Residual, stated rather than assumed:** what a live C2/C5 would still add is the row *count* per
+target and the per-target max/gaps-per-target that size §6's `MaxAckPending: 2000` and §7's
+steady-state formula. Both are sizing inputs, not correctness inputs, and §6 already prices 2 000 at
+~70× the worst observed stuck population; §12 C5's own re-derive trigger ("if a target exceeds
+~2 000 rows, re-derive §6") stands as the check to run when a live stack is next available.
+
+**§3.2 row 10's body claim is amended (2026-08-28, the falsified-claim rule).** The row's *"Plausibly
+the clinic class itself"* aside is **wrong** and is struck: the trace above rules `TemplateDataError`
+out for `clinicSiteBackfill`'s actual shape — `row.entityKey` always resolves. Row 10's *decision*
+is unchanged and stands on its own stated grounds (the fault is template × row, and one of its fix
+paths produces no new delivery, so the fix-path rule puts it in the config class); only the
+speculative attribution to the clinic population is withdrawn.
