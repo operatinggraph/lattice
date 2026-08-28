@@ -1837,6 +1837,7 @@ const (
 	issuePrefixGapConfig = "gapConfig:"
 	issuePrefixData      = "data:"
 	issuePrefixTemplate  = "template:"
+	issuePrefixSweep     = "sweep:"
 )
 
 // codeGapEscalatedToAugur is the issueKeyGapEntity code recording that one
@@ -1866,12 +1867,25 @@ const codeGapEscalatedToAugur = "GapEscalatedToAugur"
 // reconciles its alert set against every heartbeat's scan and Revoke deletes
 // the target's `__effect` windows, so those entries self-clear on the next
 // heartbeat.
+//
+// `sweep:` is here for a second reason on top of the first. Its entries would in
+// fact self-retire — the sweep clears a CorruptMark once the key stops being
+// listed, and a revoke deletes every key under the target's prefix — but that
+// retirement waits for the next sweep pass, and the family is counted against the
+// target's per-row budget (rowIssueTarget). A budget slot released only on a
+// later pass makes the cap lag the teardown; released here it does not. One
+// residue is named rather than left to be rediscovered: the sweeper's own
+// `corruptAlerted` set still holds those keys after this clear, so its later
+// listing-based retirement clears keys the cache no longer has. That is a no-op
+// on an absent key, and the entry is dropped from the set by the same pass, so it
+// self-heals within one cadence and can never resurrect an issue.
 func issueKeyTargetPrefixes(targetID string) []string {
 	return []string{
 		issuePrefixGapEntity + targetID + ".",
 		issuePrefixGapConfig + targetID + ".",
 		issuePrefixData + targetID + ".",
 		issuePrefixTemplate + targetID + ".",
+		issuePrefixSweep + targetID + ".",
 	}
 }
 
@@ -2009,6 +2023,26 @@ func issueKeyRowIssuesCapped(targetID string) string {
 // already truncated to maxHeartbeatIssues severity-first, far below this cap,
 // and a refused raise still carries its severity into the overflow entry, so
 // aggregateStatus reaches the same verdict either way.
+//
+// `sweep:` belongs here too, and its membership is decided by the same test even
+// though its key arrives differently: issueKeySweep is handed a weaver-state key
+// whole rather than a (target, entity, column) triple, so the entity segment is
+// EMBEDDED rather than passed. Two of the three shapes that reach it — a mark and
+// its `…__count` retry budget — are per-(entity, column) and multiply with the
+// subject count; the third, a `<targetId>.__effect.<gapColumn>.<actionRef>`
+// window, is not, and is counted anyway. That over-count is deliberate and is the
+// safe direction: it is bounded by the playbook (gap columns × action refs), it
+// consumes slots from the RIGHT target, and refusing to count a family because
+// one of its shapes is bounded is how an unbounded shape rides in beside it.
+//
+// The target segment is always the FIRST segment, for every shape, which is what
+// makes the arithmetic below safe on a key that by definition failed validation:
+// every writer to weaver-state builds its key as targetID + "." + …, and a
+// registered targetId is a single token with no dot (singleTokenPattern). A key
+// that does not fit — an empty first segment, a tail with no second separator —
+// falls out as not-a-per-row-key and is left uncounted, which costs only the
+// bound on that one entry. There is no input that attributes an entry to a
+// target other than the one whose prefix it carries.
 func rowIssueTarget(key string) (string, bool) {
 	tail := ""
 	switch {
@@ -2018,6 +2052,8 @@ func rowIssueTarget(key string) (string, bool) {
 		tail = key[len(issuePrefixData):]
 	case strings.HasPrefix(key, issuePrefixTemplate):
 		tail = key[len(issuePrefixTemplate):]
+	case strings.HasPrefix(key, issuePrefixSweep):
+		tail = key[len(issuePrefixSweep):]
 	default:
 		return "", false
 	}

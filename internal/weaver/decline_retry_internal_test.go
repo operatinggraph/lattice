@@ -938,8 +938,9 @@ const (
 // issueKeyProbes builds one key per issue-key constructor from that triple, so
 // each family can be classified by the key it actually produces rather than by
 // what anyone remembered to write down. Every entry passes the argument the
-// constructor's own callers pass — issueKeySweep gets a real mark key, because a
-// mark key is what its one caller has in hand.
+// constructor's own callers pass — issueKeySweep gets a real mark key, that being
+// the per-entity shape among the three weaver-state keys its callers hand it (a
+// mark, that mark's `…__count` budget, and a `__effect` window).
 //
 // The AST walk in the census below asserts this table names EVERY issueKey*
 // constructor in the package. That is what makes the census self-extending: a new
@@ -967,13 +968,13 @@ var issueKeyProbes = map[string]func() string{
 // target-scoped family cannot be parked here to silence it) AND genuinely
 // uncovered (so an entry left behind after its family IS brought under the
 // budget fails rather than rotting).
-var perEntityBudgetExceptions = map[string]string{
-	"issueKeySweep": "CorruptMark, raised per unparseable mark. Its key embeds the entity because a mark key does, " +
-		"but its cardinality is driven by data corruption rather than by the subject count, so it does not grow " +
-		"with a healthy lens the way the gap/data/template families do. Bringing it under the budget would also " +
-		"need a `sweep:` prefix in issueKeyTargetPrefixes first — the target teardown does not walk it today, so " +
-		"a revoked target's entries would hold slots nothing releases.",
-}
+//
+// It is EMPTY, and that is the state to keep it in — every per-entity family is
+// budgeted. It stays declared because the census's two-way check is what makes an
+// exception a reviewed decision rather than a silent omission, and a future
+// family that genuinely cannot be counted needs somewhere to say so with its
+// reason attached.
+var perEntityBudgetExceptions = map[string]string{}
 
 // TestCensusPerEntityIssueFamiliesAreBudgeted is the executable census behind
 // §3.6's bound, and it exists because the same class of miss has now happened
@@ -1431,5 +1432,96 @@ func TestConfig_LongRedeliveryDelayDefaultsAndClamps(t *testing.T) {
 				t.Fatalf("LongRedeliveryDelay = %v, want %v", cfg.LongRedeliveryDelay, tc.want)
 			}
 		})
+	}
+}
+
+// TestIssueCache_SweepFamilyIsBoundedAndReleased walks the `sweep:` family
+// through the budget end to end. Counting a family and giving its slots back are
+// two obligations, and the second is the one that decides whether the cap is a
+// bound or a ratchet — so the vectors here are the three retirements CorruptMark
+// actually has, not a generic clear.
+//
+// The family is unusual in one way that matters: issueKeySweep is handed a
+// weaver-state key WHOLE, so it spans three shapes — a mark, that mark's
+// `…__count` retry budget, and a `<targetId>.__effect.<gapColumn>.<actionRef>`
+// window. All three are covered here, because all three are raised by the same
+// deleteCorrupt and all three must release the same way.
+func TestIssueCache_SweepFamilyIsBoundedAndReleased(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetSweepBudget"
+
+	markCorrupt := func(entityID string) string {
+		return issueKeySweep(markKey(targetID, entityID, "missing_a"))
+	}
+	countCorrupt := func(entityID string) string {
+		return issueKeySweep(markKey(targetID, entityID, "missing_a") + countKeySuffix)
+	}
+	effectCorrupt := issueKeySweep(targetID + ".__effect.missing_a." + actionDirectOp)
+
+	// Every shape the family takes is counted against the same target's budget.
+	for _, key := range []string{markCorrupt("A0"), countCorrupt("A0"), effectCorrupt} {
+		got, perRow := rowIssueTarget(key)
+		if !perRow || got != targetID {
+			t.Fatalf("rowIssueTarget(%q) = (%q, %v), want (%q, true)", key, got, perRow, targetID)
+		}
+	}
+
+	c.set(markCorrupt("A0"), "error", "CorruptMark", "deleted")
+	c.set(countCorrupt("A0"), "error", "CorruptMark", "deleted")
+	c.set(effectCorrupt, "error", "CorruptMark", "deleted")
+	if got := c.rowIssues[targetID]; got != 3 {
+		t.Fatalf("tracked per-row entries = %d, want 3 (a mark, its count, one effect window)", got)
+	}
+
+	// Past the cap a raise is refused and folded into the overflow entry — and
+	// its `error` severity is carried there, which for this family is the whole
+	// point: a refused CorruptMark must still escalate the document.
+	for i := 1; c.rowIssues[targetID] < rowIssueCapPerTarget; i++ {
+		c.set(markCorrupt("B"+strconv.Itoa(i)), "error", "CorruptMark", "deleted")
+	}
+	c.set(markCorrupt("Boverflow"), "error", "CorruptMark", "deleted")
+	if _, tracked := c.issues[markCorrupt("Boverflow")]; tracked {
+		t.Fatalf("a sweep: raise past the cap must be refused, not tracked")
+	}
+	overflow, ok := c.issues[issueKeyRowIssuesCapped(targetID)]
+	if !ok {
+		t.Fatalf("a refused sweep: raise must maintain the target's overflow entry")
+	}
+	if overflow.Severity != "error" {
+		t.Fatalf("overflow severity = %q, want error — a refused CorruptMark that stopped escalating the "+
+			"document would turn a corruption report into silence", overflow.Severity)
+	}
+
+	// Retirement 1 — retireCorrupt's per-key clear, for a key that reads cleanly
+	// again. It returns the slot, so a target whose corruption is repaired can
+	// track fresh facts.
+	c.clear(markCorrupt("A0"))
+	if got := c.rowIssues[targetID]; got != rowIssueCapPerTarget-1 {
+		t.Fatalf("a sweep: clear must return its slot, tracked = %d", got)
+	}
+	c.set(markCorrupt("Breadmit"), "error", "CorruptMark", "deleted")
+	if _, tracked := c.issues[markCorrupt("Breadmit")]; !tracked {
+		t.Fatalf("a freed slot must be readmitted")
+	}
+
+	// Retirement 2 — the target teardown (Revoke, and reconcileConsumers'
+	// removal branch) walks issueKeyTargetPrefixes. Without `sweep:` in that list
+	// the entries below would survive a target that no longer exists AND hold
+	// their budget slots forever, which is the ratchet this family's ordering
+	// exists to avoid.
+	for _, prefix := range issueKeyTargetPrefixes(targetID) {
+		c.clearPrefix(prefix)
+	}
+	if got, present := c.rowIssues[targetID]; present || got != 0 {
+		t.Fatalf("a target teardown must drop the whole per-row budget, tracked = %d (present=%v)", got, present)
+	}
+	for _, key := range []string{countCorrupt("A0"), effectCorrupt, markCorrupt("Breadmit")} {
+		if _, still := c.issues[key]; still {
+			t.Fatalf("%s survived the target teardown", key)
+		}
+	}
+	if _, still := c.issues[issueKeyRowIssuesCapped(targetID)]; still {
+		t.Fatalf("a target teardown must retire the overflow entry with the entries it counted")
 	}
 }

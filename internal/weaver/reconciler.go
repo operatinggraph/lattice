@@ -1312,4 +1312,14 @@ func splitMarkKey(key string) (targetID, entityID, gapColumn string, ok bool) {
 	return targetID, entityID, gapColumn, true
 }
 
-func issueKeySweep(markKey string) string { return "sweep:" + markKey }
+// issueKeySweep keys the CorruptMark issue for one weaver-state entry the sweep
+// deleted because it could not be read. The key is the deleted entry's own
+// weaver-state key, so the family spans every shape that bucket holds — a
+// `<targetId>.<entityId>.<gapColumn>` mark, its `…__count` retry budget, and a
+// `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window.
+//
+// It is built from issuePrefixSweep rather than a literal because
+// issueKeyTargetPrefixes retires the family by that same prefix on a target
+// teardown; sharing the constant is what stops the key shape and the prefix that
+// frees it from drifting apart.
+func issueKeySweep(markKey string) string { return issuePrefixSweep + markKey }
