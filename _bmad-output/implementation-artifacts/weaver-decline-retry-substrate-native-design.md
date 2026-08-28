@@ -111,7 +111,8 @@ does the thing. NATS paths are in `nats-server@v2.14.0/server/`.
 | V13 | `clearClosedMarks` runs in the preamble on **every** delivery; per **closed** (non-surface) candidate column it pays `marks.get` + a mark delete + `deleteDispatchCount` — and both deletes are **unconditional KV publishes** (DEL markers even when nothing was there). Open columns cost zero | `evaluator.go:56`, `:869-919`; `state.go:225-232`, `:445-452` |
 | V14 | `issues.set` preserves an existing `since`; a clear-then-set mints a fresh one — but `alertPaced`'s pace memory **survives `clear`**, so the paced codes keep their original onset across flaps. The heartbeat **document** is already bounded severity-first with an overflow entry (`boundIssues`, cap 50) over a status computed on the full set; what is unbounded is the in-memory `issues` **map** and `snapshot()`'s per-heartbeat sort | `health.go:155-165`, `:196-200`, `:253`, `:302-315`, `:35`, `:485-501`, `:616-682` |
 | V15 | `escalateExhaustedGap` raises its standing issue and returns Ack on the raise path (no pending slot held) — but its stale-mark arm **clears the stale mark and fires a fresh Augur reasoning episode** (a paid model call), and `fireEpisode`'s stale-mark arm re-publishes an episode: a replay re-fires these for every violating row whose mark has aged past its lease (§3.3 prices and bounds it for the verb) | `evaluator.go:1325-1398`, `:1362-1385`, `:643-700` |
-| V16 | **A NATS restart strands a quiet Nak'd population.** The redelivery timer (`o.ptmr`) is not persisted; on consumer recovery `setLeader → checkPending` bails at `o.ptmr == nil`, and the only arming sites are `trackPending` (an actual delivery — **one delivery re-arms the timer for the whole pending set**) and `processNak`. `o.rdq` is not persisted either. A lane-1 consumer whose pending set is entirely long-Nak'd rows and which receives no new delivery is never redelivered again until some row under its prefix projects, or the durable is recreated | `consumer.go:5895-5898` (the bail), `:1777`, `:5771-5772`, `:3178`, `:7034` |
+| V16 | ⚠️ **FALSIFIED 2026-08-28 — see V16a.** **A NATS restart strands a quiet Nak'd population.** The redelivery timer (`o.ptmr`) is not persisted; on consumer recovery `setLeader → checkPending` bails at `o.ptmr == nil`, and the only arming sites are `trackPending` (an actual delivery — **one delivery re-arms the timer for the whole pending set**) and `processNak`. `o.rdq` is not persisted either. A lane-1 consumer whose pending set is entirely long-Nak'd rows and which receives no new delivery is never redelivered again until some row under its prefix projects, or the durable is recreated | `consumer.go:5895-5898` (the bail), `:1777`, `:5771-5772`, `:3178`, `:7034` |
+| V16a | **V16 IS FALSE for this deployment (build-time verification, 2026-08-28).** V16's enumeration of the `o.ptmr` arming sites missed a third: `applyState` re-arms it on startup whenever restored pending is non-empty — *"Setup tracking timer if we have restored pending"*, `if o.isLeader() && len(o.pending) > 0 { o.resetPtmr(delay) }` at a 500 ms–1.5 s delay. It is reached on every start via `setLeader(true)` → `readStoredState()` → `applyState`, and `o.leader.Swap` runs *before* that call so `isLeader()` is already true; for a standalone (R1) server — every shipped deployment — `setLeader(true)` is unconditional at consumer construction. Nak'd timestamps ARE persisted (`processNak` → `updateDelivered`), so `checkPending` re-arms and expires each entry on its own backdated deadline. **Consequences:** there is no restart strand, §3.3's justification #2 is void, §5's Nak'd-pending row loses its restart caveat, and **T10 as written asserts a behaviour the server does not have** — it must be rewritten to assert the OPPOSITE (a quiet long-Nak'd row DOES redeliver after a server restart, unaided) before Inc 4 is built | `nats-server@v2.14.0/server/consumer.go:3297-3308` (`applyState`), `:1678`, `:1607`, `:1434-1435`, `:3175-3177` |
 | V17 | The supervisor pump prefetches **one message** (`pumpPullMaxMessages = 1`, with the buffered-AckWait concern stated as the reason) and heartbeats `InProgress()` every AckWait/2 for the whole handler run — so neither a replay burst nor a slow handler can age a delivered row out of AckWait | `consumer_supervisor_pump.go:28-58`, `:669`, `:719-770` |
 | V18 | `fire`'s publish failure returns **Nak** — *"the mark already exists, so the redelivery re-derives the SAME requestId and re-publishes"* — i.e. the `NumDelivered != 1` re-fire branch is the **only** thing that makes that guaranteed immediate redelivery do work; `reclaim`'s own comment also leans on it. Retiring the branch without replacing this leg swallows every publish failure until reclaim, whose repeat backoff ladder is `base × 2^(count−1)` capped at 24 h | `evaluator.go:776-778`, `:795-800`, `:190-193`; `reconciler.go:993`, `:1126-1128`, `:30`; `engine.go:185-186` |
 | V19 | `boolColumn` raises `RowDataError` only for a **present, non-bool** value and returns the zero bool; `scheduleFreshness` raises `RowDataError` at three sites and deliberately **returns true (→ Ack)**, with the anti-Nak reasoning in its own comment; `intColumn` raises for `maxretries_<g>`/priority | `evaluator.go:1085-1101`, `:1117-1145`; `temporal.go:120`, `:137`, `:154-158` |
@@ -191,7 +192,7 @@ C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops,
 | 5 | Disabled target (`:115`) | Ack | **Ack** | §4.1. On `Enable`, Resume redelivers the Nak'd-pending set on its own timestamps (V9); Acked residue is the verb's or re-projection's |
 | 6 | `violating` reads a genuine bool `false` (`:120`) | Ack | **Ack** | Nothing owed |
 | 7 | Row-data errors blocking evaluation — non-bool `violating`; a violating row's missing `entityKey` echo (`:131`); a non-bool `missing_*` read | Ack (issues already level-raised, V19) | **Ack — unchanged** | Data errors: every fix is a re-projection, which delivers (V3). The raises stay level-driven at their existing sites; `scheduleFreshness`'s and `intColumn`'s raisers keep their shipped posture for the same reason |
-| 8 | `GapWithoutPlaybook` (`:231`) | error alert + Ack | **error alert + Long** | Config error — a playbook fix produces **no new delivery**, so the loop is the only automatic uptake: picked up within one floor (§3.3). The standing re-raise also survives clear-races (§3.5) |
+| 8 | `GapWithoutPlaybook` (`:231`) | error alert + Ack | **paced `warning` + Ack — AMENDED 2026-08-28, see below** | Originally specified as a Long on the config-error rule. Reverted at build time: the exit has a population whose fix can never arrive, so a Long parks it forever — §4.2's own argument, never applied to this row |
 | 9 | `UnresolvedReference` (`:579`) | paced warning + NakWithDelay | **unchanged** | Genuinely transient mid-convergence; the 5 s class is deliberate |
 | 10 | `TemplateDataError` (`:583`) | paced warning + **Ack** | **paced warning + Long** | Sits on the boundary — the fault is template × row, and one of its fix paths (a template/playbook edit) produces **no new delivery** — so the fix-path rule puts it in the config class. Plausibly the clinic class itself; today it Acks once and is never revisited |
 | 11 | `PlaybookConfigError` (`:587`) | paced error + Ack | **paced error + Long** | Config error — same as row 8 |
@@ -206,6 +207,36 @@ C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops,
 `Nak > NakWithDelay > NakWithLongDelay > Ack` — **both** existing `switch` blocks
 (`evaluator.go:172-180`, `:181-188`) gain an explicit case; their `default:` arms are exactly
 where a missed value silently downgrades to Ack (V8), so T3's mutations flip each.
+
+**Row 8 AMENDED 2026-08-28 (build-time adversarial pass) — `GapWithoutPlaybook` stays at Ack.**
+The row-8 Long was specified on the fix-path rule: a playbook edit produces no new delivery, so the
+loop is the only automatic uptake. That is true *when a playbook edit is coming*. It is false for a
+column the package **deliberately** projects with no `gaps` entry — a shipped, live pattern:
+`packages/lease-signing/lenses.go:810` and `:812` project `missing_decision` and `missing_manager`,
+both ORed into `violating` (`:815`), and neither is among `leaseApplicationComplete`'s seven declared
+gaps (`packages/lease-signing/targets.go:91-102`). The lens's own doc states the intent — *"maps to NO
+playbook entry … so it keeps the row violating without dispatching anything"*. `leaseApplicationComplete`
+sets `Augur.Escalate: ["exhausted"]`, so `augurEscalation` declines and the row takes this exit.
+
+A Long there parks a row for the whole human-latency window of a landlord decision — unbounded, and
+literally forever for `missing_manager`, which nothing in Weaver ever closes. It holds a
+`MaxAckPending` slot and re-runs the full `clearClosedMarks` preamble every floor: with nine
+candidate columns, eight of them closed, that is 8 reads + 16 unconditional KV writes per stuck row
+per floor, forever, for a configuration that is already correct.
+
+This is exactly §4.2's argument for leaving the unregistered-target exit at Ack — *"a Long here holds
+pending forever for a target that will never register"* — and it was never applied to this row. It is
+now: **row 8 keeps Ack**, and gains only §8's severity demotion and a paced raise seam (§8 as
+amended). Rows 10 and 11 keep the Long: `PlaybookConfigError`'s populations all have a real package
+edit as the fix, and `TemplateDataError` was ratified onto the config side knowingly.
+
+What row 8 gives up is automatic uptake for a genuinely-missing playbook entry. That is the smaller
+loss: the motivating symptom (the clinic population) is a row-10/11 class, and the sanctioned way to
+express an intentionally undispatched column already exists — a `surface` gap, which Acks with its
+own standing issue (row 6 of the C6 classification). Making row 8's Long sound needs that expression
+to be *required*, i.e. a gate asserting lens-projected `missing_*` ⊆ declared gaps, with the two
+lease-signing columns converted to `surface`. Filed as its own unit; it is a package-behaviour change
+(a `surface` gap raises per entity) that wants its own review, not a rider on this one.
 
 **Fix-uptake is automatic for every Nak'd class.** A Nak'd row's redelivery is a fresh
 `handleRow` against the **current** registry target and the **current** row body — so a playbook
@@ -393,8 +424,17 @@ Re-derived, not inherited (V4, V17):
 - **`MaxAckPending`: set explicitly to 2 000** (today: server default 1 000, V4). Nak'd-pending
   declines hold slots (V1); V2/V3 keep the decline cycle and fix-uptake flowing at the cap, so the
   starved class is **new entities** on a target already carrying ≥cap distinct simultaneously-stuck
-  rows. The cap is deliberately modest: above ~1 024 pending the server's `checkPending` walks the
-  whole map per timer fire and defers under ack load (`consumer.go:5916-5921`, `:5964-5973`).
+  rows. ~~The cap is deliberately modest: above ~1 024 pending the server's `checkPending` walks the
+  whole map per timer fire and defers under ack load.~~ **Corrected 2026-08-28:** the citations are
+  real and on-path but the mechanism attribution is wrong, and wrong in the direction that matters.
+  The pending-map walk (`consumer.go:5917`) is **unconditional at every size** — nothing about it
+  begins at 1 024. What `len(o.pending) > 1024` gates (`:5916`) is the opposite: an early **bail**
+  out of the expiry walk when acks are already in flight (`:5918-5921` → `resetPtmr(100ms)`,
+  return). So 2 000 deliberately sits *above* the threshold whose guard exists to protect the very
+  redelivery walk this design depends on. It is kept, because lane 1 is serial (`Workers` unset) so
+  in-flight acks are one at a time and the bail is a 100 ms **deferral, not a loss** — but "modest"
+  was the wrong word for a value chosen above the threshold it cited, and the real reason 2 000 is
+  safe is the serial lane, not the size.
   2 000 is ~70× today's worst observed stuck population — and with data errors Acking (§3.2),
   the pending mass is the config-error classes only; C5 re-derives it if the corpus says
   otherwise. Honest limits, both stated: the >cap new-entity stall (signal: `num_ack_pending`
@@ -441,6 +481,25 @@ package-authoring typo would pin Weaver `unhealthy` until the package is fixed, 
 dispatches normally for every other target. Contract #5 §5.2 defines `unhealthy` as *"cannot
 fulfil its primary responsibility"*, and the codebase draws the line itself for a sibling per-row
 fault at `evaluator.go:122-128` (*"a warning (degraded), never an error"*).
+
+**AMENDED 2026-08-28 — the demotion has a second consumer of severity, and it was not derived.**
+`aggregateStatus` is not the only reader. `boundIssues` selects the 50 listed issues **severity-first,
+ties broken on key order** (`health.go`, `severityRank`: `error` = 0, everything else = 1), and the
+unbounded per-entity families key on `data:` and `gap:`, which sort *ahead of* `gapConfig:`. While
+these two codes were `error` they were listed unconditionally; as `warning`s they fall into the same
+rank as the flood and lose the tiebreak to it — so the entry that EXPLAINS a fault is evicted by the
+fault's own per-row noise, cross-target, since the issue set is per Weaver instance.
+`docs/observability/health-kv-schema.md` states the surviving guarantee in words the demotion
+falsifies: *"the unbounded families are all `warning`s, and in key order they sort ahead of the
+entries that explain a fault … Selecting by key alone would let sixty unrouted tasks evict the one
+`error` naming the cause."*
+
+The demotion is kept (its `aggregateStatus` argument is sound); what is repaired is the ranking that
+`error` was doing by accident. `boundIssues` now ranks **bounded, target-scoped families
+(`gapConfig:`, `consumer:`, `target:`, `timer:`) ahead of the unbounded per-entity families,
+independently of severity** — the doc's actual intent, stated directly instead of riding on a
+severity that was free to change. `UnresolvedReference` was already `warning` and already had this
+exposure; the same repair covers it.
 
 **Decision (Andrew, 2026-08-27): both codes are demoted to `warning` at their raise sites** — one
 severity for all callers, so the change reaches lane 1 as well as the decline loop. Ships in
@@ -588,9 +647,13 @@ republish set at strictly narrower scope. Rejected.
   claimId on the immediate redelivery; with the set cleared (simulated restart), reclaim recovers
   within one lease. Mutation: drop the set-check → the redelivery must NOT re-publish and the
   test must fail on promptness.
-- **T10 (Inc 4, embedded NATS e2e — pins V16):** restart the embedded server under a quiet
-  long-Nak'd row; assert no redelivery arrives on its own, then `ReplayTarget` recovers it. The
-  test documents the strand and pins the verb as its repair.
+- **T10 (Inc 4, embedded NATS e2e) — REWRITTEN 2026-08-28, V16 is false (see V16a).** The original
+  asserted that a quiet long-Nak'd row does NOT redeliver after a server restart. The pinned server
+  re-arms the redelivery timer from restored pending state on startup, so that assertion is false and
+  would only ever be "made to pass" by weakening it. The test now pins the TRUE behaviour: restart the
+  embedded server under a quiet long-Nak'd row and assert the redelivery DOES arrive unaided, on the
+  row's own backdated deadline. The verb keeps T6 as its pin; it is a repair for the Acked residue,
+  not for a strand that does not exist.
 - **T11 (Inc 4):** the verb does not re-pay Augur — a row with a standing escalation issue and a
   stale mark replays without a second reasoning dispatch.
 
@@ -689,7 +752,7 @@ Green bar: `go build ./...`, `make vet`, `golangci-lint run ./...`,
 |---|---|---|---|
 | C1 — production weaver targets | 26 (9 literals + 17 constants) | **26** (9 quoted + 17 constants) | ✅ confirmed |
 | C6 — `substrate.Ack` sites in `evaluator.go` | 21, at `27,34,43,93,115,120,131,201,231,257,552,583,587,636,688,704,812,1344,1359,1388,1398` | **21, at exactly those lines** | ✅ zero drift |
-| C5 (static half) — declared gaps per target | "most targets declare 1–3 gaps" | **every target declares exactly 1** | ✅ §7's cost formula is conservative |
+| C5 (static half) — declared gaps per target | "most targets declare 1–3 gaps" | **9 of 20 target-specs declare ≥2; `leaseApplicationComplete` declares 7, `ErasureCompleteTarget` 5** | ❌ **this cell first recorded "every target declares exactly 1" — that was a broken counting script, corrected 2026-08-28.** §7's per-floor cost is `O(stuck rows × closed candidate columns)` and the multiplier reaches 8, not 1 |
 | C5 (live half) — `weaver-targets` row counts, per-target max | needs a live stack | **not runnable in this container** | ⛔ carried, below |
 | C2 — the clinic population + its decline class | needs a live stack | **not runnable in this container** | ⛔ carried, below |
 | C3 — post-preamble `msg.` reads | `msg.Sequence` only after §3.4 | deferred to Inc 3 (it *is* T2) | — |
