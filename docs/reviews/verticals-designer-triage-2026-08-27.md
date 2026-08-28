@@ -381,3 +381,48 @@ each, since both are cross-cutting platform observations, not vertical-app deman
 
 **Review depth:** security-plane change (client-side secret minting/reveal) — full 3-layer
 adversarial at admit regardless of size, per §4 of the Steward routine.
+
+## 11. Build note — item 7, typed self-anchor `{me.<type>}` (2026-08-28)
+
+Fire brief for §2 work-list item 7. Scope sentence: *`internal/descriptorform/form.mjs`'s
+`substituteTemplate` stops throwing on `{me.<type>}` and adopts the `?` OPTIONAL marker, mirroring
+Facet's own `selfAnchorKey`/`templateIsOptional` and `internal/pkgmgr/definition.go:722-781`'s
+normative contract for both.*
+
+**Verified touch-list:** `internal/descriptorform/form.mjs` — `substituteTemplate` gains an
+`expr.startsWith("me.")` branch resolving against a new `selfAnchorKey(context, type)` helper
+(filters `context.selfAnchors`, a `{type,key}` array, to the single match — zero or several
+resolves to `undefined`, never a guess); the contextParams loop gains `templateIsOptional`/
+`stripOptionalMarkers` (mirroring Facet's `app.js:2288-2296`) so an optional param that doesn't
+resolve is omitted from the payload rather than throwing. `internal/descriptorform/form.test.mjs`
+— the now-false `"an unadopted \`?\` optional marker refuses"` test replaced with the real silent-
+omit behavior; four new tests added (resolve-to-single-match, refuse-on-0-or-2+ for a required
+template, omit-on-0-or-2+/fill-on-1 for an optional one, `:id` composition).
+
+**Ground check:** `context.selfAnchors`'s shape (`{type,key}`, degenerate `{key:null}` dropped
+client-side) verified live against `packages/edge-manifest/lenses.go:508-571`'s `edgeIdentitySpec`
+— found its own doc comment stale (said "five types ship", omitting the already-shipped `patient`
+type `CreateAppointment`'s `{me.patient}` addresses); corrected in the same commit.
+
+**Non-goal, deliberately:** wiring `selfAnchors` into any of the four apps' `/api/whoami` and
+migrating a live op (OpenTab, CreateBooking/JoinWaitlist/ReassignSession/SetBookingAttendance,
+CreateAppointment — all of which already declare `{me.<type>}`/`{me.<type>?}` ContextParams per a
+live grep of `packages/*/opmetas.go`) onto `renderOpForm`. Checked live: every one of those ops is
+still rendered by hand-built app code today (`cafe-app`'s `OpenTab` submit, `wellness-app`'s
+`bookMemberIn`/`SetBookingAttendance` handlers, `clinic-app`'s `CreateAppointment` submit) — none is
+broken by form.mjs's prior gap, since none goes through form.mjs yet. Wiring whoami plumbing with no
+caller would be exactly the premature-abstraction CLAUDE.md rules against; this item closes the
+module-side gap so a *future* per-op migration (§2 item 9's drift-gate convergence, or a vertical PO
+row asking for one of these forms to gain the module's other benefits — ceremony, conditional
+visibility, etc.) is unblocked without inventing unused code now. Revive trigger: the first PO/build
+item that proposes migrating one of the six named ops onto `renderOpForm`.
+
+**Outcome (shipped `634cf8d4`):** built and tested exactly as scoped; `node --test
+internal/descriptorform/*.test.mjs` 78/78 green (was 74 before this item — the replaced test still
+counts once). `go build ./...`, `make vet`, `STRICT=1 lint-conventions`, `golangci-lint run ./...`,
+`make verify-kernel` all clean. Non-security, non-capability-plane, mechanical + fully precedented
+against Facet's shipped implementation and the Go-side contract doc — lead review at admit (XS/S
+per §4), not full 3-layer.
+
+**Item 7 is CLOSED.** §2's remaining work-list items: 8 (`derive_reads` adoption) and 9 (template-
+grammar convergence note / drift-gate vocabulary entry, which can now cite items 4 and 7 both closed).
