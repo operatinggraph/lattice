@@ -364,11 +364,11 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 						"constraint", ddlErr.ViolatedConstraint,
 						"mutationKey", ddlErr.MutationKey,
 						"detail", ddlErr.Detail)
-					cp.replyRejection(msg, env, ErrCodeDDLViolation,
+					cp.replyRejection(ctx, msg, env, ErrCodeDDLViolation,
 						ddlErr.Error(), map[string]any{
 							"constraint":  ddlErr.ViolatedConstraint,
 							"mutationKey": ddlErr.MutationKey,
-						})
+						}, "")
 					return OutcomeRejected, substrate.Term
 				}
 				return cp.handleStubFailure(ctx, msg, env, "validate", err)
@@ -400,9 +400,9 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			cp.deps.Metrics.OpsRejected.Add(1)
 			cp.deps.Logger.Warn("reply-constraint violation: response.primaryKey is not within the write footprint; rejecting before commit",
 				"requestId", env.RequestID, "primaryKey", result.PrimaryKey)
-			cp.replyRejection(msg, env, ErrCodeDDLViolation,
+			cp.replyRejection(ctx, msg, env, ErrCodeDDLViolation,
 				"response.primaryKey is not within the committed write footprint",
-				map[string]any{"primaryKey": result.PrimaryKey})
+				map[string]any{"primaryKey": result.PrimaryKey}, "")
 			return OutcomeRejected, substrate.Term
 		}
 
@@ -456,12 +456,12 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"key", protErr.Key,
 				"root", protErr.Root,
 				"op", protErr.Op)
-			cp.replyRejection(msg, env, ErrCodeProtectedKey,
+			cp.replyRejection(ctx, msg, env, ErrCodeProtectedKey,
 				protErr.Error(), map[string]any{
 					"key":  protErr.Key,
 					"root": protErr.Root,
 					"op":   protErr.Op,
-				})
+				}, "")
 			return OutcomeRejected, substrate.Term
 		}
 
@@ -476,11 +476,11 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"requestId", env.RequestID,
 				"key", provErr.Key,
 				"field", provErr.Field)
-			cp.replyRejection(msg, env, ErrCodePermissionProvenance,
+			cp.replyRejection(ctx, msg, env, ErrCodePermissionProvenance,
 				provErr.Error(), map[string]any{
 					"key":   provErr.Key,
 					"field": provErr.Field,
-				})
+				}, "")
 			return OutcomeRejected, substrate.Term
 		}
 
@@ -497,13 +497,13 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"op", pkgErr.Op,
 				"reason", pkgErr.Reason,
 				"package", pkgErr.Package)
-			cp.replyRejection(msg, env, ErrCodePackageScope,
+			cp.replyRejection(ctx, msg, env, ErrCodePackageScope,
 				pkgErr.Error(), map[string]any{
 					"key":     pkgErr.Key,
 					"op":      pkgErr.Op,
 					"reason":  pkgErr.Reason,
 					"package": pkgErr.Package,
-				})
+				}, "")
 			return OutcomeRejected, substrate.Term
 		}
 
@@ -520,13 +520,13 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"limit", btlErr.Limit,
 				"actual", btlErr.Actual,
 				"key", btlErr.Key)
-			cp.replyRejection(msg, env, ErrCodeBatchTooLarge,
+			cp.replyRejection(ctx, msg, env, ErrCodeBatchTooLarge,
 				btlErr.Error(), map[string]any{
 					"reason": btlErr.Reason,
 					"limit":  btlErr.Limit,
 					"actual": btlErr.Actual,
 					"key":    btlErr.Key,
-				})
+				}, "")
 			return OutcomeRejected, substrate.Term
 		}
 
@@ -595,10 +595,10 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				cp.deps.Logger.Info("step 8: revision conflict; rejecting",
 					"requestId", env.RequestID,
 					"conflictingKey", conflictKey)
-				cp.replyRejection(msg, env, ErrCodeRevisionConflict,
+				cp.replyRejection(ctx, msg, env, ErrCodeRevisionConflict,
 					confErr.Error(), map[string]any{
 						"conflictingKey": conflictKey,
-					})
+					}, "")
 				return OutcomeRejected, substrate.Term
 			}
 		}
@@ -987,20 +987,18 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Messa
 	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "operationType", env.OperationType, "error", err)
 
+	// The script's own adjudication is the finest-grained outcome there is, so
+	// it names the counter; anything else this path reaches is a fault the
+	// script never got to. replyRejection records whichever is handed to it.
 	var sErr *ScriptError
-	claimKeyInvalid := errors.As(err, &sErr) && sErr.Code == "ClaimKeyInvalid"
-	if cp.deps.ClaimEmitter != nil {
-		switch {
-		case claimKeyInvalid:
-			cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, sErr.Detail)
-		case isNFRS6Operation(env.OperationType):
-			cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, claimOutcomeInternalFault)
-		}
+	outcome := claimOutcomeInternalFault
+	if errors.As(err, &sErr) && sErr.Code == "ClaimKeyInvalid" {
+		outcome = sErr.Detail
 	}
 
 	code, details := classifyStepError(err)
-	cp.replyRejection(msg, env, code,
-		fmt.Sprintf("step %s failed: %s", step, err.Error()), details)
+	cp.replyRejection(ctx, msg, env, code,
+		fmt.Sprintf("step %s failed: %s", step, err.Error()), details, outcome)
 	return OutcomeRejected, substrate.Term
 }
 
@@ -1078,16 +1076,30 @@ func (cp *CommitPath) replyTo(msg substrate.Message, reply OperationReply) {
 // For an NFR-S6 operation the caller's copy collapses to the generic code with
 // nil details and one fixed message — Contract #9 §9.3 requires ALL failure
 // modes of those operations to answer alike. The real code, message and details
-// are logged here, so the collapse costs an operator nothing; handleStubFailure
-// additionally records the specific outcome to Health KV, which is where the
-// contract says specifics belong.
+// are logged here, and the outcome is recorded to the claim-attempts counter,
+// which is where the contract says specifics belong.
+//
+// This is the SINGLE accounting point for an NFR-S6 rejection, and it is single
+// because the collapse is single: every path that hides a cause behind the
+// generic shape passes through here, so anything that reports the cause has to
+// live here too or it covers only the paths its author happened to think of.
+// outcome names the cause when the caller knows it (the script's own
+// adjudication); an empty outcome means the platform refused before or after
+// the script adjudicated, and is counted as such — the real code stays in the
+// log line below.
 //
 // Every other operation keeps its real code and details: debuggability matters,
 // and there is no target state to hide.
-func (cp *CommitPath) replyRejection(msg substrate.Message, env *OperationEnvelope, code ErrorCode, message string, details map[string]any) {
+func (cp *CommitPath) replyRejection(ctx context.Context, msg substrate.Message, env *OperationEnvelope, code ErrorCode, message string, details map[string]any, outcome string) {
 	if !isNFRS6Operation(env.OperationType) {
 		cp.replyTo(msg, BuildRejectedReply(env.RequestID, code, message, details))
 		return
+	}
+	if outcome == "" {
+		outcome = claimOutcomePlatformRefused
+	}
+	if cp.deps.ClaimEmitter != nil {
+		cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, outcome)
 	}
 	// WARN, not Info: for the post-commit rejection branches this line is the
 	// ONLY record of what actually failed — the caller is told nothing and the
@@ -1095,7 +1107,8 @@ func (cp *CommitPath) replyRejection(msg substrate.Message, env *OperationEnvelo
 	// that sits below the default level is a refusal nobody can diagnose.
 	cp.deps.Logger.Warn("NFR-S6 rejection collapsed to the generic reply shape",
 		"requestId", env.RequestID, "operationType", env.OperationType,
-		"actualCode", string(code), "actualMessage", message, "actualDetails", details)
+		"actualCode", string(code), "actualMessage", message, "actualDetails", details,
+		"claimAttemptOutcome", outcome)
 	cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeClaimKeyInvalid, claimRejectionMessage, nil))
 }
 

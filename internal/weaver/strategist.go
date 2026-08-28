@@ -521,7 +521,7 @@ func (e *Engine) resolveGoalAction(gapColumn string, ga GapAction, row map[strin
 const (
 	defaultAugurOp      = "CreateAugurReasoningClaim" // op-name: (submits) Weaver dispatches this directly as a directOp, minting the reasoning claim vertex write-ahead and emitting the external.<adapter> event
 	defaultAugurAdapter = "augur"
-	defaultAugurReplyOp = "RecordProposal" // op-name: (submits) the verb Weaver names in the dispatch for the Bridge to post as the reply once the model call returns
+	defaultAugurReplyOp = "RecordProposal" // op-name: (policy) Weaver never publishes this; it names the verb in the dispatch params, the augur script copies it into the external event, and the Bridge posts it — a core-owned default over a verb packages/augur owns pin=TestAugurConvergence_HappyPath
 )
 
 // augurEscalation builds the reasoning-tier GapAction for a stuck gap whose

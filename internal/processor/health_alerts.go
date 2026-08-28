@@ -24,13 +24,17 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// ClaimAttemptEmitter surfaces ClaimIdentity outcomes to Health KV at
-// health.processor.<instance>.claim-attempts.<outcome>. Separate from the
+// ClaimAttemptEmitter surfaces the outcome of every NFR-S6 operation to Health
+// KV at health.processor.<instance>.claim-attempts.<outcome>. Separate from the
 // security-alert emitter because claim attempt counters are operational metrics,
 // not security alerts.
 //
-// Outcome enum: success, invalid-key, wrong-state, flagged, merged,
-// credential-already-bound, no-target.
+// The outcome vocabulary is open, not a closed enum: success, internal-fault and
+// platform-refused are minted here in Go, while the rest are ScriptError.Detail
+// carried out of a Starlark fail("ClaimKeyInvalid: <detail>") — so the words
+// belong to the packages' scripts. docs/observability/health-kv-schema.md lists
+// what is emitted today (invalid-key, wrong-state, flagged, merged,
+// credential-already-bound, credential-not-provisioned, no-target, erased).
 type ClaimAttemptEmitter interface {
 	RecordClaimAttempt(ctx context.Context, outcome string)
 }

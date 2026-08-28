@@ -20,9 +20,20 @@ import (
 // member must also be one whose rejections the Processor collapses to a single
 // wire shape.
 //
-// Containment, not equality, is the sound direction. Equalizing an operation
-// that never sees a raw credential is merely conservative and costs nothing, so
-// the reverse inclusion is not required.
+// Containment, not equality, is the sound direction: an operation may be
+// equalized without being in the carve-out, and the reverse inclusion is not
+// required. That is not the same as equalization being free — membership in
+// nfrS6Operations also closes the operation's declared read set at step 4, so
+// widening that set without a matching Dispatch descriptor refuses the
+// operation outright. See the failure message for what equalizing actually costs.
+//
+// SCOPE: this pins the Gateway's carve-out, which is where every production
+// submitter of these operations goes (cmd/facet, the vertical apps and the edge
+// browser agent all reach the Processor through /v1/operations). It does not
+// see a binary that submits to core-operations directly — cmd/lattice's admin
+// identity tooling does exactly that, and satisfies the invariant only because
+// the operations it names happen to be equalized. A new raw-credential ceremony
+// added outside the Gateway is not covered here.
 func TestRawCredentialCarveOutIsNFRS6Equalized(t *testing.T) {
 	var unequalized []string
 	for op := range rawCredentialCarveOut {
@@ -42,8 +53,17 @@ func TestRawCredentialCarveOutIsNFRS6Equalized(t *testing.T) {
 			"operation's rejections depend on whether that credential is already bound — and without "+
 			"the NFR-S6 collapse those rejections reach the caller distinguishable, which is a probe "+
 			"for who holds an account.\n"+
-			"Add %[1]q to internal/processor's nfrS6Operations (equalizing an op costs nothing), or "+
-			"take it out of the carve-out and let resolveActor resolve its actor.", op)
+			"There are two ways out, and the cheap-looking one is not cheap. Taking %[1]q OUT of "+
+			"the carve-out, letting resolveActor resolve its actor, is the simple fix wherever it "+
+			"applies.\n"+
+			"Adding %[1]q to internal/processor's nfrS6Operations is NOT a free conservative "+
+			"widening: the same predicate closes the operation's declared read set at step 4 "+
+			"(refuseUndeclaredContextHint), and an operation with no Dispatch descriptor admits "+
+			"nothing — so it would then refuse EVERY declared key, rejecting 100%% of its "+
+			"submissions behind the one reply shape engineered to tell nobody why. Equalizing "+
+			"means all three together: add it here, give it an OpDispatchSpec whose read templates "+
+			"cover its whole legitimate declared set, and move every dispatcher of it onto exactly "+
+			"that set.", op)
 	}
 }
 
