@@ -254,7 +254,13 @@ file (`step3_auth_capability.go:419-481`). The Gateway's `rawCredentialCarveOut`
 weaker than "four instances" — and it still supports the conclusion, because the pair is the one that
 states the ownership rule.
 
-**And the look-alike is the more interesting datum, which this design records rather than fixes.**
+**And the look-alike is the more interesting datum.** Andrew's original row asked for something wider
+than this design's scope — *"ideally make it a lint violation to reference package-specific information
+from `internal/`"* — and that half is **filed separately** as its own `📋 ready` row on the board
+(`[Tooling] internal/ hardcodes package-owned operation names, undeclared`). It stands on its own as a
+codebase-convention gate whether or not the payload cap is ever built, and it subsumes the *discovery*
+of the problem below without subsuming its *assertion*, so both are worth having.
+
 `rawCredentialCarveOut`'s membership is **byte-identical** to `nfrS6Operations` — the same two
 operations, maintained independently in two packages, with no shared constant and no gate tying them
 together. **Nothing in the tree fails if one drifts from the other**, and a drift would silently
