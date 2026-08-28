@@ -426,3 +426,57 @@ per §4), not full 3-layer.
 
 **Item 7 is CLOSED.** §2's remaining work-list items: 8 (`derive_reads` adoption) and 9 (template-
 grammar convergence note / drift-gate vocabulary entry, which can now cite items 4 and 7 both closed).
+
+## 12. Build note — item 8, `derive_reads` adoption (2026-08-28)
+
+Fire brief for §2 work-list item 8. Scope sentence, as re-grounded during the build: *wellness-domain's
+`CreateSession`/`CreateSessionSeries` and clinic-domain's `CreateAppointment`/`RescheduleAppointment`
+declare their studioSlotClaim/instructorSlotClaim/providerSlotClaim/patientSlotClaim cells via the DDL's
+own `derive_reads(op)`, so the four hand-built app.js dispatchers stop computing them.*
+
+**Scope correction found during the build: `ReassignSession` is excluded, not adopted.** `derive_reads`
+runs pre-hydration with `kv`/`state`/`ddl` hard-stubbed to fail on any access (Contract #2 §2.5) — a pure
+function of `{operationType, actor, payload}` only. `ReassignSession`'s "edit only what's supplied, carry
+the rest forward unchanged" semantics mean a studio-only move, an instructor-only swap, or a time-move
+that doesn't touch the instructor all need the session's CURRENT studio/instructor/schedule to compute
+which cells to claim — state genuinely absent from the payload in each of those shapes (verified against
+every branch of `ReassignSession`'s `execute()`, not assumed). No payload shape makes the op fully
+derivable. The FE (`cmd/wellness-app/web/app.js`) keeps declaring its optionalReads for this one op;
+`slotCellKeys` stays in place (still used there and by three other call sites). `CreateAppointment` and
+`RescheduleAppointment` have no such "carry forward unchanged" branches — both required fields the cells
+key on (`provider`/`patient`/`startsAt`/`endsAt`) are always present in payload — so both migrate cleanly.
+
+**Cold adversarial review (opus, independent of the implementer) verified the derived read-sets are exact
+supersets of every `kv.Read` the scripts' `claim_cell` actually calls** — RFC3339 normalization parity,
+the `CreateSessionSeries` occurrence-offset loop byte-matched against `execute()`'s own, bounds mirroring
+`required_int`'s `[2,52]`/`[1,365]`, and the `ReassignSession` exclusion's premise (it also found the
+exclusion was slightly *under*-stated: even a call supplying both `newStudio` and an explicit
+`startsAt`/`endsAt` still resolves its FINAL instructor from a KV-read `old_instructor` fallback when the
+instructor itself isn't also named — folded into the doc comment). Two real findings, both fixed in the
+same commit: raw `getattr` where the scripts' own `optional_string` trims + type-checks (a
+malformed/whitespace payload would otherwise `DeriveReadsInvalid` an operation `execute()` would have
+accepted — objects-base's own `derive_reads` sets the `optional_string` precedent, now followed here too);
+and `derive_reads` calling the `fail()`-raising `slot_cells` past the 24h/96-cell ceiling instead of
+bounding and deferring to `execute()`'s own clean `SessionTooLong`/`AppointmentTooLong`. Also swept four
+now-stale doc comments (two in `wellness-domain/opmetas.go`, one each in the two packages'
+`claim_cell` functions) that asserted the old "a descriptor-driven caller falls to the commit-time
+RevisionConflict" behavior — no longer true for any caller shape.
+
+**Coverage gap closed in the same fire:** `CreateSessionSeries` had no execution test anywhere in the
+suite (only permission-table/opmeta references) — its 3-occurrence offset loop had never actually run.
+Added its first execution test plus two tests proving `derive_reads` alone (zero client-declared
+optionalReads) is sufficient for both the accept and the `StudioConflict`-reject paths. (Also had to add
+`CreateSessionSeries` to the test fixture's own granted-permissions list — the op had never been submitted
+in this suite before, so nothing had surfaced its absence.)
+
+**Outcome (shipped `883e2875`):** `go build ./...`, `make vet`, `STRICT=1 lint-conventions`,
+`golangci-lint run ./...`, `lint-package-version` (wellness-domain 0.22.8→0.22.9, clinic-domain
+0.34.9→0.34.10), `make verify-kernel` all clean; `go test` on wellness-domain, clinic-domain,
+clinic-reminders, clinic-ledger, wellness-ledger all green. Non-security, non-capability-plane (Contract
+#2 §2.5 hygiene, not a new enforcement point) — lead review at admit plus the one cold adversarial pass
+above, not a full 3-layer panel.
+
+**Item 8 is CLOSED for `CreateSession`/`CreateSessionSeries`/`CreateAppointment`/`RescheduleAppointment`.**
+`ReassignSession` stays client-declared, by design, per the exclusion above. §2's remaining work-list item:
+9 (template-grammar convergence note / drift-gate vocabulary entry for `{me.<type>}`/`{entity.*}`/
+`{service}`/`{scopedTo}`, which can now cite items 4, 7, and this one).
