@@ -480,3 +480,26 @@ above, not a full 3-layer panel.
 `ReassignSession` stays client-declared, by design, per the exclusion above. §2's remaining work-list item:
 9 (template-grammar convergence note / drift-gate vocabulary entry for `{me.<type>}`/`{entity.*}`/
 `{service}`/`{scopedTo}`, which can now cite items 4, 7, and this one).
+
+## 13. Build note — item 9, drift-gate vocabulary entry (2026-08-28)
+
+Scope, re-grounded: only `{me.<type>}` (item 7) and `{entity.<column>}`/`{context.<field>}` (item 4) are
+live in any staff-plane descriptor — a census of every `packages/*/opmetas.go`/`ddls.go` found no
+`{service}` or `{scopedTo}` template on the form.mjs side, so those two forms had nothing to pin. Added
+both as `vocabMember`s in `scripts/lint-facet-renderer-drift.go`. `entityColumn` is Swift-exempt:
+`DescriptorForm.swift`'s `DescriptorContext` carries no row/entity field, and its one production call
+site (`DescriptorFormSheet.swift:175`) constructs it with only `actorIdentityKey` — no caller anywhere
+threads a viewed row in, so the template can never resolve there regardless of source support (unbuilt
+scope in the shelved macOS-proxy spike, same class as the existing `ceremony` exemption). `selfAnchor`
+needed no exemption — all three renderers carry the case. Also corrected `docs/components/edge-manifest.md`'s
+stale "six field kinds plus contextParams" line (already undercounting `textarea`/`ceremony` before this
+fire).
+
+**Outcome (shipped `ec63ae71`):** `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 lint-conventions`, `STRICT=1 lint-facet-renderer-drift` all clean. No package/DDL touched (no
+version bump). Lead review only — mechanical marker-parity addition to an existing gate, no new
+enforcement point.
+
+**§2's work-list (items 1–9) is now CLOSED.** The two specced-but-unconsumed field kinds (per-field
+conditional visibility beyond `RecordEncounter`, array-of-objects) stay build-ready with no open row
+demanding them — revive when a consumer needs one.
