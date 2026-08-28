@@ -51,7 +51,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Processor] NFR-S6: equalize the timing where it is made, delete the masking quantum** | Ratified direction: decrypt-and-discard the retained tombstone ciphertext (closes the dominant gap, no declassification), equalize identity-domain's 18+15 script early returns, delete ~190 lines of release-quantum machinery. The substrate-rooted absent-vs-claimed residue is accepted; the wire collapse and its op-name map stay. | ★★ | M | 🏗️ owner: claude/great-lamport-qiyk0f · [design](../../implementation-artifacts/nfr-s6-release-quantum-payload-design.md) · next: Inc 1 engine deletion |
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary does not build stays live and executable: a dispatchable DDL, a running lens pipeline, a held canonicalName. No wipe-free shrink path. | ★ | S–M | 🗄️ shelved (Inc 2 retire verb) · [design](../../implementation-artifacts/kernel-orphan-retirement-design.md) · Inc 1 detector shipped, census 0/0 both buckets; needs a binary-version floor |
 | **[Loupe] A `newPackage` proposal is closed over a same-named package it never wrote** | Live (the Studio path is ungated) and shared by the apply 409 AND the mark-applied recovery. No primitive missing: the durable receipt is computed and discarded — `InstallPackage` drops the reply's `RequestID`/`OpTrackerKey`/`Revisions` after `.Status`. Shape: thread it through `ApplyResult`, stamp it as a no-TTL aspect on the proposal vertex; name+version stays the legacy fallback. | ★★ | M | 📋 ready · [triage §3](../../../docs/reviews/lattice-designer-triage-2026-08-27.md) |
 | **[Pkgmgr] No additive (partial-Definition) package apply** | A capability proposal can create a package, never add to one: `Apply`'s in-place branch is whole-Definition convergence. Needs a per-key origin stamp + a removal verb to be sound. | ★ | L | 🗄️ shelved · trigger: the first shipped producer emitting `target.mode: upgradeExisting` for a NEW artifact · [why](../../implementation-artifacts/capability-apply-removal-refusal-design.md) §4 |
@@ -137,6 +136,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-08-28 · `2d1b7ef` · [Processor] NFR-S6 release quantum DELETED — timing equalized where it is made (script fails once, tombstoned sensitive read pays the live decrypt); 3 cold reviews, 2 MAJOR + T2 unmet found and closed
 - 2026-08-27 · (triage, no code) · [Refractor] "wedged rebuild / event loss" row retired — refuted by `e63cff5` + a live Health-KV re-check; residue folded into the varlength-anchor row.
 - 2026-08-27 · (triage, no code) · [Processor] Reads-template `:type` segment retired — DetachObject is served package-only by objects-base `derive_reads`; revive: a client-side type-extraction demand.
 - 2026-08-27 · (live-stack op run) · [Bootstrap] stranded operator epoch `b153d120` tooled but never run — 42 edges revoked, 5 packages reinstalled (the tool's derived set, not the design's guess); unblocks 2 verticals.md rows.
@@ -163,11 +163,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-08-23 · `62432f2` · [Refractor] dispositionEvalErr privacy-critical arm CLOSED — the tier fell through to Nak+nil (no pause, no alert, no backoff); mutation-proven
 - 2026-08-23 · `9718dac7` · [Pkgmgr] live-vs-declared permission reconciliation CLOSED — key-based against declaredKeys, registry-anchored, five drift classes + a CI gate; 3 cold reviews found a fail-open and 3 false remedies
 - 2026-08-23 · `a12fef1` · [Pkgmgr] grant-slice property-map gate CLOSED — parse-time propVars, one quote-aware scanner; cold review found a BLOCKING false refusal (sibling walks sharing `{k: false}`) + a smuggled accumulator
-- 2026-08-23 · `a6e8cec` · [Weaver] malformed-anchor RowDataError CLOSED — per-entity key, level-driven raise/clear, registry-removal teardown; 4 review findings fixed, placement move-mutation pinned
-- 2026-08-23 · `20264df` · [Tooling] ceremony 5s SLA CLOSED — 5 waits across 2 harnesses poll to a 3-min convergence ceiling, mirroring verify-erasure-ceremony
-- 2026-08-23 · `960bb01` · [Docs] root actor set named by its predicate — 21 comments said "kernel-seeded" for a `holdsRole → operator` population; contracts untouched
-- 2026-08-23 · `94daa9f` · [Process] batch review lessons routed — builder prompts ban the tree-wide git verbs; weaver teardown-route + pkgmgr one-fact-twice dossier entries
-- 2026-08-23 · `e63cff5` · [Refractor] capability-plane rebuild throughput CLOSED — "wedged" refuted (throughput-bound); the phantom audit firehose gated on a positive `Committed` signal at every write site; varlength-anchor successor filed
-- 2026-08-23 · `44d42a7` · [Processor/Tooling] derived-reads plane tail CLOSED — floor reaches derived reads (refuse, not demote), `state`/`ddl` fail closed, G2 covers `internal/`; 3 cold reviews, 47 mutations
 
 - *(older rolled to [archive/lattice-done.md](archive/lattice-done.md); newest `f28f832`)*

@@ -26,18 +26,20 @@
 // is refused before hydration
 // (internal/processor/descriptor_floor.go, refuseUndeclaredContextHint). A
 // hand-rolled envelope from an ordinary consumer credential therefore cannot
-// re-open the oracle for itself, and cannot price the hydration work inside the
-// rejection quantum: MEMBERSHIP of the declared set — and so the KV work it
-// buys — is the descriptor's to fix, not the submitter's.
+// re-open the oracle for itself, and cannot add hydration work that no rejection
+// cause has been equalized against: MEMBERSHIP of the declared set — and so the
+// KV work it buys — is the descriptor's to fix, not the submitter's. An extra
+// key's cost turns on whether it exists, whether it is sensitive and whether it
+// is tombstoned, which are exactly the per-cause differences the equalization
+// removes from the descriptor-named set.
 //
 // That closure covers the DECLARATION and nothing else. The PAYLOAD is still
-// submitter-priced work inside the same window: its bytes are deep-decoded by
-// the guard itself (payloadMap, before it can answer), again by the
-// `derive_reads` pre-pass that ClaimIdentity runs (deriveReadsOpValue →
-// goValueToStarlark), and again by step 5's runner — and nothing bounds a
-// payload below the Gateway's 1 MiB body cap or enforces InputSchema
-// server-side. The declared-read channel into the quantum is closed; the
-// payload-sized one is open.
+// submitter-priced: its bytes are deep-decoded by the guard itself (payloadMap,
+// before it can answer), again by the `derive_reads` pre-pass that ClaimIdentity
+// runs (deriveReadsOpValue → goValueToStarlark), and again by step 5's runner —
+// and nothing bounds a payload below the Gateway's 1 MiB body cap or enforces
+// InputSchema server-side. That work is the same on every cause, so it is not
+// itself an oracle; it is simply not bounded.
 //
 // What the builders below owe that mechanism is the other half: each emits
 // EXACTLY the template set its op's descriptor declares

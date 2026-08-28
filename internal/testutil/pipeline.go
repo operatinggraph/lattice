@@ -258,13 +258,6 @@ type PipelineConfig struct {
 	// primordial `operator` role — the class-aware routing consults. Only read
 	// when RbacRolesActive; empty means every actor is ordinary.
 	SystemActorKeys []string
-	// ClaimRejectionFloor threads processor.Deps.ClaimRejectionFloor — the reply
-	// floor that equalizes ClaimIdentity's three rejection causes in the time
-	// domain (internal/processor/claim_reply_floor.go). Zero keeps the
-	// production default (processor.DefaultClaimRejectionFloor); a NEGATIVE
-	// value disables the floor, which is what an instrument measuring the raw
-	// per-cause service-time gap needs.
-	ClaimRejectionFloor time.Duration
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -320,8 +313,6 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Logger:      logger,
 		Vault:       v,
 		DDLs:        cache,
-
-		ClaimRejectionFloor: cfg.ClaimRejectionFloor,
 	}
 	if cfg.ClaimEmitter != nil {
 		deps.ClaimEmitter = cfg.ClaimEmitter

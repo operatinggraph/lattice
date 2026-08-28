@@ -211,11 +211,13 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		floor = newDescriptorFloorResolver(templates, env, h.Logger)
 		declared = applyDescriptorFloor(declared, floor)
 	}
-	// For the operations whose rejections must be indistinguishable
-	// (claim_reply_floor.go's nfrS6Operations) the declared set is CLOSED, not
+	// For the operations whose rejection causes must cost the same
+	// (nfr_s6_wire_shape.go's nfrS6Operations) the declared set is CLOSED, not
 	// merely floored: the submitter may name only what the descriptor names,
-	// and anything else faults here rather than being hydrated inside the
-	// rejection quantum.
+	// and anything else faults here rather than being hydrated. The equalization
+	// those operations rest on holds over the descriptor's keys; a key the
+	// submitter adds costs whatever its own target's existence, sensitivity and
+	// tombstone state cost, which is exactly the divergence being removed.
 	//
 	// The subject is env.ContextHint — the submitter's own declaration — and
 	// the check runs BEFORE derive_reads and before the first Core KV GET.

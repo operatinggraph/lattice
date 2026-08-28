@@ -1141,6 +1141,11 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 			&ContextHint{Reads: []string{probe}, OptionalReads: admitted["ClaimIdentity"].OptionalReads}},
 		{"an extra optionalReads key on the credential link", "CompleteCredentialLink",
 			&ContextHint{OptionalReads: append(append([]string{}, admitted["CompleteCredentialLink"].OptionalReads...), probe)}},
+		// The egress row carries the closure's second reason on its own:
+		// decryptSensitiveDoc refuses a TOMBSTONED sensitive aspect under the
+		// egress disposition while serving a live one, so an admitted egressReads
+		// key would put a refusal whose reachability depends on the target's state
+		// back inside these two operations.
 		{"an egressReads key", "ClaimIdentity",
 			&ContextHint{OptionalReads: admitted["ClaimIdentity"].OptionalReads, EgressReads: []string{target + ".ssn"}}},
 		{"an enumeration", "ClaimIdentity",
@@ -1152,7 +1157,10 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 			_, err := h.Hydrate(ctx, envFor(tc.op, tc.hint))
 			var hErr *HydrationError
 			if !errors.As(err, &hErr) || hErr.Code != "UndeclaredContextHintKey" {
-				t.Fatalf("Hydrate = %v, want the closed-set refusal — an admitted extra key is hydrated INSIDE the rejection quantum", err)
+				t.Fatalf("Hydrate = %v, want the closed-set refusal — an admitted extra key is work nothing "+
+					"equalized, and what its hydration costs turns on whether it exists, whether it is sensitive "+
+					"and whether it is tombstoned: exactly the facts the equalization takes out of the "+
+					"descriptor-named set", err)
 			}
 			if hErr.MissingKey != "" {
 				t.Fatalf("MissingKey = %q, want empty", hErr.MissingKey)
@@ -1202,8 +1210,8 @@ func TestHydrate_NFRS6ClosedDeclaredSet(t *testing.T) {
 // saw the merged set would refuse the package's own class-(g) probes and make
 // every conforming submission of these two operations unsubmittable. And a
 // refusal that happened after the derivation would have already run a Starlark
-// program on the submitter's payload inside the rejection quantum, which is the
-// work the closure exists to keep out of it.
+// program on the submitter's payload — submitter-priced work over a declaration
+// the closure exists to reject before any of it is paid for.
 //
 // Two arms, because one alone does not pin the order. The first moves the
 // subject (a derived key must survive); the second moves the POINT (the
@@ -1278,7 +1286,9 @@ def derive_reads(op):
 			t.Fatalf("Hydrate = %v, want a *HydrationError", err)
 		}
 		if hErr.Code != "UndeclaredContextHintKey" {
-			t.Fatalf("code = %q, want UndeclaredContextHintKey — the derivation ran on a payload the closure had already refused, i.e. inside the rejection quantum", hErr.Code)
+			t.Fatalf("code = %q, want UndeclaredContextHintKey — the derivation ran a Starlark program on a "+
+				"payload whose declaration the closure had already refused, so the refusal no longer precedes "+
+				"the work it exists to keep the submitter from pricing", hErr.Code)
 		}
 	})
 }
