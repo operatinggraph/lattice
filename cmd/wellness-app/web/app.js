@@ -1138,7 +1138,8 @@ async function loadRoster() {
       for (const se of sessions) {
         const opt = document.createElement("option");
         opt.value = se.sessionKey;
-        opt.textContent = (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
+        opt.textContent =
+          (se.missingInstructor ? "[no instructor] " : "") + (se.name || "?") + " — " + fmtRange(se.startsAt, se.endsAt);
         select.appendChild(opt);
       }
       if (prev && sessions.some((se) => se.sessionKey === prev)) select.value = prev;
@@ -1203,6 +1204,9 @@ async function renderRoster() {
     : '<div class="empty">No one has booked this session yet.</div>';
   if (isLeader && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
+  }
+  if (isStaff() && se && se.missingInstructor) {
+    summary.textContent += " — no instructor assigned; use Reassign to enable attendance";
   }
   if (isLeader && started) bindAttendance(sessionKey, mine);
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey, se);

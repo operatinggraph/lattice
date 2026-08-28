@@ -269,6 +269,8 @@ RETURN
 // consumer flagging this column should point staff at.
 // instructorKey/instructorName are null for the many
 // sessions nobody leads, CreateSession's instructor param being optional.
+// missingInstructor names that gap explicitly, mirroring missingStudio, for
+// a roster consumer to point staff at ReassignSession's newInstructor repair.
 //
 // instructorKey is what scopes a bound instructor's own-roster read: their
 // `identifiedBy` anchor names their instructor vertex, and this column is the
@@ -324,7 +326,8 @@ RETURN
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
   [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations,
-  (s.key = null) AS missingStudio`
+  (s.key = null) AS missingStudio,
+  (i.key = null) AS missingInstructor`
 
 // wellnessBookingsSpec projects one row per booking, walking forSession and
 // bookedBy (each 0..1). bookerKey (not a name) is projected — identity
