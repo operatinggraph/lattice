@@ -132,6 +132,28 @@ var vocabulary = []vocabMember{
 		appJS:  {`ceremonySupported`},
 		formJS: {`ceremonySupported`},
 	}, exempt: []string{descriptorSwift}},
+	// selfAnchor: the `{me.<type>}` read/contextParams template — the
+	// submitting identity's own vertex of that type, resolved off the
+	// caller's declared selfAnchors. All three renderers carry the case.
+	{name: "selfAnchor", markers: map[string][]string{
+		appJS:           {`expr.startsWith("me.")`},
+		descriptorSwift: {`expr.hasPrefix("me.")`},
+		formJS:          {`expr.startsWith("me.")`},
+	}},
+	// entityColumn: the `{entity.<column>}` template (form.mjs also accepts
+	// the `{context.<field>}` spelling as an alias, same resolution) — a
+	// projected column of the row the form was opened from. Swift is
+	// EXEMPT: `DescriptorContext` (DescriptorForm.swift) carries no row/
+	// entity field at all, and its one production call site
+	// (DescriptorFormSheet.swift) constructs it with only
+	// `actorIdentityKey` — no caller anywhere threads a viewed row in, so
+	// the template could never resolve there regardless of whether a case
+	// existed for it. Unbuilt scope in the shelved macOS-proxy spike, not
+	// new drift.
+	{name: "entityColumn", markers: map[string][]string{
+		appJS:  {`expr.startsWith("entity.")`},
+		formJS: {`expr.startsWith("context.")`, `expr.startsWith("entity.")`},
+	}, exempt: []string{descriptorSwift}},
 }
 
 func main() {

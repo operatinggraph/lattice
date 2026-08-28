@@ -166,7 +166,9 @@ rather than sending an empty key for one that cannot be resolved. `context.row` 
 (loftspace's renewal row, for `SignRenewal`/`VerifyGuarantor`'s `leaseApp`/`applicant`).
 `scripts/lint-facet-renderer-drift.go` holds it to the same descriptor vocabulary as
 `cmd/facet/web/app.js` and `FacetManifestKit/DescriptorForm.swift` — three renderers, one marker-parity
-gate, covering the six field kinds plus `contextParams`.
+gate, covering the six field kinds, `contextParams`, `ceremony`, and the `{me.<type>}`/`{entity.<column>}`
+read-template pair (the latter Swift-exempt: its `DescriptorContext` carries no viewed-row field, so no
+caller can ever thread one in).
 
 ## Server panes
 
