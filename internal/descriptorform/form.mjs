@@ -64,6 +64,10 @@
 // both renderers. entity-ref renders as a plain text input in this module —
 // staff apps have no entity-ref picker yet, so the marker only needs to
 // exist for drift-gate parity; the resolution source is out of scope here.
+// A long string (`maxLength` over 120, the same threshold Facet's own
+// renderField uses) renders as `textarea` rather than a single-line input —
+// checked after entity-ref, mirroring app.js's own ordering, since an
+// entity-ref is a distinct control regardless of its declared length.
 function fieldKind(name, schema) {
   if (schema.type === "boolean") return "boolean";
   if (schema.enum) return "enum";
@@ -73,6 +77,7 @@ function fieldKind(name, schema) {
   if (schema.type === "string" && schema.format === "date") return "date";
   if (schema.type === "string" && schema.format === "date-time") return "date-time";
   if (schema.type === "string" && schema["x-entityRef"]) return "entity-ref";
+  if (schema.type === "string" && (schema.maxLength || 0) > 120) return "textarea";
   return "text";
 }
 
@@ -130,7 +135,11 @@ function nextFieldID() {
 // `sensitive` masks a plain text/entity-ref control as a password input —
 // never a date or a number, which are unenterable masked and are not a
 // secret from the person typing them (identity-domain descriptors' own note
-// on fields like `dob`).
+// on fields like `dob`). A field carrying `x-visibleWhen` (spec:
+// verticals-designer-triage-2026-08-27.md §2) still renders unconditionally
+// here — renderOpForm wires the actual show/hide once every field in the op
+// exists to look a sibling up by name — but the returned descriptor carries
+// `control` and `visibleWhen` so that wiring has something to attach to.
 function buildField(name, schema, isRequired, help, prefill, sensitive) {
   const kind = fieldKind(name, schema);
   const label = schema.title || prettifyFieldName(name);
@@ -206,6 +215,14 @@ function buildField(name, schema, isRequired, help, prefill, sensitive) {
     control.type = "datetime-local";
     if (prefillVal) control.value = prefillVal;
     read = () => (control.value === "" ? undefined : dateTimeToRFC3339(control.value));
+  } else if (kind === "textarea") {
+    control = document.createElement("textarea");
+    if (schema.maxLength) control.maxLength = schema.maxLength;
+    if (prefillVal !== undefined && prefillVal !== null) control.value = String(prefillVal);
+    read = () => {
+      const v = control.value.trim();
+      return v === "" ? undefined : v;
+    };
   } else {
     control = document.createElement("input");
     control.type = sensitive ? "password" : "text";
@@ -237,7 +254,7 @@ function buildField(name, schema, isRequired, help, prefill, sensitive) {
     container.appendChild(helpEl);
   }
 
-  return { name, label, required: isRequired, container, read };
+  return { name, label, required: isRequired, container, read, control, visibleWhen: schema["x-visibleWhen"] || null };
 }
 
 // buildClassChoiceField renders the class-choice `<select>` for an op whose
@@ -295,9 +312,14 @@ function buildClassChoiceField(choices, prefillVal) {
 // Processor. A `"type":"array"` property is refused the same way: fieldKind
 // has no array case, so it would fall through to a plain text control that
 // submits a string where the script expects a list — a silent wrong-shaped
-// write, not a rejection the person could see and correct. canRender (below)
-// is this same refusal, exposed for a caller deciding whether to enable an
-// offer before it has a mount to render into.
+// write, not a rejection the person could see and correct. A field-level
+// `x-visibleWhen` (verticals-designer-triage-2026-08-27.md §2) naming a
+// sibling that does not exist, or that is itself conditional (chaining — not
+// supported in v1), is refused the same way: the module's house rule is to
+// fail loud on a descriptor it cannot honor rather than render something
+// that looks right and silently mis-behaves. canRender (below) is this same
+// refusal, exposed for a caller deciding whether to enable an offer before
+// it has a mount to render into.
 function normalizeCatalogRow(row) {
   if (!row || !row.inputSchema || !row.dispatch) return null;
   const dispatch = row.dispatch;
@@ -311,7 +333,14 @@ function normalizeCatalogRow(row) {
     return null;
   }
   if (!schema || typeof schema !== "object") return null;
-  if (Object.values(schema.properties || {}).some((p) => p && p.type === "array")) return null;
+  const props = schema.properties || {};
+  if (Object.values(props).some((p) => p && p.type === "array")) return null;
+  for (const p of Object.values(props)) {
+    const vw = p && p["x-visibleWhen"];
+    if (!vw) continue;
+    const sibling = props[vw.field];
+    if (!sibling || sibling["x-visibleWhen"]) return null;
+  }
   return {
     operationType: row.operationType,
     schema,
@@ -501,6 +530,33 @@ export function renderOpForm(catalogRow, context, mount) {
   const fields = fieldNames.map((name) =>
     buildField(name, props[name] || {}, required.has(name), fieldDescriptions[name], context.prefill, !!catalogRow.sensitive));
 
+  // Wire per-field conditional visibility now that every field in the op
+  // exists to look a sibling up by name (normalizeCatalogRow already refused
+  // a dangling or chained x-visibleWhen, so `sibling` here always exists and
+  // is never itself conditional). `apply` re-reads the sibling's own typed
+  // value on every input/change so a boolean's `equals:true` compares
+  // against `.checked`, not the raw DOM value — a sibling mid-invalid-entry
+  // (a money/number field failing its own read()) just leaves the dependent
+  // field's visibility where it was rather than throwing out of an input
+  // handler. Hidden is the container's own DOM state, which the submit loop
+  // below reads directly — no separate flag to fall out of sync with it.
+  for (const f of fields) {
+    if (!f.visibleWhen) continue;
+    const sibling = fields.find((s) => s.name === f.visibleWhen.field);
+    const apply = () => {
+      let siblingValue;
+      try {
+        siblingValue = sibling.read();
+      } catch (_e) {
+        return;
+      }
+      f.container.hidden = siblingValue !== f.visibleWhen.equals;
+    };
+    sibling.control.addEventListener("input", apply);
+    sibling.control.addEventListener("change", apply);
+    apply();
+  }
+
   // A classChoices op has no static dispatch.class to send, so the caller's
   // pick stands in for it — rendered ahead of the schema-driven fields since
   // it decides WHICH DDL those fields describe. normalizeCatalogRow already
@@ -532,6 +588,13 @@ export function renderOpForm(catalogRow, context, mount) {
       if (targetField) payload[targetField] = context.target;
 
       for (const f of fields) {
+        // A field its own x-visibleWhen has hidden contributes nothing —
+        // dropped from payload, and exempt from required-validation while
+        // hidden (spec: verticals-designer-triage-2026-08-27.md §2). The
+        // container's `hidden` is the single source of truth the visibility
+        // wiring above already maintains; nothing else needs to ask "is this
+        // field currently offered".
+        if (f.container.hidden) continue;
         const value = f.read();
         if (value === undefined) {
           if (f.required) throw new Error(f.label + " is required.");

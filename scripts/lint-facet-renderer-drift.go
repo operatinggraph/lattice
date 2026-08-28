@@ -53,6 +53,14 @@ var renderers = []string{appJS, descriptorSwift, formJS}
 type vocabMember struct {
 	name    string
 	markers map[string][]string
+	// exempt lists renderers that deliberately do not implement this member —
+	// a documented product decision, not an unnoticed gap (e.g. Swift's own
+	// DescriptorForm.swift comment: `textarea` and `x-sensitive` are PWA
+	// presentation choices over the SAME `.text` value, not a distinct
+	// submission shape, so Swift carries no case for either). An exempt
+	// renderer is excluded from the has/missing comparison entirely, so its
+	// absence never reads as drift.
+	exempt []string
 }
 
 var vocabulary = []vocabMember{
@@ -86,6 +94,14 @@ var vocabulary = []vocabMember{
 		descriptorSwift: {`x-entityRef`},
 		formJS:          {`schema["x-entityRef"]`},
 	}},
+	// textarea: a long string (maxLength > 120) renders as a multiline
+	// control. Swift is EXEMPT (see vocabMember.exempt) — `textarea` and
+	// `x-sensitive` are presentation choices over the same `.text` submission
+	// shape there, not a distinct case, per DescriptorForm.swift's own comment.
+	{name: "textarea", markers: map[string][]string{
+		appJS:  {`(schema.maxLength || 0) > 120`},
+		formJS: {`(schema.maxLength || 0) > 120`},
+	}, exempt: []string{descriptorSwift}},
 	// contextParams is a dispatch column rather than a field kind, and it is
 	// the member whose loss in a single renderer is silent AND wrong in both
 	// directions at once: that renderer asks a person to type a raw vertex key
@@ -120,8 +136,15 @@ func main() {
 
 	var issues []string
 	for _, m := range vocabulary {
+		exempt := map[string]bool{}
+		for _, r := range m.exempt {
+			exempt[r] = true
+		}
 		var has, missing []string
 		for _, renderer := range renderers {
+			if exempt[renderer] {
+				continue
+			}
 			if detects(src[renderer], m.markers[renderer]) {
 				has = append(has, renderer)
 			} else {

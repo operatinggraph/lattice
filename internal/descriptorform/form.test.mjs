@@ -24,6 +24,8 @@ class FakeElement {
     this.textContent = "";
     this.className = "";
     this.attrs = {};
+    this.hidden = false;
+    this._listeners = {};
   }
   appendChild(child) {
     this.children.push(child);
@@ -31,6 +33,17 @@ class FakeElement {
   }
   setAttribute(k, v) {
     this.attrs[k] = v;
+  }
+  // addEventListener/fire: the fake DOM's stand-in for a real dispatched
+  // event — form.mjs only ever adds a listener and expects it to run on the
+  // next input/change, so a plain callback list plus a synchronous `fire`
+  // the tests call directly is enough; there is no real event loop to
+  // simulate.
+  addEventListener(type, fn) {
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  }
+  fire(type) {
+    for (const fn of this._listeners[type] || []) fn();
   }
   set innerHTML(v) {
     this._innerHTML = v;
@@ -127,6 +140,149 @@ test("renderOpForm renders each schema shape as its own control kind", () => {
   assert.equal(provider.attrs["data-entity-ref-type"], "provider",
     "entity-ref is still DETECTED and carries its declared vertex type, even without a picker yet — " +
     "deleting the entity-ref branch entirely must fail this, not just the .type assertion above");
+});
+
+// A string over the 120-char maxLength threshold renders as a textarea
+// (mirrors cmd/facet/web/app.js:2515-2516); at or under it, or with no
+// maxLength at all, it stays a plain text input.
+test("a string field's maxLength decides textarea vs plain text", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      summary: { type: "string", maxLength: 4000 },
+      note: { type: "string", maxLength: 120 },
+      untyped: { type: "string" },
+    },
+    required: [],
+  };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "testclass", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const mount = new FakeElement("div");
+  renderOpForm(row, {}, mount);
+
+  const summary = controlByName(mount, "summary");
+  assert.equal(summary.tagName, "textarea", "over 120 renders as textarea");
+  assert.equal(summary.maxLength, 4000);
+
+  assert.equal(controlByName(mount, "note").tagName, "input", "exactly 120 stays a plain input");
+  assert.equal(controlByName(mount, "untyped").tagName, "input", "no maxLength stays a plain input");
+});
+
+test("a textarea's whitespace-only value reads as undefined, same as a text field", () => {
+  const schema = { type: "object", properties: { notes: { type: "string", maxLength: 4000 } }, required: [] };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "testclass", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {}, mount);
+  controlByName(mount, "notes").value = "   ";
+  assert.equal(handle.submit().payload.notes, undefined);
+});
+
+// ---- per-field conditional visibility (x-visibleWhen) ----
+
+function visibleWhenRow(overrides) {
+  const schema = {
+    type: "object",
+    properties: {
+      followUpRequested: { type: "boolean" },
+      followUpDate: {
+        type: "string",
+        format: "date",
+        "x-visibleWhen": { field: "followUpRequested", equals: true },
+      },
+    },
+    required: [],
+  };
+  return baseRow(Object.assign(
+    {
+      inputSchema: JSON.stringify(schema),
+      dispatch: { class: "testclass", authContext: "standing", reads: [], optionalReads: [] },
+    },
+    overrides,
+  ));
+}
+
+test("x-visibleWhen starts hidden/shown to match the sibling's initial value, and tracks it live", () => {
+  const mount = new FakeElement("div");
+  renderOpForm(visibleWhenRow(), {}, mount);
+  const toggle = controlByName(mount, "followUpRequested");
+  // The date control's wrapper <div class="field"> is the mount's direct
+  // child carrying it — find it the same way controlByName walks children.
+  const wrapper = mount.children.find((w) => w.children.some((c) => c.name === "followUpDate"));
+
+  assert.equal(wrapper.hidden, true, "unchecked at render: the dependent field starts hidden");
+
+  toggle.checked = true;
+  toggle.fire("change");
+  assert.equal(wrapper.hidden, false, "checking the sibling reveals the dependent field");
+
+  toggle.checked = false;
+  toggle.fire("change");
+  assert.equal(wrapper.hidden, true, "unchecking hides it again");
+});
+
+test("submit() drops a hidden x-visibleWhen field and never fails its required check while hidden", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      followUpRequested: { type: "boolean" },
+      followUpDate: {
+        type: "string",
+        format: "date",
+        "x-visibleWhen": { field: "followUpRequested", equals: true },
+      },
+    },
+    required: ["followUpDate"], // required, but exempt while its visibleWhen is unmet
+  };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "testclass", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {}, mount);
+
+  const envelope = handle.submit();
+  assert.equal("followUpDate" in envelope.payload, false, "a hidden field contributes nothing to the payload");
+
+  const toggle = controlByName(mount, "followUpRequested");
+  toggle.checked = true;
+  toggle.fire("change");
+  assert.throws(() => handle.submit(), /Follow up date is required/,
+    "revealed and still required — now it must fail its own required check like any other field");
+
+  controlByName(mount, "followUpDate").value = "2026-09-01";
+  assert.equal(handle.submit().payload.followUpDate, "2026-09-01");
+});
+
+test("normalizeCatalogRow refuses a dangling x-visibleWhen sibling reference", () => {
+  const row = visibleWhenRow();
+  const schema = JSON.parse(row.inputSchema);
+  schema.properties.followUpDate["x-visibleWhen"].field = "noSuchField";
+  row.inputSchema = JSON.stringify(schema);
+  assert.equal(renderOpForm(row, {}, new FakeElement("div")), null);
+  assert.equal(canRender(row), false);
+});
+
+test("normalizeCatalogRow refuses chained x-visibleWhen (a conditional field naming another conditional field)", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      a: { type: "boolean" },
+      b: { type: "boolean", "x-visibleWhen": { field: "a", equals: true } },
+      c: { type: "string", "x-visibleWhen": { field: "b", equals: true } },
+    },
+    required: [],
+  };
+  const row = baseRow({
+    inputSchema: JSON.stringify(schema),
+    dispatch: { class: "testclass", authContext: "standing", reads: [], optionalReads: [] },
+  });
+  assert.equal(renderOpForm(row, {}, new FakeElement("div")), null, "b is itself conditional — c chaining off it is refused");
+  assert.equal(canRender(row), false);
 });
 
 test("rendered fields carry the .field/.field-help CSS hooks and a paired label[for]/input[id]", () => {
