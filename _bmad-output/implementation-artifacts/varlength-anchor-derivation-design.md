@@ -1,6 +1,6 @@
 # Refractor — anchor derivation across a variable-length hop, and the second refusal behind it
 
-> **📐 awaiting-Andrew (ratification)** — *Winston (Designer fire, 2026-08-27).*
+> **✅ RATIFIED — Andrew, 2026-08-27** (ratification session; DD re-verified by Winston in-session).
 >
 > **What it does, in two lines.** A lens whose cypher carries a variable-length hop is refused by
 > `AnchorHopIndex`, so every CDC event on it falls back to an undirected adjacency BFS plus **one full
@@ -19,20 +19,39 @@
 > multi-walk. §6 is the per-lens table. **Both blockers are in scope here** — fixing one and leaving
 > the starvation would not be the item.
 >
-> - **No architectural fork.** Every mechanism choice is resolved in the body on grounded cost.
-> - **No frozen-contract change.** §11.
-> - **One decision is genuinely Andrew's** — a scope/capacity call, not a mechanism one:
+> **Decisions recorded at ratification:**
 >
-> > **§13 — Increment 2 is a precision fix to a deliberately conservative security refusal.**
-> > `withScopeReject`'s posture is written down and is correct: *"over-refusing costs one BFS
-> > fallback, and under-refusing costs a grant that outlives its revocation."* Increment 2 narrows
-> > that refusal so the generated read-grant producers stop being caught by it. The narrowing is
-> > sound and I argue it in §7.3 — but it moves a lens **onto** the acted-upon path, which the
-> > corpus census calls *"the direction that needs an argument,"* and the lens in question mints
-> > `cap-read.edgeManifest.*`. **My recommendation: build Increment 1, ship it, and hold Increment 2
-> > until Increment 1 has run in anger** — the ordering is free (they are independent) and it buys a
-> > live measurement before the auth plane's read-grant producer changes paths. If you want the live
-> > symptom closed sooner, Increment 2 can go first; that is the trade.
+> 1. **Sequencing — Increment 1 ships first; Increment 2 is HELD until Increment 1 has run in anger.**
+>    §13's ask is resolved in favour of the recommendation. `withScopeReject`'s posture is deliberately
+>    conservative (*"over-refusing costs one BFS fallback, and under-refusing costs a grant that
+>    outlives its revocation"*), and Increment 2 moves a `cap-read.edgeManifest.*` producer **onto** the
+>    acted-upon path — the direction the corpus census itself calls *"the direction that needs an
+>    argument."* The increments are code-independent (Inc 2 depends on Inc 1 only for the census
+>    baseline), Inc 1 already relieves part of the live starvation (`capabilityServiceAccess` is one of
+>    the two rebuilding lenses), and the wait buys a live measurement before the auth plane's
+>    read-grant producers change paths. **Inc 2's revive trigger: Increment 1 shipped and observed live
+>    (C4 re-derived after), with no derivation-soundness regression.**
+> 2. **No architectural fork.** Every mechanism choice is resolved in the body on grounded cost.
+> 3. **No frozen-contract change** (§11) — nothing to commit alongside; the derived set's superset
+>    invariant and the fallback are unchanged.
+>
+> **Ratification-session DD (in addition to the two adversarial passes this doc already folded).** The
+> load-bearing citations were re-opened and hold: the refusal and its stated reason
+> (`hopindex.go:622-627`); the executor's ranged walk and its clamp (`rel_traverse.go:11-16`,
+> `executor.go:29`); the read cap's *"fallback trigger, not a truncation"* contract
+> (`anchor_derivation.go:25-33`); the completeness switch ordering varlength before `withReject`
+> (`hopindex.go:243-278`), which is why the census masks the second blocker; `withScopeReject`'s posture
+> quote (`withscope.go:1-26`); the generator's 1,000,001-row cross-product rationale (`anchorwalk.go`)
+> and the `UNWIND` refusal (`visitor.go:146`) behind §10 F. The **retracted-precedent** finding is
+> confirmed: `390b2cb8` deleted `internal/refractor/ruleengine/simple/` entirely, so the triage's cited
+> precedent is a retracted claim in a deleted subsystem. Both census harnesses were **run green** in
+> session (`TestCorpusAnchorHopIndex_PinnedConjuncts`, `TestScanRootCorpusCensus`), so §12 C1's counts
+> are test-pinned, not asserted. `8dea6284` is confirmed as the prior cypher-rewrite precedent §10 D
+> prices on both sides.
+>
+> **Standing obligation carried into the build:** Phase 0 of Increment 1 runs census **C3** and **stops
+> if its expectation fails** — §6's payoff table and the increment split are derived from it. C4's live
+> figures are a build-time re-derivation, before and after.
 
 **Author:** Winston (Designer fire, 2026-08-27).
 **Board row:** `[Refractor] A varlength-hop lens re-evaluates every actor per CDC event, starving the
@@ -527,8 +546,12 @@ visible. Tests T1–T8, T11.
 
 **Increment 2 — the WITH narrowing** (engine; converts the two `cap-read.edgeManifest*` producers —
 the live symptom). Depends on Increment 1 only for the census baseline, not for code. `withScopeReject`
-gains the structural-identity whitelist (§5, §7.3). Tests T9, T10, T12. **Held per the banner unless
-Andrew sequences it first.**
+gains the structural-identity whitelist (§5, §7.3). Tests T9, T10, T12. **HELD at ratification
+(Andrew, 2026-08-27) — revive trigger: Increment 1 shipped and observed live (C4 re-derived after)
+with no derivation-soundness regression.** The hold is deliberate and its reason is the security
+posture, not capacity: this increment narrows a conservative refusal and moves a `cap-read.*` producer
+onto the acted-upon path, so it buys a live measurement first. The Steward does not pull it until the
+trigger is met.
 
 **Explicitly out of scope, with the conjunct that holds each** (not deferred work — unreachable work):
 the five Personal lenses (`patternClosedOutput`, a property of the lens kind); the two multi-walk
