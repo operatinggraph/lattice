@@ -173,14 +173,30 @@ RETURN
   }) AS serviceAccess
 `
 
-// TestAnchorHopIndex_ServiceAccessFallsBack pins the expected NON-answer. The
-// variable-length containedIn hop makes the index incomplete, so this lens
-// keeps the shipped BFS on every event — recorded as the design's own
-// prediction, not discovered as a defect later.
-func TestAnchorHopIndex_ServiceAccessFallsBack(t *testing.T) {
+// TestAnchorHopIndex_ServiceAccessIndexesItsRangedHops pins the shipped
+// auth-plane lens whose containment walks are variable-length: both of its
+// `containedIn*0..` hops are recorded as ranged hops carrying the executor's own
+// clamp, and the index is authoritative.
+//
+// It is the whole-lens vector behind the mechanism tests: the positive arm's
+// hop and the exclusion arm's hop are separate `containedIn` occurrences, and an
+// index that recorded only one of them would look complete while the walk lost
+// the exclusion — an unavailableAt that stops revoking.
+func TestAnchorHopIndex_ServiceAccessIndexesItsRangedHops(t *testing.T) {
 	ix := indexOf(t, shippedCapabilityServiceAccess)
-	require.False(t, ix.Complete)
-	require.Contains(t, ix.Incomplete, "variable-length")
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+
+	var ranged []PatternHop
+	for _, h := range ix.Hops {
+		if h.Rel == "containedIn" {
+			ranged = append(ranged, h)
+		}
+	}
+	require.Len(t, ranged, 2, "the positive chain and the exclusion chain each carry one containedIn hop")
+	for _, h := range ranged {
+		require.Equal(t, 0, h.Min, "`*0..` admits the standing node itself")
+		require.Equal(t, maxVarLengthHops, h.Max, "an open range takes the executor's own clamp")
+	}
 }
 
 // TestAnchorHopIndex_WalksEveryPatternSource is the adversarial finding §11.2
@@ -229,11 +245,6 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			name: "an untyped relationship cannot be indexed by relation name",
 			body: `MATCH (i:identity {key: $actorKey})-[]->(x:role) RETURN i.key AS k, x.key AS r`,
 			want: "untyped relationship",
-		},
-		{
-			name: "a variable-length hop cannot be stepped hop-by-hop",
-			body: `MATCH (i:identity {key: $actorKey})-[:containedIn*0..]->(x:location) RETURN i.key AS k, x.key AS r`,
-			want: "variable-length relationship",
 		},
 		{
 			// The adversarial case: a scan-seeded position RESCUED by a hop
@@ -643,15 +654,15 @@ func TestAnchorHopIndex_DirectionMapping(t *testing.T) {
 	out := indexOf(t, `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(x:role) RETURN i.key AS k, x.key AS r`)
 	require.True(t, out.Complete, "%s", out.Incomplete)
 	far := 1 - out.Anchor
-	require.Equal(t, []PatternStep{{ToPos: out.Anchor, Rel: "holdsRole", EdgeDir: "in", ToLabel: "identity"}}, out.StepsFrom(far))
-	require.Equal(t, []PatternStep{{ToPos: far, Rel: "holdsRole", EdgeDir: "out", ToLabel: "role"}}, out.StepsFrom(out.Anchor))
+	require.Equal(t, []PatternStep{{ToPos: out.Anchor, Rel: "holdsRole", EdgeDir: "in", ToLabel: "identity", Min: 1, Max: 1}}, out.StepsFrom(far))
+	require.Equal(t, []PatternStep{{ToPos: far, Rel: "holdsRole", EdgeDir: "out", ToLabel: "role", Min: 1, Max: 1}}, out.StepsFrom(out.Anchor))
 
 	// Inbound as written: (anchor)<-[:r]-(x). Standing at x, the anchor is
 	// reached by x's OUTBOUND r edges.
 	in := indexOf(t, `MATCH (i:identity {key: $actorKey})<-[:assignedTo]-(x:task) RETURN i.key AS k, x.key AS r`)
 	require.True(t, in.Complete, "%s", in.Incomplete)
 	far = 1 - in.Anchor
-	require.Equal(t, []PatternStep{{ToPos: in.Anchor, Rel: "assignedTo", EdgeDir: "out", ToLabel: "identity"}}, in.StepsFrom(far))
+	require.Equal(t, []PatternStep{{ToPos: in.Anchor, Rel: "assignedTo", EdgeDir: "out", ToLabel: "identity", Min: 1, Max: 1}}, in.StepsFrom(far))
 }
 
 // TestAnchorHopIndex_LabelIsNeverUpgraded is the regression for the unsoundest
@@ -730,15 +741,6 @@ RETURN identity.key AS actorKey, o.key AS ok
 `,
 			wantDeclared:   true,
 			wantIncomplete: "pattern carries an untyped relationship",
-		},
-		{
-			name: "variable-length relationship — capabilityServiceAccess' shape",
-			body: `
-MATCH (identity:identity {key: $actorKey})-[:memberOf*1..3]->(s:site)
-RETURN identity.key AS actorKey, s.key AS sk
-`,
-			wantDeclared:   true,
-			wantIncomplete: "pattern carries a variable-length relationship",
 		},
 		{
 			name: "pattern head the anchor never reaches — the ungrounded refusal",
@@ -889,12 +891,6 @@ func TestScanRootHopIndex_Refusals(t *testing.T) {
 			refused:  `MATCH (pr:provider)-[]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
 			positive: positive,
 			want:     "untyped relationship",
-		},
-		{
-			name:     "a variable-length hop cannot be stepped hop-by-hop",
-			refused:  `MATCH (pr:provider)-[:identifiedBy*0..]->(id:identity) RETURN pr.key AS key, id.key AS idk`,
-			positive: positive,
-			want:     "variable-length relationship",
 		},
 		{
 			// The conjunct AnchorHopIndex's own `b.anchor < 0` early-out

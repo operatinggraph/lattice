@@ -41,6 +41,22 @@ type PatternHop struct {
 	To   int
 	Dir  Direction
 
+	// Min and Max are the hop's length range, already CLAMPED to what the
+	// executor will actually walk: addPattern applies rel_traverse.go's own
+	// clamp (an open or over-long Max becomes maxVarLengthHops, a negative Min
+	// becomes 0) before recording the hop, so Max >= Min >= 0 always holds and
+	// a consumer never has to re-derive the bound. A fixed single hop — the
+	// overwhelming majority — carries Min == Max == 1.
+	//
+	// The clamp is what makes a ranged hop safe to walk: the derivation is
+	// complete with respect to what the EXECUTOR will evaluate, not with
+	// respect to the graph. A path crossing more than maxVarLengthHops of this
+	// relation produces no row, because the executor's own frontier stops
+	// there, so a derivation that stops there misses nothing that could have
+	// changed.
+	Min int
+	Max int
+
 	// Binding is true when this hop comes from a MATCH clause's own pattern —
 	// the only source that BINDS a variable. A hop written inside a WHERE, a
 	// negated pattern, or a RETURN comprehension is a filter or a projection:
@@ -57,12 +73,26 @@ type PatternHop struct {
 // the derivation reach `capabilityEphemeral`'s three unlabeled targets).
 //
 // Anchor is the position bound to `$actorKey`. Dist[i] is position i's hop
-// distance from the anchor over the BINDING hops only (-1 when it has none),
-// which is what tells a link event which of its two endpoints sits anchor-side.
-// Counting a non-binding hop here would be a real defect rather than a
-// pessimisation: a WHERE-NOT shortcut to the anchor can make the far endpoint
-// look nearer, and the walk would then be seeded at the endpoint that can only
-// reach the anchor by crossing the very edge a tombstone just removed.
+// distance from the anchor over the BINDING hops only, which is what tells a
+// link event which of its two endpoints sits anchor-side. Counting a
+// non-binding hop here would be a real defect rather than a pessimisation: a
+// WHERE-NOT shortcut to the anchor can make the far endpoint look nearer, and
+// the walk would then be seeded at the endpoint that can only reach the anchor
+// by crossing the very edge a tombstone just removed.
+//
+// -1 is the INCOMPARABLE sentinel, and it carries two distinct meanings that a
+// reader must not conflate:
+//
+//   - the position has NO binding path to the anchor at all — every hop
+//     incident to it is a filter or a projection; or
+//   - a binding path exists, but at least one hop on it is variable-length, so
+//     the path's length is an INTERVAL and no single distance is comparable.
+//
+// Both take the same value because AnchorSideSeeds' `consider` treats them the
+// same way and must: it drops the endpoint whose distance is the larger, so a
+// distance that is not a single number cannot be allowed to lose that
+// comparison. The sentinel's branch seeds BOTH endpoints, which only widens
+// the derived set.
 //
 // Hops carries every typed relationship, from the required patterns and the
 // OPTIONAL / WHERE / RETURN pattern sources alike; a relation appearing at
@@ -446,10 +476,29 @@ func describeLabel(l string) string {
 }
 
 // distances returns each position's undirected distance from the anchor over
-// the BINDING hops, or -1 where it has no binding path. Undirected is right:
-// the question is whether the executor's binding of that position is
-// established by walking from the anchor's, and a hop binds in whichever
-// direction the walk crosses it.
+// the BINDING hops, or the incomparable sentinel -1 (HopIndex.Dist's field doc
+// names its two meanings). Undirected is right: the question is whether the
+// executor's binding of that position is established by walking from the
+// anchor's, and a hop binds in whichever direction the walk crosses it.
+//
+// It runs in two passes, because a ranged hop has no single length:
+//
+//  1. exact distances over the FIXED binding hops only (Min == Max == 1);
+//  2. a two-state BFS over (position, has-crossed-a-ranged-hop) that poisons
+//     every non-anchor position reachable from the anchor over binding hops
+//     using at least one ranged hop.
+//
+// The poison is applied to every such position, not only to positions
+// reachable ONLY across a ranged hop, and the asymmetry is deliberate. A
+// position holding both a fixed path of length L and a ranged path whose true
+// length may be shorter would keep L, which OVER-STATES its distance — and
+// AnchorSideSeeds' `consider` drops the endpoint whose distance is the larger,
+// so an over-stated distance drops a seed, which is the under-approximating
+// direction this whole unit refuses. Over-poisoning only makes `consider` seed
+// both endpoints, which merely widens the derived set.
+//
+// The anchor itself keeps 0: it is pinned by `{key: $actorKey}` to exactly one
+// vertex, so it is never the endpoint a distance comparison has to place.
 func (ix HopIndex) distances() []int {
 	d := make([]int, len(ix.Labels))
 	for i := range d {
@@ -458,13 +507,15 @@ func (ix HopIndex) distances() []int {
 	if ix.Anchor < 0 || ix.Anchor >= len(d) {
 		return d
 	}
+
+	// Pass 1 — exact distances over fixed binding hops.
 	d[ix.Anchor] = 0
 	queue := []int{ix.Anchor}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
 		for _, h := range ix.Hops {
-			if !h.Binding {
+			if !h.Binding || h.Min != 1 || h.Max != 1 {
 				continue
 			}
 			var next int
@@ -479,6 +530,43 @@ func (ix HopIndex) distances() []int {
 			if d[next] < 0 {
 				d[next] = d[cur] + 1
 				queue = append(queue, next)
+			}
+		}
+	}
+
+	// Pass 2 — the poison set, as a BFS over (position, usedRanged) so the
+	// "an interval was crossed" bit is carried by the search rather than
+	// re-derived from the shape of the graph.
+	type rangedState struct {
+		pos        int
+		usedRanged bool
+	}
+	seen := map[rangedState]struct{}{{pos: ix.Anchor}: {}}
+	states := []rangedState{{pos: ix.Anchor}}
+	for len(states) > 0 {
+		cur := states[0]
+		states = states[1:]
+		for _, h := range ix.Hops {
+			if !h.Binding {
+				continue
+			}
+			var next int
+			switch {
+			case h.From == cur.pos:
+				next = h.To
+			case h.To == cur.pos:
+				next = h.From
+			default:
+				continue
+			}
+			ns := rangedState{pos: next, usedRanged: cur.usedRanged || h.Min != 1 || h.Max != 1}
+			if _, dup := seen[ns]; dup {
+				continue
+			}
+			seen[ns] = struct{}{}
+			states = append(states, ns)
+			if ns.usedRanged && next != ix.Anchor {
+				d[next] = -1
 			}
 		}
 	}
@@ -620,13 +708,36 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 			// on, for the same reason.
 			b.rejectOnce("pattern carries an untyped relationship")
 		case r.MinHops != 1 || r.MaxHops != 1:
-			// The intermediate NODES are the problem here, not the relation: a
-			// walk crossing a variable-length hop cannot be stepped
-			// hop-by-hop, because the number of adjacency reads between the two
-			// bound positions is not known from the pattern.
-			b.rejectOnce("pattern carries a variable-length relationship")
+			// A variable-length hop is recorded as a RANGED hop, carrying the
+			// same clamped bounds traverseRel walks it under. The number of
+			// adjacency reads between the two bound positions is not a single
+			// number, but it is an interval, and an interval is walkable: the
+			// consumer expands a bounded frontier instead of taking one edge.
+			//
+			// Clamping here — rather than leaving the raw AST range for each
+			// consumer to bound — is the soundness invariant, not a
+			// convenience. The derivation is complete with respect to what the
+			// executor will evaluate, not with respect to the graph: an anchor
+			// whose path crosses more than maxVarLengthHops of this relation
+			// cannot produce a row, because rel_traverse.go's frontier stops
+			// at exactly that bound. Sharing the constant is what makes
+			// "stops there too" equal "misses nothing".
+			minHops, maxHops := r.MinHops, r.MaxHops
+			if maxHops < 0 || maxHops > maxVarLengthHops {
+				maxHops = maxVarLengthHops
+			}
+			if minHops < 0 {
+				minHops = 0
+			}
+			b.hops = append(b.hops, PatternHop{
+				Rel: r.Type, From: positions[i], To: positions[i+1], Dir: r.Direction,
+				Min: minHops, Max: maxHops, Binding: binding,
+			})
 		default:
-			b.hops = append(b.hops, PatternHop{Rel: r.Type, From: positions[i], To: positions[i+1], Dir: r.Direction, Binding: binding})
+			b.hops = append(b.hops, PatternHop{
+				Rel: r.Type, From: positions[i], To: positions[i+1], Dir: r.Direction,
+				Min: 1, Max: 1, Binding: binding,
+			})
 		}
 	}
 }
@@ -866,10 +977,19 @@ type Seed struct {
 // which prunes an edge whose other end the pattern cannot bind. ToLabelExpand
 // + ToExpanded carry the same generalization when the far end is a `*`
 // position: the prune becomes set membership instead of string equality.
+//
+// Min/Max carry the hop's clamped length range through UNCHANGED in both
+// readings. A bounded reachability relation is symmetric — "the nodes reaching
+// Y in at most k forward steps" is exactly "the nodes reachable from Y in at
+// most k reverse steps" — and edgeDirFor has already flipped the direction the
+// walk reads, so the reverse reading needs no adjustment to the range itself.
 func (ix HopIndex) StepsFrom(pos int) []PatternStep {
 	var out []PatternStep
-	step := func(toPos int, rel string, dir Direction, standingAtTail bool) PatternStep {
-		s := PatternStep{ToPos: toPos, Rel: rel, EdgeDir: edgeDirFor(dir, standingAtTail), ToLabel: ix.Labels[toPos]}
+	step := func(h PatternHop, toPos int, standingAtTail bool) PatternStep {
+		s := PatternStep{
+			ToPos: toPos, Rel: h.Rel, EdgeDir: edgeDirFor(h.Dir, standingAtTail),
+			ToLabel: ix.Labels[toPos], Min: h.Min, Max: h.Max,
+		}
 		if toPos < len(ix.LabelExpand) && ix.LabelExpand[toPos] {
 			s.ToLabelExpand = true
 			if ix.Expanded != nil {
@@ -885,10 +1005,10 @@ func (ix HopIndex) StepsFrom(pos int) []PatternStep {
 		if h.From == pos {
 			// Walking From→To follows the arrow as written, so the edge on the
 			// node we are standing on is outbound for DirOut.
-			out = append(out, step(h.To, h.Rel, h.Dir, true))
+			out = append(out, step(h, h.To, true))
 		}
 		if h.To == pos {
-			out = append(out, step(h.From, h.Rel, h.Dir, false))
+			out = append(out, step(h, h.From, false))
 		}
 	}
 	return out
@@ -902,6 +1022,14 @@ type PatternStep struct {
 	Rel     string
 	EdgeDir string
 	ToLabel string
+
+	// Min and Max are the hop's clamped length range (PatternHop.Min/Max). A
+	// fixed hop is Min == Max == 1 and the move is a single edge; anything
+	// else is a bounded frontier expansion over Rel/EdgeDir for hops 1..Max,
+	// admitting the far end at every hop >= Min, plus the standing node itself
+	// when Min == 0.
+	Min int
+	Max int
 
 	// ToLabelExpand + ToExpanded generalize ToLabel the same way NodePattern.
 	// LabelExpand + CompiledRule.LabelExpansion generalize a query pattern's
