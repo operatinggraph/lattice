@@ -890,7 +890,8 @@ never installed, which is the monitoring equivalent of reporting healthy.
     "sweepReArms": <int>,
     "sweepLastRunAt": "<RFC3339>",
     "timersScheduled": <int>,
-    "timersFired": <int>
+    "timersFired": <int>,
+    "laneAckPending": {"<targetId>": <int>}
   },
   "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>", "since": "<RFC3339>"}]
 }
@@ -898,6 +899,19 @@ never installed, which is the monitoring equivalent of reporting healthy.
 
 `metrics` keys are present only when their subsystem has data (e.g. `marksInFlight` is omitted if
 the scan failed; `timers*` only when the temporal lane is wired).
+
+**`laneAckPending`** lists, per target, how many rows that target's lane-1 durable has delivered and
+not yet acked — omitted entirely when every lane-1 durable is at zero. It is the gradient behind the
+`ConsumerSaturated` issue below: a declined row holds its slot until it is fixed or re-projected, so
+this number IS the target's stuck population. A target whose count reaches the consumer's
+`MaxAckPending` cap (1024) is wedged — the server stops delivering NEW rows for it, so entities that
+appear from then on are never evaluated — and raises an `error`-severity `ConsumerSaturated` issue
+naming the target. That is deliberately louder than the `warning` its usual *cause* carries
+(`GapWithoutPlaybook` and friends describe a target that is degraded but still evaluated and
+self-healing; this one describes a target whose deliveries have stopped). Neither `ConsumerPaused`
+nor `ConsumerSaturated` is latched in the issue cache: both are rebuilt in full from live consumer
+state on every heartbeat, so a consumer that drains — or a target that leaves — simply stops being
+listed, and neither can consume one of the per-row cache slots described below.
 
 #### Issue scope: per-entity vs per-target
 
@@ -907,11 +921,29 @@ decides whose close retires the issue. The key never appears on the wire — it 
 
 | Key shape | Scope | Codes |
 |---|---|---|
-| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
-| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
+| `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted`; `GapEscalatedToAugur` |
+| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` — all three `warning` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo, a row body that does not parse as JSON) |
+| `data:<targetId>.__capped` | the target's per-ROW issue budget | `RowIssuesCapped` |
+| *(not latched — rebuilt from live consumer state each heartbeat)* | one lane-1 consumer | `ConsumerPaused`, `ConsumerSaturated` |
 | `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
+
+`GapBudgetExhausted` and `GapEscalatedToAugur` are the two mutually-exclusive outcomes of one spent
+retry budget, and they share that latch deliberately. A gap whose budget is spent with no augur
+policy for `exhausted` raises the first (`warning`: a loud stop, never a silent park). One whose
+target does escalate raises the second (`warning` too — the row is on the reasoning tier because
+conventional remediation ran out, which is degraded service for that row while every other row still
+remediates). Both retire on the same event, the gap actually ending, so a fresh exhaustion afterwards
+raises whichever branch applies again.
+
+`GapEscalatedToAugur` is a **record, and nothing gates on it.** What stops a re-derivation of the same
+exhaustion — a decline-floor redelivery, a sweep pass, one row of an operator `replayTarget` — from
+minting a second reasoning episode is the escalation's own mark: while its lease is live the episode
+is in flight and the derivation costs one mark read. Once that lease expires the episode is presumed
+dead and IS re-fired, because a reasoning claim that never converges has no other recovery, and each
+re-fire mints a fresh live mark, which paces the re-fires to one per lease. A suppression keyed on
+this latch instead would be permanent and would retire that recovery.
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
@@ -942,9 +974,67 @@ entity, so no sweep leg retires it.
 never reads the column. An entity whose only remaining open gap is a `surface` one therefore *does*
 retire its priority entry — the entry describes a column nothing will read again.
 
+One member of the family names no projected column at all. A row whose **body does not parse as
+JSON** raises `RowDataError` at the synthetic column `__body` — the fault is about the whole body, so
+it needs a segment that cannot collide with a projected one. What guarantees that is not the name:
+Refractor accepts any non-blank `bodyColumns` entry, so a lens may legally project a column called
+`__body`. It is that a column segment only reaches this family by being *passed to a reader*, and
+every call site passes either an engine constant (`violating`, `entityKey`, `freshUntil`, `priority`,
+`inflight_<g>`, `maxretries_<g>`) or a gap column — and a gap column is either one of the row's own
+`missing_*` keys or a playbook `gaps` key, which install-time validation rejects unless it matches
+the same `missing_<gap>` convention. A lens-authored name therefore reaches this family only when it
+starts with `missing_`. Its retirement is not a read either: the next revision of
+that row that *does* parse clears it, and the entity and target teardowns cover a row that ends
+without ever parsing again. Read an entry at `__body` as "this row's last projected value was not
+JSON", so N such rows are N entries.
+
 Without a retirement that does not depend on a further read, these entries would stand one per
-`(row, column)` for the process's lifetime. The listing cap below bounds the *document*, never the
-cache behind it.
+`(row, column)` for the process's lifetime. Two separate bounds apply, and they bound different
+things. The listing cap below bounds the **document**. The **cache** behind it is bounded per target:
+at most 500 per-row entries are tracked for one target, after which further raises for rows outside
+that set are refused and counted into one entry at `data:<targetId>.__capped`:
+
+Membership in that budget is decided by key SHAPE — an entity segment AND a column segment below the
+target — because that shape is exactly what makes a family grow with the subject count. All three
+per-row families qualify: `gap:`, `data:` and `template:`. A target-scoped fact (`gapConfig:`, the
+overflow entry itself, `consumer:`, `effect:`) never consumes a slot, or a flood of row faults would
+start refusing the very entries that explain them.
+
+```json
+{"severity": "<the worst severity among the raises it refused — warning or error>",
+ "code": "RowIssuesCapped",
+ "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> further raises for rows outside the tracked set were not recorded, and are not re-derivable until those rows project again",
+ "since": "<RFC3339 — when the cap was first reached>"}
+```
+
+`severity` is **not** fixed at `warning`, and that is the entry's whole point: it carries the worst
+severity of the raises it turned away, so a refused `error` still escalates the document's `status`
+(see below). A sample showing `warning` would read as the only value it takes.
+
+The tracked set is a **sample, not a ranking** — whichever rows raised first hold the slots. Slots are
+freed as their entries retire (a repaired row, an entity tombstone, a target teardown), and admission
+resumes as soon as the target is back under the cap.
+
+The `RowIssuesCapped` entry itself retires only once the target holds **no** per-row entries at all,
+not merely when it drops back under the cap. A refused raise is not re-derivable on demand: the
+`data:` exits all Ack, and lane 1 delivers the last revision per subject from a stable durable, so a
+row that was refused is never delivered again until something writes its key. (A refused `gap:` raise
+IS re-derived — its row keeps being delivered — but it is re-derived only into the same full budget,
+so the entry stays honest for it too.) Retiring the entry at the boundary would delete the only
+surviving record that those rows are broken.
+
+Two properties the cap must not cost, and does not. Its `severity` is the **worst severity among the
+raises it refused**, so a refused `error` still escalates the document (`status` is aggregated over
+every entry the cache holds, and a refused raise reaches it only through this entry). And it is
+pinned into the listed set ahead of the ordinary warnings — otherwise the one entry saying "N further
+rows are broken and are not tracked" would sort among the hundreds of warnings that caused it and be
+truncated away.
+
+The log-pacing clock behind the paced codes carries the same per-target bound, for the same reason:
+a per-row fault re-derived on the long redelivery floor refreshes its pace entry faster than the
+staleness prune can drop it, so without a budget that map would be sized by the consumer's
+`MaxAckPending` instead. A refused pace key logs at `debug` rather than at its severity; the Health
+entry is unaffected.
 
 `template:` is a separate family for the same reason those retirements are separate. A gap's plan
 whose template references resolve null is a different fact from that gap column carrying a non-bool

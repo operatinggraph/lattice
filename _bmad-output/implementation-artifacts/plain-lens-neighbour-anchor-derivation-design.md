@@ -175,6 +175,16 @@ designs touch adjacent code and answer different questions — which events are 
 anchors are **re-executed** once one arrives. Neither substitutes for the other, and this design does not
 claim their populations compose.
 
+> **AMENDED 2026-08-28 — the "can never be indexed" premise behind this section is falsified.**
+> `AnchorHopIndex`'s refusal of a variable-length relationship hop has been lifted — see
+> [varlength-anchor-derivation-design.md](varlength-anchor-derivation-design.md). A ranged hop is now
+> indexed, carrying a `[Min, Max]` range clamped to `maxVarLengthHops`; only a lower bound above one
+> hop is still refused. That moves "Shapes an index can never step", the "Addressable ceiling: ≤ 36 (45
+> exposed − 9 variable-length)" arithmetic, and the nine-lens list above — none of these figures should
+> be restated from this prose going forward. Re-derive the live count from the census test
+> (`go test ./internal/refractor/ -run 'TestScanRootCorpusCensus'`) before scoping a build against this
+> design.
+
 **Why ≤ and not =.** Two of the completeness conjuncts (`ground`, the WITH-scope walk) are *terminus-relative*
 and are unmeasurable today, because the builder refuses at `anchor < 0` before it ever evaluates them for a
 plain lens. Some of the 36 will refuse on grounding — a second `MATCH` headed by an unbound variable really

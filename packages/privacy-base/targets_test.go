@@ -89,11 +89,14 @@ func TestWeaverTargets_PlaybookColumnsMatchLens(t *testing.T) {
 
 // TestWeaverTargets_EveryLensGapHasPlaybookEntry is the reverse direction, and
 // the one that matters most: a `missing_<g>` column the lens projects with NO
-// matching Gaps entry raises a standing error-severity GapWithoutPlaybook
-// issue and escalates the whole Weaver component to unhealthy
-// (internal/weaver/evaluator.go's dispatchGap, health.go's aggregateStatus) —
-// silently, for every subject that ever opens the orphaned gap. Deleting any
-// one of this package's five Gaps entries must red this test.
+// matching Gaps entry is never remediated, for every subject that ever opens it.
+// Weaver holds each such row on its long redelivery floor with a standing
+// GapWithoutPlaybook issue (internal/weaver/evaluator.go's dispatchGap), so the
+// gap is audible and picks the fix up automatically once the entry is added —
+// but until then those rows occupy the target's lane-1 pending set, and a target
+// whose pending set reaches the consumer's MaxAckPending cap stops receiving NEW
+// deliveries altogether (weaver's ConsumerSaturated). Deleting any one of this
+// package's five Gaps entries must red this test.
 func TestWeaverTargets_EveryLensGapHasPlaybookEntry(t *testing.T) {
 	target := WeaverTargets()[0]
 	lens := findErasureLens(t)
@@ -105,7 +108,7 @@ func TestWeaverTargets_EveryLensGapHasPlaybookEntry(t *testing.T) {
 			continue
 		}
 		if _, ok := target.Gaps[col]; !ok {
-			t.Errorf("lens projects %q with no playbook entry — this is the GapWithoutPlaybook failure mode (evaluator.go dispatchGap): the row column is true, the Weaver finds no Gaps[%q], and it escalates the whole target to unhealthy instead of remediating", col, col)
+			t.Errorf("lens projects %q with no playbook entry — this is the GapWithoutPlaybook failure mode (evaluator.go dispatchGap): the row column is true, Weaver finds no Gaps[%q], and instead of remediating it holds every such row pending on the long redelivery floor until a package author adds the entry", col, col)
 		}
 	}
 }

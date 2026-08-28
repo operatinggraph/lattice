@@ -106,12 +106,23 @@ func (h *handlerHarness) requireNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleRow_NumDeliveredBranches walks the in-flight-mark decision point:
-// a FRESH delivery (NumDelivered 1) with an existing mark anti-storm drops; a
-// REDELIVERY (NumDelivered > 1) with an existing mark re-publishes the SAME
-// episode requestId; missing metadata (NumDelivered/Sequence 0) takes the
-// conservative side — never the drop, never an expectedRevision of 0.
-func TestHandleRow_NumDeliveredBranches(t *testing.T) {
+// TestHandleRow_LiveMarkDropsEveryDeliveryClass walks the in-flight-mark
+// decision point. A live mark means an episode for this gap is already running,
+// and NO delivery class may act on it: the anti-storm drop is taken from the
+// mark read alone, ahead of planning and admission, so it does not depend on
+// how the delivery was classified.
+//
+// That independence is the point. A row's OTHER gap can now hold the whole row
+// on a redelivery loop — a config-error gap Naks the message every long floor —
+// and every one of those redeliveries re-enters dispatchGap for this gap too. A
+// classification that re-published on redelivery would therefore re-publish this
+// episode's op once per floor for as long as the sibling fault stood, and past
+// the Contract #4 tracker's 24h TTL those stop collapsing and become genuine
+// duplicate executions.
+//
+// Missing metadata (Sequence 0) still defers: that guard sits above the mark
+// read, and an expectedRevision of 0 is the "must not exist" OCC sentinel.
+func TestHandleRow_LiveMarkDropsEveryDeliveryClass(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -154,34 +165,36 @@ func TestHandleRow_NumDeliveredBranches(t *testing.T) {
 	}
 	h.requireNoOp(t)
 
-	// Redelivery (NumDelivered 2) + existing mark: re-fires the SAME episode
-	// requestId (idempotent at the Contract #4 tracker).
+	// Redelivery (NumDelivered 2) + existing mark: the same drop. The mark is
+	// the record that the episode is owed; a redelivery is not evidence that its
+	// op was lost, and a lost publish is recovered by the mark's lease expiring
+	// into the sweep's reclaim.
 	dec = h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 2))
 	if dec != substrate.Ack {
-		t.Fatalf("redelivery re-fire must Ack, got %v", dec)
+		t.Fatalf("a redelivery against a live mark must Ack, got %v", dec)
 	}
-	refire := h.nextOp(t)
-	if refire["requestId"] != wantRequestID {
-		t.Fatalf("re-fire requestId = %v, want the same episode %v", refire["requestId"], wantRequestID)
-	}
+	h.requireNoOp(t)
 
 	// Metadata unavailable (Sequence 0, NumDelivered 0): defer on a delayed
-	// redelivery — no anti-storm drop, no expectedRevision 0 published.
+	// redelivery — the guard is above the mark read, and expectedRevision 0 is
+	// the "must not exist" OCC sentinel, never publishable.
 	dec = h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 0, 0))
 	if dec != substrate.NakWithDelay {
 		t.Fatalf("metadata-less delivery must NakWithDelay, got %v", dec)
 	}
 	h.requireNoOp(t)
 
-	// NumDelivered 0 with usable Sequence: not classified as fresh — the
-	// possible-redelivery re-fires the same episode (the safe side).
+	// NumDelivered 0 with a usable Sequence: still the drop. No delivery class
+	// re-publishes against a live mark.
 	dec = h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 0))
 	if dec != substrate.Ack {
-		t.Fatalf("NumDelivered-0 re-fire must Ack, got %v", dec)
+		t.Fatalf("an unclassifiable delivery against a live mark must Ack, got %v", dec)
 	}
-	refire = h.nextOp(t)
-	if refire["requestId"] != wantRequestID {
-		t.Fatalf("NumDelivered-0 re-fire requestId = %v, want %v", refire["requestId"], wantRequestID)
+	h.requireNoOp(t)
+
+	// The mark survives every one of those passes: dropping is not clearing.
+	if _, _, stillInFlight, err := h.engine.marks.get(ctx, targetID, entityID, "missing_x"); err != nil || !stillInFlight {
+		t.Fatalf("the anti-storm drop must leave the mark in place (err=%v, inFlight=%v)", err, stillInFlight)
 	}
 }
 
@@ -264,11 +277,17 @@ func issueSeverity(issues []healthIssue, code string) string {
 }
 
 // TestHandleRow_MalformedAnchorDegradesNotErrors pins the Contract #5 §5.2
-// severity of a single malformed/incomplete anchor row: a per-row DATA error
-// (a template reference that resolves null, or a violating row missing its
-// entityKey echo) is surfaced as a `warning` (degraded) and the row is skipped
-// (Ack, no op) — it must NOT raise an `error` (unhealthy) and pin the whole
-// Weaver component red while every other row still remediates.
+// severity of a single malformed/incomplete anchor row: a template reference
+// that resolves null, or a violating row missing its entityKey echo, is
+// surfaced as a `warning` (degraded) and dispatches nothing — it must NOT raise
+// an `error` (unhealthy) and pin the whole Weaver component red while every
+// other row still remediates.
+//
+// The two rows take different retry classes, which the subtests pin alongside
+// the severity: the missing entityKey echo is a pure data error only a
+// re-projection can fix, so it Acks; the template fault is fixable by a
+// template edit that projects no new row, so it rides the long redelivery
+// floor.
 func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -298,8 +317,8 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		}
 
 		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 1))
-		if dec != substrate.Ack {
-			t.Fatalf("a malformed-row data error must Ack (skip), got %v", dec)
+		if dec != substrate.NakWithLongDelay {
+			t.Fatalf("a template fault must ride the long redelivery floor, got %v", dec)
 		}
 		h.requireNoOp(t)
 		if sev := issueSeverity(h.engine.issues.snapshot(), "TemplateDataError"); sev != "warning" {
@@ -1564,8 +1583,10 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 		"entityKey": "vtx.task." + entityID, "violating": true,
 		"missing_claim": true, "missing_orphan": true,
 	}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("dispatch must Ack, got %v", dec)
+	// The config dead-end is a config-error class: the row rides the long
+	// redelivery floor rather than being Acked away.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a gap with no playbook entry must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); !ok {
@@ -1826,9 +1847,11 @@ func TestHandleRow_FreshPlanRetiresStaleExhaustedIssue(t *testing.T) {
 // while this subject's own entity-scoped issue is untouched — a policy addition
 // says nothing about any one row.
 //
-// The target declares an admission rate the escalated dispatch cannot draw a
-// token from, so the deferral stops the pass before a plan is built: this
-// clear is observed on its own, not shadowed by the fresh-plan clear.
+// The escalated delivery carries no JetStream metadata (Sequence 0), so the
+// pass stops at dispatchGap's own expectedRevision guard — which sits below this
+// clear and above the mark read and planGap. That is what lets this clear be
+// observed ON ITS OWN, unshadowed by the fresh-plan clear, which retires both
+// scopes.
 func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1842,14 +1865,13 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 	const col = "missing_unknown"
 	vtx := testNanoID(t)
 	spec := targetSpecFixture(targetID) // declares gaps.missing_a only
-	spec["admission"] = map[string]any{"globalRate": 0.5}
 	h.engine.source.handle(vertexEvent(t, vtx, weaverTargetClass))
 	h.engine.source.handle(specEvent(t, vtx, spec))
 
 	entityID := testNanoID(t)
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a gap with no playbook entry must Ack, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a gap with no playbook entry must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); !ok {
@@ -1860,8 +1882,8 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 	// The package adds the augur policy: the dead-end is covered from here on.
 	spec["augur"] = map[string]any{"escalate": []any{"unplannable"}}
 	h.engine.source.handle(specEvent(t, vtx, spec))
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.NakWithDelay {
-		t.Fatalf("the escalated dead-end must defer on admission, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 0, 1)); dec != substrate.NakWithDelay {
+		t.Fatalf("the escalated dead-end must defer for metadata, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); ok {
@@ -1874,12 +1896,18 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 	}
 }
 
-// TestPlanGap_UnplannableEscalationRetiresConfigIssue pins the scope of the
-// third config clear: an augur escalation that resolves an unplannable plan
-// says the playbook dead-end is covered, so it retires the TARGET-scoped issue
-// and leaves this subject's own untouched. The declared admission rate holds
-// the pass at the deferral, so the fresh-plan clear (which retires both scopes)
-// never runs and this clear is observed on its own.
+// TestPlanGap_UnplannableEscalationRetiresConfigIssue pins the SCOPES of the
+// clears an escalated-then-built plan performs. An augur escalation that
+// resolves an unplannable plan says the playbook dead-end is covered, which is a
+// fact about the target; the plan that then builds says this ROW's gap has an
+// attempt left and its templates resolve, which are facts about one entity. Both
+// fire on this path, and neither may reach further than its own scope — a
+// target-scoped clear must never become a sweep of the per-entity family.
+//
+// The admission gate denies, so the pass defers without dispatching. That is now
+// BELOW the build (a token is a permit to dispatch, drawn only for a plan that
+// would actually fire), so the deferral no longer hides the build's own clears —
+// which is why the entity assertions below name two different entities.
 func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 	t.Parallel()
 	const targetID = "fixtureUnplannableEscalate"
@@ -1899,22 +1927,29 @@ func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 		Admission: &AdmissionPolicy{GlobalRate: 0.5},
 	}
 	entityID := testNanoID(t)
-	e.issues.set(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError", "the pin has vanished")
+	sibling := testNanoID(t)
+	e.issues.set(issueKeyGapConfig(targetID, col), "warning", "PlaybookConfigError", "the pin has vanished")
 	e.issues.set(issueKeyGapEntity(targetID, entityID, col), "warning", "GapBudgetExhausted", "budget spent")
+	e.issues.set(issueKeyGapEntity(targetID, sibling, col), "warning", "GapBudgetExhausted", "another row's budget")
 
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID}
 	// A pin the catalog no longer names is the unplannable-flagged error.
 	if pl, _, dec := e.planGap(context.Background(), target, targetID, entityID, col,
 		goalGapFixture(t), row, 42, "aGhostLeg"); pl != nil || dec != substrate.NakWithDelay {
-		t.Fatalf("the escalated gap must escalate then defer on admission, got plan=%v decision %v", pl != nil, dec)
+		t.Fatalf("the escalated gap must escalate, build, then defer on admission, got plan=%v decision %v",
+			pl != nil, dec)
 	}
 	if _, ok := issueAt(e.issues, issueKeyGapConfig(targetID, col)); ok {
 		t.Fatalf("the augur escalation covers the dead-end; its config issue must retire, issues = %+v",
 			e.issues.snapshot())
 	}
-	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, entityID, col)); !ok {
-		t.Fatalf("the escalation says nothing about this subject's budget; its issue must stand, issues = %+v",
-			e.issues.snapshot())
+	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, entityID, col)); ok {
+		t.Fatalf("a plan BUILT for this row disproves its GapBudgetExhausted — the build settles it, "+
+			"whether or not admission lets it fire; issues = %+v", e.issues.snapshot())
+	}
+	if _, ok := issueAt(e.issues, issueKeyGapEntity(targetID, sibling, col)); !ok {
+		t.Fatalf("neither clear says anything about ANOTHER row's budget; the sibling's issue must stand, "+
+			"issues = %+v", e.issues.snapshot())
 	}
 }
 
@@ -2083,8 +2118,8 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	first, ok := issueAt(h.engine.issues, key)
@@ -2096,8 +2131,8 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 	}
 
 	// The same unrepaired row, delivered again: the fault is the same fault.
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.Ack {
-		t.Fatalf("the redelivery must Ack, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("the redelivery must ride the long floor again, got %v", dec)
 	}
 	second, ok := issueAt(h.engine.issues, key)
 	if !ok {
@@ -2129,8 +2164,8 @@ func TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose(t *testing.T) {
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	if _, ok := issueAt(h.engine.issues, key); !ok {
 		t.Fatalf("setup: the template fault must stand, issues = %+v", h.engine.issues.snapshot())
@@ -2166,8 +2201,8 @@ func TestHandleRow_EntityTombstoneRetiresTemplateFaults(t *testing.T) {
 
 	const targetID = "fixtureTemplateTombstone"
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	live := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 	if _, ok := issueAt(h.engine.issues, live); !ok {
@@ -2513,9 +2548,9 @@ func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
 		entityID := testNanoID(t)
 		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_z": true}
 
-		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap missing_z:")
-		if len(levels) != 2 || levels[0] != slog.LevelError || levels[1] != slog.LevelDebug {
-			t.Fatalf("levels = %v, want [Error Debug]: an `error` raise keeps its own loud level", levels)
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithLongDelay, "gap missing_z:")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]: the arrival is loud, the re-derivation behind it is damped", levels)
 		}
 		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
 			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
@@ -2528,7 +2563,7 @@ func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
 		const targetID = "fixturePacedTemplateGap"
 		entityID, row := seedTemplateFaultTarget(t, h, targetID)
 
-		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap "+templateFaultGap+":")
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithLongDelay, "gap "+templateFaultGap+":")
 		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
 			t.Fatalf("levels = %v, want [Warn Debug]", levels)
 		}

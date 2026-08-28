@@ -53,8 +53,16 @@ var controlComponents = map[string]controlComponent{
 		reads: map[string]string{
 			"list": "lattice.ctrl.weaver.list",
 		},
-		// All three weaver ops mutate — no read-only carve-out.
-		mutateOps:   setOf("disable", "enable", "revoke"),
+		// Every weaver op mutates — no read-only carve-out.
+		//
+		// resetBudget is deliberately absent, and its absence is not an
+		// oversight: it is per-(target, entity, gap) and carries its entityId +
+		// gapColumn in the REQUEST BODY, while controlMutate sends the plane a
+		// bodyless request for every op. Allow-listing it here would ship a path
+		// whose every invocation comes back as the plane's "invalid resetBudget
+		// request body". It stays a `lattice weaver reset-budget` CLI verb until
+		// this proxy learns to forward a body.
+		mutateOps:   setOf("disable", "enable", "revoke", "resetConfidence", "replayTarget"),
 		readOnlyOps: setOf(),
 	},
 	// Refractor serves only per-lens subjects (no fixed component-wide list);

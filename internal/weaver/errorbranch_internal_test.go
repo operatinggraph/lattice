@@ -120,7 +120,7 @@ func TestFireEpisode_StaleReclaim_ConflictSkipsDispatch(t *testing.T) {
 	}
 
 	got := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, false, &expired, staleRev, true, true)
+		pl, &expired, staleRev, true, true)
 	if got != substrate.Ack {
 		t.Fatalf("a conflicted stale-reclaim must Ack (the winner already dispatched), got %v", got)
 	}
@@ -161,7 +161,7 @@ func TestFireEpisode_StaleReclaim_ReplaceFailureNaksWithDelay(t *testing.T) {
 	expired := fixtureMark(targetID, entityID, "missing_x", actionDirectOp, pastLease())
 
 	got := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, false, &expired, 1, true, true)
+		pl, &expired, 1, true, true)
 	if got != substrate.NakWithDelay {
 		t.Fatalf("a mark-store failure during reclaim must nak with delay, got %v", got)
 	}
@@ -194,7 +194,7 @@ func TestFireEpisode_MarkCreateFailureNaksWithDelay(t *testing.T) {
 	}
 
 	got := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, false, nil, 0, false, false)
+		pl, nil, 0, false, false)
 	if got != substrate.NakWithDelay {
 		t.Fatalf("a mark-create failure must nak with delay, got %v", got)
 	}
@@ -233,7 +233,7 @@ func TestFireEpisode_MarkCreateLostAcksWithoutDispatch(t *testing.T) {
 	}
 
 	got := h.engine.fireEpisode(ctx, targetID, entityID, "vtx.leaseApp."+entityID, "missing_x", actionDirectOp,
-		pl, false, nil, 0, false, false)
+		pl, nil, 0, false, false)
 	if got != substrate.Ack {
 		t.Fatalf("a lost CAS-create race must Ack (the winner already dispatched), got %v", got)
 	}

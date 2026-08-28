@@ -156,6 +156,16 @@ range through `StepsFrom`, and the reverse reading (`h.To == pos`) carries the s
 direction already flipped by `edgeDirFor` — a bounded reachability relation is symmetric, so *"nodes
 reaching Y in ≤k forward steps"* is exactly *"nodes reachable from Y in ≤k reverse steps."*
 
+> **Amended at build time, 2026-08-28.** A ranged hop whose **lower bound exceeds one hop** is refused
+> outright, and the limit is in the SEEDING rather than in the walk. `AnchorSideSeeds` seeds the two
+> endpoints of the changed link; on a ranged hop that link is an *intermediate* edge of the expansion, so
+> the nodes really bound at the From position are every node reaching it within `Max-1` steps. Those are
+> recovered only by the walk bouncing back across the hop, covering From-offsets `[1-Max, 1-Min]`, which
+> together with the direct seed at offset 0 covers the required `[1-Max, 0]` only while `Min <= 2`. A cold
+> reviewer's sweep over ranges, chain lengths and cut positions found **thirteen** graphs where a higher
+> lower bound returned `ok == true` having dropped an anchor. Every shipped ranged hop is `*0..`, `*1..` or
+> `*0..7`, so the refusal costs the corpus nothing; §6's payoff table is unaffected.
+
 **The open range keeps the executor's clamp, applied per hop, never globally.** `Max < 0` or
 `Max > maxVarLengthHops` clamps to `maxVarLengthHops`, matching `rel_traverse.go:14-16` exactly. This
 is the soundness argument and it must be stated precisely: **the derivation is complete with respect
@@ -192,6 +202,17 @@ instead of a single edge move. Standing on `cur.id` at `cur.pos`, for a step wit
    by `(pos, id)`. The derivation is therefore a **superset** in reachability, which is what the
    invariant needs (`anchor_derivation.go:9-13`). The design claims the superset, not equivalence.
 
+> **Amended at build time, 2026-08-28.** *"No new budget"* did not survive measurement, and the paragraph
+> below is kept only as the reasoning that led there. The read cap bounds **I/O, not work**: `edgesOf`
+> memoises, so a walk that re-enters the closure once per admitted node re-iterates cached edge lists at no
+> read cost at all. Measured by a cold reviewer: **4,092 expansions and 86,050 edge visits to derive one
+> anchor** on a 1,023-vertex containment tree — *twelve times* the cost of the BFS this replaces — and
+> seconds of CPU at 40% of the read cap, and above the cap the walk pays in full *and then* falls back. The
+> closure therefore carries a **work budget** (`DerivationRangedWorkFactor` × the read cap, so one operator
+> knob still moves the whole envelope) on exactly the read cap's terms: a breach raises the same sentinel,
+> so it can only ever cause MORE fallback, never a narrower answer. The "no truncation" half stands
+> unchanged and is what makes adding the budget safe.
+
 **No new budget.** Every read in the closure goes through `edgesOf`, so `DefaultDerivationReadCap`
 governs it and a breach returns `ok == false` ⇒ the BFS (ledger row 5). That is the correct failure
 mode and it is already shipped and doc-commented: a walk that gets too wide degrades to today's
@@ -202,10 +223,19 @@ fan-out is the descendant set rather than the ~1 ancestor chain.
 ### 4.3 `Dist`
 
 A ranged hop's distance is an interval, so it must not make either endpoint appear **provably nearer**
-— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position
-reachable only across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
+— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position the
+anchor can reach across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
 branch seeds **both** endpoints and is documented as the safe, widening direction (ledger row 9).
 `Dist` has one production consumer, so the blast radius is that one call site.
+
+> **Amended at build time, 2026-08-28** (§17.6 (a)). This paragraph read *"a position reachable **only**
+> across a ranged binding hop"*, and that rule leaves a hole: a position holding **both** a fixed binding
+> path of length L **and** a ranged path whose true length may be shorter would keep the finite L, which
+> **over-states** its distance — and `consider` drops the endpoint whose distance is the larger, so an
+> over-stated distance drops a seed. That is the under-approximating direction this unit exists to refuse.
+> The shipped rule is therefore the wider one stated above: exact distances over the **fixed** binding hops,
+> then the sentinel for every non-anchor position the anchor reaches over binding hops **via at least one
+> ranged hop** (a two-state BFS over `(position, usedRanged)`). Over-poisoning only seeds both endpoints.
 
 Two things the increment owes because of it, neither optional: the sentinel currently means *"no
 binding path to the anchor"* (`hopindex.go:59-65`), so **the field doc must distinguish the two
@@ -213,6 +243,11 @@ meanings** or the next reader misreads a genuine non-binding position; and
 `hopindex_test.go:513`'s `Dist[s.Pos] >= 0` assertion for every seeded position has to move. A ranged
 hop written inside a `WHERE` or a comprehension is `Binding: false` and already contributes no
 distance, so only ranged hops in a `MATCH` are affected.
+
+> **Amended at build time, 2026-08-28** (§17.6 (b)). The second obligation does not exist: that
+> assertion's fixture carries no ranged hop, so no position in it is poisoned and it holds verbatim.
+> It stays where it is, and a ranged-hop equivalent is added beside it instead. The first obligation —
+> splitting the field doc — stands and shipped.
 
 ---
 
@@ -328,7 +363,9 @@ a later cypher edit cannot arm it silently.
 ### 7.1 The budget, and why no new one is added
 
 The ranged closure reads through `edgesOf`, so `DefaultDerivationReadCap = 2_000` bounds it and a
-breach is `ok == false` ⇒ BFS. The design adds **no** cap, no depth budget and no truncation. This
+breach is `ok == false` ⇒ BFS. The design adds no depth budget and **no truncation** — but it does add a
+**work budget** for the ranged closures, for the reason recorded at §4.2's amendment: the read cap governs
+documents read, and the closure's cost is edge entries iterated, which memoisation decouples from it. This
 matters because the corpus's expensive direction is real: `(work)<-[:containedIn*0..]-(place)` walks
 *down* a containment tree. On a deep or wide tree the read cap, not the pattern, decides fallback —
 and falling back is today's behaviour, so the worst case is "no better than now," never "wrong."
@@ -771,3 +808,28 @@ Increment 2 (`withScopeReject`'s structural-identity whitelist) — **HELD at ra
 unmet. `ReferencedLabels`' exhaustiveness clear. The generator (`internal/pkgmgr/anchorwalk.go`). Any
 cypher edit in `packages/`. The five Personal lenses, the two multi-walk lenses and the two `SecureColumns`
 plain lenses (§13's named conjuncts — unreachable work, not deferred work).
+
+### 17.9 Build checkpoint (2026-08-28)
+
+Branch `claude/great-lamport-kxa2su`. Landed and pushed, in order:
+
+| Increment | Commit | State |
+|---|---|---|
+| 6 · component doc (ranged-step walk) | `eb14c25` | ✅ |
+| 4 · `lint-lens-anchors` negated-narrowing-bound rule | `9923554` | ✅ |
+| dossier · polarity entry's second sighting | `5659744` | ✅ |
+| 5a · the 16 census pin moves | `e7f7dfd` | ✅ |
+| 1 + 2 + 3 · index, walk, tally | `397786e` | ✅ |
+| 5b · T1–T8, T11 | — | in flight |
+
+**C4 is NOT re-derived, and that is a REMOTE-environment limit, not an omission.** §12 C4 reads Health KV
+on a *running* stack for the capability pipeline's rebuild/suppression state and per-lens lag. This fire ran
+in an ephemeral remote container (`agents/steward/REMOTE.md` §3), where the only stack available is one this
+fire would bootstrap itself — with no accumulated lag and no suppression history, so any figure measured
+there would be a fabrication dressed as a measurement, not the live symptom. C4-after is in any case the
+**acceptance measurement for Increment 2**, whose revive trigger (§13) is "Increment 1 shipped **and observed
+live**". That trigger therefore remains **unmet** until someone re-reads Health KV against the real
+deployment after this ships. Increment 2 stays held; the Steward does not pull it on the strength of a green
+suite.
+
+**The deviations in §17.6 are now amended into the body where they stand** — §4.3 carries both, dated.

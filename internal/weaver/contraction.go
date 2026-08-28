@@ -20,9 +20,22 @@ const (
 // lane-1 CDC delivery, never a KV scan) plus a bounded ring of periodic
 // samples the reconciler sweep appends on its own cadence (design §3.4: "over
 // a sweep-cadence window"). Purely in-memory and diagnostic, mirroring
-// shadowStats: a restart resets it, and lane-1's DeliverLastPerSubject replay
-// of every target's current rows on start re-derives the true count from
-// scratch.
+// shadowStats.
+//
+// A restart empties it, and what rebuilds it is only what lane-1 delivers
+// afterwards. A lane-1 durable that SURVIVES the restart resumes from its
+// persisted ack floor, so a violating row that was already acked and has not
+// re-projected is never re-counted — the count is a lower bound on the true one
+// until every violating row projects again. The two things that re-derive it in
+// full are a durable created from scratch (a cold boot, a newly registered
+// target) and Engine.ReplayTarget, which recreates one target's lane-1 durable
+// so DeliverLastPerSubject re-presents that target's whole current row set.
+//
+// Best-effort with an honest bound is the right posture here because nothing
+// gates on the number: it feeds the heartbeat's trajectory metric and no
+// decision. Machinery to make it exact would be a per-target enumeration paid
+// on every boot, which is precisely the cost the replay verb exists to pay only
+// when an operator asks for it.
 type contractionStats struct {
 	mu      sync.Mutex
 	known   map[string]struct{} // "<targetId>.<entityId>" currently counted as violating

@@ -32,6 +32,8 @@ type fakeEngine struct {
 	// subject cannot carry and which therefore have to survive the request body.
 	resetPrevious int
 	budgetArgs    []string
+	// replayQueued is the row count ReplayTarget reports on success.
+	replayQueued int
 }
 
 func (f *fakeEngine) ListTargets(_ context.Context) ([]internalweaver.TargetSummary, error) {
@@ -63,6 +65,13 @@ func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gap
 		return 0, err
 	}
 	return f.resetPrevious, nil
+}
+
+func (f *fakeEngine) ReplayTarget(_ context.Context, targetID string) (int, error) {
+	if err := f.errOn["replayTarget:"+targetID]; err != nil {
+		return 0, err
+	}
+	return f.replayQueued, nil
 }
 
 // startWeaverControlTest starts an embedded NATS server with a
@@ -410,4 +419,80 @@ func TestWeaverResetBudget_NoBudget_JSON(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, out, "no retry budget")
 	assert.Contains(t, out, `"ok":false`)
+}
+
+// TestWeaverReplayTarget_HappyPath verifies `replay-target <targetId>` reaches
+// the replayTarget endpoint and reports the queued-row count the engine
+// returned — how big a re-delivery burst the operator just ordered.
+func TestWeaverReplayTarget_HappyPath(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, replayQueued: 26}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := ""
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"replay-target", "t1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `target "t1" replayed`)
+	assert.Contains(t, out, "26 row(s) queued")
+}
+
+// TestWeaverReplayTarget_JSONReportsCount pins the machine-readable shape
+// operators and scripts read.
+func TestWeaverReplayTarget_JSONReportsCount(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, replayQueued: 7}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"replay-target", "t1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"ok":true`)
+	assert.Contains(t, out, `"rowsQueued":7`)
+}
+
+// TestWeaverReplayTarget_Refused_JSON verifies an engine refusal fails loudly
+// rather than printing a successful zero-row replay. A replay reported as
+// succeeding when nothing was re-delivered leaves the operator's diagnostic
+// standing over a fact nothing re-derived, which is the whole reason the verb
+// refuses instead of no-opping.
+func TestWeaverReplayTarget_Refused_JSON(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{
+		"replayTarget:ghost": errors.New(`weaver: target "ghost" not registered`),
+	}}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"replay-target", "ghost"})
+	require.Error(t, err)
+	assert.Contains(t, out, "ghost")
+	assert.Contains(t, out, `"ok":false`)
+}
+
+// TestWeaverReplayTarget_DottedTargetIDRejectedLocally verifies the local
+// targetId shape check refuses a dotted id before a subject is built — the
+// control endpoints subscribe a single-token wildcard, so a dotted id would
+// otherwise hang to the client timeout with an opaque "no responders".
+func TestWeaverReplayTarget_DottedTargetIDRejectedLocally(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"replay-target", "a.b"})
+	require.Error(t, err)
+	assert.Contains(t, out, `"ok":false`)
+	assert.Contains(t, out, "single dot-free token")
 }

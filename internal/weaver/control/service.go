@@ -1,8 +1,8 @@
 // Package control implements the Weaver control plane (FR30): a NATS
-// Services responder exposing list/disable/enable/revoke operator commands
-// for Weaver convergence targets, plus the cmd/lattice/weaver CLI's server
-// side. Depends on internal/weaver only for the four engineControl methods
-// and the weaver.TargetSummary type — internal/weaver never imports this
+// Services responder exposing the list/disable/enable/revoke/resetConfidence/
+// resetBudget/replayTarget operator commands for Weaver convergence targets,
+// plus the cmd/lattice/weaver CLI's server side. Depends on internal/weaver
+// only for the engineControl methods and the weaver.TargetSummary type — internal/weaver never imports this
 // package (one-way dependency, mirrors internal/refractor/control being a
 // sibling of internal/refractor/{pipeline,lens,...}).
 package control
@@ -24,9 +24,10 @@ import (
 )
 
 // engineControl is the minimal interface this package needs from
-// *weaver.Engine — list/disable/enable/revoke/resetConfidence/resetBudget.
-// Defining it here (rather than depending on the full *weaver.Engine) keeps the
-// dependency surface to exactly these six methods plus weaver.TargetSummary.
+// *weaver.Engine — list/disable/enable/revoke/resetConfidence/resetBudget/
+// replayTarget. Defining it here (rather than depending on the full
+// *weaver.Engine) keeps the dependency surface to exactly these seven methods
+// plus weaver.TargetSummary.
 type engineControl interface {
 	ListTargets(ctx context.Context) ([]weaver.TargetSummary, error)
 	Disable(ctx context.Context, targetID string) error
@@ -34,6 +35,7 @@ type engineControl interface {
 	Revoke(ctx context.Context, targetID string) error
 	ResetConfidence(ctx context.Context, targetID string) (int, error)
 	ResetRetryBudget(ctx context.Context, targetID, entityID, gapColumn string) (int, error)
+	ReplayTarget(ctx context.Context, targetID string) (int, error)
 }
 
 // subjectPrefix is the wildcard subject pattern the control endpoints are
@@ -57,6 +59,7 @@ const handlerTimeout = 5 * time.Second
 // On success (revoke op): Revoke is present.
 // On success (resetConfidence op): ResetConfidence is present.
 // On success (resetBudget op): ResetBudget is present.
+// On success (replayTarget op): ReplayTarget is present.
 // On error: only Error is present.
 type ControlResponse struct {
 	Targets         []weaver.TargetSummary `json:"targets,omitempty"`
@@ -65,6 +68,7 @@ type ControlResponse struct {
 	Revoke          *RevokeResult          `json:"revoke,omitempty"`
 	ResetConfidence *ResetConfidenceResult `json:"resetConfidence,omitempty"`
 	ResetBudget     *ResetBudgetResult     `json:"resetBudget,omitempty"`
+	ReplayTarget    *ReplayTargetResult    `json:"replayTarget,omitempty"`
 	Error           string                 `json:"error,omitempty"`
 }
 
@@ -117,8 +121,20 @@ type ResetConfidenceResult struct {
 	WindowsDeleted int `json:"windowsDeleted"`
 }
 
-// listOp and the disable/enable/revoke/resetConfidence per-target ops
-// registered as individual NATS Services endpoints.
+// ReplayTargetResult is the synchronous acknowledgement returned by the
+// "replayTarget" op. RowsQueued is how many rows the recreated lane-1 durable
+// had queued to deliver when the verb returned — the size of the burst the
+// operator just ordered. The recreate does not wait for the pump to re-open, so
+// this is normally the whole replay set; it is a lower bound rather than a
+// promise, because a pump that reopened before the count was read will have
+// drained some of it. A count the engine could not read reports 0; neither case
+// is an error, and neither means the replay did not happen.
+type ReplayTargetResult struct {
+	RowsQueued int `json:"rowsQueued"`
+}
+
+// listOp and the disable/enable/revoke/resetConfidence/resetBudget/
+// replayTarget per-target ops registered as individual NATS Services endpoints.
 const (
 	opList            = "list"
 	opDisable         = "disable"
@@ -126,6 +142,7 @@ const (
 	opRevoke          = "revoke"
 	opResetConfidence = "resetConfidence"
 	opResetBudget     = "resetBudget"
+	opReplayTarget    = "replayTarget"
 )
 
 // targetOps enumerates the per-target (wildcard-subject) ops registered
@@ -135,7 +152,7 @@ const (
 // service serves — nothing is registered outside them, so a reader (or a
 // lockstep test) that ranges the same two vars sees exactly what NATS routes.
 var (
-	targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence, opResetBudget}
+	targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence, opResetBudget, opReplayTarget}
 	exactOps  = []string{opList}
 )
 
@@ -192,10 +209,10 @@ func (s *Service) resolveActor(ctx context.Context, req micro.Request) (string, 
 }
 
 // StartNATSListener registers the Weaver control plane as a NATS
-// micro-service named "weaver-control". Four endpoints are added: "list" on
-// the exact subject subjectPrefix+".list", and "disable"/"enable"/"revoke"
-// on the wildcard subjectPrefix+".*.<op>" so a single handler instance
-// serves every target ID without prior knowledge.
+// micro-service named "weaver-control". One endpoint is added per op: the
+// exactOps on subjectPrefix+".<op>", and the targetOps on the wildcard
+// subjectPrefix+".*.<op>" so a single handler instance serves every target ID
+// without prior knowledge.
 //
 // All endpoints share the default queue group ("q") so multiple Weaver
 // instances distribute load. The service framework auto-registers the
@@ -292,8 +309,9 @@ func (s *Service) exactEndpoint(op string, req micro.Request) {
 }
 
 // dispatchEndpoint is the entry point for the disable/enable/revoke/
-// resetConfidence/resetBudget endpoints. It extracts the target ID from the subject, authorizes the
-// operation, dispatches by op, and writes the JSON response.
+// resetConfidence/resetBudget/replayTarget endpoints. It extracts the target ID
+// from the subject, authorizes the operation, dispatches by op, and writes the
+// JSON response.
 func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	subject := req.Subject()
 	targetID, ok := targetIDFromSubject(subject)
@@ -355,6 +373,14 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 		}
 		s.respondMicro(req, ControlResponse{
 			ResetBudget: &ResetBudgetResult{PreviousCount: previous}})
+	case opReplayTarget:
+		queued, err := s.engine.ReplayTarget(ctx, targetID)
+		if err != nil {
+			s.respondMicro(req, ControlResponse{Error: err.Error()})
+			return
+		}
+		s.respondMicro(req, ControlResponse{
+			ReplayTarget: &ReplayTargetResult{RowsQueued: queued}})
 	default:
 		// Unreachable — targetOps gates the endpoint registration.
 		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})
@@ -386,8 +412,8 @@ func ListSubject() string {
 }
 
 // TargetSubject returns the canonical request subject for the given target
-// ID + op (disable/enable/revoke/resetConfidence/resetBudget). Exposed for
-// tests and tooling.
+// ID + op (disable/enable/revoke/resetConfidence/resetBudget/replayTarget).
+// Exposed for tests and tooling.
 func TargetSubject(targetID, op string) string {
 	return subjectPrefix + "." + targetID + "." + op
 }
