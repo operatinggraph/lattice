@@ -1,33 +1,52 @@
-# NFR-S6 — delete the masking machinery and equalize the work instead
+# NFR-S6 — remove the timing difference where it is made, and delete what then has no reason to exist
 
-> **📐 awaiting-Andrew (ratification)** — *Winston (Designer fire, 2026-08-27; rewritten the same day
-> after Andrew rejected the draft's direction).*
+> **📐 awaiting-Andrew (ratification)** — *Winston (Designer fire, 2026-08-27. Third framing: the
+> payload-cap draft was rejected by Andrew in favour of deletion; an adversarial grounding pass then
+> falsified two load-bearing claims in the deletion draft. This version is what survives both.)*
 >
-> **What it does, in two lines.** `ClaimIdentity` / `CompleteCredentialLink` rejections take
-> measurably different times depending on *why* they failed, which is an identity-existence oracle.
-> Today that is **masked**: 277 lines of engine code hold every rejection and release it on a 50 ms
-> lattice. This design **deletes that machinery** and removes the timing difference at its source
-> instead — where it actually lives, which is mostly the package's own script.
+> **Read this first — the headline changed, downward.** The previous version promised "delete 277
+> lines, no new mechanism." That is **not available**, and the reason is worth more than the promise
+> was:
 >
-> **Net effect: −277 lines of engine code, −1 hardcoded op-name map, −3 metrics, −1 goroutine-per-reply
-> deferral, −1 shutdown drain, −50 ms of latency on every claim rejection. No new mechanism anywhere.**
-> The payload cap the first draft recommended, and the fork it put to you, both **dissolve** — with no
-> deferral window there is nothing for a caller to price.
+> - **The file splits, it does not delete.** Four identifiers in `claim_reply_floor.go` are
+>   *wire-shape*, not timing — `nfrS6Operations`, `isNFRS6Operation`, `claimRejectionMessage`,
+>   `claimOutcomeInternalFault` — and they have surviving consumers, including one outside the reply
+>   path entirely (`step4_hydrate.go:227`). **~190 of the 277 lines are deletable; the op-name map is
+>   not.** Andrew's "de-hardcode" ask is not reachable by this route either, and §5 F says why that
+>   is correct rather than a shortfall.
+> - **One of the two engine gaps is not equalizable.** Absent-vs-claimed (~0.27 ms) is rooted in the
+>   substrate: a `multi_last` response carries one message per **matched** subject, so an absent
+>   target means four fewer messages, parses and decrypt entries. Equalizing it would need the engine
+>   to fabricate a synthetic snapshot per operation — *more* per-operation coupling than the one-line
+>   predicate the deletion was meant to remove.
 >
-> **One decision is yours, and it is a data-sensitivity judgement** (§4.2): `.claimKey` is declared
-> `Sensitive: true`, so it is encrypted at rest and its hydration costs a **Vault NATS round-trip** —
-> except for an already-claimed identity, whose tombstoned `.claimKey` takes `decryptSensitiveDoc`'s
-> `IsDeleted` arm and **skips the RPC entirely**. That skipped round-trip is almost certainly the
-> dominant term in the measured 0.27–0.70 ms spread. It is not fixable in the script and it must not be
-> fixed by decrypting a tombstone (`sensitive_decrypt.go:158-171` forbids that deliberately). The clean
-> removal is to **stop declaring `.claimKey` sensitive**: it stores the sha256 of 256 bits of
-> `crypto/rand` (`cmd/lattice/identity/identity.go:27-35`), which is not a secret encryption-at-rest
-> protects. **My recommendation: drop the flag.** The counter-argument is real and it is why this is
-> yours: nothing validates a *client's* secret entropy, so a client that hashes a weak PIN would lose
-> defence-in-depth against an attacker who already reads Core KV.
+> **What survived, and it is the better half.** The dominant gap is claimed-vs-wrong-key (~0.36 ms),
+> and it **is** cleanly equalizable in the engine with no synthetic anything — see §4.2, and note it
+> **withdraws the data-sensitivity decision the last version put to you.** You do not need to
+> declassify `.claimKey`.
 >
-> **If you keep the flag**, the residue survives and some masking with it — §7 says exactly how much
-> and what the fallback is. The script equalization (§4.1) and most of the deletion still land.
+> **So the shape is: remove the difference where it is made, measure what is left, and delete the
+> masking only if the remainder is below the noise floor.** That is a conditional deletion gated on
+> §7's measurement, not a promised one. Three moves:
+>
+> | | Move | Layer | Removes |
+> |---|---|---|---|
+> | 1 | Decrypt-and-discard on `decryptSensitiveDoc`'s `IsDeleted` arm | engine, ~10 lines | the ~0.36 ms dominant gap |
+> | 2 | Equalize the script's 18 + 15 early returns | package, existing builtins | the script-half gaps |
+> | 3 | Delete the release quantum (~190 lines) **iff** §7 says the residue is unmeasurable | engine, subtractive | 50 ms/rejection, 3 metrics, a goroutine-per-reply |
+>
+> **The decision for Andrew is now a risk judgement, not a data one** (§8): move 3 trades an
+> *enforced* engine `if` for an *unenforceable* per-package authoring obligation. Nothing stops the
+> next author of a secret-bearing op from writing an early return, and no lint can reasonably check
+> Starlark control flow for timing equality. **My recommendation: do moves 1 and 2 now, run §7, and
+> treat move 3 as a separate decision made against real numbers** — moves 1 and 2 are strict
+> improvements whether or not the quantum ever goes.
+>
+> **Also newly known and unpriced anywhere:** `CompleteCredentialLink` has **never been measured**,
+> and its profile is worse than `ClaimIdentity`'s — its descriptor declares a second sensitive aspect,
+> so a claimed target pays **two** `readPiiKeyEnvelope` round trips where an unclaimed one pays zero
+> (§6.1). And there is a **fourth** timing class nobody has counted: a shredded-key envelope makes
+> `decryptSensitiveDoc` error mid-way, target-state-dependently, escaping as `InternalError` (§6.2).
 
 **Board row:** `[Processor] The NFR-S6 tail` — ★★, M.
 **Andrew, 2026-08-25:** *"de-hardcode by SIMPLIFYING — net reduction in lines, no new machinery."*
@@ -70,10 +89,17 @@ strictly less work than the next.
 | # | Divergence | Where | Size |
 |---|---|---|---|
 | R1 | Hydrate response bodies — absent keys return nothing, present keys return documents | `step4_hydrate.go`'s batched `KVGetMulti` | Small. The **same three keys** are requested every time: the descriptor declares exactly `{payload.targetIdentityKey}`, `.state`, `.claimKey` as `OptionalReads` (`packages/identity-domain/opmetas.go:283-287`), and `c69aa4a4` closed the set. One request either way; only the response differs. |
-| R2 | **`decryptSensitiveDoc`'s `IsDeleted` arm skips `readPiiKeyEnvelope` + `Vault.Decrypt`** for an already-claimed identity's tombstoned `.claimKey` | `sensitive_decrypt.go:154-171` | **Dominant.** Vault is a NATS micro service (`internal/vault/service.go:208`), so this is a whole RPC round-trip — the right order of magnitude to *be* the measured 0.27–0.70 ms spread. |
+| R2 | **`decryptSensitiveDoc`'s `IsDeleted` arm** skips `ciphertextFromData`, `vault.KeyHolder`, **`readPiiKeyEnvelope`**, `Decrypt`, the unmarshal and `markPlaintext`, for an already-claimed identity's tombstoned `.claimKey` | `sensitive_decrypt.go:154-171`, `:255-271` | **Dominant (~0.36 ms).** **Correction to the previous version: `Vault.Decrypt` is NOT the cost.** The Processor runs the in-process `*vault.LocalBackend` (`cmd/processor/main.go:395-412`); `vault.NewService` only *hosts* the RPC for other components, so a decrypt is a cached-DEK AES-GCM open — microseconds. The network hop is **`readPiiKeyEnvelope`'s `conn.KVGet`** (`sensitive_decrypt.go:307-308`). |
 
 R2 is the one that matters and it is **not** fixable in the script: the script never sees it, because
-it happens during hydration before the script runs.
+it happens during hydration before the script runs. **R1 is not fixable anywhere** — see §6.3.
+
+A free reduction rides along with R2's fix: `readPiiKeyEnvelope` re-reads `<target>.piiKey` live even
+though the package's `derive_reads` already put that key in the step-4 snapshot
+(`packages/identity-domain/ddls.go:1052`). The function's own doc calls it *"internal Processor
+bookkeeping — never declared in a script's contextHint.reads"*, which is true of the *script's*
+declaration and not of the snapshot's contents. Serving it from the snapshot removes the round trip
+from **both** arms rather than adding it to one.
 
 ---
 
@@ -100,7 +126,7 @@ it happens during hydration before the script runs.
 
 ---
 
-## 4. The shape — three moves, all subtractive or package-side
+## 4. The shape — three moves; the third is conditional
 
 ### 4.1 Equalize the script (package work, no new primitive)
 
@@ -120,28 +146,34 @@ it is where the difference is made, so it is where it should be removed.
 
 **What it does not fix:** R1 and R2, which happen before the script runs.
 
-### 4.2 Remove `Sensitive: true` from `.claimKey` — the decision for Andrew
+### 4.2 Equalize R2 in the engine — decrypt and discard
 
-R2 is the dominant term and there are only three ways to remove it:
+**The previous version recommended declassifying `.claimKey`. That is withdrawn — it is unnecessary.**
 
-| | | |
-|---|---|---|
-| **(a) Decrypt the tombstone anyway** | **Refused.** `sensitive_decrypt.go:158-171` forbids it in terms, and its reason is sound: the tombstone retains the body, so the flag is the only thing between a dead aspect and a live decrypt. Bending it to fix a timing channel would trade a real confidentiality rule for a statistical one. | ✗ |
-| **(b) Stop tombstoning `.claimKey` on claim; overwrite the hash with a random value** | **Refused, same reason at one remove.** It keeps a claimed identity's claim aspect live and decryptable forever. Junk content does not make that posture better. | ✗ |
-| **(c) Stop declaring `.claimKey` sensitive** | The aspect holds the **sha256 of 32 bytes of `crypto/rand`** (ledger row 10). Encryption-at-rest of that hash protects against nothing an attacker who already reads Core KV can do — the preimage is not recoverable. Drop the flag and `decryptSensitiveDoc` never runs for it: **both arms disappear, and with them the divergence.** | ✓ **recommended** |
+The tombstone **retains the real ciphertext**: `sensitive_decrypt.go:158-172` scrubs `doc.Data` to
+`{}` *after* the fact, and the rule it enforces is that a dead aspect must never **yield plaintext**,
+not that it must never be decrypted. So the `IsDeleted` arm can perform the full decrypt and
+**discard the result**, still scrubbing `Data` before the document is handed on. Nothing synthetic is
+required, no data-sensitivity trade is required, and the confidentiality rule is honoured exactly as
+written — what the caller receives is byte-identical to today.
 
-**The counter-argument, stated because it is why this is yours and not mine.** The contract validates
-the hash's *shape* — "lowercase hex `sha256`, validated for shape on create" (§9.4) — never its
-preimage entropy. The CLI mints 256 bits; a different client could submit the hash of a four-digit
-PIN, and for that client encryption-at-rest is real defence-in-depth against an attacker with Core-KV
-read. So (c) trades a defence that only matters for a weak-secret client against the deletion of the
-entire masking mechanism. **I recommend taking the trade** — the weak-secret client is already
-catastrophically exposed by the oracle this design closes, and by brute-forcing the claim endpoint
-directly — but it is a data-sensitivity call at your altitude, not a mechanism call at mine.
+Two obligations that ship with it, because "decrypt then throw away" is the kind of code a later
+reader deletes as pointless:
 
-### 4.3 Delete the machinery
+- the discard is **stated in the code** as a timing-equalization requirement with a pointer to this
+  design, not left as an unexplained call;
+- a test asserts the plaintext never reaches `doc.Data`, `markPlaintext`, or an egress ref on the
+  tombstoned path — i.e. that equalizing the *time* did not widen the *reach*.
 
-With §4.1 and §4.2 in place there is nothing left to mask:
+Combined with the snapshot read above, R2 goes to zero and the engine's dominant gap is closed with
+roughly ten lines and no new concept.
+
+### 4.3 Delete the release quantum — conditionally, and it is a split not a delete
+
+With §4.1 and §4.2 in place the *known* gaps are closed. **R1 is not**, so whether the quantum can go
+is §7's measurement to answer, not this section's. What follows is the inventory for the case where
+it can. Note the file **splits**: ~190 of its 277 lines are timing machinery; the rest is wire-shape
+that survives (§6.4).
 
 - **`internal/processor/claim_reply_floor.go`** — the whole file, 277 lines: `claimReplyFloor`,
   `releaseAt`, `publishNoEarlierThan`, `Drain`, `DefaultClaimRejectionFloor`,
@@ -152,8 +184,13 @@ With §4.1 and §4.2 in place there is nothing left to mask:
   heartbeat fields.
 - **`cmd/processor/main.go`** — the drain call and `claimReplyDrainBudget`.
 - **`internal/testutil/pipeline.go`** — the floor wiring.
-- **`nfrS6Operations`'s quantized-release half**, and the `receipt` stamp at `commit_path.go:222` if
-  nothing else reads it.
+- **the `receipt` stamp** at `commit_path.go:222` and its thread through three signatures and
+  fourteen call sites — it has no other consumer.
+
+**What does NOT go: `nfrS6Operations` and `isNFRS6Operation`.** They keep two consumers that have
+nothing to do with timing — the wire-shape collapse (`commit_path.go:1125`) and the closed
+declared-read set (`step4_hydrate.go:227`). The edit at the collapse is one call:
+`replyToNoEarlierThan(...)` → `replyTo(...)`. §6.4 and §6.5 carry the consequences.
 
 **What survives, and why.** The **wire-shape collapse** is a Contract #9 §9.3 promise and stays. Two
 of its three current supports are already universal, not membership-keyed: the script emits one code
@@ -197,7 +234,63 @@ cheapest possible oracle.
 
 ---
 
-## 6. Reconciliation with the existing mental model
+## 6. What the adversarial pass falsified, and what it added
+
+The previous version's two headline claims were wrong. Both corrections narrow the design, and both
+are recorded here rather than quietly folded, because the next reader will otherwise inherit the
+version I got wrong.
+
+### 6.1 `CompleteCredentialLink` has never been measured, and its profile is worse
+
+The n=3000 study covers `ClaimIdentity` only (`packages/identity-domain/claim_timing_probe_test.go`).
+`CompleteCredentialLink`'s descriptor declares a **second** sensitive aspect,
+`{target}.credentialBinding` (`opmetas.go:494-499`, `ddls.go:421-424`), and there is no envelope memo —
+only `ddlResolutionMemo` is shared — so a *claimed* target pays **two** `readPiiKeyEnvelope` round
+trips where an unclaimed one pays zero. Its cause profile is therefore different from the one that was
+measured, and the mechanism has been covering it on the strength of the *other* operation's numbers.
+§4.2's fix helps both, and §7 adds the missing arm.
+
+### 6.2 There is a fourth timing class, and equalizing three causes does not cover it
+
+A **shredded** key envelope makes `checkAndDeriveDEK` return `ErrKeyShredded` mid-decrypt
+(`internal/vault/local.go:399-401`), which escapes as a bare `fmt.Errorf` classified
+`ErrCodeInternalError` (`commit_path.go:1071`). It is **target-state-dependent and reachable** — an
+unclaimed identity whose key has been shredded has a live `.claimKey` ciphertext and a shredded
+`.piiKey`, a population the identity-domain DDL's own comment says exists (`ddls.go:713-718`). This is
+exactly the hole `claim_reply_floor.go:52-62` documents as the reason for keying on `operationType`
+rather than on the error code, and **no amount of equalizing the three known causes closes it.** §7
+adds a fixture; the wire-shape collapse is what contains it, which is one more reason that half stays.
+
+### 6.3 R1 is not equalizable, and trying would add coupling rather than remove it
+
+An absent target means four fewer messages come back from `multi_last`
+(`internal/substrate/kv_multi.go:338-360`), four fewer `parseVertexDoc` calls, three fewer
+`decryptSensitiveDoc` entries. To equalize, the engine would have to fabricate a fixed-size snapshot
+and a synthetic decrypt for keys that do not exist — which requires knowing, per operation, which
+declared keys *would* have been sensitive. **That is more per-operation coupling than the one-line
+predicate the deletion set out to remove**, and it argues Contract #9 §9.4's genericity invariant in
+the wrong direction. So R1 is measured (§7), not fixed.
+
+### 6.4 The file splits; the op-name map survives
+
+`nfrS6Operations`, `isNFRS6Operation`, `claimRejectionMessage` and `claimOutcomeInternalFault` are
+wire-shape, consumed at `commit_path.go:1032,1033,1125,1137` and `step4_hydrate.go:227`. They move to
+a wire-shape file; ~190 lines of timing machinery go. **Andrew's original "de-hardcode" ask is
+therefore not satisfied by this route** — and that is the right answer, not a shortfall: §5 F and §3.4
+show the collapse is a frozen Contract #9 §9.3 promise whose remaining engine-side support is the map.
+What the item *can* deliver is the map dropping from four consumers to two.
+
+### 6.5 The closed declared-read set loses its stated justification
+
+`refuseUndeclaredContextHint` (`step4_hydrate.go:227`, `descriptor_floor.go:419-509`) is justified
+*entirely* by the release quantum: an unbounded declared set lets a caller price the work inside the
+window (`descriptor_floor.go:429-437`). Delete the quantum and that reason evaporates — but the
+refusal must **not** be deleted with it, because it is also what stops a caller padding an *equalized*
+path back into inequality. **It needs an explicit re-derivation in the same increment**, not a
+deletion and not a silent survival on a dead rationale. This is the guard-justification-unreachable
+class, found in my own design by a reviewer rather than by me.
+
+## 7. Reconciliation with the existing mental model
 
 **"Didn't `624d445` decide this?"** It closed the oracle, correctly, with the tool available at the
 time. Its own §19.10 recorded that quantization *"removes the escape branch but not the boundary."*
@@ -217,7 +310,7 @@ The board row's payload half closes as *dissolved*, not as *fixed*.
 
 ---
 
-## 7. The measurement — the acceptance gate, and it can refute the design
+## 8. The measurement — the acceptance gate, and it can refute the design
 
 The harness already exists in the shape `624d445` used, and `Deps.ClaimRejectionFloor` accepts a
 **negative** value to disable the quantizer (ledger row 15) — which is exactly the posture needed.
@@ -228,19 +321,24 @@ The harness already exists in the shape `624d445` used, and `Deps.ClaimRejection
 |---|---|
 | **P0 — today, floor off** | Reproduces the baseline: monotone ordering, 0.27–0.70 ms spread. Confirms the harness still measures what it measured. |
 | **P1 — after §4.1 (script equalized), floor off, flag kept** | Isolates R1+R2. The remaining spread **is** the engine-side residue, measured rather than argued. |
-| **P2 — after §4.2 (flag dropped), floor off** | The acceptance test. **All three CIs must include zero**, as they did with the mask on. |
+| **P2 — after §4.2 (decrypt-and-discard + snapshot read), floor off** | The acceptance test for the deletion. R2 is closed, so what remains is **R1 alone**. All three CIs must include zero. |
+| **P3 — `CompleteCredentialLink`, all points** | The arm that has never been run (§6.1). Its two-sensitive-aspect profile means P2 clearing for `ClaimIdentity` says nothing about it. |
+| **P4 — the shredded-envelope fixture** | The fourth class (§6.2). Not equalizable and not expected to clear; measured so its magnitude is on the record rather than assumed. |
 
-**Acceptance:** P2 clears ⇒ delete the machinery (§4.3). **P2 fails ⇒ the design is refuted and the
-mask stays** — write up why, keep §4.1 (it is a strict improvement regardless), and the item closes as
-*"equalization insufficient, masking retained."* That outcome is stated in advance as a success.
+**Acceptance:** P2 **and** P3 clear ⇒ move 3 is available and the quantum can go (§4.3), with §6.5's
+re-derivation in the same increment. **Either fails ⇒ moves 1 and 2 still land and the quantum
+stays** — they are strict improvements regardless, and the item closes as *"equalization insufficient
+for R1; masking retained on a measured basis rather than an assumed one."* Stated in advance as a
+success: the current mechanism would then be justified by numbers instead of by the sentence in
+`releaseAt`'s doc that this fire proved false.
 
-**P1 is what decides Andrew's question with data rather than argument.** If P1 already clears, the
-sensitive flag never needs to move and §4.2 is moot — I would expect it not to, given R2 is an RPC,
-but the measurement outranks my expectation.
+**P1 is what isolates the two engine gaps.** The previous version claimed R2 was a Vault RPC and it is
+not (§2) — the hop is a KV read. The magnitude conclusion survives the correction, but the mechanism
+did not, which is why P1 measures rather than argues.
 
 ---
 
-## 8. Decomposition for the Steward
+## 9. Decomposition for the Steward
 
 **One increment, gated on the measurement.** Phase 0 runs P0 and P1. Then, per Andrew's answer on
 §4.2: run P2, and if it clears, land the script equalization, the flag removal, and the deletion
@@ -256,7 +354,7 @@ install (`DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`).
 
 ---
 
-## 9. Test strategy
+## 10. Test strategy
 
 | # | Proves | Shape |
 |---|---|---|
@@ -275,7 +373,7 @@ study used; an unloaded run passes vacuously.
 
 ---
 
-## 10. Contract surface
+## 11. Contract surface
 
 **No frozen-contract change.** Contract #9 §9.3 promises the wire-shape collapse, which survives
 untouched; it says nothing about timing, the quantum, or payload size (ledger row 16). §9.4's
@@ -287,7 +385,7 @@ the stored data, which is why §4.2 is a decision rather than an edit.
 
 ---
 
-## 11. Corrections this design records
+## 12. Corrections this design records
 
 1. **The first draft answered half of Andrew's row** — it argued membership cannot dissolve and never
    considered removing the code. The alternatives table had no "delete the component" row, which is a
@@ -299,10 +397,17 @@ the stored data, which is why §4.2 is a decision rather than an edit.
    answer un-collapsed today.
 5. **Two of the collapse's three supports are already universal** (ledger rows 11–12), so the
    membership map buys less than its doc implies even before this design.
+6. **`Vault.Decrypt` is in-process, not an RPC** — the previous version of this doc said otherwise and
+   built its recommendation on it. The network hop is `readPiiKeyEnvelope`'s `KVGet` (§2).
+7. **The declassification of `.claimKey` is withdrawn** — unnecessary once the tombstone's retained
+   ciphertext is used (§4.2). The data-sensitivity question put to Andrew in the previous version is
+   void.
+8. **The deletion is conditional, not promised** — R1 is not equalizable (§6.3), so §8's measurement
+   decides, and the file splits rather than deletes (§6.4).
 
 ---
 
-## 12. Executable censuses
+## 13. Executable censuses
 
 **C1 — the deletion inventory.**
 `grep -rln 'claimReplyFloor\|ClaimRejectionFloor\|publishNoEarlierThan\|replyToNoEarlierThan\|DrainClaimReplies\|ClaimFloor' --include='*.go' internal/ cmd/`
