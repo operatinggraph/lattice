@@ -16,6 +16,13 @@
 > verified in the pinned `nats-server` 2.14.0 source (§2 V3). Two adversarial passes ran against
 > the draft (§15); their findings are folded.
 >
+> - **Your second push-back, folded (§3.2):** decline classes now split on **where the fix can
+>   come from** — data errors (fix necessarily arrives as a re-projection, which V3 guarantees
+>   delivers) **Ack with a standing level issue**, the codebase's own argued posture; only the
+>   config-error classes (fix arrives via a registry/template change with *no* new delivery)
+>   ride the long Nak loop, which is the one place it is load-bearing. The substrate has no
+>   "acked-but-declined" state — the pending set is the only substrate-level owed-tracking, and
+>   an engine-side declined marker was priced and rejected in both designs.
 > - **The one decision (carried from the held design's §8, same recommendation):** making
 >   `GapWithoutPlaybook` / `PlaybookConfigError` standing converts a package-authoring typo into a
 >   **permanent, restart-surviving-in-effect `unhealthy`**. Recommendation: **demote both to
@@ -136,32 +143,52 @@ routes to `NakWithDelay(long)` and **not** to a `default:` Ack, at every switch.
 
 Why 5 minutes: the long floor is pure re-poll cadence — fix uptake rides it or beats it (§3.3),
 and what it prices is the `gapConfig:` re-raise bound (§3.5) and the steady-state cost of a stuck
-population (§7). Two honest edges: for a lens that keeps **re-projecting** a still-broken row,
+population (§7). **Retry count is deliberately indefinite** (V5's unbounded-MaxDeliver posture):
+a Nak'd row retries until the handler Acks, the message is superseded (V3), or the durable is
+deleted — the bounds are the floor's cadence, the `maxretries` budget on *dispatch* attempts, and
+fix-uptake ending the loop; a give-up cap would be the silent park §10.8 forbids, and the
+standing Health issue is the escalation while the loop runs. Two honest edges: for a lens that keeps **re-projecting** a still-broken row,
 the loop rides the projection rate, not the floor (V3 is the floor's escape hatch — bounded by a
 projection cost the platform already pays); and the floor is a *redelivery* floor, so the whole
 stuck set expires as a batch each period and is drained serially (V2, §7).
 
 ### 3.2 The decline-class table
 
-The per-row state table, outcome decided per row. "Long" = `NakWithLongDelay`.
-**Precedence: rows 1/4/5 dominate everything below them; row 6 applies only to a genuine bool
-`false` (V19's `isBool` distinguishes).** Scope: `handleRow`, `dispatchGap`, `planGap`,
-`escalateExhaustedGap`, `fireEpisode` — the full 21-site Ack census is C6 (§12); sites not listed
-here are success paths or anti-storm/CAS-lost drops, enumerated there.
+**The classifying rule (Andrew's push-back, folded): the class follows WHERE THE FIX CAN COME
+FROM.** The substrate offers no "acked-but-declined" state — Ack, Nak(+delay), Term, InProgress
+are the whole menu, and the pending set is the only substrate-level "owed" tracking — so the
+taxonomy is three-way:
+
+- **Transient** → `NakWithDelay` (5 s): the retry itself fixes it.
+- **Config error** → `NakWithLongDelay` (5 m): the fix arrives via a registry/target/template
+  change that produces **no new row delivery** — the Nak loop is the only automatic uptake path.
+  This is the only class the long floor exists for.
+- **Data error** → **Ack + a standing level `RowDataError` issue**: every fix necessarily
+  arrives as a **re-projection**, and V3 guarantees the fresh revision supersedes any pending
+  state eagerly — so a Nak here buys no retry value, only restart-surviving audibility, at a
+  pending-slot and per-cycle KV cost. This is also the codebase's own argued posture
+  (`temporal.go:154-156`, V19), and the same footing as exhausted rows: the standing issue IS
+  the invariant's *escalated* branch. Residual, named: the in-memory issue is lost at a Weaver
+  restart and not re-derived for a quiet row until re-projection or `ReplayTarget` — unchanged
+  from today.
+
+The per-row table, outcome decided per row. "Long" = `NakWithLongDelay`. Scope: `handleRow`,
+`dispatchGap`, `planGap`, `escalateExhaustedGap`, `fireEpisode` — the full 21-site Ack census is
+C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops, enumerated there.
 
 | # | Exit / class | Today | New | Why |
 |---|---|---|---|---|
 | 1 | Malformed row key (`:27`) | Ack | **Ack** | Not data — redelivery can never fix a key |
 | 2 | Target not registered (`:34`) | Ack | **Ack** (unchanged — §4.2) | The reachable cases are teardown/rename/rejected-target; a Long here holds pending forever for a target that will never register |
-| 3 | Body does not parse (`:43`) | Ack, log only | **Long + raise `RowDataError`** at `issueKeyDataEntity(target, entity, "body")`, **cleared on the next successful parse** of the same row (immediately after `json.Unmarshal` succeeds — nothing else can clear a synthetic column) | The row stays owed and audible; a re-projection supersedes via V3. Honest limit: this exit precedes the preamble bookkeeping, so an unparseable row feeds neither mark-reconcile nor the contraction count — stated, not hidden |
+| 3 | Body does not parse (`:43`) | Ack, log only | **Ack + raise `RowDataError`** at `issueKeyDataEntity(target, entity, "body")`, **cleared on the next successful parse** of the same row (immediately after `json.Unmarshal` succeeds — nothing else can clear a synthetic column) | Data error — only a re-projection can fix it, and it will deliver (V3). The delta over today is the standing audibility |
 | 4 | Tombstone (`:93`) | Ack | **Ack** | Correct — nothing owed |
-| 5 | Disabled target (`:115`) | Ack | **Ack** | §4.1. Dominates row 7: no data-error Nak for a disabled target's rows. On `Enable`, Resume redelivers the Nak'd-pending set on its own timestamps (V9); Acked residue is the verb's or re-projection's |
+| 5 | Disabled target (`:115`) | Ack | **Ack** | §4.1. On `Enable`, Resume redelivers the Nak'd-pending set on its own timestamps (V9); Acked residue is the verb's or re-projection's |
 | 6 | `violating` reads a genuine bool `false` (`:120`) | Ack | **Ack** | Nothing owed |
-| 7 | A data error that blocks an **enabled** row's evaluation — exactly three sites: non-bool `violating`; a violating row's missing `entityKey` echo (`:131`); a non-bool `missing_*` read in `openGapColumns` on a violating row | Ack | **Long** | The row's owed-ness is unknowable or its dispatch is blocked by row data; the issue re-raises level-driven; fix supersedes via V3. **Deliberately excluded** from the flag: `clearClosedMarks`' candidate scan (bookkeeping, §3.6), `scheduleFreshness`'s three raisers (their own anti-Nak reasoning stands, V19), and `intColumn` (advisory — the budget falls to a default; the dispatch is not blocked) |
-| 8 | `GapWithoutPlaybook` (`:231`) | error alert + Ack | **error alert + Long** | The row stays owed; the standing re-raise survives clear-races (§3.5), and a playbook fix is picked up **automatically within one floor** — the redelivery re-evaluates against the current registry target (§3.3) |
+| 7 | Row-data errors blocking evaluation — non-bool `violating`; a violating row's missing `entityKey` echo (`:131`); a non-bool `missing_*` read | Ack (issues already level-raised, V19) | **Ack — unchanged** | Data errors: every fix is a re-projection, which delivers (V3). The raises stay level-driven at their existing sites; `scheduleFreshness`'s and `intColumn`'s raisers keep their shipped posture for the same reason |
+| 8 | `GapWithoutPlaybook` (`:231`) | error alert + Ack | **error alert + Long** | Config error — a playbook fix produces **no new delivery**, so the loop is the only automatic uptake: picked up within one floor (§3.3). The standing re-raise also survives clear-races (§3.5) |
 | 9 | `UnresolvedReference` (`:579`) | paced warning + NakWithDelay | **unchanged** | Genuinely transient mid-convergence; the 5 s class is deliberate |
-| 10 | `TemplateDataError` (`:583`) | paced warning + **Ack** | **paced warning + Long** | A per-row data fault (template resolves null off a missing column) — the same class as row 7, and plausibly the clinic class itself; today it Acks once and is never revisited, which is this design's headline defect verbatim |
-| 11 | `PlaybookConfigError` (`:587`) | paced error + Ack | **paced error + Long** | Same class as row 8 |
+| 10 | `TemplateDataError` (`:583`) | paced warning + **Ack** | **paced warning + Long** | Sits on the boundary — the fault is template × row, and one of its fix paths (a template/playbook edit) produces **no new delivery** — so the fix-path rule puts it in the config class. Plausibly the clinic class itself; today it Acks once and is never revisited |
+| 11 | `PlaybookConfigError` (`:587`) | paced error + Ack | **paced error + Long** | Config error — same as row 8 |
 | 12 | Seq-0 metadata defer (`:273`) | NakWithDelay | **unchanged** | Metadata arrives on redelivery |
 | 13 | Suppressed in-flight (`inflight_<g>`) | skip | **unchanged** | The mark owns it; `reclaim` is the authority |
 | 14 | Exhausted → escalate (`:1344-1398`) | standing issue + Ack (V15) | **unchanged** | Escalated IS the invariant's third branch; no pending slot held |
@@ -258,10 +285,10 @@ After (a)+(b), `msg.NumDelivered` has no reader (C3 narrows to `msg.Sequence` on
 
 Per the direction, the per-entity clear stays at its site — **narrowed to a column read as an
 explicit bool `false`** (V19's `isBool`, threaded out of `boolColumn`): today the clear also fires
-for a *non-bool* value, and under row 7 that row redelivers every floor, which would have cleared
-the target-scoped latch every 5 minutes forever. With the narrowing, the flap is what the
-direction accepted: at most one clear per genuinely closing entity, re-raised within ≤ one long
-floor by a still-open row's next delivery.
+for a *non-bool* value — a read that is not evidence of closure — so a repeatedly re-projecting
+broken row would clear the target-scoped latch at its projection rate. With the narrowing, the
+flap is what the direction accepted: at most one clear per genuinely closing entity, re-raised
+within ≤ one long floor by a still-open row's next delivery.
 
 Re-raise conditionality, per code (the adversarial pass's enumeration):
 
@@ -273,14 +300,11 @@ Re-raise conditionality, per code (the adversarial pass's enumeration):
 `since` semantics (V14): `GapWithoutPlaybook` (via `alert`) re-mints `since` on a flap; the two
 paced codes keep their original onset across flaps because the pace memory survives `clear`.
 
-### 3.6 The data-error flag and the issue-cache bound
+### 3.6 The issue-cache bound
 
-Row 7's flag is set at **exactly the three named sites** (its exclusions are part of the row —
-V19's `scheduleFreshness` reasoning and `intColumn`'s advisory role are deliberate, cited
-decisions). Mechanically: `boolColumn` grows an `isBool`-reporting sibling used at the `violating`
-read, the `openGapColumns` reads on a violating row, and the §3.5 clear; the flag is a
-`handleRow`-local value threaded to the return — never engine state (deliveries run concurrently
-across targets).
+With data errors Acking (§3.2's rule), no per-delivery data-error flag exists — the only
+mechanical thread is `boolColumn`'s `isBool`-reporting sibling, used solely by the §3.5 clear
+narrowing.
 
 **The cache bound, re-scoped (V14):** the heartbeat *document* is already capped severity-first
 with an overflow entry (`boundIssues`, 50) — that machinery stays the sole document-level cap.
@@ -326,7 +350,6 @@ DeliverPolicy-at-first-create.
 
 | State | Scope | Created / reset / carried |
 |---|---|---|
-| The data-error flag (§3.6) | one delivery | created at delivery start, dies at the Decision; never carried |
 | The republish set (§3.4b) | process, in-memory, per (target, entity, col) | entry added on a `fire` publish failure; removed on that key's next successful publish and by `clearClosedMarks`' mark clear; **lost on restart → reclaim ladder is the backstop**; evicted with the target on unregister/revoke |
 | Nak'd-pending set + delay timestamps | JetStream consumer (server-side) | the substrate's own machinery — created by the Nak, freed by ack/Term (V1, V3), discarded whole by the verb's durable delete (§3.3); the V16 restart-strand is repaired by the verb or any fresh delivery; no engine mirror exists |
 
@@ -349,7 +372,8 @@ Re-derived, not inherited (V4, V17):
   starved class is **new entities** on a target already carrying ≥cap distinct simultaneously-stuck
   rows. The cap is deliberately modest: above ~1 024 pending the server's `checkPending` walks the
   whole map per timer fire and defers under ack load (`consumer.go:5916-5921`, `:5964-5973`).
-  2 000 is ~70× today's worst observed stuck population; C5 re-derives it if the corpus says
+  2 000 is ~70× today's worst observed stuck population — and with data errors Acking (§3.2),
+  the pending mass is the config-error classes only; C5 re-derives it if the corpus says
   otherwise. Honest limits, both stated: the >cap new-entity stall (signal: `num_ack_pending`
   pinned at the cap — Lamplighter surface), and the V2 head-of-line drain — each floor tick
   redelivers the stuck set as a batch through one serial worker, so new-row latency degrades by
@@ -362,7 +386,9 @@ Re-derived, not inherited (V4, V17):
 
 ## 7. Cost
 
-- **Steady state:** per stuck row per long floor, one `handleRow` **plus V13's preamble term** —
+- **Steady state:** the loop's population is the **config-error classes only** (rows 8/10/11 —
+  data errors Ack out per §3.2's rule). Per stuck row per long floor, one `handleRow` **plus
+  V13's preamble term** —
   `1 read + 2 unconditional KV writes` per **closed** (non-surface) candidate column, serialized
   on the target's worker. Formula: `O(stuck rows × closed candidate columns)` KV ops per floor.
   For the shipped corpus this is small (most targets declare 1–3 gaps); C5 measures `gaps per
@@ -516,10 +542,10 @@ republish set at strictly narrower scope. Rejected.
   iota pin test extended; mutation: revert any one case to `default` → red.
 - **T2 (Inc 3):** pinning — post-preamble message reads are `msg.Sequence` only; `redelivered`
   gone (C3).
-- **T3 (Inc 2):** per-class Decisions — one test per changed §3.2 row (3, 7 ×3 sites, 8, 10, 11),
-  mutation-checked at each site **and** at both aggregation switches; plus the precedence tests
-  (disabled target + non-bool column → Ack; genuine-false + non-bool sibling column → Ack) and
-  the row-3 clear-on-parse test.
+- **T3 (Inc 2):** per-class Decisions — one test per changed §3.2 row (3, 8, 10, 11),
+  mutation-checked at each site **and** at both aggregation switches; plus the fix-path-rule
+  boundary tests (a data-error row — non-bool column, missing echo — returns **Ack** with its
+  issue raised; a disabled target's rows return Ack regardless) and the row-3 raise/clear test.
 - **T4 (Inc 2, embedded NATS e2e — pins V1+V3+V7):** a declined row is Nak'd-pending; overwriting
   the key frees the slot (eager Term) and the fresh revision delivers and dispatches once fixed.
   Includes the **explicit `History: 1` assertion, Weaver-owned** — its reddening is the
@@ -556,8 +582,8 @@ pass; Inc 1 and Inc 4 standard.
 
 - **Inc 1 — substrate.** `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns
   T1. Weaver-inert until Inc 2.
-- **Inc 2 — decline classes.** §3.2's table + the `isBool` threading + the flag (§3.6) + the
-  row-3 clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
+- **Inc 2 — decline classes.** §3.2's table + the `isBool` threading + the
+  row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
   (if ratified) the §8 severity demotion. Owns T3, T4, T5, T8. Phase 0 runs C1/C2/C5 with C2's
   stop-rule.
 - **Inc 3 — dispatch-path restructure.** Early anti-storm ahead of `planGap`; retire
@@ -584,8 +610,9 @@ landed:
 - `TemplateDataError` (`:583`) was missing from the class table and is plausibly the clinic class
   → row 10; C2's stop-rule generalized.
 - Row 7 as first drafted Nak-looped rows owing nothing (non-bool sibling columns, disabled
-  targets) and contradicted `scheduleFreshness`'s own anti-Nak decision → the three-site flag +
-  precedence rules (§3.2, §3.6).
+  targets) and contradicted `scheduleFreshness`'s own anti-Nak decision → first a three-site
+  flag + precedence rules; then Andrew's fix-path rule (below) resolved it wholesale — data
+  errors Ack, so the flag and its precedence machinery deleted.
 - The draft's `AckWait: 2m` rationale was defeated by the pump's own prefetch-1 + `keepAckAlive`
   (V17) → withdrawn.
 - `MaxAckPending: 10000` ignored the server's >1024 `checkPending` scan behavior → 2 000 (§6).
@@ -598,6 +625,12 @@ landed:
 - Findings specific to the withdrawn automatic rebuilds (Enable-Reset ordering, update-Reset
   double-replay, boot-burst pricing, multi-replica rolling-deploy multiplication) are resolved by
   their removal; their content survives as the §11 Row 3 pricing.
+
+Andrew's second live push-back (same day) reshaped §3.2: the class taxonomy now keys on the fix
+path — data errors Ack with a standing issue (their fix necessarily arrives as a superseding
+re-projection), only config errors ride the long Nak loop — which also deleted the per-delivery
+data-error flag and its precedence machinery; and the indefinite-retry posture (unbounded
+MaxDeliver) is now stated explicitly with its bounds (§3.1).
 
 **Checkpoint:** design complete · adversarial pass run and folded · replay scope corrected by
 Andrew (2026-08-27) and folded · awaiting Andrew (§8 severity + the update-rebuild lever + ratification).
