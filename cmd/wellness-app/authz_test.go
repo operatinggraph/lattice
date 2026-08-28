@@ -177,8 +177,16 @@ func fakeGatewayActor(t *testing.T) string {
 		// names (internal/gateway/whoami.go forwards what rolesanchors
 		// resolves), so the fixture has to speak keys — a fixture saying
 		// "operator" would let a name comparison pass here and match nothing
-		// against a live Gateway.
-		roles := []string{"vtx.role.9vGfETkjxLSNuZzb9vGf"}
+		// against a live Gateway. Every subject carries frontOfHouse: the
+		// front-desk surfaces below (members/ledger/roster) gate on
+		// isFrontDesk (worksAt AND frontOfHouse, readauth.go — mirroring
+		// wellness-domain's own `GrantsTo: [operator, frontOfHouse]`), and
+		// isStaff's own workplace requirement already confines which
+		// subjects above isFrontDesk actually admits; a subject with no
+		// workplace holding this role too proves nothing extra either way.
+		// The worksAt-but-no-frontOfHouse case is its own dedicated test,
+		// TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk.
+		roles := []string{frontOfHouseRoleKey()}
 		if claims.Subject == rootSubj {
 			roles = append(roles, bootstrap.RoleOperatorKey)
 		}
@@ -587,6 +595,74 @@ func TestResolveSubjectHats(t *testing.T) {
 				t.Errorf("identityKey() = %q, want the caller's own vertex key", got.identityKey())
 			}
 		})
+	}
+}
+
+// TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk is the exact
+// shape verticals-designer-triage-2026-08-27.md §7 named: a `worksAt`
+// caller holding no `frontOfHouse` role — wellness-domain's write side has
+// always required `GrantsTo: [operator, frontOfHouse]`, so this caller
+// already held zero op grants — is staff (isStaff, a structural fact) but
+// NOT front-desk (isFrontDesk), the predicate the member directory, ledger,
+// and roster surfaces gate on. fakeGatewayActor grants frontOfHouse to
+// every subject unconditionally, so this negative case needs its own
+// minimal double.
+func TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk(t *testing.T) {
+	const id = "iiiiiiiiiiiiiiiiiiii"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + id,
+			"resolvedActorId": "vtx.identity." + id,
+			"roles":           []string{},
+			"anchors":         []appsession.ActorAnchor{{Relation: "worksAt", Key: staffWorkplace, Name: "Riverside Building"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	testutil.EnsurePrimordials(t)
+	t.Setenv(envPrefix+"_DEV_AUTH", "1")
+	signer, err := appsession.NewDevSigner(discardLogger(), envPrefix, true)
+	if err != nil {
+		t.Fatalf("NewDevSigner: %v", err)
+	}
+	authn, refreshAuthn, err := appsession.NewAuthenticators(discardLogger(), envPrefix, signer, nil)
+	if err != nil {
+		t.Fatalf("NewAuthenticators: %v", err)
+	}
+	session, err := appsession.New(appsession.Config{
+		AppName: appName, EnvPrefix: envPrefix, Logger: discardLogger(), GatewayURL: srv.URL,
+		Signer: signer, Authn: authn, RefreshAuthn: refreshAuthn, Loopback: true, LoginPage: []byte("<html>login</html>"),
+	})
+	if err != nil {
+		t.Fatalf("appsession.New: %v", err)
+	}
+	s := &server{logger: discardLogger(), session: session, natsTimeout: testTimeout, gatewayURL: srv.URL}
+	tok, exp, err := signer.Mint(id)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	r.AddCookie(&http.Cookie{Name: session.CookieName(), Value: tok, Expires: exp})
+	ran := false
+	s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ran = true
+		hats, err := s.resolveSubjectHats(req)
+		if err != nil {
+			t.Fatalf("resolveSubjectHats: %v", err)
+		}
+		if !hats.isStaff() {
+			t.Error("a worksAt anchor must still confer the (structural) staff hat")
+		}
+		if hats.isFrontDesk() {
+			t.Error("worksAt without frontOfHouse must not confer the front-desk hat")
+		}
+	})).ServeHTTP(httptest.NewRecorder(), r)
+	if !ran {
+		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
 	}
 }
 

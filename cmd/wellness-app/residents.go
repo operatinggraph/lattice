@@ -196,7 +196,7 @@ func (s *server) handleMembers(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
-	if !hats.isStaff() && !hats.isOperator {
+	if !hats.isFrontDesk() && !hats.isOperator {
 		s.writeError(w, http.StatusForbidden,
 			"the member directory is a staff surface for the place you work at")
 		return

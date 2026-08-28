@@ -38,7 +38,12 @@ const (
 // that resolveSubjectHats calls: it decodes the bearer's JWT subject
 // (unverified — a trusted test double, not a security boundary, standing in
 // for the Gateway which has already verified the token) and reports a
-// `worksAt` anchor at staffWorkplace for exactly the staff subjects named.
+// `worksAt` anchor at staffWorkplace for exactly the staff subjects named —
+// plus the `frontOfHouse` role each of them (fakeGatewayActorWorkplaces),
+// since every caller of this helper means "front-desk staff", the only kind
+// of worksAt-carrying identity this app's staff surfaces actually admit
+// (isFrontDesk, readauth.go). A worksAt-only, role-less caller is its own
+// case, `TestNonFrontOfHouseRole_IsNotExempt`.
 // Returns the fake server's base URL, to set as server.gatewayURL.
 func fakeGatewayActor(t *testing.T, staffSubjects map[string]bool) string {
 	t.Helper()
@@ -61,8 +66,23 @@ const nonOperatorRoleKey = "vtx.role.T4pQmZbNxKrWvL8dHcyR"
 // is what the real Gateway forwards (internal/gateway/whoami.go returns what
 // rolesanchors resolved) — a fixture answering "operator" would let a
 // name comparison pass here while matching nothing against a live Gateway.
+//
+// Every subject with at least one workplace ALSO gets the `frontOfHouse`
+// role: this app's staff surfaces gate on isFrontDesk (worksAt AND
+// frontOfHouse, readauth.go — mirroring the write side's own
+// `GrantsTo: [operator, frontOfHouse]`), so a worksAt-only fixture would
+// only ever exercise the 403 path every caller of this helper is instead
+// using to assert 200. A test wanting a worksAt-only, role-less caller
+// (there is exactly one: `TestNonFrontOfHouseRole_IsNotExempt`) calls
+// fakeGatewayActorRoles directly instead.
 func fakeGatewayActorWorkplaces(t *testing.T, workplaces map[string][]string, operators map[string]bool) string {
-	return fakeGatewayActorRoles(t, workplaces, operators, nil)
+	roles := map[string][]string{}
+	for subj, locs := range workplaces {
+		if len(locs) > 0 {
+			roles[subj] = []string{frontOfHouseRoleKey()}
+		}
+	}
+	return fakeGatewayActorRoles(t, workplaces, operators, roles)
 }
 
 // fakeGatewayActorRoles is the fullest form: workplace anchors, the operator

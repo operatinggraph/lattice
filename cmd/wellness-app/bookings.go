@@ -200,7 +200,7 @@ func (s *server) mayReadRoster(ctx context.Context, hats subjectHats, sessionKey
 	if hats.isOperator {
 		return true, nil
 	}
-	if !hats.isStaff() && hats.instructorKey == "" {
+	if !hats.isFrontDesk() && hats.instructorKey == "" {
 		return false, nil
 	}
 	bucket := wellnessdomain.WellnessSessionsBucket

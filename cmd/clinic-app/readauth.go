@@ -12,6 +12,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // The read boundary (D1.5, porting D1.3's loftspace-app pattern into a second
@@ -69,13 +70,33 @@ type subjectHats struct {
 	identityID string
 	workplaces []string
 	isOperator bool
+	// frontOfHouse marks the `frontOfHouse` role, the conjunct isFrontDesk
+	// composes with a workplace — see isFrontDesk's own comment.
+	frontOfHouse bool
 }
 
 // isStaff reports whether the caller carries any clinic workplace at all —
-// front-desk, not a patient looking up their own residency.
+// a structural fact, NOT an authorization answer; the front-desk roster
+// gates on isFrontDesk, below.
 func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
 
+// isFrontDesk reports whether the caller may use clinic-app's front-desk
+// surfaces — the app-side mirror of the write side's own definition
+// (clinic-domain/permissions.go's `GrantsTo: [operator, frontOfHouse]` and
+// service-location's `cap-read.staff` grant lens, both requiring `worksAt`
+// AND `holdsRole frontOfHouse`): a worksAt-only caller with no frontOfHouse
+// role holds neither an op grant nor a PII-read grant
+// (verticals-designer-triage-2026-08-27.md §7).
+func (h subjectHats) isFrontDesk() bool { return h.isStaff() && h.frontOfHouse }
+
 func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
+
+// frontOfHouseRoleKey is identity-domain's `frontOfHouse` role's VERTEX
+// KEY — a pure, install-independent derivation, mirroring cmd/cafe-app's
+// own frontOfHouseRoleKey.
+func frontOfHouseRoleKey() string {
+	return "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
+}
 
 // resolveSubjectHats authenticates the caller and asks the Gateway's own
 // external /v1/actor door which anchors and roles the session's token
@@ -106,6 +127,13 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		for _, role := range actor.Roles {
 			if strings.TrimSpace(role) == opKey {
 				hats.isOperator = true
+			}
+		}
+	}
+	if fohKey := frontOfHouseRoleKey(); strings.TrimSpace(fohKey) != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == fohKey {
+				hats.frontOfHouse = true
 			}
 		}
 	}

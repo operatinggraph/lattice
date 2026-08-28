@@ -251,7 +251,7 @@ func (s *server) handleRosterSessions(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
-	if !hats.isOperator && !hats.isStaff() && hats.instructorKey == "" {
+	if !hats.isOperator && !hats.isFrontDesk() && hats.instructorKey == "" {
 		s.writeError(w, http.StatusForbidden,
 			"the roster is a staff surface for the place you work at, or an instructor's own classes")
 		return

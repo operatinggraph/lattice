@@ -11,6 +11,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
@@ -33,6 +34,20 @@ const actorFetchTimeout = 10 * time.Second
 // compile-time constant — the same reason cafe-domain's `actor_holds_operator`
 // resolves the role from the graph rather than from a substituted literal.
 func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
+
+// frontOfHouseRoleKey is identity-domain's `frontOfHouse` role's VERTEX KEY —
+// a pure, install-independent derivation (unlike the operator key, which
+// needs a bootstrap read), so it can be a plain function rather than a value
+// threaded in from main. This is the SAME conjunct cafe-domain's own op
+// grants (`GrantsTo: [operator, frontOfHouse]`) and service-location's
+// `cap-read.staff` grant lens require — a `worksAt`-only caller with no
+// frontOfHouse role holds zero POS grants and resolves zero other
+// residents' names, so treating them as front-desk staff here would offer a
+// surface they cannot actually use (verticals-designer-triage-2026-08-27.md
+// §7).
+func frontOfHouseRoleKey() string {
+	return "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
+}
 
 // authenticateRead returns the bare identity the session middleware already
 // resolved from this request's verified cookie. Defense in depth: the
@@ -59,12 +74,31 @@ type subjectHats struct {
 	// cafe-domain's ddls.go), so the read side does too: break-glass admin
 	// that can settle a tab at any building must be able to see it.
 	isOperator bool
+	// frontOfHouse marks the `frontOfHouse` role, the conjunct isFrontDesk
+	// composes with a workplace. A `backOfHouse`-only or role-less worksAt
+	// caller leaves this false.
+	frontOfHouse bool
 }
 
-// isStaff reports whether the caller carries any workplace at all. It answers
-// "is this a staff surface" — NOT "may this staffer read this row", which is
-// covers()'s question. A staff surface still has to name which rows.
+// isStaff reports whether the caller carries any workplace at all — a
+// structural fact, "does this identity work here", NOT an authorization
+// answer. PII-adjacent front-desk surfaces (POS, roster, another lease's
+// ledger) gate on `isFrontDesk`, below. The Manage Menu grid still gates on
+// this directly (handleMenu) — that surface confines a workplace's own
+// (non-sensitive) catalog rather than refusing outright, so a worksAt-only
+// backOfHouse caller sees a workplace-scoped read, not the whole catalog,
+// and every write it could attempt still 403s at the op grant regardless.
 func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
+
+// isFrontDesk reports whether the caller may use the café's staff surfaces —
+// the app-side mirror of the write side's own definition (permissions.go's
+// `GrantsTo: [operator, frontOfHouse]` and service-location's `cap-read.staff`
+// grant lens, both requiring `worksAt` AND `holdsRole frontOfHouse`): a
+// worksAt-only caller holds neither a POS grant nor a PII-read grant, so
+// isStaff() alone let a role-less or backOfHouse-only worksAt caller into a
+// front-desk surface that could only ever show them unresolved names and
+// 403 every write (verticals-designer-triage-2026-08-27.md §7).
+func (h subjectHats) isFrontDesk() bool { return h.isStaff() && h.frontOfHouse }
 
 // covers reports whether any location the caller works at appears in a lease's
 // projected covering set — the read-side mirror of cafe-domain's
@@ -121,6 +155,13 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		for _, role := range actor.Roles {
 			if strings.TrimSpace(role) == opKey {
 				hats.isOperator = true
+			}
+		}
+	}
+	if fohKey := frontOfHouseRoleKey(); strings.TrimSpace(fohKey) != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == fohKey {
+				hats.frontOfHouse = true
 			}
 		}
 	}
@@ -217,7 +258,7 @@ func (s *server) visibleLeases(ctx context.Context, hats subjectHats) (leaseVisi
 	if err != nil {
 		return leaseVisibility{}, fmt.Errorf("resolve resident's own leases: %w", err)
 	}
-	if hats.isStaff() {
+	if hats.isFrontDesk() {
 		covered, err := s.staffCoveredLeases(ctx, hats)
 		if err != nil {
 			return leaseVisibility{}, err
@@ -230,13 +271,14 @@ func (s *server) visibleLeases(ctx context.Context, hats subjectHats) (leaseVisi
 }
 
 // notYourLease is the denial for naming a lease outside the caller's
-// visibility. A staffer and a resident are refused for different reasons, and
-// the message says which — "not yours" is misleading at the front desk, where
-// the lease genuinely is somebody's, just not at this staffer's building.
-// Neither message names the lease's actual location: that a lease exists
-// somewhere is already implied by asking for it, but where is not.
+// visibility. A front-desk staffer and a resident are refused for different
+// reasons, and the message says which — "not yours" is misleading at the
+// front desk, where the lease genuinely is somebody's, just not at this
+// staffer's building. Neither message names the lease's actual location:
+// that a lease exists somewhere is already implied by asking for it, but
+// where is not.
 func notYourLease(hats subjectHats) string {
-	if hats.isStaff() {
+	if hats.isFrontDesk() {
 		return "that lease is not at a place you work"
 	}
 	return "that lease is not yours"
@@ -264,7 +306,7 @@ type leaseWorkplaceProjection struct {
 // installed fails loudly instead of silently blanking every staff view.
 func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (map[string]bool, error) {
 	covered := map[string]bool{}
-	if !hats.isStaff() {
+	if !hats.isFrontDesk() {
 		return covered, nil
 	}
 	bucket := cafedomain.LeaseWorkplacesBucket

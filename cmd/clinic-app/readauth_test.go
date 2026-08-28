@@ -308,6 +308,13 @@ const staffWorkplace = "vtx.building.A9jnKK2bGwZNrfHHkLme"
 // standing in for the Gateway which has already verified the token) and
 // reports the named `worksAt` anchors and operator role per subject. Mirrors
 // cmd/cafe-app's and cmd/wellness-app's identical fixture.
+//
+// Every subject with at least one workplace ALSO gets the `frontOfHouse`
+// role: clinic-app's front-desk roster gates on isFrontDesk (worksAt AND
+// frontOfHouse, readauth.go — mirroring clinic-domain's own
+// `GrantsTo: [operator, frontOfHouse]`), so every current caller of this
+// helper means "front-desk staff". A worksAt-only, role-less caller is its
+// own case, TestRoleLessWorksAt_IsNotFrontDesk.
 func fakeGatewayActorWorkplaces(t *testing.T, workplaces map[string][]string, operators map[string]bool) string {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -325,6 +332,9 @@ func fakeGatewayActorWorkplaces(t *testing.T, workplaces map[string][]string, op
 		var roles []string
 		if operators[claims.Subject] {
 			roles = append(roles, bootstrap.RoleOperatorKey)
+		}
+		if len(workplaces[claims.Subject]) > 0 {
+			roles = append(roles, frontOfHouseRoleKey())
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -424,6 +434,50 @@ func TestResolveSubjectHats_KeylessWorksAtAnchorIsNotStaff(t *testing.T) {
 		}
 		if hats.isStaff() {
 			t.Error("a keyless worksAt anchor must not confer the staff hat")
+		}
+	})).ServeHTTP(rec, r)
+	if !ran {
+		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
+	}
+}
+
+// TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk is the exact
+// shape verticals-designer-triage-2026-08-27.md §7 named: a `worksAt`
+// caller holding no `frontOfHouse` role — clinic-domain's write side has
+// always required `GrantsTo: [operator, frontOfHouse]`, so this caller
+// already held zero op grants — is staff (isStaff, a structural fact) but
+// NOT front-desk (isFrontDesk), the predicate the roster gates on.
+func TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + id,
+			"resolvedActorId": "vtx.identity." + id,
+			"roles":           []string{},
+			"anchors":         []appsession.ActorAnchor{{Relation: "worksAt", Key: staffWorkplace, Name: "Clinic Building"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = srv.URL })
+	r := httptest.NewRequest(http.MethodGet, "/api/residents", nil)
+	r.AddCookie(cookieFor(id))
+	rec := httptest.NewRecorder()
+	ran := false
+	s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		hats, err := s.resolveSubjectHats(r)
+		if err != nil {
+			t.Fatalf("resolveSubjectHats: %v", err)
+		}
+		if !hats.isStaff() {
+			t.Error("a worksAt anchor must still confer the (structural) staff hat")
+		}
+		if hats.isFrontDesk() {
+			t.Error("worksAt without frontOfHouse must not confer the front-desk hat")
 		}
 	})).ServeHTTP(rec, r)
 	if !ran {
