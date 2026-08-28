@@ -289,12 +289,29 @@ After (a)+(b), `msg.NumDelivered` has no reader (C3 narrows to `msg.Sequence` on
 
 ### 3.5 The `gapConfig:` latch self-heals (symptom 2)
 
-Per the direction, the per-entity clear stays at its site — **narrowed to a column read as an
-explicit bool `false`** (V19's `isBool`, threaded out of `boolColumn`): today the clear also fires
-for a *non-bool* value — a read that is not evidence of closure — so a repeatedly re-projecting
-broken row would clear the target-scoped latch at its projection rate. With the narrowing, the
-flap is what the direction accepted: at most one clear per genuinely closing entity, re-raised
-within ≤ one long floor by a still-open row's next delivery.
+Per the direction, the per-entity clear stays at its site — **narrowed to a WELL-FORMED read**,
+threaded out of `boolColumn`: the clear also fires today for a *non-bool* value — a read that is
+not evidence of closure — so a repeatedly re-projecting broken row would clear the target-scoped
+latch at its projection rate. With the narrowing, the flap is what the direction accepted: at most
+one clear per genuinely closing entity, re-raised within ≤ one long floor by a still-open row's
+next delivery.
+
+**Amended 2026-08-28 at build time — the predicate is WELL-FORMED, not `isBool`.** This section
+first specified V19's `isBool`. That is wrong and must not be built: `boolColumn` returns `false`
+for three distinct reads, and `isBool` is false for two of them.
+
+| read | `isBool` | evidence the gap CLOSED? |
+|---|---|---|
+| column absent / nil (`evaluator.go:1088-1091`) | **false** | **yes** — `evaluator.go:867-869`: "a row that stopped reporting the column closed it" |
+| present, genuine `false` | true | yes |
+| present, **not a bool** | false | **no** — the only read the narrowing targets |
+
+An `isBool` gate would therefore stop clearing the latch for a column that **disappears from the
+projection**, and `evaluator.go:874-882` records that this site is the *only* clear a
+`GapWithoutPlaybook` / `UnresolvedReference` / `PlaybookConfigError` can reach when a column simply
+stops being reported — so the gate would strand those issues permanently, the dossier's
+"every RETIRE belongs above every cannot-act GUARD" failure. The shipped predicate is
+**well-formed = absent, nil, or a genuine bool**; only present-and-not-a-bool is refused.
 
 Re-raise conditionality, per code (the adversarial pass's enumeration):
 
@@ -309,8 +326,8 @@ paced codes keep their original onset across flaps because the pace memory survi
 ### 3.6 The issue-cache bound
 
 With data errors Acking (§3.2's rule), no per-delivery data-error flag exists — the only
-mechanical thread is `boolColumn`'s `isBool`-reporting sibling, used solely by the §3.5 clear
-narrowing.
+mechanical thread is `boolColumn`'s well-formedness return (§3.5 as amended), used solely by the
+§3.5 clear narrowing.
 
 **The cache bound, re-scoped (V14):** the heartbeat *document* is already capped severity-first
 with an overflow entry (`boundIssues`, 50) — that machinery stays the sole document-level cap.
@@ -587,7 +604,7 @@ pass; Inc 1 and Inc 4 standard.
 
 - **Inc 1 — substrate.** `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns
   T1. Weaver-inert until Inc 2.
-- **Inc 2 — decline classes.** §3.2's table + the `isBool` threading + the
+- **Inc 2 — decline classes.** §3.2's table + the well-formedness threading (§3.5 as amended) + the
   row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
   (if ratified) the §8 severity demotion. Owns T3, T4, T5, T8. Phase 0 runs C1/C2/C5 with C2's
   stop-rule.
@@ -717,7 +734,7 @@ empty (`REMOTE.md` §3). What this changes and what it does not:
 | `evaluator.go:580-583` | 10 | `TemplateDataError` `substrate.Ack` → **`NakWithLongDelay`** (severity stays `warning`) |
 | `evaluator.go:584-587` | 11 | `PlaybookConfigError` `"error"` → **`"warning"`** (§8) and `substrate.Ack` → **`NakWithLongDelay`** |
 | `evaluator.go:171-179`, `:182-188` | — | both aggregation switches gain an explicit `case substrate.NakWithLongDelay:`; accumulators at `:134-135` gain the third (`longDelayed`), precedence `Nak > NakWithDelay > NakWithLongDelay > Ack` |
-| `evaluator.go:1085-1102` | §3.5 | `boolColumn` threads `isBool` out to its caller |
+| `evaluator.go:1085-1102` | §3.5 | `boolColumn` threads WELL-FORMEDNESS out to its caller — not `isBool`; see §3.5's 2026-08-28 amendment |
 | `evaluator.go:883-884` | §3.5 | the `gapConfig:` clear fires **only** on an explicit bool `false` read |
 | `engine.go:414-425` | §6 | `targetSpec` gains `MaxAckPending: 2000` — **currently unset** (server default 1000, V4) |
 | `health.go:132`, `:147-164`, `:303-316` | §3.6 | per-target cap on the per-entity `data:`/`template:` issue families in the map itself, with one overflow counter entry per target maintained in place; `boundIssues` (`:616-637`) untouched |
