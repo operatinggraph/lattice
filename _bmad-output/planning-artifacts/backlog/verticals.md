@@ -74,7 +74,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-27 · `<pending>` · The two landlord views agree on "qualified" again — unit-applications now mirrors the RLS view's applicantApproved instead of folding in the decision.
+- 2026-08-27 · `2b0faf8f` · The two landlord views agree on "qualified" again — unit-applications now mirrors the RLS view's applicantApproved instead of folding in the decision.
 - 2026-08-27 · `cd41d53b` · A rival/tombstoned-unit applicant can no longer sign a stale grant — SignLease re-verifies unit availability at execution time. lease-signing 0.31.9
 - 2026-08-27 · `e233ce28` · `SetAppointmentStatus` can finally submit — schema widened + Dispatch.Reads declared for it + 9 more ops (clinic/service/wellness-domain). clinic-domain 0.34.8, service-domain 0.10.5, wellness-domain 0.22.8
 - 2026-08-27 · `2ce7da1d`+`d8988c1e` · Task liveness closed — `capabilityEphemeral` stops granting past completion, `staleAssignedTasks` mirrors unroutedTasks. orchestration-base 0.7.13
