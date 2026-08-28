@@ -1,5 +1,12 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-23 · `a6e8cec` · [Weaver] malformed-anchor RowDataError CLOSED — per-entity key, level-driven raise/clear, registry-removal teardown; 4 review findings fixed, placement move-mutation pinned
+- 2026-08-23 · `20264df` · [Tooling] ceremony 5s SLA CLOSED — 5 waits across 2 harnesses poll to a 3-min convergence ceiling, mirroring verify-erasure-ceremony
+- 2026-08-23 · `960bb01` · [Docs] root actor set named by its predicate — 21 comments said "kernel-seeded" for a `holdsRole → operator` population; contracts untouched
+- 2026-08-23 · `94daa9f` · [Process] batch review lessons routed — builder prompts ban the tree-wide git verbs; weaver teardown-route + pkgmgr one-fact-twice dossier entries
+- 2026-08-23 · `e63cff5` · [Refractor] capability-plane rebuild throughput CLOSED — "wedged" refuted (throughput-bound); the phantom audit firehose gated on a positive `Committed` signal at every write site; varlength-anchor successor filed
+- 2026-08-23 · `44d42a7` · [Processor/Tooling] derived-reads plane tail CLOSED — floor reaches derived reads (refuse, not demote), `state`/`ddl` fail closed, G2 covers `internal/`; 3 cold reviews, 47 mutations
+
 - 2026-08-22 · `dea6550` · [Pkgmgr] capability-apply removal refusal CLOSED — coverage guard + `ApplyCapabilityPlan` as the only entry point; 3 cold reviews rewrote the ratified predicate, guard order and §3.4; 16 mutants pinned
 - 2026-08-21 · `f28f832` · [Processor/Pkgmgr] §2.5 floor template-coverage CLOSED — `{me.*}` compiles to whole-segment patterns; install gate pins the vocabulary; review caught a submitter-steerable exclusion, fixed pre-ship
 - 2026-08-21 · `dd22e08c` · [Pkgmgr] uninstall secure-lens attestation CLOSED — operator-attested `UninstallOptions`, CLI/Loupe/UI; 4 cold reviews found 2 bypasses; guard-vs-oracle agreement test mechanizes the class
