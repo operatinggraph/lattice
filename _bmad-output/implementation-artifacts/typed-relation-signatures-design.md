@@ -505,6 +505,14 @@ terminus on `HopIndex` and a standing healer. **The two touch adjacent code and 
 changes which events are *delivered*; that one changes which anchors are *re-executed* once an event arrives.
 Neither's fix substitutes for the other's.
 
+> **AMENDED 2026-08-28 — "a varlength walk cannot be [stepped]" is falsified.** `HopIndex` no longer
+> rejects a variable-length relationship outright: the refusal was refuted by the executor's own
+> `traverseRel`, which walks exactly that hop with a clamp, and has been lifted — see
+> [varlength-anchor-derivation-design.md](varlength-anchor-derivation-design.md). A ranged hop is now
+> indexed, carrying a `[Min, Max]` range clamped to `maxVarLengthHops`, and the derivation walk expands
+> a bounded frontier. This section's conclusion is otherwise unaffected — a signature still does not
+> make a hop steppable; the walk's own clamp does.
+
 **"Does this introduce new state we already keep somewhere?"** The subtype graph already exists in Core KV and
 is already read by Refractor (`corekv_source.go:721`). §4.2 adds a **second reader** of the same links, in the
 opposite direction, in the component that has to enforce the rule — not a second copy of the truth.

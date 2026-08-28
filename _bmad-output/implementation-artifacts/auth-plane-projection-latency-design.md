@@ -1218,6 +1218,14 @@ derives; the caller falls back to the shipped BFS.
    ungrounded head is a bucket scan: every vertex of that type binds, and every anchor's row depends on all
    of them. That is precisely the case a "derived empty ⇒ skip" answer would get catastrophically wrong.
 
+> **AMENDED 2026-08-28 — conjunct 3 above is falsified.** The stated reason ("a back-chain crossing
+> [a variable-length hop] cannot be walked hop-by-hop") was refuted by the executor's own
+> `traverseRel` (`internal/refractor/ruleengine/full/rel_traverse.go`), which walks exactly that hop
+> with a clamp, and the refusal has been lifted — see
+> [varlength-anchor-derivation-design.md](varlength-anchor-derivation-design.md). The predicate now
+> **admits** a ranged hop, carrying a `[Min, Max]` range clamped to `maxVarLengthHops`. A lower bound
+> above one hop (`MinHops > 1`) is still refused — that half of conjunct 3 stands.
+
 Conjunct 5 is the one that is easy to miss and the only one that is unsound to omit — the other four
 degrade to a wider set, this one degrades to a *smaller* one. It is stated as **grounding rather than
 connectivity** because the review falsified the weaker form: a scan-seeded position with one optional or

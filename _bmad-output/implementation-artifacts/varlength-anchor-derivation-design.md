@@ -156,6 +156,16 @@ range through `StepsFrom`, and the reverse reading (`h.To == pos`) carries the s
 direction already flipped by `edgeDirFor` — a bounded reachability relation is symmetric, so *"nodes
 reaching Y in ≤k forward steps"* is exactly *"nodes reachable from Y in ≤k reverse steps."*
 
+> **Amended at build time, 2026-08-28.** A ranged hop whose **lower bound exceeds one hop** is refused
+> outright, and the limit is in the SEEDING rather than in the walk. `AnchorSideSeeds` seeds the two
+> endpoints of the changed link; on a ranged hop that link is an *intermediate* edge of the expansion, so
+> the nodes really bound at the From position are every node reaching it within `Max-1` steps. Those are
+> recovered only by the walk bouncing back across the hop, covering From-offsets `[1-Max, 1-Min]`, which
+> together with the direct seed at offset 0 covers the required `[1-Max, 0]` only while `Min <= 2`. A cold
+> reviewer's sweep over ranges, chain lengths and cut positions found **thirteen** graphs where a higher
+> lower bound returned `ok == true` having dropped an anchor. Every shipped ranged hop is `*0..`, `*1..` or
+> `*0..7`, so the refusal costs the corpus nothing; §6's payoff table is unaffected.
+
 **The open range keeps the executor's clamp, applied per hop, never globally.** `Max < 0` or
 `Max > maxVarLengthHops` clamps to `maxVarLengthHops`, matching `rel_traverse.go:14-16` exactly. This
 is the soundness argument and it must be stated precisely: **the derivation is complete with respect
@@ -191,6 +201,17 @@ instead of a single edge move. Standing on `cur.id` at `cur.pos`, for a step wit
    **per-path** `seen` set and enumerates paths; `walkToAnchors` carries a **global** `visited` keyed
    by `(pos, id)`. The derivation is therefore a **superset** in reachability, which is what the
    invariant needs (`anchor_derivation.go:9-13`). The design claims the superset, not equivalence.
+
+> **Amended at build time, 2026-08-28.** *"No new budget"* did not survive measurement, and the paragraph
+> below is kept only as the reasoning that led there. The read cap bounds **I/O, not work**: `edgesOf`
+> memoises, so a walk that re-enters the closure once per admitted node re-iterates cached edge lists at no
+> read cost at all. Measured by a cold reviewer: **4,092 expansions and 86,050 edge visits to derive one
+> anchor** on a 1,023-vertex containment tree — *twelve times* the cost of the BFS this replaces — and
+> seconds of CPU at 40% of the read cap, and above the cap the walk pays in full *and then* falls back. The
+> closure therefore carries a **work budget** (`DerivationRangedWorkFactor` × the read cap, so one operator
+> knob still moves the whole envelope) on exactly the read cap's terms: a breach raises the same sentinel,
+> so it can only ever cause MORE fallback, never a narrower answer. The "no truncation" half stands
+> unchanged and is what makes adding the budget safe.
 
 **No new budget.** Every read in the closure goes through `edgesOf`, so `DefaultDerivationReadCap`
 governs it and a breach returns `ok == false` ⇒ the BFS (ledger row 5). That is the correct failure
@@ -342,7 +363,9 @@ a later cypher edit cannot arm it silently.
 ### 7.1 The budget, and why no new one is added
 
 The ranged closure reads through `edgesOf`, so `DefaultDerivationReadCap = 2_000` bounds it and a
-breach is `ok == false` ⇒ BFS. The design adds **no** cap, no depth budget and no truncation. This
+breach is `ok == false` ⇒ BFS. The design adds no depth budget and **no truncation** — but it does add a
+**work budget** for the ranged closures, for the reason recorded at §4.2's amendment: the read cap governs
+documents read, and the closure's cost is edge entries iterated, which memoisation decouples from it. This
 matters because the corpus's expensive direction is real: `(work)<-[:containedIn*0..]-(place)` walks
 *down* a containment tree. On a deep or wide tree the read cap, not the pattern, decides fallback —
 and falling back is today's behaviour, so the worst case is "no better than now," never "wrong."
