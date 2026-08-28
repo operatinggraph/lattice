@@ -1,42 +1,43 @@
 # Weaver — substrate-native decline retry: Nak'd declines standing, replay as an operator verb
 
-> **📐 awaiting-Andrew (ratification).**
+> **✅ RATIFIED — Andrew, 2026-08-27.** Build-ready; the Lattice Steward builds §14's four
+> increments in order.
 >
-> **For Andrew.** The redesign you directed when holding the row sweep (2026-08-27), folded with
-> your **same-day correction** (*"I could consider a durable rebuild as a manual, Loupe solution
-> but not as the standing, new per-target durable on every boot. Or Resume."*): the **standing**
-> mechanism is the Nak loop alone — declined violating rows are Nak'd on a long redelivery floor
-> instead of Acked, so every decline class self-retries and picks up fixes automatically, with no
-> automatic durable rebuild anywhere. The **replay** — delete-then-create of one target's lane-1
-> durable so `DeliverLastPerSubject` re-delivers its current row set — exists only as a **manual
-> operator verb** (`ReplayTarget`, joining Disable/Enable/Revoke/ResetRetryBudget in `control.go`,
-> surfaced in Loupe), used to heal the pre-existing Acked-decline population once after this
-> ships, and as the recovery for the two strands the loop cannot reach (§3.3). `Enable` stays
-> plain Resume. Phase 0's keystone (Nak'd pending state vs. per-subject compaction) **cooperates**,
-> verified in the pinned `nats-server` 2.14.0 source (§2 V3). Two adversarial passes ran against
-> the draft (§15); their findings are folded.
+> **What was ratified.** The **standing** mechanism is the Nak loop alone — a declined violating
+> row of a **config-error** class is Nak'd on a long (5 m) redelivery floor instead of Acked, so
+> it re-evaluates against current config until fixed; **data-error** classes Ack with a standing
+> level Health issue, because their fix necessarily arrives as a re-projection that supersedes
+> any pending state anyway (§3.2's fix-path rule). There is **no automatic durable rebuild
+> anywhere**: the replay — delete-then-create of one target's lane-1 durable so
+> `DeliverLastPerSubject` re-delivers its current row set — exists only as the **manual
+> `ReplayTarget` operator verb** (joining Disable/Enable/Revoke/ResetRetryBudget in `control.go`,
+> surfaced in Loupe), used once after ship to heal the pre-existing Acked-decline population and
+> thereafter as operator repair. `Enable` stays plain Resume. The `NumDelivered` re-fire branch
+> retires, with its one legitimate job preserved by the republish set (§3.4).
 >
-> - **Your second push-back, folded (§3.2):** decline classes now split on **where the fix can
->   come from** — data errors (fix necessarily arrives as a re-projection, which V3 guarantees
->   delivers) **Ack with a standing level issue**, the codebase's own argued posture; only the
->   config-error classes (fix arrives via a registry/template change with *no* new delivery)
->   ride the long Nak loop, which is the one place it is load-bearing. The substrate has no
->   "acked-but-declined" state — the pending set is the only substrate-level owed-tracking, and
->   an engine-side declined marker was priced and rejected in both designs.
-> - **The one decision (carried from the held design's §8, same recommendation):** making
->   `GapWithoutPlaybook` / `PlaybookConfigError` standing converts a package-authoring typo into a
->   **permanent, restart-surviving-in-effect `unhealthy`**. Recommendation: **demote both to
->   `warning`** at their raise sites (§8).
-> - **One lever you may want back:** I dropped ALL automatic rebuild triggers under your
->   correction — including the target-**update** rebuild (a package fixing its playbook). The Nak
->   loop covers fix-uptake for every *declined* row automatically (§3.3), so what the update
->   rebuild would add is only the pre-design Acked residue — small, and the verb covers it. If you
->   meant update-triggered rebuild to survive as automatic, say so at ratification; it is one
->   bounded event, not a standing per-boot churn.
-> - **No architectural fork otherwise; no frozen-contract change** — Contract #10 §10.8's liveness
->   bullet already promises what this implements (§10).
-> - **One deviation from the hold-direction's letter besides the correction**, argued in §4: the
->   unregistered-target exit stays Ack.
+> **The two open questions, resolved by this ratification** (no separate answer was given; the
+> design's own recommendation stands in each case — flagged here so the builder is not guessing):
+>
+> 1. **§8 severity — demote.** `GapWithoutPlaybook` and `PlaybookConfigError` become `warning` at
+>    their raise sites, so a package-authoring typo degrades Weaver rather than pinning it
+>    `unhealthy`. Ships in Inc 2.
+> 2. **The update-rebuild lever — stays dropped.** No target-update-triggered rebuild; the Nak
+>    loop's automatic fix-uptake plus the verb cover it.
+>
+> **Provenance.** Directed by Andrew at the row-sweep hold (2026-08-27), corrected the same day on
+> replay scope (*"a manual, Loupe solution but not as the standing, new per-target durable on
+> every boot"*), and again on decline taxonomy (data vs. transient/config) and the `Term`
+> alternative — both folded into §3.2. Phase 0's keystone (Nak'd pending state vs. per-subject
+> compaction) is verified in the pinned `nats-server` 2.14.0 source (§2 V3). Two adversarial
+> passes ran and are folded (§15). No architectural fork; **no frozen-contract change** —
+> Contract #10 §10.8's liveness bullet already promises what this implements (§10). One deviation
+> from the hold-direction's letter besides the correction, argued in §4: the unregistered-target
+> exit stays Ack.
+>
+> **Build gate:** Inc 2's Phase 0 runs censuses C1/C2/C5 (§12) and **stops** if C2's stranded
+> class lands in a row §3.2 leaves at Ack. **Revive trigger for the shelved
+> [row-sweep fallback](weaver-sweep-declared-work-enumeration-design.md):** §2 V7's KV
+> history-1 pin failing (T4 is its gate).
 
 **Author:** Winston (Designer fire, 2026-08-27; replay scope corrected by Andrew live, same day).
 **Size: M.**
@@ -414,20 +415,19 @@ Re-derived, not inherited (V4, V17):
 
 ---
 
-## 8. The one decision for Andrew — severity (carried from the held §8)
+## 8. Severity — RATIFIED: demote both to `warning`
 
 §3.2 rows 8/11 make `GapWithoutPlaybook` and `PlaybookConfigError` standing (the Nak loop
-re-raises for as long as the fact holds). Both are `error`-severity, and `aggregateStatus` maps
-any `error` to `unhealthy` over the full issue set (`health.go:734-748`). A package-authoring typo
-would pin Weaver `unhealthy` until the package is fixed — while it dispatches normally for every
-other target. Contract #5 §5.2 defines `unhealthy` as *"cannot fulfil its primary
-responsibility"*, and the codebase draws the line itself for a sibling per-row fault at
-`evaluator.go:122-128` (*"a warning (degraded), never an error"*).
+re-raises for as long as the fact holds). Both are `error`-severity today, and `aggregateStatus`
+maps any `error` to `unhealthy` over the full issue set (`health.go:734-748`) — so a
+package-authoring typo would pin Weaver `unhealthy` until the package is fixed, while it
+dispatches normally for every other target. Contract #5 §5.2 defines `unhealthy` as *"cannot
+fulfil its primary responsibility"*, and the codebase draws the line itself for a sibling per-row
+fault at `evaluator.go:122-128` (*"a warning (degraded), never an error"*).
 
-**Recommendation: demote both codes to `warning` at their raise sites** — one severity for all
-callers, reaching lane 1 as well. The alternative — keep `error` and accept the pin — is
-defensible only if `unhealthy` is meant that strictly; it destroys any alert wired to
-`status != healthy`.
+**Decision (Andrew, 2026-08-27): both codes are demoted to `warning` at their raise sites** — one
+severity for all callers, so the change reaches lane 1 as well as the decline loop. Ships in
+Inc 2, with the raise-site change and its lane-1 effect covered by T3.
 
 ---
 
@@ -638,4 +638,6 @@ data-error flag and its precedence machinery; and the indefinite-retry posture (
 MaxDeliver) is now stated explicitly with its bounds (§3.1).
 
 **Checkpoint:** design complete · adversarial pass run and folded · replay scope corrected by
-Andrew (2026-08-27) and folded · awaiting Andrew (§8 severity + the update-rebuild lever + ratification).
+Andrew (2026-08-27) and folded · decline taxonomy corrected and folded · **✅ RATIFIED (Andrew,
+2026-08-27) — build-ready**; §8 demote and the dropped update-rebuild lever are settled in the
+banner.

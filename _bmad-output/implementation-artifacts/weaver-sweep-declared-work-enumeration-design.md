@@ -14,11 +14,14 @@
 > the retry engine.** No new durable, no cursor/cycle/budget state, no walk; steady-state cost is
 > O(stuck rows) instead of the sweep's perpetual O(all rows)/5min.
 >
-> **The redesign exists:** [weaver-decline-retry-substrate-native-design.md](weaver-decline-retry-substrate-native-design.md)
-> (📐 awaiting-Andrew, 2026-08-27) — it delivers the direction below **as corrected by Andrew the
-> same day**: item 2's per-boot replay was too strong; a durable rebuild is a **manual,
-> Loupe-invoked verb**, never a standing per-boot mechanism. This doc stays as the row-sweep
-> record and the fallback (revive trigger: the redesign's §2 V7 history pin fails).
+> **The redesign is RATIFIED and supersedes this shape:**
+> [weaver-decline-retry-substrate-native-design.md](weaver-decline-retry-substrate-native-design.md)
+> (✅ Andrew, 2026-08-27) — it delivers the direction below **as corrected by Andrew the same
+> day**: item 2's per-boot replay was too strong (a durable rebuild is a **manual, Loupe-invoked
+> verb**, never a standing per-boot mechanism), and the decline taxonomy splits on where the fix
+> can come from (data errors Ack with a standing issue; only config errors ride the Nak loop).
+> This doc stays as the row-sweep record and the fallback — **revive trigger: the redesign's §2
+> V7 KV history-1 pin fails.**
 >
 > **Replacement direction (named for the redesign):**
 > 1. `handleRow`'s transient/data-error decline exits return **`NakWithDelay`** (per-class backoffs,
