@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-23 · `533f639e` · The wellness class schedule stops advertising agent-verify litter — reapVerifyLitter reaps "Verify"/"Discovery"-named studios/sessions (5 sessions + 3 studios reaped live).
+- 2026-08-23 · `d46dd59f` · The applicant storefront stops going permanently empty — seed-classic-demo's backfillBareListings gives every live listing-less unit an available listing (0→5 live), mirroring the file's own reap helpers.
+- 2026-08-23 · `c7a8e222` · A losing rival on a leased unit stops being dispatched RecordIdentityPII/SignLease — the applicant gaps gain the `unitStatus <> 'leased'` term missing_listingLeased already used. lease-signing 0.31.7
+- 2026-08-23 · `8f49c13b` · StartVisitSeries's "no descriptor" row closed by verification — visitSeriesOpMetas already ships a full OpMetaSpec (that commit), lint-app-op-descriptors reports 0 issues; no new code.
+- 2026-08-23 · `69823fbe` · The 6 sessions stuck on "Studio needs reassignment" finally have a way out — reassign form gains a studio picker wired to the operator-only newStudio repair path.
+- 2026-08-23 · `c5aabf68` · A full or mispriced class no longer needs TombstoneSession + recreate — ReassignSession edits name/capacity/priceCents/residentPriceCents in place, front-desk Reassign form gains the fields. wellness-domain 0.22.5
+- 2026-08-23 · `7e6b1ab3` · A waived no-show fee no longer overstates cash collected — ClinicCreditAccount gains reason (payment|waiver), front-desk/operator only, rejected on a self-scoped patient credit. clinic-ledger 0.2.12
+- 2026-08-23 · `abe579ca` · A verified resident finally pays less than a walk-in — sessions gain residentPriceCents, classPriceSettlementSpec CASE WHENs on rate. wellness-domain 0.22.4, wellness-ledger 0.2.11
+- 2026-08-22 · `4fae046b` · The clinic patient roster, empty for EVERY actor, finally projects — pre-2026-08-08 patients get a one-time BackfillPatientRegistration. clinic-domain 0.34.5
+- 2026-08-22 · `4a56c575` · A clinic staffer can finally fill in an appointment's missing site — new SetAppointmentSite op (17→16 live), CreateOnly guard aspect closes a concurrent-write race an adversarial review caught. clinic-domain 0.34.4
 - 2026-08-22 · `18c867d1` · The LoftSpace storefront's 8 duplicate listings reap to one — the landlord converges on its existing link instead of co-manager-minting a fresh one per rerun (12 accrued → 1). seed-classic-demo.go
 - 2026-08-22 · `be2588d8` · A wellness class whose studio was retired finally has a way out — ReassignSession gains an operator-only newStudio repair path; orphaned classes flag `missingStudio` instead of a blank location. wellness-domain 0.22.3
 - 2026-08-22 · `f6734e6c` · Two café ghost leases held by the admin identity finally drop out of the POS lease picker — reapGhostLeases withdraws verify-fire litter live.

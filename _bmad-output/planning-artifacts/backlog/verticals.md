@@ -75,7 +75,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-27 · `<pending>` · A rival/tombstoned-unit applicant can no longer sign a stale grant — SignLease re-verifies unit availability at execution time, mirroring missing_signature's own gate; live 13 rival + 6 tombstoned grants closed. lease-signing 0.31.9
+- 2026-08-27 · `cd41d53b` · A rival/tombstoned-unit applicant can no longer sign a stale grant — SignLease re-verifies unit availability at execution time. lease-signing 0.31.9
 - 2026-08-27 · `e233ce28` · `SetAppointmentStatus` can finally submit — schema widened + Dispatch.Reads declared for it + 9 more ops (clinic/service/wellness-domain). clinic-domain 0.34.8, service-domain 0.10.5, wellness-domain 0.22.8
 - 2026-08-27 · `2ce7da1d`+`d8988c1e` · Task liveness closed — `capabilityEphemeral` stops granting past completion, `staleAssignedTasks` mirrors unroutedTasks. orchestration-base 0.7.13
 - 2026-08-27 · `5f12d337` · DetachObject gets a full OpMetaSpec via `derive_reads`, closing AttachObject/DetachObject at its ratified scope ([design §22](../../implementation-artifacts/staff-descriptor-rendering-design.md)). objects-base 0.3.8
@@ -100,14 +100,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-08-25 · `5aa287b0` · `MarkPastDueNoShow` stops billing the automated no-show sweep — only staff-observed no-shows charge now. clinic-domain 0.34.6
 - 2026-08-23 · `aa04a7a5` · [location-domain] `CreateLocation` gets a full descriptor via a new `Dispatch.ClassChoices` field — location-domain 0.4.0, edge-manifest 0.17.0; `AttachObject`/`DetachObject` stay open debt
 - 2026-08-23 · `fee0621b` · Clinic /api/sites + roster stop advertising verify artifacts — reapNonCanonicalSites/Patients allowlist by pinned id (name-marker missed some); reaped 10 patients + 5 buildings live.
-- 2026-08-23 · `533f639e` · The wellness class schedule stops advertising agent-verify litter — reapVerifyLitter reaps "Verify"/"Discovery"-named studios/sessions (5 sessions + 3 studios reaped live).
-- 2026-08-23 · `d46dd59f` · The applicant storefront stops going permanently empty — seed-classic-demo's backfillBareListings gives every live listing-less unit an available listing (0→5 live), mirroring the file's own reap helpers.
-- 2026-08-23 · `c7a8e222` · A losing rival on a leased unit stops being dispatched RecordIdentityPII/SignLease — the applicant gaps gain the `unitStatus <> 'leased'` term missing_listingLeased already used. lease-signing 0.31.7
-- 2026-08-23 · `8f49c13b` · StartVisitSeries's "no descriptor" row closed by verification — visitSeriesOpMetas already ships a full OpMetaSpec (that commit), lint-app-op-descriptors reports 0 issues; no new code.
-- 2026-08-23 · `69823fbe` · The 6 sessions stuck on "Studio needs reassignment" finally have a way out — reassign form gains a studio picker wired to the operator-only newStudio repair path.
-- 2026-08-23 · `c5aabf68` · A full or mispriced class no longer needs TombstoneSession + recreate — ReassignSession edits name/capacity/priceCents/residentPriceCents in place, front-desk Reassign form gains the fields. wellness-domain 0.22.5
-- 2026-08-23 · `7e6b1ab3` · A waived no-show fee no longer overstates cash collected — ClinicCreditAccount gains reason (payment|waiver), front-desk/operator only, rejected on a self-scoped patient credit. clinic-ledger 0.2.12
-- 2026-08-23 · `abe579ca` · A verified resident finally pays less than a walk-in — sessions gain residentPriceCents, classPriceSettlementSpec CASE WHENs on rate. wellness-domain 0.22.4, wellness-ledger 0.2.11
-- 2026-08-22 · `4fae046b` · The clinic patient roster, empty for EVERY actor, finally projects — pre-2026-08-08 patients get a one-time BackfillPatientRegistration. clinic-domain 0.34.5
-- 2026-08-22 · `4a56c575` · A clinic staffer can finally fill in an appointment's missing site — new SetAppointmentSite op (17→16 live), CreateOnly guard aspect closes a concurrent-write race an adversarial review caught. clinic-domain 0.34.4
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
