@@ -342,7 +342,7 @@ test("renderOpForm refuses a target whose vertex type doesn't match dispatch.tar
 
 // ---- normalization refusals (item 1's catalogDescriptor-equivalent) ----
 
-test("renderOpForm refuses a row with no inputSchema, no dispatch class, or a visibleWhen it can't evaluate", () => {
+test("renderOpForm refuses a row with no inputSchema, no dispatch class, or an authContext:service voice", () => {
   const schema = { type: "object", properties: {}, required: [] };
   const ctx = { target: TARGET };
 
@@ -354,14 +354,42 @@ test("renderOpForm refuses a row with no inputSchema, no dispatch class, or a vi
   });
   assert.equal(renderOpForm(noClass, ctx, new FakeElement("div")), null);
 
-  const gated = baseRow({ inputSchema: JSON.stringify(schema) });
-  gated.dispatch.visibleWhen = { field: "active", equals: true };
-  assert.equal(renderOpForm(gated, ctx, new FakeElement("div")), null, "an unevaluated visibleWhen fails closed");
-
   const serviceVoice = baseRow({ inputSchema: JSON.stringify(schema) });
   serviceVoice.dispatch.authContext = "service";
   assert.equal(renderOpForm(serviceVoice, ctx, new FakeElement("div")), null,
     "this module's context shape carries no service key to build authContext:service from");
+});
+
+// ---- dispatch.visibleWhen (item 5) — evaluated against context.row ----
+
+function visibleWhenOpRow() {
+  const schema = { type: "object", properties: {}, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.visibleWhen = { field: "series_status", equals: "active" };
+  return row;
+}
+
+test("renderOpForm offers a visibleWhen-gated op when context.row's column matches", () => {
+  const handle = renderOpForm(visibleWhenOpRow(), { target: TARGET, row: { series_status: "active" } }, new FakeElement("div"));
+  assert.ok(handle, "the row's column matches equals, so the op renders");
+});
+
+test("renderOpForm refuses a visibleWhen-gated op when context.row's column doesn't match, is absent, or the row itself is absent", () => {
+  const mismatched = renderOpForm(visibleWhenOpRow(), { target: TARGET, row: { series_status: "paused" } }, new FakeElement("div"));
+  assert.equal(mismatched, null, "wrong value ⇒ no offer");
+
+  const noColumn = renderOpForm(visibleWhenOpRow(), { target: TARGET, row: {} }, new FakeElement("div"));
+  assert.equal(noColumn, null, "row exists but lacks the named column ⇒ no state, no offer");
+
+  const noRow = renderOpForm(visibleWhenOpRow(), { target: TARGET }, new FakeElement("div"));
+  assert.equal(noRow, null, "no row at all ⇒ nothing to evaluate against, fails closed");
+});
+
+test("renderOpForm's visibleWhen check uses strict equality, not truthiness", () => {
+  const row = visibleWhenOpRow();
+  row.dispatch.visibleWhen = { field: "count", equals: 1 };
+  const handle = renderOpForm(row, { target: TARGET, row: { count: "1" } }, new FakeElement("div"));
+  assert.equal(handle, null, "a string \"1\" must not satisfy equals: 1");
 });
 
 // A "type":"array" property has no fieldKind case: left unguarded it would
@@ -392,9 +420,13 @@ test("canRender agrees with renderOpForm's own refusal, without needing a contex
   const noClass = baseRow({ inputSchema: JSON.stringify(schema), dispatch: { targetField: "renewalKey" } });
   assert.equal(canRender(noClass), false, "no dispatch class ⇒ no envelope could ever be assembled");
 
+  // Same split as dispatch.targetType (already untestable here for the same
+  // reason): canRender has no context.row to evaluate visibleWhen against,
+  // so — like targetType — it defers, and renderOpForm applies the real,
+  // fail-closed check once a row is known (see the visibleWhen tests above).
   const gated = baseRow({ inputSchema: JSON.stringify(schema) });
   gated.dispatch.visibleWhen = { field: "active", equals: true };
-  assert.equal(canRender(gated), false, "an unevaluated visibleWhen offers nothing, same as renderOpForm");
+  assert.equal(canRender(gated), true, "visibleWhen is deferred to renderOpForm, which has context.row");
 
   const serviceVoice = baseRow({ inputSchema: JSON.stringify(schema) });
   serviceVoice.dispatch.authContext = "service";

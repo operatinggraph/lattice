@@ -302,29 +302,29 @@ function buildClassChoiceField(choices, prefillVal) {
 // assembled even if a form appeared (`targetField` itself is optional — see
 // the free-choice/no-target note above; classChoices is this same
 // class-resolution question answered by a caller pick instead of a package
-// literal — see buildClassChoiceField), a declared `visibleWhen` this module
-// ships no evaluator for is treated as unmet (no state, no offer — the honest
-// answer to a condition a client cannot decide, loftspace `catalogDescriptor`'s
-// own rule), and `authContext:"service"` has no source in this module's
-// context shape (`{ target, me, taskKey, workplace, row, prefill, selfVoice }`
-// carries no service key) — refusing it here means a caller never gets a
-// handle back for it, rather than one whose submit() always fails at the
-// Processor. A `"type":"array"` property is refused the same way: fieldKind
-// has no array case, so it would fall through to a plain text control that
-// submits a string where the script expects a list — a silent wrong-shaped
-// write, not a rejection the person could see and correct. A field-level
-// `x-visibleWhen` (verticals-designer-triage-2026-08-27.md §2) naming a
-// sibling that does not exist, or that is itself conditional (chaining — not
-// supported in v1), is refused the same way: the module's house rule is to
-// fail loud on a descriptor it cannot honor rather than render something
-// that looks right and silently mis-behaves. canRender (below) is this same
-// refusal, exposed for a caller deciding whether to enable an offer before
-// it has a mount to render into.
+// literal — see buildClassChoiceField), and `authContext:"service"` has no
+// source in this module's context shape (`{ target, me, taskKey, workplace,
+// row, prefill, selfVoice }` carries no service key) — refusing it here
+// means a caller never gets a handle back for it, rather than one whose
+// submit() always fails at the Processor. A `"type":"array"` property is
+// refused the same way: fieldKind has no array case, so it would fall
+// through to a plain text control that submits a string where the script
+// expects a list — a silent wrong-shaped write, not a rejection the person
+// could see and correct. A field-level `x-visibleWhen`
+// (verticals-designer-triage-2026-08-27.md §2) naming a sibling that does
+// not exist, or that is itself conditional (chaining — not supported in
+// v1), is refused the same way: the module's house rule is to fail loud on
+// a descriptor it cannot honor rather than render something that looks
+// right and silently mis-behaves. canRender (below) is this same refusal,
+// exposed for a caller deciding whether to enable an offer before it has a
+// mount to render into. A declared `dispatch.visibleWhen` is left
+// unevaluated here — the row it gates on is `context.row`, which this
+// function never sees — and checked once renderOpForm has it (see below),
+// the same split renderOpForm already applies to `dispatch.targetType`.
 function normalizeCatalogRow(row) {
   if (!row || !row.inputSchema || !row.dispatch) return null;
   const dispatch = row.dispatch;
   if (!dispatch.class && !(dispatch.classChoices && dispatch.classChoices.length)) return null;
-  if (dispatch.visibleWhen) return null;
   if (dispatch.authContext === "service") return null;
   let schema;
   try {
@@ -356,8 +356,8 @@ function normalizeCatalogRow(row) {
 // standalone so a caller can decide whether to enable a "Complete"-style
 // button before it has resolved the specific context (target, task) a click
 // would render against. It cannot check `dispatch.targetType` against a
-// resolved target from here — `renderOpForm` still refuses that case once a
-// target is known.
+// resolved target, or `dispatch.visibleWhen` against a resolved row, from
+// here — `renderOpForm` still refuses either case once they are known.
 export function canRender(catalogRow) {
   return !!normalizeCatalogRow(catalogRow);
 }
@@ -492,6 +492,17 @@ export function renderOpForm(catalogRow, context, mount) {
   if (!normalized) return null;
 
   const { schema, dispatch, presentation, fieldDescriptions, operationType } = normalized;
+  // dispatch.visibleWhen gates the whole op on the state of context.row
+  // (Facet's own opVisibleForRow, cmd/facet/web/app.js — same rule, same
+  // fail-closed default): a row that doesn't carry the named column, or no
+  // row at all, is "no state, no offer", never "offer anyway". Strict JSON
+  // scalar equality — the vocabulary's own contract (op_catalog.go's
+  // opVisibleWhen), not truthiness.
+  if (dispatch.visibleWhen) {
+    const vw = dispatch.visibleWhen;
+    const row = context && context.row;
+    if (!row || typeof row !== "object" || !(vw.field in row) || row[vw.field] !== vw.equals) return null;
+  }
   const targetField = dispatch.targetField;
   // dispatch.contextParams maps a schema field the CLIENT fills from context
   // to the template it fills it from (pkgmgr.OpDispatchSpec.ContextParams).
