@@ -1052,7 +1052,42 @@ speculative attribution to the clinic population is withdrawn.
 
 ---
 
-## 17. CHECKPOINT — 2026-08-28 (fire `claude/great-lamport-i6872w`)
+## 17. SHIPPED — 2026-08-28 (`81a1c94`). Live actions still owed.
+
+The item is merged to `main`. Two things a container with no stack could not do, and
+they are the difference between "the class stops accumulating" and "the live damage is repaired":
+
+**1. `ReplayTarget clinicSiteBackfill` must be RUN against the live stack.** Phase 0's C2 established
+that the clinic 26 are **already Acked**, and an Acked row on a stable-named `DeliverLastPerSubject`
+durable is never redelivered. Incs 1–4 stop the class accumulating; only this verb reaches the
+existing population, and the `verticals.md` clinic row stays blocked until it is run. It is one
+invocation per affected target — `lattice weaver replay-target clinicSiteBackfill`, or the Loupe
+button — and C2's affected-target list is its run-book.
+
+**2. MERGED ≠ RUNNING — the rebuild set, derived mechanically, not from memory.** Nothing was running
+in the build container (`pgrep` = 0), so nothing was cycled there.
+- `internal/weaver` reaches **`bin/weaver`** (daemon — kill with the Makefile's own matcher
+  `pkill -x weaver`, then `make orchestration`) and **`bin/lattice`** (the operator CLI — rebuild, no
+  cycle; it is not a daemon).
+- **`internal/substrate` reaches nearly everything**, because the `keepAckAlive` stop-ordering fix
+  lives there: `bootstrap, bridge, cafe-app, chronicler, clinic-app, edge, facet, gateway, lattice,
+  lattice-pkg, loftspace-app, loom, loupe, model-runner, object-store-manager, processor, refractor,
+  weaver, wellness-app`. That fix only bites a handler slower than `AckWait/2`, so the urgency is low
+  — but "which binaries does a substrate change reach" is exactly the question the §4 rule exists to
+  stop anyone answering from memory.
+- `packages/console-operator` (0.7.2) and `packages/control-authz` (0.7.7) need a package refresh for
+  the new `ctrl.weaver.replayTarget` grant to exist live — without it the verb is deployed but the
+  operator holds no capability for it.
+- Verify freshness rather than assuming it: the running binary's mtime must postdate `81a1c94`.
+
+**3. One declared exception ships with the new census gate.** `issueKeySweep` emits a per-entity key
+(`sweep:<t>.<e>.<gap>`, `CorruptMark`) that is outside the issue-cache budget. Fixing it has an order
+— add `sweep:` to `issueKeyTargetPrefixes` FIRST (budgeting it before the teardown walks it would
+strand slots on every revoke), then to `rowIssueTarget`, then delete the exception.
+`TestCensusPerEntityIssueFamiliesAreBudgeted` enforces that order and fails the exception as stale
+once it lands. This is a pre-existing gap the gate exposed, not one this item introduced.
+
+### The build record (was: checkpoint)
 
 **Branch, not a worktree** (`agents/steward/REMOTE.md` §1): `claude/great-lamport-i6872w`, pushed
 after every increment. `main` carries Inc 1 + every docs commit; **Incs 2–4 merge to `main` as one
