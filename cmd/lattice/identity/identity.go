@@ -98,8 +98,9 @@ opTrackerKey, the created identity key (primaryKey), and the claim secret.`,
 			}
 
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "identity create-unclaimed" CLI command submits this to mint an unclaimed identity, carrying only the sha256 hash of a locally-minted one-time claim secret (the plaintext never enters Lattice).
 				OperationType: "CreateUnclaimedIdentity",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -205,8 +206,9 @@ Read payload from --payload @file.json or stdin (-).`,
 			}
 
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "identity claim" CLI command submits this to bind the submitting actor's own credential to an unclaimed target identity, from an operator-supplied payload naming the targetIdentityKey.
 				OperationType: "ClaimIdentity",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

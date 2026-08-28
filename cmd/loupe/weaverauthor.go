@@ -483,6 +483,7 @@ func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+			// op-name: (submits) weaverAuthorPropose submits this once per authored artifact in the request, recording each Weaver-drafted proposal (kind, content, target, rationale, validation) for operator review.
 			OperationType: "SubmitCapabilityProposal",
 			Lane:          string(processor.LaneDefault),
 			Payload:       payload,
@@ -733,6 +734,7 @@ func (s *server) weaverAuthorRequest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.gatewaySubmitContext(r)
 	defer cancel()
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		// op-name: (submits) weaverAuthorRequest submits this to hand the Weaver an operator-stated intent (plus an optional context reference) to author capability proposals against, kicking off the reasoning that later produces SubmitCapabilityProposal calls.
 		OperationType: "RequestCapabilityAuthoring",
 		Lane:          string(processor.LaneDefault),
 		Payload:       payload,

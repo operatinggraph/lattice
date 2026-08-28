@@ -115,8 +115,9 @@ submitting as needs neither flag beyond the credential file.`,
 			}
 
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "identity provision" CLI command submits this to mint the identity vertex for a raw sign-in credential, carrying the target actor key and the consumer role to grant it.
 				OperationType: "ProvisionConsumerIdentity",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

@@ -79,15 +79,34 @@ Source package: `internal/processor/`
 | `health.processor.<instance>` | ≥ 10s heartbeat | `internal/processor/health.go` | `HealthHeartbeater.emit()` | Category A — `interval×10`, re-armed |
 | `health.processor.<instance>.step3-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitCapabilityAuthSignals()` | Category A — same TTL, lock-step with the heartbeat |
 | `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — fixed 1h default, not re-armed |
-| `health.processor.<instance>.claim-attempts.<outcome>` | per `ClaimIdentity` call | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
+| `health.processor.<instance>.claim-attempts.<outcome>` | per NFR-S6 operation call (`ClaimIdentity`, `CompleteCredentialLink`) | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.commit-conflicts` | per same-key commit conflict | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordCommitConflict()` | Category B — 1h default, re-armed each write |
 | `health.alerts.security.<alertCode>` | on security event | `internal/processor/health_alerts.go` | `HealthAlertEmitter.EmitAlert()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.auth-trace.<requestId>` | per auth denial | `internal/processor/step3_auth_trace.go` | `AuthTraceEmitter.Emit()` | fixed 1h |
 
 **`<instance>`** follows the convention `proc-<NanoID>` (Contract #5 §5.1).
 
-**`<outcome>` enum** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
-`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`.
+**`<outcome>` values** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
+`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`,
+`internal-fault`, `platform-refused`.
+
+The counter spans the whole **NFR-S6 equalized set** (`internal/processor`'s `nfrS6Operations`), not
+`ClaimIdentity` alone. Both legs key on `isNFRS6Operation`: the success leg at `commit_path.go`'s
+post-commit emission, and the rejection leg inside `replyRejection`, which is the single point every
+collapsed rejection passes through. That is deliberate and load-bearing: those operations answer
+every caller with one fixed wire shape, so this counter is an operator's **only** view of what they
+actually did. An operation whose failures are counted but whose successes are not reads as a
+totally-failing flow, and a real failure spike is then invisible against that baseline — which is
+also why `platform-refused` exists rather than the platform's own refusals going uncounted.
+
+**This list is the values emitted TODAY, not a closed enum, and the difference matters
+operationally.** `success`, `internal-fault` and `platform-refused` are minted in Go. The rest are
+`ScriptError.Detail`, parsed out of a Starlark `fail("ClaimKeyInvalid: <detail>")` message and used
+verbatim as the key's last segment — so the vocabulary belongs to the *scripts*, and any package
+shipping a script that fails with that prefix mints new keys here. Today `identity-domain` is the
+only such package and the values above are exactly what its `fail_claim` / `fail_link` /
+`first_outcome` produce. An operator seeing an outcome word not on this list is looking at a package
+that added one, not at corruption; a dashboard enumerating these keys should tolerate that.
 
 `credential-not-provisioned` means the SUBMITTING credential has no live identity vertex — either
 never provisioned, or tombstoned (revoked). The claim emits a `boundTo` edge whose source is that
@@ -118,7 +137,7 @@ refused at step 3 — Contract #6 §6.1).
 completeness test):
 - `health.processor.<instance>.auth-trace.<requestId>` — per denial only
 - `health.processor.<instance>.malformed-operation.<requestId>` — per malformed envelope only
-- `health.processor.<instance>.claim-attempts.<outcome>` — per ClaimIdentity call only
+- `health.processor.<instance>.claim-attempts.<outcome>` — per NFR-S6 operation call only
 - `health.processor.<instance>.commit-conflicts` — per same-key commit conflict only
 - `health.alerts.security.<alertCode>` — on event only
 

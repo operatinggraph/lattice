@@ -563,3 +563,65 @@ func TestClaimIdentity_WritesCredentialsArray(t *testing.T) {
 		t.Fatalf("credentials[0].actorKey = %q, want %q", got, consumerActorKey)
 	}
 }
+
+// TestCompleteCredentialLink_SuccessCountedInHealthKV drives a real successful
+// link through the pipeline and asserts the claim-attempts success counter moved.
+//
+// This is the behavioural pin under the equalized-set accounting, and it is
+// behavioural on purpose. CompleteCredentialLink answers its caller with the
+// same fixed shape whether it succeeded or failed, so claim-attempts is the only
+// channel carrying the difference — and a counter that records this operation's
+// failures but not its successes is worse than one that records neither: the
+// flow reads as one that never works, and a real spike in link failures hides
+// against a baseline that is already total failure. Its sibling
+// TestCompleteCredentialLink_GenericError_NoEnumeration pins the failure leg;
+// this one pins the success leg, so the pair spans the counter.
+//
+// A source-text assertion cannot stand in for this. The emission is gated on a
+// predicate over the equalized set, and any refactor that keeps the predicate's
+// NAME while changing which operations reach it — hoisting the operand into a
+// constant, rerouting the call, narrowing the set — leaves the text intact and
+// the counter wrong. Only driving the operation and reading the counter sees it.
+func TestCompleteCredentialLink_SuccessCountedInHealthKV(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	logger := testutil.TestLogger()
+	instance := claimInstance + "-cmpl-succount"
+	emitter := processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, logger)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable:      "cmpl-succount",
+		Instance:     instance,
+		ClaimEmitter: emitter,
+	})
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "CmplSucCount")
+	seedIdentityCapDoc(t, ctx, conn, uKey, "InitiateCredentialLink")
+
+	// claimFreshIdentity ran a real ClaimIdentity through the same pipeline, so
+	// the counter already holds its success. The assertion below is against
+	// THIS baseline, not against zero: a test that asserted >= 1 would pass on
+	// ClaimIdentity's own increment alone and prove nothing about the operation
+	// under test.
+	before, _ := readClaimHealthCounter(t, ctx, conn, instance, "success")
+
+	plaintext := "link-secret-cmpl-succount"
+	testutil.PublishOp(t, conn, initiateLinkEnv(testutil.GenReqID("CmplSucCountArm"), uKey, sha256HexOf(plaintext)))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, completeLinkEnv(testutil.GenReqID("CmplSucCountDone"), secondCredActorKey, uKey, plaintext))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	after, found := readClaimHealthCounter(t, ctx, conn, instance, "success")
+	if !found {
+		t.Fatalf("claim-attempts.success not found after a committed CompleteCredentialLink — " +
+			"the success leg is not recording for the equalized set, so this operation's " +
+			"successes are invisible while its failures are counted")
+	}
+	if after <= before {
+		t.Fatalf("claim-attempts.success = %d, want > %d (the baseline before the link): a "+
+			"committed CompleteCredentialLink recorded no success. Its failures ARE counted, so "+
+			"the counter now reports a working credential-link flow as one that never succeeds, "+
+			"and a genuine spike in link failures is invisible against that baseline",
+			after, before)
+	}
+}

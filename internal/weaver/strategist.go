@@ -33,10 +33,10 @@ const (
 
 // Operation types the Actuator submits.
 const (
-	opStartLoomPattern       = "StartLoomPattern"
-	opCreateTask             = "CreateTask"
-	opMarkExpired            = "MarkExpired"
-	opRecordProposalDispatch = "RecordProposalDispatch"
+	opStartLoomPattern       = "StartLoomPattern"       // op-name: (submits) the Actuator submits this to trigger a Loom pattern instance for a triggerLoom action
+	opCreateTask             = "CreateTask"             // op-name: (submits) the Actuator submits this for an assignTask action, assigning a bound op to a human subject
+	opMarkExpired            = "MarkExpired"            // op-name: (submits) the Actuator submits this when a gap's mark has outlived its TTL
+	opRecordProposalDispatch = "RecordProposalDispatch" // op-name: (submits) the Actuator submits this to record that an approved Augur proposal was dispatched as a directOp
 )
 
 // assignTaskGrantTTL is the expiry horizon set on an assignTask grant. The
@@ -519,9 +519,9 @@ func (e *Engine) resolveGoalAction(gapColumn string, ga GapAction, row map[strin
 // mints the claim vertex write-ahead + emits external.<adapter>; the bridge
 // calls the model and posts RecordProposal as the replyOp.
 const (
-	defaultAugurOp      = "CreateAugurReasoningClaim"
+	defaultAugurOp      = "CreateAugurReasoningClaim" // op-name: (submits) Weaver dispatches this directly as a directOp, minting the reasoning claim vertex write-ahead and emitting the external.<adapter> event
 	defaultAugurAdapter = "augur"
-	defaultAugurReplyOp = "RecordProposal"
+	defaultAugurReplyOp = "RecordProposal" // op-name: (policy) Weaver never publishes this; it names the verb in the dispatch params, the augur script copies it into the external event, and the Bridge posts it — a core-owned default over a verb packages/augur owns pin=TestAugurConvergence_HappyPath
 )
 
 // augurEscalation builds the reasoning-tier GapAction for a stuck gap whose

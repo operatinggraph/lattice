@@ -521,7 +521,7 @@ func (m *Manager) submitFinalization(ctx context.Context, holderKey string, seq 
 		RequestID: substrate.DeriveNanoID("rcshredfin:"+StepProjectionsRebuilt+":",
 			holderKey+"\x00"+strconv.FormatUint(seq, 10)),
 		Lane:          m.cfg.OpLane,
-		OperationType: "RecordRetentionClassShredFinalization",
+		OperationType: "RecordRetentionClassShredFinalization", // op-name: (submits) this manager submits its own finalization op after rebuilding lens projections for a shredded retention class; a separate, independent consumer of the same event from privacyworker's own RecordRetentionClassShredFinalization submit — not a duplicate to consolidate
 		Actor:         m.cfg.ActorKey,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       payload,

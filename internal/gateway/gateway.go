@@ -295,6 +295,7 @@ func (s *Server) ConfigureRolesAnchors(r RolesAnchorsResolver) {
 // op.actor, so it must see the raw credential — a resolved actor would let
 // an already-bound person chain-claim a second identity
 // (gateway-claim-flow-identity-provisioning-design.md §11.0 "one carve-out").
+// op-name: (policy) member of the raw-credential carve-out resolveActor's caller skips; hashing the raw credential makes a rejection informative, so every member must also be NFR-S6 equalized pin=TestRawCredentialCarveOutIsNFRS6Equalized
 const claimIdentityOperationType = "ClaimIdentity"
 
 // completeCredentialLinkOperationType extends the raw-credential carve-out
@@ -303,6 +304,7 @@ const claimIdentityOperationType = "ClaimIdentity"
 // control of a link secret), so it must see the raw A2, never a resolved
 // identity (multi-credential-identity-linking-design.md §5, Contract #11
 // §11.4's carve-out generalizes from ClaimIdentity alone to this pair).
+// op-name: (policy) member of the raw-credential carve-out resolveActor's caller skips; hashing the raw credential makes a rejection informative, so every member must also be NFR-S6 equalized pin=TestRawCredentialCarveOutIsNFRS6Equalized
 const completeCredentialLinkOperationType = "CompleteCredentialLink"
 
 // rawCredentialCarveOut is the set of operation types resolveActor's caller
@@ -703,7 +705,7 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer,
 	env := &processor.OperationEnvelope{
 		RequestID:     requestID,
 		Lane:          processor.LaneDefault,
-		OperationType: "ProvisionConsumerIdentity",
+		OperationType: "ProvisionConsumerIdentity", // op-name: (submits) the Gateway submits this on a consumer's first authenticated touch, provisioning their identity and consumer-role grant
 		Actor:         s.gatewayActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "identity",

@@ -433,8 +433,9 @@ func submitTombstoneOrphanedIndex(ctx context.Context, conn *substrate.Conn, act
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 	env := &processor.OperationEnvelope{
-		RequestID:     requestID,
-		Lane:          processor.LaneDefault,
+		RequestID: requestID,
+		Lane:      processor.LaneDefault,
+		// op-name: (submits) the "sweep-credential-residue" CLI command submits this per row whose owner or credential has been erased, retiring the now-orphaned credentialindex entry that would otherwise keep naming an erased person's plaintext link.
 		OperationType: "TombstoneOrphanedCredentialIndex",
 		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

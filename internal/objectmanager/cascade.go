@@ -213,7 +213,7 @@ func (m *Manager) submitDetach(ctx context.Context, oid, ownerKey, linkName, lin
 	env := cascadeOpEnvelope{
 		RequestID:     deriveCascadeRequestID(objKey, linkKey, seq),
 		Lane:          m.cfg.OpLane,
-		OperationType: "DetachObject",
+		OperationType: "DetachObject", // op-name: (submits) the cascade manager submits this per dangling link left behind by a cascaded child object's departure
 		Actor:         m.cfg.ActorKey,
 		SubmittedAt:   substrate.FormatTimestamp(m.cfg.now()),
 		Payload:       payload,

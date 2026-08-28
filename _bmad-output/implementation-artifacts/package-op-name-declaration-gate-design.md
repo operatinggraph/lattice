@@ -45,16 +45,36 @@ from the canonical declaration site means the gate's reach tracks the packages a
 the row's own "12 non-test engine files" estimate, made 2026-08-25, reads 15 today: a hand census misses
 sites a derived one cannot.)
 
-**Categories** — three, and the author picks one:
+**Categories** — two, and the author picks one:
 
 - **`(policy)`** — the core decides something *about* this op: a policy set, carve-out, reserved-verb list,
   or a branch keyed on the name. A `(policy)` declaration must additionally carry a **`pin=`** sub-field
   naming what keeps the set honest (the test or gate that catches drift). This is the one category that
   encodes a coupling to a package the core does not own, so it is the one that must name its guard.
-- **`(submits)`** — this engine constructs and submits this operation itself.
-- **`(routes)`** — this engine dispatches inbound work on this operation name.
+- **`(submits)`** — the operation is submitted: built and published by this engine, or named in the remedy
+  an operator submits on its instruction.
 
-`<why>` is required on all three, in the author's own words.
+`<why>` is required on both, in the author's own words.
+
+**A third category, `(routes)` — "this engine dispatches inbound work on this operation name" — was drafted
+and dropped at build time (2026-08-28), and the vocabulary above is the ratified one.** The live census
+carries no such site: the one that reads that way, `internal/bridge/dispatch.go`'s `replyOpReads` switch, is
+`(submits)` because the Bridge genuinely does post that op. (Cold review noted the *stronger* reason to
+accept it there, since the assembly at `dispatch.go:251` is name-agnostic: a stale arm costs read posture,
+not correctness — an unlisted `replyOp` leaves the DDL's `kv.Read` lazy on-demand, as the function's own
+comment records — so the branch degrades gracefully rather than faulting, which is what keeps it out of
+`(policy)`. Neither arm is pinned today.) A category with no member is
+speculative API that invites miscategorization, and the processor's own routing is dynamic (through the DDL
+cache), so no literal reaches it. A `(routes)` annotation therefore fails as the unknown category it is; a
+router, should one ever appear, is a deliberate amendment rather than a slot left standing open for it.
+
+**The derived universe also buys a rename detector, and it ships.** When a package retires or renames a
+verb, the engine's literal silently leaves the universe — the undeclared check stops matching it, so a site
+declared against a real counterparty now points at nothing and trips nothing. The declaration outliving its
+subject is the only remaining trace, so an `# op-name:` annotation whose covered span names *no*
+package-owned operation is itself denied. It cannot fire on a live site, because a correctly-placed
+declaration always covers at least one member — which also makes it catch an annotation that drifted off its
+statement (a blank line between comment and code leaves it covering nothing).
 
 **Required sub-fields have precedent in this file.** `# read-posture: (e)` already requires the annotation
 to name `relation=` and record `epoch=` (`checkReadPosture`); `pin=` is the same idiom.
@@ -64,10 +84,23 @@ also deliberate. The live census is 30 literals across 15 files and every one is
 zero coincidental collisions — so an escape hatch today would buy nothing but a lazy out. A genuine
 collision later is a deliberate amendment, made then.
 
-**Scope excludes `cmd/**` and `internal/spike/`.** A `cmd/` binary submitting operations is its whole job,
-and the row's hazard is engine policy. `internal/spike/` holds standalone benchmark harnesses (already
-excluded from this file's embedded-NATS gate for the same reason); its one hit is a literal
-`PermittedCommands` fixture — a declaration, not a use.
+**Scope is `internal/**` plus the ungoverned `cmd/` trees, excluding `internal/spike/`.**
+
+An earlier draft excluded `cmd/**` wholesale on the grounds that the tier was already governed —
+`lint-app-op-descriptors.go` ratchets each vertical app's distinct hardcoded op-literal count against a
+pinned per-app ceiling, and `lint-facet-discovery.go` bans op literals outright in `cmd/facet` beyond five
+ceremony ops. **Cold review showed that claim covered only part of the tier** (2026-08-28): those two gates
+scope to `cmd/*-app` and `cmd/facet` respectively, leaving `cmd/lattice`, `cmd/lattice-pkg` and `cmd/loupe`
+governed by nothing. A live census puts 19 op-name literals there, and two of them —
+`cmd/lattice/bootstrap/retire.go`'s `op.OperationType != "RevokeRole"` / `!= "RevokePermission"` — are the
+"branch keyed on the name" shape this rule itself defines as `(policy)`. That is the *same mechanism* whose
+`internal/bootstrap/strandedretire.go` half this change declares, so excluding `cmd/` would have split one
+coupling across the scope boundary with only one side declared — the exact invisibility the gate exists to
+end. The ungoverned trees are therefore in scope, and the division of labor is now real rather than assumed:
+every `cmd/` tree is covered by this gate or by a stricter one.
+
+`internal/spike/` holds standalone benchmark harnesses (already excluded from this file's embedded-NATS gate
+for the same reason); its one hit is a literal `PermittedCommands` fixture — a declaration, not a use.
 
 ### 2.2 A containment invariant for the carve-out pair
 
@@ -77,10 +110,27 @@ as text-matching in a lint:
 > `rawCredentialCarveOut ⊆ nfrS6Operations`
 
 Containment, not equality, is the sound direction. An op in the carve-out sees the raw credential and hashes
-it, so its rejections distinguish a bound credential from an unbound one and it **must** be equalized.
-Equalizing an op that takes no raw credential is merely conservative and costs nothing, so the reverse
-inclusion is not required. `internal/gateway` already imports `internal/processor` (`gateway.go:31`), so the
-processor exports a predicate over its set and the gateway-side test asserts containment.
+it, so its rejections distinguish a bound credential from an unbound one and it **must** be equalized. The
+reverse inclusion is not required: an op may be equalized without being in the carve-out.
+`internal/gateway` already imports `internal/processor` (`gateway.go:31`), so the processor exports a
+predicate over its set and the gateway-side test asserts containment.
+
+**Correction (2026-08-28, cold review): equalization is NOT free, and an earlier draft of this section said
+it was.** `isNFRS6Operation` also gates `refuseUndeclaredContextHint` at `step4_hydrate.go:229`, so
+membership closes the operation's declared read set — and an operation with no `Dispatch` descriptor admits
+nothing, therefore refuses every declared key. A reviewer proved the consequence by adding
+`InitiateCredentialLink` to the set and watching its own success test reject: the op rejects 100% of its
+submissions, behind the one reply shape engineered to tell nobody why. Equalizing an op means three things
+together — add it to the set, give it an `OpDispatchSpec` whose read templates cover its whole legitimate
+declared set, and move every dispatcher onto exactly that set. The containment *direction* stands; the
+"merely conservative" reasoning behind the asymmetry does not, and the failing test's remedy message now
+says so, because that message is read at exactly the moment the mistake would be made.
+
+**Scope of the test.** It pins the *Gateway's* carve-out, which is where every production submitter of these
+operations goes (`cmd/facet`, the vertical apps and the edge browser agent all reach the Processor through
+`/v1/operations`). A binary submitting to `core-operations` directly is outside it — `cmd/lattice`'s admin
+identity tooling does exactly that and satisfies the invariant only because the operations it names happen
+to be equalized.
 
 This test is what the two sites' `pin=` sub-fields name.
 
@@ -158,9 +208,28 @@ unknown-shape rejection + required `<why>`, the closest shape by construction. `
   read-posture contract it claims to mirror, not copied on trust.
 - No `packages/` content changes, so no manifest version bump is in play.
 
-**6. Adjacent finds.** `internal/privacyworker` / `internal/refractor/keyshredded` both submit
-`RecordShredFinalization` — verified **deliberate** (two independent consumers of one event, documented at
-`keyshredded/manager.go:10,79,273`), not a defect; §3. No rows filed.
+**6. Adjacent finds + review outcomes.**
+
+The touch-list line numbers above are the pre-build census; several second-of-a-pair entries shifted by one
+when the first annotation was inserted (`installer.go` and `privacyworker/manager.go` in particular). Read
+them as the census that scoped the fire, not as current anchors.
+
+
+- `internal/privacyworker` / `internal/refractor/keyshredded` both submit `RecordShredFinalization` —
+  verified **deliberate** (two independent consumers of one event, documented at
+  `keyshredded/manager.go:10,79,273`), not a defect; §3. No row.
+- **A live defect, found while categorizing `commit_path.go:430` — FIXED in this fire (`b8ecdff`), not
+  filed.** The claim-attempts counter's two emission legs disagreed about their subject: the rejection leg
+  (`handleStubFailure`) keys on `isNFRS6Operation` — the whole equalized set — while the post-commit success
+  leg keyed on a bare `"ClaimIdentity"` literal. `CompleteCredentialLink` is in that set, so its failures
+  were counted and its successes dropped. Because every member of the set answers its caller with one fixed
+  wire shape *by construction*, this counter is an operator's only view of what the operation did: the leg
+  asymmetry made a working credential-link flow read as one that never succeeds, and hid a real failure
+  spike behind a baseline that was already total failure. Both legs now key on the set;
+  `docs/observability/health-kv-schema.md` moved with the emission (its row said "per `ClaimIdentity` call",
+  which never described the rejection leg either, and its outcome enum was missing `internal-fault`). The
+  fix *retires* one of the 29 sites rather than annotating it — the gate's first application finding a
+  defect in the mechanism it governs.
 
 **7. Non-goals.** `cmd/**`. Kernel-seeded verbs (`InstallPackage`/`UpgradePackage`/`UninstallPackage`) are
 core-owned, not declared by any package's `PermittedCommands`, and so fall outside the derived universe by
