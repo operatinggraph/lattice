@@ -1237,7 +1237,17 @@ rows.
   by a later fire (§9.6 defers a generalization whose reads do reach Core KV). Minted: grouping-key close pass,
   found by the capability-plane reviewer, not the author. Check: for any "don't do X or Y breaks" constraint,
   read Y's consumer and state which DIRECTION the failure runs; if removing X makes a check pass more readily
-  rather than fail, say so.
+  rather than fail, say so. **Second sighting, and it is the mirror image: refuting a refusal's REASON does
+  not establish that the whole refusal was wrong.** `AnchorHopIndex` refused every variable-length hop
+  because "the intermediate nodes cannot be stepped hop-by-hop" — refutable, and refuted, by the engine's own
+  `traverseRel`. But the shape had a *real* boundary nobody had derived: `AnchorSideSeeds` seeds the changed
+  link's two endpoints, which is exact only while that link binds its pattern positions, and across a ranged
+  hop the changed link is an intermediate edge, so a lower bound above two drops anchors (thirteen graphs,
+  found by a cold reviewer's sweep, not by the design). The refuted reason had been standing in for a
+  correct one. Check: when you lift a refusal, do not stop at falsifying its stated reason — re-derive the
+  boundary from the CONSUMERS the refusal was protecting, and expect the true limit to sit somewhere inside
+  the old one. Corollary from the same fire: a refuted reason lives in more documents than the one you are
+  building, so grep it — this one was normative text in three sibling designs, one of them the parent.
 - **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
@@ -1288,7 +1298,19 @@ rows.
   left the writer no-oping every rebuild and the reader returning an EMPTY edge set as authoritative, with no
   error and no log line. Minted: adjacency Shape B close review (the state table had named the boundary and
   answered it with an environmental assertion). Check: a cache of durable state is consulted for PRESENCE
-  only, never to conclude absence — or it is deleted, which is what shipped.
+  only, never to conclude absence — or it is deleted, which is what shipped. **Second sighting, in memory
+  rather than across a cache boundary: a present-but-EMPTY set and a missing one are the same answer, and two
+  readers disagreed about that.** `HopIndex.Expanded` is consulted by `admitsType` per edge (an empty set
+  admits no type, which PRUNES) and gated once per rule state by `UnresolvedExpansionPosition` (which tested
+  `== nil`, so an empty set read as *resolved*). A `*` label resolving to nothing is a real, warned-about
+  state, so the derivation accepted the index, built zero seeds, and returned an empty derived set with
+  `ok == true` — read by the caller as "no anchor changes" on the lens that mints `cap.svc.<actor>`. Minted:
+  varlength-anchor-derivation Inc 1, found by a cold reviewer; the design's own risk table had predicted it
+  and the decomposition never turned that row into a task. Check — **MECHANIZED as a mandated test shape**:
+  every absence gate over a resolved-set field asserts BOTH vectors, resolved and empty, against the same
+  index (`TestAnchorHopIndex_EmptyExpansionIsUnresolved`), and the empty one is proven by reverting the
+  predicate. Standing rule for the reader: `len(x) == 0`, not `x == nil`, wherever "no answer" and "the
+  answer is nothing" must behave alike.
 - **An authoring gate and its runtime resolver must agree, or the gate is advisory.** A parse-time refusal
   named the projectable surface of a relationship binding while `resolveProperty`'s arm resolved *whatever
   reached it*, so any shape the parse walk did not model served the value anyway: `WITH coalesce(r, r) AS rr`
