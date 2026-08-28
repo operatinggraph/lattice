@@ -215,11 +215,12 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		}
 	}
 	if nak {
-		// At least one gap needs an immediate retry; redelivery re-evaluates
-		// every gap idempotently — a gap whose episode is already in flight is
-		// dropped at dispatchGap's anti-storm mark read, and one that plans
-		// afresh derives its requestId from the mark it creates, so nothing is
-		// double-acted and nothing is re-published.
+		// At least one gap's op publish failed and needs an immediate retry.
+		// The redelivery re-evaluates every gap idempotently: the failed gap is
+		// named in the republish set and re-publishes its SAME episode
+		// requestId, every other in-flight gap takes dispatchGap's anti-storm
+		// drop untouched, and a gap that plans afresh derives its requestId from
+		// the mark it creates. Nothing is double-acted.
 		return substrate.Nak
 	}
 	if delayed {
@@ -245,13 +246,20 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 //
 // The anti-storm decision is taken EARLY, from the mark read, before anything
 // plans or admits: a gap whose mark is present and whose lease is live has an
-// episode genuinely in flight, and there is nothing this delivery may do for it.
+// episode genuinely in flight, and the ONE thing that can still be owed against
+// it is whether that episode's op actually reached the Processor. The republish
+// set answers exactly that, per gap, so the live-mark disposition is a two-way
+// split: re-publish the episode when its last publish failed, drop otherwise.
+//
 // That ordering is load-bearing now that a row's OTHER gap can hold the whole
 // row on a redelivery loop — a config-error gap Naks the message, and every
 // redelivery it causes re-enters this function for every open gap on the row.
 // Planning a marked gap on each of those passes would consume an admission
 // token per cycle and, worse, re-publish the in-flight episode's op every cycle
-// for as long as the row keeps coming back.
+// for as long as the row keeps coming back. The republish set is what keeps the
+// re-publish per-GAP and conditional on a real publish failure; a message's own
+// redelivery count cannot serve, being per-MESSAGE for an obligation each of the
+// row's gaps holds separately.
 func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	row map[string]any, msg substrate.Message) substrate.Decision {
 
@@ -399,32 +407,38 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// internal/leaseconvergence).
 	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, ga)
 
+	// A live mark means an episode for THIS gap is genuinely in flight, and the
+	// republish set is the one thing that can still be owed against it: whether
+	// that episode's op actually reached the Processor. Nothing else this
+	// delivery could do for the gap is owed, so the two arms are the whole
+	// disposition.
 	if found && !stale {
-		// The anti-storm drop: a live mark means an episode for THIS gap is
-		// genuinely in flight, so this delivery has nothing to do for it and
-		// must not plan, admit or publish. Taken here rather than after
-		// planning, because a row that keeps being redelivered — for its own
-		// sake or for a sibling gap's config-error floor — would otherwise
-		// burn one admission token and re-publish one op per cycle, forever,
-		// for a gap whose episode is already running.
-		//
-		// Nothing owed is skipped by returning above planGap. planGap's three
-		// retires all describe facts a LIVE mark has already disproved: the
-		// mark exists only because an earlier pass built and fired a plan for
-		// this row and gap, which cleared the config and template entries then;
-		// and the gap's own GapBudgetExhausted entry, if one stands, is retired
-		// by the episode's completion closing the column (retireClosedGapIssues)
-		// or by the next delivery once the mark clears. releaseCompletedLeg runs
-		// above this, so a goal leg that finished is released rather than
-		// mistaken for an in-flight one.
-		//
-		// RESIDUAL, named: `fire`'s publish-failure Nak used to be re-fired by
-		// this delivery's redelivery, and no longer is — a lost publish now
-		// waits for the sweep's lease-expiry reclaim (≤ MarkLease). Telling
-		// "the redelivery my own publish failure caused" from "the redelivery a
-		// sibling gap caused" needs the per-(target, entity, gap) republish set,
-		// which lands with the dispatch-path restructure.
-		return substrate.Ack
+		if !e.republish.owes(targetID, entityID, col) {
+			// The anti-storm drop. Taken here rather than after planning,
+			// because a row that keeps being redelivered — for its own sake or
+			// for a sibling gap's config-error floor — would otherwise burn one
+			// admission token and re-publish one op per cycle, forever, for a
+			// gap whose episode is already running.
+			//
+			// Nothing owed is skipped by returning above planGap. planGap's
+			// three retires all describe facts a LIVE mark has already
+			// disproved: the mark exists only because an earlier pass built and
+			// fired a plan for this row and gap, which cleared the config and
+			// template entries then; and the gap's own GapBudgetExhausted entry,
+			// if one stands, is retired by the episode's completion closing the
+			// column (retireClosedGapIssues) or by the next delivery once the
+			// mark clears. releaseCompletedLeg runs above this, so a goal leg
+			// that finished is released rather than mistaken for an in-flight
+			// one.
+			return substrate.Ack
+		}
+		// This episode's op publish FAILED and has not been made good since, so
+		// this redelivery — the one that failure asked for — re-publishes it.
+		// Falling through re-plans against the mark's pinned action and reaches
+		// fireEpisode's in-flight arm, which fires with the mark's preserved
+		// claimId: same requestId, so a publish that was in fact ambiguous
+		// (op accepted, ack lost) collapses on the Contract #4 tracker rather
+		// than minting a second episode.
 	}
 
 	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
@@ -432,16 +446,7 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		return dec
 	}
 
-	// redelivered classifies this delivery for fireEpisode's in-flight branch:
-	// only NumDelivered 1 is a definitively FRESH delivery. NumDelivered 0
-	// (metadata unavailable) deliberately counts as a redelivery: it may be a
-	// retry whose prior delivery never published, and re-firing is the safe side
-	// (the same episode requestId collapses on the Contract #4 tracker; a drop
-	// could wedge a lost publish behind its own mark). The early drop above
-	// means lane 1 now only ever reaches that branch with found=false or a stale
-	// mark, so the flag decides nothing here — the other callers of fireEpisode
-	// still pass it.
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, msg.NumDelivered != 1, rec, markRev, found, stale)
+	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, rec, markRev, found, stale)
 }
 
 // staleMark reports whether gap column col is declared as an EXTERNAL gap
@@ -746,26 +751,25 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 // (the dispatch OCC) and fire the episode op. rec/markRev/found/stale are the
 // caller's own already-read mark snapshot (dispatchGap reads it once, up
 // front, so the Fire 5 candidate-pin resolution and the fire decision made
-// here never see two different mark states). redelivered selects the
-// genuinely-in-flight disposition — false drops (the anti-storm gate:
-// another episode is in flight), true re-publishes the SAME episode
-// requestId (idempotent at the Contract #4 tracker). stale (staleMark)
-// reclaims the mark in place instead — see that branch. The reconciler
-// sweep's OWN reclaim does not pass through here for its lease-expiry case:
-// it replaces the expired mark in place under a revision condition and
-// fires directly, independently. action is recorded on the mark (the §10.3
-// value shape) so a later reclaim can re-dispatch the right episode.
+// here never see two different mark states). stale (staleMark) reclaims the
+// mark in place — see that branch. The reconciler sweep's OWN reclaim does not
+// pass through here for its lease-expiry case: it replaces the expired mark in
+// place under a revision condition and fires directly, independently. action is
+// recorded on the mark (the §10.3 value shape) so a later reclaim can
+// re-dispatch the right episode.
+//
+// A live mark (found && !stale) reaches here only from dispatchGap, and only
+// when the republish set says this gap's last publish FAILED — the anti-storm
+// drop for every other live-mark delivery is taken there, above planning. This
+// arm is therefore the re-publish and nothing else. Every other caller passes
+// found=false, so none of them can reach it.
 func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey, col, action string,
-	pl *plan, redelivered bool, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
+	pl *plan, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
 
 	if found && !stale {
-		if !redelivered {
-			// A fresh delivery while the episode is genuinely in flight — the
-			// anti-storm drop.
-			return substrate.Ack
-		}
-		// Redelivery retry path: re-publish the same episode with the existing
-		// mark's preserved claimId (so the userTask identity stays stable).
+		// Re-publish the same episode with the existing mark's preserved
+		// claimId, so the userTask identity — and the derived requestId — stay
+		// stable and the Processor collapses the duplicate.
 		return e.fire(ctx, targetID, entityID, col, markRev, rec.ClaimID, pl)
 	}
 
@@ -902,14 +906,22 @@ func planOptionalReads(pl *plan, claimID string) []string {
 	return pl.optionalReads(claimID)
 }
 
-// fire materializes one episode's op and fire-and-forget publishes it. A
-// publish failure Naks, which asks for the row back immediately; what recovers
-// the lost publish is the mark's own lease — the redelivery finds the mark
-// present and live and takes dispatchGap's anti-storm drop, so the re-attempt
-// is the sweep's reclaim at lease expiry, re-deriving the same episode identity
-// from the mark (idempotent at the Processor either way). The op's
-// requestId is episode-scoped (markRevision) UNLESS the plan overrides it
-// (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
+// fire materializes one episode's op and fire-and-forget publishes it, and it
+// is the SOLE writer of the republish set — the record of which gaps owe a
+// re-publish.
+//
+// A primary-op publish failure Naks, which asks for the row back immediately,
+// and records the obligation. On that redelivery dispatchGap finds the mark
+// present with a live lease and would take the anti-storm drop; the recorded
+// obligation is what makes it re-publish this same episode instead, with the
+// mark's preserved claimId so the requestId is unchanged and the duplicate
+// collapses on the Contract #4 tracker. A successful publish retires the
+// obligation at the same key. If the obligation cannot be recorded (the target
+// is at its cap) the key simply degrades to the restart behaviour — the sweep's
+// lease-expiry reclaim re-derives the same episode identity from the mark.
+//
+// The op's requestId is episode-scoped (markRevision) UNLESS the plan overrides
+// it (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
 // per-open-episode token the payload folds into the STABLE userTask identity
 // (§10.3).
 //
@@ -920,17 +932,23 @@ func planOptionalReads(pl *plan, claimID string) []string {
 // dispatched-flip whose loss self-heals on the reconciler's next sweep
 // (design augur-dispatch-pickup §3.4); Nak-ing here would needlessly re-fire
 // the ALREADY-SUCCEEDED primary op's redelivery path for a purely cosmetic
-// flip delay.
+// flip delay. For the same reason it records no obligation: the republish set
+// exists to re-fire an episode whose op was lost, and this episode's op landed.
 func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markRevision uint64, claimID string, pl *plan) substrate.Decision {
 	requestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
 	if pl.requestID != nil {
 		requestID = pl.requestID(claimID)
 	}
 	if err := e.act.submit(ctx, requestID, pl.operationType, pl.class, pl.payload(claimID), pl.authTarget, pl.reads, planOptionalReads(pl, claimID), pl.enumerations); err != nil {
+		if !e.republish.add(targetID, entityID, col) {
+			e.logger.Warn("weaver: republish obligations at their per-target cap; this lost publish falls back to the reclaim ladder",
+				"targetId", targetID, "entityId", entityID, "gap", col, "cap", republishCapPerTarget)
+		}
 		e.logger.Error("weaver: op publish failed; nak for retry",
 			"targetId", targetID, "entityId", entityID, "gap", col, "requestId", requestID, "err", err)
 		return substrate.Nak
 	}
+	e.republish.clear(targetID, entityID, col)
 	if fu := pl.followUp; fu != nil {
 		fuRequestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
 		if fu.requestID != nil {
@@ -1068,6 +1086,14 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
 		}
+		// The gap ended, so nothing is owed against its episode any more: retire
+		// any republish obligation with the mark it was owed against. Runs on the
+		// same not-currently-true condition as the mark and count deletes, so it
+		// covers a gap that closed, a column the row dropped, and a deleted
+		// entity alike. It cannot race the `fire` that ADDS one: this pass runs
+		// in handleRow's preamble and only names columns the row is NOT reporting
+		// open, while the dispatch leg below only fires columns it IS.
+		e.republish.clear(targetID, entityID, col)
 		if markCleared {
 			if cErr := e.marks.recordEffectClose(ctx, targetID, col, rec.Action); cErr != nil {
 				e.logger.Warn("weaver: effect close record failed",
@@ -1580,7 +1606,7 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	if pl == nil {
 		return dec
 	}
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false)
+	return e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
 }
 
 // markCandidateColumns is the union of the playbook's gaps keys and the row's

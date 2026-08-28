@@ -288,6 +288,7 @@ type Engine struct {
 	contraction      *contractionStats
 	oscillation      *oscillationStats
 	admission        *admissionScheduler
+	republish        *republishSet
 
 	mu sync.Mutex
 	// targets is the last-applied desired lane-1 consumer set (targetId →
@@ -380,6 +381,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		contraction:      newContractionStats(),
 		oscillation:      newOscillationStats(),
 		admission:        newAdmissionScheduler(),
+		republish:        newRepublishSet(),
 		targets:          make(map[string]specFingerprint),
 	}
 	e.budgets = e.marks
@@ -577,6 +579,9 @@ func (e *Engine) reconcileConsumers() {
 		for _, prefix := range issueKeyTargetPrefixes(id) {
 			e.issues.clearPrefix(prefix)
 		}
+		// Same reasoning for the in-memory republish obligations: no consumer
+		// means no delivery, so nothing could ever consult or retire them.
+		e.republish.clearTarget(id)
 		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states)
 		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("weaver target consumer health-state cleanup failed", "targetId", id, "durable", name, "err", err)

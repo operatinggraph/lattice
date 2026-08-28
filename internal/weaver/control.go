@@ -236,6 +236,10 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 	for _, prefix := range issueKeyTargetPrefixes(targetID) {
 		e.issues.clearPrefix(prefix)
 	}
+	// The in-memory republish obligations go with them: the weaver-state
+	// teardown above deleted every mark they were owed against, so no delivery
+	// can consult them and no publish can retire them.
+	e.republish.clearTarget(targetID)
 	if ownerID, ok := e.source.ownerVertexID(targetID); ok {
 		e.issues.clear("target:" + ownerID)
 	}
