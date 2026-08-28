@@ -1127,7 +1127,16 @@ greenfield redesign. Cover, as the feature warrants:
     re-ask "could a variant of this *beat* my recommendation?"** — do not reject the use-what-we-have option
     for a narrow reason (trialed 2026-06-27: a Weaver reclaim *probe* was recommended while the cleaner answer
     — back off using the mark state Weaver already writes — sat *rejected* in the alternatives for a narrow
-    storage reason; Andrew's one question surfaced it). **Quantify a benefit with its bounding constraint**
+    storage reason; Andrew's one question surfaced it). **Rejected alternatives must also be priced in
+    COMBINATION — a rejection that leans on another rejected alternative's absence proves nothing** (held at
+    ratification 2026-08-27: the Weaver row-sweep design rejected "Nak the declines" because it could not
+    reach already-acked rows and "periodic durable re-create" because it was unpaced — each objection was the
+    other half's solution, and the substrate-native combination (NakWithDelay declines + per-boot replay)
+    dominated the new enumerator). Corollary, Andrew's standing doctrine from the same hold: **needing a NEW
+    mechanism to patch a gap left by the previous mechanism is evidence the base design should be re-derived,
+    not extended** — when the substrate already provides the loop (redelivery, replay, durable re-create), a
+    hand-built enumerator on top of it is the smell, and "simplify the base" is the alternative that must be
+    priced first. **Quantify a benefit with its bounding constraint**
     (TTL / lease / cap), not the headline number. **A platform mechanism needs demand breadth — when the
     consumer census is single-digit, "rewrite the N consumers directly" is a mandatory alternative and
     usually wins** (held at ratification 2026-08-13: typed-relation-signatures priced five alternatives but

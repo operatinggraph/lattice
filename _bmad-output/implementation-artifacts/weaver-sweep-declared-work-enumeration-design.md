@@ -1,40 +1,43 @@
 # Weaver — the reconciler's work set is the projection, not the residue of past dispatches
 
-> **📐 awaiting-Andrew (ratification)** — *Winston (Designer fire, 2026-08-27).*
+> **🗄️ HELD — not ratified** (*Andrew, ratification session 2026-08-27; adjudicated by Winston in the
+> same session*). The problem is real and the DD held up (every §2 citation re-verified at review;
+> §17 stands) — but the **shape is refused**: no new enumerator on top of the per-target durables.
 >
-> **What it does, in two lines.** Weaver's reconciler sweep enumerates `weaver-state`, and every key in
-> that bucket is *evidence something was already dispatched* — so the sweep can reclaim work it started
-> and can never see work it never started. A violating row that lane 1 declined once, for any reason,
-> leaves no key, is never revisited, and sits violating forever with nothing owed on it: the Contract
-> #10 §10.8 **liveness invariant** failing in exactly the population it exists for. This design adds a
-> **row sweep** — its own `@every` schedule and durable — that derives its work from each registered
-> target's currently-projected rows and demotes `weaver-state` to what it always was semantically:
-> memory of what is already owned. Three filed symptoms, one walk; unblocks the clinic
-> `clinicSiteBackfill` row on the verticals board.
+> **Why held.** Andrew's standing doctrine: a new mechanism built to patch a gap left by the previous
+> mechanism is evidence the base design should be re-derived, not extended. Review DD confirmed the
+> suspicion structurally: §11's alternatives **A** (periodic durable re-create) and **B** (Nak the
+> declines) were each rejected on grounds the *other* one solves — B "cannot reach rows declined before
+> the change" (A's re-create reaches exactly them); A is "unpaced" and cannot build the observed-column
+> set (under standing Nak-retry the latch self-heals by level re-raise, dissolving the need). **The
+> combination was never priced, and it is the substrate-native shape: JetStream is the enumerator and
+> the retry engine.** No new durable, no cursor/cycle/budget state, no walk; steady-state cost is
+> O(stuck rows) instead of the sweep's perpetual O(all rows)/5min.
 >
-> **No architectural fork, and no frozen-contract change** (§10 — an earlier draft proposed one; it was
-> withdrawn as unearned, and the reasoning is recorded there). **One decision is genuinely Andrew's**,
-> and it is an operator-surface question, not an engine one:
+> **Replacement direction (named for the redesign):**
+> 1. `handleRow`'s transient/data-error decline exits return **`NakWithDelay`** (per-class backoffs,
+>    `MaxDeliver` unbounded — the substrate omits the bound at ≤0) instead of Ack.
+> 2. Lane-1 durables adopt the **registry's own per-boot-nonce replay** (`registry.go:26-34` documents
+>    the pattern as deliberate): every boot re-delivers the current row set — heals the already-stranded
+>    population and makes `contraction.go:22-25`'s replay claim *true* instead of deleted.
+> 3. `dispatchGap`'s `NumDelivered > 1` blanket re-fire branch **retires** — redelivery becomes routine,
+>    so lease-gated `reclaim` becomes the sole re-fire authority (a simplification in itself).
+> 4. The `gapConfig:` latch stays per-entity-cleared; an over-eager clear self-heals within one backoff
+>    period because a still-open row's Nak loop re-raises it.
 >
-> > **§8 — should a package-authoring bug pin Weaver `unhealthy` forever?** Today `GapWithoutPlaybook`
-> > and `PlaybookConfigError` are `error`-severity, but the in-memory issue cache empties on restart and
-> > a quiet row never re-raises, so they self-clear. This design makes them **standing** — which is the
-> > point — and `aggregateStatus` turns any `error` into `status: "unhealthy"`. So one package's missing
-> > `gaps` entry would pin the whole component `unhealthy` permanently while it dispatches normally for
-> > the other 25 targets. Contract #5 §5.2 defines `unhealthy` as *"cannot fulfil its primary
-> > responsibility"*, and this codebase already draws that exact line for a sibling fault
-> > (`evaluator.go:123-131`: a malformed row is *"a Contract #5 §5.2 `warning` (degraded), never an
-> > `error`"*). **My recommendation: demote both to `warning` in this fire**, with the standing-issue
-> > listing as the operator's signal. It is a deliberate, shipped severity and the change reaches lane 1
-> > too, so it is yours, not mine.
+> **Phase 0 of the redesign (keystone, vendor-grounded per `docs/vendors.md`, NATS 2.14):** the exact
+> semantics of pending/Nak'd redelivery state when per-subject compaction erases the message (KV
+> overwrite of the key). If that semantics does not cooperate, **this design revives as the fallback**
+> — its DD is done (two adversarial passes + the 2026-08-27 ratify-session spot-checks, all green).
 >
-> **Ratification status, stated honestly.** Two independent adversarial passes ran against the first
-> draft and returned five blocking findings each, converging on the same defects. All are folded, and
-> the fold **changed the shape** — the leg moved onto its own durable, the skip predicate narrowed to
-> mark presence, the dispatch budget became per-target, the observed-column walk moved above the guards,
-> and one shipped clear site moves. That corrected shape has not itself been through a review pass; §13's
-> pinning tests carry the load-bearing claims, and §17 lists what each reviewer verified as **sound** so
-> the surviving argument is legible.
+> **Carried forward into the redesign:** the §8 severity question (standing re-raised issues have the
+> same package-typo-pins-`unhealthy` property — argue it there, same recommendation stands); census C2
+> (which decline class actually stranded the clinic 26 — the boot-race narrative was corrected at
+> review: consumers are created from registry callbacks, so the arrival-direction race does not exist;
+> `GapWithoutPlaybook` under an earlier package version is the leading hypothesis); the §13 fixture and
+> mutation disciplines, which apply to the Nak shape's tests unchanged.
+>
+> The body below is the held design, kept as the record of the row-sweep shape and its grounding.
 
 **Author:** Winston (Designer fire, 2026-08-27).
 **Board row:** `[Weaver] The sweep enumerates state keys, not declared×projected work` — ★★★
