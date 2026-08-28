@@ -313,10 +313,13 @@ staff apps' op-catalog proxy carry an op's mint-and-reveal ceremony end to end, 
 
 **Verified touch-list:**
 
-- `packages/edge-manifest/lenses.go:671-673` — `opCatalogSpec`'s RETURN already projects
-  `ceremonyMintedSecretHashField`/`ceremonyRevealTitle`/`ceremonyRevealHelp` (shipped `7bd18e4a`,
-  2026-08-23). **No lens change** — layer 1 of the triage's "three layers" is already done; verify
-  it live, don't re-touch it.
+- `packages/edge-manifest/lenses.go:671-673` — **premise corrected during the build**: those lines are
+  `edgeCatalogTail`'s RETURN, not `opCatalogSpec`'s. `opCatalogSpec` (the lens the four staff apps
+  actually read) began at line 721 and carried none of the three ceremony columns — `7bd18e4a` is an
+  unrelated `CreateLocation`/`ClassChoices` fix; the ceremony columns landed on `edgeCatalogTail` alone
+  in `0e4911d8`. Layer 1 of the triage's "three layers" was **not** already done. Fixed as part of this
+  item: 3 columns added to `opCatalogSpec`'s RETURN, `edge-manifest` version-bumped 0.17.4→0.17.5, a
+  mutation-checked assertion added to `lens_cypher_test.go`.
 - `cmd/{cafe,clinic,loftspace,wellness}-app/op_catalog.go` — `opCatalogProjection` carries no
   ceremony fields today (checked all four; two are byte-identical, the other two differ only in
   doc-comment wording and a local KV-get helper). Add 3 fields + a `Ceremony *opCeremony` on
@@ -333,21 +336,22 @@ staff apps' op-catalog proxy carry an op's mint-and-reveal ceremony end to end, 
   (`{title, help, plaintext}` or none) rather than the envelope alone — a **caller-visible contract
   change**, not additive, because every existing caller destructures the return today.
 - 12 `handle.submit()` call sites across the four apps' `web/app.js` (cafe ×3, clinic ×5, loftspace
-  ×1, wellness ×3) all need `await` plus a reveal check after a **non-rejected** reply — mirroring
-  the fail-closed rule both Facet's ceremony and loftspace's own hand-built
-  `submitNewApplicant`/`showClaimSecret` (`app.js:941-983`) already apply: show once, only on
-  confirmed success, drop on anything else. loftspace already has a claim-secret modal
+  ×1, wellness ×3) all need `await` plus a reveal check gated on an **affirmative**
+  `reply.status === "accepted"` — the cold adversarial review at admit caught a first pass that gated
+  on the weaker "not rejected" (see Outcome below). loftspace already has a claim-secret modal
   (`#claim-overlay`); the other three have none. Rather than four divergent hand-rolled modals, the
-  module exports one self-contained `showCeremonyReveal(title, help, plaintext)` — its own
-  DOM/inline-style overlay appended to `document.body`, no dependency on a host app's modal markup
-  (the same self-containment `attachments.mjs` already follows) — so the 12 call sites stay
-  mechanical.
+  module exports one self-contained `showCeremonyReveal(title, help, plaintext)` plus a
+  `revealCeremonySecret(reveal, reply)` that decides and performs the reveal in one place for all
+  four apps — its own DOM/inline-style overlay appended to `document.body`, no dependency on a host
+  app's modal markup (the same self-containment `attachments.mjs` already follows) — so the 12 call
+  sites stay mechanical.
 
 **In-scope gotchas:** `submit()`'s return-shape change is a real breaking change to every existing
 caller, not a purely additive one — every call site must be updated in the same commit or the build
-fails; there is no partial-adoption state. The reveal must never show for a rejected reply (mirrors
-both cited precedents). Ceremony-unsupported runtimes must refuse to OFFER, not degrade to a raw
-hash textbox (`OpCeremonySpec`'s normative contract, `internal/pkgmgr/definition.go:676-699`).
+fails; there is no partial-adoption state. The reveal must never show for anything short of a
+confirmed commit (mirrors Facet's own ceremony). Ceremony-unsupported runtimes must refuse to OFFER,
+not degrade to a raw hash textbox (`OpCeremonySpec`'s normative contract,
+`internal/pkgmgr/definition.go:676-699`).
 
 **Non-goals:** migrating loftspace's existing hand-built `submitNewApplicant` ceremony onto the
 catalog-driven path — that stays hand-built (its own form UI, name/email/phone fields the schema
@@ -355,6 +359,25 @@ doesn't map 1:1); this item only unblocks the catalog-driven surface (a future t
 `CreateUnclaimedIdentity`/`RotateClaimKey` completion, and §3's guest-create form) from having to
 hand-roll ceremony support again. No change to `packages/identity-domain` — its `OpCeremonySpec`
 declarations are already correct and unchanged.
+
+**Outcome (shipped `<pending-sha>`):** built as scoped, plus the lens-premise fix above. A cold
+adversarial security review at admit found the first pass gated the reveal on `status !== "rejected"`
+— which a Gateway reply-timeout (HTTP 202, no `status` field — `internal/gateway/gateway.go:535-545`)
+and a `duplicate` reply both satisfy without the write being confirmed, so either could have shown a
+person a secret for a write that never landed. Fixed to gate on `status === "accepted"` exclusively,
+centralized in the module's new `revealCeremonySecret` so no host app re-derives the check; 9
+mutation-proven regression vectors added (reverting the gate to the weaker check fails 6 of them).
+Also added: a `ceremony` member to `scripts/lint-facet-renderer-drift.go`'s vocabulary table (the
+gate had no coverage for this vocabulary at all — Swift is exempt, the shelved macOS-proxy spike
+reaches no ceremony-bearing op). Two residuals surfaced and were NOT built here — both pre-existing,
+neither introduced by this change: (a) Refractor's live-Core-KV re-evaluation assumes read-after-write
+monotonicity that a clustered (R>1) `core-kv` stream's direct-get could violate — the current
+deployment is R=1 so this doesn't bite today, but nothing pins it; a Lattice-lane design question if
+the platform ever clusters that stream. (b) a lens's aspect-column read order in its RETURN clause is
+memoized first-read, so a same-batch op-meta *upgrade* that reorders which aspect a script reads first
+could in principle produce a torn intermediate — shared with the pre-existing `sensitive` column, no
+test pins the order today. Neither blocks this item; noting them here rather than filing a row for
+each, since both are cross-cutting platform observations, not vertical-app demand.
 
 **Review depth:** security-plane change (client-side secret minting/reveal) — full 3-layer
 adversarial at admit regardless of size, per §4 of the Steward routine.
