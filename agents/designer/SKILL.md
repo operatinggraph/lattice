@@ -1074,6 +1074,22 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   anchor you named and the guard, and mark which inputs each step produces. If the guard reads a
   field a later step produces, you have a fork, not a placement.
 
+- **A direction named at a hold is a POINTER, not a pre-ratified mechanism — and an AUTOMATIC,
+  standing trigger for a heavyweight operation needs evidence-of-need at the trigger.** When the
+  principal holds a design and names the replacement direction, the named mechanism sets the
+  *family*, not the strength: re-derive how much of it the demand actually needs, and default to
+  the weakest form that serves it. Specifically, for any O(everything) operation (a replay, a
+  rebuild, a rescan), ask of each proposed trigger: *is this event evidence the operation is
+  needed?* Boot, reconnect, and deploy are not — they are merely moments; an operator invoking a
+  verb IS. **The manual operator-verb form is the default shape; each automatic trigger is an
+  alternative that must justify itself**, and a standing mechanism (the retry loop) that already
+  delivers the payoff automatically usually leaves the automatic triggers covering only a
+  one-time residue. (Trialed 2026-08-27, the decline-retry redesign: the hold direction said
+  "per-boot replay"; I built boot + Enable + update + reconnect automatic rebuilds, and Andrew's
+  live correction was that he meant at most a *manual, Loupe-invoked* rebuild — the Nak loop
+  alone already gave automatic fix-uptake for every declined row, so the automatic rebuilds
+  were standing bursts serving a one-time heal. The corrected design was simpler and cheaper.)
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
