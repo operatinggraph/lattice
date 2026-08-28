@@ -105,15 +105,15 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"applicantRosterRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"augurProposals":      {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"availableListings":   {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
-	// ScanRootHopIndex is complete now that its `containedIn` range is indexed,
-	// but the plain licence still refuses this lens on `secureDecryptor == nil`
-	// (it declares SecureColumns, cafe-domain/lenses.go): a complete index, and
-	// unchanged behaviour.
+	// A complete ScanRootHopIndex that the plain arm never acts on: the plain
+	// licence refuses this lens on `secureDecryptor == nil`, because it declares
+	// SecureColumns (cafe-domain/lenses.go). Indexed is the index's verdict, not
+	// a statement about what the pipeline does with the lens.
 	"cafeIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"cafeLeaseAccounts":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// One of the four plain lenses this increment converts: the plain derivation
-	// arm now narrows this lens's neighbour events to the derived anchors instead
-	// of rescanning the corpus.
+	// One of the four plain lenses the derivation acts on: its neighbour events
+	// narrow to the derived anchors rather than rescanning the corpus. Its
+	// `containedIn` range is a ranged hop the walk steps.
 	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"cafeLedgerHistory":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"capabilityAuthorContext":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
@@ -148,7 +148,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"leaseAccounts":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// Converts — see cafeLeaseWorkplaces.
+	// Acted on — see cafeLeaseWorkplaces.
 	"menuCatalog":                   {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"objectIdentityAttachmentsRead": {hasNeighbour: true, reason: rootUntypedHop},
 	"oneBillCafeEntries":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
@@ -171,14 +171,14 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"staffReadGrants":            {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"visitSeriesRead":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessBookings":           {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// SecureColumns — see cafeIdentitiesRead.
+	// SecureColumns, licence-held — see cafeIdentitiesRead.
 	"wellnessIdentitiesRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessInstructors":    {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessLedgerHistory":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessMemberAccounts": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	// Converts — see cafeLeaseWorkplaces.
+	// Acted on — see cafeLeaseWorkplaces.
 	"wellnessMembers": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	// Converts — see cafeLeaseWorkplaces.
+	// Acted on — see cafeLeaseWorkplaces.
 	"wellnessSessions": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"wellnessStudios":  {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 }

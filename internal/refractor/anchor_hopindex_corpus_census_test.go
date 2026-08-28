@@ -86,26 +86,25 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"capabilityEphemeral":     hopIndexed,
 	"capabilityRead":          hopIndexed,
 	"capabilityRoles":         hopIndexed,
-	// The lens Increment 1 exists for. Its two `containedIn*0..` walks are now
-	// indexed, so the auth plane's `cap.svc.<actor>` producer derives its
-	// affected anchors instead of re-executing the cypher once per actor a BFS
-	// reaches. This row moving to indexed means the pipeline DOES now act on
-	// this lens's derived set, which is the intended conversion.
+	// The auth plane's `cap.svc.<actor>` producer, and the one anchored lens the
+	// pipeline acts on across a ranged hop: both of its `containedIn*0..` walks
+	// are indexed, so an event derives the affected anchors instead of
+	// re-executing the cypher once per actor an undirected BFS reaches.
 	"capabilityServiceAccess": hopIndexed,
 	"clauseSatisfaction":      hopIndexed,
 	"clinicNoShowSettlement":  hopIndexed,
 	"clinicSiteBackfill":      hopIndexed,
 	// Multi-walk (`len(branches) > 1`, ruleinstall.go): the pipeline installs no
 	// HopIndex for it at all, so this row records the index's own verdict and
-	// nothing downstream consumes it. The conjunct that holds the lens is
-	// unchanged and no cypher edit reaches it.
+	// nothing downstream consumes it. No cypher edit reaches that conjunct.
 	"edgeCatalog#0":      hopIndexed,
 	"edgeCatalog#1":      hopIndexed,
 	"edgeCatalog#2":      hopIndexed,
 	"edgeEntityBookings": hopIndexed,
 	// Personal lens: held by `patternClosedOutput` and `sweeper != nil`
-	// (derivationIndexForAct), inputs outside the compiled pattern that no index
-	// change can reach. The row moves; the behaviour does not.
+	// (derivationIndexForAct) — the D1 read gate and the Interest Set are inputs
+	// outside the compiled pattern, so a complete index is necessary and not
+	// sufficient, and this row states the index's verdict alone.
 	"edgeEntityMenuItems":            hopIndexed,
 	"edgeEntityProviders":            hopIndexed, // Personal — see edgeEntityMenuItems.
 	"edgeEntitySessions#0":           hopIndexed, // Multi-walk — see edgeCatalog#0.
@@ -115,12 +114,12 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"edgeIdentity":                   hopIndexed,
 	"edgeInstances":                  hopIndexed,
 	"edgeManifestProviderReadGrants": hopIndexed,
-	// The completeness switch reports the FIRST declining conjunct and orders
-	// varlength ahead of the WITH refusal, so lifting the varlength arm reveals
-	// what was masked behind it: `generateProducerSpec` stages one WITH per walk
-	// and four base walks re-open `chainResidence`, dropping `container` at one
-	// stage boundary and re-binding it at the next. Increment 2 is what converts
-	// these two, and it is HELD at ratification.
+	// Held by the WITH refusal, which the completeness switch reports only once
+	// no earlier conjunct declines: `generateProducerSpec` stages one WITH per
+	// walk and four base walks re-open `chainResidence`, so `container` is
+	// dropped at one stage boundary and re-bound at the next. Lifting that
+	// refusal is Increment 2 of the varlength-anchor-derivation design, held at
+	// ratification behind a live measurement.
 	"edgeManifestReadGrants":            hopWithDropped,
 	"edgeManifestStaffReadGrants":       hopWithDropped, // Same shape, dropping `role`.
 	"edgeProviderQueue":                 hopIndexed,
