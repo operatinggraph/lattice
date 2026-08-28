@@ -217,17 +217,33 @@
 //     rejection back into an enumeration oracle. So a (policy) declaration must
 //     additionally carry `pin=<test or gate>` naming what catches that drift —
 //     the same required-sub-field idiom `# read-posture: (e)` uses for
-//     `relation=`. Every category needs a trailing `<why>`.
-//     The universe is DERIVED, never listed: the gate reads every non-test
-//     `packages/**/*.go`, collects the literals inside `PermittedCommands:
-//     []string{…}`, and treats exactly that set as package-owned. A
-//     hand-maintained list rots the day a package adds a verb, and a stale one
-//     cannot be told apart from a name that is genuinely not package-owned.
+//     `relation=`. The pin's VALUE is resolved, not merely counted as present: a
+//     value shaped like a Go test name must be declared by some `_test.go` file
+//     in the tree, and an empty `pin=` is no pin at all. A pin naming nothing
+//     reads exactly like one that holds, which is the failure the sub-field
+//     exists to prevent, one level up. Every category needs a trailing `<why>`.
+//     A declaration binds to ONE operation name, on the literal's own line or
+//     directly above it. An annotation anchored to a line that OPENS a block
+//     (`const (`, `var s = map[string]struct{}{`, a func signature) is denied:
+//     it would cover every name in the block, so a name added to the block later
+//     arrives pre-declared — and, on a (policy) set, pre-pinned — with a sentence
+//     written about other verbs. A per-line trailing annotation INSIDE such a
+//     block is the sanctioned form.
+//     The universe is DERIVED, never listed: the gate parses every non-test
+//     `packages/**/*.go` with go/ast, reads each DDL's `PermittedCommands`
+//     elements — string literals and package-level string constants alike — and
+//     treats exactly that set as package-owned. A hand-maintained list rots the
+//     day a package adds a verb, and a stale one cannot be told apart from a name
+//     that is genuinely not package-owned; a literals-only scrape has the same
+//     blind spot for the packages that name their verbs through constants.
 //     Deriving it also buys the rename half: when a package retires a verb the
 //     engine's literal leaves the universe and every check above goes quiet on
 //     the site, so a declaration whose covered span names no package-owned
 //     operation at all is itself denied — the orphaned declaration is the only
-//     remaining trace that the coupling it described is gone.
+//     remaining trace that the coupling it described is gone. That verdict is
+//     keyed on the declaration's own anchor, never on its text: byte-identical
+//     declarations are the norm for a policy set, and a text-keyed one lets the
+//     twin still covering a live verb answer for the twin whose verb was retired.
 //     There is deliberately NO exemption category, mirroring
 //     authCtxTargetShapes; a genuine name collision later is a deliberate
 //     amendment, made then. `cmd/**` is out of scope (a binary submitting
@@ -248,11 +264,16 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -627,19 +648,22 @@ var (
 	kvGetCall    = regexp.MustCompile(`\.KVGet\(`)
 	kvBatchShape = regexp.MustCompile(`//\s*kv-batch:\s*\(([a-z-]+)\)(.*)$`)
 
-	// permittedCommandsBlock captures the body of a package DDL's
-	// `PermittedCommands: []string{…}` — the canonical site where a package
-	// DECLARES the operation names it owns, and therefore the only honest source
-	// for the op-name gate's universe. The block spans as many lines as the
-	// package has verbs, so the pattern is dot-all and non-greedy: it stops at the
-	// literal's own closing brace, which is the first `}` after the opener because
-	// the elements are string literals and nothing nests inside them.
-	permittedCommandsBlock = regexp.MustCompile(`(?s)PermittedCommands:\s*\[\]string\{(.*?)\}`)
-	// goStringLiteral matches an identifier-shaped Go string literal — both the
-	// elements inside a PermittedCommands block and the candidate uses the gate
-	// tests against the derived universe. An operation name is an identifier by
-	// Contract #2, so a literal carrying anything else can never be one.
+	// goStringLiteral matches an identifier-shaped Go string literal — the
+	// candidate uses the op-name gate tests against the derived universe. An
+	// operation name is an identifier by Contract #2, so a literal carrying
+	// anything else can never be one.
 	goStringLiteral = regexp.MustCompile(`"([A-Za-z0-9_]+)"`)
+	// opNamePinField captures the value of a (policy) declaration's `pin=`
+	// sub-field — the token naming the test or gate that catches drift between
+	// the core's set and the package's own declaration.
+	opNamePinField = regexp.MustCompile(`pin=(\S*)`)
+	// goTestFuncName captures the name of a top-level Go test function, the
+	// index a `pin=Test…` value is resolved against.
+	goTestFuncName = regexp.MustCompile(`(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(`)
+	// goTestNameShape is the pin value that names a Go test and is therefore
+	// resolvable. Anything else (a lint gate, say) is accepted on its author's
+	// word, because this file has no index to resolve it against.
+	goTestNameShape = regexp.MustCompile(`^Test[A-Za-z0-9_]+$`)
 	// opNameShape is the declaration a package-owned operation-name literal must
 	// carry. The host comment marker is either spelling: `//` in the Go engine
 	// files this gate scopes to, `#` for consistency with the Starlark-side
@@ -681,9 +705,19 @@ var (
 // difference between "not package-owned" and "nobody updated this". Non-test
 // packages/ sources only — a package's own tests exercise verbs they do not
 // declare.
+//
+// The derivation parses each source with go/ast rather than matching text,
+// because `PermittedCommands` takes a Go expression and only half the corpus
+// writes it as string literals. The other half names package-level string
+// constants (`[]string{reminderOp}`, `[]string{startVisitSeriesOp, …}`), which
+// no literal-scraping pattern can see: an operation whose name reaches the DDL
+// through a constant is as package-owned as one spelled inline, and a universe
+// that omits it hands every engine site naming it a silent pass. Resolving the
+// constants is what makes the derived universe equal the declared one.
 func packageOwnedOpNames() map[string]string {
 	opNameUniverseOnce.Do(func() {
 		opNameUniverseSet = map[string]string{}
+		var files []string
 		for _, f := range trackedGoFilePaths() {
 			slash := filepath.ToSlash(f)
 			if !strings.HasPrefix(slash, "packages/") && !strings.Contains(slash, "/packages/") {
@@ -692,20 +726,164 @@ func packageOwnedOpNames() map[string]string {
 			if strings.HasSuffix(slash, "_test.go") {
 				continue
 			}
-			data, err := os.ReadFile(f)
-			if err != nil {
+			files = append(files, slash)
+		}
+		fset := token.NewFileSet()
+		parsed := map[string]*ast.File{}
+		for _, f := range files {
+			// A file this pass cannot parse contributes nothing and stops
+			// nothing: the gate still has every other package's declarations,
+			// and the compiler is the authority on a broken source anyway.
+			if file, err := parser.ParseFile(fset, f, nil, 0); err == nil {
+				parsed[f] = file
+			}
+		}
+		consts := packageStringConstants(files, parsed)
+		for _, f := range files {
+			file, ok := parsed[f]
+			if !ok {
 				continue
 			}
-			for _, block := range permittedCommandsBlock.FindAllStringSubmatch(string(data), -1) {
-				for _, lit := range goStringLiteral.FindAllStringSubmatch(block[1], -1) {
-					if _, seen := opNameUniverseSet[lit[1]]; !seen {
-						opNameUniverseSet[lit[1]] = slash
-					}
+			dir := path.Dir(f)
+			for _, name := range permittedCommandNames(file, consts[dir]) {
+				if _, seen := opNameUniverseSet[name]; !seen {
+					opNameUniverseSet[name] = f
 				}
 			}
 		}
 	})
 	return opNameUniverseSet
+}
+
+// packageStringConstants indexes every package-level `const`/`var` bound to a
+// plain string literal, keyed by the directory holding it and then by
+// identifier.
+//
+// The directory is the key because a Go package's identifiers are visible to
+// every file in it and to no file outside it. Keying any wider would let one
+// package's `reminderOp` resolve another's — and the two live packages that
+// declare that identifier bind it to DIFFERENT operation names, so a flat index
+// would attribute one vertical's verb to the other.
+func packageStringConstants(files []string, parsed map[string]*ast.File) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, f := range files {
+		file, ok := parsed[f]
+		if !ok {
+			continue
+		}
+		dir := path.Dir(f)
+		if out[dir] == nil {
+			out[dir] = map[string]string{}
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, id := range vs.Names {
+					if i >= len(vs.Values) {
+						continue
+					}
+					if s, ok := stringLiteralValue(vs.Values[i]); ok {
+						out[dir][id.Name] = s
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// permittedCommandNames returns the operation names one parsed packages/ source
+// declares in its DDLs' `PermittedCommands` fields, resolving an element named
+// by a package-level string constant through consts.
+//
+// An element this pass cannot resolve to a string — a call, a concatenation, a
+// constant from another package — yields no name rather than a guess: the
+// universe is what the gate default-denies against, so a fabricated member would
+// deny a literal no package actually owns.
+func permittedCommandNames(file *ast.File, consts map[string]string) []string {
+	var out []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		kv, ok := n.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "PermittedCommands" {
+			return true
+		}
+		lit, ok := kv.Value.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		for _, el := range lit.Elts {
+			if s, ok := stringLiteralValue(el); ok {
+				out = append(out, s)
+				continue
+			}
+			if id, ok := el.(*ast.Ident); ok {
+				if s, ok := consts[id.Name]; ok {
+					out = append(out, s)
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// stringLiteralValue reports the value of an expression that is exactly one
+// interpreted or raw string literal.
+func stringLiteralValue(e ast.Expr) (string, bool) {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// goTestNames caches the tree's top-level Go test function names, the index a
+// (policy) declaration's `pin=Test…` value is resolved against.
+var (
+	goTestNamesOnce sync.Once
+	goTestNamesSet  map[string]bool
+)
+
+// goTestFunctionNames indexes every `func Test…(` in a tracked `_test.go` file.
+//
+// A `pin=` naming a test that does not exist pins nothing, and it reads exactly
+// like one that does — which is the whole failure mode `pin=` exists to prevent,
+// reproduced one level up. The index is built from the file text rather than the
+// build graph on purpose: a build-tagged harness (`make test-*-convergence` and
+// friends) never compiles under a plain `go test ./...`, and a pin naming one of
+// those tests is as honest as any other.
+func goTestFunctionNames() map[string]bool {
+	goTestNamesOnce.Do(func() {
+		goTestNamesSet = map[string]bool{}
+		for _, f := range trackedGoFilePaths() {
+			if !strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			data, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+			for _, m := range goTestFuncName.FindAllStringSubmatch(string(data), -1) {
+				goTestNamesSet[m[1]] = true
+			}
+		}
+	})
+	return goTestNamesSet
 }
 
 // kvBatchShapes are the declarable reasons a listed key set is read one key
@@ -871,31 +1049,53 @@ func annotationSpans(lines []string, re *regexp.Regexp) map[int]annotation {
 		if len(m) > 2 {
 			a.why = m[2]
 		}
-		anchor := i
-		if isCommentLine(line) {
-			anchor = -1
-			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(lines[j]) == "" {
-					break
-				}
-				if isCommentLine(lines[j]) {
-					continue
-				}
-				anchor = j
-				break
-			}
-			if anchor < 0 {
-				continue
-			}
+		anchor := annotationAnchor(lines, i)
+		if anchor < 0 {
+			continue
 		}
-		indent := indentWidth(lines[anchor])
-		out[anchor+1] = a
-		for j := anchor + 1; j < len(lines); j++ {
-			if strings.TrimSpace(lines[j]) != "" && indentWidth(lines[j]) <= indent {
-				break
-			}
-			out[j+1] = a
+		for _, ln := range annotationSpan(lines, anchor) {
+			out[ln] = a
 		}
+	}
+	return out
+}
+
+// annotationAnchor resolves the ONE statement an annotation on line i (0-based)
+// binds to, as a 0-based index, or -1 when it binds to nothing.
+//
+// The annotation binds to the line it trails, or — when it sits on its own
+// comment line — to the first code line beneath it, reachable across further
+// comment lines only. A blank line ends a comment block, so an annotation
+// separated from the code by one anchors to nothing and every reference below it
+// fails closed.
+func annotationAnchor(lines []string, i int) int {
+	if !isCommentLine(lines[i]) {
+		return i
+	}
+	for j := i + 1; j < len(lines); j++ {
+		if strings.TrimSpace(lines[j]) == "" {
+			return -1
+		}
+		if isCommentLine(lines[j]) {
+			continue
+		}
+		return j
+	}
+	return -1
+}
+
+// annotationSpan lists the 1-based lines an annotation anchored at the 0-based
+// index anchor covers: the anchored statement plus the statement's own
+// indentation block — each following line indented deeper than it (blank lines
+// carried along), closed by the first line at or left of its indentation.
+func annotationSpan(lines []string, anchor int) []int {
+	out := []int{anchor + 1}
+	indent := indentWidth(lines[anchor])
+	for j := anchor + 1; j < len(lines); j++ {
+		if strings.TrimSpace(lines[j]) != "" && indentWidth(lines[j]) <= indent {
+			break
+		}
+		out = append(out, j+1)
 	}
 	return out
 }
@@ -1124,14 +1324,19 @@ func main() {
 // edit. Findings are fed back to the editing agent via a PostToolUse
 // hookSpecificOutput.additionalContext object on stdout (ignored harmlessly by a
 // harness that predates that field) and mirrored to stderr for the human.
-// repoRelative converts an absolute edit path to the repo-relative form every
-// scope test in scanSource is written against (`internal/…`, `packages/…`).
-// Without it the hook checks a DIFFERENT set of rules than CI: prefix-scoped
+// repoRelative converts a path to the repo-relative form every scope test in
+// scanSource is written against (`internal/…`, `packages/…`, `cmd/…`): an
+// absolute path under the repo root is made relative to it, and a `./` prefix —
+// what a shell glob or a `go run … ./internal/x.go` invocation supplies — is
+// dropped. A path outside the repo, or one that is already in that form, is
+// returned untouched.
+//
+// Without it the caller checks a DIFFERENT set of rules than CI: prefix-scoped
 // exemptions stop matching, so exempt files get flagged, and prefix-scoped
 // checks stop firing, so real findings go unreported.
 func repoRelative(path string) string {
 	if !filepath.IsAbs(path) {
-		return path
+		return strings.TrimPrefix(filepath.ToSlash(path), "./")
 	}
 	root, err := os.Getwd()
 	if err != nil {
@@ -1141,7 +1346,7 @@ func repoRelative(path string) string {
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return path
 	}
-	return rel
+	return filepath.ToSlash(rel)
 }
 
 func runHook() {
@@ -1211,7 +1416,14 @@ func scanSource(path string, data []byte) []finding {
 	var out []finding
 	app := verticalAppCmd(path)
 	isTest := strings.HasSuffix(path, "_test.go")
-	slash := filepath.ToSlash(path)
+	// Every prefix-scoped rule below tests slash against a repo-relative form
+	// (`internal/…`, `packages/…`, `cmd/…`), so the path is normalized to that
+	// form FIRST. A path spelled any other way — `./internal/loom/x.go` from a
+	// shell glob, an absolute path from an editor — matches no prefix at all, and
+	// a rule that matches no prefix does not report "out of scope": it reports
+	// nothing and the run ends "0 issues". Scoping-in and scoping-out both go
+	// silent, which is the one failure mode a default-deny gate cannot afford.
+	slash := repoRelative(filepath.ToSlash(path))
 	// Read-posture classification applies to shipped package scripts only:
 	// packages/ non-test .go files (Starlark sources live there as Go string
 	// constants). Tests, engines, and harnesses are out of scope.
@@ -1358,7 +1570,7 @@ func scanSource(path string, data []byte) []finding {
 		opNameLines := strings.Split(string(data), "\n")
 		opNameAt = annotationSpans(opNameLines, opNameShape)
 		opNameUniverse = packageOwnedOpNames()
-		out = append(out, checkStaleOpNameDeclarations(path, opNameLines, opNameAt, opNameUniverse)...)
+		out = append(out, checkOpNameDeclarations(path, opNameLines, opNameUniverse)...)
 	}
 	kvBatchScoped := !isTest && (strings.HasPrefix(slash, "internal/processor/") || strings.HasPrefix(slash, "internal/substrate/"))
 	if kvBatchScoped {
@@ -2286,7 +2498,11 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 	if isCommentLine(line) {
 		return nil
 	}
-	var names, owners []string
+	// Each name carries ITS OWN declaring file. A line naming three operations
+	// commonly names three packages' verbs, and attributing all of them to the
+	// first one's owner sends the reader to a file whose PermittedCommands does
+	// not mention two of the three.
+	var named []string
 	seen := map[string]bool{}
 	for _, m := range goStringLiteral.FindAllStringSubmatch(line, -1) {
 		owner, ok := universe[m[1]]
@@ -2294,10 +2510,9 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 			continue
 		}
 		seen[m[1]] = true
-		names = append(names, fmt.Sprintf("%q", m[1]))
-		owners = append(owners, owner)
+		named = append(named, fmt.Sprintf("%q (declared by %s)", m[1], owner))
 	}
-	if len(names) == 0 {
+	if len(named) == 0 {
 		return nil
 	}
 	const remedy = "Declare what it is on the line or in its comment block: " +
@@ -2310,10 +2525,10 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 	shape, why := declared.shape, declared.why
 	if shape == "" {
 		return []finding{{file: path, line: ln, warn: false,
-			msg: "op-name: undeclared package-owned operation name " + strings.Join(names, ", ") +
-				" — declared by " + owners[0] + " in its DDLs' PermittedCommands, so a bare literal here " +
-				"is a coupling to a package this core does not own, with no declared counterparty and " +
-				"nothing telling a reader it exists. " + remedy}}
+			msg: "op-name: undeclared package-owned operation name " + strings.Join(named, ", ") +
+				" in its DDLs' PermittedCommands — a bare literal here is a coupling to a package " +
+				"this core does not own, with no declared counterparty and nothing telling a reader " +
+				"it exists. " + remedy}}
 	}
 	if !opNameCategories[shape] {
 		return []finding{{file: path, line: ln, warn: false,
@@ -2325,55 +2540,104 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 			msg: "op-name: a (" + shape + ") declaration must state its `<why>` — what this operation " +
 				"name is doing here, in the author's own words"})
 	}
-	if shape == "policy" && !strings.Contains(declared.text, "pin=") {
-		out = append(out, finding{file: path, line: ln, warn: false,
-			msg: "op-name: a (policy) declaration must name `pin=<test or gate>` — a core-owned policy " +
-				"set keyed on names the core does not own is the one category that encodes a " +
-				"cross-package coupling, so it is the one that must name what catches the drift " +
-				"(the byte-identical pair maintained independently in two packages is the live " +
-				"instance this gate exists over)"})
+	if shape == "policy" {
+		out = append(out, checkOpNamePin(path, ln, why)...)
 	}
 	return out
 }
 
-// checkStaleOpNameDeclarations flags an `op-name:` declaration whose covered
-// span names no package-owned operation at all.
+// checkOpNamePin resolves the `pin=` sub-field a (policy) declaration must
+// carry: the test or gate that catches drift between the core's set and the
+// package's own declaration.
 //
-// This is the rename half of the gate, and it exists because the universe is
-// DERIVED. When a package renames or retires a verb, the literal in the engine
+// The sub-field is read out of the declaration's own `<why>` text, not the whole
+// source line, because a TRAILING annotation shares its line with code — a map
+// value or a struct tag holding the three characters `pin=` anywhere on that
+// line would otherwise discharge the requirement for a declaration that names
+// nothing.
+//
+// The VALUE is then resolved, not merely counted as present. `pin=` with nothing
+// after it, and `pin=` naming a test that does not exist, both read exactly like
+// a pin that holds — which is the failure the sub-field exists to prevent,
+// reproduced one level up: an unmet coupling whose guard is asserted rather than
+// real. A value shaped like a Go test name is resolved against the tree's test
+// functions; any other value names something this file has no index for (a lint
+// gate, say) and is taken on the author's word, but it must still be there.
+func checkOpNamePin(path string, ln int, why string) []finding {
+	const need = "op-name: a (policy) declaration must name `pin=<test or gate>` — a core-owned policy " +
+		"set keyed on names the core does not own is the one category that encodes a " +
+		"cross-package coupling, so it is the one that must name what catches the drift " +
+		"(the byte-identical pair maintained independently in two packages is the live " +
+		"instance this gate exists over)"
+	m := opNamePinField.FindStringSubmatch(why)
+	if m == nil {
+		return []finding{{file: path, line: ln, warn: false, msg: need}}
+	}
+	pin := strings.TrimRight(m[1], ".,;:)")
+	if pin == "" {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: need + ". This `pin=` names nothing"}}
+	}
+	if !goTestNameShape.MatchString(pin) || goTestFunctionNames()[pin] {
+		return nil
+	}
+	return []finding{{file: path, line: ln, warn: false,
+		msg: "op-name: this (policy) declaration pins `" + pin + "`, which no `_test.go` file in the " +
+			"tree declares as a test function. A pin naming a test that does not exist reads exactly " +
+			"like one that holds, so the coupling it claims to guard is unguarded. Name the real test, " +
+			"or name the gate that catches the drift"}}
+}
+
+// checkOpNameDeclarations audits each `op-name:` annotation in an engine file as
+// a DECLARATION — the two ways one can be written and still declare nothing its
+// author meant. Both findings are BLOCKING, and both are reported on the
+// annotation's own line.
+//
+// Every judgement here is keyed on the annotation's own ANCHOR — the statement
+// annotationAnchor binds it to — never on its text. Two declarations may be
+// byte-identical (a policy set whose members carry the same sentence is the
+// natural way to write one), and text-keyed liveness makes such a pair share one
+// verdict: whichever twin still covers a live operation answers for both, so the
+// twin whose operation was retired is silently vouched for by its sibling and
+// the rename half of the gate goes quiet on exactly the site it exists for.
+//
+// The first finding is the RENAME half, and it exists because the universe is
+// derived. When a package renames or retires a verb, the literal in the engine
 // silently leaves the universe: checkOpName stops matching it, so the site that
 // was declared against a real counterparty now points at nothing and no longer
 // trips anything. The declaration outliving its subject is the only remaining
 // trace, so that is what is checked. A correctly placed declaration always
 // covers at least one member, which is why the rule cannot fire on a live site.
 //
+// The second is the BLANKET: an annotation anchored to a line that opens a Go
+// block covers everything inside the block, so one declaration adopts every
+// operation name in it — including every name added to it later, which arrives
+// pre-declared with a sentence written about other verbs entirely. The shape is
+// not exotic: a core policy set's natural Go idiom (`var s = map[string]struct{}{`,
+// or a `const (` run of op-name constants) is exactly it, and blanketing one
+// `(policy)` over the set also discharges its `pin=` for members nobody pinned.
+// A declaration therefore binds to one operation name, on its line or directly
+// above it. A per-line trailing annotation INSIDE such a block is untouched:
+// its anchor is the element line, which opens nothing.
+//
 // universe maps each package-owned name to its declaring packages/ file.
-func checkStaleOpNameDeclarations(path string, lines []string, covered map[int]annotation, universe map[string]string) []finding {
+func checkOpNameDeclarations(path string, lines []string, universe map[string]string) []finding {
 	var out []finding
 	for i, line := range lines {
 		if !opNameShape.MatchString(line) {
 			continue
 		}
-		live := false
-		for ln, a := range covered {
-			if a.text != line || ln-1 < 0 || ln-1 >= len(lines) {
-				continue
-			}
-			body := lines[ln-1]
-			if isCommentLine(body) {
-				continue
-			}
-			for _, m := range goStringLiteral.FindAllStringSubmatch(body, -1) {
-				if _, ok := universe[m[1]]; ok {
-					live = true
-					break
-				}
-			}
-			if live {
-				break
-			}
+		anchor := annotationAnchor(lines, i)
+		if anchor >= 0 && opensGoBlock(lines[anchor]) {
+			out = append(out, finding{file: path, line: i + 1, warn: false,
+				msg: "op-name: blanket declaration — this `op-name:` annotation is anchored to a line " +
+					"that OPENS a block, so it covers every operation name inside it, and every name " +
+					"added to that block later silently inherits a declaration written about other " +
+					"verbs. Put the declaration on the individual literal's own line, or directly " +
+					"above it — one declaration per operation name"})
+			continue
 		}
-		if live {
+		if anchor >= 0 && spanNamesPackageOwnedOp(lines, anchor, universe) {
 			continue
 		}
 		out = append(out, finding{file: path, line: i + 1, warn: false,
@@ -2384,6 +2648,65 @@ func checkStaleOpNameDeclarations(path string, lines []string, covered map[int]a
 				"Re-point it at the live literal, or remove it with the code it described"})
 	}
 	return out
+}
+
+// spanNamesPackageOwnedOp reports whether the span an annotation anchored at the
+// 0-based index anchor covers names at least one package-owned operation.
+// Comment lines in the span are skipped — prose ABOUT an operation is not a use
+// of it, and a declaration kept alive by its own sentence would vouch for
+// itself.
+func spanNamesPackageOwnedOp(lines []string, anchor int, universe map[string]string) bool {
+	for _, ln := range annotationSpan(lines, anchor) {
+		body := lines[ln-1]
+		if isCommentLine(body) {
+			continue
+		}
+		for _, m := range goStringLiteral.FindAllStringSubmatch(body, -1) {
+			if _, ok := universe[m[1]]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// opensGoBlock reports whether a line's code opens a brace or paren group — a
+// `const (` / `var (` run, a composite literal's header, a func signature, a
+// call split across lines. The trailing comment is stripped first so an
+// annotation trailing the opener is judged on the code it sits after.
+func opensGoBlock(line string) bool {
+	code := strings.TrimSpace(stripTrailingLineComment(line))
+	return strings.HasSuffix(code, "{") || strings.HasSuffix(code, "(")
+}
+
+// stripTrailingLineComment returns a line's code, cutting at the first `//` or
+// `#` comment marker that is not inside a string or rune literal. A `//` inside
+// a URL or a key prefix (`"vtx.//"`) is code, not a comment, and cutting there
+// would misread what the line ends with.
+func stripTrailingLineComment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote == '`':
+			if c == '`' {
+				quote = 0
+			}
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'' || c == '`':
+			quote = c
+		case c == '#':
+			return line[:i]
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // exemptionHelpers derives the file's validated-target exemption helpers from
@@ -3599,6 +3922,81 @@ func selfTest() []string {
 		{"a declaration covering a live operation is not stale", "internal/loom/engine.go",
 			"\t// op-name: (submits) Loom completes the pattern it drove\n" +
 				"\topCompletePattern = \"CompletePattern\"\n", ""},
+		// Liveness is per-declaration, keyed on the annotation's own anchor.
+		// Byte-identical declarations are the NORM for a policy set (one
+		// sentence describes every member), so a text-keyed check lets the twin
+		// still covering a live verb answer for the twin whose verb was retired
+		// — the rename half going quiet on exactly the site it exists for.
+		{"an identical declaration over a live name does not vouch for a retired one", "internal/gateway/gateway.go",
+			"// op-name: (policy) member of the raw-credential carve-out pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"const claimIdentityOperationType = \"ClaimIdentity\"\n" +
+				"\n" +
+				"// op-name: (policy) member of the raw-credential carve-out pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"const retiredOperationType = \"CompleteCredentialLinkOldSpelling\"\n",
+			"op-name: stale declaration"},
+		// The blanket. One annotation on a block-opening line covers every
+		// literal inside the block, so a name added to the block later arrives
+		// pre-declared — and, on a (policy) set, pre-pinned.
+		{"a declaration blanketing a const block is denied", "internal/loom/engine.go",
+			"// op-name: (submits) Loom submits these\n" +
+				"const (\n" +
+				"\topCreateTask = \"CreateTask\"\n" +
+				"\topCompletePattern = \"CompletePattern\"\n" +
+				"\topFailPattern = \"FailPattern\"\n" +
+				")\n",
+			"op-name: blanket declaration"},
+		{"a declaration blanketing a policy set literal is denied", "internal/processor/nfr_s6_wire_shape.go",
+			"// op-name: (policy) rejections of these collapse to one wire shape " +
+				"pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"var nfrS6Operations = map[string]struct{}{\n" +
+				"\t\"ClaimIdentity\":          {},\n" +
+				"\t\"CompleteCredentialLink\": {},\n" +
+				"}\n",
+			"op-name: blanket declaration"},
+		{"per-line declarations inside a const block are clean", "internal/loom/engine.go",
+			"const (\n" +
+				"\t// op-name: (submits) Loom submits this to open the task\n" +
+				"\topCreateTask = \"CreateTask\"\n" +
+				"\t// op-name: (submits) Loom completes the pattern it drove\n" +
+				"\topCompletePattern = \"CompletePattern\"\n" +
+				")\n", ""},
+		{"per-line trailing declarations inside a policy set literal are clean", "internal/processor/nfr_s6_wire_shape.go",
+			"var nfrS6Operations = map[string]struct{}{\n" +
+				"\t\"ClaimIdentity\": {}, // op-name: (policy) one wire shape " +
+				"pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"\t\"CompleteCredentialLink\": {}, // op-name: (policy) one wire shape " +
+				"pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"}\n", ""},
+		// The pin is resolved, not counted. A pin naming nothing, and a pin
+		// naming a test that does not exist, both read exactly like one that
+		// holds.
+		{"a pin= with no value is denied", "internal/processor/nfr_s6_wire_shape.go",
+			"\t// op-name: (policy) rejections of this op collapse to one wire shape pin=\n" +
+				"\t\"ClaimIdentity\": {},\n",
+			"must name `pin=<test or gate>`"},
+		{"a pin= naming a test that does not exist is denied", "internal/processor/nfr_s6_wire_shape.go",
+			"\t// op-name: (policy) rejections of this op collapse to one wire shape " +
+				"pin=TestDefinitelyDoesNotExist\n" +
+				"\t\"ClaimIdentity\": {},\n",
+			"which no `_test.go` file in the tree declares as a test function"},
+		{"a pin= in surrounding code does not discharge a trailing declaration", "internal/processor/nfr_s6_wire_shape.go",
+			"\tpins := map[string]string{\"ClaimIdentity\": \"pin=nothing\"} // op-name: (policy) keyed on this\n",
+			"must name `pin=<test or gate>`"},
+		{"a pin= naming something other than a Go test is taken on the author's word",
+			"internal/processor/nfr_s6_wire_shape.go",
+			"\t// op-name: (policy) rejections of this op collapse to one wire shape pin=lint-conventions\n" +
+				"\t\"ClaimIdentity\": {},\n", ""},
+		// A path spelled with a `./` prefix must reach the same verdict as the
+		// bare form: a prefix-scoped rule that stops matching reports nothing,
+		// not "out of scope", so the run ends "0 issues" on a denied literal.
+		{"a ./-prefixed path is still in scope", "./internal/loom/engine.go",
+			"\topCreateTask = \"CreateTask\"\n",
+			"op-name: undeclared package-owned operation name \"CreateTask\""},
+		// Each name is attributed to ITS OWN declaring package: a line naming
+		// three operations commonly names three packages' verbs.
+		{"each name on a multi-name line names its own declaring package", "internal/loom/engine.go",
+			"\tops := []string{\"OpenTab\", \"ClaimIdentity\", \"DetachObject\"}\n",
+			"\"ClaimIdentity\" (declared by packages/identity-domain/ddls.go)"},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -3654,6 +4052,60 @@ func selfTest() []string {
 	}
 	failures = append(failures, historyLineSelfTest()...)
 	failures = append(failures, opNameCountSelfTest()...)
+	failures = append(failures, opNameUniverseSelfTest()...)
+	return failures
+}
+
+// opNameUniverseSelfTest pins the REACH of the derived universe — that it holds
+// operations declared through a package-level constant as well as ones spelled
+// inline.
+//
+// Every other op-name case above names an operation whose DDL spells it as a
+// string literal, so the whole table passes over a universe that sees literals
+// only, and the constant-declared half of the corpus (two verticals, eleven
+// verbs) is default-denied by nothing. The gate reports "0 issues" on an
+// undeclared literal naming one, which is indistinguishable from a clean tree.
+// Naming a constant-declared operation here is what keeps that gap closed.
+func opNameUniverseSelfTest() []string {
+	var failures []string
+	universe := packageOwnedOpNames()
+	// Both are declared as `PermittedCommands: []string{<ident>}` — the first
+	// through a constant in the same file as its DDL, the second through one
+	// shared by five DDLs in another. Neither name appears as a literal in any
+	// PermittedCommands anywhere.
+	for _, name := range []string{"RecordBookingReminder", "StartVisitSeries"} {
+		if _, ok := universe[name]; !ok {
+			failures = append(failures, "op-name universe: missing "+name+
+				", declared by a package through a Go constant — the universe sees only literals")
+		}
+	}
+	// The inline half must not regress while the constant half is proven.
+	for _, name := range []string{"ClaimIdentity", "StartLoomPattern"} {
+		if _, ok := universe[name]; !ok {
+			failures = append(failures, "op-name universe: missing "+name+", declared inline by a package")
+		}
+	}
+	// A core-owned verb no package declares must stay OUT: the universe is what
+	// the gate default-denies against, so a fabricated member denies a literal
+	// nobody owns.
+	for _, name := range []string{"InstallPackage", "PermittedCommands"} {
+		if _, ok := universe[name]; ok {
+			failures = append(failures, "op-name universe: holds "+name+
+				", which no package declares in its PermittedCommands")
+		}
+	}
+	// The two verticals bind the SAME identifier to different operation names,
+	// so a constant index keyed any wider than the Go package would attribute
+	// one vertical's verb to the other.
+	for name, want := range map[string]string{
+		"RecordBookingReminder":     "packages/wellness-reminders/",
+		"RecordAppointmentReminder": "packages/clinic-reminders/",
+	} {
+		if got := universe[name]; !strings.HasPrefix(got, want) {
+			failures = append(failures, fmt.Sprintf(
+				"op-name universe: %s attributed to %q, want a declaration under %s", name, got, want))
+		}
+	}
 	return failures
 }
 
