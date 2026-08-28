@@ -687,8 +687,10 @@ func TestWeaverE2E_InstallValidations(t *testing.T) {
 		"rejected targets must surface a Health KV issue, got: %v", issues)
 	require.True(t, hasIssue(issues, "GapWithoutPlaybook"),
 		"a true gap with no playbook entry must surface a Health KV issue, got: %v", issues)
-	// Contract #5 §5.3: error-severity issues (TargetRejected, GapWithoutPlaybook)
-	// must drive status to "unhealthy" — never false-healthy alongside open issues.
+	// Contract #5 §5.3: an error-severity issue (TargetRejected) must drive status
+	// to "unhealthy" — never false-healthy alongside open issues. GapWithoutPlaybook
+	// sits alongside it as a `warning`: it self-heals on a package edit, so it
+	// degrades Weaver rather than declaring it unable to fulfil its responsibility.
 	require.Equal(t, "unhealthy", status,
 		"a heartbeat carrying error issues must report status:unhealthy, got %q with issues %v", status, issues)
 }

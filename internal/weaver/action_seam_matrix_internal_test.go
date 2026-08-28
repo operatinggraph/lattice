@@ -21,9 +21,10 @@ import (
 // Every value target.Gaps[col].Action can hold must be CLASSIFIED at every seam
 // that can reach planGap: the seam either builds a plan for it, or refuses it
 // before planGap runs. There is no third option, because buildPlan's `default:`
-// arm turns an action it has no case for into an `error`-severity
-// PlaybookConfigError — a Health alert whose subject is a contract-legal
-// package declaration, which is a false alarm rather than a diagnostic.
+// arm turns an action it has no case for into a standing PlaybookConfigError —
+// a Health alert whose subject is a contract-legal package declaration, which is
+// a false alarm rather than a diagnostic — and declines the row on the long
+// redelivery floor for as long as the alert stands.
 //
 // The two axes are crossed here rather than guarded one point at a time:
 //
@@ -61,8 +62,9 @@ const planTimeResolvedAction = ""
 // assertion that fired.
 const seamGateAdvice = "\n\nEvery playbook action must be CLASSIFIED at every seam that can reach planGap: " +
 	"the seam either builds a plan for it, or refuses it BEFORE planGap. buildPlan's `default:` arm " +
-	"turns an unclassified action into an `error`-severity PlaybookConfigError against a declaration " +
-	"that is entirely contract-legal.\nIf you added an action: give buildPlan a case for it, or guard it " +
+	"turns an unclassified action into a standing PlaybookConfigError against a declaration " +
+	"that is entirely contract-legal, and declines the row on the long redelivery floor while it stands." +
+	"\nIf you added an action: give buildPlan a case for it, or guard it " +
 	"at each seam the way surfaceOnlyGap guards `surface`, then record the verdict for every seam in " +
 	"playbookActionSeamMatrix (internal/weaver/action_seam_matrix_internal_test.go).\nIf you added a SEAM " +
 	"that calls planGap: add it to actionSeams in the same file."

@@ -316,7 +316,7 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 			return
 		}
 	}
-	if !e.boolColumn(targetID, entityID, row, gapColumn) {
+	if open, _ := e.boolColumn(targetID, entityID, row, gapColumn); !open {
 		// The gap is closed (or the column is gone from the row): prompt
 		// level-reconciled clear, no lease wait.
 		s.deleteMark(ctx, key, entry.Revision, rec.Action, sweepReasonGapClosed,
@@ -579,7 +579,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 			return
 		}
 	}
-	if !e.boolColumn(targetID, entityID, row, gapColumn) {
+	if open, _ := e.boolColumn(targetID, entityID, row, gapColumn); !open {
 		// The gap is closed (or the column is gone from the row) and no mark
 		// exists to carry the level reconcile: this leg is the one that resets
 		// the budget and retires the standing issue.
@@ -622,7 +622,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// raises for exactly this column too — leave it alone (see arm (j)).
 		return
 	}
-	if !e.boolColumn(targetID, entityID, row, "violating") {
+	if violating, _ := e.boolColumn(targetID, entityID, row, "violating"); !violating {
 		return
 	}
 
@@ -702,8 +702,9 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 		// FR29: a surface gap dispatches nothing and holds no mark, so it has
 		// no episode to re-arm — its count can only be a leftover from a
 		// version of the playbook that dispatched this column. buildPlan has no
-		// case for it and would raise an `error` PlaybookConfigError naming a
-		// contract-legal declaration. Leave the count to its TTL.
+		// case for it and would raise a PlaybookConfigError naming a
+		// contract-legal declaration — and decline the row on the long
+		// redelivery floor for as long as it stood. Leave the count to its TTL.
 		return
 	}
 	// The action is read from the playbook rather than from planGap's resolved
@@ -849,8 +850,8 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// (surfaceOnlyGap) — an episode that was genuinely in flight at the
 		// upgrade. Every path below dispatches: the leg-advance, the escalation
 		// and the reclaim itself all end in planGap, which has no case for
-		// `surface` and would alert PlaybookConfigError, at `error` severity,
-		// against a contract-legal playbook, once per sweep interval.
+		// `surface` and would alert PlaybookConfigError against a contract-legal
+		// playbook, once per sweep interval.
 		//
 		// Leave the mark rather than deleting it — the entityKey arm just below
 		// would otherwise treat this same pair as corrupt evidence and delete it.
@@ -911,7 +912,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
-	if !e.boolColumn(targetID, entityID, row, "violating") {
+	if violating, _ := e.boolColumn(targetID, entityID, row, "violating"); !violating {
 		// Mirrors lane-1's L1 gate (handleRow dispatches only violating rows):
 		// an open missing_* on a non-violating row must not be re-dispatched
 		// here when lane-1 never would fire it. Leave the mark to level

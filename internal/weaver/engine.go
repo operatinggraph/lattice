@@ -83,6 +83,21 @@ type Config struct {
 	// re-dispatch is the intended bounded retry). Values <= 0 default to
 	// MarkLease (the first repeat then paces at the same cadence as the lease).
 	ReclaimBackoffBase time.Duration
+	// RedeliveryDelay is lane-1's SHORT redelivery floor: the minimum wait
+	// before JetStream redelivers a row the handler declined transiently (an
+	// unresolved reference mid-convergence, a KV failure, missing metadata).
+	// Values <= 0 take substrate.DefaultRedeliveryDelay.
+	RedeliveryDelay time.Duration
+	// LongRedeliveryDelay is lane-1's LONG redelivery floor: the minimum wait
+	// before JetStream redelivers a row declined for a CONFIG error — no
+	// playbook entry for the gap, an unbuildable template, an un-dispatchable
+	// action. Such a fix arrives as a registry/package edit that produces no new
+	// row delivery, so this redelivery loop is the only automatic uptake path
+	// and this value is its cadence. Values <= 0 take
+	// substrate.DefaultLongRedeliveryDelay; values below RedeliveryDelay are
+	// clamped up to it (with a Warn) — a "long" floor shorter than the short one
+	// is a misconfiguration, not a faster loop.
+	LongRedeliveryDelay time.Duration
 	// ReclaimBackoffCap caps the reclaim backoff interval. Defaults to 24h — the
 	// Contract #4 §4.3 op-tracker TTL horizon, beyond which a duplicate re-dispatch
 	// would no longer collapse on the tracker anyway. Values <= 0 take the default.
@@ -181,6 +196,21 @@ func (c *Config) withDefaults() {
 	}
 	if c.SweepOrphanWarmup < c.SweepInterval {
 		c.SweepOrphanWarmup = c.SweepInterval
+	}
+	if c.RedeliveryDelay <= 0 {
+		c.RedeliveryDelay = substrate.DefaultRedeliveryDelay
+	}
+	if c.LongRedeliveryDelay <= 0 {
+		c.LongRedeliveryDelay = substrate.DefaultLongRedeliveryDelay
+	}
+	if c.LongRedeliveryDelay < c.RedeliveryDelay {
+		// The substrate applies the same clamp when it resolves the floor, so a
+		// misconfigured pair is never honoured either way; resolving it here is
+		// what makes the value the operator reads back from the spec the value
+		// that will actually be used.
+		c.Logger.Warn("weaver: LongRedeliveryDelay is below RedeliveryDelay; clamping",
+			"longRedeliveryDelay", c.LongRedeliveryDelay, "redeliveryDelay", c.RedeliveryDelay)
+		c.LongRedeliveryDelay = c.RedeliveryDelay
 	}
 	if c.ReclaimBackoffBase <= 0 {
 		c.ReclaimBackoffBase = c.MarkLease
@@ -414,15 +444,35 @@ func supervisedHandler(h func(context.Context, substrate.Message) substrate.Deci
 func (e *Engine) targetSpec(targetID string) substrate.ConsumerSpec {
 	name := laneConsumerPrefix + targetID
 	return substrate.ConsumerSpec{
-		Name:          name,
-		Stream:        "KV_" + e.cfg.WeaverTargetsBucket,
-		FilterSubject: e.rowSubjectPrefix + targetID + ".>",
-		DeliverPolicy: substrate.DeliverLastPerSubject,
-		Handler:       supervisedHandler(e.handleRow),
-		Health:        healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
-		Logger:        e.logger,
+		Name:                name,
+		Stream:              "KV_" + e.cfg.WeaverTargetsBucket,
+		FilterSubject:       e.rowSubjectPrefix + targetID + ".>",
+		DeliverPolicy:       substrate.DeliverLastPerSubject,
+		Handler:             supervisedHandler(e.handleRow),
+		Health:              healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
+		MaxAckPending:       laneOneMaxAckPending,
+		RedeliveryDelay:     e.cfg.RedeliveryDelay,
+		LongRedeliveryDelay: e.cfg.LongRedeliveryDelay,
+		Logger:              e.logger,
 	}
 }
+
+// laneOneMaxAckPending caps the un-acked in-flight window of a lane-1 target
+// consumer. It is set explicitly rather than left at the server's
+// JsDefaultMaxAckPending because a declined row now STAYS pending: a config-error
+// decline is Nak'd on the long floor, so every simultaneously-stuck row of the
+// target holds a pending slot for as long as the config stays broken. The
+// starved class at the cap is new entities of a target already carrying that
+// many distinct stuck rows.
+//
+// The raise is deliberately modest rather than generous. Past roughly a thousand
+// pending messages the server's ack-pending timer walks the whole pending map per
+// fire and defers under ack load (nats-server v2.14.0 server/consumer.go:5916-5921,
+// :5964-5973), so a large window converts a broken target into steady server-side
+// work. Lane 1 is also deliberately serial (Workers unset), so each floor tick
+// redelivers the stuck set as a batch through one worker — the cap is sized
+// against that drain, not against the row count of the lens.
+const laneOneMaxAckPending = 2000
 
 // reconcileConsumers diffs the desired lane-1 consumer set (the registered
 // targets) against the last-applied set, driving the supervisor:

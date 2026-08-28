@@ -3535,7 +3535,7 @@ func TestSweep_CountLegReArmGatesBlockDispatch(t *testing.T) {
 // that no arm above it provides. FR29's `surface` action dispatches nothing and
 // holds no mark, so its column can carry a count only as a leftover from a
 // playbook version that DID dispatch it — and buildPlan has no case for
-// `surface`, so planning one raises an `error`-severity PlaybookConfigError
+// `surface`, so planning one raises a standing PlaybookConfigError
 // naming an action the contract explicitly allows. The gap is left exactly as
 // found: no op, no mark, and no alarm about a legal declaration.
 func TestSweep_CountLegNeverReArmsASurfaceGap(t *testing.T) {
@@ -3806,9 +3806,8 @@ func TestSweep_CountLegNeverReArmsAPlanTimeAction(t *testing.T) {
 // episode that was in flight at the upgrade leaves a MARK. clearClosedMarks
 // skips a surface column's mark cleanup outright, so nothing but the per-key TTL
 // removes it, and every sweep pass in between drives reclaim into planGap, which
-// has no `surface` case: an `error`-severity PlaybookConfigError against a
-// playbook that is entirely contract-legal, once per sweep interval for the
-// mark's whole life.
+// has no `surface` case: a standing PlaybookConfigError against a playbook that
+// is entirely contract-legal, once per sweep interval for the mark's whole life.
 //
 // The control carries the identical stranded mark under a playbook that still
 // names a dispatching action, so the negative pins the ACTION and not an inert

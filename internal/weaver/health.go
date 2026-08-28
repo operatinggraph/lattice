@@ -38,6 +38,34 @@ const maxHeartbeatIssues = 50
 // heartbeat did not list.
 const issuesTruncatedCode = "IssuesTruncated"
 
+// maxPerTargetRowIssues caps how many PER-ROW issue entries — the `data:` and
+// `template:` families together — one target may hold in the issue cache at
+// once. This is a bound on the CACHE, a different job from maxHeartbeatIssues'
+// bound on the DOCUMENT: the document cap decides what one heartbeat lists,
+// while this one decides what the in-memory map and the per-heartbeat sort over
+// it can grow to. Both families carry an entity segment, so both are O(rows of
+// the target) — a systemically broken 100k-row lens would otherwise grow the map
+// and the sort without limit, for one repeated fault.
+//
+// The value sits well above maxHeartbeatIssues on purpose: for any target an
+// operator can actually read, the visible truncation must stay the document
+// cap's (which selects severity-first), with this cap engaging only where the
+// population is already far past anything a heartbeat could list. Insertion past
+// it is refused rather than evicting — an entry already standing is a fact with
+// an age (Contract #5 §5.5), and dropping it to admit an identical newer one
+// would restamp the fault as young.
+const maxPerTargetRowIssues = 500
+
+// issueCacheCappedCode is the synthetic per-target entry that stands in for the
+// per-row issues the cache cap refused.
+const issueCacheCappedCode = "IssueCacheCapped"
+
+// issuePrefixCapped is the key family of the synthetic cap entries. It is
+// distinct from every raised family so a cap entry can never be cleared as if it
+// were a fact of its own — it is derived state, minted and retired by the cap
+// arithmetic alone.
+const issuePrefixCapped = "capped:"
+
 // omittedCodeSampleCap bounds how many distinct codes the truncation entry
 // names before it summarises the remainder.
 const omittedCodeSampleCap = 8
@@ -127,18 +155,115 @@ type pacedLog struct {
 //	                       | raise would arrive fresh anyway, and the map stays bounded by
 //	                       | "keys raised in the last two intervals"
 //	restart                | empty, like the latch itself; the first raise after a restart is an arrival, which is correct
+//
+// rowIssues and capped are the cache BOUND (maxPerTargetRowIssues), and they are
+// derived state, never facts: rowIssues counts the per-row entries each target
+// currently holds, and capped records the refusals once a target is at its cap.
+// Their lifetime is the counted entries' own:
+//
+//	created   | rowIssues on the first per-row raise for a target; capped on the first raise refused
+//	counted   | rowIssues on every admitted per-row insertion, never on a refresh of a standing key
+//	           | (a refresh grows nothing); capped on every refused raise, so it counts RAISE
+//	           | ATTEMPTS, not distinct rows — the refused keys are exactly what is not tracked
+//	decounted | clear and clearPrefix, per entry actually removed
+//	retired   | rowIssues when the target's count reaches zero; capped the moment the count
+//	           | drops back under the cap — the refused raises are level-driven and re-arrive
+//	           | on the next delivery, so a count kept past the suppression it describes would
+//	           | report a suppression that is no longer happening
+//	retired   | (subject gone) clearPrefix takes both with the entries it removes — an entity
+//	           | tombstone, a Revoke, a registry teardown
+//	restart   | empty, like the latch itself
 type issueCache struct {
 	mu     sync.Mutex
 	issues map[string]healthIssue
 	since  map[string]string
 	paced  map[string]pacedLog
+	// rowIssues counts the entries of the per-row families (`data:`, `template:`)
+	// currently held, per targetID.
+	rowIssues map[string]int
+	// capped holds one overflow record per target at its cap, maintained in
+	// place; snapshot renders each as a single synthetic issue.
+	capped map[string]cappedRowIssues
+}
+
+// cappedRowIssues is the overflow record for one target whose per-row issue
+// families have reached maxPerTargetRowIssues: how many raises have been refused
+// since the cap engaged, and when it engaged.
+type cappedRowIssues struct {
+	refused int
+	since   string
 }
 
 func newIssueCache() *issueCache {
 	return &issueCache{
-		issues: make(map[string]healthIssue),
-		since:  make(map[string]string),
-		paced:  make(map[string]pacedLog),
+		issues:    make(map[string]healthIssue),
+		since:     make(map[string]string),
+		paced:     make(map[string]pacedLog),
+		rowIssues: make(map[string]int),
+		capped:    make(map[string]cappedRowIssues),
+	}
+}
+
+// rowIssueTarget reports whether key belongs to a per-row (per-entity) issue
+// family and, if so, which target it counts against. The target segment is the
+// key's first segment below the family prefix — dot-free by construction
+// (splitRowKey reads the row key's FIRST dot as the target/entity boundary, so a
+// registered targetId can carry none).
+func rowIssueTarget(key string) (string, bool) {
+	rest := ""
+	switch {
+	case strings.HasPrefix(key, issuePrefixData):
+		rest = key[len(issuePrefixData):]
+	case strings.HasPrefix(key, issuePrefixTemplate):
+		rest = key[len(issuePrefixTemplate):]
+	default:
+		return "", false
+	}
+	i := strings.IndexByte(rest, '.')
+	if i <= 0 {
+		return "", false
+	}
+	return rest[:i], true
+}
+
+// admitRowIssue decides whether a per-row insertion at key may grow the cache,
+// and records the refusal when it may not. Called with c.mu held, for a key that
+// is NOT already present — refreshing a standing entry grows nothing and is
+// never refused.
+func (c *issueCache) admitRowIssue(key string, now time.Time) bool {
+	targetID, ok := rowIssueTarget(key)
+	if !ok {
+		return true
+	}
+	if c.rowIssues[targetID] < maxPerTargetRowIssues {
+		c.rowIssues[targetID]++
+		return true
+	}
+	ov, standing := c.capped[targetID]
+	if !standing {
+		ov.since = substrate.FormatTimestamp(now)
+	}
+	ov.refused++
+	c.capped[targetID] = ov
+	return false
+}
+
+// releaseRowIssue decounts one per-row entry that has been removed from the
+// cache, retiring the target's overflow record once the population is back under
+// the cap. Called with c.mu held.
+func (c *issueCache) releaseRowIssue(key string) {
+	targetID, ok := rowIssueTarget(key)
+	if !ok {
+		return
+	}
+	n := c.rowIssues[targetID] - 1
+	if n <= 0 {
+		delete(c.rowIssues, targetID)
+	} else {
+		c.rowIssues[targetID] = n
+	}
+	if n < maxPerTargetRowIssues {
+		delete(c.capped, targetID)
 	}
 }
 
@@ -154,13 +279,20 @@ func (c *issueCache) set(key, severity, code, message string) {
 // issue's age is never overwritten, exactly as under set.
 func (c *issueCache) setSince(key, severity, code, message string, arrivedAt time.Time) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, standing := c.issues[key]; !standing && !c.admitRowIssue(key, arrivedAt) {
+		// The target is at its per-row cache cap: this raise is counted on its
+		// overflow record and not stored. Nothing is lost that the next delivery
+		// cannot re-raise — every family this covers is level-driven — and the
+		// operator sees the suppression rather than silence.
+		return
+	}
 	since, ok := c.since[key]
 	if !ok {
 		since = substrate.FormatTimestamp(arrivedAt)
 		c.since[key] = since
 	}
 	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since}
-	c.mu.Unlock()
 }
 
 // standingAs reports whether an issue with exactly this severity and code is
@@ -192,6 +324,9 @@ func (c *issueCache) standingAs(key, severity, code string) bool {
 // re-derivation an arrival and hand back the flood the pacing exists to stop.
 func (c *issueCache) clear(key string) {
 	c.mu.Lock()
+	if _, standing := c.issues[key]; standing {
+		c.releaseRowIssue(key)
+	}
 	delete(c.issues, key)
 	delete(c.since, key)
 	c.mu.Unlock()
@@ -291,6 +426,7 @@ func (c *issueCache) clearPrefix(prefix string) int {
 	}
 	for k := range c.issues {
 		if strings.HasPrefix(k, prefix) {
+			c.releaseRowIssue(k)
 			delete(c.issues, k)
 			delete(c.since, k)
 			n++
@@ -299,18 +435,42 @@ func (c *issueCache) clearPrefix(prefix string) int {
 	return n
 }
 
-// snapshot returns the active issues in deterministic (key) order.
+// snapshot returns the active issues in deterministic (key) order, with one
+// synthetic entry per target whose per-row families are at the cache cap. The
+// synthetic entries are rendered here rather than stored, so the cap's own
+// bookkeeping can never be mistaken for — or cleared as — a raised fact, and
+// they are ordered on the same key sort as everything else.
 func (c *issueCache) snapshot() []healthIssue {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	keys := make([]string, 0, len(c.issues))
+	keys := make([]string, 0, len(c.issues)+len(c.capped))
 	for k := range c.issues {
 		keys = append(keys, k)
+	}
+	overflow := make(map[string]healthIssue, len(c.capped))
+	for targetID, ov := range c.capped {
+		key := issuePrefixCapped + targetID
+		overflow[key] = healthIssue{
+			// The refused families are all `warning`s (a RowDataError, a
+			// TemplateDataError), so the entry standing in for them is one too.
+			Severity: "warning",
+			Code:     issueCacheCappedCode,
+			Message: "target " + targetID + ": per-row issue cache is at its " +
+				strconv.Itoa(maxPerTargetRowIssues) + "-entry cap; " + strconv.Itoa(ov.refused) +
+				" further per-row raises for this target have been suppressed since (raise attempts, " +
+				"not distinct rows — the suppressed keys are exactly what is not tracked)",
+			Since: ov.since,
+		}
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	out := make([]healthIssue, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, c.issues[k])
+		if is, standing := c.issues[k]; standing {
+			out = append(out, is)
+			continue
+		}
+		out = append(out, overflow[k])
 	}
 	return out
 }
