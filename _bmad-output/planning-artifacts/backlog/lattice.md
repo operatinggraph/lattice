@@ -94,6 +94,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **[Loom] Sensitive-egress reads can't reach a link-discovered aspect** | `subject.<aspect>` egress declaration only covers the SUBJECT's own key (known at Loom dispatch time); a value discovered by walking a link inside the DDL script has no declaration path. A retention-class-custody workaround is also refused at the egress boundary. Unblocks the `verticals.md` executed-lease tenant-name gap. | ★★ | M | 📐 needs designer pass · no-pattern: link-discovered egress · [evidence](../../implementation-artifacts/lease-tenant-name-fire-brief.md) |
 
 ### Scale-out
 | Item | What it is | Imp | Size | State |

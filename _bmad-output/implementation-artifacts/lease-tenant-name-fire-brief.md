@@ -1,5 +1,74 @@
 # Fire brief — the executed lease finally names its tenant
 
+> ## ⛔ REFUTED at build, 2026-08-27 — the prescribed mechanism cannot be built
+>
+> The plan below (§"Grounding" step 4/5: a SENSITIVE `.tenantName` on the leaseapp custodied on a
+> retention class, egressed through `subject.tenantName.data.value`) is **structurally impossible**, and
+> building it would be **strictly worse than the bug it fixes**: `CreateLeaseDocInstance` would be
+> REJECTED for every signed leaseapp, so no executed-lease document would be produced at all.
+>
+> **Verified empirically** by implementing the brief in full and running it against the package's own
+> harness (which wires a real Vault — `testutil.PipelineConfig.Vault` defaults to `TestVault(t)`):
+>
+> ```
+> step=hydrate operationType=CreateLeaseDocInstance outcome=rejected
+> error="step4: decrypt vtx.leaseapp.<id>.tenantName: author egress ref for vtx.leaseapp.<id>.tenantName:
+>   key holder vtx.retentionclass.<id> is a \"retentionclass\" holder, and only an identity holder's
+>   envelope is reachable at the external-egress boundary"
+> ```
+>
+> **Why — two independent, purpose-built gates refuse a class-custodied record at the egress boundary:**
+>
+> - `internal/processor/sensitive_decrypt.go` `refusableEgressHolder` (called at ref-mint, `:225`) —
+>   refuses any `vault.KeyHolderType(keyId) != "identity"`. A `CustodyKindRetentionClass` aspect's DEK
+>   holder IS `vtx.retentionclass.<id>` (`internal/processor/step65_encrypt.go` `keyHolderFor`), and that
+>   holder key is the ciphertext's own `keyId` (`internal/vault/keyholder.go` `KeyHolder`).
+>   Pinned by `TestEgressReads_ClassHeldRecord_RefusedAtMint`
+>   (`internal/processor/sensitive_decrypt_keyid_test.go`) — passes today.
+> - `internal/bridge/egress.go` `resolveSensitiveRef` — the same refusal, UNCONDITIONAL (it does not
+>   depend on a Vault being wired), because the bridge resolves envelopes from the `piiKeyEnvelope` lens
+>   (`packages/privacy-base/lenses.go` `piiKeyEnvelopeSpec`), whose `MATCH (i:identity)` enumerates
+>   identity holders alone. `retentionKeyStatusSpec` — the retention-class lens — deliberately projects
+>   policy/shred status and **no envelope columns** (`wrappedDEK`/`keyId`/`kekVersion`/`alg`).
+>   Pinned by `internal/bridge/egress_test.go` subtest `"non-identity key holder"`.
+>
+> **The obvious workaround is also blocked** (verified the same way): reading `.tenantName` as plaintext
+> under `contextHint.reads` and putting the string into `doc{}` is rejected by
+> `validateExternalEgressGuard` (`internal/processor/step6_validate.go:161`,
+> `ViolatedConstraint: "externalEgressSensitivePlaintext"`) — an op that emits an `external.*` event and
+> decrypted any sensitive aspect as plaintext is refused.
+>
+> **What DOES work:** the snapshot half alone. `SignLease` walking `applicationFor`, reading the
+> applicant's `.name`, and writing a sensitive `.tenantName` custodied on a new `executedLeaseRecord`
+> class was built and its test PASSED (encrypted at rest, `keyId` == the class holder). It is the egress
+> half that is impossible. A snapshot with no reader is dead scaffolding, so it was reverted too.
+>
+> **The real fork (needs adjudication — not a builder's call):**
+>
+> 1. **Make `.tenantName` NON-sensitive.** Mechanically works today (a non-sensitive aspect declared in
+>    `egressReads` hydrates as a plain read and `resolve_subject_params` returns the string). But it puts
+>    a plaintext party name at rest on the leaseapp with **no destruction path ever** — the exact shape
+>    `clinic-domain`'s shipped §8.7 F3(b) decision rejects for `.demographics.fullName` ("a name left
+>    plaintext … outlives the ShredIdentityKey that destroys the same person's email and phone"). This is
+>    a privacy-custody decision at product/architecture altitude.
+> 2. **Extend the egress boundary to retention-class holders** (Lattice lane): envelope columns on a
+>    retention-class lens + a bridge envelope-source switch + relaxing both gates above. Correct, but it
+>    widens what the bridge can hand a vendor to a holder class deliberately excluded — needs design.
+> 3. **Extend egress-safe reads to LINK-DISCOVERED aspects** (Lattice lane, Loom + Contract #2 §2.5).
+>    This is the follow-on the code itself already names, in `leasedoc_scripts.go`'s own doc comment and
+>    in `TestLeaseDocInstance_ManagedUnit_ResolvesLandlordKey`'s comment ("not blocked on the same Loom
+>    primitive"). It needs **no snapshot and no new retention class at all** — the doc DDL would reach
+>    the applicant identity's already-sensitive, already-identity-custodied `.name` directly.
+>
+> Note that (3) makes (1)'s and (2)'s machinery unnecessary, which is why nothing was left in the tree:
+> a new retention class is install-time state that is awkward to un-ship.
+>
+> **Live blast radius** (read-only against the running dev stack, 2026-08-27): 56 `vtx.leaseapp.*` roots
+> (51 live), **8 signed** (7 live), **0** carrying `.tenantName`. So the brief's change would have broken
+> docGen for 7 live signed applications, and a backfill would have been a 7–8 row job (no pagination).
+>
+> Everything below is the original brief, retained unchanged as the record of what was attempted.
+
 **Board row:** `verticals.md` — "The executed lease still doesn't name its tenant" (LoftSpace, pkg, ★★, S).
 **Steward:** Vertical Steward, unattended fire, 2026-08-27.
 
