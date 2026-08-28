@@ -44,9 +44,14 @@ type PatternHop struct {
 	// Min and Max are the hop's length range, already CLAMPED to what the
 	// executor will actually walk: addPattern applies rel_traverse.go's own
 	// clamp (an open or over-long Max becomes maxVarLengthHops, a negative Min
-	// becomes 0) before recording the hop, so Max >= Min >= 0 always holds and
-	// a consumer never has to re-derive the bound. A fixed single hop — the
-	// overwhelming majority — carries Min == Max == 1.
+	// becomes 0) before recording the hop, so a consumer never has to re-derive
+	// the bound. A fixed single hop — the overwhelming majority — carries
+	// Min == Max == 1.
+	//
+	// Max >= Min >= 0 holds because addPattern refuses a lower bound above one
+	// hop outright, on a seeding argument stated at that refusal: clamping Max
+	// down without clamping Min would otherwise leave Min > Max, a range that
+	// admits nothing while still costing a full frontier walk.
 	//
 	// The clamp is what makes a ranged hop safe to walk: the derivation is
 	// complete with respect to what the EXECUTOR will evaluate, not with
@@ -178,12 +183,22 @@ func (ix HopIndex) WithLabelExpansion(exp map[string]map[string]struct{}) HopInd
 // fail-closed for a DERIVATION are opposite motions, so the derivation must
 // decline the whole index up front and let its caller fall back to the BFS,
 // rather than walk one that silently narrows.
+//
+// A present-but-EMPTY concrete set is the same answer as a missing one, and is
+// reported as unresolved for exactly that reason. An expansion resolving to
+// nothing is a real state rather than an error — ruleinstall.go warns and
+// degrades the lens to its broad consumer filter — but admitsType then admits
+// no type at either expanded position, so the walk builds ZERO seeds and
+// returns an empty derived set with ok == true. The caller reads that as "no
+// anchor changes" and reprojects nobody. On a lens that mints cap.svc.<actor>
+// the dropped event is a revocation, so the empty set must decline the index
+// and take the BFS, not answer.
 func (ix HopIndex) UnresolvedExpansionPosition() int {
 	for i, isExpand := range ix.LabelExpand {
 		if !isExpand {
 			continue
 		}
-		if i >= len(ix.Expanded) || ix.Expanded[i] == nil {
+		if i >= len(ix.Expanded) || len(ix.Expanded[i]) == 0 {
 			return i
 		}
 	}
@@ -707,6 +722,32 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 			// relation name — the arm ReferencedRelations fails exhaustiveness
 			// on, for the same reason.
 			b.rejectOnce("pattern carries an untyped relationship")
+		case r.MinHops > 1:
+			// A ranged hop whose LOWER bound exceeds 1 is refused, and the
+			// reason is in the SEEDING rather than in the walk.
+			//
+			// A changed link on a fixed hop binds its two pattern positions
+			// exactly, so AnchorSideSeeds' two endpoint seeds are exact. On a
+			// ranged hop the changed link is an INTERMEDIATE edge of the
+			// expansion: the real bindings are `a →^i u -r-> v →^j b` with
+			// i+j+1 in [Min,Max], so the nodes bound at the From position are
+			// every node reaching u within Max-1 steps, not u. Those ancestors
+			// are recovered only by the walk bouncing back across the hop from
+			// the To seed, which covers From-offsets [1-Max, 1-Min]; together
+			// with the direct seed at offset 0 that covers the required
+			// [1-Max, 0] only while Min <= 2. At a higher lower bound the
+			// offset -1 binding is reachable only through a second bounce,
+			// which a node near the edge of its component does not have the
+			// graph room for — so the derivation returns ok == true having
+			// dropped an anchor, which on the auth plane is a revocation that
+			// never fires.
+			//
+			// Refusing costs nothing the corpus uses (every shipped ranged hop
+			// is `*0..`, `*1..` or `*0..7`) and leaves those shapes on the BFS,
+			// exactly as before this arm existed. Widening the seed set to the
+			// [1..Max] neighbourhood of both endpoints is the alternative, and
+			// it is a larger change with a much larger derived set.
+			b.rejectOnce("pattern carries a variable-length relationship whose lower bound exceeds one hop")
 		case r.MinHops != 1 || r.MaxHops != 1:
 			// A variable-length hop is recorded as a RANGED hop, carrying the
 			// same clamped bounds traverseRel walks it under. The number of

@@ -32,6 +32,20 @@ import (
 // 10_000.
 const DefaultDerivationReadCap = 2_000
 
+// DerivationRangedWorkFactor multiplies the read cap into the ranged closures'
+// work budget: the adjacency ENTRIES they may iterate, as against the documents
+// they may read. The two differ because edgesOf memoises, so a re-entered
+// closure re-walks cached edge lists at no read cost at all.
+//
+// It is a multiple rather than its own constant so one operator knob still
+// governs the walk's whole cost envelope: SetAnchorDerivationReadCap moves both
+// together. The factor is the average degree above which iterating is no longer
+// cheap relative to the read that fetched the list — generous against the
+// shapes the derivation is built for (a containment chain's handful of edges
+// per vertex) and far below the measured pathology (86,050 entries for 1,023
+// reads on a binary containment tree).
+const DerivationRangedWorkFactor = 16
+
 // SetAnchorDerivationReadCap overrides the per-walk adjacency read budget.
 // n <= 0 restores the default. It exists so an operator can bound the
 // derivation's cost on a live lens without a redeploy, and so a test can reach
@@ -225,6 +239,10 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 	// rangedReads is the adjacency documents the ranged closures below read,
 	// tallied for the whole walk and reported once however the walk exits —
 	// including the read-cap exit, which is the firing rate worth seeing.
+	// work counts the adjacency entries the ranged closures iterate, which is
+	// what the memoising read cap cannot see (its doc above).
+	work := 0
+	workBudget := readCap * DerivationRangedWorkFactor
 	rangedReads := 0
 	defer func() {
 		if rangedReads > 0 {
@@ -252,9 +270,21 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 	//     budget: a pattern chaining a fixed hop, a ten-hop range and another
 	//     fixed hop is twelve graph hops, and a global depth cap would
 	//     under-approximate it.
-	//   - It reads only through edgesOf, so DefaultDerivationReadCap governs it
-	//     and a breach returns errDerivationTooWide, which the caller turns into
-	//     ok == false and the enumerator BFS. No new budget, no truncation.
+	//   - It reads only through edgesOf, so DefaultDerivationReadCap governs its
+	//     I/O, and a breach returns errDerivationTooWide, which the caller turns
+	//     into ok == false and the enumerator BFS. Never a truncation.
+	//
+	// The read cap bounds I/O and NOT work, and the difference is measurable:
+	// edgesOf memoises, so a walk that re-enters this closure once per admitted
+	// node re-iterates cached edge lists for free as far as the read cap is
+	// concerned. On a 1,023-vertex containment tree that is 4,092 expansions and
+	// 86,050 edge visits to derive one anchor — twelve times what the BFS this
+	// replaces costs — and on a wide layered graph it reaches seconds of CPU at
+	// 40% of the read cap. workBudget therefore bounds the edge entries the
+	// ranged closures may iterate, and it is a FALLBACK trigger on exactly the
+	// read cap's terms: a breach raises errDerivationTooWide, so the walk
+	// degrades to the enumerator rather than returning a smaller set. It can
+	// only ever cause MORE fallback, never a narrower answer.
 	//
 	// This closure is NOT equivalent to traverseRel and does not try to be.
 	// traverseRel carries a per-path `seen` and enumerates paths; this walk
@@ -263,16 +293,27 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 	// executor's paths can reach. The superset is what the invariant needs.
 	//
 	// The frontier's own guard is keyed by (vertex, hop) and dies with the
-	// call — no state outlives the walk. The hop belongs in the key because a
-	// step with Min > 1 can reach a node both below Min and at or above it, and
-	// a guard keyed by vertex alone would let the first sighting suppress the
-	// admissible one.
+	// call — no state outlives the walk. The hop belongs in the key only where
+	// a step's lower bound exceeds one: such a step can reach a node both below
+	// Min and at or above it, and a guard keyed by vertex alone would let the
+	// first sighting suppress the admissible one. At Min <= 1 — every shape
+	// AnchorHopIndex admits, since it refuses a higher lower bound — admission
+	// precedes the guard and the two keys produce the same set, so the hop is
+	// dropped and the guard costs one entry per vertex instead of Max.
 	type frontierNode struct {
 		id  string
 		hop int
 	}
 	expandRanged := func(cur seededNode, step full.PatternStep) (int, error) {
 		readsBefore := reads
+		// A step with no hop to take crosses no edge. StepsFrom never builds
+		// one, but this closure also serves a caller assembling a HopIndex
+		// directly, where silently admitting only the standing node would be an
+		// under-approximation rather than a no-op.
+		if step.Max < 1 {
+			return 0, nil
+		}
+		hopInKey := step.Min > 1
 		// The zero-hop admission: `*0..` binds the far position to the
 		// standing node itself, crossing no edge (rel_traverse.go's minHops ==
 		// 0 arm). No adjacency entry names this node's type, so the far-end
@@ -290,6 +331,10 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 				if err != nil {
 					return reads - readsBefore, err
 				}
+				work += len(edges)
+				if work > workBudget {
+					return reads - readsBefore, errDerivationTooWide
+				}
 				for _, e := range edges {
 					if !edgeTakesStep(step, e) {
 						continue
@@ -297,7 +342,10 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 					if hop >= step.Min && stepAdmitsFarEnd(step, e.OtherType) {
 						admit(seededNode{pos: step.ToPos, id: e.OtherNodeID})
 					}
-					fn := frontierNode{id: e.OtherNodeID, hop: hop}
+					fn := frontierNode{id: e.OtherNodeID}
+					if hopInKey {
+						fn.hop = hop
+					}
 					if _, dup := seen[fn]; dup {
 						continue
 					}
