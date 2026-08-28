@@ -641,3 +641,223 @@ MaxDeliver) is now stated explicitly with its bounds (§3.1).
 Andrew (2026-08-27) and folded · decline taxonomy corrected and folded · **✅ RATIFIED (Andrew,
 2026-08-27) — build-ready**; §8 demote and the dropped update-rebuild lever are settled in the
 banner.
+
+---
+
+## 16. Fire brief (build note, 2026-08-28) — the whole item, Inc 1→4
+
+Compiled by the Lattice Steward at selection, from four read-only scouts over
+`internal/substrate`, `internal/weaver`, `internal/processor` and the operator-verb layers.
+One brief per ITEM: a later fire resuming an unfinished increment runs a delta-scout, not a
+recompile.
+
+### 1. Scope sentence (verbatim, §14)
+
+> Inc 1 — substrate. `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns T1.
+> Weaver-inert until Inc 2. · Inc 2 — decline classes. §3.2's table + the `isBool` threading + the
+> row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
+> the §8 severity demotion. Owns T3, T4, T5, T8. Phase 0 runs C1/C2/C5 with C2's stop-rule. ·
+> Inc 3 — dispatch-path restructure. Early anti-storm ahead of `planGap`; retire `redelivered`; the
+> republish set; the three comment rewrites. Owns T2, T9. · Inc 4 — the `ReplayTarget` verb. Engine
+> verb + capability verb + Loupe surface (V20's pattern) + Augur re-fire suppression + the
+> contraction/component-doc sentence rewrites. Owns T6, T7, T10, T11.
+
+**Landing shape (§4 requires the doc to state which):** **land each increment on `main`.** Every
+boundary is independently green and safe, and the invariant that keeps `main` correct across them is
+that **Inc 1 is Weaver-inert** (a new Decision value no handler returns yet) and Incs 2/3/4 each
+leave the engine at a complete dispatch posture — Inc 2 without Inc 3 keeps the shipped re-fire
+branch, Inc 3 without Inc 4 keeps today's operator verb set. The remote container is ephemeral
+(`agents/steward/REMOTE.md` §4), so holding four increments in one unpushed branch is the riskier
+shape here.
+
+### 2. Verified touch-list (checked live at 2026-08-28, against `c9a7df1`)
+
+**Premise re-runs (the scope-diff gate's census rule). Every design count re-run live:**
+
+| Census | Design says | Live now | Verdict |
+|---|---|---|---|
+| C1 — production weaver targets | 26 | **26** (`grep -rn 'TargetID:' --include='*.go' packages/ \| grep -v _test \| wc -l`) | ✅ exact |
+| C6 — `substrate.Ack` sites in `evaluator.go` | 21, at 27/34/43/93/115/120/131/201/231/257/552/583/587/636/688/704/812/1344/1359/1388/1398 | **21, same lines, zero drift** | ✅ exact |
+| V8 — `applyDecision` call sites | 4 | **4**: `substrate/consumer.go:319`, `:395`, `substrate/consumer_supervisor_pump.go:704`, `:710` | ✅ exact |
+| V8 — switches over `Decision` | "two, both `default: → Ack`" (+ handleRow's two aggregation switches, named separately in §3.1) | **five**: the two appliers (`substrate/consumer.go:450`, `processor/commit_path.go:810`), the two weaver aggregators (`evaluator.go:172`, `:182`), **and one the design does not name — `internal/processor/outbox/consumer_decisions_test.go:29`'s `decisionName`** | ⚠️ **corrected**: a fifth switch exists. Benign (a test helper whose fall-through returns `Decision(%d)`, not Ack) but it is a switch a new value must reach, so T1 covers it. |
+| C3 — post-preamble `msg.*` reads | `msg.Sequence` + `msg.NumDelivered`, the latter at exactly the retiring branch | **`:172`, `:270`, `:305` Sequence; `:346` NumDelivered** — the only NumDelivered read, and `redelivered` is read at exactly one site (`:633`) | ✅ exact |
+| §6 — lane-1's shipped consumer envelope | `MaxAckPending` unset (server default 1000) | **confirmed**: `weaver/engine.go:414-425` `targetSpec` sets neither `MaxAckPending` nor `RedeliveryDelay` | ✅ |
+
+Line drift against the design's citations, all resolved to current lines: `disposeJetstream`
+`commit_path.go:850-869` → **`:810-829`**; `planGap` `:575-590` → **`:516-589`** (its `errData`
+arm at `:580-583`, default at `:584-587`); `admitGap` → **`:600-614`**, its token consumed inside
+`planGap` at **`:528`**; `fireEpisode` **`:629-694`**; `fire` **`:792-813`**;
+`escalateExhaustedGap` **`:1325-1407`**; `clearClosedMarks` **`:839-933`**; `boolColumn`
+**`:1085-1102`**; `intColumn` **`:1117-1146`**; `reclaim`'s backoff **`reconciler.go:142-162`**.
+
+**Inc 1 — substrate (`NakWithLongDelay` + `LongRedeliveryDelay`)**
+
+| File:line | Edit |
+|---|---|
+| `internal/substrate/consumer.go:39-57` | append `NakWithLongDelay` to the `Decision` iota (value 4), doc-commented like `NakWithDelay` |
+| `internal/substrate/consumer.go:59-65` | add `DefaultLongRedeliveryDelay = 5 * time.Minute` beside `DefaultRedeliveryDelay` |
+| `internal/substrate/consumer.go:449-472` | `applyDecision` grows a `longRedeliveryDelay` parameter + a `case NakWithLongDelay` floored at `DefaultLongRedeliveryDelay` **and at the consumer's own `RedeliveryDelay`** (§3.1: "floored at `DefaultRedeliveryDelay` if set lower") |
+| `internal/substrate/consumer.go:319`, `:395` | both call sites pass the second floor |
+| `internal/substrate/consumer_supervisor_pump.go:704`, `:710` | ditto; `:704` keeps `effectiveProbeInterval` for its own `NakWithDelay` |
+| `internal/substrate/consumer.go:108-148` | `DurableConsumerConfig.LongRedeliveryDelay` |
+| `internal/substrate/consumer_supervisor_spec.go:152-176` | `ConsumerSpec.LongRedeliveryDelay` |
+| `internal/processor/commit_path.go:810-829` | explicit `case substrate.NakWithLongDelay` (today's `default:` would silently Ack) |
+| `internal/processor/outbox/consumer_decisions_test.go:29-38` | the fifth switch — add the name |
+| `internal/substrate/nak_with_delay_test.go:13-26` | extend the iota pin (`NakWithLongDelay != 4` → red) |
+
+**Inc 2 — decline classes.** `internal/weaver/evaluator.go` rows 3/8/10/11 at `:43`, `:231`,
+`:583`, `:587`; both aggregation switches `:172-178`, `:182-188` gain the explicit case with
+precedence `Nak > NakWithDelay > NakWithLongDelay > Ack`; `boolColumn:1085-1102` threads its
+existing `isBool` local out; `clearClosedMarks:853` narrows its clear to an explicit-bool-false
+read; severity `"error"` → `"warning"` at `:228` (`alert`) and `:585` (`alertPaced`);
+`weaver/engine.go:414-425` `targetSpec` gains `MaxAckPending: 2000` + `LongRedeliveryDelay`;
+`internal/weaver/health.go` (`issueCache` `:130-135`, `set` `:147`, `snapshot` `:303-316`) gains the
+per-target per-family map cap.
+
+**Inc 3 — dispatch restructure.** `evaluator.go` `dispatchGap:204-347` (mark read + `found &&
+!stale` early Ack ahead of `planGap:305`), `fireEpisode:629-694` (`redelivered` parameter deletes),
+`fire:792-813` (republish-set insert on the `:800` Nak, removal on success), the three comments at
+`:190-193`, `:776-778`, `reconciler.go:1126-1128`.
+
+**Inc 4 — the verb.** Nine layers, verified end to end against `ResetRetryBudget`:
+`weaver/control.go` (engine method + not-registered check, mirroring `:341-343`);
+`weaver/control/service.go` (`engineControl` iface `:26-37`, `ControlResponse` `:61-69`, op const
+beside `opResetBudget` `:128`, `targetOps` `:138`, `dispatchEndpoint` switch `:317-362`);
+`internal/controlauth/ops.go:23-30` `WeaverOps`; `packages/console-operator/permissions.go:58` +
+`manifest.yaml` (+ **version bump**, `package.go`'s mirroring constant) + `package_test.go:154`;
+`internal/controlauth/checker_test.go:175` (the lock-step wiring test);
+`cmd/loupe/control.go:57` `mutateOps`; `cmd/loupe/web/js/views/weaver.js`;
+`internal/substrate/consumer_supervisor.go` `Reset`/`ResetAwaitReopen` `:197-261`, `resetMu`
+`:41-62`.
+
+### 3. Precedents to mirror
+
+- New Decision value → **`NakWithDelay` itself** (`consumer.go:39-57`, `:59-65`, `:449-472`) — the
+  same append-at-the-end + package-default + floor-fallback shape, pinned by the same test.
+- Env-clamped tunable → **`weaver/engine.go:157-184`**'s sweep-interval clamps (zero → default,
+  invalid → `logger.Warn` + clamp).
+- The operator verb → **`ResetRetryBudget`** end to end (the `057286f` un-park fire), all nine
+  layers above; its tests `control_internal_test.go:891-1043` and
+  `control/service_test.go:357-413` are the fixture shapes.
+- Per-target durable delete-then-create → **`substrate.ConsumerSupervisor.Reset`/`ResetAwaitReopen`
+  under `resetMu`** (`consumer_supervisor.go:197-261`) — already the machinery `Revoke` and the
+  registry use; no new mechanism.
+- The issue-map cap → **`boundIssues`** (`health.go:616-637`) and `installer.go`'s
+  `sampleWithOverflow`, per the dossier entry that minted `boundIssues`.
+
+### 4. Increment order + runnable green checks
+
+Each increment: build → vet → lint → its own tests → full suite → commit → CI.
+
+```sh
+export PATH="$(go env GOPATH)/bin:$PATH"          # golangci-lint v2.11.4, REMOTE.md §7
+export POSTGRES_TEST_DSN="postgres://lattice:lattice_dev@127.0.0.1:5433/lattice?sslmode=disable"
+go build ./... && make vet && golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go
+# Inc 1
+go test -count=1 ./internal/substrate/... ./internal/processor/...
+# Inc 2
+go test -count=1 ./internal/weaver/...                      # T3, T4, T5, T8
+# Inc 3
+go test -count=1 ./internal/weaver/...                      # T2, T9
+# Inc 4
+go test -count=1 ./internal/weaver/... ./internal/controlauth/... ./cmd/loupe/... \
+  ./packages/console-operator/...                            # T6, T7, T10, T11
+DIFF_BASE=origin/main go run ./scripts/lint-package-version.go   # console-operator bump
+# every increment, before commit — the whole tree plus the build-tagged harnesses the
+# Decision-interface change reaches (CLAUDE.md: `go test ./...` is NOT the whole gate set)
+go test ./... -p 4
+make test-control-plane-authz && make test-unrouted-convergence && make test-augur-convergence
+```
+
+### 5. In-scope gotchas
+
+- **`packages/console-operator` content edit ⇒ bump `manifest.yaml`'s version AND the `Version`
+  constant mirroring it** (CLAUDE.md), verified by `lint-package-version.go`.
+- **A Decision-enum change reaches build-tagged harnesses** that `go test ./...` never compiles —
+  `make test-control-plane-authz` in particular drives a real `weaver control.Service` round-trip
+  and is the gate Inc 4's transport layer must pass.
+- **No frozen-contract change** (§10): Contract #10 §10.8's liveness bullet already promises this.
+  If the build falsifies that, the contract edit becomes a branch commit per `REMOTE.md` §2 — it is
+  not a reason to stop.
+- **`docs/components/weaver.md` is updated in the same increment** as the behaviour it describes —
+  the lane-1 decline classes (Inc 2), the `Enable` sentence (Inc 3/4), and `contraction.go:20-25`'s
+  currently-false restart sentence (Inc 4).
+- **Health-emission changes update the canonical Health-KV schema doc in the same change**
+  (`agents/steward/SKILL.md` §4) — Inc 2 adds a `RowDataError` raise at a synthetic `body` column
+  and demotes two codes' severity.
+
+**Weaver's "Review keeps catching" dossier — the entries this fire trips, copied in verbatim
+(`docs/components/weaver.md:970-1095`):**
+
+- **A Health issue key is a LATCH: scope it to the fact it states, and split it only with every
+  clear re-paired.** *Before adding a CLEAR, enumerate every OTHER leg that raises at that key* — a
+  clear one leg believes against a raise another believes does not settle: the latch flaps,
+  re-stamps its `since`, and defeats arrival-vs-repeat damping. Check: enumerate every raise and
+  every clear — grep the family's key CONSTRUCTOR, not only the file you are editing — assert each
+  raise still reaches each clear it had, and pin two entities on one column.
+  **→ binds Inc 2's row-3 `issueKeyDataEntity(…, "body")` raise/clear AND the §3.5 narrowing.**
+- **Segmenting a Health key by entity is safe only where a clear site names that exact COLUMN —
+  enumerate the raise COLUMNS, not the raise functions.** A shared reader (`boolColumn`/`intColumn`)
+  raises for whatever column its caller passes; six columns flowed through those two readers and one
+  had a clear. The issue cap bounds the DOCUMENT, not the cache.
+  **→ binds Inc 2's map-level cap and the new synthetic `body` column.**
+- **A per-entity Health issue is unbounded, and the heartbeat is ONE KV value.** Aggregate status
+  over ALL issues, then bound the listing, and select by SEVERITY, never key order.
+  **→ binds Inc 2's §3.6 cap: it must not disturb `boundIssues`' honest total.**
+- **An `error`-severity Health issue must not fire on a self-healing condition.**
+  **→ this is exactly §8's demotion; assert no `error` remains at either raise site.**
+- **A leg's arms are a lattice, not a list: every RETIRE belongs above every "cannot act" GUARD.**
+  **→ binds Inc 3's move of the mark read/anti-storm ahead of `planGap` — the moved block must not
+  strand a retire below a guard.**
+- **A gap class is decided by the dispatch's SHAPE, never by its action name; a NEW dispatch seam
+  inherits that classifier and the pacing built on it.** A mark's ABSENCE is not evidence the
+  episode concluded.
+  **→ binds Inc 3's republish set (a new re-fire seam) and Inc 4's replay (re-delivering rows whose
+  marks may be live, stale, or gone).**
+- **An operator verb that hands a gap to a reconciler arm must refuse exactly what that arm
+  PERMANENTLY declines** — TRANSIENT declines the verb must accept, PERMANENT ones it must refuse
+  and NAME. Minted four times on one verb.
+  **→ binds Inc 4: `ReplayTarget` must refuse an unregistered target (design §3.3) and an unmanaged
+  consumer (`"reset %q: not managed"`), each with its own message.**
+- **A shared test fixture that always supplies an OPTIONAL input pins only the supplied case.**
+  **→ binds every new T-test's fixture.**
+- **Prove each changed line by reverting THAT LINE, not the feature — and where the claim is about
+  WHERE a block sits, the mutation is a MOVE, not a revert.**
+  **→ binds Inc 3's early-anti-storm proof specifically: revert proves nothing, the block must be
+  MOVED back past `planGap` and the test must red.**
+- **A fact ends by more routes than the one you are editing — enumerate the LEGS, not just the
+  verb.** The issue families are prefix-keyed below the target; a route that clears only the key it
+  owns strands every per-entity entry.
+  **→ binds Inc 2's `body` key: it lives in the `data:` prefix family, so it inherits `Revoke`'s and
+  `reconcileConsumers`' prefix clears — verify, don't assume.**
+
+**Standing checklist (`agents/fire-brief-template.md`), all six live here:**
+(1) the **republish set** and the **issue-map cap** are new state → each needs its state table
+written before it is built (§5 has the republish set's; the cap's must be added);
+(2) every census above was re-run live — one came back wrong (the fifth switch);
+(3) each T-test's positive vector proven before its negative;
+(4) **the retiring `NumDelivered` branch is a REPLACEMENT, not a deletion — enumerate everything it
+was silently doing** (V18 names one job; C3 + the three comments are the enumeration, and the
+adversarial pass must look for a second);
+(5) one deterministic key, one writer — the republish set's key is `(targetID, entityID, col)`, the
+same tuple the mark owns, so its arbitration with `clearClosedMarks` must be explicit;
+(6) precedent may carry debt — `ResetRetryBudget` is the mirror **and it is itself incomplete**
+(see part 6).
+
+### 6. Adjacent finds
+
+- **`resetBudget` is unreachable from Loupe.** `cmd/loupe/control.go:57` lists
+  `mutateOps: setOf("disable", "enable", "revoke")` — `resetConfidence` and `resetBudget` exist in
+  the engine, the transport, `controlauth` and `console-operator`, but Loupe's allow-list refuses
+  them, so `weaver.md`'s "surfaced in Loupe" is false for both. **Absorbed into this run's batch**
+  as part of Inc 4 (the same two lines that admit `replayTarget`), not filed.
+- The design's V8 switch count was one short (part 2's table). **Fixed in Inc 1**, and this
+  brief amends the doc's own §3.1 touch list.
+
+### 7. Non-goals (the drift fence)
+
+No automatic rebuild of any kind (per-boot, per-reconnect, per-update) — withdrawn by Andrew's
+correction. No row sweep / declared-work enumerator (the shelved fallback). No `Term` for the
+data-error class (§3.2 rejects it). No `AckWait` change (§6 withdrew it). No `MaxDeliver` bound
+(V5's posture). `Enable` stays plain Resume. The unregistered-target exit stays Ack (§4.2). No
+change to marks / OCC / idempotency / the sweep's legs.
