@@ -376,6 +376,7 @@ func (s *server) handleVaultErase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		// op-name: (submits) handleVaultErase submits this to launch the installed identityErasure Loom pattern for the requested identity, the mechanism that actually carries out erasure once the operator confirms it here.
 		OperationType: "StartLoomPattern",
 		Lane:          string(processor.LaneDefault),
 		Payload:       payload,

@@ -217,8 +217,9 @@ maintained by the script itself (both declared, not part of the edge list).`,
 			optionalReads = append(optionalReads, rewrittenEdgeKeys(edges, primaryID, secondaryID)...)
 
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "candidates merge" CLI command submits this after enumerating the secondary identity's live links, carrying the discovered edge list for the script to migrate onto the primary identity.
 				OperationType: "MergeIdentity",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

@@ -669,6 +669,7 @@ func (s *server) reviewCapabilityApprove(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		// op-name: (submits) reviewCapabilityApprove submits this once the proposal's artifact re-validates against the current catalog, carrying the operator's approve verdict from the Loupe console.
 		OperationType: "ReviewCapabilityProposal",
 		Lane:          string(processor.LaneDefault),
 		Payload:       payload,
@@ -788,6 +789,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		// op-name: (submits) reviewCapabilityApply submits this immediately after ApplyCapabilityPlan installs/upgrades the target package, closing the loop on the same request that just committed the install.
 		OperationType: "MarkCapabilityProposalApplied",
 		Lane:          string(processor.LaneDefault),
 		Payload:       markPayload,
@@ -1066,6 +1068,7 @@ func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		// op-name: (submits) reviewCapabilityMarkApplied submits this from the standalone mark-applied recovery endpoint, closing over an install it independently confirmed already committed (the Apply request's own close never landed) rather than as part of an in-flight apply.
 		OperationType: "MarkCapabilityProposalApplied",
 		Lane:          string(processor.LaneDefault),
 		Payload:       markPayload,

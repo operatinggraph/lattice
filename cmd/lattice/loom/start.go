@@ -100,8 +100,9 @@ carries — both as the payload's patternRef and as authContext.target.`,
 			}
 
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "loom start" CLI command submits this to launch a Loom pattern instance for a subject, carrying the resolved pattern reference and the subject key the instance runs against.
 				OperationType: "StartLoomPattern",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

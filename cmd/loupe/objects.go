@@ -373,8 +373,9 @@ func (s *server) submitAttach(ctx context.Context, conn *substrate.Conn, oid, di
 		requestID := substrate.DeriveNanoID(attachReqNamespace, seed)
 
 		greq := gatewayOperationRequest{
-			RequestID:     requestID,
-			Lane:          string(processor.LaneDefault),
+			RequestID: requestID,
+			Lane:      string(processor.LaneDefault),
+			// op-name: (submits) the object-upload handler submits this via the Gateway after storing an uploaded file's bytes, linking the resulting object to its target vertex under the given link name (optionally replacing a prior object).
 			OperationType: "AttachObject",
 			Class:         "object",
 			Payload:       mustJSON(payload),
@@ -594,8 +595,9 @@ func (s *server) handleObjectDetach(w http.ResponseWriter, r *http.Request, oid 
 	requestID := substrate.DeriveNanoID(detachReqNamespace,
 		join0(oid, targetKey, linkName, strconv.FormatUint(linkRev, 10)))
 	greq := gatewayOperationRequest{
-		RequestID:     requestID,
-		Lane:          string(processor.LaneDefault),
+		RequestID: requestID,
+		Lane:      string(processor.LaneDefault),
+		// op-name: (submits) the handleObjectDetach handler submits this via the Gateway to unlink an object from its target vertex on operator request, salted with the link's current revision so a retry collapses while a re-detach of a since-revived link is a distinct intent.
 		OperationType: "DetachObject",
 		Class:         "object",
 		Payload:       mustJSON(map[string]any{"oid": oid, "targetKey": targetKey, "linkName": linkName}),

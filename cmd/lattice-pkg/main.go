@@ -618,8 +618,9 @@ func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposa
 	}
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	env := &processor.OperationEnvelope{
-		RequestID:     requestID,
-		Lane:          processor.LaneDefault,
+		RequestID: requestID,
+		Lane:      processor.LaneDefault,
+		// op-name: (submits) closes the two-commit apply-proposal flow — the lattice-pkg CLI submits this after runApplyProposal has installed/upgraded the package through the Apply dispatcher, recording that the review's approved proposal is now materialized.
 		OperationType: "MarkCapabilityProposalApplied",
 		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

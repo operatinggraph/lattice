@@ -219,8 +219,9 @@ closes the approve to invalid if it no longer validates.`,
 			}
 			proposalKey := "vtx.capabilityproposal." + proposalID
 			env := &processor.OperationEnvelope{
-				RequestID:     requestID,
-				Lane:          processor.LaneDefault,
+				RequestID: requestID,
+				Lane:      processor.LaneDefault,
+				// op-name: (submits) the "capability review" CLI command submits this to approve or reject a pending AI-authored capability proposal, carrying the operator's verdict and, on approval, the freshly recomputed validation.
 				OperationType: "ReviewCapabilityProposal",
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),

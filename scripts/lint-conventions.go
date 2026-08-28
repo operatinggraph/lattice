@@ -223,12 +223,18 @@
 //     reads exactly like one that holds, which is the failure the sub-field
 //     exists to prevent, one level up. Every category needs a trailing `<why>`.
 //     A declaration binds to ONE operation name, on the literal's own line or
-//     directly above it. An annotation anchored to a line that OPENS a block
-//     (`const (`, `var s = map[string]struct{}{`, a func signature) is denied:
-//     it would cover every name in the block, so a name added to the block later
-//     arrives pre-declared — and, on a (policy) set, pre-pinned — with a sentence
-//     written about other verbs. A per-line trailing annotation INSIDE such a
-//     block is the sanctioned form.
+//     directly above it, and an annotation whose span covers SEVERAL names is
+//     denied as a blanket: one sentence written about one verb would vouch for
+//     the others, and — on a (policy) — discharge their `pin=` too. The natural
+//     Go idiom for a policy set (`const (` of op-name constants, a
+//     `map[string]struct{}{` literal) annotated once at its opening line is
+//     exactly that shape; the sanctioned form is a per-line annotation inside it.
+//     What is counted is NAMES, not the syntax of the anchor line, because
+//     `if op.OperationType != "RevokeRole" {` opens a block AND is the (policy)
+//     category's own defining shape — a branch keyed on the name. Counting names
+//     admits that branch, denies the blanket, and still catches the drift: a
+//     second name appearing inside an annotated span takes it to two and trips
+//     this on the commit that adds it.
 //     The universe is DERIVED, never listed: the gate parses every non-test
 //     `packages/**/*.go` with go/ast, reads each DDL's `PermittedCommands`
 //     elements — string literals and package-level string constants alike — and
@@ -2647,16 +2653,24 @@ func checkOpNamePin(path string, ln int, why string) []finding {
 // trace, so that is what is checked. A correctly placed declaration always
 // covers at least one member, which is why the rule cannot fire on a live site.
 //
-// The second is the BLANKET: an annotation anchored to a line that opens a Go
-// block covers everything inside the block, so one declaration adopts every
-// operation name in it — including every name added to it later, which arrives
-// pre-declared with a sentence written about other verbs entirely. The shape is
-// not exotic: a core policy set's natural Go idiom (`var s = map[string]struct{}{`,
-// or a `const (` run of op-name constants) is exactly it, and blanketing one
-// `(policy)` over the set also discharges its `pin=` for members nobody pinned.
-// A declaration therefore binds to one operation name, on its line or directly
-// above it. A per-line trailing annotation INSIDE such a block is untouched:
-// its anchor is the element line, which opens nothing.
+// The second is the BLANKET: one declaration standing for SEVERAL operation
+// names. A declaration says what one literal is doing at one site, so a span
+// holding more than one name has a sentence written about one verb vouching for
+// others — and, when it is a `(policy)`, discharging their `pin=` too. The shape
+// is not exotic: a core policy set's natural Go idiom (`var s = map[string]struct{}{`,
+// or a `const (` run of op-name constants) annotated once at its opening line is
+// exactly it.
+//
+// The count is what is checked, not the syntax of the anchor line. An earlier
+// form of this rule denied any anchor that opened a Go block, which reads as the
+// same thing and is not: `if op.OperationType != "RevokeRole" {` opens a block,
+// and it is also the `(policy)` category's own defining shape — a branch keyed
+// on the name. That form made the shape unannotatable and forced a contributor
+// to restructure working code to satisfy the gate, which is the tail wagging the
+// dog. Counting names denies the blanket, admits the branch, and still catches
+// the drift the syntactic form was reaching for: a second name added to an
+// annotated block later takes the span to two and trips this on the commit that
+// adds it.
 //
 // universe maps each package-owned name to its declaring packages/ file.
 func checkOpNameDeclarations(path string, lines []string, universe map[string]string) []finding {
@@ -2666,16 +2680,17 @@ func checkOpNameDeclarations(path string, lines []string, universe map[string]st
 			continue
 		}
 		anchor := annotationAnchor(lines, i)
-		if anchor >= 0 && opensGoBlock(lines[anchor]) {
+		named := spanPackageOwnedOps(lines, anchor, universe)
+		if len(named) > 1 {
 			out = append(out, finding{file: path, line: i + 1, warn: false,
-				msg: "op-name: blanket declaration — this `op-name:` annotation is anchored to a line " +
-					"that OPENS a block, so it covers every operation name inside it, and every name " +
-					"added to that block later silently inherits a declaration written about other " +
-					"verbs. Put the declaration on the individual literal's own line, or directly " +
-					"above it — one declaration per operation name"})
+				msg: "op-name: blanket declaration — this `op-name:` annotation covers " +
+					strconv.Itoa(len(named)) + " operation names (" + strings.Join(named, ", ") +
+					"), so one sentence written about one verb vouches for the others, and every name " +
+					"added inside its span later arrives pre-declared. Put the declaration on each " +
+					"literal's own line, or directly above it — one declaration per operation name"})
 			continue
 		}
-		if anchor >= 0 && spanNamesPackageOwnedOp(lines, anchor, universe) {
+		if len(named) == 1 {
 			continue
 		}
 		out = append(out, finding{file: path, line: i + 1, warn: false,
@@ -2688,63 +2703,36 @@ func checkOpNameDeclarations(path string, lines []string, universe map[string]st
 	return out
 }
 
-// spanNamesPackageOwnedOp reports whether the span an annotation anchored at the
-// 0-based index anchor covers names at least one package-owned operation.
-// Comment lines in the span are skipped — prose ABOUT an operation is not a use
-// of it, and a declaration kept alive by its own sentence would vouch for
-// itself.
-func spanNamesPackageOwnedOp(lines []string, anchor int, universe map[string]string) bool {
+// spanPackageOwnedOps lists the DISTINCT package-owned operation names the span
+// of an annotation anchored at the 0-based index anchor covers, in first-seen
+// order. An anchor of -1 (an annotation that binds to nothing) covers none.
+//
+// Distinct, because one operation named twice inside a declaration's own
+// statement is still one coupling declared once — a guard that compares a value
+// against the same verb on two lines of one branch has not blanketed anything.
+//
+// Comment lines in the span are skipped: prose ABOUT an operation is not a use
+// of it, and a declaration kept alive by its own sentence would vouch for itself.
+func spanPackageOwnedOps(lines []string, anchor int, universe map[string]string) []string {
+	if anchor < 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
 	for _, ln := range annotationSpan(lines, anchor) {
 		body := lines[ln-1]
 		if isCommentLine(body) {
 			continue
 		}
 		for _, m := range goStringLiteral.FindAllStringSubmatch(body, -1) {
-			if _, ok := universe[m[1]]; ok {
-				return true
+			if _, ok := universe[m[1]]; !ok || seen[m[1]] {
+				continue
 			}
+			seen[m[1]] = true
+			out = append(out, strconv.Quote(m[1]))
 		}
 	}
-	return false
-}
-
-// opensGoBlock reports whether a line's code opens a brace or paren group — a
-// `const (` / `var (` run, a composite literal's header, a func signature, a
-// call split across lines. The trailing comment is stripped first so an
-// annotation trailing the opener is judged on the code it sits after.
-func opensGoBlock(line string) bool {
-	code := strings.TrimSpace(stripTrailingLineComment(line))
-	return strings.HasSuffix(code, "{") || strings.HasSuffix(code, "(")
-}
-
-// stripTrailingLineComment returns a line's code, cutting at the first `//` or
-// `#` comment marker that is not inside a string or rune literal. A `//` inside
-// a URL or a key prefix (`"vtx.//"`) is code, not a comment, and cutting there
-// would misread what the line ends with.
-func stripTrailingLineComment(line string) string {
-	var quote byte
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		switch {
-		case quote == '`':
-			if c == '`' {
-				quote = 0
-			}
-		case quote != 0:
-			if c == '\\' {
-				i++
-			} else if c == quote {
-				quote = 0
-			}
-		case c == '"' || c == '\'' || c == '`':
-			quote = c
-		case c == '#':
-			return line[:i]
-		case c == '/' && i+1 < len(line) && line[i+1] == '/':
-			return line[:i]
-		}
-	}
-	return line
+	return out
 }
 
 // exemptionHelpers derives the file's validated-target exemption helpers from
@@ -3998,6 +3986,28 @@ func selfTest() []string {
 				"\t// op-name: (submits) Loom completes the pattern it drove\n" +
 				"\topCompletePattern = \"CompletePattern\"\n" +
 				")\n", ""},
+		// A branch keyed on the name is the (policy) category's own defining
+		// shape, and in Go it always opens a block. Denying it would leave the
+		// category unannotatable and force a contributor to restructure working
+		// code to satisfy the gate — so the blanket rule counts NAMES, and one
+		// name is one declaration however the line ends.
+		{"a declaration on a branch keyed on the name is clean", "internal/bootstrap/strandedretire.go",
+			"\t// op-name: (policy) the verb whose revocations carry a permKey pin=TestRecordIfGrant\n" +
+				"\tif op.OperationType != \"RevokePermission\" {\n" +
+				"\t\treturn\n" +
+				"\t}\n", ""},
+		{"the same branch trailing-annotated is clean", "internal/bootstrap/strandedretire.go",
+			"\tif op.OperationType != \"RevokeRole\" { // op-name: (policy) the deferred verb pin=TestIsSelfRevokeRole\n" +
+				"\t\treturn false\n" +
+				"\t}\n", ""},
+		// The drift the syntactic form was reaching for, caught by the count:
+		// a second operation appearing inside an annotated span takes it to two.
+		{"a second name inside an annotated branch is denied", "internal/bootstrap/strandedretire.go",
+			"\t// op-name: (policy) the verb whose revocations carry a permKey pin=TestRecordIfGrant\n" +
+				"\tif op.OperationType != \"RevokePermission\" {\n" +
+				"\t\treturn op.OperationType == \"RevokeRole\"\n" +
+				"\t}\n",
+			"op-name: blanket declaration"},
 		{"per-line trailing declarations inside a policy set literal are clean", "internal/processor/nfr_s6_wire_shape.go",
 			"var nfrS6Operations = map[string]struct{}{\n" +
 				"\t\"ClaimIdentity\": {}, // op-name: (policy) one wire shape " +
