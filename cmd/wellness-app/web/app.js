@@ -575,6 +575,45 @@ function loadDescriptorform() {
   return descriptorformPromise;
 }
 
+// revealCeremonySecret narrates, in this app's toast vocabulary, whatever the
+// module's own revealCeremonySecret did with a minted plaintext. The DECISION
+// — descriptorform's ceremony rule 3, an affirmative `status === "accepted"`
+// and never the weaker "not rejected" — is the module's, so all four staff
+// apps enforce one implementation of it rather than four re-derivations of
+// "does this reply confirm the write landed?". Two of them do not: a
+// `duplicate` reply says an earlier submission claimed this requestId, and a
+// Processor reply timeout answers a status-less HTTP 202, and neither
+// confirms the envelope carrying this secret's hash committed.
+//
+// It reads the already-resolved descriptorformModule rather than awaiting
+// loadDescriptorform() again. Holding a reveal means a form rendered, which
+// means the module is loaded — so the await would buy nothing, and could only
+// invent a way to lose the single copy of the secret in the window between
+// the write landing and its display.
+function revealCeremonySecret(reveal, reply) {
+  // Nothing was minted for an ordinary op, so the module is never reached for
+  // one — its absence must not surface as a lost-secret warning.
+  if (!reveal) return;
+  let outcome;
+  try {
+    outcome = descriptorformModule.revealCeremonySecret(reveal, reply);
+  } catch (e) {
+    // Contained, and reported as a landed write, because the only thing that
+    // can throw in there is the display, which the module reaches only on a
+    // confirmed commit. Every caller runs this inside the same try whose catch
+    // reports the submission as failed, so an uncaught throw would tell the
+    // person the opposite of what happened and hide the fact that matters —
+    // the target is armed with a secret nobody now holds, which is only
+    // fixable by issuing a fresh one.
+    console.error("ceremony reveal failed", e);
+    toast("The write landed but its one-time secret could not be shown — issue a fresh one.", false);
+    return;
+  }
+  if (outcome === "withheld") {
+    toast("The write was not confirmed, so its one-time secret was not shown — check whether it landed, and issue a fresh one.", false);
+  }
+}
+
 // isTransientAuthLag reports whether a rejected reply is the known,
 // architecturally-expected async-projection race — the Capability Lens or
 // the credential-bindings materializer (both eventually-consistent CDC
@@ -1994,8 +2033,9 @@ async function submitBillingEntry(opType, what, reason) {
     const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined, reason } };
     const handle = renderOpForm(row, context, document.createElement("div"));
     if (!handle) throw new Error("this action is unavailable");
-    const envelope = handle.submit();
-    await submitCatalogOp(envelope, what);
+    const { envelope, reveal } = await handle.submit();
+    const reply = await submitCatalogOp(envelope, what);
+    revealCeremonySecret(reveal, reply);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", true);
     amountInput.value = "";
     memoInput.value = "";
@@ -2283,14 +2323,15 @@ async function createInstructor() {
   const submit = document.getElementById("instructor-new-create");
   submit.disabled = true;
   try {
-    let envelope;
+    let envelope, reveal;
     try {
-      envelope = handle.submit();
+      ({ envelope, reveal } = await handle.submit());
     } catch (e) {
       toast(e.message || String(e), false);
       return;
     }
-    await submitCatalogOp(envelope, "add the instructor");
+    const reply = await submitCatalogOp(envelope, "add the instructor");
+    revealCeremonySecret(reveal, reply);
     toast("Instructor added.", true);
     document.getElementById("instructor-new-form").hidden = true;
     instructorsCache = null;
@@ -2407,14 +2448,15 @@ async function wireInstructorCard(i) {
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     try {
-      let envelope;
+      let envelope, reveal;
       try {
-        envelope = handle.submit();
+        ({ envelope, reveal } = await handle.submit());
       } catch (e) {
         toast(e.message || String(e), false);
         return;
       }
-      await submitCatalogOp(envelope, "update the instructor");
+      const reply = await submitCatalogOp(envelope, "update the instructor");
+      revealCeremonySecret(reveal, reply);
       toast("Instructor updated.", true);
       form.hidden = true;
       instructorsCache = null;

@@ -6,12 +6,21 @@
 // installing a minimal fake `document` on the global is simpler than
 // `vm.SourceTextModule` and needs no `--experimental-vm-modules` flag. The
 // fake DOM below implements only what form.mjs actually calls
-// (createElement/appendChild/the handful of element properties it sets) —
-// there is no DOM library in this repo (no package.json, no jsdom) to reach
-// for instead.
+// (createElement/appendChild/removeChild/the handful of element properties it
+// sets, plus a `document.body` for showCeremonyReveal to mount into) — there
+// is no DOM library in this repo (no package.json, no jsdom) to reach for
+// instead.
+//
+// WebCrypto is NOT faked: Node's own `crypto`/`TextEncoder` globals are the
+// same WebCrypto surface a browser gives form.mjs, so the ceremony vectors
+// mint and hash for real and the sha256(plaintext) == submitted-hash
+// invariant is checked against node:crypto rather than against a stub that
+// could agree with a wrong implementation. The unsupported-runtime vector
+// deletes the global for the length of one assertion instead.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 class FakeElement {
   constructor(tag) {
@@ -25,10 +34,18 @@ class FakeElement {
     this.className = "";
     this.attrs = {};
     this.hidden = false;
+    this.style = {};
+    this.parentNode = null;
     this._listeners = {};
   }
   appendChild(child) {
     this.children.push(child);
+    child.parentNode = this;
+    return child;
+  }
+  removeChild(child) {
+    this.children = this.children.filter((c) => c !== child);
+    child.parentNode = null;
     return child;
   }
   setAttribute(k, v) {
@@ -58,9 +75,11 @@ globalThis.document = {
   createElement(tag) {
     return new FakeElement(tag);
   },
+  body: new FakeElement("body"),
 };
 
-const { renderOpForm, canRender } = await import("./form.mjs");
+const { renderOpForm, canRender, showCeremonyReveal, revealCeremonySecret } =
+  await import("./form.mjs");
 
 // controlByName finds the rendered control for one field name inside a mount
 // — each field is a wrapper <div> whose children are [label, control, help?].
@@ -96,7 +115,7 @@ function baseRow(overrides) {
 
 // ---- schema -> field-kind table (6 kinds) ----
 
-test("renderOpForm renders each schema shape as its own control kind", () => {
+test("renderOpForm renders each schema shape as its own control kind", async () => {
   const schema = {
     type: "object",
     properties: {
@@ -145,7 +164,7 @@ test("renderOpForm renders each schema shape as its own control kind", () => {
 // A string over the 120-char maxLength threshold renders as a textarea
 // (mirrors cmd/facet/web/app.js:2515-2516); at or under it, or with no
 // maxLength at all, it stays a plain text input.
-test("a string field's maxLength decides textarea vs plain text", () => {
+test("a string field's maxLength decides textarea vs plain text", async () => {
   const schema = {
     type: "object",
     properties: {
@@ -170,7 +189,7 @@ test("a string field's maxLength decides textarea vs plain text", () => {
   assert.equal(controlByName(mount, "untyped").tagName, "input", "no maxLength stays a plain input");
 });
 
-test("a textarea's whitespace-only value reads as undefined, same as a text field", () => {
+test("a textarea's whitespace-only value reads as undefined, same as a text field", async () => {
   const schema = { type: "object", properties: { notes: { type: "string", maxLength: 4000 } }, required: [] };
   const row = baseRow({
     inputSchema: JSON.stringify(schema),
@@ -179,7 +198,7 @@ test("a textarea's whitespace-only value reads as undefined, same as a text fiel
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, {}, mount);
   controlByName(mount, "notes").value = "   ";
-  assert.equal(handle.submit().payload.notes, undefined);
+  assert.equal((await handle.submit()).envelope.payload.notes, undefined);
 });
 
 // ---- per-field conditional visibility (x-visibleWhen) ----
@@ -206,7 +225,7 @@ function visibleWhenRow(overrides) {
   ));
 }
 
-test("x-visibleWhen starts hidden/shown to match the sibling's initial value, and tracks it live", () => {
+test("x-visibleWhen starts hidden/shown to match the sibling's initial value, and tracks it live", async () => {
   const mount = new FakeElement("div");
   renderOpForm(visibleWhenRow(), {}, mount);
   const toggle = controlByName(mount, "followUpRequested");
@@ -225,7 +244,7 @@ test("x-visibleWhen starts hidden/shown to match the sibling's initial value, an
   assert.equal(wrapper.hidden, true, "unchecking hides it again");
 });
 
-test("submit() drops a hidden x-visibleWhen field and never fails its required check while hidden", () => {
+test("submit() drops a hidden x-visibleWhen field and never fails its required check while hidden", async () => {
   const schema = {
     type: "object",
     properties: {
@@ -245,20 +264,20 @@ test("submit() drops a hidden x-visibleWhen field and never fails its required c
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, {}, mount);
 
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   assert.equal("followUpDate" in envelope.payload, false, "a hidden field contributes nothing to the payload");
 
   const toggle = controlByName(mount, "followUpRequested");
   toggle.checked = true;
   toggle.fire("change");
-  assert.throws(() => handle.submit(), /Follow up date is required/,
+  await assert.rejects(() => handle.submit(), /Follow up date is required/,
     "revealed and still required — now it must fail its own required check like any other field");
 
   controlByName(mount, "followUpDate").value = "2026-09-01";
-  assert.equal(handle.submit().payload.followUpDate, "2026-09-01");
+  assert.equal((await handle.submit()).envelope.payload.followUpDate, "2026-09-01");
 });
 
-test("normalizeCatalogRow refuses a dangling x-visibleWhen sibling reference", () => {
+test("normalizeCatalogRow refuses a dangling x-visibleWhen sibling reference", async () => {
   const row = visibleWhenRow();
   const schema = JSON.parse(row.inputSchema);
   schema.properties.followUpDate["x-visibleWhen"].field = "noSuchField";
@@ -267,7 +286,7 @@ test("normalizeCatalogRow refuses a dangling x-visibleWhen sibling reference", (
   assert.equal(canRender(row), false);
 });
 
-test("normalizeCatalogRow refuses chained x-visibleWhen (a conditional field naming another conditional field)", () => {
+test("normalizeCatalogRow refuses chained x-visibleWhen (a conditional field naming another conditional field)", async () => {
   const schema = {
     type: "object",
     properties: {
@@ -285,7 +304,7 @@ test("normalizeCatalogRow refuses chained x-visibleWhen (a conditional field nam
   assert.equal(canRender(row), false);
 });
 
-test("rendered fields carry the .field/.field-help CSS hooks and a paired label[for]/input[id]", () => {
+test("rendered fields carry the .field/.field-help CSS hooks and a paired label[for]/input[id]", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, method: { type: "string" } },
@@ -311,7 +330,7 @@ test("rendered fields carry the .field/.field-help CSS hooks and a paired label[
 
 // ---- unresolvable-target refusal ----
 
-test("renderOpForm refuses to render without a resolved context.target", () => {
+test("renderOpForm refuses to render without a resolved context.target", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   assert.equal(renderOpForm(row, {}, new FakeElement("div")), null);
@@ -332,7 +351,7 @@ test("renderOpForm refuses to render without a resolved context.target", () => {
 // not a value to submit under real authority — the caller may have handed
 // this a key it resolved for some other purpose. Mirrors Facet's own
 // resolveTargetKey type check.
-test("renderOpForm refuses a target whose vertex type doesn't match dispatch.targetType", () => {
+test("renderOpForm refuses a target whose vertex type doesn't match dispatch.targetType", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.targetType: "renewal"
   const WRONG_TYPE = "vtx.identity.EEEEEEEEEEEEEEEEEEEE";
@@ -342,7 +361,7 @@ test("renderOpForm refuses a target whose vertex type doesn't match dispatch.tar
 
 // ---- normalization refusals (item 1's catalogDescriptor-equivalent) ----
 
-test("renderOpForm refuses a row with no inputSchema, no dispatch class, or an authContext:service voice", () => {
+test("renderOpForm refuses a row with no inputSchema, no dispatch class, or an authContext:service voice", async () => {
   const schema = { type: "object", properties: {}, required: [] };
   const ctx = { target: TARGET };
 
@@ -369,12 +388,12 @@ function visibleWhenOpRow() {
   return row;
 }
 
-test("renderOpForm offers a visibleWhen-gated op when context.row's column matches", () => {
+test("renderOpForm offers a visibleWhen-gated op when context.row's column matches", async () => {
   const handle = renderOpForm(visibleWhenOpRow(), { target: TARGET, row: { series_status: "active" } }, new FakeElement("div"));
   assert.ok(handle, "the row's column matches equals, so the op renders");
 });
 
-test("renderOpForm refuses a visibleWhen-gated op when context.row's column doesn't match, is absent, or the row itself is absent", () => {
+test("renderOpForm refuses a visibleWhen-gated op when context.row's column doesn't match, is absent, or the row itself is absent", async () => {
   const mismatched = renderOpForm(visibleWhenOpRow(), { target: TARGET, row: { series_status: "paused" } }, new FakeElement("div"));
   assert.equal(mismatched, null, "wrong value ⇒ no offer");
 
@@ -385,7 +404,7 @@ test("renderOpForm refuses a visibleWhen-gated op when context.row's column does
   assert.equal(noRow, null, "no row at all ⇒ nothing to evaluate against, fails closed");
 });
 
-test("renderOpForm's visibleWhen check uses strict equality, not truthiness", () => {
+test("renderOpForm's visibleWhen check uses strict equality, not truthiness", async () => {
   const row = visibleWhenOpRow();
   row.dispatch.visibleWhen = { field: "count", equals: 1 };
   const handle = renderOpForm(row, { target: TARGET, row: { count: "1" } }, new FakeElement("div"));
@@ -398,7 +417,7 @@ test("renderOpForm's visibleWhen check uses strict equality, not truthiness", ()
 // no way to notice. Refusing the whole row is the honest answer until a real
 // array kind ships (fieldKind has no way to omit just the one bad field and
 // still assemble a submittable envelope).
-test("renderOpForm refuses a row with an array-typed schema property", () => {
+test("renderOpForm refuses a row with an array-typed schema property", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, windows: { type: "array", items: { type: "object" } } },
@@ -411,7 +430,7 @@ test("renderOpForm refuses a row with an array-typed schema property", () => {
 
 // ---- canRender: the same structural refusal, before there is a mount ----
 
-test("canRender agrees with renderOpForm's own refusal, without needing a context or a mount", () => {
+test("canRender agrees with renderOpForm's own refusal, without needing a context or a mount", async () => {
   const schema = { type: "object", properties: {}, required: [] };
 
   assert.equal(canRender(baseRow({ inputSchema: JSON.stringify(schema) })), true);
@@ -435,27 +454,27 @@ test("canRender agrees with renderOpForm's own refusal, without needing a contex
 
 // ---- envelope assembly per authContext kind ----
 
-test("submit() assembles authContext:task and throws when the task leg has no taskKey", () => {
+test("submit() assembles authContext:task and throws when the task leg has no taskKey", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.authContext = "task";
 
   const withTask = renderOpForm(row, { target: TARGET, taskKey: "manifest.task.x" }, new FakeElement("div"));
-  const envelope = withTask.submit();
+  const envelope = (await withTask.submit()).envelope;
   assert.deepEqual(envelope.authContext, { task: "manifest.task.x", target: TARGET });
 
   const withoutTask = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.throws(() => withoutTask.submit(), /task/);
+  await assert.rejects(() => withoutTask.submit(), /task/);
 });
 
-test("submit() assembles authContext:self from context.me when selfVoice is set, never from context.target", () => {
+test("submit() assembles authContext:self from context.me when selfVoice is set, never from context.target", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.authContext = "self";
   const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
 
   const handle = renderOpForm(row, { target: TARGET, me: ME, selfVoice: true }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().authContext, { target: ME });
+  assert.deepEqual((await handle.submit()).envelope.authContext, { target: ME });
 });
 
 // A caller that never opts into self-voice gets NO authContext at all for a
@@ -468,35 +487,35 @@ test("submit() assembles authContext:self from context.me when selfVoice is set,
 // any per-op ownership guard keyed to it — stricter than the caller's actual
 // (broader) grant required. Mirrors loftspace's pre-migration
 // landlordSubmit(), which sent the self authContext only when isLandlord().
-test("submit() sends no authContext for a self-authContext op when the caller never opted into self-voice", () => {
+test("submit() sends no authContext for a self-authContext op when the caller never opted into self-voice", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.authContext = "self";
   const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
 
   const noFlag = renderOpForm(row, { target: TARGET, me: ME }, new FakeElement("div"));
-  assert.equal(noFlag.submit().authContext, undefined, "selfVoice absent ⇒ no authContext, exactly like standing");
+  assert.equal((await noFlag.submit()).envelope.authContext, undefined, "selfVoice absent ⇒ no authContext, exactly like standing");
 
   const flaggedFalse = renderOpForm(row, { target: TARGET, me: ME, selfVoice: false }, new FakeElement("div"));
-  assert.equal(flaggedFalse.submit().authContext, undefined);
+  assert.equal((await flaggedFalse.submit()).envelope.authContext, undefined);
 });
 
-test("submit() sends no authContext at all for a standing-authContext op", () => {
+test("submit() sends no authContext at all for a standing-authContext op", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) }); // authContext: "standing"
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.equal(handle.submit().authContext, undefined);
+  assert.equal((await handle.submit()).envelope.authContext, undefined);
 });
 
 // ---- wholeKey drop + write-before-substitute order ----
 
-test("submit() drops a read whose template left an unresolved segment, and resolves one built off the just-written target", () => {
+test("submit() drops a read whose template left an unresolved segment, and resolves one built off the just-written target", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{payload.renewalKey}.terms", "{payload.missingField}.suffix"];
 
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   // TARGET itself trails the declared read: the targetField fallback (below)
   // pushes it too, and it is a distinct string from TARGET + ".terms".
   assert.deepEqual(envelope.reads, [TARGET + ".terms", TARGET],
@@ -504,18 +523,18 @@ test("submit() drops a read whose template left an unresolved segment, and resol
     "and the unresolvable template is dropped rather than sent as a hole");
 });
 
-test("submit() drops an optionalRead the same way", () => {
+test("submit() drops an optionalRead the same way", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.optionalReads = ["{payload.missingField}.guarantorVerification"];
 
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().optionalReads, []);
+  assert.deepEqual((await handle.submit()).envelope.optionalReads, []);
 });
 
 // ---- required-field validation ----
 
-test("submit() throws for a missing required field and never for an unset optional one", () => {
+test("submit() throws for a missing required field and never for an unset optional one", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, note: { type: "string" }, method: { type: "string" } },
@@ -524,20 +543,20 @@ test("submit() throws for a missing required field and never for an unset option
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, { target: TARGET }, mount);
-  assert.throws(() => handle.submit(), /Note is required/);
+  await assert.rejects(() => handle.submit(), /Note is required/);
 
   controlByName(mount, "note").value = "   ";
-  assert.throws(() => handle.submit(), /Note is required/, "whitespace-only is not a value");
+  await assert.rejects(() => handle.submit(), /Note is required/, "whitespace-only is not a value");
 
   controlByName(mount, "note").value = "renewed by phone";
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   assert.equal(envelope.payload.note, "renewed by phone");
   assert.equal("method" in envelope.payload, false, "an empty optional field is omitted, not sent as \"\"");
 });
 
 // ---- {context.<field>} — the staff analog of Facet's {entity.<column>} ----
 
-test("a {context.<field>} read resolves against the caller's companion row", () => {
+test("a {context.<field>} read resolves against the caller's companion row", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{context.leaseApp}"];
@@ -545,16 +564,16 @@ test("a {context.<field>} read resolves against the caller's companion row", () 
   const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC" } }, new FakeElement("div"));
   // TARGET trails: the targetField fallback pushes it too, since it never
   // appeared in the declared {context.leaseApp} read.
-  assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
+  assert.deepEqual((await handle.submit()).envelope.reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
-test("{entity.<field>} is accepted as an alias for {context.<field>} against the same companion row", () => {
+test("{entity.<field>} is accepted as an alias for {context.<field>} against the same companion row", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{entity.leaseApp}"];
 
   const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC" } }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
+  assert.deepEqual((await handle.submit()).envelope.reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
 // ---- dispatch.contextParams — a field the CLIENT fills and never renders ----
@@ -582,7 +601,7 @@ function signRenewalRow() {
   return row;
 }
 
-test("a contextParams field is filled from context and never rendered", () => {
+test("a contextParams field is filled from context and never rendered", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, leaseApp: { type: "string" }, note: { type: "string" } },
@@ -597,18 +616,18 @@ test("a contextParams field is filled from context and never rendered", () => {
     "a contextParams field is excluded from the form the same way the target field is");
   assert.ok(controlByName(mount, "note"), "an ordinary field still renders");
 
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   assert.equal(envelope.payload.leaseApp, LEASE_APP,
     "the descriptor said where the value comes from, so submit() fills it");
 });
 
-test("contextParams are filled BEFORE the read templates that name them", () => {
+test("contextParams are filled BEFORE the read templates that name them", async () => {
   const handle = renderOpForm(signRenewalRow(), {
     target: TARGET,
     taskKey: "manifest.task.x",
     row: { leaseApp: LEASE_APP, tenant: TENANT },
   }, new FakeElement("div"));
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
 
   assert.deepEqual(envelope.payload, { renewalKey: TARGET, leaseApp: LEASE_APP, applicant: TENANT });
   assert.deepEqual(envelope.reads, [
@@ -623,38 +642,38 @@ test("contextParams are filled BEFORE the read templates that name them", () => 
 // the person never saw it — so an unresolvable template has to refuse here or
 // the op reaches the Processor with an empty key it can only reject, with
 // nothing in the UI to explain why.
-test("submit() refuses when a contextParams template resolves to nothing", () => {
+test("submit() refuses when a contextParams template resolves to nothing", async () => {
   const handle = renderOpForm(signRenewalRow(), {
     target: TARGET,
     taskKey: "manifest.task.x",
     row: { leaseApp: LEASE_APP }, // no tenant column
   }, new FakeElement("div"));
-  assert.throws(() => handle.submit(), /applicant/);
+  await assert.rejects(() => handle.submit(), /applicant/);
 });
 
-test("submit() refuses a contextParams template with no companion row at all", () => {
+test("submit() refuses a contextParams template with no companion row at all", async () => {
   const handle = renderOpForm(signRenewalRow(), {
     target: TARGET,
     taskKey: "manifest.task.x",
     row: null,
   }, new FakeElement("div"));
-  assert.throws(() => handle.submit(), /leaseApp/);
+  await assert.rejects(() => handle.submit(), /leaseApp/);
 });
 
 // The `?` OPTIONAL marker is real descriptor vocabulary this module does not
 // implement. What matters is that NOT implementing it fails loud rather than
 // silently filling the wrong value: the `?` survives into the placeholder
 // name, nothing answers to it, and the refusal above fires.
-test("an unadopted `?` optional marker refuses rather than resolving to nothing", () => {
+test("an unadopted `?` optional marker refuses rather than resolving to nothing", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.contextParams = { leaseApp: "{context.leaseApp?}" };
 
   const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: LEASE_APP } }, new FakeElement("div"));
-  assert.throws(() => handle.submit(), /leaseApp/);
+  await assert.rejects(() => handle.submit(), /leaseApp/);
 });
 
-test("an op declaring no contextParams renders and submits exactly as before", () => {
+test("an op declaring no contextParams renders and submits exactly as before", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, note: { type: "string" } },
@@ -664,7 +683,7 @@ test("an op declaring no contextParams renders and submits exactly as before", (
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, { target: TARGET }, mount);
   assert.ok(controlByName(mount, "note"));
-  assert.deepEqual(handle.submit().payload, { renewalKey: TARGET });
+  assert.deepEqual((await handle.submit()).envelope.payload, { renewalKey: TARGET });
 });
 
 // ---- {actor} alias, the `:id` bare-NanoID modifier, and unrecognized
@@ -672,7 +691,7 @@ test("an op declaring no contextParams renders and submits exactly as before", (
 // VerifyGuarantor completions declare (VerifyGuarantor's real read is
 // `lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}`). ----
 
-test("{actor} is an alias for {me}", () => {
+test("{actor} is an alias for {me}", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{actor}"];
@@ -682,10 +701,10 @@ test("{actor} is an alias for {me}", () => {
   // TARGET trails: the targetField fallback pushes it (not yet in reads);
   // the context.me fallback then no-ops since ME is already present via
   // {actor}'s own resolution.
-  assert.deepEqual(handle.submit().reads, [ME, TARGET]);
+  assert.deepEqual((await handle.submit()).envelope.reads, [ME, TARGET]);
 });
 
-test("the :id modifier substitutes the bare NanoID, composing into a 6-segment link key", () => {
+test("the :id modifier substitutes the bare NanoID, composing into a 6-segment link key", async () => {
   const schema = {
     type: "object",
     properties: { renewalKey: { type: "string" }, leaseApp: { type: "string" } },
@@ -699,11 +718,11 @@ test("the :id modifier substitutes the bare NanoID, composing into a 6-segment l
   controlByName(mount, "leaseApp").value = "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC";
   // TARGET trails: the targetField fallback pushes it too, since the
   // composite link key above never resolves to the bare TARGET string.
-  assert.deepEqual(handle.submit().reads,
+  assert.deepEqual((await handle.submit()).envelope.reads,
     ["lnk.renewal.AAAAAAAAAAAAAAAAAAAA.renews.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
-test("{me:id} and {taskKey:id} also take the modifier", () => {
+test("{me:id} and {taskKey:id} also take the modifier", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{me:id}", "{taskKey:id}"];
@@ -716,22 +735,22 @@ test("{me:id} and {taskKey:id} also take the modifier", () => {
   // TARGET and the full context.me key both trail: the :id modifier's bare
   // NanoIDs above are distinct strings from the FULL keys the two fallbacks
   // push, so both land, in fallback order (targetField, then context.me).
-  assert.deepEqual(handle.submit().reads,
+  assert.deepEqual((await handle.submit()).envelope.reads,
     ["BBBBBBBBBBBBBBBBBBBB", "DDDDDDDDDDDDDDDDDDDD", TARGET, "vtx.identity.BBBBBBBBBBBBBBBBBBBB"]);
 });
 
-test("an unrecognized read template throws instead of silently dropping", () => {
+test("an unrecognized read template throws instead of silently dropping", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{scopedTo}"]; // not a form this module recognizes
 
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.throws(() => handle.submit(), /unrecognized read template/);
+  await assert.rejects(() => handle.submit(), /unrecognized read template/);
 });
 
 // ---- targetField-less ops (free-choice create / no single subject) ----
 
-test("a row with no dispatch.targetField renders every schema property as a field, with no context.target required", () => {
+test("a row with no dispatch.targetField renders every schema property as a field, with no context.target required", async () => {
   const schema = {
     type: "object",
     properties: { fullName: { type: "string" }, specialty: { type: "string" } },
@@ -754,7 +773,7 @@ test("a row with no dispatch.targetField renders every schema property as a fiel
   assert.ok(handleNoContext, "a targetField-less op renders even with no context object at all");
 });
 
-test("submit() on a targetField-less op never writes an undefined-keyed entry into the payload", () => {
+test("submit() on a targetField-less op never writes an undefined-keyed entry into the payload", async () => {
   const schema = {
     type: "object",
     properties: { fullName: { type: "string" } },
@@ -767,7 +786,7 @@ test("submit() on a targetField-less op never writes an undefined-keyed entry in
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, {}, mount);
   controlByName(mount, "fullName").value = "Dr. Sam Okafor";
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   assert.deepEqual(envelope.payload, { fullName: "Dr. Sam Okafor" });
   assert.equal("undefined" in envelope.payload, false);
 });
@@ -775,7 +794,7 @@ test("submit() on a targetField-less op never writes an undefined-keyed entry in
 // Regression guard: a targetField-BEARING row must still refuse without a
 // resolved context.target — this must NOT have changed by loosening the
 // targetField-less case above.
-test("a targetField-bearing row still refuses to render without a resolved context.target", () => {
+test("a targetField-bearing row still refuses to render without a resolved context.target", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.targetField: "renewalKey"
   assert.equal(renderOpForm(row, {}, new FakeElement("div")), null);
@@ -784,22 +803,22 @@ test("a targetField-bearing row still refuses to render without a resolved conte
 
 // ---- numeric coercion ----
 
-test("a money field submits cents, and a non-numeric value throws rather than serializing NaN", () => {
+test("a money field submits cents, and a non-numeric value throws rather than serializing NaN", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" }, rentCents: { type: "integer" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   const mount = new FakeElement("div");
   const handle = renderOpForm(row, { target: TARGET }, mount);
 
   controlByName(mount, "rentCents").value = "12.50";
-  assert.equal(handle.submit().payload.rentCents, 1250);
+  assert.equal((await handle.submit()).envelope.payload.rentCents, 1250);
 
   controlByName(mount, "rentCents").value = "not-a-number";
-  assert.throws(() => handle.submit(), /valid number/);
+  await assert.rejects(() => handle.submit(), /valid number/);
 });
 
 // ---- dispatch.classChoices — no single static class (Fire: CreateLocation) ----
 
-test("a row with classChoices and no class renders the choice select and is not refused", () => {
+test("a row with classChoices and no class renders the choice select and is not refused", async () => {
   const schema = { type: "object", properties: { name: { type: "string" } }, required: [] };
   const row = baseRow({
     inputSchema: JSON.stringify(schema),
@@ -825,7 +844,7 @@ test("a row with classChoices and no class renders the choice select and is not 
   assert.ok(controlByName(mount, "name"), "the ordinary schema field still renders alongside it");
 });
 
-test("submit() sends the picked classChoice as the envelope's class, and never renders it into payload", () => {
+test("submit() sends the picked classChoice as the envelope's class, and never renders it into payload", async () => {
   const schema = { type: "object", properties: { name: { type: "string" } }, required: [] };
   const row = baseRow({
     inputSchema: JSON.stringify(schema),
@@ -841,14 +860,14 @@ test("submit() sends the picked classChoice as the envelope's class, and never r
 
   controlByName(mount, "__classChoice").value = "building";
   controlByName(mount, "name").value = "West Tower";
-  const envelope = handle.submit();
+  const envelope = (await handle.submit()).envelope;
   assert.equal(envelope.class, "building");
   assert.equal("__classChoice" in envelope.payload, false,
     "the synthetic class-choice control is never a schema field, so it never lands in payload");
   assert.equal(envelope.payload.name, "West Tower");
 });
 
-test("submit() throws when no classChoice was picked, exactly like any other required field", () => {
+test("submit() throws when no classChoice was picked, exactly like any other required field", async () => {
   const schema = { type: "object", properties: {}, required: [] };
   const row = baseRow({
     inputSchema: JSON.stringify(schema),
@@ -860,14 +879,14 @@ test("submit() throws when no classChoice was picked, exactly like any other req
     },
   });
   const handle = renderOpForm(row, {}, new FakeElement("div"));
-  assert.throws(() => handle.submit(), /Type is required/);
+  await assert.rejects(() => handle.submit(), /Type is required/);
 });
 
 // Regression pin for the normalizeCatalogRow refusal change: a row with
 // NEITHER class NOR classChoices must still be refused exactly as before —
 // loosening the line-253 check to accommodate classChoices must not also
 // loosen it for the genuinely classless case.
-test("a row with neither dispatch.class nor dispatch.classChoices is still refused", () => {
+test("a row with neither dispatch.class nor dispatch.classChoices is still refused", async () => {
   const schema = { type: "object", properties: {}, required: [] };
   const ctx = {};
 
@@ -893,24 +912,24 @@ test("a row with neither dispatch.class nor dispatch.classChoices is still refus
 // to declare it; this module must not depend on every package getting that
 // declaration right, the same way Facet's own renderer never has) ----
 
-test("submit() auto-pushes the resolved targetField value onto reads when the descriptor didn't declare it", () => {
+test("submit() auto-pushes the resolved targetField value onto reads when the descriptor didn't declare it", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.reads: [] — nothing declared
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, [TARGET],
+  assert.deepEqual((await handle.submit()).envelope.reads, [TARGET],
     "a script's vertex_alive/class_of check on its own target needs the target key in state " +
     "regardless of whether the descriptor declared it");
 });
 
-test("submit() does not duplicate the targetField push when a declared read already resolved to the same key", () => {
+test("submit() does not duplicate the targetField push when a declared read already resolved to the same key", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = ["{payload.renewalKey}"]; // already declares it
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, [TARGET], "no duplicate entry for the same key");
+  assert.deepEqual((await handle.submit()).envelope.reads, [TARGET], "no duplicate entry for the same key");
 });
 
-test("submit() auto-pushes context.me onto reads when set and not already declared", () => {
+test("submit() auto-pushes context.me onto reads when set and not already declared", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   row.dispatch.reads = []; // no targetField push either would occur without a real targetField...
@@ -918,22 +937,254 @@ test("submit() auto-pushes context.me onto reads when set and not already declar
   row.dispatch.targetType = undefined;
   const me = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
   const handle = renderOpForm(row, { me }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, [me]);
+  assert.deepEqual((await handle.submit()).envelope.reads, [me]);
 });
 
-test("submit() does not duplicate context.me when it's already the resolved target", () => {
+test("submit() does not duplicate context.me when it's already the resolved target", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
   const handle = renderOpForm(row, { target: TARGET, me: TARGET }, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, [TARGET], "the targetField push and the context.me push must not both add the same key");
+  assert.deepEqual((await handle.submit()).envelope.reads, [TARGET], "the targetField push and the context.me push must not both add the same key");
 });
 
-test("submit() pushes neither fallback when targetField is absent and context.me is unset", () => {
+test("submit() pushes neither fallback when targetField is absent and context.me is unset", async () => {
   const schema = { type: "object", properties: { fullName: { type: "string" } }, required: [] };
   const row = baseRow({
     inputSchema: JSON.stringify(schema),
     dispatch: { class: "provider", authContext: "standing", reads: [], optionalReads: [] },
   });
   const handle = renderOpForm(row, {}, new FakeElement("div"));
-  assert.deepEqual(handle.submit().reads, []);
+  assert.deepEqual((await handle.submit()).envelope.reads, []);
+});
+
+// ---- the mint-and-reveal ceremony (pkgmgr.OpCeremonySpec) ----
+//
+// Two ops declare one today (identity-domain's CreateUnclaimedIdentity and
+// RotateClaimKey): the client mints a secret Lattice must never learn,
+// submits only its hash, and shows the plaintext exactly once, only after
+// the write lands.
+
+const CEREMONY_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string" },
+    claimKeyHash: { type: "string" },
+  },
+  required: ["name", "claimKeyHash"],
+};
+
+// ceremonyRow is a catalog row shaped like CreateUnclaimedIdentity's — no
+// targetField (a create mints its own subject), and a ceremony naming the
+// schema's hash field.
+function ceremonyRow() {
+  return baseRow({
+    inputSchema: JSON.stringify(CEREMONY_SCHEMA),
+    dispatch: { class: "identity", authContext: "standing", reads: [], optionalReads: [] },
+    ceremony: {
+      mintedSecretHashField: "claimKeyHash",
+      revealTitle: "Claim key",
+      revealHelp: "Hand this to them — it is never shown again.",
+    },
+  });
+}
+
+// withoutWebCrypto runs fn with globalThis.crypto removed, restoring it
+// however fn ends. It is the only way to reach the runtime this module has to
+// refuse on — an insecure origin, where crypto.subtle simply does not exist —
+// since Node's own global is real and cannot be un-supported any other way.
+function withoutWebCrypto(fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  delete globalThis.crypto;
+  try {
+    return fn();
+  } finally {
+    Object.defineProperty(globalThis, "crypto", descriptor);
+  }
+}
+
+test("an op declaring a ceremony is refused outright when the runtime cannot perform one", () => {
+  const row = ceremonyRow();
+  // The positive vector runs FIRST, so the refusal below is provably about
+  // WebCrypto's absence and not about some unrelated defect in the row.
+  assert.equal(canRender(row), true, "the same row is offerable when WebCrypto is present");
+  assert.ok(renderOpForm(row, {}, new FakeElement("div")));
+
+  withoutWebCrypto(() => {
+    assert.equal(canRender(row), false,
+      "no ceremony support ⇒ the op is not offered at all, never offered with the hash field rendered");
+    assert.equal(renderOpForm(row, {}, new FakeElement("div")), null);
+  });
+});
+
+test("the ceremony's hash field is never rendered as a field", () => {
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(ceremonyRow(), {}, mount);
+  assert.equal(controlByName(mount, "claimKeyHash"), undefined,
+    "rendering it would ask a person to type a digest whose preimage nobody holds");
+  assert.ok(controlByName(mount, "name"), "every other schema property still renders");
+});
+
+test("submit() fills the hash field with the sha256 of the plaintext it reveals", async () => {
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(ceremonyRow(), {}, mount);
+  controlByName(mount, "name").value = "Ada Okonkwo";
+
+  const { envelope, reveal } = await handle.submit();
+  assert.equal(envelope.payload.name, "Ada Okonkwo");
+  assert.ok(reveal, "a ceremony op hands its plaintext back for the caller to reveal");
+  assert.equal(reveal.title, "Claim key");
+  assert.equal(reveal.help, "Hand this to them — it is never shown again.");
+  assert.match(reveal.plaintext, /^[0-9a-f]{64}$/, "32 CSPRNG bytes, hex encoded");
+
+  // THE invariant. The hash submitted must be the hash OF the secret handed
+  // to the person: nothing downstream can ever detect a mismatch, since
+  // Lattice only ever sees the hash — the write would simply land, arming a
+  // target with a secret no one can present.
+  assert.equal(envelope.payload.claimKeyHash,
+    createHash("sha256").update(reveal.plaintext).digest("hex"));
+});
+
+test("each submission of the same form mints its own secret", async () => {
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(ceremonyRow(), {}, mount);
+  controlByName(mount, "name").value = "Ada Okonkwo";
+  const first = await handle.submit();
+  const second = await handle.submit();
+  assert.notEqual(first.reveal.plaintext, second.reveal.plaintext,
+    "a re-submitted form must never re-arm the target with a secret already handed out");
+  assert.notEqual(first.envelope.payload.claimKeyHash, second.envelope.payload.claimKeyHash);
+});
+
+test("submit() answers reveal: null for an op that declares no ceremony", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const handle = renderOpForm(baseRow({ inputSchema: JSON.stringify(schema) }), { target: TARGET }, new FakeElement("div"));
+  const { envelope, reveal } = await handle.submit();
+  assert.equal(reveal, null,
+    "one return shape for every op, so no caller has to branch on which kind it holds");
+  assert.equal(envelope.operationType, "TestOp");
+});
+
+// The projection omits the whole ceremony object unless it names a hash field
+// (each app's op_catalog.go), so this row cannot arrive over the wire. The
+// vector pins which way the module reads one anyway: a ceremony with no field
+// to fill describes nothing to perform, so it is no ceremony — never a
+// half-performed one that withholds a field it has no value for.
+test("a ceremony naming no hash field describes nothing to perform and is not one", async () => {
+  const row = ceremonyRow();
+  row.ceremony = { revealTitle: "Claim key" };
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(row, {}, mount);
+  assert.ok(handle);
+  assert.ok(controlByName(mount, "claimKeyHash"), "nothing is excluded, because nothing was declared");
+  controlByName(mount, "name").value = "Ada Okonkwo";
+  controlByName(mount, "claimKeyHash").value = "deadbeef";
+  assert.equal((await handle.submit()).reveal, null);
+});
+
+test("showCeremonyReveal mounts the plaintext as text, never as markup, and dismisses on click", () => {
+  const before = document.body.children.length;
+  const overlay = showCeremonyReveal("Claim key", "<b>hand it over</b>", "abc123");
+  assert.equal(document.body.children.length, before + 1);
+
+  const panel = overlay.children[0];
+  const texts = panel.children.map((c) => c.textContent);
+  assert.ok(texts.includes("Claim key"));
+  assert.ok(texts.includes("<b>hand it over</b>"),
+    "copy goes in through textContent, so markup inside it is shown, never parsed");
+  assert.ok(texts.includes("abc123"));
+
+  const dismiss = panel.children[panel.children.length - 1];
+  dismiss.fire("click");
+  assert.equal(document.body.children.length, before, "dismissing removes it from the DOM");
+});
+
+test("showCeremonyReveal omits the help paragraph when the descriptor declared none", () => {
+  const overlay = showCeremonyReveal("Claim key", "", "abc123");
+  const panel = overlay.children[0];
+  assert.deepEqual(panel.children.map((c) => c.tagName), ["h2", "pre", "button"]);
+  panel.children[2].fire("click"); // leave document.body as this test found it
+});
+
+// ---- ceremony rule 3: reveal only on a CONFIRMED write ----
+//
+// The invariant these vectors exist for is an ordering one, and the way to get
+// it wrong is a NEGATIVE check: `reply.status !== "rejected"` reads as "the
+// write was fine" and is not, because two reply shapes are neither accepted
+// nor rejected. Contract #2 §2.4's `duplicate` says an earlier submission
+// already claimed this requestId — so the envelope carrying THIS secret's hash
+// was never applied — and the Gateway answers a Processor reply timeout with a
+// status-less HTTP 202 `{requestId}`, which means the write may still commit
+// and may not. Revealing on either hands a person a plaintext for a write that
+// did not land, which is what the whole ceremony vocabulary exists to prevent.
+//
+// The gate is exercised through the exported function rather than pinned by
+// reading the four staff apps' sources: they each call it and narrate the
+// answer, so this is the one place the decision is made for all of them.
+
+// revealed captures the plaintexts a call put on screen, and leaves
+// document.body exactly as it found it — every mounted overlay is dismissed
+// through its own button, so a withholding vector's assertion that NOTHING
+// mounted cannot pass merely because an earlier vector left the body dirty.
+function revealed(reveal, reply) {
+  const before = document.body.children.length;
+  const outcome = revealCeremonySecret(reveal, reply);
+  const mounted = document.body.children.slice(before);
+  const plaintexts = mounted.map((o) => {
+    const panel = o.children[0];
+    return panel.children.find((c) => c.tagName === "pre").textContent;
+  });
+  for (const o of mounted) o.children[0].children[o.children[0].children.length - 1].fire("click");
+  assert.equal(document.body.children.length, before);
+  return { outcome, plaintexts };
+}
+
+const aReveal = { title: "Claim key", help: "Hand it over.", plaintext: "s3cr3t" };
+
+test("a confirmed write is the only reply that reveals the plaintext", () => {
+  const { outcome, plaintexts } = revealed(aReveal, { status: "accepted", requestId: "r1" });
+  assert.equal(outcome, "shown");
+  assert.deepEqual(plaintexts, ["s3cr3t"]);
+});
+
+// The table is the point: every entry is a reply an app can actually receive,
+// and every one of them EXCEPT "accepted" must withhold. A gate written as
+// "not rejected" passes the last vector and fails the first four.
+for (const [name, reply] of [
+  ["a status-less HTTP 202, the Gateway's reply-timeout fallback", { requestId: "r1" }],
+  ["a duplicate — some earlier submission claimed this requestId", { status: "duplicate", requestId: "r1" }],
+  ["a reply with an unrecognized status", { status: "pending", requestId: "r1" }],
+  ["no reply at all", undefined],
+  ["a null reply", null],
+  ["a rejection", { status: "rejected", error: { code: "AuthDenied", message: "no" } }],
+]) {
+  test(`${name} withholds the plaintext`, () => {
+    const { outcome, plaintexts } = revealed(aReveal, reply);
+    assert.equal(outcome, "withheld",
+      "not a confirmed commit ⇒ the secret is dropped, and the caller is told so it can say a fresh one is needed");
+    assert.deepEqual(plaintexts, [], "nothing reached the screen");
+  });
+}
+
+test("an op that minted nothing reveals nothing and says nothing, on any reply", () => {
+  for (const reply of [{ status: "accepted" }, { requestId: "r1" }, undefined]) {
+    const { outcome, plaintexts } = revealed(null, reply);
+    assert.equal(outcome, "none", "no ceremony ⇒ there is no secret to withhold and nothing to narrate");
+    assert.deepEqual(plaintexts, []);
+  }
+});
+
+// End to end over the two halves: submit() mints and hands back, the gate
+// decides. A ceremony op whose submission timed out must leave no trace of its
+// plaintext on screen even though the hash it derived is already on the wire.
+test("a ceremony submission that only got a 202 back shows nothing, hash on the wire or not", async () => {
+  const mount = new FakeElement("div");
+  const handle = renderOpForm(ceremonyRow(), {}, mount);
+  controlByName(mount, "name").value = "Ada Okonkwo";
+  const { envelope, reveal } = await handle.submit();
+
+  assert.match(envelope.payload.claimKeyHash, /^[0-9a-f]{64}$/,
+    "the hash was assembled and would have been submitted");
+  const { outcome, plaintexts } = revealed(reveal, { requestId: "r1" });
+  assert.equal(outcome, "withheld");
+  assert.deepEqual(plaintexts, []);
 });

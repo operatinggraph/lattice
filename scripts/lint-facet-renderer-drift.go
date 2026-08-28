@@ -121,6 +121,17 @@ var vocabulary = []vocabMember{
 		descriptorSwift: {`!contextParamKeys.contains($0)`, `for (field, template) in contextParams`},
 		formJS:          {`!(name in contextParams)`, `Object.entries(contextParams)`},
 	}},
+	// ceremony: the mint-and-reveal client contract (OpCeremonySpec,
+	// internal/pkgmgr/definition.go) — a runtime that can't perform it must
+	// REFUSE to offer the op rather than fall back to rendering the raw hash
+	// field. Swift is EXEMPT: the facet-swiftui-spike is a shelved macOS-proxy
+	// build with no ceremony-bearing op reachable from its manifest, and
+	// implementing mint/hash/reveal there is unbuilt scope, not a gap this
+	// gate should flag as drift.
+	{name: "ceremony", markers: map[string][]string{
+		appJS:  {`ceremonySupported`},
+		formJS: {`ceremonySupported`},
+	}, exempt: []string{descriptorSwift}},
 }
 
 func main() {

@@ -603,6 +603,11 @@ func emOpCatalogWorld(t *testing.T) *emFixture {
 		"optionalReads": []any{"{payload.workOrderKey}.resolution"},
 	})
 	f.aspect(t, "fullOp", "sensitive", "sensitive", map[string]any{"value": true})
+	f.aspect(t, "fullOp", "ceremony", "ceremony", map[string]any{
+		"mintedSecretHashField": "resolutionKeyHash",
+		"revealTitle":           "Resolution key",
+		"revealHelp":            "Hand this over — it is never shown again.",
+	})
 
 	f.vtxData(t, "bareOp", "meta", map[string]any{"operationType": "RecordLeaseDocOutcome"})
 
@@ -689,6 +694,15 @@ func TestOpCatalog_FullVocabularyOpProjectsEveryColumn(t *testing.T) {
 	require.Equal(t, []any{"{payload.workOrderKey}.resolution"}, row["dispatchOptionalReads"])
 	require.Equal(t, true, row["sensitive"],
 		"the masking rule the modal keys on — absent, a client renders an SSN in the clear")
+
+	// The ceremony columns are the sharpest case of "no column may be quietly
+	// dropped": a staff client that never sees mintedSecretHashField cannot
+	// tell this op from an ordinary one, so it renders the hash field as a text
+	// box and accepts a submission arming a secret nobody holds — the exact
+	// outcome pkgmgr.OpCeremonySpec exists to make impossible.
+	require.Equal(t, "resolutionKeyHash", row["ceremonyMintedSecretHashField"])
+	require.Equal(t, "Resolution key", row["ceremonyRevealTitle"])
+	require.Equal(t, "Hand this over — it is never shown again.", row["ceremonyRevealHelp"])
 }
 
 // TestOpCatalog_BareOpMetaProjectsWithNullSchema pins the fail-closed

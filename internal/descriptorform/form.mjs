@@ -9,10 +9,23 @@
 // and returns { descriptor, submit() }, or null when the op cannot be offered
 // from this context at all — never a form that renders but cannot submit.
 //
+// `await submit()` answers `{ envelope, reveal }` for EVERY op, ceremony or
+// not: `envelope` is the submission, and `reveal` is `{title, help, plaintext}`
+// for a ceremony op and `null` for every other one. One shape rather than
+// "bare envelope, or a wrapper when there's a ceremony" — a caller that
+// forgets to branch on the wrapper would post the wrapper object as its
+// envelope, which is exactly the mistake a uniform return makes unavailable.
+// A caller hands the reveal, with the reply its submission got, to
+// revealCeremonySecret (exported below) — which shows it only when the reply
+// affirmatively confirms the write committed, and answers what it did so the
+// host can say a secret was withheld. See the ceremony section for why "not
+// rejected" is not that confirmation.
+//
 // `catalogRow` is the raw `/api/op-catalog` row shape: `operationType`,
 // `presentation`, `inputSchema` (a JSON string), `fieldDescriptions`,
 // `dispatch.{class,classChoices,authContext,targetField,targetType,
-// contextParams,reads,optionalReads,visibleWhen}`, `sensitive`.
+// contextParams,reads,optionalReads,visibleWhen}`,
+// `ceremony.{mintedSecretHashField,revealTitle,revealHelp}`, `sensitive`.
 //
 // `dispatch.classChoices` is the mutually-exclusive alternative to a static
 // `dispatch.class`: an op legitimately declared on more than one DDL (a
@@ -295,6 +308,171 @@ function buildClassChoiceField(choices, prefillVal) {
   return { container, read: () => (control.value === "" ? undefined : control.value) };
 }
 
+// ---- the mint-and-reveal ceremony -------------------------------------
+//
+// Some ops cannot be submitted by filling a form: the client has to MINT a
+// secret Lattice must never learn, submit only its hash, and show the
+// plaintext to a person exactly once. `ceremony` (pkgmgr.OpCeremonySpec)
+// declares that as data — which field holds the hash, and the copy for the
+// reveal — so a client PERFORMS the ceremony instead of rendering the hash
+// field as a text box asking a human to type a preimage nobody holds.
+//
+// Three rules, all fail-closed:
+//
+//  1. No ceremony support ⇒ the op is NOT OFFERED, degrading exactly as an
+//     unresolvable targetType or an unrenderable schema does. Falling back to
+//     rendering the field is the accepted-garbage outcome the vocabulary
+//     exists to prevent.
+//  2. The hash field is filled by submit(), never rendered.
+//  3. The plaintext is revealed only once the write is CONFIRMED, and dropped
+//     without display on any other outcome — a secret for a write that did
+//     not land is not a secret anybody should be handed. submit() never sees
+//     the reply, so it hands the plaintext back; revealCeremonySecret (below)
+//     takes it together with the reply and is where rule 3 is decided, so the
+//     "is this a confirmation?" question is answered once for every host app
+//     rather than four times.
+
+// ceremonyOf answers a catalog row's ceremony, or null — so "does this op
+// carry a ceremony" is asked exactly one way, and a row whose ceremony names
+// no hash field describes nothing to perform and is not one.
+function ceremonyOf(row) {
+  const c = row && row.ceremony;
+  return c && c.mintedSecretHashField ? c : null;
+}
+
+// ceremonySupported reports whether this runtime can perform a ceremony at
+// all. crypto.subtle is absent on an insecure origin, so this is a real
+// runtime condition rather than a flag we set ourselves — which is why it has
+// to gate the OFFER rather than be discovered at submit time, once a person
+// has already filled the form.
+function ceremonySupported() {
+  return typeof crypto !== "undefined" &&
+    typeof crypto.getRandomValues === "function" &&
+    !!crypto.subtle && typeof crypto.subtle.digest === "function" &&
+    typeof TextEncoder === "function"; // mintSecret hashes the encoded plaintext
+}
+
+function hexOf(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// mintSecret returns [plaintext, sha256Hex(plaintext)] — 32 CSPRNG bytes hex
+// encoded as the plaintext, the shape every hand-rolled copy of this ceremony
+// already used (cmd/facet/credentials.go's mintLinkSecret, loftspace-app's own
+// mintClaimSecret). The plaintext is returned to the caller and never logged,
+// stored, or sent: the hash is the only half that reaches an envelope.
+async function mintSecret() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const plaintext = hexOf(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
+  return [plaintext, hexOf(new Uint8Array(digest))];
+}
+
+// showCeremonyReveal renders the one-time display of a minted plaintext in a
+// dismissable overlay appended to `document.body`.
+//
+// Fully self-contained — its own inline styles and `descriptorform-reveal-`
+// class names, no dependency on any host app's modal CSS or markup — for the
+// same reason attachments.mjs takes exactly the I/O it needs: four apps mount
+// this module, none of them share a modal convention, and a reveal that
+// inherited nothing and rendered as unstyled text at the bottom of a scrolled
+// page is a secret nobody sees. It is deliberately NOT a toast: a toast
+// auto-hides and the next toast() clears it, either of which would destroy
+// the only copy of the secret in existence (loftspace-app's own showClaimSecret
+// carries the same note for the same reason).
+//
+// Every caller-supplied string goes in through `.textContent`, never a
+// concatenated `innerHTML` — the plaintext is a minted secret and the copy is
+// package-authored text arriving over the wire, and neither has any business
+// being parsed as markup.
+export function showCeremonyReveal(title, help, plaintext) {
+  const overlay = document.createElement("div");
+  overlay.className = "descriptorform-reveal-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;" +
+    "align-items:center;justify-content:center;padding:1rem;background:rgba(0,0,0,0.55);";
+
+  const panel = document.createElement("div");
+  panel.className = "descriptorform-reveal-panel";
+  panel.style.cssText = "max-width:32rem;width:100%;background:#fff;color:#111;border-radius:8px;" +
+    "padding:1.25rem;box-shadow:0 8px 32px rgba(0,0,0,0.35);font-family:system-ui,sans-serif;";
+
+  const titleEl = document.createElement("h2");
+  titleEl.className = "descriptorform-reveal-title";
+  titleEl.style.cssText = "margin:0 0 0.5rem;font-size:1.1rem;";
+  titleEl.textContent = title || "Copy this now";
+  panel.appendChild(titleEl);
+
+  if (help) {
+    const helpEl = document.createElement("p");
+    helpEl.className = "descriptorform-reveal-help";
+    helpEl.style.cssText = "margin:0 0 0.75rem;font-size:0.9rem;line-height:1.4;";
+    helpEl.textContent = help;
+    panel.appendChild(helpEl);
+  }
+
+  // <pre> rather than an input: the value is selectable and copyable but has
+  // no control to be cleared, re-typed, or submitted by an enclosing form.
+  const secretEl = document.createElement("pre");
+  secretEl.className = "descriptorform-reveal-secret";
+  secretEl.style.cssText = "margin:0 0 1rem;padding:0.75rem;background:#f4f4f5;border-radius:6px;" +
+    "font-family:ui-monospace,monospace;font-size:0.9rem;white-space:pre-wrap;word-break:break-all;" +
+    "user-select:all;";
+  secretEl.textContent = plaintext;
+  panel.appendChild(secretEl);
+
+  const dismiss = document.createElement("button");
+  dismiss.className = "descriptorform-reveal-dismiss";
+  dismiss.type = "button";
+  dismiss.style.cssText = "padding:0.5rem 1rem;border:0;border-radius:6px;background:#111;color:#fff;" +
+    "font-size:0.9rem;cursor:pointer;";
+  dismiss.textContent = "Done";
+  // Removing the overlay drops the module's last reference to the plaintext:
+  // nothing above holds it once submit() returned, so dismissal is also the
+  // point it stops existing anywhere in the page.
+  dismiss.addEventListener("click", () => {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+  });
+  panel.appendChild(dismiss);
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+// revealCeremonySecret decides whether a minted plaintext may be shown, and
+// shows it if so. It is ceremony rule 3 as CODE, in one place for every app
+// that mounts this module: the rule is a security property, and four host apps
+// each re-deriving "is this reply a confirmation?" is four chances to get it
+// wrong. A host passes the reveal submit() handed back and the reply its own
+// submission got, and reads back what happened:
+//
+//   "shown"    — the reply confirmed the commit; the overlay is up.
+//   "withheld" — a secret was minted for a write this reply does not confirm.
+//                Nothing was displayed; the plaintext is gone with this call.
+//   "none"     — no ceremony, nothing minted, nothing to say.
+//
+// The gate is Contract #2 §2.4's `status === "accepted"` — AFFIRMATIVE, never
+// the weaker "not rejected". Two replies are neither accepted nor rejected and
+// neither confirms this write landed: a `duplicate` says some earlier
+// submission already claimed this requestId, so THIS envelope — the one
+// carrying the hash of the secret in hand — was never applied; and a Processor
+// reply timeout answers HTTP 202 `{requestId}` with no status field at all,
+// which means the write MAY still commit, and may not. Handing a person a
+// secret on either is the outcome rule 3 exists to prevent, so both withhold.
+//
+// "withheld" is a distinct answer rather than a silent no-op because the host
+// has to be able to say so: the caller's own success path has already decided
+// what to tell the person about the WRITE, and "a one-time secret was minted
+// for it and you will never see it" is a separate fact they can only act on by
+// issuing a fresh one.
+export function revealCeremonySecret(reveal, reply) {
+  if (!reveal) return "none";
+  if (!reply || reply.status !== "accepted") return "withheld";
+  showCeremonyReveal(reveal.title, reveal.help, reveal.plaintext);
+  return "shown";
+}
+
 // normalizeCatalogRow turns one raw `/api/op-catalog` row into the shape this
 // module renders from, refusing (returning `null`) rather than
 // half-rendering: no inputSchema means there is nothing to render, neither a
@@ -315,7 +493,11 @@ function buildClassChoiceField(choices, prefillVal) {
 // not exist, or that is itself conditional (chaining — not supported in
 // v1), is refused the same way: the module's house rule is to fail loud on
 // a descriptor it cannot honor rather than render something that looks
-// right and silently mis-behaves. canRender (below) is this same refusal,
+// right and silently mis-behaves. A declared `ceremony` this runtime cannot
+// perform (no WebCrypto — an insecure origin) is refused on that same rule and
+// is the one case where the descriptor is fine and the RUNTIME is not: see the
+// ceremony section above for why that has to withhold the offer rather than
+// surface at submit time. canRender (below) is this same refusal,
 // exposed for a caller deciding whether to enable an offer before it has a
 // mount to render into. A declared `dispatch.visibleWhen` is left
 // unevaluated here — the row it gates on is `context.row`, which this
@@ -326,6 +508,8 @@ function normalizeCatalogRow(row) {
   const dispatch = row.dispatch;
   if (!dispatch.class && !(dispatch.classChoices && dispatch.classChoices.length)) return null;
   if (dispatch.authContext === "service") return null;
+  const ceremony = ceremonyOf(row);
+  if (ceremony && !ceremonySupported()) return null;
   let schema;
   try {
     schema = JSON.parse(row.inputSchema);
@@ -345,6 +529,7 @@ function normalizeCatalogRow(row) {
     operationType: row.operationType,
     schema,
     dispatch,
+    ceremony,
     presentation: row.presentation || {},
     fieldDescriptions: row.fieldDescriptions || {},
   };
@@ -491,7 +676,7 @@ export function renderOpForm(catalogRow, context, mount) {
   const normalized = normalizeCatalogRow(catalogRow);
   if (!normalized) return null;
 
-  const { schema, dispatch, presentation, fieldDescriptions, operationType } = normalized;
+  const { schema, dispatch, ceremony, presentation, fieldDescriptions, operationType } = normalized;
   // dispatch.visibleWhen gates the whole op on the state of context.row
   // (Facet's own opVisibleForRow, cmd/facet/web/app.js — same rule, same
   // fail-closed default): a row that doesn't carry the named column, or no
@@ -537,9 +722,13 @@ export function renderOpForm(catalogRow, context, mount) {
   // same principle and for the same reason: the descriptor already says where
   // its value comes from, so rendering it would ask a person to type a raw
   // `vtx.<type>.<NanoID>` the package's own field help promises they will
-  // never see.
+  // never see. The ceremony's hash field is excluded on that same principle,
+  // and more sharply: its value is a digest submit() computes from a secret
+  // this module mints, so rendering it would ask a person to type a preimage
+  // nobody holds (ceremony rule 2 above).
+  const ceremonyField = ceremony ? ceremony.mintedSecretHashField : undefined;
   const fieldNames = Object.keys(props).filter(
-    (name) => name !== targetField && !(name in contextParams));
+    (name) => name !== targetField && name !== ceremonyField && !(name in contextParams));
 
   const fields = fieldNames.map((name) =>
     buildField(name, props[name] || {}, required.has(name), fieldDescriptions[name], context.prefill, !!catalogRow.sensitive));
@@ -591,7 +780,11 @@ export function renderOpForm(catalogRow, context, mount) {
       targetField,
       targetType: dispatch.targetType || "",
     },
-    submit() {
+    // async because a ceremony op has to reach WebCrypto's digest before it
+    // has an envelope at all. Non-ceremony ops assemble synchronously inside
+    // it and simply resolve — the return SHAPE stays the same either way, so
+    // no caller has to know which kind it holds (module doc comment).
+    async submit() {
       const payload = {};
       // Written FIRST, before any read template is substituted: a declared
       // read of the form `{payload.<targetField>}.suffix` can only resolve
@@ -615,6 +808,19 @@ export function renderOpForm(catalogRow, context, mount) {
           continue;
         }
         payload[f.name] = value;
+      }
+
+      // The ceremony's secret is minted here, between the typed fields and
+      // every template that may name a payload key: the hash is an ordinary
+      // payload value once it exists, and a contextParam or read declared over
+      // it must resolve like any other. `plaintext` stays a local — it is
+      // handed back to the caller below and written nowhere else, so nothing
+      // in this module outlives the call holding it.
+      let reveal = null;
+      if (ceremony) {
+        const [plaintext, hash] = await mintSecret();
+        payload[ceremony.mintedSecretHashField] = hash;
+        reveal = { title: ceremony.revealTitle, help: ceremony.revealHelp, plaintext };
       }
 
       // Filled AFTER every typed field (so a contextParams template may name
@@ -681,13 +887,19 @@ export function renderOpForm(catalogRow, context, mount) {
         return value;
       };
 
+      // `reveal` is null for every op that declares no ceremony — the caller
+      // reads one shape and hands whatever it got, with its reply, to
+      // revealCeremonySecret (ceremony rule 3 above).
       return {
-        operationType,
-        class: dispatch.class || readClassChoice(),
-        payload,
-        reads,
-        optionalReads,
-        authContext: buildAuthContext(dispatch.authContext, context),
+        envelope: {
+          operationType,
+          class: dispatch.class || readClassChoice(),
+          payload,
+          reads,
+          optionalReads,
+          authContext: buildAuthContext(dispatch.authContext, context),
+        },
+        reveal,
       };
     },
   };
