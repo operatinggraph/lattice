@@ -1009,3 +1009,62 @@ out for `clinicSiteBackfill`'s actual shape — `row.entityKey` always resolves.
 is unchanged and stands on its own stated grounds (the fault is template × row, and one of its fix
 paths produces no new delivery, so the fix-path rule puts it in the config class); only the
 speculative attribution to the clinic population is withdrawn.
+
+---
+
+## 17. CHECKPOINT — 2026-08-28 (fire `claude/great-lamport-i6872w`)
+
+**Branch, not a worktree** (`agents/steward/REMOTE.md` §1): `claude/great-lamport-i6872w`, pushed
+after every increment. `main` carries Inc 1 + every docs commit; **Incs 2–4 merge to `main` as one
+unit** (§16's revised landing shape — Inc 2 is not independently safe to run).
+
+**Done**
+
+- **Inc 1 — SHIPPED to `main`, CI green (11/11):** `8a6d162`. `NakWithLongDelay` +
+  `LongRedeliveryDelay` across all V8 touch points, plus a fifth `Decision` switch the design's own
+  list missed (`internal/processor/outbox/consumer_decisions_test.go`). Owns T1.
+- **Phase 0 — committed to `main`:** the §16 fire brief (`971ee82`) and the §12 census run +
+  C2 adjudication (`ec9798b`). C1 and C6 exact; V8's switch count was wrong; **C2 answered
+  statically** because this container has no live stack.
+- **Inc 2 — BUILT, reviewed, held on the branch:** `bffbb53`. §3.2's table, the `isBool` thread-out,
+  the `__body` raise/clear, the §3.6 cache bound, `MaxAckPending`, the §3.5 narrowing, §8's
+  demotion. Owns T3/T4/T5/T8. All gates green including five build-tagged harnesses.
+- **Inc 2's full 3-layer adversarial pass — RUN:** three cold reviewers (substrate mechanics ·
+  health-latch lifecycle · decline-taxonomy control flow). **7 MAJOR + ~12 MINOR**, two of them
+  converged independently. Findings and the design amendments they forced are in `32f930a`; the
+  landing-shape reversal is §16.
+
+**In flight when this checkpoint was written**
+
+- **Inc 2 fix round**, dispatched to the increment's own implementer (resumed, not a fresh agent —
+  §3's agent-lifetime rule). Covers M1 `MaxAckPending` 2000→1024 · M2 `alert`→`alertPaced` (the
+  demotion is defeated at the log layer) · M3 `admitGap` moved after `buildPlan` · **M4: §3.4a's
+  early anti-storm pulled forward from Inc 3** (the converged finding) · M5 cap must not discard an
+  `error` severity · M6 overflow entry retires at 0, not under the cap · M7 a wedged-consumer signal
+  · seven MINORs.
+
+**Exact next steps, in order**
+
+1. Land the fix round on the branch; re-run the full gate set + the five harnesses.
+2. **Inc 3** — the *rest* of §3.4 (the republish set, retiring `redelivered`/`NumDelivered`, the
+   three comment rewrites). §3.4a itself is already in via M4; do not build it twice. Owns T2, T9.
+3. **Inc 4** — `ReplayTarget`. Nine layers, mapped live: `weaver/control.go` ·
+   `weaver/control/service.go` (iface, `ControlResponse`, op const, `targetOps`, `dispatchEndpoint`)
+   · `internal/controlauth/ops.go` · `packages/console-operator/{permissions.go,manifest.yaml,
+   package.go,package_test.go}` **+ version bump** · `internal/controlauth/checker_test.go` ·
+   `cmd/loupe/control.go:57` · `cmd/loupe/web/js/views/component.js`'s weaver `actions` array ·
+   `cmd/loupe/{control_test.go,demo_test.go}`. Owns T6, T7, T10, T11.
+   **Absorb here (found at Phase 0, not filed):** `resetConfidence` and `resetBudget` are missing
+   from BOTH `control.go`'s `mutateOps` and that `actions` array, so two shipped verbs are
+   unreachable from Loupe and `weaver.md`'s "surfaced in Loupe" is false for both.
+4. **Cumulative adversarial pass over the item's whole diff**, then classify every finding
+   (design-gap / implementation-bug / brief-gap / convention / review-over-reach) and append the
+   component-shaped classes to `docs/components/weaver.md`'s dossier, promoting any twice-seen class
+   to a `scripts/lint-*.go` gate.
+5. Merge the branch to `main`, watch CI, then the §4 MERGED ≠ RUNNING rebuild.
+
+**The item's one carried-forward action, which no amount of code closes.** Phase 0's C2 established
+that the clinic 26 are **already Acked**, so the Nak loop cannot reach them. Incs 1–4 stop the class
+accumulating; only **`ReplayTarget clinicSiteBackfill`, actually RUN against a live stack**, heals
+the existing population and unblocks the `verticals.md` clinic row. This container has no such
+stack, so that run is Mac/live work regardless of how far the code gets here.
