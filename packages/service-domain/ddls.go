@@ -203,6 +203,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "service",
 				TargetField: "service",
 				TargetType:  "service",
+				// Both are required, live checks (vertex_alive on the service
+				// template and on the requesting actor's own vertex) — every
+				// RequestService call validates them before minting the run,
+				// with a clean UnknownTemplate/UnknownApplicant fail on
+				// absence, not a designed branch.
+				Reads: []string{"{payload.service}", "{actor}"},
 			},
 		},
 		{

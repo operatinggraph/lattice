@@ -92,6 +92,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// rejected server-side, and now sees the honest "needs your
 				// own Patient" card instead of a form that cannot succeed.
 				ContextParams: map[string]string{"patient": "{me.patient}"},
+				// Both endpoints are required, live, class-checked reads
+				// (appointmentDDLScript's require_live_typed on patient and
+				// provider) — every CreateAppointment call validates them
+				// before minting.
+				Reads: []string{"{payload.patient}", "{payload.provider}"},
+				// The self-scope ownership probe (does op.authContextTarget —
+				// which step 3 requires to equal op.actor for a scope=self
+				// grant — identify this patient?). {actor:id} substitutes the
+				// identical value {scopedTo:id} would here, without exercising
+				// that placeholder's first-ever use in the corpus. Absence is a
+				// meaningful rejection the script renders (AuthDenied), not a
+				// correctness error.
+				OptionalReads: []string{"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}"},
 			},
 		},
 		{
@@ -124,6 +137,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
+				// The appointment's own .schedule is REQUIRED: the script reads
+				// it (appointmentDDLScript's "read-posture: (a)" old_sched read)
+				// to know which cells the move releases, and faults InvalidState
+				// on its absence rather than rendering a business rejection. The
+				// provider/patient match probes are the SAME "(a)" required class
+				// (require_matching_provider/require_matching_patient's own doc
+				// comments name RescheduleAppointment's dispatcher explicitly) —
+				// every reschedule recomputes the held cells against them, so
+				// they are never absence-tolerant here the way CancelBooking's
+				// analogous probes are.
+				Reads: []string{
+					"{payload.appointmentKey}",
+					"{payload.appointmentKey}.schedule",
+					"lnk.appointment.{payload.appointmentKey:id}.withProvider.provider.{payload.provider:id}",
+					"lnk.appointment.{payload.appointmentKey:id}.forPatient.patient.{payload.patient:id}",
+				},
+				// The self-scope ownership probe, same shape and rationale as
+				// CreateAppointment's above.
+				OptionalReads: []string{"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}"},
 			},
 		},
 		{
@@ -139,14 +171,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// only — this op-meta describes exactly that consumer-reachable
 			// slice, not the operator's full status-transition surface (see
 			// package doc comment above).
+			// provider/patient are required: cancelling is always a terminal
+			// transition (the self-scope grant's only reachable value), and the
+			// script's terminal branch requires both — validated against the
+			// appointment's own withProvider/forPatient links — to release the
+			// held slot-claim cells (appointmentDDLScript's SetAppointmentStatus
+			// terminal branch). RescheduleAppointment, in this same package,
+			// requires the identical pair for the identical reason.
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to cancel — auto-filled from the appointment being viewed."},` +
 				`"status":{"type":"string","title":"Status","enum":["cancelled"],"default":"cancelled","description":"Fixed to cancelled — the only self-service transition."},` +
+				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider. Required to release the appointment's held slot-claim cells."},` +
+				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient. Required to release the appointment's held slot-claim cells."},` +
 				`"note":{"type":"string","title":"Note","description":"Optional cancellation reason."}},` +
-				`"required":["appointmentKey","status"]}`,
+				`"required":["appointmentKey","status","provider","patient"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being cancelled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
 				"status":         "Fixed to \"cancelled\" — cancelling is the only change you can make here.",
+				"provider":       "The appointment's own provider — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual provider.",
+				"patient":        "The appointment's own patient — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual patient.",
 				"note":           "Optional cancellation reason, kept with the appointment.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -154,6 +197,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
+				// The current .status is OPTIONAL: absence is the legit
+				// first-set case (appointmentDDLScript's own "read-posture: (d)"
+				// comment on this exact key). The provider/patient match probes
+				// are REQUIRED — the SAME "(a)" class RescheduleAppointment's
+				// identical probes use, verified against
+				// require_matching_provider/require_matching_patient's own doc
+				// comments, which name SetAppointmentStatus's terminal branch
+				// explicitly alongside RescheduleAppointment.
+				Reads: []string{
+					"{payload.appointmentKey}",
+					"lnk.appointment.{payload.appointmentKey:id}.withProvider.provider.{payload.provider:id}",
+					"lnk.appointment.{payload.appointmentKey:id}.forPatient.patient.{payload.patient:id}",
+				},
+				OptionalReads: []string{
+					"{payload.appointmentKey}.status",
+					// The self-scope ownership probe, same shape and rationale
+					// as CreateAppointment's / RescheduleAppointment's above.
+					"lnk.patient.{payload.patient:id}.identifiedBy.identity.{actor:id}",
+				},
 			},
 		},
 		{
@@ -178,6 +240,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "providerKey",
 				TargetType:  "provider",
+				Reads:       []string{"{payload.providerKey}"},
+				// The standing-caller ownership probe (actor_bound_to_provider):
+				// does the actor identifiedBy-bind to THIS provider? Absent ->
+				// AuthDenied unless the actor also holds operator (that walk is
+				// script-derived and undeclarable) — a meaningful rejection, not
+				// a correctness error.
+				OptionalReads: []string{"lnk.provider.{payload.providerKey:id}.identifiedBy.identity.{actor:id}"},
 			},
 		},
 		{
@@ -202,6 +271,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "providerKey",
 				TargetType:  "provider",
+				Reads:       []string{"{payload.providerKey}"},
+				// The standing-caller ownership probe, same shape and
+				// rationale as SetProviderHours's above.
+				OptionalReads: []string{"lnk.provider.{payload.providerKey:id}.identifiedBy.identity.{actor:id}"},
 			},
 		},
 		{
@@ -234,6 +307,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
+				Reads:       []string{"{payload.appointmentKey}"},
 			},
 		},
 		{
@@ -258,6 +332,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
+				// site is required (unlike CreateAppointment's optional site)
+				// and require_site_membership hard-fails UnknownSite on its
+				// absence — a correctness error on THIS op, even though the
+				// shared helper's own doc comment describes the class-(d)
+				// posture CreateAppointment's optional site uses.
+				Reads: []string{"{payload.appointmentKey}", "{payload.site}"},
 			},
 		},
 		{

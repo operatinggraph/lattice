@@ -173,6 +173,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"booker":      "{actor}",
 					"leaseAppKey": "{me.leaseapp?}",
 				},
+				// The session + its own .schedule + the booker's own vertex
+				// are all required, live checks (prepare_booking_common's
+				// require_live_typed on session/booker, plus the .schedule
+				// read that rejects a booking once the class has started,
+				// SessionStarted) — every CreateBooking call validates them,
+				// with a clean UnknownEndpoint/InvalidState fail on absence,
+				// not a designed branch.
+				Reads: []string{
+					"{payload.session}",
+					"{payload.session}.schedule",
+					"{actor}",
+				},
 				// The per-(session, booker) double-book guard. It must be
 				// DECLARED (not merely relied on via CreateOnly-at-commit like
 				// the seat claim): the script reads its current state to
@@ -217,6 +229,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				ContextParams: map[string]string{
 					"booker":      "{actor}",
 					"leaseAppKey": "{me.leaseapp?}",
+				},
+				// Same shape and rationale as CreateBooking's above — the two
+				// ops share prepare_booking_common.
+				Reads: []string{
+					"{payload.session}",
+					"{payload.session}.schedule",
+					"{actor}",
 				},
 				OptionalReads: []string{
 					"vtx.session.{payload.session:id}.bkr{actor:id}",
