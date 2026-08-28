@@ -202,10 +202,19 @@ fan-out is the descendant set rather than the ~1 ancestor chain.
 ### 4.3 `Dist`
 
 A ranged hop's distance is an interval, so it must not make either endpoint appear **provably nearer**
-— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position
-reachable only across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
+— `AnchorSideSeeds` drops the far endpoint's seed when one side is strictly nearer. A position the
+anchor can reach across a ranged binding hop therefore takes the existing *incomparable* sentinel, whose
 branch seeds **both** endpoints and is documented as the safe, widening direction (ledger row 9).
 `Dist` has one production consumer, so the blast radius is that one call site.
+
+> **Amended at build time, 2026-08-28** (§17.6 (a)). This paragraph read *"a position reachable **only**
+> across a ranged binding hop"*, and that rule leaves a hole: a position holding **both** a fixed binding
+> path of length L **and** a ranged path whose true length may be shorter would keep the finite L, which
+> **over-states** its distance — and `consider` drops the endpoint whose distance is the larger, so an
+> over-stated distance drops a seed. That is the under-approximating direction this unit exists to refuse.
+> The shipped rule is therefore the wider one stated above: exact distances over the **fixed** binding hops,
+> then the sentinel for every non-anchor position the anchor reaches over binding hops **via at least one
+> ranged hop** (a two-state BFS over `(position, usedRanged)`). Over-poisoning only seeds both endpoints.
 
 Two things the increment owes because of it, neither optional: the sentinel currently means *"no
 binding path to the anchor"* (`hopindex.go:59-65`), so **the field doc must distinguish the two
@@ -213,6 +222,11 @@ meanings** or the next reader misreads a genuine non-binding position; and
 `hopindex_test.go:513`'s `Dist[s.Pos] >= 0` assertion for every seeded position has to move. A ranged
 hop written inside a `WHERE` or a comprehension is `Binding: false` and already contributes no
 distance, so only ranged hops in a `MATCH` are affected.
+
+> **Amended at build time, 2026-08-28** (§17.6 (b)). The second obligation does not exist: that
+> assertion's fixture carries no ranged hop, so no position in it is poisoned and it holds verbatim.
+> It stays where it is, and a ranged-hop equivalent is added beside it instead. The first obligation —
+> splitting the field doc — stands and shipped.
 
 ---
 
@@ -771,3 +785,28 @@ Increment 2 (`withScopeReject`'s structural-identity whitelist) — **HELD at ra
 unmet. `ReferencedLabels`' exhaustiveness clear. The generator (`internal/pkgmgr/anchorwalk.go`). Any
 cypher edit in `packages/`. The five Personal lenses, the two multi-walk lenses and the two `SecureColumns`
 plain lenses (§13's named conjuncts — unreachable work, not deferred work).
+
+### 17.9 Build checkpoint (2026-08-28)
+
+Branch `claude/great-lamport-kxa2su`. Landed and pushed, in order:
+
+| Increment | Commit | State |
+|---|---|---|
+| 6 · component doc (ranged-step walk) | `eb14c25` | ✅ |
+| 4 · `lint-lens-anchors` negated-narrowing-bound rule | `9923554` | ✅ |
+| dossier · polarity entry's second sighting | `5659744` | ✅ |
+| 5a · the 16 census pin moves | `e7f7dfd` | ✅ |
+| 1 + 2 + 3 · index, walk, tally | `397786e` | ✅ |
+| 5b · T1–T8, T11 | — | in flight |
+
+**C4 is NOT re-derived, and that is a REMOTE-environment limit, not an omission.** §12 C4 reads Health KV
+on a *running* stack for the capability pipeline's rebuild/suppression state and per-lens lag. This fire ran
+in an ephemeral remote container (`agents/steward/REMOTE.md` §3), where the only stack available is one this
+fire would bootstrap itself — with no accumulated lag and no suppression history, so any figure measured
+there would be a fabrication dressed as a measurement, not the live symptom. C4-after is in any case the
+**acceptance measurement for Increment 2**, whose revive trigger (§13) is "Increment 1 shipped **and observed
+live**". That trigger therefore remains **unmet** until someone re-reads Health KV against the real
+deployment after this ships. Increment 2 stays held; the Steward does not pull it on the strength of a green
+suite.
+
+**The deviations in §17.6 are now amended into the body where they stand** — §4.3 carries both, dated.
