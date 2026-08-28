@@ -45,16 +45,32 @@ from the canonical declaration site means the gate's reach tracks the packages a
 the row's own "12 non-test engine files" estimate, made 2026-08-25, reads 15 today: a hand census misses
 sites a derived one cannot.)
 
-**Categories** — three, and the author picks one:
+**Categories** — two, and the author picks one:
 
 - **`(policy)`** — the core decides something *about* this op: a policy set, carve-out, reserved-verb list,
   or a branch keyed on the name. A `(policy)` declaration must additionally carry a **`pin=`** sub-field
   naming what keeps the set honest (the test or gate that catches drift). This is the one category that
   encodes a coupling to a package the core does not own, so it is the one that must name its guard.
-- **`(submits)`** — this engine constructs and submits this operation itself.
-- **`(routes)`** — this engine dispatches inbound work on this operation name.
+- **`(submits)`** — the operation is submitted: built and published by this engine, or named in the remedy
+  an operator submits on its instruction.
 
-`<why>` is required on all three, in the author's own words.
+`<why>` is required on both, in the author's own words.
+
+**A third category, `(routes)` — "this engine dispatches inbound work on this operation name" — was drafted
+and dropped at build time (2026-08-28), and the vocabulary above is the ratified one.** The live census
+carries no such site: the one that reads that way, `internal/bridge/dispatch.go`'s `replyOpReads` switch, is
+assembling the reply op the Bridge itself posts, which is `(submits)`. A category with no member is
+speculative API that invites miscategorization, and the processor's own routing is dynamic (through the DDL
+cache), so no literal reaches it. A `(routes)` annotation therefore fails as the unknown category it is; a
+router, should one ever appear, is a deliberate amendment rather than a slot left standing open for it.
+
+**The derived universe also buys a rename detector, and it ships.** When a package retires or renames a
+verb, the engine's literal silently leaves the universe — the undeclared check stops matching it, so a site
+declared against a real counterparty now points at nothing and trips nothing. The declaration outliving its
+subject is the only remaining trace, so an `# op-name:` annotation whose covered span names *no*
+package-owned operation is itself denied. It cannot fire on a live site, because a correctly-placed
+declaration always covers at least one member — which also makes it catch an annotation that drifted off its
+statement (a blank line between comment and code leaves it covering nothing).
 
 **Required sub-fields have precedent in this file.** `# read-posture: (e)` already requires the annotation
 to name `relation=` and record `epoch=` (`checkReadPosture`); `pin=` is the same idiom.
@@ -65,9 +81,12 @@ zero coincidental collisions — so an escape hatch today would buy nothing but 
 collision later is a deliberate amendment, made then.
 
 **Scope excludes `cmd/**` and `internal/spike/`.** A `cmd/` binary submitting operations is its whole job,
-and the row's hazard is engine policy. `internal/spike/` holds standalone benchmark harnesses (already
-excluded from this file's embedded-NATS gate for the same reason); its one hit is a literal
-`PermittedCommands` fixture — a declaration, not a use.
+and the row's hazard is engine policy. That exclusion is a division of labor rather than a gap: the `cmd/`
+tier is already governed — `lint-app-op-descriptors.go` ratchets each vertical app's distinct hardcoded
+op-literal count against a pinned per-app ceiling, and `lint-facet-discovery.go` bans op literals outright
+in `cmd/facet` beyond five ceremony ops. `internal/**` was the last ungoverned tier. `internal/spike/` holds
+standalone benchmark harnesses (already excluded from this file's embedded-NATS gate for the same reason);
+its one hit is a literal `PermittedCommands` fixture — a declaration, not a use.
 
 ### 2.2 A containment invariant for the carve-out pair
 
@@ -158,9 +177,23 @@ unknown-shape rejection + required `<why>`, the closest shape by construction. `
   read-posture contract it claims to mirror, not copied on trust.
 - No `packages/` content changes, so no manifest version bump is in play.
 
-**6. Adjacent finds.** `internal/privacyworker` / `internal/refractor/keyshredded` both submit
-`RecordShredFinalization` — verified **deliberate** (two independent consumers of one event, documented at
-`keyshredded/manager.go:10,79,273`), not a defect; §3. No rows filed.
+**6. Adjacent finds.**
+
+- `internal/privacyworker` / `internal/refractor/keyshredded` both submit `RecordShredFinalization` —
+  verified **deliberate** (two independent consumers of one event, documented at
+  `keyshredded/manager.go:10,79,273`), not a defect; §3. No row.
+- **A live defect, found while categorizing `commit_path.go:430` — FIXED in this fire (`b8ecdff`), not
+  filed.** The claim-attempts counter's two emission legs disagreed about their subject: the rejection leg
+  (`handleStubFailure`) keys on `isNFRS6Operation` — the whole equalized set — while the post-commit success
+  leg keyed on a bare `"ClaimIdentity"` literal. `CompleteCredentialLink` is in that set, so its failures
+  were counted and its successes dropped. Because every member of the set answers its caller with one fixed
+  wire shape *by construction*, this counter is an operator's only view of what the operation did: the leg
+  asymmetry made a working credential-link flow read as one that never succeeds, and hid a real failure
+  spike behind a baseline that was already total failure. Both legs now key on the set;
+  `docs/observability/health-kv-schema.md` moved with the emission (its row said "per `ClaimIdentity` call",
+  which never described the rejection leg either, and its outcome enum was missing `internal-fault`). The
+  fix *retires* one of the 29 sites rather than annotating it — the gate's first application finding a
+  defect in the mechanism it governs.
 
 **7. Non-goals.** `cmd/**`. Kernel-seeded verbs (`InstallPackage`/`UpgradePackage`/`UninstallPackage`) are
 core-owned, not declared by any package's `PermittedCommands`, and so fall outside the derived universe by
