@@ -304,3 +304,57 @@ Lesson captured (memory + this doc §1): a `no-pattern:` tag names the census so
 build-fire altitude, against that instant's tree — the designer pass re-runs it against today's
 tree before designing anything, because this codebase ships the missing pattern at a rate that
 outruns its own board.
+
+## 10. Build note — item 6, ceremony plumbing (2026-08-28)
+
+Fire brief for §2 work-list item 6. Scope sentence: *the shared descriptorform module and the four
+staff apps' op-catalog proxy carry an op's mint-and-reveal ceremony end to end, so a catalog-driven
+`CreateUnclaimedIdentity`/`RotateClaimKey` form no longer needs a hand-built client.*
+
+**Verified touch-list:**
+
+- `packages/edge-manifest/lenses.go:671-673` — `opCatalogSpec`'s RETURN already projects
+  `ceremonyMintedSecretHashField`/`ceremonyRevealTitle`/`ceremonyRevealHelp` (shipped `7bd18e4a`,
+  2026-08-23). **No lens change** — layer 1 of the triage's "three layers" is already done; verify
+  it live, don't re-touch it.
+- `cmd/{cafe,clinic,loftspace,wellness}-app/op_catalog.go` — `opCatalogProjection` carries no
+  ceremony fields today (checked all four; two are byte-identical, the other two differ only in
+  doc-comment wording and a local KV-get helper). Add 3 fields + a `Ceremony *opCeremony` on
+  `opDescriptor`, mirroring the existing `DispatchContextParams` plumbing (same optionality: omit
+  the whole object when `MintedSecretHashField == ""`).
+- `internal/descriptorform/form.mjs` — no ceremony support at all today. Needs: a
+  `ceremonySupported()` gate mirroring `cmd/facet/web/app.js:1991` (refuse to OFFER the op when the
+  runtime lacks `crypto.subtle`, per `OpCeremonySpec`'s Go doc contract — never fall back to
+  rendering the hash field); mint+hash mirroring `app.js:1998-2012` (32 CSPRNG bytes → hex
+  plaintext, sha256 hex digest — `attachments.mjs` is the module's existing precedent that crypto
+  belongs here, though its own `deriveNanoID` is a different primitive and not reused directly);
+  exclude the hash field from the rendered field list (same filter `targetField`/`contextParams`
+  fields already get); `submit()` becomes async and returns the envelope plus a pending reveal
+  (`{title, help, plaintext}` or none) rather than the envelope alone — a **caller-visible contract
+  change**, not additive, because every existing caller destructures the return today.
+- 12 `handle.submit()` call sites across the four apps' `web/app.js` (cafe ×3, clinic ×5, loftspace
+  ×1, wellness ×3) all need `await` plus a reveal check after a **non-rejected** reply — mirroring
+  the fail-closed rule both Facet's ceremony and loftspace's own hand-built
+  `submitNewApplicant`/`showClaimSecret` (`app.js:941-983`) already apply: show once, only on
+  confirmed success, drop on anything else. loftspace already has a claim-secret modal
+  (`#claim-overlay`); the other three have none. Rather than four divergent hand-rolled modals, the
+  module exports one self-contained `showCeremonyReveal(title, help, plaintext)` — its own
+  DOM/inline-style overlay appended to `document.body`, no dependency on a host app's modal markup
+  (the same self-containment `attachments.mjs` already follows) — so the 12 call sites stay
+  mechanical.
+
+**In-scope gotchas:** `submit()`'s return-shape change is a real breaking change to every existing
+caller, not a purely additive one — every call site must be updated in the same commit or the build
+fails; there is no partial-adoption state. The reveal must never show for a rejected reply (mirrors
+both cited precedents). Ceremony-unsupported runtimes must refuse to OFFER, not degrade to a raw
+hash textbox (`OpCeremonySpec`'s normative contract, `internal/pkgmgr/definition.go:676-699`).
+
+**Non-goals:** migrating loftspace's existing hand-built `submitNewApplicant` ceremony onto the
+catalog-driven path — that stays hand-built (its own form UI, name/email/phone fields the schema
+doesn't map 1:1); this item only unblocks the catalog-driven surface (a future task-based
+`CreateUnclaimedIdentity`/`RotateClaimKey` completion, and §3's guest-create form) from having to
+hand-roll ceremony support again. No change to `packages/identity-domain` — its `OpCeremonySpec`
+declarations are already correct and unchanged.
+
+**Review depth:** security-plane change (client-side secret minting/reveal) — full 3-layer
+adversarial at admit regardless of size, per §4 of the Steward routine.
