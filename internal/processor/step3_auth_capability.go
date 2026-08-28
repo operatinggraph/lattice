@@ -476,8 +476,8 @@ const AlertCodePrivilegedLaneGrantRejected = "privileged-lane-grant-rejected"
 // (internal/bootstrap/lenses.go) is the design's named core-owned exception and
 // is likewise unstamped.
 var reservedOperationTypes = map[string]bool{
-	"ShredRetentionClassKey": true,
-	"UpdatePermission":       true,
+	"ShredRetentionClassKey": true, // op-name: (policy) core-reserved verb a runtime-provenanced grant may never confer pin=TestReservedOperationTypes_V1Set
+	"UpdatePermission":       true, // op-name: (policy) core-reserved verb a runtime-provenanced grant may never confer; blocks minting a runtime permission that rewrites another permission's body pin=TestReservedOperationTypes_V1Set
 }
 
 // AlertCodeReservedOperationGrantRejected is raised (Contract #5 §5.5 alert

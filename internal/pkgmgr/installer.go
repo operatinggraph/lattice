@@ -1190,7 +1190,9 @@ func (i *Installer) readDeclaredKeyOccupants(ctx context.Context, declared []str
 // each declared keys — so a remedy naming only the mint hands the operator a
 // success reply and no grant.
 const (
-	restoreMintVerb  = "CreatePermission"
+	// op-name: (submits) named in the runtime-restore remedy pkgmgr advises; the operator, not pkgmgr, submits it to re-mint the permission vertex
+	restoreMintVerb = "CreatePermission"
+	// op-name: (submits) named in the runtime-restore remedy pkgmgr advises; the operator, not pkgmgr, submits it to re-attach the grantedBy edge that carries authority
 	restoreGrantVerb = "GrantPermission"
 )
 

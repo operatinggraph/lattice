@@ -30,8 +30,8 @@ package processor
 // a submitter free to add keys of its own would price work the equalization has
 // no subject for.
 var nfrS6Operations = map[string]struct{}{
-	"ClaimIdentity":          {},
-	"CompleteCredentialLink": {},
+	"ClaimIdentity":          {}, // op-name: (policy) member of the equalized rejection set, which must cover every op the Gateway submits under a raw credential pin=TestRawCredentialCarveOutIsNFRS6Equalized
+	"CompleteCredentialLink": {}, // op-name: (policy) member of the equalized rejection set, which must cover every op the Gateway submits under a raw credential pin=TestRawCredentialCarveOutIsNFRS6Equalized
 }
 
 // isNFRS6Operation reports whether this operationType's rejections must be
