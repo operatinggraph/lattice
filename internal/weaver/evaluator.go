@@ -998,6 +998,15 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// rowBodyColumn entry: an entity whose last projected body was
 		// unparseable can end by deletion instead of by a parseable revision,
 		// and the tombstone's empty body needs no parsing to get here.
+		//
+		// The `gap:` family is retired by the same prefix and for a stronger
+		// reason: its entries are raised at whatever openGapColumns enumerated,
+		// which is every true missing_* column WHETHER OR NOT the playbook names
+		// it, while the candidate walk below yields only the playbook's keys
+		// unioned with the (now empty) row's. A gap entry raised at an orphan
+		// column is therefore reachable by no per-key clear once the entity is
+		// gone, and the prefix is its only retirement.
+		e.issues.clearPrefix(issuePrefixGapEntity + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
 	}
@@ -1551,27 +1560,6 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	}
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)
-	if escalated && e.issues.standingAs(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur) {
-		// The level check that keeps a re-derivation from re-paying the model.
-		// The fact "this gap spent its budget and was handed to Augur" is
-		// already recorded and still standing, and this call is another
-		// derivation of it — a redelivery on the decline floor, a sweep pass, an
-		// operator replay of the whole target. Firing again would mint a second
-		// reasoning episode for a question already asked, at a real per-call
-		// cost, as often as the gap is re-derived.
-		//
-		// It cannot swallow a FIRST escalation: the latch is written below, only
-		// after an episode actually fired, so an unfired gap never matches here.
-		// Nor can it strand one — the latch retires exactly where the fact ends:
-		// the column going false or the row leaving (retireClosedGapIssues), a
-		// plan that BUILDS for this gap again (planGap's "a plan disproves the
-		// park" clear, which is what an operator's `resetBudget` reaches through
-		// the sweep's re-arm), and the target's own teardown. After any of those
-		// a fresh exhaustion escalates afresh.
-		e.logger.Debug("weaver: exhausted-gap escalation suppressed; the Augur episode for this gap already stands",
-			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-		return substrate.Ack
-	}
 	if !escalated {
 		budget := "its declared retry budget"
 		if budgetIsDefault {
@@ -1585,7 +1573,16 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 			"target "+targetID+" entity "+entityID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
 		return substrate.Ack
 	}
-	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	// Retire a GapBudgetExhausted raised for this row BEFORE the augur policy
+	// covered the gap — that fact is superseded the moment an escalation is the
+	// disposition. The guard is what keeps the clear to that one job: this
+	// function's own escalation record lives at the same latch, and clearing
+	// unconditionally would wipe it on every derivation that short-circuits below
+	// on a live mark, leaving a "standing" record that never stands for longer
+	// than one delivery.
+	if !e.issues.standingAs(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur) {
+		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	}
 
 	// The exhausted gap's OWN mark, if one survives, occupies the SAME
 	// <targetId>.<entityId>.<gapColumn> key the escalation's fresh CAS-create
@@ -1600,11 +1597,20 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	//     subsequent redelivery of this still-open gap would tear down and
 	//     re-fire a brand-new escalation episode on top of one already
 	//     running (a self-inflicted storm this function must not cause).
+	//     This arm is ALSO what bounds the cost of re-deriving the same
+	//     exhaustion: a decline-floor redelivery, a sweep pass and an operator
+	//     replay all reach this function, and every one of them that finds a
+	//     live mark costs one mark read and no model call.
 	//   - A STALE mark (expired lease) or none at all belongs to the
 	//     original action's now-spent retry lineage (or a prior escalation
 	//     attempt that never completed) — clear it, revision-conditioned on
 	//     the read just taken so a genuinely concurrent fresh episode is
-	//     never clobbered, then fire fresh.
+	//     never clobbered, then fire fresh. This is the ONLY recovery a dead
+	//     escalation episode has: the reasoning claim's own Loom instance or
+	//     bridge call can be lost, and nothing else re-derives it, so this arm
+	//     must stay reachable from every derivation. Its re-fire rate is one per
+	//     mark lease per gap, because each re-fire mints a fresh live mark —
+	//     which is what keeps it from becoming a per-pass model call.
 	rec, markRev, found, err := e.marks.get(ctx, targetID, entityID, gapColumn)
 	if err != nil {
 		e.logger.Warn("weaver: mark read failed ahead of exhausted-gap escalation; nak with delay",
@@ -1632,21 +1638,44 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	}
 	dec = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
 	if dec != substrate.Ack {
-		// The episode did not fire (a publish failure, a mint failure) and the
-		// redelivery it asked for is the retry. Recording the escalation now
-		// would suppress that retry against an episode that never ran.
+		// A publish failure inside `fire` records a republish obligation at this
+		// gap's key, and for an escalation that obligation is both useless and
+		// unsafe, so it is withdrawn here rather than left to age out.
+		//
+		// Useless: handleRow routes an exhausted gap through THIS function and
+		// never reaches dispatchGap, which is the set's only reader — so the
+		// entry can never be consulted while the gap stays exhausted, and it
+		// occupies one of the target's 256 slots meanwhile.
+		//
+		// Unsafe: it does not stay unreachable. An operator `resetBudget`, or a
+		// lens raising maxretries_<g>, makes the gap dispatchable again while the
+		// escalation's own mark is still present — and dispatchGap's live-mark
+		// arm falls through on `owes`, re-planning against that mark's pinned
+		// actionRef and re-publishing an episode nothing asked for. Beyond the
+		// Contract #4 tracker's 24 h horizon that is a genuine second dispatch.
+		//
+		// Nothing is lost by withdrawing it: this episode's retry is the
+		// lease-expiry re-fire above, which is reached by every derivation of the
+		// exhaustion, not the republish set.
+		e.republish.clear(targetID, entityID, gapColumn)
 		return dec
 	}
-	// The escalation is now a standing FACT about this gap, and it is recorded
-	// as one so the next derivation of the same exhaustion can see it rather
-	// than re-ask the model (the level check above). It replaces, at the same
-	// latch, the GapBudgetExhausted the un-escalated branch raises: both state
-	// what a spent budget led to for this one row, they are mutually exclusive,
-	// and sharing the latch is what puts them on the same retirement machinery.
+	// The escalation is now a standing FACT about this gap, recorded as one so an
+	// operator can see which gaps are on the reasoning tier and how long they
+	// have been there. It replaces, at the same latch, the GapBudgetExhausted the
+	// un-escalated branch raises: both state what a spent budget led to for this
+	// one row, they are mutually exclusive, and sharing the latch is what puts
+	// them on the same retirement machinery.
+	//
+	// It is a RECORD, not a gate. Nothing reads it back to decide whether to
+	// escalate: what bounds the re-escalation of one gap is the mark lease read
+	// above — a live mark Acks, an expired one re-fires — and a latch consulted
+	// as a gate there would suppress the expired-mark arm too, which is the only
+	// recovery a dead reasoning episode has.
 	//
 	// The raise sits BELOW planGap, which clears this latch for any gap whose
 	// plan builds — including this escalation's own. Written above the plan it
-	// would be erased on the way out and suppress nothing.
+	// would be erased on the way out and record nothing.
 	//
 	// `warning`, not `error`: an escalated gap is one Weaver could not remediate
 	// conventionally and has handed to the reasoning tier, which is degraded
@@ -1657,7 +1686,7 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	// deserves.
 	e.issues.set(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur,
 		"target "+targetID+" entity "+entityID+": row column "+gapColumn+" exhausted its retry budget and was "+
-			"escalated to Augur reasoning; no further escalation fires for it while this stands")
+			"escalated to Augur reasoning")
 	return substrate.Ack
 }
 
@@ -1811,11 +1840,14 @@ const (
 )
 
 // codeGapEscalatedToAugur is the issueKeyGapEntity code recording that one
-// row's gap spent its retry budget and was handed to the Augur reasoning tier.
-// It is named rather than inlined because it is read as well as written: the
-// escalation's own level check consults the latch for exactly this code before
-// deciding whether the episode has already been dispatched, so a drift between
-// the raise and the check would re-pay the model on every re-derivation.
+// row's gap spent its retry budget and was handed to the Augur reasoning tier —
+// the operator-facing counterpart of GapBudgetExhausted, which the same latch
+// carries when no augur policy takes the gap.
+//
+// It is a record and nothing gates on it. What bounds a gap's re-escalation is
+// the escalation mark's own lease (escalateExhaustedGap's live/expired arms);
+// gating on this latch instead would suppress the expired-mark arm, which is the
+// only recovery a reasoning episode that died has.
 const codeGapEscalatedToAugur = "GapEscalatedToAugur"
 
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
@@ -1957,18 +1989,31 @@ func issueKeyRowIssuesCapped(targetID string) string {
 }
 
 // rowIssueTarget reports whether key is a member of a PER-ROW issue family — a
-// `data:` or `template:` entry keyed per (target, entity, column) — and if so
-// which target's budget it counts against.
+// `gap:`, `data:` or `template:` entry keyed per (target, entity, column) — and
+// if so which target's budget it counts against.
 //
 // The test is the key SHAPE, not a list of raise sites: every member carries an
 // entity segment and a column segment below the target, so a key whose family
 // tail has fewer than two separators is not one. That is what excludes the
 // overflow entry itself (target + reserved segment only) without special-casing
-// it, and what keeps a future target-scoped member of either family from
-// silently consuming a per-row budget.
+// it, and what keeps a future target-scoped member of any family from silently
+// consuming a per-row budget.
+//
+// `gap:` belongs here for the same reason the other two do, and its omission
+// would leave the bound describing less than it names. Every member of that
+// family — a `surface` gap standing open, a spent retry budget, a budget spent
+// and escalated — is one fact about one (entity, column) and multiplies with the
+// lens exactly like a row-data fault, so a systemically-broken target grows the
+// in-memory map and the per-heartbeat sort over it without limit. Capping it
+// costs an operator nothing they could otherwise see: the heartbeat DOCUMENT is
+// already truncated to maxHeartbeatIssues severity-first, far below this cap,
+// and a refused raise still carries its severity into the overflow entry, so
+// aggregateStatus reaches the same verdict either way.
 func rowIssueTarget(key string) (string, bool) {
 	tail := ""
 	switch {
+	case strings.HasPrefix(key, issuePrefixGapEntity):
+		tail = key[len(issuePrefixGapEntity):]
 	case strings.HasPrefix(key, issuePrefixData):
 		tail = key[len(issuePrefixData):]
 	case strings.HasPrefix(key, issuePrefixTemplate):

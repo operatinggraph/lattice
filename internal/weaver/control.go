@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
 	"github.com/operatinggraph/lattice/internal/healthkv"
@@ -33,6 +34,13 @@ const (
 	targetStateActive   = "active"
 	targetStateDisabled = "disabled"
 )
+
+// replayResetTimeout bounds ReplayTarget's delete-then-create of a lane-1
+// durable. It is deliberately far wider than the two JetStream API round trips
+// that pair costs, because a deadline expiring BETWEEN the delete and the create
+// is the one outcome that leaves a target with no durable; and it is bounded at
+// all so a detached call cannot wedge the control responder's goroutine.
+const replayResetTimeout = 30 * time.Second
 
 // seedDisabledTargets scans weaver-state for every `<targetId>.__control`
 // dispatch-skip marker and populates the engine's in-memory disabled-set
@@ -411,11 +419,15 @@ func (e *Engine) ResetRetryBudget(ctx context.Context, targetID, entityID, gapCo
 // holding evidence, rather than the engine paying it on every boot.
 //
 // Returns how many rows the recreated durable had queued to deliver at the
-// instant the verb returned — the size of the burst just ordered. It is a
-// SNAPSHOT, not a total: the pump starts draining immediately, so a busy target
-// reports fewer rows than it will replay. A count that cannot be read is
-// reported as 0 with a log line rather than as an error, because the replay has
-// already happened by then and failing the call would describe it wrongly.
+// instant the verb returned — the size of the burst just ordered. Reset signals
+// each pump to re-open and returns WITHOUT waiting for it (that is Reset's
+// documented contract; ResetAwaitReopen is the variant that waits), so in the
+// ordinary case the pump still holds its old iterator when this count is read
+// and the number is the whole replay set. It is nonetheless a LOWER BOUND rather
+// than a promise: nothing orders the pump's re-open against this read, so a pump
+// that reopened first will have drained some of it. A count that cannot be read
+// is reported as 0 with a log line rather than as an error, because the replay
+// has already happened by then and failing the call would describe it wrongly.
 //
 // Refusals. The verb's whole effect is what the lane-1 ladder does with the
 // replayed rows, so it must refuse exactly the shapes that ladder PERMANENTLY
@@ -460,10 +472,39 @@ func (e *Engine) ReplayTarget(ctx context.Context, targetID string) (rowsQueued 
 			"durable to recreate — a revoke removed it, or its add failed (the target's ConsumerReconcileError "+
 			"issue names which); `enable` re-adds the consumer", targetID, name)
 	}
-	if err := e.supervisor.Reset(ctx, name); err != nil {
+	// The delete/create pair runs on a context detached from the caller's, under
+	// its own generous bound. Reset deletes the durable and then creates it, and
+	// a cancellation landing BETWEEN those two calls leaves the target with no
+	// durable at all — a state nothing else in the engine repairs: the pump
+	// retries `Consumer(...)` forever on a capped backoff without taking a pause
+	// reason, so the health sink still reads `running`, and reconcileConsumers
+	// skips a target whose fingerprint is unchanged. The control plane's handler
+	// deadline is 5 s, which is well inside the range where that window is
+	// reachable, so the pair must not inherit it. The bound below still exists,
+	// because a detached call must not be able to wedge the responder goroutine
+	// — and the standing issue raised on failure is what makes the residual
+	// window observable instead of silent.
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replayResetTimeout)
+	defer cancel()
+	if err := e.supervisor.Reset(resetCtx, name); err != nil {
+		// A failed reset can have deleted the durable without recreating it, and
+		// that target then evaluates nothing while every other signal reports it
+		// healthy. Raise the same standing issue reconcileConsumers raises for
+		// its own failed Add/Remove/Reset — same key, so a later successful
+		// reconcile or replay retires it — and name the remedy, which is this
+		// verb again rather than `enable` (Resume is a no-op on an unpaused pump
+		// and the reconcile skips an unchanged fingerprint).
+		e.issues.set(issueKeyConsumer(targetID), "error", "ConsumerReconcileError",
+			"target "+targetID+": lane-1 consumer replay failed: "+err.Error()+
+				" — the durable may have been deleted without being recreated, in which case the target "+
+				"evaluates nothing until this verb is re-run")
 		return 0, fmt.Errorf("weaver: replay %q: %w", targetID, err)
 	}
-	queued, perr := e.supervisor.PendingForConsumer(ctx, name)
+	// A completed reset disproves any wedge standing at that key, including one
+	// an earlier failed replay or reconcile left there.
+	e.issues.clear(issueKeyConsumer(targetID))
+
+	queued, perr := e.supervisor.PendingForConsumer(resetCtx, name)
 	if perr != nil {
 		e.logger.Warn("weaver: replay recreated the durable but its queued-row count could not be read",
 			"targetId", targetID, "durable", name, "err", perr)

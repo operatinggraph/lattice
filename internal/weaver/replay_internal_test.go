@@ -96,20 +96,27 @@ func expireMark(t *testing.T, ctx context.Context, h *handlerHarness, targetID, 
 	}
 }
 
-// TestEscalateExhaustedGap_StandingEscalationIsNotRePaid is T11: a replay must
-// not re-pay Augur for a question already asked.
+// TestEscalateExhaustedGap_LiveEscalationIsNotRePaidAndADeadOneIsRetried is
+// T11, and it pins BOTH halves of the bound — because they trade off directly
+// and a fix for either one alone silently destroys the other.
 //
-// One ReplayTarget invocation re-delivers every row of a target, and for a
-// violating row whose mark has aged past its lease the exhausted-gap arm would
-// clear that mark and fire a FRESH reasoning episode — a real per-call cost, paid
-// again on every replay, every decline-floor redelivery and every sweep pass, for
-// a gap whose escalation already stands.
+// The cost T11 names is real: every derivation of the same exhaustion reaches
+// this function — a decline-floor redelivery, a sweep pass, one row of an
+// operator's ReplayTarget — and a re-fire mints a fresh reasoning episode at a
+// real per-call price. What bounds it is the escalation mark's own LEASE, read
+// here: while the mark is live the episode is in flight and the derivation costs
+// one mark read and nothing else.
 //
-// The level check at the raise site stops that. This test walks all three states
-// it has to tell apart: a first escalation (fires), a re-derivation with the fact
-// standing and the mark stale (does not fire, and does not tear the mark down
-// either), and the fact having been retired by the gap closing (fires again).
-func TestEscalateExhaustedGap_StandingEscalationIsNotRePaid(t *testing.T) {
+// The other half is why that bound is the lease and not a standing Health fact.
+// A reasoning episode can DIE — its claim never converges, the bridge drops it —
+// and nothing else in the engine re-derives it, so the expired-lease arm is that
+// episode's only recovery. A suppression keyed on "an escalation was recorded
+// for this gap" would be permanent, would sit above this read, and would retire
+// that recovery from every leg at once: the gap would stay open and violating
+// forever behind a warning.
+//
+// So: live mark ⇒ no second dispatch. Expired mark ⇒ re-escalate.
+func TestEscalateExhaustedGap_LiveEscalationIsNotRePaidAndADeadOneIsRetried(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -130,8 +137,8 @@ func TestEscalateExhaustedGap_StandingEscalationIsNotRePaid(t *testing.T) {
 	}
 	issueKey := issueKeyGapEntity(targetID, entityID, "missing_a")
 
-	// The first escalation: no fact stands, so the episode fires and the fact is
-	// recorded.
+	// The first escalation: nothing is in flight, so the episode fires and the
+	// standing record is written.
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
 		t.Fatalf("first delivery: decision = %v, want Ack", dec)
 	}
@@ -143,12 +150,12 @@ func TestEscalateExhaustedGap_StandingEscalationIsNotRePaid(t *testing.T) {
 			issueKey, h.engine.issues.snapshot())
 	}
 
-	// The replay: the mark this escalation left has aged past its lease, which is
-	// the exact input the re-fire arm acts on. The standing fact must stop it.
-	expireMark(t, ctx, h, targetID, entityID, "missing_a")
+	// Half one — the replay, while that episode is genuinely in flight. This is
+	// the delivery a ReplayTarget of the whole target produces for this row, and
+	// it must cost no model call and leave the mark exactly as it found it.
 	_, revBefore, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a")
 	if err != nil || !found {
-		t.Fatalf("the expired mark must still be there (found=%v err=%v)", found, err)
+		t.Fatalf("the escalation's mark must be there (found=%v err=%v)", found, err)
 	}
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 8, 1)); dec != substrate.Ack {
 		t.Fatalf("replayed delivery: decision = %v, want Ack", dec)
@@ -156,19 +163,34 @@ func TestEscalateExhaustedGap_StandingEscalationIsNotRePaid(t *testing.T) {
 	h.requireNoOp(t)
 	_, revAfter, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a")
 	if err != nil || !found || revAfter != revBefore {
-		t.Fatalf("the suppression must return before the mark teardown (found=%v rev=%v want=%v err=%v)",
+		t.Fatalf("a live escalation's mark must survive the replay untouched (found=%v rev=%v want=%v err=%v)",
 			found, revAfter, revBefore, err)
 	}
 
-	// The fact is not a permanent gag: it retires exactly where the fact ends —
-	// the gap closing, the row leaving, a plan building for the gap again — and a
-	// fresh exhaustion after that escalates afresh.
-	h.engine.retireClosedGapIssues(targetID, entityID, "missing_a")
+	// Half two — the same delivery once that episode is presumed dead. The lease
+	// has expired, so the gap is owed a fresh escalation and gets one; the
+	// standing record must not have turned into a gag.
+	expireMark(t, ctx, h, targetID, entityID, "missing_a")
+	if !h.engine.issues.standingAs(issueKey, "warning", codeGapEscalatedToAugur) {
+		t.Fatalf("the record must still stand — this half is about it NOT suppressing the retry")
+	}
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 9, 1)); dec != substrate.Ack {
-		t.Fatalf("post-retirement delivery: decision = %v, want Ack", dec)
+		t.Fatalf("lease-expired delivery: decision = %v, want Ack", dec)
 	}
 	if op := h.nextOp(t); op["operationType"] != defaultAugurOp {
-		t.Fatalf("a retired fact must let the next exhaustion escalate again, got %v", op["operationType"])
+		t.Fatalf("a dead escalation episode must be re-fired — it has no other recovery, got %v",
+			op["operationType"])
+	}
+	if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a"); err != nil || !found {
+		t.Fatalf("the re-fired escalation must leave a fresh live mark, which is what paces the next "+
+			"re-fire to one per lease (found=%v err=%v)", found, err)
+	}
+
+	// And the record retires where the fact ends, so a later exhaustion of a
+	// re-opened gap is reported afresh rather than inheriting this one's age.
+	h.engine.retireClosedGapIssues(targetID, entityID, "missing_a")
+	if h.engine.issues.standingAs(issueKey, "warning", codeGapEscalatedToAugur) {
+		t.Fatalf("the gap closing must retire the record")
 	}
 }
 
@@ -285,5 +307,114 @@ func TestEscalateExhaustedGap_UnfiredEscalationRecordsNothing(t *testing.T) {
 	}
 	if !h.engine.issues.standingAs(issueKey, "warning", codeGapEscalatedToAugur) {
 		t.Fatalf("the retry that DID fire must record the fact, issues = %+v", h.engine.issues.snapshot())
+	}
+}
+
+// TestEscalateExhaustedGap_PublishFailureRecordsNoRepublishObligation pins the
+// withdrawal of a republish entry the escalation path would otherwise strand.
+//
+// `fire` records an obligation at the gap's key whenever a publish fails, which
+// is right for an ordinary episode: dispatchGap reads that set and re-publishes
+// the SAME episode on the redelivery the failure asked for. An exhausted gap
+// never reaches dispatchGap — handleRow routes it here and continues — so the
+// entry has no reader, and it does not merely idle: it burns one of the target's
+// 256 slots, and the moment the gap becomes dispatchable again (an operator
+// `resetBudget`, a lens raising maxretries_<g>) dispatchGap's live-mark arm falls
+// through on `owes` and re-publishes an episode against the escalation's own
+// mark. Past the Contract #4 tracker's horizon that is a second real dispatch.
+//
+// The escalation's retry is the lease-expiry re-fire, not the republish set, so
+// nothing is lost by withdrawing the entry — and this test is what keeps a
+// future edit from re-adding it by making `fire` generic again.
+func TestEscalateExhaustedGap_PublishFailureRecordsNoRepublishObligation(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureEscalateNoRepublish"
+	const budget = 2
+	entityID := testNanoID(t)
+	escalatingTarget(t, ctx, h, targetID, entityID, budget)
+
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_a": true,
+		"inflight_a": false, "maxretries_a": budget,
+	}
+
+	if err := h.conn.JetStream().DeleteStream(ctx, "core-operations"); err != nil {
+		t.Fatalf("delete ops stream: %v", err)
+	}
+	pubCtx, pubCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pubCancel()
+	if dec := h.engine.handleRow(pubCtx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec == substrate.Ack {
+		t.Fatalf("a publish failure must not Ack the row")
+	}
+	if h.engine.republish.owes(targetID, entityID, "missing_a") {
+		t.Fatalf("an escalation's failed publish must leave no republish obligation: nothing reads it while " +
+			"the gap is exhausted, and it re-publishes against the escalation's own mark once the gap is " +
+			"dispatchable again")
+	}
+}
+
+// TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue pins the `gap:`
+// prefix clear on the entity-deletion branch, and the vector is the one the
+// per-key walk provably cannot reach.
+//
+// `gap:` entries are raised at whatever openGapColumns enumerated — every true
+// missing_* column, WHETHER OR NOT the playbook names it. The tombstone branch's
+// candidate walk is markCandidateColumns(target, nil), which for an empty body is
+// just the playbook's own keys. So an entry raised at a column the playbook has
+// since dropped is retired by no per-key clear once the entity is gone: the row
+// that would re-derive it no longer exists, and the walk no longer names it. The
+// prefix clear is its only retirement, and without it the entry stands for the
+// process's lifetime holding one of the target's per-row budget slots.
+func TestClearClosedMarks_TombstoneRetiresAnOrphanColumnsGapIssue(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureTombstoneOrphanGap"
+	entityID := testNanoID(t)
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_a": {Action: actionSurface, IssueCode: "UnroutedTasks"}},
+	})
+
+	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_a": true}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 7, 1)); dec != substrate.Ack {
+		t.Fatalf("surface delivery: decision = %v, want Ack", dec)
+	}
+	issueKey := issueKeyGapEntity(targetID, entityID, "missing_a")
+	if !h.engine.issues.standingAs(issueKey, "warning", "UnroutedTasks") {
+		t.Fatalf("a surface gap standing open must raise at %s, issues = %+v", issueKey, h.engine.issues.snapshot())
+	}
+
+	// The package re-author drops the column. The entry stays raised — nothing
+	// about a playbook edit is evidence that THIS row's gap closed — but it is
+	// now at a column the candidate walk will not name for an empty body.
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_b": {Action: actionDirectOp, Operation: "FixB"}},
+	})
+
+	// The entity is deleted: an empty body is the §10.2 tombstone.
+	tombstone := substrate.Message{
+		Subject:  h.engine.rowSubjectPrefix + targetID + "." + entityID,
+		Sequence: 8,
+	}
+	if dec := h.engine.handleRow(ctx, tombstone); dec != substrate.Ack {
+		t.Fatalf("tombstone delivery: decision = %v, want Ack", dec)
+	}
+	if h.engine.issues.standingAs(issueKey, "warning", "UnroutedTasks") {
+		t.Fatalf("a deleted entity must retire its gap: entries; %s survives an entity that no longer exists "+
+			"and nothing can ever reach it again", issueKey)
 	}
 }

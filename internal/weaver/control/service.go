@@ -124,10 +124,11 @@ type ResetConfidenceResult struct {
 // ReplayTargetResult is the synchronous acknowledgement returned by the
 // "replayTarget" op. RowsQueued is how many rows the recreated lane-1 durable
 // had queued to deliver when the verb returned — the size of the burst the
-// operator just ordered. It is a snapshot taken while the pump is already
-// draining, so a busy target reports fewer rows than it replays, and a count
-// the engine could not read reports 0; neither is an error, and neither means
-// the replay did not happen.
+// operator just ordered. The recreate does not wait for the pump to re-open, so
+// this is normally the whole replay set; it is a lower bound rather than a
+// promise, because a pump that reopened before the count was read will have
+// drained some of it. A count the engine could not read reports 0; neither case
+// is an error, and neither means the replay did not happen.
 type ReplayTargetResult struct {
 	RowsQueued int `json:"rowsQueued"`
 }

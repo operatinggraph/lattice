@@ -41,6 +41,40 @@ func waitConsumerState(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 	return nil
 }
 
+// waitPlaybookGap polls the engine's own registry view until targetID's playbook
+// carries gapColumn, and is the precondition every "the fix lands" step in this
+// file needs.
+//
+// declineTarget writes the target's meta-vertex spec; the engine picks that up
+// asynchronously through its registry consumer. A row projected before the pickup
+// is evaluated against the OLD playbook, declines, and is Nak'd onto the long
+// floor — after which no assertion with a timeout shorter than that floor can
+// pass. Waiting on the engine's own view of the playbook removes the race
+// instead of relying on the write winning it.
+func waitPlaybookGap(t *testing.T, ctx context.Context, engine *weaver.Engine, targetID, gapColumn string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var last []string
+	for time.Now().Before(deadline) {
+		targets, err := engine.ListTargets(ctx)
+		require.NoError(t, err)
+		for _, tgt := range targets {
+			if tgt.TargetID != targetID {
+				continue
+			}
+			last = tgt.Gaps
+			for _, col := range tgt.Gaps {
+				if col == gapColumn {
+					return
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the engine's registry never picked up %s.%s within the wait; last gaps = %v",
+		targetID, gapColumn, last)
+}
+
 // declineTarget installs a weaverTarget whose playbook does NOT name gapColumn,
 // so a violating row carrying that column takes the GapWithoutPlaybook decline.
 func declineTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexID, targetID string, gaps map[string]any) {
@@ -157,6 +191,7 @@ func TestWeaverE2E_DeclinedRowStaysPendingAndIsSupersededByItsOverwrite(t *testi
 			"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
 		},
 	})
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
 	putRow(t, ctx, conn, targetID, entityID, row)
 
 	op := nextOp(t, ops, 20*time.Second)
@@ -197,7 +232,15 @@ func TestWeaverE2E_DeclinedRowTakesTheFixWithinOneFloor(t *testing.T) {
 	targetVtx := mustNanoID(t)
 	declineTarget(t, ctx, conn, targetVtx, targetID, nil)
 
-	const longFloor = 15 * time.Second
+	// Sized against the discrimination below rather than for speed, and no
+	// larger. The clock starts when the fix lands, so the measured wait is the
+	// floor MINUS however long the preamble took to get there; the floor has to
+	// stand clear of the 2 × transient threshold by more than any plausible
+	// preamble, or a slow host fails a correct implementation. It also has to
+	// stay modest: this test runs in parallel with the rest of the package's
+	// embedded-NATS e2e set, and a floor bought purely for margin is wall-clock
+	// every one of those neighbours competes with.
+	const longFloor = 20 * time.Second
 	engine := newEngine(conn, "e2e-decline-uptake-"+mustNanoID(t), func(c *weaver.Config) {
 		c.LongRedeliveryDelay = longFloor
 	})
@@ -216,7 +259,6 @@ func TestWeaverE2E_DeclinedRowTakesTheFixWithinOneFloor(t *testing.T) {
 		"missing_onboarding": true,
 	}
 	putRow(t, ctx, conn, targetID, entityID, row)
-	projectedAt := time.Now()
 
 	waitConsumerState(t, ctx, conn, durable, 20*time.Second,
 		"a Nak'd-pending declined row", func(i *jetstream.ConsumerInfo) bool {
@@ -234,13 +276,27 @@ func TestWeaverE2E_DeclinedRowTakesTheFixWithinOneFloor(t *testing.T) {
 			"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
 		},
 	})
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
+	// The clock starts at the FIX, not at the projection. Measured from the
+	// projection, the elapsed time also contains however long the preamble and
+	// the first decline took, so on a loaded host a row riding the SHORT floor
+	// could accumulate enough of that to clear a projection-anchored threshold —
+	// the test would then pass while asserting nothing. From the fix, the only
+	// thing between here and the dispatch is the wait for the next redelivery,
+	// which is exactly the floor under test.
+	fixedAt := time.Now()
 
 	op := nextOp(t, ops, 2*longFloor)
-	elapsed := time.Since(projectedAt)
+	elapsed := time.Since(fixedAt)
 	require.Equal(t, "StartLoomPattern", op.OperationType)
-	require.Greater(t, elapsed, longFloor-6*time.Second,
-		"the dispatch arrived %v after the row was projected — too early for the %v long floor, so the "+
-			"decline was Nak'd on the transient floor (or not Nak'd at all)", elapsed, longFloor)
+	// Discriminated against the TRANSIENT floor by name, with room on both sides:
+	// a decline that rode substrate.DefaultRedeliveryDelay would dispatch within
+	// about one of those, so anything past a comfortable multiple of it can only
+	// have waited out the long one.
+	require.Greater(t, elapsed, 2*substrate.DefaultRedeliveryDelay,
+		"the dispatch arrived %v after the playbook was fixed — a decline on the %v transient floor would "+
+			"have redelivered inside that, so this row did not ride the %v long floor",
+		elapsed, substrate.DefaultRedeliveryDelay, longFloor)
 
 	after, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
 	require.NoError(t, err)

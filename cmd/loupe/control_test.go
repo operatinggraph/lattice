@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMutateSubject(t *testing.T) {
 	tests := []struct {
@@ -122,6 +125,76 @@ func TestSplitNonEmpty(t *testing.T) {
 			if got[i] != tt.want[i] {
 				t.Fatalf("splitNonEmpty(%q)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
 			}
+		}
+	}
+}
+
+// armedOpsInComponentView extracts the `armedOps` set literal from the shipped
+// component view — the ops whose button arms on the first click and only runs on
+// a confirming second one. Parsed from the asset rather than restated here, so
+// this test reads what actually ships.
+func armedOpsInComponentView(t *testing.T) map[string]bool {
+	t.Helper()
+	src, err := webFS.ReadFile("web/js/views/component.js")
+	if err != nil {
+		t.Fatalf("read views/component.js: %v", err)
+	}
+	const marker = "const armedOps = new Set(["
+	i := strings.Index(string(src), marker)
+	if i < 0 {
+		t.Fatalf("views/component.js declares no armedOps set; every control button now fires on one click")
+	}
+	rest := string(src)[i+len(marker):]
+	j := strings.Index(rest, "]")
+	if j < 0 {
+		t.Fatalf("armedOps literal is unterminated")
+	}
+	out := map[string]bool{}
+	for _, tok := range strings.Split(rest[:j], ",") {
+		if op := strings.Trim(strings.TrimSpace(tok), `"`); op != "" {
+			out[op] = true
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("armedOps parsed empty from %q — the extractor is broken, not the asset", rest[:j])
+	}
+	return out
+}
+
+// TestWeaverControlButtonsArmBeforeTheyFire pins the confirm step on the Weaver
+// row's destructive buttons, and derives WHICH ops need it from the server's own
+// allow-list rather than a second hand-kept copy — so a weaver op added to
+// mutateOps without arming its button fails here rather than shipping as a
+// one-click whole-target action.
+//
+// The Weaver row renders its ops side by side next to an enable/disable toggle an
+// operator clicks routinely. A misclick one button off that toggle would
+// otherwise re-dispatch a whole target's violating backlog (replayTarget), delete
+// its confidence windows (resetConfidence) or tear it down (revoke) outright.
+//
+// The toggle itself is deliberately exempt and asserted as such: it is the
+// reversible op — its own opposite undoes it — and arming every button in the row
+// trains an operator to double-click all of them, which is what defeats arming on
+// the ones that matter.
+func TestWeaverControlButtonsArmBeforeTheyFire(t *testing.T) {
+	armed := armedOpsInComponentView(t)
+	const toggleA, toggleB = "disable", "enable"
+
+	weaver, ok := controlComponents["weaver"]
+	if !ok {
+		t.Fatal("no weaver control component")
+	}
+	for op := range weaver.mutateOps {
+		if op == toggleA || op == toggleB {
+			if armed[op] {
+				t.Errorf("%q is the reversible toggle and must NOT arm — arming every button in the row "+
+					"trains a double-click habit that defeats arming on the destructive ones", op)
+			}
+			continue
+		}
+		if !armed[op] {
+			t.Errorf("weaver op %q is a one-click button: it is allow-listed for the console but absent from "+
+				"armedOps, so a misclick beside the enable/disable toggle fires it outright", op)
 		}
 	}
 }

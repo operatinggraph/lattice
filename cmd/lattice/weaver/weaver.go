@@ -396,8 +396,10 @@ func newResetBudgetCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comm
 // One invocation costs O(the target's current rows) and re-fires the episode of
 // every violating row whose mark has aged past its lease, so it is manual by
 // design: run it holding evidence. The reported count is how many rows the
-// recreated durable had queued when the engine answered — a snapshot taken
-// while the pump is already draining, not a total.
+// recreated durable had queued when the engine answered. The recreate does not
+// wait for the pump to re-open, so that is normally the whole replay set — a
+// lower bound rather than a promise, since a pump that reopened first will have
+// drained some of it.
 func newReplayTargetCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
 	var actorToken string

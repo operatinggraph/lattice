@@ -2,6 +2,7 @@ package weaver_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
@@ -113,6 +114,7 @@ func TestWeaverE2E_ReplayTargetReachesAnAckedDecline(t *testing.T) {
 	// durable, so the acked row is not reconsidered — the fix reaches every
 	// FUTURE row of this target and none of the acked ones.
 	declineTarget(t, ctx, conn, targetVtx, targetID, onboardingPlaybook())
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
 	requireNoOp(t, ops, 3*time.Second)
 	require.Equal(t, createdBefore, laneConsumerInfo(t, ctx, conn, durable).Created,
 		"a playbook fix must not rebuild the lane-1 durable on its own — if it does, the acked-decline "+
@@ -283,6 +285,7 @@ func TestWeaverE2E_EnableAfterFreezeRedeliversNakdRows(t *testing.T) {
 	// Enable below can only have come from the resumed pump, never from a
 	// redelivery the freeze failed to hold.
 	declineTarget(t, ctx, conn, targetVtx, targetID, onboardingPlaybook())
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
 	requireNoOp(t, ops, 3*longFloor)
 	require.Equal(t, 1, int(laneConsumerInfo(t, ctx, conn, durable).NumAckPending),
 		"the declined row must still hold its pending slot through the freeze")
@@ -345,10 +348,18 @@ func TestWeaverE2E_ServerRestartKeepsANakdRowOwed(t *testing.T) {
 	targetVtx := mustNanoID(t)
 	declineTarget(t, ctx, conn, targetVtx, targetID, nil)
 
-	// The floor is long enough that the restart completes well inside it, so a
-	// redelivery observed afterwards is the RESTORED timer firing on schedule and
-	// not one that was already due when the server came back.
-	const longFloor = 25 * time.Second
+	// The floor is sized to sit between two things it must be told apart from.
+	// It is long enough that the restart (a couple of seconds) completes well
+	// inside it, so a redelivery observed afterwards is a restored timer rather
+	// than one already due when the server came back. And it is SHORT of the
+	// consumer's AckWait by a wide margin, which is what lets the upper bound
+	// below discriminate "the delayed-Nak schedule survived" from "the delay was
+	// discarded and the message redelivered on the ordinary ack timeout" — those
+	// two are indistinguishable at any floor close to AckWait.
+	const longFloor = 12 * time.Second
+	// jetStreamAckWait is the server default the lane-1 spec leaves unset; named
+	// here because the upper bound's whole job is to land beneath it.
+	const jetStreamAckWait = 30 * time.Second
 	engine := newEngine(conn, "e2e-restart-owed-"+mustNanoID(t), func(c *weaver.Config) {
 		c.LongRedeliveryDelay = longFloor
 	})
@@ -385,9 +396,15 @@ func TestWeaverE2E_ServerRestartKeepsANakdRowOwed(t *testing.T) {
 		"a redelivery of the Nak'd row after the restart", func(i *jetstream.ConsumerInfo) bool {
 			return i.Delivered.Consumer > deliveredBefore
 		})
-	require.Greater(t, time.Since(nakedAt), longFloor/2,
+	arrived := time.Since(nakedAt)
+	require.Greater(t, arrived, longFloor/2,
 		"the redelivery arrived %v after the Nak, far inside the %v floor — the restart did not restore the "+
-			"delay, it discarded it", time.Since(nakedAt), longFloor)
+			"delay, it discarded it", arrived, longFloor)
+	require.Less(t, arrived, longFloor+(jetStreamAckWait-longFloor)/2,
+		"the redelivery arrived %v after the Nak — past the %v floor and drifting toward the %v AckWait, "+
+			"which is what a restart that dropped the delayed-Nak timestamp and fell back to the ordinary "+
+			"ack timeout would look like. The row being owed is not enough: it must be owed on ITS OWN "+
+			"schedule", arrived, longFloor, jetStreamAckWait)
 	require.Equal(t, 1, int(redelivered.NumAckPending),
 		"the row must still be owed after the restart: one pending slot, held continuously")
 
@@ -396,6 +413,7 @@ func TestWeaverE2E_ServerRestartKeepsANakdRowOwed(t *testing.T) {
 	// so fixing the playbook and replaying dispatches without waiting on any
 	// server-side timer at all.
 	declineTarget(t, ctx, conn, targetVtx, targetID, onboardingPlaybook())
+	waitPlaybookGap(t, ctx, engine, targetID, "missing_onboarding")
 	_, err = engine.ReplayTarget(ctx, targetID)
 	require.NoError(t, err)
 	op := nextOp(t, ops, 30*time.Second)
@@ -416,4 +434,154 @@ func waitReconnected(t *testing.T, nc *nats.Conn, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("client never reconnected to the restarted server within %v; status = %v", timeout, nc.Status())
+}
+
+// waitWeaverIssue polls the instance's heartbeat until an issue carrying code is
+// listed, returning the whole issue set and the document status so the caller
+// can assert on both. Polling the document is the deterministic wait for a fact
+// whose timing belongs to the heartbeat cadence.
+func waitWeaverIssue(t *testing.T, ctx context.Context, conn *substrate.Conn, instance, code string,
+	timeout time.Duration) ([]map[string]any, string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var issues []map[string]any
+	var status string
+	for time.Now().Before(deadline) {
+		entry, err := conn.KVGet(ctx, healthKVBucket, "health.weaver."+instance)
+		if err == nil {
+			var doc struct {
+				Status string           `json:"status"`
+				Issues []map[string]any `json:"issues"`
+			}
+			if json.Unmarshal(entry.Value, &doc) == nil {
+				issues, status = doc.Issues, doc.Status
+				if hasIssue(issues, code) {
+					return issues, status
+				}
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("heartbeat never listed a %q issue within %v; last issues = %v (status %q)",
+		code, timeout, issues, status)
+	return nil, ""
+}
+
+// TestWeaverE2E_FailedReplayIsObservable pins the loud-failure half of the verb,
+// and it exists because the silent version of this is genuinely dangerous.
+//
+// The replay is a delete-then-create of the target's durable. If it fails
+// BETWEEN those two calls the target is left with no durable at all, and every
+// other signal keeps reporting it healthy: the pump retries `Consumer(...)`
+// forever on a capped backoff without taking a pause reason, so the per-consumer
+// health sink still reads `running`; `pausedIssues` sees nothing to report; and
+// `saturatedIssues` skips the consumer on its ack-stats read failure at Debug.
+// A target that evaluates nothing would look exactly like a target with no work.
+//
+// So a failed replay raises the same standing ConsumerReconcileError the
+// reconcile raises for its own failed Add/Remove/Reset — at the same key, so a
+// later success retires it — and the verb's error names re-running the verb
+// rather than `enable`, which cannot heal this state (Resume is a no-op on an
+// unpaused pump, and the reconcile skips an unchanged fingerprint).
+func TestWeaverE2E_FailedReplayIsObservable(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+
+	targetID := "fixtureReplayFails"
+	targetVtx := mustNanoID(t)
+	declineTarget(t, ctx, conn, targetVtx, targetID, onboardingPlaybook())
+
+	instance := "e2e-replay-fails-" + mustNanoID(t)
+	engine := newEngine(conn, instance)
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+
+	durable := "weaver-target-" + targetID
+	waitConsumer(t, ctx, conn, durable)
+
+	// A real failure, not a stubbed one: with the backing stream gone the
+	// recreate cannot succeed, which is the same end state as a cancellation
+	// landing between the delete and the create.
+	require.NoError(t, conn.JetStream().DeleteStream(ctx, "KV_"+weaverTargetsBucket))
+
+	_, err = engine.ReplayTarget(ctx, targetID)
+	require.Error(t, err, "a replay that could not recreate the durable must never report success")
+	require.ErrorContains(t, err, targetID)
+
+	issues, status := waitWeaverIssue(t, ctx, conn, instance, "ConsumerReconcileError", 30*time.Second)
+	require.Equal(t, "error", issueSeverityAt(issues, "ConsumerReconcileError"),
+		"a target left with no durable evaluates nothing — that is Contract #5 §5.2's cannot-fulfil, not a "+
+			"degradation, got issues %v", issues)
+	require.Equal(t, "unhealthy", status,
+		"the heartbeat must not read healthy while a target evaluates nothing")
+	for _, is := range issues {
+		if is["code"] == "ConsumerReconcileError" {
+			require.Contains(t, is["message"], "re-run",
+				"the standing issue must name the remedy, and the remedy is this verb — `enable` cannot "+
+					"heal it (Resume is a no-op on an unpaused pump, and the reconcile skips an unchanged "+
+					"fingerprint)")
+		}
+	}
+}
+
+// TestWeaverE2E_ReplaySurvivesACancelledCallerContext pins the one thing that
+// keeps a half-completed reset out of ordinary operation.
+//
+// The replay is a delete followed by a create. A cancellation landing BETWEEN
+// them leaves the target with no durable, evaluating nothing, while every other
+// signal reports it healthy — and the caller here is a control-plane handler
+// whose context carries a 5-second deadline, which is well inside the range
+// where that window is reachable. So the pair runs on a context detached from
+// the caller's, under a bound of its own.
+//
+// The vector is the extreme of that: a caller context already cancelled before
+// the verb is entered. Under an inherited context the delete fails outright and
+// the verb reports an error; detached, the durable is genuinely recreated.
+func TestWeaverE2E_ReplaySurvivesACancelledCallerContext(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+
+	targetID := "fixtureReplayCancelled"
+	targetVtx := mustNanoID(t)
+	declineTarget(t, ctx, conn, targetVtx, targetID, onboardingPlaybook())
+
+	instance := "e2e-replay-cancelled-" + mustNanoID(t)
+	engine := newEngine(conn, instance)
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+
+	durable := "weaver-target-" + targetID
+	waitConsumer(t, ctx, conn, durable)
+	createdBefore := laneConsumerInfo(t, ctx, conn, durable).Created
+
+	dead, deadCancel := context.WithCancel(ctx)
+	deadCancel()
+	_, err = engine.ReplayTarget(dead, targetID)
+	require.NoError(t, err,
+		"the delete/create pair must not inherit the caller's cancellation: a cancellation between the two "+
+			"leaves the target with no durable at all, and nothing else in the engine repairs or reports that")
+
+	after := laneConsumerInfo(t, ctx, conn, durable)
+	require.True(t, after.Created.After(createdBefore),
+		"the durable must really have been recreated, not merely reported as such")
 }

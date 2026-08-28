@@ -2,12 +2,17 @@ package weaver
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -919,38 +924,253 @@ func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
 	}
 }
 
-// TestIssueCache_CapCountsTheTwoPerRowFamiliesAndNothingElse pins WHICH keys the
-// budget covers. Only the two families keyed per (target, entity, column) grow
-// with the lens; a target-scoped fact — a config latch, the overflow entry
-// itself — must never consume a per-row slot, or a flood of row errors would
-// start refusing the very entries an operator needs in front of them.
-func TestIssueCache_CapCountsTheTwoPerRowFamiliesAndNothingElse(t *testing.T) {
-	t.Parallel()
-	const targetID = "targetShapes"
-	entityID := "eNTTYnanoidSEGMENTx2"
+// --- The per-entity issue-family census, executable ---------------------------
 
-	perRow := []string{
-		issueKeyDataEntity(targetID, entityID, "violating"),
-		issueKeyDataEntity(targetID, entityID, rowBodyColumn),
-		issueKeyTemplateEntity(targetID, entityID, "missing_a"),
+// censusEntityID and its companions are the canonical triple every issue-key
+// constructor is probed with below. The entity segment is NanoID-shaped and
+// dot-free so the keys built from it have the real thing's segment structure.
+const (
+	censusTargetID  = "censusTarget"
+	censusEntityID  = "eNTTYnanoidSEGMENTx2"
+	censusGapColumn = "missing_census"
+)
+
+// issueKeyProbes builds one key per issue-key constructor from that triple, so
+// each family can be classified by the key it actually produces rather than by
+// what anyone remembered to write down. Every entry passes the argument the
+// constructor's own callers pass — issueKeySweep gets a real mark key, because a
+// mark key is what its one caller has in hand.
+//
+// The AST walk in the census below asserts this table names EVERY issueKey*
+// constructor in the package. That is what makes the census self-extending: a new
+// family cannot be classified by omission, because omitting it fails the walk
+// with the constructor's own file:line.
+var issueKeyProbes = map[string]func() string{
+	"issueKeyGapEntity":       func() string { return issueKeyGapEntity(censusTargetID, censusEntityID, censusGapColumn) },
+	"issueKeyDataEntity":      func() string { return issueKeyDataEntity(censusTargetID, censusEntityID, censusGapColumn) },
+	"issueKeyTemplateEntity":  func() string { return issueKeyTemplateEntity(censusTargetID, censusEntityID, censusGapColumn) },
+	"issueKeyGapConfig":       func() string { return issueKeyGapConfig(censusTargetID, censusGapColumn) },
+	"issueKeyRowIssuesCapped": func() string { return issueKeyRowIssuesCapped(censusTargetID) },
+	"issueKeyEffect":          func() string { return issueKeyEffect(censusTargetID, censusGapColumn, actionDirectOp) },
+	"issueKeyConsumer":        func() string { return issueKeyConsumer(censusTargetID) },
+	"issueKeyTimer":           func() string { return issueKeyTimer(censusTargetID) },
+	"issueKeyPendingSpec":     func() string { return issueKeyPendingSpec(censusTargetID) },
+	"issueKeySweep":           func() string { return issueKeySweep(markKey(censusTargetID, censusEntityID, censusGapColumn)) },
+	"issueKeyOscillation": func() string {
+		return issueKeyOscillation(censusTargetID, censusTargetID+"B", guardgrammar.Path{Field: "f"})
+	},
+}
+
+// perEntityBudgetExceptions names each constructor that mints a PER-ENTITY key
+// the budget deliberately does not cover, with the reason. It is not an escape
+// hatch: the census asserts every entry is genuinely per-entity (so a
+// target-scoped family cannot be parked here to silence it) AND genuinely
+// uncovered (so an entry left behind after its family IS brought under the
+// budget fails rather than rotting).
+var perEntityBudgetExceptions = map[string]string{
+	"issueKeySweep": "CorruptMark, raised per unparseable mark. Its key embeds the entity because a mark key does, " +
+		"but its cardinality is driven by data corruption rather than by the subject count, so it does not grow " +
+		"with a healthy lens the way the gap/data/template families do. Bringing it under the budget would also " +
+		"need a `sweep:` prefix in issueKeyTargetPrefixes first — the target teardown does not walk it today, so " +
+		"a revoked target's entries would hold slots nothing releases.",
+}
+
+// TestCensusPerEntityIssueFamiliesAreBudgeted is the executable census behind
+// §3.6's bound, and it exists because the same class of miss has now happened
+// three times: a per-entity issue family ships, the budget's predicate is not
+// extended to it, and nothing fails.
+//
+// The predicate (rowIssueTarget) decides which keys count against a target's
+// per-row cap, and the facts that must count are exactly the ones whose
+// cardinality grows with the SUBJECT count — one entry per (entity, column) — so
+// that a systemically-broken lens cannot grow the in-memory map and the
+// per-heartbeat sort over it without limit.
+//
+// The classification is DERIVED, twice over, which is the whole point. Which
+// constructors exist comes from parsing the package, not from a list here — so a
+// family added tomorrow is caught by its own absence from the probe table rather
+// than by nobody noticing. And whether each one is per-entity comes from the key
+// it actually builds (does it carry the entity segment?), not from its name or
+// its parameter names — so a constructor that takes an entity-ish string under
+// another name is classified by what it emits.
+//
+// A failure here names the constructor and its file:line, because the next author
+// needs to know which family to act on, not that a count moved.
+func TestCensusPerEntityIssueFamiliesAreBudgeted(t *testing.T) {
+	t.Parallel()
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("list internal/weaver sources: %v", err)
 	}
-	for _, key := range perRow {
-		got, ok := rowIssueTarget(key)
-		if !ok || got != targetID {
-			t.Fatalf("rowIssueTarget(%q) = (%q, %v), want (%q, true)", key, got, ok, targetID)
+	fset := token.NewFileSet()
+	found := map[string]string{} // constructor name -> file:line
+	scanned := 0
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		scanned++
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "issueKey") {
+				continue
+			}
+			// A constructor mints ONE key and returns it. The prefix helpers
+			// (issueKeyTargetPrefixes) return a slice and are teardown inputs, not
+			// keys, so the return type is what separates them — a future prefix
+			// helper is excluded for the same structural reason rather than by
+			// name.
+			if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+				continue
+			}
+			if ident, isIdent := fn.Type.Results.List[0].Type.(*ast.Ident); !isIdent || ident.Name != "string" {
+				continue
+			}
+			found[fn.Name.Name] = path + ":" + strconv.Itoa(fset.Position(fn.Pos()).Line)
 		}
 	}
-	notPerRow := []string{
-		issueKeyGapConfig(targetID, "missing_a"),
-		issueKeyGapEntity(targetID, entityID, "missing_a"),
-		issueKeyRowIssuesCapped(targetID),
-		issueKeyConsumer(targetID),
-		issueKeyEffect(targetID, "missing_a", actionDirectOp),
+	if scanned == 0 {
+		t.Fatalf("the scan found no non-test sources to read — this census would pass vacuously")
 	}
-	for _, key := range notPerRow {
-		if got, ok := rowIssueTarget(key); ok {
-			t.Fatalf("rowIssueTarget(%q) = (%q, true), want not-a-per-row-key", key, got)
+	if len(found) == 0 {
+		t.Fatalf("the scan found no issueKey* constructors in %d source file(s) — the walk is broken, not the "+
+			"package; this census would pass vacuously", scanned)
+	}
+
+	// Completeness, both directions: the probe table is the census's only way to
+	// build a key for a family, so a constructor missing from it is unclassified
+	// (not "fine"), and a probe for a constructor that no longer exists is a
+	// stale entry that would keep asserting about nothing.
+	for name, where := range found {
+		if _, probed := issueKeyProbes[name]; !probed {
+			t.Errorf("%s (%s) is an issue-key constructor with no probe in issueKeyProbes, so this census "+
+				"cannot classify it. Add one that calls it the way its own callers do. If the key it builds "+
+				"carries the entity segment, rowIssueTarget must match it too — a per-entity family outside "+
+				"the budget grows the issue map and the per-heartbeat sort with the subject count", name, where)
 		}
+	}
+	for name := range issueKeyProbes {
+		if _, exists := found[name]; !exists {
+			t.Errorf("issueKeyProbes names %q, which the package no longer declares — a stale probe asserts "+
+				"about a family that is gone", name)
+		}
+	}
+
+	// The classification itself.
+	for name, where := range found {
+		probe, ok := issueKeyProbes[name]
+		if !ok {
+			continue // already reported above
+		}
+		key := probe()
+		perEntity := strings.Contains(key, censusEntityID)
+		_, budgeted := rowIssueTarget(key)
+		reason, excepted := perEntityBudgetExceptions[name]
+
+		switch {
+		case perEntity && !budgeted && !excepted:
+			t.Errorf("%s (%s) builds the per-entity key %q, but rowIssueTarget does not count it against the "+
+				"target's per-row budget. One entry per (entity, column) grows with the subject count, so an "+
+				"uncovered family is unbounded in the issues map and in snapshot()'s per-heartbeat sort. "+
+				"Add its prefix to rowIssueTarget — the release legs (clear, clearPrefix, the target teardown) "+
+				"are already shape-driven — or declare it in perEntityBudgetExceptions with the reason",
+				name, where, key)
+		case !perEntity && budgeted:
+			t.Errorf("%s (%s) builds the target-scoped key %q, but rowIssueTarget counts it against the per-row "+
+				"budget. A flood of row faults would then start refusing the very entries that explain them",
+				name, where, key)
+		case excepted && !perEntity:
+			t.Errorf("%s (%s) is declared in perEntityBudgetExceptions but builds the target-scoped key %q — "+
+				"the exception is for a per-entity family the budget deliberately skips, not a parking space "+
+				"for anything that fails the check. Reason on file: %s", name, where, key, reason)
+		case excepted && budgeted:
+			t.Errorf("%s (%s) is declared in perEntityBudgetExceptions but rowIssueTarget now covers %q. The "+
+				"exception is stale — delete it, or the next reader believes a bounded family is unbounded. "+
+				"Reason on file: %s", name, where, key, reason)
+		}
+
+		// Counting a family and RELEASING it are two obligations, and a family
+		// that gains the first without the second turns the cap into a one-way
+		// ratchet: a revoked target's entries would hold slots nothing ever gives
+		// back, and the target would eventually refuse every raise. The per-key
+		// legs (clear, clearPrefix) are shape-driven and need nothing, but the
+		// TARGET teardown walks an explicit prefix list, so a budgeted family
+		// must appear in it.
+		if !budgeted {
+			continue
+		}
+		reachable := false
+		for _, prefix := range issueKeyTargetPrefixes(censusTargetID) {
+			if strings.HasPrefix(key, prefix) {
+				reachable = true
+				break
+			}
+		}
+		if !reachable {
+			t.Errorf("%s (%s) builds %q, which rowIssueTarget counts against the per-row budget, but no prefix "+
+				"in issueKeyTargetPrefixes matches it — a revoke or a registry removal would drop the target's "+
+				"entries from nothing and leave their budget slots held forever. Add the family's prefix there "+
+				"in the same change that adds it to rowIssueTarget", name, where, key)
+		}
+	}
+}
+
+// TestIssueCache_GapFamilyIsBoundedAndReleased walks the `gap:` family through
+// the budget end to end, because being counted is only half of belonging to it:
+// an entry that takes a slot and never gives it back turns the cap into a
+// one-way ratchet that eventually refuses everything for the target.
+//
+// The vectors are the two retirement legs the family actually uses — the
+// per-gap clear a closing gap runs (retireClosedGapIssues) and the per-target
+// prefix teardown a revoke runs — plus the refusal itself.
+func TestIssueCache_GapFamilyIsBoundedAndReleased(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetGapBudget"
+
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		c.set(issueKeyGapEntity(targetID, "A"+strconv.Itoa(i), "missing_a"), "warning", "UnroutedTasks", "open")
+	}
+	if got := c.rowIssues[targetID]; got != rowIssueCapPerTarget {
+		t.Fatalf("tracked per-row entries = %d, want the full cap %d", got, rowIssueCapPerTarget)
+	}
+	// Past the cap the raise is refused and folded into the one overflow entry,
+	// exactly as a data/template raise is.
+	c.set(issueKeyGapEntity(targetID, "Aoverflow", "missing_a"), "warning", "UnroutedTasks", "open")
+	if _, tracked := c.issues[issueKeyGapEntity(targetID, "Aoverflow", "missing_a")]; tracked {
+		t.Fatalf("a gap: raise past the cap must be refused, not tracked")
+	}
+	if _, ok := c.issues[issueKeyRowIssuesCapped(targetID)]; !ok {
+		t.Fatalf("a refused gap: raise must maintain the target's overflow entry")
+	}
+
+	// A closing gap returns its slot, so a target whose rows repair can track
+	// fresh facts again.
+	c.clear(issueKeyGapEntity(targetID, "A0", "missing_a"))
+	if got := c.rowIssues[targetID]; got != rowIssueCapPerTarget-1 {
+		t.Fatalf("a gap: clear must return its slot, tracked = %d", got)
+	}
+	c.set(issueKeyGapEntity(targetID, "Areadmit", "missing_a"), "warning", "UnroutedTasks", "open")
+	if _, tracked := c.issues[issueKeyGapEntity(targetID, "Areadmit", "missing_a")]; !tracked {
+		t.Fatalf("a freed slot must be readmitted")
+	}
+
+	// The target's teardown returns every slot and retires the overflow entry
+	// with them — the entry sits in the data: family, so the prefix walk that
+	// carries it is issueKeyTargetPrefixes', not this family's own.
+	for _, prefix := range issueKeyTargetPrefixes(targetID) {
+		c.clearPrefix(prefix)
+	}
+	if got, ok := c.rowIssues[targetID]; ok || got != 0 {
+		t.Fatalf("a target teardown must drop the whole per-row budget, tracked = %d (present=%v)", got, ok)
+	}
+	if _, ok := c.issues[issueKeyRowIssuesCapped(targetID)]; ok {
+		t.Fatalf("a target teardown must retire the overflow entry with the entries it counted")
 	}
 }
 
