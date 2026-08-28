@@ -2155,7 +2155,20 @@ whole component to `unhealthy` on (`internal/weaver/health.go:362-386`). Increme
 **and** the field-diff (`lenses.go:296-303`), so it opens **the moment the first erasure converges**,
 not at every request. Nothing else can ever close it: `.erasure` has no other producer. A target
 shipped now would therefore install a permanent red on the Weaver at the first converged erasure —
-later than "immediately", and no less permanent. Same ordering rationale increments 3 and
+later than "immediately", and no less permanent.
+
+> **AMENDED 2026-08-28 — the severity half of this rationale no longer holds.**
+> `GapWithoutPlaybook` was demoted `error` → `warning` at its raise site by the weaver decline-retry
+> design's §8 ([weaver-decline-retry-substrate-native-design.md](weaver-decline-retry-substrate-native-design.md)),
+> precisely because that code became *standing* under the Nak loop and a package-authoring typo
+> would otherwise pin Weaver `unhealthy` while it dispatched normally for every other target. So an
+> orphaned `missing_erasureSeal` column now yields a standing **`warning`** and a **`degraded`**
+> component, not a permanent red. The **ordering** conclusion is unchanged and still right — the
+> pieces a target dispatches should exist before the target that dispatches them, and a standing
+> warning nobody can clear is still a defect to avoid — but this paragraph must not be read as
+> "shipping the target early takes the component unhealthy". It no longer does.
+
+Same ordering rationale increments 3 and
 4 each gave: the pieces the target dispatches exist before the target that dispatches them. This is the
 third and last of them, so the target increment that follows wires all five gaps against real ops.
 
@@ -2450,7 +2463,8 @@ dispatch is a naming question only.
 
 - **The gap column names in the playbook must match the lens's projected columns exactly** — a
   `missing_<g>` column true with no `Gaps` entry raises a standing **`error`**-severity
-  `GapWithoutPlaybook` and escalates the whole Weaver to `unhealthy`
+  `GapWithoutPlaybook` and takes the whole Weaver `degraded` (it escalated to `unhealthy` until the
+  decline-retry design's §8 demoted the code to `warning`, 2026-08-28)
   (`evaluator.go:179-201`, `health.go:362-386`). This is the failure increment 6 declined to ship into.
 - **Integer literals project, and land as the Weaver expects.** `256 AS x` parses to `Literal{int64}`
   (`ruleengine/full/visitor.go:662-672`), serializes as a bare JSON number, and `intColumn`
@@ -2554,7 +2568,8 @@ person who cannot be erased **at all** today can be erased slowly.
 
 Four tests. `…_EveryLensGapHasPlaybookEntry` is the one that earns its place and is
 mutation-verified: a `missing_*` column the lens projects with no `Gaps` entry raises a standing
-**`error`**-severity `GapWithoutPlaybook` and takes the whole Weaver component `unhealthy`
+**`warning`**-severity `GapWithoutPlaybook` and takes the whole Weaver component `degraded`
+(demoted from `error`/`unhealthy` by the decline-retry design's §8, 2026-08-28)
 (`evaluator.go:179-201`, `health.go:362-386`) — the failure increment 6 explicitly declined to ship
 into, now pinned from the other direction. `…_PlaybookColumnsMatchLens` walks the forward direction and
 resolves the lens by `LensRef`, not by name-equals-`TargetID`; the two shipped copies of this check

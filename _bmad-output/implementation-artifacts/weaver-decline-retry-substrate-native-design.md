@@ -197,7 +197,7 @@ C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops,
 | 11 | `PlaybookConfigError` (`:587`) | paced error + Ack | **paced error + Long** | Config error — same as row 8 |
 | 12 | Seq-0 metadata defer (`:273`) | NakWithDelay | **unchanged** | Metadata arrives on redelivery |
 | 13 | Suppressed in-flight (`inflight_<g>`) | skip | **unchanged** | The mark owns it; `reclaim` is the authority |
-| 14 | Exhausted → escalate (`:1344-1398`) | standing issue + Ack (V15) | **unchanged** | Escalated IS the invariant's third branch; no pending slot held |
+| 14 | Exhausted → escalate (`:1344-1398`) | standing issue + Ack (V15) | **unchanged at its own exits**, but its return set WIDENED (amended 2026-08-28) | Escalated IS the invariant's third branch; no pending slot held. `escalateExhaustedGap` returns `planGap`'s decision straight out, so once rows 10/11 ride the long floor it can also return `NakWithLongDelay` — deliberate and pinned, but it is no longer true that this row is unchanged end to end. Both sweep call sites discard the Decision (log only), so no long Nak reaches the schedule-fired sweep consumer |
 | 15 | Admission deferral (`:535`) | NakWithDelay paces | **unchanged** | Contract #10 §10.8: "ordinary pacing, not a fault" |
 | 16 | Infra failures (`:56`, `:104`, mark read/CAS errors) | NakWithDelay | **unchanged** | The 5 s transient class |
 | 17 | `releaseCompletedLeg` KV-failure → anti-storm Ack (`:1045-1049` → `:636`) | Ack, silent | **unchanged, now named** | Pre-existing and out of scope; listed so C6 classifies every site |
@@ -315,6 +315,17 @@ Re-raise conditionality, per code (the adversarial pass's enumeration):
 | `UnresolvedReference` / `PlaybookConfigError` | **Yes, unconditionally** — raised in `planGap`, reached by every delivery of an open un-suppressed row |
 | `GapWithoutPlaybook` | **Conditionally** — the raise site is below the suppression and exhaustion gates, so a target whose *every* remaining open row is in-flight-suppressed or exhausted does not re-raise it. Residual, named: those populations are not dark (an in-flight row is owed by its mark/`reclaim`; an exhausted row carries its own standing exhaustion issue), but the `gapConfig:` latch itself can stay retired while such rows hold the column open |
 
+**Residual the narrowing creates, named 2026-08-28 (it was not in this section's first draft).**
+Every clear of `issueKeyGapConfig` except `clearClosedMarks`' is reachable only from a delivery whose
+gap column read **true**; a present non-bool reads false. So once *every* row of a target projects
+that column as a non-bool, `clearClosedMarks` is the only clear left — and the narrowing removes it.
+A config latch raised before the projection broke then stands until the column becomes readable again
+or the target is revoked, **even if the playbook was fixed in the meantime**. The trade is accepted:
+the latch is a `warning` after §8, so it pins nothing `unhealthy`, and a live `RowDataError` at
+`data:<t>.<e>.<col>` always stands beside it naming the real cause. But "self-heals" in this
+section's heading is not unconditional, and a reader should not assume absent / false / non-bool are
+all covered — only the first two are.
+
 `since` semantics (V14): `GapWithoutPlaybook` (via `alert`) re-mints `since` on a flap; the two
 paced codes keep their original onset across flaps because the pace memory survives `clear`.
 
@@ -386,7 +397,18 @@ Re-derived, not inherited (V4, V17):
   buffered-replay-churn premise the pump already defeats twice over — `pumpPullMaxMessages = 1`
   and the `keepAckAlive` heartbeat (V17) — and the raise would have quadrupled crash-recovery
   redelivery latency for nothing. Withdrawn.
-- **`MaxAckPending`: set explicitly to 2 000** (today: server default 1 000, V4). Nak'd-pending
+- **`MaxAckPending`: set explicitly to 1 024** (today: server default 1 000, V4). **Corrected at
+  build, 2026-08-28 — the original 2 000 was chosen against an INVERTED reading of the server.**
+  `consumer.go:5916` is `check := len(o.pending) > 1024`, and that gates only the **bail**, not the
+  walk: `for seq, p := range o.pending` is unconditional at any pending size. What crossing 1 024
+  buys is a *defer-under-ack-load* regime — whenever an ack/nak/`+WPI` is inbound (`o.awl > 0`),
+  `checkPending` returns having done nothing, re-arms at 100 ms, and **discards the partially built
+  `expired` slice**. At the server default 1 000 that branch is structurally unreachable, because
+  `getNextMsg` stalls at `len(o.pending) >= o.maxp` first (`:4796`). So 2 000 would have made lane 1
+  the only consumer in Lattice able to enter that regime, and it would do so across the band
+  1 025..1 999 where this design's *only* named tripwire ("`num_ack_pending` pinned at the cap") is
+  silent. 1 024 keeps the cap under the threshold and keeps the stall — a visible signal — as the
+  failure mode. Nak'd-pending
   declines hold slots (V1); V2/V3 keep the decline cycle and fix-uptake flowing at the cap, so the
   starved class is **new entities** on a target already carrying ≥cap distinct simultaneously-stuck
   rows. The cap is deliberately modest: above ~1 024 pending the server's `checkPending` walks the
@@ -415,6 +437,19 @@ Re-derived, not inherited (V4, V17):
   happens at boot** — the standing cost is the loop and only the loop. (An optimization — skip
   the two deletes when the adjacent `marks.get` already said not-found — is noted for the
   builder; not load-bearing.)
+- **Two terms this formula omits, added 2026-08-28 at Inc 2's review.** (i) **A server-side term the
+  model has none of.** `checkPending` initialises `next` to `AckWait + 1ms` (~30 s) and only ever
+  lowers it; a long-Nak'd entry's `deadline - elapsed` exceeds AckWait, so it never lowers. A
+  consumer whose pending set is entirely 5-minute-Nak'd rows therefore walks its whole pending map
+  **ten times per floor, doing nothing**, forever — and `processNak` re-arms at 10 ms on every
+  delayed Nak, so a serial drain of N stuck rows walks the map ~N times as well. This term is
+  per-consumer, independent of the floor, and is what actually scales with `MaxAckPending` × number
+  of targets. (ii) **The formula is wrong for a MIXED-class row by ~60×.** "Per stuck row per long
+  floor" holds only for a row whose gaps are *all* config-class. A row that also carries a transient
+  gap is Nak'd at the 5 s floor by the precedence rule, so its config gap is re-evaluated 12×/minute,
+  not 288×/day. This is not a regression — pre-diff the transient gap already redelivered the row and
+  the config gap already ran on each such delivery — but the steady-state number is stated for a
+  population the shipped corpus does not exclusively contain.
 - **The verb:** O(current rows of the target) per invocation, operator-paced, plus the bounded
   stale-mark re-fires (§3.3).
 - **Op traffic:** *reduced in steady state* — §3.4a stops marked rows re-entering `planGap` (and
@@ -541,7 +576,14 @@ republish set at strictly narrower scope. Rejected.
 - **C5 (build Phase 0, live stack):** total `weaver-targets` rows, per-target max, and **declared
   gaps per target** — sizes the verb's burst, the §7 steady-state formula, and the §6 cap. If a
   target exceeds ~2 000 rows, re-derive §6 before building.
-- **C6 (run this fire — the review artifact):** `grep -n 'substrate.Ack' internal/weaver/evaluator.go`
+- **C6 — RE-RUN post-Inc-2, 2026-08-28: now 18 sites, not 21.** Rows 8/10/11 left the Ack census by
+  construction (they return `NakWithLongDelay`); the remaining 18 map 1:1 onto the old list with no
+  site added, moved into an unclassified position, or lost: `27, 34, 56, 107, 129, 134, 145` (rows
+  1–7), `236` (aggregation tail), `306` (surface raise), `601, 875` (success paths), `699, 751, 767`
+  (anti-storm / CAS-lost), `1452, 1467, 1496, 1506` (row 14 + escalation-mark). Row 3's exit did NOT
+  flip — it stays `Ack` and gains the `RowDataError` raise, so this design flips **three** exits, not
+  four. The pre-diff census, for the record:
+- **C6 (as designed, pre-Inc-2):** `grep -n 'substrate.Ack' internal/weaver/evaluator.go`
   → **21 sites**: `27, 34, 43, 93, 115, 120, 131, 201, 231, 257, 552, 583, 587, 636, 688, 704,
   812, 1344, 1359, 1388, 1398`. Classification: §3.2 rows cover 27/34/43/93/115/120/131 (rows
   1-7), 231 (row 8), 583 (row 10), 587 (row 11), 1344/1359 (row 14), 1388/1398 (escalation-mark
@@ -675,13 +717,42 @@ recompile.
 > verb + capability verb + Loupe surface (V20's pattern) + Augur re-fire suppression + the
 > contraction/component-doc sentence rewrites. Owns T6, T7, T10, T11.
 
-**Landing shape (§4 requires the doc to state which):** **land each increment on `main`.** Every
-boundary is independently green and safe, and the invariant that keeps `main` correct across them is
-that **Inc 1 is Weaver-inert** (a new Decision value no handler returns yet) and Incs 2/3/4 each
-leave the engine at a complete dispatch posture — Inc 2 without Inc 3 keeps the shipped re-fire
-branch, Inc 3 without Inc 4 keeps today's operator verb set. The remote container is ephemeral
-(`agents/steward/REMOTE.md` §4), so holding four increments in one unpushed branch is the riskier
-shape here.
+**Landing shape (§4 requires the doc to state which) — REVISED at Inc 2's admit review, 2026-08-28.**
+
+**Inc 1 landed on `main` alone** (`8a6d162`); it is Weaver-inert by construction, which is what made
+that safe. **Incs 2, 3 and 4 hold on the fire branch and merge to `main` as ONE unit.** The original
+call here — "land each increment on `main`" — rested on a claim Inc 2's three cold reviewers
+falsified: that "Inc 2 without Inc 3 keeps the shipped re-fire branch" is *safe*. It is not. Keeping
+that branch is precisely the harm:
+
+- **The converged finding (two independent reviewers, different lenses).** With config-error rows
+  now redelivering on a floor instead of Acking once, a row that mixes a config-error gap with a
+  normal gap holding a **live mark** re-enters `dispatchGap` every floor tick, reaches
+  `fireEpisode` with `found && !stale && redelivered`, and **re-publishes that gap's episode op —
+  forever.** It collapses on the Contract #4 tracker only inside `TrackerTTL = 24h`; a playbook
+  fault outlives that by design ("an author must fix it"), after which each re-fire is a genuine
+  fresh execution. `clinicSiteBackfill`'s own `missing_site` (bare `directOp`, no
+  `inflight_`/`maxretries_` companion) is exactly this shape — the motivating case is the victim.
+  §7 already credits the op-traffic *reduction* to §3.4a, so Inc 2 alone ships a regression this
+  design asserts cannot happen.
+- **The V16 remedy gap.** Inc 2 creates the first routinely long-Nak'd population, and V16's
+  restart-strand has no operator remedy until Inc 4's `ReplayTarget`. Worse than the design admits:
+  if the stranded pending set has reached `MaxAckPending`, `getNextMsg` returns `errMaxAckPending`
+  for every new message, and a new delivery is the only thing that re-arms `o.ptmr` — so the
+  consumer wedges for **new rows too**, silently and totally. Before Inc 2 those rows Acked and a
+  cold boot recovered them; between Inc 2 and Inc 4 there is no remedy short of `make down && up`.
+
+So the increments stay sequenced for *build and review* (each still gets its own commit, gates and
+review pass on the branch) but land together. §4's other sanctioned shape — "hold and merge once
+when complete, main never partial" — is the correct one here, and the ephemerality argument the
+original call leaned on is answered by pushing the fire branch after every increment, which is what
+`REMOTE.md` §4 actually asks for.
+
+**The general lesson, recorded because it outlives this item:** "each increment is independently
+green" is not the same claim as "each increment is independently *safe to run*". Inc 2 was green on
+every gate — build, vet, lint, the full suite, five build-tagged harnesses — and would have shipped
+an unbounded op-republish loop. A per-increment landing decision has to be argued from what the
+*partial* system does in production, not from what its test suite reports.
 
 ### 2. Verified touch-list (checked live at 2026-08-28, against `c9a7df1`)
 
