@@ -701,13 +701,13 @@ func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, 
 				// latency exceeds AckWait/2; closing it means making
 				// stopHeartbeat synchronous, which changes the ack path of every
 				// consumer in the system for a slow-path optimisation.
-				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), specLogger(spec))
+				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), spec.LongRedeliveryDelay, specLogger(spec))
 			}
 			return class, herr, false
 		}
 		// Transient/Terminal handler error: fall back to the returned Decision.
 	}
-	applyDecision(decision, msg, spec.Name, spec.RedeliveryDelay, specLogger(spec))
+	applyDecision(decision, msg, spec.Name, spec.RedeliveryDelay, spec.LongRedeliveryDelay, specLogger(spec))
 	return ClassTransient, nil, true
 }
 

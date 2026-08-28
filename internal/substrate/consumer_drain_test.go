@@ -234,12 +234,12 @@ func TestDrainDurable_ReconnectHandsBackTheWholePrefetchBuffer(t *testing.T) {
 	// The link stalls after two messages have reached the handler; 3, 4 and 5
 	// are buffered behind it.
 	stalled := newPrefetchIterator(buffer, 2)
-	c.drainDurable(ctx, stalled, "edge-sync-U-D", 0, logger, handler)
+	c.drainDurable(ctx, stalled, "edge-sync-U-D", 0, 0, logger, handler)
 
 	// The loop reopens the iterator on the same consumer and the server offers
 	// the next never-delivered sequence.
 	reopened := newPrefetchIterator([]*bufferedMsg{{seq: 6}}, 1)
-	c.drainDurable(ctx, reopened, "edge-sync-U-D", 0, logger, handler)
+	c.drainDurable(ctx, reopened, "edge-sync-U-D", 0, 0, logger, handler)
 
 	if got := floor.cursor(); got >= heldSeq {
 		t.Fatalf("resume floor advanced to %d, past the unresolved sequence %d: the prefetch buffer was discarded unhandled (handled %v)",
@@ -289,7 +289,7 @@ func TestDrainDurable_ShutdownDiscardsThePrefetchBuffer(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, drainTestLogger(), handler)
+		(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, 0, drainTestLogger(), handler)
 	}()
 
 	if got := <-handled; got != 1 {
@@ -320,7 +320,7 @@ func TestDrainDurable_DrainRidesOutAnErrorThatBeatAReadyMessage(t *testing.T) {
 
 	it := newPrefetchIterator(buffer, 1)
 	it.postDrainErrs = drainBufferedMaxErrs - 1
-	(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, drainTestLogger(), handler)
+	(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, 0, drainTestLogger(), handler)
 
 	if len(handled) != len(buffer) {
 		t.Fatalf("handler saw %v, want every buffered sequence", handled)
@@ -338,7 +338,7 @@ func TestDrainDurable_DrainGivesUpOnAnErrorRun(t *testing.T) {
 	it := newPrefetchIterator([]*bufferedMsg{{seq: 1}, {seq: 2}}, 1)
 	it.postDrainErrs = 1_000
 	started := time.Now()
-	(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, drainTestLogger(), func(context.Context, Message) Decision {
+	(&Conn{}).drainDurable(ctx, it, "edge-sync-U-D", 0, 0, drainTestLogger(), func(context.Context, Message) Decision {
 		return Ack
 	})
 

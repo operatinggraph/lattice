@@ -696,7 +696,7 @@ arm at `:580-583`, default at `:584-587`); `admitGap` → **`:600-614`**, its to
 |---|---|
 | `internal/substrate/consumer.go:39-57` | append `NakWithLongDelay` to the `Decision` iota (value 4), doc-commented like `NakWithDelay` |
 | `internal/substrate/consumer.go:59-65` | add `DefaultLongRedeliveryDelay = 5 * time.Minute` beside `DefaultRedeliveryDelay` |
-| `internal/substrate/consumer.go:449-472` | `applyDecision` grows a `longRedeliveryDelay` parameter + a `case NakWithLongDelay` floored at `DefaultLongRedeliveryDelay` **and at the consumer's own `RedeliveryDelay`** (§3.1: "floored at `DefaultRedeliveryDelay` if set lower") |
+| `internal/substrate/consumer.go:449-472` | `applyDecision` grows a `longRedeliveryDelay` parameter + a `case NakWithLongDelay` falling back to `DefaultLongRedeliveryDelay` when unset and then floored at **`DefaultRedeliveryDelay`** — the package default, **not** the consumer's own `RedeliveryDelay` field (§3.1: "floored at `DefaultRedeliveryDelay` if set lower") |
 | `internal/substrate/consumer.go:319`, `:395` | both call sites pass the second floor |
 | `internal/substrate/consumer_supervisor_pump.go:704`, `:710` | ditto; `:704` keeps `effectiveProbeInterval` for its own `NakWithDelay` |
 | `internal/substrate/consumer.go:108-148` | `DurableConsumerConfig.LongRedeliveryDelay` |

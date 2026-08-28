@@ -7,9 +7,11 @@ import (
 	"time"
 )
 
-// TestDecisionEnumValues pins the binary-additive layout of the Decision iota.
-// Ack/Nak/Term must keep their original values so every existing caller (loom,
-// processor) behaves identically; NakWithDelay is appended at the end.
+// TestDecisionEnumValues pins the layout of the Decision iota: Ack=0, Nak=1,
+// Term=2, NakWithDelay=3, NakWithLongDelay=4. Every existing caller (loom,
+// processor) depends on the first four values behaving identically; new
+// values are appended at the end, never inserted, so that dependency holds
+// as the enum grows.
 func TestDecisionEnumValues(t *testing.T) {
 	if Ack != 0 {
 		t.Fatalf("Ack = %d, want 0", Ack)
@@ -22,6 +24,9 @@ func TestDecisionEnumValues(t *testing.T) {
 	}
 	if NakWithDelay != 3 {
 		t.Fatalf("NakWithDelay = %d, want 3", NakWithDelay)
+	}
+	if NakWithLongDelay != 4 {
+		t.Fatalf("NakWithLongDelay = %d, want 4", NakWithLongDelay)
 	}
 }
 
