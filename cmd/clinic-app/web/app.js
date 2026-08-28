@@ -2347,13 +2347,11 @@ async function submitBook(ev) {
   try {
     // The op claims a deterministic slot-claim aspect per covered 15-minute grid
     // cell on both the provider and patient hubs — the write-path key collision at
-    // commit IS the double-book lock (SlotConflict / PatientDoubleBook), so no
-    // per-hub OCC epoch needs to be declared here. Each covered cell's slot-claim
-    // key is (d)-declared optionalReads (claim_cell, ddls.go — absence is the
-    // common no-existing-booking case; script-read-posture-design.md §13).
-    const optionalReads = slotClaimKeys(provider, startsAt, endsAt).concat(
-      slotClaimKeys(state.patient, startsAt, endsAt),
-    );
+    // commit IS the double-book lock (SlotConflict / PatientDoubleBook). Those
+    // cell keys are no longer declared here: the DDL's own derive_reads(op)
+    // (packages/clinic-domain/ddls.go) computes them server-side from this same
+    // payload (Contract #2 §2.5 class (g)).
+    const optionalReads = [];
     // Site membership (Increment 2): both reads require_site_membership makes
     // are (d)-declared optionalReads — the site is itself optional, so neither
     // can be a required contextHint.reads entry.
@@ -4234,12 +4232,9 @@ async function submitReschedule(ev) {
     // read-posture (a): the appointment's current .schedule (required to compute
     // released/claimed cells) + the withProvider/forPatient endpoint-validation
     // links (require_matching_provider/patient, ddls.go) — script-read-posture-
-    // design.md §13. The new interval's slot-claim keys are (d) optionalReads
-    // (claim_cell; an over-declare of cells already held across the move is
-    // harmless — the script only reads what claim_cell actually calls kv.Read on).
-    const optionalReads = slotClaimKeys(a.providerKey, startsAt, endsAt).concat(
-      slotClaimKeys(a.patientKey, startsAt, endsAt),
-    );
+    // design.md §13. The new interval's slot-claim keys are no longer declared
+    // here: the DDL's own derive_reads(op) (packages/clinic-domain/ddls.go)
+    // computes them server-side from this same payload (Contract #2 §2.5 class (g)).
     const reply = await submitOp(
       "RescheduleAppointment",
       "appointment",
@@ -4250,7 +4245,7 @@ async function submitReschedule(ev) {
         "lnk.appointment." + bareId(a.appointmentKey) + ".withProvider.provider." + bareId(a.providerKey),
         "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
       ],
-      { optionalReads, asSelf },
+      { asSelf },
     );
     const msg = rejectionMessage(reply);
     if (msg) {

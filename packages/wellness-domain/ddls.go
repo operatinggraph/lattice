@@ -2167,9 +2167,11 @@ def slot_cellcode(cell_start):
 
 def claim_cell(hub, cellcode, cls, conflict_code, who):
     key = hub + ".slot" + cellcode
-    # read-posture: (d) declared optionalReads at CreateSession/ReassignSession
-    # dispatch — an absent cell is the common case (no existing booking), never
-    # a required read.
+    # read-posture: (d) optionalReads — derived server-side by this script's
+    # own derive_reads(op) for CreateSession/CreateSessionSeries, still
+    # client-declared for ReassignSession (see derive_reads' doc comment for
+    # why that op is excluded). An absent cell is the common case (no
+    # existing booking), never a required read.
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
         fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
@@ -2240,6 +2242,98 @@ def session_atstudio_link(sess_key):
         if not lk.isDeleted:
             return lk.key, lk.targetVertex
     return None, None
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g). CreateSession/CreateSessionSeries's
+    # studioSlotClaim/instructorSlotClaim cells are entirely a function of the
+    # payload (studio/instructor/startsAt/endsAt), so the caller no longer has
+    # to declare them (cmd/wellness-app/web/app.js's slotCellKeys/
+    # occurrenceCellKeys are deleted in the same change). Mirrors this script's
+    # own slot_cells/slot_cellcode exactly, so a derived key always matches
+    # what claim_cell actually reads.
+    #
+    # ReassignSession is deliberately NOT covered here: its "edit only what's
+    # supplied, carry the rest forward unchanged" semantics mean the cells a
+    # move must claim are keyed off session state this pre-hydration pass has
+    # no access to (kv is a failing stub here) whenever that state ISN'T also
+    # in the payload -- the current schedule (session_atstudio_link's
+    # kv.Links walk / kv.Read(sess_key + ".schedule") when studio/time are
+    # unconfirmed) and, independently, the current instructor
+    # (session_ledby_link) whenever the call doesn't ALSO name
+    # newInstructor/clearInstructor. Even a call supplying newStudio AND an
+    # explicit startsAt/endsAt still claims new_instr_cells against a
+    # KV-resolved old_instructor when the instructor itself isn't touched, so
+    # there is no payload shape (short of also editing the instructor on
+    # every call) that is fully derivable. A partial derivation would be a
+    # partial, silently-wrong read set on every other call shape. The
+    # client-declared optionalReads stays load-bearing for this op.
+    ot = op.operationType
+    if ot != "CreateSession" and ot != "CreateSessionSeries":
+        return {}
+    p = op.payload
+    # optional_string, never required_string: a malformed/empty/whitespace-only
+    # field derives nothing rather than faulting the pre-pass — execute()'s own
+    # required_string/optional_string still raises the real InvalidArgument
+    # (objects-base's derive_reads sets this precedent). Raw getattr would see
+    # "" as a truthy-looking key fragment where optional_string sees None.
+    studio = optional_string(p, "studio")
+    starts_at_raw = optional_string(p, "startsAt")
+    ends_at_raw = optional_string(p, "endsAt")
+    if studio == None or starts_at_raw == None or ends_at_raw == None:
+        return {}
+    starts_at = time.rfc3339_utc(starts_at_raw)
+    ends_at = time.rfc3339_utc(ends_at_raw)
+    if not (starts_at < ends_at):
+        return {}
+    # slot_cells fails (SessionTooLong) past MAX_SLOT_CELLS -- a real rejection,
+    # but a worse one to raise HERE: derive_reads runs before enforce_grid/
+    # execute()'s own checks, so a too-long span would fault as an opaque
+    # DeriveReadsFailed instead of execute()'s clean SessionTooLong/
+    # SlotGridViolation. Bounding by the identical 24h ceiling slot_cells
+    # enforces (MAX_SLOT_CELLS * GRID_STEP) and returning {} defers to that.
+    if ends_at > time.rfc3339_add(starts_at, "24h"):
+        return {}
+    instructor = optional_string(p, "instructor")
+
+    if ot == "CreateSession":
+        cells = slot_cells(starts_at, ends_at)
+        keys = [studio + ".slot" + slot_cellcode(c) for c in cells]
+        if instructor != None:
+            keys += [instructor + ".slot" + slot_cellcode(c) for c in cells]
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
+
+    # CreateSessionSeries: same per-occurrence cells CreateSession claims,
+    # repeated occurrenceCount times on the intervalDays cadence -- mirrors
+    # this script's own occurrence loop exactly (offset_hours_step below).
+    interval_days = getattr(p, "intervalDays", None)
+    occurrence_count = getattr(p, "occurrenceCount", None)
+    if interval_days == None or occurrence_count == None:
+        return {}
+    # Mirror execute()'s own required_int(p, "occurrenceCount", 2, 52) bound:
+    # this loop runs before that validation, so an out-of-range value here
+    # would otherwise cost real Starlark budget before execute() ever gets to
+    # reject it the normal way.
+    if type(occurrence_count) != type(0) or occurrence_count < 2 or occurrence_count > 52:
+        return {}
+    if type(interval_days) != type(0) or interval_days < 1 or interval_days > 365:
+        return {}
+    offset_hours_step = interval_days * 24
+    occ_starts = starts_at
+    occ_ends = ends_at
+    keys = []
+    for i in range(occurrence_count):
+        if i > 0:
+            occ_starts = time.rfc3339_add(occ_starts, str(offset_hours_step) + "h")
+            occ_ends = time.rfc3339_add(occ_ends, str(offset_hours_step) + "h")
+        cells = slot_cells(occ_starts, occ_ends)
+        keys += [studio + ".slot" + slot_cellcode(c) for c in cells]
+        if instructor != None:
+            keys += [instructor + ".slot" + slot_cellcode(c) for c in cells]
+    if len(keys) == 0:
+        return {}
+    return {"optionalReads": keys}
 
 def execute(state, op):
     ot = op.operationType

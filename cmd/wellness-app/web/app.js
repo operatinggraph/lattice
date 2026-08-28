@@ -2469,25 +2469,6 @@ async function wireInstructorCard(i) {
   });
 }
 
-// occurrenceCellKeys mirrors slotCellKeys across a CreateSessionSeries batch
-// — one occurrence's worth of cells per i in [0, occurrenceCount), each
-// offset by i*intervalDays days from the first occurrence's span. Kept
-// separate from slotCellKeys rather than parameterizing it: the two shapes
-// (single span vs. a batch of offset spans) diverge enough that threading
-// one through the other would obscure both.
-function occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, occurrenceCount) {
-  const stepMs = intervalDays * 24 * 60 * 60 * 1000;
-  const start = Date.parse(startsAt);
-  const end = Date.parse(endsAt);
-  const keys = [];
-  for (let i = 0; i < occurrenceCount; i++) {
-    const occStart = new Date(start + i * stepMs).toISOString().slice(0, 19) + "Z";
-    const occEnd = new Date(end + i * stepMs).toISOString().slice(0, 19) + "Z";
-    keys.push(...slotCellKeys(studioKey, occStart, occEnd));
-  }
-  return keys;
-}
-
 async function createSession(studioKey, els) {
   const name = els.name.value.trim();
   const startsAt = toUtcInstant(els.starts.value);
@@ -2541,24 +2522,15 @@ async function createSession(studioKey, els) {
       payload.instructor = instructor;
       reads.push(instructor);
     }
-    let optionalReads;
     if (isSeries) {
       payload.intervalDays = intervalDays;
       payload.occurrenceCount = repeatCount;
-      optionalReads = occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, repeatCount);
-    } else {
-      optionalReads = slotCellKeys(studioKey, startsAt, endsAt);
     }
-    // Instructor cells mirror the studio's own (instructorSlotClaim,
-    // ddls.go) — claimed only when an instructor is named, same condition
-    // as the required read above.
-    if (instructor) {
-      optionalReads = optionalReads.concat(
-        isSeries
-          ? occurrenceCellKeys(instructor, startsAt, endsAt, intervalDays, repeatCount)
-          : slotCellKeys(instructor, startsAt, endsAt),
-      );
-    }
+    // studioSlotClaim/instructorSlotClaim cells are no longer declared here —
+    // the DDL's own derive_reads(op) (packages/wellness-domain/ddls.go)
+    // computes them server-side from this same payload (Contract #2 §2.5
+    // class (g)).
+    //
     // A staff submit carries NO authContext.target: CreateSession's and
     // CreateSessionSeries's frontOfHouse grant is scope=any, confined
     // in-script by the caller's own worksAt walk rather than by a
@@ -2568,7 +2540,6 @@ async function createSession(studioKey, els) {
         operationType: isSeries ? "CreateSessionSeries" : "CreateSession",
         class: isSeries ? "sessionseries" : "session",
         reads,
-        optionalReads,
         payload,
       },
       isSeries ? "schedule the class series" : "schedule the class",
