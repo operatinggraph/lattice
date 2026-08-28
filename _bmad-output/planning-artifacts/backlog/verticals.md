@@ -78,7 +78,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-28 · `7255a48f` · VoidCharge's itemized (lineId) form declared in its InputSchema — descriptor clients (Facet included) can finally submit it, not just cafe-app's hand-built button. cafe-domain 0.11.25
+- 2026-08-28 · `5ac9b361` · VoidCharge's itemized (lineId) form declared in its InputSchema — descriptor clients (Facet included) can finally submit it, not just cafe-app's hand-built button. cafe-domain 0.11.25
 - 2026-08-28 · `b997ff2a` · Café front-desk ScriptTimeout on OpenTab/Charge/VoidCharge/CreateMenuItem fixed — a redundant workplace_exempt() operator recheck removed; verified live, no timeout. cafe-domain 0.11.24
 - 2026-08-28 · `883e2875` · `derive_reads` adoption for CreateSession/CreateSessionSeries/CreateAppointment/RescheduleAppointment (item 8); ReassignSession stays client-declared (excluded, not adopted — see build note). triage §2 item 8
 - 2026-08-28 · `634cf8d4` · descriptorform's `{me.<type>}` typed self-anchor + the `?` optional marker (item 7), mirroring Facet's own resolver. triage §2 item 7
