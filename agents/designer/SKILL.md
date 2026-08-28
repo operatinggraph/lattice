@@ -1036,6 +1036,44 @@ inverted it. If you find a committed clause that *defaults class from the key* �
   I/O and multiply by N before the cost table hardens — the same list-then-per-key-get shape
   `lint-conventions`' `checkListThenGet` already gates elsewhere.
 
+- **A shipped refusal's stated REASON is a claim, and the thing that refutes it is usually in the
+  same package. Check three things before you inherit it: is the reason true, is the cited precedent
+  still in the tree, and does the code comment agree with the design that introduced it?** Three
+  faces, all trialed 2026-08-27 across two fires. (1) `hopindex.go` refuses a variable-length hop
+  because *"a walk crossing a variable-length hop cannot be stepped hop-by-hop"* — and
+  `rel_traverse.go`, the same package, steps exactly that hop as a bounded frontier BFS with a clamp.
+  **Three prior designs repeated the reason verbatim and none opened the sibling**, so a whole
+  population sat on the slow path behind a sentence that was false when it was written. (2) The
+  demand row's *"the one ratified precedent nobody connected"* pointed at a coverage table whose
+  **own code-review section overturned it** (*"compiled to a single 1-hop step and not flagged …
+  ⇒ Covered:false … it doesn't today → reject"*) and whose subsystem was later **deleted as dead
+  scaffolding**. A citation to a retracted claim in a retired package reads exactly like a citation
+  to a live one. (3) In the other fire, two code comments asserted a security closure — *"carries no
+  information about the target"*, *"quantizing means that leaks nothing"* — that the **ratified
+  design introducing them explicitly declined to claim** (*"a Bernoulli one, raising the cost by
+  roughly two orders of magnitude rather than removing it"*). The design doc was honest and the
+  comments were not, which is the dangerous direction: the next fire reads the comment. **The checks:**
+  for every refusal you inherit, grep the package for code that already does the thing it says cannot
+  be done; for every precedent you cite, confirm it still exists **and** read the review section of
+  the doc it lives in; and where a comment states a security property, diff it against the design doc
+  that shipped it. Corollary: when you find the divergence, correcting it is owed **in the same fire**
+  whatever else is decided — an argument refutable by measurement is how a correct guardrail gets
+  deleted later.
+
+- **WHERE a check can sit is a constraint, not a detail — a predicate needs its inputs, and the field
+  that scopes it may be produced by the very work you are trying to get in front of.** A design
+  sentence of the form *"check X at admission"* or *"refuse it before the expensive work"* silently
+  asserts that everything the predicate reads is already available at that point. Open the call
+  sequence and place the check against the line that produces each input. (Trialed 2026-08-27,
+  NFR-S6: I specified a **class-scoped** payload cap *"before the receipt stamp"* — but receipt is
+  stamped before `parseEnvelopeFromBody`, and `operationType` is what the parse produces. A
+  class-scoped check cannot precede the parse, and a check that precedes the parse cannot be
+  class-scoped. The contradiction was in the design's central sentence, it was invisible until the
+  sequence was written out line by line, and resolving it turned a clean recommendation into a real
+  fork.) **The check:** for every guard you place, write the ordered list of the work between the
+  anchor you named and the guard, and mark which inputs each step produces. If the guard reads a
+  field a later step produces, you have a fork, not a placement.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
