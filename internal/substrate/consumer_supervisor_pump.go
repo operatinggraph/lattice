@@ -689,18 +689,16 @@ func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, 
 				// would ignore AckWait and redeliver instantly —
 				// nats.go@v1.52.0 jetstream/message.go:60-70.)
 				//
-				// KNOWN WINDOW, accepted: stopHeartbeat closes the heartbeat's
-				// done channel but does not wait for the goroutine, so a +WPI
-				// already past its select can still land AFTER this Nak. The
-				// server implements the delay by BACKDATING the pending entry to
-				// now-AckWait+delay (nats-server@v2.14.0 server/consumer.go:
-				// 3173-3176), and progressUpdate re-stamps that entry to
-				// time.Now() (:2762-2771) — so a straggler erases the backdate
-				// and redelivery reverts to the full AckWait. The window is one
-				// scheduling gap wide and only reachable for a handler whose
-				// latency exceeds AckWait/2; closing it means making
-				// stopHeartbeat synchronous, which changes the ack path of every
-				// consumer in the system for a slow-path optimisation.
+				// The delay holds only because stopHeartbeat is ORDERED against
+				// the heartbeat's own send. The server implements a delayed Nak
+				// by BACKDATING the pending entry to now-AckWait+delay
+				// (nats-server@v2.14.0 server/consumer.go:3173-3176), and
+				// progressUpdate re-stamps that entry to time.Now()
+				// (:2762-2771) — so a +WPI landing after this call would erase
+				// the backdate and reset redelivery to the full AckWait,
+				// silently discarding whatever floor the decision asked for.
+				// keepAckAlive's stop closes that window: it blocks on a send
+				// already in flight and refuses any later one.
 				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), spec.LongRedeliveryDelay, specLogger(spec))
 			}
 			return class, herr, false
@@ -728,8 +726,19 @@ const jetStreamDefaultAckWait = 30 * time.Second
 //
 // InProgress sends +WPI, which is the one ack type that does NOT mark the
 // message acked, so it may be sent repeatedly; a heartbeat that races the
-// handler's own Ack fails with ErrMsgAlreadyAckd and is dropped. The returned
-// stop is idempotent and must be called before the decision is applied.
+// handler's own Ack fails with ErrMsgAlreadyAckd and is dropped.
+//
+// The returned stop is idempotent and must be called before the decision is
+// applied — and it is ORDERED against the heartbeat's send, not merely a signal
+// to wind down. A +WPI that lands after the decision is not harmless: the server
+// implements a delayed Nak by backdating the message's pending timestamp, and
+// progressUpdate re-stamps that timestamp to now, so one straggling heartbeat
+// silently replaces whatever redelivery floor the handler asked for with a plain
+// AckWait. That inverts the harm as the floors grow — a straggler used to delay a
+// 5 s retry slightly, and would now pull a 5 m one forward to 30 s. So stop takes
+// the same mutex the send holds: it waits out a send already in flight, and the
+// re-check under that mutex stops a tick that was already past its select from
+// sending at all.
 func keepAckAlive(msg jetstream.Msg, spec ConsumerSpec) func() {
 	wait := spec.AckWait
 	if wait <= 0 {
@@ -742,6 +751,8 @@ func keepAckAlive(msg jetstream.Msg, spec ConsumerSpec) func() {
 	}
 
 	done := make(chan struct{})
+	var sendMu sync.Mutex
+	stopped := false
 	var once sync.Once
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -751,7 +762,14 @@ func keepAckAlive(msg jetstream.Msg, spec ConsumerSpec) func() {
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := msg.InProgress(); err != nil {
+				sendMu.Lock()
+				if stopped {
+					sendMu.Unlock()
+					return
+				}
+				err := msg.InProgress()
+				sendMu.Unlock()
+				if err != nil {
 					// The message is already disposed, or the connection is
 					// gone; either way there is no window left to hold open.
 					return
@@ -759,7 +777,14 @@ func keepAckAlive(msg jetstream.Msg, spec ConsumerSpec) func() {
 			}
 		}
 	}()
-	return func() { once.Do(func() { close(done) }) }
+	return func() {
+		once.Do(func() {
+			sendMu.Lock()
+			stopped = true
+			close(done)
+			sendMu.Unlock()
+		})
+	}
 }
 
 // handleDrainOutcome maps a drain result to the pause state machine. On infra it

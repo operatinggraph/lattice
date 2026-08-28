@@ -25,7 +25,8 @@ const defaultHeartbeatEvery = 10 * time.Second
 // The whole document is a single Health-KV value, and two of the issue classes
 // Weaver raises are per-ENTITY: a `surface` gap standing open (one per
 // violating subject — every unrouted task past its expiresAt, every erasure
-// stuck mid-flight) and GapBudgetExhausted. Both are unbounded in entity count,
+// stuck mid-flight) and the spent-budget pair (GapBudgetExhausted, or
+// GapEscalatedToAugur where a policy escalates). Both are unbounded in entity count,
 // so an unbounded issues[] would grow the value without limit. The listing is
 // bounded instead; the aggregate status is computed over EVERY open issue
 // before the cut, so truncation never makes the heartbeat read healthier than
@@ -41,6 +42,29 @@ const issuesTruncatedCode = "IssuesTruncated"
 // omittedCodeSampleCap bounds how many distinct codes the truncation entry
 // names before it summarises the remainder.
 const omittedCodeSampleCap = 8
+
+// rowIssueCapPerTarget bounds how many PER-ROW issue entries — the `data:` and
+// `template:` families together, one entry per (entity, column) — the issue
+// cache tracks for one target.
+//
+// maxHeartbeatIssues bounds the DOCUMENT and is unaffected by this: the
+// heartbeat still computes its aggregate status over every entry the cache holds
+// and still lists severity-first with an honest truncation entry. What this
+// bounds is the in-memory map and snapshot's per-heartbeat sort over it, which
+// the document cap never touched — those grow with the LENS (one entry per
+// malformed row), so a systemically-broken large target would grow them without
+// limit while the document stayed a tidy fifty entries.
+//
+// Sized an order of magnitude above the document cap: the tracked set is a
+// sample either way once it exceeds fifty, so the extra entries buy nothing an
+// operator reads, and the value's real job is to keep a pathological target from
+// making every heartbeat's sort proportional to its row count.
+const rowIssueCapPerTarget = 500
+
+// rowIssuesCappedCode is the synthetic per-target entry standing in for the
+// per-row issues the cache refused to track once rowIssueCapPerTarget was
+// reached.
+const rowIssuesCappedCode = "RowIssuesCapped"
 
 // weaverHealthDoc is the Contract #5 §5.2 heartbeat document Weaver writes to
 // health.weaver.<instance>. Same shape as the Processor/Refractor/Loom docs;
@@ -127,18 +151,55 @@ type pacedLog struct {
 //	                       | raise would arrive fresh anyway, and the map stays bounded by
 //	                       | "keys raised in the last two intervals"
 //	restart                | empty, like the latch itself; the first raise after a restart is an arrival, which is correct
+//
+// The remaining maps are the per-target bound on the two PER-ROW families
+// (`data:` and `template:`), whose entry count is one per (entity, column) and
+// therefore grows with the LENS, not with the deployment: a systemically-broken
+// 100k-row target would otherwise grow both this map and snapshot's
+// per-heartbeat sort without limit. rowIssues counts a target's currently-tracked
+// per-row latch entries; rowPaced counts its tracked per-row PACE entries, which
+// need their own budget because prunePaced can never reach them once a stuck row
+// re-raises inside every staleness window; refused counts the latch raises turned
+// away, and refusedWorst remembers the worst severity among them so the one
+// surfaced overflow entry (issueKeyRowIssuesCapped) can carry it. Their lifetimes:
+//
+//	created                | lazily, at the target's first per-row raise
+//	incremented            | rowIssues / rowPaced on each newly-tracked per-row key; refused on each
+//	                       | latch raise past the cap, which also folds its severity into refusedWorst
+//	decremented            | rowIssues on each per-row key's clear / clearPrefix removal; rowPaced on
+//	                       | prunePaced and clearPrefix (clear deliberately leaves the pace entry)
+//	retired (drained)      | refused, refusedWorst and the overflow entry when rowIssues reaches ZERO —
+//	                       | NOT merely when it falls back under the cap. A refused `data:` fact is not
+//	                       | re-derivable on demand: those exits Ack, and lane 1 is DeliverLastPerSubject
+//	                       | on a stable durable, so the row is never delivered again until it
+//	                       | re-projects. Retiring the count at the boundary would delete the only
+//	                       | record that those rows are broken
+//	retired (subject gone) | with the target's `data:`/`template:` prefix clears — an entity tombstone frees
+//	                       | that entity's slots, a Revoke or registry removal frees the target's whole set
+//	restart                | empty, like the latch itself: the cache is rebuilt from redeliveries, so the cap
+//	                       | re-fills in delivery order and the overflow entry re-arrives when it is re-reached
+//	ordering               | none is promised — the cap admits whichever keys are raised first, so the tracked
+//	                       | set is a SAMPLE, never a ranking; the overflow entry is what states that
 type issueCache struct {
-	mu     sync.Mutex
-	issues map[string]healthIssue
-	since  map[string]string
-	paced  map[string]pacedLog
+	mu           sync.Mutex
+	issues       map[string]healthIssue
+	since        map[string]string
+	paced        map[string]pacedLog
+	rowIssues    map[string]int
+	rowPaced     map[string]int
+	refused      map[string]int
+	refusedWorst map[string]string
 }
 
 func newIssueCache() *issueCache {
 	return &issueCache{
-		issues: make(map[string]healthIssue),
-		since:  make(map[string]string),
-		paced:  make(map[string]pacedLog),
+		issues:       make(map[string]healthIssue),
+		since:        make(map[string]string),
+		paced:        make(map[string]pacedLog),
+		rowIssues:    make(map[string]int),
+		rowPaced:     make(map[string]int),
+		refused:      make(map[string]int),
+		refusedWorst: make(map[string]string),
 	}
 }
 
@@ -152,15 +213,87 @@ func (c *issueCache) set(key, severity, code, message string) {
 // key that has none — for a caller holding better evidence of when the fault
 // arose than "now". A key that already carries a since keeps it: a standing
 // issue's age is never overwritten, exactly as under set.
+//
+// A NEW key in one of the per-ROW families is admitted only while its target is
+// under rowIssueCapPerTarget; past the cap the insertion is refused and folded
+// into the target's one overflow entry instead. Refreshing a key the cache
+// ALREADY tracks is never refused — the cap bounds how many distinct facts are
+// tracked, never how current a tracked one is.
+//
+// The refusal carries the raise's SEVERITY into the overflow entry. Without
+// that, aggregateStatus — which only ever sees c.issues — would never learn that
+// an `error` was raised at all, and a component that cannot fulfil its
+// responsibility would report `degraded`. The two per-row families are
+// warning-dominated today, but nothing constrains them: temporal.go's
+// timer-payload marshal failure already raises `error` at a per-ENTITY
+// issueKeyDataEntity key, so "errors here are O(1)" is not an invariant this
+// cache may rest on.
 func (c *issueCache) setSince(key, severity, code, message string, arrivedAt time.Time) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, tracked := c.issues[key]; !tracked {
+		if target, perRow := rowIssueTarget(key); perRow {
+			if c.rowIssues[target] >= rowIssueCapPerTarget {
+				c.refused[target]++
+				if severityRank(severity) < severityRank(c.refusedWorst[target]) || c.refusedWorst[target] == "" {
+					c.refusedWorst[target] = severity
+				}
+				c.setLocked(issueKeyRowIssuesCapped(target), c.refusedWorst[target], rowIssuesCappedCode,
+					"target "+target+": per-row issue tracking reached its cap of "+
+						strconv.Itoa(rowIssueCapPerTarget)+" entries; "+strconv.Itoa(c.refused[target])+
+						" further raises for rows outside the tracked set were not recorded, and are not "+
+						"re-derivable until those rows project again", arrivedAt)
+				return
+			}
+			c.rowIssues[target]++
+		}
+	}
+	c.setLocked(key, severity, code, message, arrivedAt)
+}
+
+// setLocked is setSince's write, past the cap decision and with c.mu held.
+func (c *issueCache) setLocked(key, severity, code, message string, arrivedAt time.Time) {
 	since, ok := c.since[key]
 	if !ok {
 		since = substrate.FormatTimestamp(arrivedAt)
 		c.since[key] = since
 	}
 	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since}
-	c.mu.Unlock()
+}
+
+// releaseRowIssueLocked gives one per-row latch slot back to target and, once
+// the target holds NO per-row entries at all, retires its overflow entry and the
+// refusal accounting behind it.
+//
+// The retirement waits for zero rather than for the cap boundary, and the reason
+// is the shape of the facts that were refused. A `template:` fault is re-derived
+// on the long redelivery floor, so it would come back; a `data:` fault is not —
+// those exits Ack, and lane 1 is DeliverLastPerSubject on a stable durable, so
+// the row is never delivered again until something writes its key. Retiring the
+// overflow entry the moment one tracked row repairs would therefore delete the
+// only surviving record that N further rows are broken, and nothing would ever
+// re-create it. Waiting for the target's per-row set to drain also stops the
+// entry's `since` flapping around the boundary.
+func (c *issueCache) releaseRowIssueLocked(target string) {
+	if n := c.rowIssues[target]; n > 1 {
+		c.rowIssues[target] = n - 1
+	} else {
+		delete(c.rowIssues, target)
+	}
+	if c.rowIssues[target] == 0 {
+		c.retireRowIssueOverflowLocked(target)
+	}
+}
+
+// retireRowIssueOverflowLocked drops a target's overflow entry and its refusal
+// accounting. Called when the target's per-row set drains to nothing — by
+// repair, by an entity tombstone, or by the target's own teardown.
+func (c *issueCache) retireRowIssueOverflowLocked(target string) {
+	delete(c.refused, target)
+	delete(c.refusedWorst, target)
+	overflow := issueKeyRowIssuesCapped(target)
+	delete(c.issues, overflow)
+	delete(c.since, overflow)
 }
 
 // standingAs reports whether an issue with exactly this severity and code is
@@ -192,9 +325,16 @@ func (c *issueCache) standingAs(key, severity, code string) bool {
 // re-derivation an arrival and hand back the flood the pacing exists to stop.
 func (c *issueCache) clear(key string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, tracked := c.issues[key]
 	delete(c.issues, key)
 	delete(c.since, key)
-	c.mu.Unlock()
+	if !tracked {
+		return
+	}
+	if target, perRow := rowIssueTarget(key); perRow {
+		c.releaseRowIssueLocked(target)
+	}
 }
 
 // pacedRaise records a raise at key on the pace clock and reports how it must
@@ -222,10 +362,28 @@ func (c *issueCache) clear(key string) {
 // Message is not compared, for the reason standingAs gives: a message carrying
 // an embedded count or timestamp would re-arrive on every pass and bring the
 // flood straight back.
+//
+// A NEW per-ROW key is admitted only while its target is under the same
+// rowIssueCapPerTarget budget the latch uses. prunePaced cannot bound this map on
+// its own once a per-row fault is re-derived on a redelivery floor shorter than
+// its staleness window — every stuck row then refreshes its entry forever — so
+// without the budget the map would be sized by the consumer's MaxAckPending
+// rather than by the cap the design advertises. A refused key is reported
+// NOT-loud and dated `now`: an untracked key has no clock to tell arrival from
+// continuation, and for a map deliberately not grown the safe side is the quiet
+// one. Nothing is dropped, only lowered to Debug — alertPaced's own rule.
 func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud bool, arrivedAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	last, ok := c.paced[key]
+	if !ok {
+		if target, perRow := rowIssueTarget(key); perRow {
+			if c.rowPaced[target] >= rowIssueCapPerTarget {
+				return false, now
+			}
+			c.rowPaced[target]++
+		}
+	}
 	if !ok || last.severity != severity || last.code != code ||
 		now.Sub(last.lastRaiseAt) > logPaceInterval {
 		c.paced[key] = pacedLog{
@@ -257,10 +415,27 @@ func (c *issueCache) prunePaced(now time.Time) int {
 	for k, p := range c.paced {
 		if now.Sub(p.lastRaiseAt) >= 2*logPaceInterval {
 			delete(c.paced, k)
+			c.releaseRowPacedLocked(k)
 			n++
 		}
 	}
 	return n
+}
+
+// releaseRowPacedLocked gives one per-row PACE slot back, for a key just removed
+// from c.paced. Only prunePaced and clearPrefix remove pace entries — clear
+// deliberately does not, which is the whole point of the map — so those two are
+// the only sites that return a slot.
+func (c *issueCache) releaseRowPacedLocked(key string) {
+	target, perRow := rowIssueTarget(key)
+	if !perRow {
+		return
+	}
+	if n := c.rowPaced[target]; n > 1 {
+		c.rowPaced[target] = n - 1
+	} else {
+		delete(c.rowPaced, target)
+	}
 }
 
 // clearPrefix retires every issue whose key starts with prefix, returning how
@@ -287,13 +462,34 @@ func (c *issueCache) clearPrefix(prefix string) int {
 	for k := range c.paced {
 		if strings.HasPrefix(k, prefix) {
 			delete(c.paced, k)
+			c.releaseRowPacedLocked(k)
 		}
 	}
+	// The per-row slot accounting is settled per TARGET after the walk rather
+	// than per key inside it: a prefix clear removes a whole entity's or a whole
+	// target's entries at once, and reconciling the overflow entry mid-walk
+	// could retire it against a count the same walk is still draining — and,
+	// for a target-wide clear, against the overflow entry the walk is itself
+	// about to remove.
+	touched := make(map[string]struct{})
 	for k := range c.issues {
 		if strings.HasPrefix(k, prefix) {
+			if target, perRow := rowIssueTarget(k); perRow {
+				if n := c.rowIssues[target]; n > 1 {
+					c.rowIssues[target] = n - 1
+				} else {
+					delete(c.rowIssues, target)
+				}
+				touched[target] = struct{}{}
+			}
 			delete(c.issues, k)
 			delete(c.since, k)
 			n++
+		}
+	}
+	for target := range touched {
+		if c.rowIssues[target] == 0 {
+			c.retireRowIssueOverflowLocked(target)
 		}
 	}
 	return n
@@ -356,6 +552,23 @@ type heartbeater struct {
 	// solely by emit (single heartbeat ticker goroutine — no lock needed); a
 	// consumer no longer paused is dropped so a later pause gets a fresh since.
 	consumerPausedSince map[string]string
+
+	// ackStats reads a managed durable's live un-acked count. Nil disables the
+	// saturation leg entirely (unit fixtures with no supervisor).
+	ackStats ackStatsReader
+
+	// consumerSaturatedSince tracks each saturated lane-1 durable's first-arose
+	// timestamp, on exactly the same terms as consumerPausedSince: the issue is
+	// built inline from live consumer state rather than latched in issueCache, so
+	// a consumer that drains, or a target that leaves, simply stops appearing and
+	// needs no teardown leg of its own.
+	consumerSaturatedSince map[string]string
+}
+
+// ackStatsReader is the heartbeat's window onto a managed durable's server-side
+// ack state — substrate.ConsumerSupervisor in production.
+type ackStatsReader interface {
+	AckStatsForConsumer(ctx context.Context, name string) (substrate.AckStats, error)
 }
 
 func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every time.Duration,
@@ -369,26 +582,31 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every t
 		every = defaultHeartbeatEvery
 	}
 	return &heartbeater{
-		conn:                  conn,
-		bucket:                healthBucket,
-		instance:              instance,
-		startedAt:             time.Now(),
-		interval:              every,
-		states:                states,
-		issues:                issues,
-		source:                source,
-		marks:                 marks,
-		sweep:                 sweep,
-		temporal:              temporal,
-		shadow:                shadow,
-		contraction:           contraction,
-		admission:             admission,
-		logger:                logger,
-		ttlMultiplier:         healthkv.DefaultTTLMultiplier,
-		effectMismatchAlerted: make(map[string]struct{}),
-		consumerPausedSince:   make(map[string]string),
+		conn:                   conn,
+		bucket:                 healthBucket,
+		instance:               instance,
+		startedAt:              time.Now(),
+		interval:               every,
+		states:                 states,
+		issues:                 issues,
+		source:                 source,
+		marks:                  marks,
+		sweep:                  sweep,
+		temporal:               temporal,
+		shadow:                 shadow,
+		contraction:            contraction,
+		admission:              admission,
+		logger:                 logger,
+		ttlMultiplier:          healthkv.DefaultTTLMultiplier,
+		effectMismatchAlerted:  make(map[string]struct{}),
+		consumerPausedSince:    make(map[string]string),
+		consumerSaturatedSince: make(map[string]string),
 	}
 }
+
+// SetAckStatsReader wires the saturation leg's window onto live consumer state.
+// Must be called before run starts; left unset, the leg is skipped.
+func (h *heartbeater) SetAckStatsReader(r ackStatsReader) { h.ackStats = r }
 
 // SetTTLMultiplier overrides the heartbeat TTL multiplier (TTL = interval ×
 // multiplier, Contract #5 §5.6). Must be called before run starts. Zero
@@ -483,6 +701,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 	// actually being re-derived.
 	h.issues.prunePaced(now)
 	issues := append(h.issues.snapshot(), h.pausedIssues(states, now)...)
+	issues = append(issues, h.saturatedIssues(ctx, states, now, metrics)...)
 
 	// Contract #5 §5.2/§5.3: a heartbeat carrying issues must not report
 	// status:"healthy" (issues is empty iff healthy). Escalate the lifecycle
@@ -558,6 +777,85 @@ func (h *heartbeater) pausedIssues(states map[string]string, now time.Time) []he
 	return issues
 }
 
+// saturatedIssues reports every lane-1 durable whose pending set has reached the
+// consumer's MaxAckPending cap, and records each target's raw ack-pending count
+// as a metric so an operator can see the gradient rather than only the cliff.
+//
+// This is the observable side of the decline loop. A Nak'd row holds its pending
+// slot until it is acked or its message is superseded, so one mis-authored gap
+// column parks every violating row of its target in the pending set; at the cap,
+// getNextMsg stops handing out NEW deliveries for that target entirely, and
+// entities that appear from then on are never evaluated at all. Nothing else in
+// the platform observes that: the per-consumer health sink carries running/paused
+// and the durable is running throughout.
+//
+// `error`, deliberately, and not in tension with the config-error classes being
+// `warning`. Those describe a target that is DEGRADED — its violating rows are
+// not remediated while the fault stands, but they are still being evaluated and
+// the fix is picked up automatically. This describes a target whose deliveries
+// have STOPPED: it is not self-healing, no redelivery re-derives it away, and
+// for that target Weaver genuinely "cannot fulfil its primary responsibility"
+// (Contract #5 §5.2).
+//
+// Built inline rather than latched in issueCache, exactly like pausedIssues: the
+// fact is re-derived in full on every pass from live consumer state, so a
+// consumer that drains or a target that leaves needs no teardown leg, and the
+// entry can never consume one of the per-row cache slots it is often reporting on.
+func (h *heartbeater) saturatedIssues(ctx context.Context, states map[string]string, now time.Time,
+	metrics map[string]any) []healthIssue {
+
+	if h.ackStats == nil {
+		return nil
+	}
+	var issues []healthIssue
+	pending := make(map[string]uint64)
+	saturatedNow := make(map[string]struct{})
+	for name, state := range states {
+		targetID, isLane1 := strings.CutPrefix(name, laneConsumerPrefix)
+		if !isLane1 || state != "running" {
+			continue
+		}
+		stats, err := h.ackStats.AckStatsForConsumer(ctx, name)
+		if err != nil {
+			// A consumer being torn down between the snapshot and this read is
+			// ordinary; the next pass re-derives the whole set either way.
+			h.logger.Debug("weaver heartbeat: lane-1 ack-stats read failed",
+				"consumer", name, "err", err)
+			continue
+		}
+		if stats.AckPending > 0 {
+			pending[targetID] = stats.AckPending
+		}
+		if stats.AckPending < uint64(laneMaxAckPending) {
+			continue
+		}
+		saturatedNow[name] = struct{}{}
+		since, ok := h.consumerSaturatedSince[name]
+		if !ok {
+			since = substrate.FormatTimestamp(now)
+			h.consumerSaturatedSince[name] = since
+		}
+		issues = append(issues, healthIssue{
+			Severity: "error",
+			Code:     "ConsumerSaturated",
+			Message: "target " + targetID + ": lane-1 consumer " + name + " holds " +
+				strconv.FormatUint(stats.AckPending, 10) + " un-acked rows, its MaxAckPending cap of " +
+				strconv.Itoa(laneMaxAckPending) + " — declined rows are held pending until they are fixed or " +
+				"re-projected, and at the cap NO new entity of this target is delivered at all",
+			Since: since,
+		})
+	}
+	for name := range h.consumerSaturatedSince {
+		if _, ok := saturatedNow[name]; !ok {
+			delete(h.consumerSaturatedSince, name)
+		}
+	}
+	if len(pending) > 0 {
+		metrics["laneAckPending"] = pending
+	}
+	return issues
+}
+
 // flagEffectMismatches scans every `__effect` confidence window (heartbeat
 // cadence, never per-message) and raises a LensEffectMismatch issue for each
 // one whose last effectWindowSize dispatch episodes recorded zero observed
@@ -620,7 +918,7 @@ func boundIssues(issues []healthIssue, limit int) []healthIssue {
 	ranked := make([]healthIssue, len(issues))
 	copy(ranked, issues)
 	sort.SliceStable(ranked, func(i, j int) bool {
-		return severityRank(ranked[i].Severity) < severityRank(ranked[j].Severity)
+		return listingRank(ranked[i]) < listingRank(ranked[j])
 	})
 	omitted := ranked[limit:]
 	out := make([]healthIssue, 0, limit+1)
@@ -634,6 +932,29 @@ func boundIssues(issues []healthIssue, limit int) []healthIssue {
 		Since: oldestSince(omitted),
 	})
 	return out
+}
+
+// listingRank orders issues for the truncation cut, in three tiers: every
+// `error` first, then the per-target cache-overflow markers, then everything
+// else.
+//
+// The middle tier exists because of what that marker is. It is the only entry
+// that describes issues the CACHE refused to hold — facts with no other record
+// anywhere — and it is raised at a `data:` key, in the same warning-severity
+// family as the hundreds of per-row entries whose volume caused it. Ranked on
+// severity alone it would sort among them in key order and effectively never
+// make the listed fifty, so the one entry saying "N further rows are broken and
+// are not tracked" would itself be truncated away. There is at most one such
+// marker per target, so pinning them cannot crowd out much; errors still sort
+// strictly ahead of them.
+func listingRank(issue healthIssue) int {
+	if severityRank(issue.Severity) == 0 {
+		return 0
+	}
+	if issue.Code == rowIssuesCappedCode {
+		return 1
+	}
+	return 2
 }
 
 // severityRank orders issues for the listing cut: `error` ahead of everything

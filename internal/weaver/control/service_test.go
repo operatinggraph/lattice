@@ -19,7 +19,8 @@ import (
 
 // fakeEngine satisfies the unexported engineControl interface structurally —
 // it implements ListTargets/Disable/Enable/Revoke/ResetConfidence/
-// ResetRetryBudget with the exact same signatures as *weaver.Engine, so
+// ResetRetryBudget/ReplayTarget with the exact same signatures as
+// *weaver.Engine, so
 // control.NewService accepts it. No real
 // *weaver.Engine is needed for this package's tests (internal/weaver's own
 // tests cover the real engine wiring, per Task 3).
@@ -35,6 +36,8 @@ type fakeEngine struct {
 	// the two the subject cannot carry.
 	resetPrevious   int
 	resetBudgetArgs []string
+	// replayQueued is the row count ReplayTarget reports on success.
+	replayQueued int
 }
 
 func newFakeEngine(targets ...weaver.TargetSummary) *fakeEngine {
@@ -80,6 +83,15 @@ func (f *fakeEngine) ResetRetryBudget(_ context.Context, targetID, entityID, gap
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.resetPrevious, nil
+}
+
+func (f *fakeEngine) ReplayTarget(_ context.Context, targetID string) (int, error) {
+	if err := f.record("replayTarget", targetID); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.replayQueued, nil
 }
 
 func (f *fakeEngine) budgetArgs() []string {
@@ -410,4 +422,72 @@ func TestControl_ResetBudget_RejectsAnUnreadableBody(t *testing.T) {
 	if len(eng.budgetArgs()) != 0 {
 		t.Fatalf("the engine must not be called for a malformed body, got %v", eng.budgetArgs())
 	}
+}
+
+// TestControl_ReplayTarget verifies the "replayTarget" op invokes
+// Engine.ReplayTarget for the target ID extracted from the subject and returns
+// the engine's queued-row count verbatim — the operator's only feedback for how
+// big a re-delivery burst the verb just ordered.
+func TestControl_ReplayTarget(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	eng.replayQueued = 26
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("t1", "replayTarget"))
+
+	require.Empty(t, resp.Error)
+	require.NotNil(t, resp.ReplayTarget)
+	assert.Equal(t, 26, resp.ReplayTarget.RowsQueued)
+	assert.Equal(t, []string{"replayTarget:t1"}, eng.callLog())
+	// A replay re-delivers rows and nothing else: it must never be dispatched as
+	// a disable, enable, or revoke on the way through.
+	assert.Nil(t, resp.Disable)
+	assert.Nil(t, resp.Enable)
+	assert.Nil(t, resp.Revoke)
+}
+
+// TestControl_ReplayTarget_EngineError verifies a refusal — an unregistered or
+// disabled target, or a consumer this instance does not manage — surfaces in
+// Error rather than reporting a successful zero-row replay. The verb's whole
+// value is that its refusals reach the operator: a refusal reported as success
+// leaves the diagnostic that prompted the replay standing over a fact nothing
+// re-derived.
+func TestControl_ReplayTarget_EngineError(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	eng.errOn["replayTarget:ghost"] = errors.New("weaver: target \"ghost\" not registered")
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("ghost", "replayTarget"))
+
+	require.Nil(t, resp.ReplayTarget)
+	assert.Contains(t, resp.Error, "not registered")
+}
+
+// TestControl_ReplayTarget_CapabilityDenied verifies the verb is gated by the
+// same per-op capability check as every other mutating op — it makes Weaver
+// re-dispatch a whole target's violating backlog, so an ungranted actor must
+// never reach the engine.
+func TestControl_ReplayTarget_CapabilityDenied(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	svc := control.NewService(eng, denyCapability{err: errors.New("capability denied")}, nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("t1", "replayTarget"))
+
+	assert.Contains(t, resp.Error, "capability denied")
+	assert.Empty(t, eng.callLog(), "a denied replayTarget must never reach the engine")
 }

@@ -11,15 +11,20 @@ type OpMeta struct {
 }
 
 // WeaverOps mirrors internal/weaver/control/service.go's op constants
-// (opList/opDisable/opEnable/opRevoke/opResetConfidence/opResetBudget). A
-// per-cmd wiring test asserts this table stays in lockstep with the service's
-// dispatch tables (design R5). resetConfidence carries its own verb rather than
-// reusing revoke's: it is a strictly narrower deletion (advisory confidence
-// windows only), and folding it under an existing verb would grant the wider
-// one to every actor that needs the narrower. resetBudget likewise: it re-arms
-// one gap's retry budget, which makes Weaver DISPATCH again — an authority
-// unrelated to draining confidence data or to pausing a target, so it is
-// neither wider nor narrower than any existing verb and shares none.
+// (opList/opDisable/opEnable/opRevoke/opResetConfidence/opResetBudget/
+// opReplayTarget). A per-cmd wiring test asserts this table stays in lockstep
+// with the service's dispatch tables (design R5). resetConfidence carries its
+// own verb rather than reusing revoke's: it is a strictly narrower deletion
+// (advisory confidence windows only), and folding it under an existing verb
+// would grant the wider one to every actor that needs the narrower. resetBudget
+// likewise: it re-arms one gap's retry budget, which makes Weaver DISPATCH
+// again — an authority unrelated to draining confidence data or to pausing a
+// target, so it is neither wider nor narrower than any existing verb and shares
+// none. replayTarget likewise again: it recreates one target's lane-1 durable
+// so every row of that target is re-evaluated, which makes Weaver dispatch for
+// a whole target's backlog at once — wider in blast radius than resetBudget's
+// single gap, and narrower in effect than revoke's deletion, so it shares with
+// neither.
 var WeaverOps = map[string]OpMeta{
 	"list":            {Verb: "read", Read: true},
 	"disable":         {Verb: "disable", Read: false},
@@ -27,6 +32,7 @@ var WeaverOps = map[string]OpMeta{
 	"revoke":          {Verb: "revoke", Read: false},
 	"resetConfidence": {Verb: "resetConfidence", Read: false},
 	"resetBudget":     {Verb: "resetBudget", Read: false},
+	"replayTarget":    {Verb: "replayTarget", Read: false},
 }
 
 // LoomOps mirrors internal/loom/control/service.go's exactOps/nameOps

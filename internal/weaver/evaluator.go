@@ -36,12 +36,26 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 
 	// An empty body is the entity-deletion tombstone (§10.2 IsDeleted path):
 	// no row columns remain true, so the level reconcile clears every mark.
+	//
+	// A body that does not parse is a per-row DATA error, and the only thing
+	// that can fix it is a re-projection — which supersedes this revision and
+	// delivers on its own, so the row Acks rather than holding a pending slot.
+	// What the Ack must not do is lose the fact: the standing issue at the
+	// row's synthetic body column is the durable "acked but declined" record,
+	// and the successful parse below is its repair. Nothing else can retire it
+	// — no column reader ever names rowBodyColumn — except the two prefix
+	// teardowns that retire the whole `data:` family for a subject that leaves
+	// (the deletion tombstone in clearClosedMarks, and a target's Revoke /
+	// registry removal).
 	var row map[string]any
 	if len(msg.Body) != 0 {
 		if err := json.Unmarshal(msg.Body, &row); err != nil {
-			e.logger.Warn("weaver: row value unparseable; dropping", "key", key, "err", err)
+			unparseable := "weaver-targets row " + key + " does not parse as JSON: " + err.Error()
+			e.logger.Warn("weaver: " + unparseable)
+			e.issues.set(issueKeyDataEntity(targetID, entityID, rowBodyColumn), "warning", "RowDataError", unparseable)
 			return substrate.Ack
 		}
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, rowBodyColumn))
 	}
 
 	// Level-reconciled mark-clearing runs on EVERY row update first, violating
@@ -131,8 +145,17 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		return substrate.Ack
 	}
 
+	// The three retry accumulators, collapsed at the tail with precedence
+	// Nak > NakWithDelay > NakWithLongDelay > Ack: a message carries ONE
+	// decision for the whole row, so the shortest floor any gap asked for wins
+	// — a gap needing an immediate retry must not wait out another gap's
+	// config-error floor, and the long floor's own gap is re-evaluated by
+	// whichever redelivery arrives first either way. Each switch below names
+	// every non-Ack Decision explicitly, because a value that falls through to
+	// `default` is silently downgraded to Ack rather than failing to compile.
 	nak := false
 	delayed := false
+	longDelayed := false
 	for _, col := range e.openGapColumns(targetID, entityID, row) {
 		// The static playbook entry for this gap (zero value when the column has
 		// no gaps entry at all — the "no playbook entry" dead-end dispatchGap
@@ -174,6 +197,8 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 					nak = true
 				case substrate.NakWithDelay:
 					delayed = true
+				case substrate.NakWithLongDelay:
+					longDelayed = true
 				default:
 				}
 			}
@@ -184,13 +209,18 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 			nak = true
 		case substrate.NakWithDelay:
 			delayed = true
+		case substrate.NakWithLongDelay:
+			longDelayed = true
 		default:
 		}
 	}
 	if nak {
-		// At least one gap needs an immediate retry; redelivery re-evaluates
-		// every gap idempotently (existing marks re-fire the same episode
-		// requestId).
+		// At least one gap's op publish failed and needs an immediate retry.
+		// The redelivery re-evaluates every gap idempotently: the failed gap is
+		// named in the republish set and re-publishes its SAME episode
+		// requestId, every other in-flight gap takes dispatchGap's anti-storm
+		// drop untouched, and a gap that plans afresh derives its requestId from
+		// the mark it creates. Nothing is double-acted.
 		return substrate.Nak
 	}
 	if delayed {
@@ -198,21 +228,38 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		// redeliver on the bounded cadence, never a hot loop.
 		return substrate.NakWithDelay
 	}
+	if longDelayed {
+		// Only config-error gaps (no playbook entry, an unbuildable template,
+		// an undispatchable action). Their fix arrives as a package/target
+		// change that projects no new row, so the redelivery IS the uptake
+		// path — held on the long floor, which prices the re-poll cadence of a
+		// row that stays declined until an author fixes it.
+		return substrate.NakWithLongDelay
+	}
 	return substrate.Ack
 }
 
 // dispatchGap runs Evaluator L2 + Strategist + Actuator for one open gap.
 //
 // Dispatch OCC (§10.8): the weaver-state CAS-create is the anti-storm gate —
-// create wins → dispatch; create loses → the winner dispatched, drop. The
-// in-flight skip applies to FIRST deliveries only: on a redelivery
-// (msg.NumDelivered > 1, i.e. a prior delivery Nak'd or crashed before ack)
-// EVERY in-flight gap on the row re-fires its episode requestId — the
-// redelivery signal is per-message, not per-gap, so the retry is a blanket
-// re-fire across the row's in-flight gaps. Each re-fire derives the same
-// requestId from its mark's create revision and collapses on the Contract #4
-// tracker, so the blanket retry never double-acts and a lost publish is not
-// wedged behind its own mark.
+// create wins → dispatch; create loses → the winner dispatched, drop.
+//
+// The anti-storm decision is taken EARLY, from the mark read, before anything
+// plans or admits: a gap whose mark is present and whose lease is live has an
+// episode genuinely in flight, and the ONE thing that can still be owed against
+// it is whether that episode's op actually reached the Processor. The republish
+// set answers exactly that, per gap, so the live-mark disposition is a two-way
+// split: re-publish the episode when its last publish failed, drop otherwise.
+//
+// That ordering is load-bearing now that a row's OTHER gap can hold the whole
+// row on a redelivery loop — a config-error gap Naks the message, and every
+// redelivery it causes re-enters this function for every open gap on the row.
+// Planning a marked gap on each of those passes would consume an admission
+// token per cycle and, worse, re-publish the in-flight episode's op every cycle
+// for as long as the row keeps coming back. The republish set is what keeps the
+// re-publish per-GAP and conditional on a real publish failure; a message's own
+// redelivery count cannot serve, being per-MESSAGE for an obligation each of the
+// row's gaps holds separately.
 func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	row map[string]any, msg substrate.Message) substrate.Decision {
 
@@ -226,9 +273,38 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// skipped (FR29 discipline).
 		esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col)
 		if !escalated {
-			e.alert(issueKeyGapConfig(targetID, col), "error", "GapWithoutPlaybook",
+			// A CONFIG error: the fix is a package re-author adding the gaps
+			// entry, which projects no new row — so nothing would ever
+			// re-deliver this row and an Ack would strand it violating forever.
+			// Hold it on the long redelivery floor instead: each redelivery
+			// re-evaluates against the CURRENT playbook, so the fix is picked
+			// up automatically within one floor with no rebuild.
+			//
+			// `warning`, not `error`: the fact now stands for as long as it
+			// holds (the loop re-raises it every floor), and aggregateStatus
+			// maps any `error` over the whole issue set to `unhealthy` — so an
+			// `error` here would report "cannot fulfil its primary
+			// responsibility" (Contract #5 §5.2) for a Weaver that is
+			// dispatching normally for every other target. The severity is one
+			// value for every caller of this raise, lane 1 included.
+			//
+			// alertPaced, not alert: this raise is now re-derived on a CADENCE —
+			// once per long floor per stuck row, for as long as the playbook is
+			// wrong — and alert logs every call at Error. It is the third raise at
+			// this target-scoped key, and it needs its two siblings' seam for the
+			// same reason they do: clearClosedMarks retires the key as soon as ANY
+			// one entity's column closes, so an arrival test built on the latch
+			// (alertStanding) would report an arrival on essentially every pass and
+			// damp nothing. A clock survives that clear.
+			//
+			// The message stays a pure function of the key — the playbook is wrong
+			// for the target, identically for every row — so nothing is lost to a
+			// damped pass, exactly as for the PlaybookConfigError sibling. (The
+			// UnresolvedReference sibling names its entity because ITS fault
+			// genuinely differs per row; this one does not.)
+			e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
 				"target "+targetID+": row column "+col+" is true but the playbook defines no gaps entry for it")
-			return substrate.Ack
+			return substrate.NakWithLongDelay
 		}
 		// The augur policy now covers this gap — clear any GapWithoutPlaybook
 		// alert raised before the policy was added, and dispatch the reasoning
@@ -302,19 +378,6 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		pinnedAction = ""
 	}
 
-	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
-	if pl == nil {
-		return dec
-	}
-
-	// redelivered classifies this delivery for the in-flight branch: only
-	// NumDelivered 1 is a definitively FRESH delivery (the anti-storm drop).
-	// NumDelivered 0 (metadata unavailable) deliberately counts as a
-	// redelivery: it may be a retry whose prior delivery never published, and
-	// re-firing is the safe side (the same episode requestId collapses on the
-	// Contract #4 tracker; a drop could wedge a lost publish behind its own
-	// mark).
-	//
 	// staleMark reports whether col is an EXTERNAL gap (Contract #10 §10.3: "a
 	// legitimate close→reopen... mints a new claimId ⇒ a fresh artifact...
 	// External gaps are unchanged — their reclaim re-dispatch is intended
@@ -336,14 +399,54 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// and its claim vertex exist) and .dispatch landing, a call is
 	// committed-and-queued while inflight_<g> still reads false, so a reclaim
 	// in that window mints a genuinely second call. What bounds the exposure is
-	// the `!leaseLive` requirement below: the mark's whole lease must have
+	// the `!leaseLive` requirement here: the mark's whole lease must have
 	// expired first (production default 30 minutes), which is orders of
 	// magnitude longer than a bridge turnaround. It is a window, not an
 	// impossibility — tests that shorten the mark lease have to keep it well
 	// clear of that turnaround (see asyncConvergeOpts in
 	// internal/leaseconvergence).
 	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, ga)
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, msg.NumDelivered != 1, rec, markRev, found, stale)
+
+	// A live mark means an episode for THIS gap is genuinely in flight, and the
+	// republish set is the one thing that can still be owed against it: whether
+	// that episode's op actually reached the Processor. Nothing else this
+	// delivery could do for the gap is owed, so the two arms are the whole
+	// disposition.
+	if found && !stale {
+		if !e.republish.owes(targetID, entityID, col) {
+			// The anti-storm drop. Taken here rather than after planning,
+			// because a row that keeps being redelivered — for its own sake or
+			// for a sibling gap's config-error floor — would otherwise burn one
+			// admission token and re-publish one op per cycle, forever, for a
+			// gap whose episode is already running.
+			//
+			// Nothing owed is skipped by returning above planGap. planGap's
+			// three retires all describe facts a LIVE mark has already
+			// disproved: the mark exists only because an earlier pass built and
+			// fired a plan for this row and gap, which cleared the config and
+			// template entries then; and the gap's own GapBudgetExhausted entry,
+			// if one stands, is retired by the episode's completion closing the
+			// column (retireClosedGapIssues) or by the next delivery once the
+			// mark clears. releaseCompletedLeg runs above this, so a goal leg
+			// that finished is released rather than mistaken for an in-flight
+			// one.
+			return substrate.Ack
+		}
+		// This episode's op publish FAILED and has not been made good since, so
+		// this redelivery — the one that failure asked for — re-publishes it.
+		// Falling through re-plans against the mark's pinned action and reaches
+		// fireEpisode's in-flight arm, which fires with the mark's preserved
+		// claimId: same requestId, so a publish that was in fact ambiguous
+		// (op accepted, ack lost) collapses on the Contract #4 tracker rather
+		// than minting a second episode.
+	}
+
+	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
+	if pl == nil {
+		return dec
+	}
+
+	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, rec, markRev, found, stale)
 }
 
 // staleMark reports whether gap column col is declared as an EXTERNAL gap
@@ -484,16 +587,20 @@ func surfaceOnlyGap(ga GapAction) bool {
 }
 
 // planGap resolves one gap's plan (Evaluator L2 + Strategist), routing a
-// failure by its class: an unresolved reference defers on the bounded
-// redelivery cadence; a config or data error is surfaced and the gap skipped
-// (retrying cannot fix it). The two carry different Contract #5 §5.2
-// severities: a per-row DATA error (a malformed/incomplete anchor row whose
-// template references resolve null) is a `warning` (degraded) — one bad row,
-// every other row still remediates, so Weaver fulfils its responsibility; a
-// CONFIG error (a package playbook missing a gaps entry, an un-dispatchable
-// action) is an `error` (unhealthy) — it affects every row of the target and
-// only a package re-author can fix it. pl == nil means do not dispatch — the
-// returned Decision is the caller's disposition for this gap.
+// failure by WHERE ITS FIX CAN COME FROM: an unresolved reference is transient
+// mid-convergence and defers on the short redelivery cadence; a template fault
+// and an un-dispatchable action both have a fix path that projects no new row
+// (an edit to the template, the playbook, or the package), so redelivery is
+// their only automatic uptake and they defer on the LONG floor instead. None of
+// the three is skipped-and-forgotten: pl == nil means do not dispatch on THIS
+// pass, and the returned Decision is the caller's disposition.
+//
+// All three raise at `warning`. A per-row DATA error is one bad row while every
+// other row still remediates; a CONFIG error affects every row of the target but
+// is now a STANDING fact, re-derived for as long as it holds, and
+// aggregateStatus maps any `error` over the whole issue set to `unhealthy` — so
+// an `error` here would report "cannot fulfil its primary responsibility"
+// (Contract #5 §5.2) for a Weaver dispatching normally for every other target.
 //
 // pinnedAction (Fire 5/6) is the mark's currently-recorded actionRef, or ""
 // for a genuinely fresh episode — the sole input resolvePlannedAction needs
@@ -525,23 +632,16 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		}
 	}
 	if perr == nil {
-		if !e.admitGap(target, targetID, entityID, col, resolved.Adapter, row) {
-			// Fire 8 admission control (design §3.4): a declared budget has no
-			// spare capacity for this gap right now. No mark, no plan, no
-			// issue — this is ordinary pacing, not a fault; the redelivery
-			// cadence is the retry, exactly like an unresolved-reference defer.
-			e.logger.Debug("weaver: gap dispatch deferred by admission control",
-				"targetId", targetID, "entityId", entityID, "gap", col)
-			return nil, "", substrate.NakWithDelay
-		}
 		var pl *plan
 		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
-			// A plan built and about to fire disproves THREE standing facts: the
-			// playbook resolves (the config issue), this entity's gap has an
-			// attempt left after all (its GapBudgetExhausted, which a raised
-			// maxretries_<g> or an escalation can make stale without the gap ever
-			// having closed), and this row's template references resolve (the
-			// template issue — building the plan IS the resolution).
+			// A plan that BUILT disproves THREE standing facts, whether or not
+			// admission lets it fire on this pass: the playbook resolves (the
+			// config issue), this entity's gap has an attempt left after all (its
+			// GapBudgetExhausted, which a raised maxretries_<g> or an escalation
+			// can make stale without the gap ever having closed), and this row's
+			// template references resolve (the template issue — building the plan
+			// IS the resolution). The build is what settles all three, so the
+			// retires belong above the admission gate, not below it.
 			//
 			// The gap column's own `data:` entry is deliberately NOT cleared here:
 			// a built plan says nothing about whether missing_<g> carries a §10.2
@@ -549,6 +649,26 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
 			e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
+
+			// Fire 8 admission control (design §3.4): a declared budget has no
+			// spare capacity for this gap right now. No mark, no episode, no
+			// issue — this is ordinary pacing, not a fault; the redelivery
+			// cadence is the retry, exactly like an unresolved-reference defer.
+			//
+			// The gate sits BELOW the build, not above it, and both halves of that
+			// ordering matter. A token is a permit to DISPATCH, so it must only be
+			// drawn for a plan that would actually fire — above the build, a row
+			// whose plan can never build (a template fault, an un-dispatchable
+			// action) would draw one on every one of its redeliveries for as long
+			// as the fault stood. And a deferral is the 5 s transient class, so
+			// deciding it above the build would hand that class to a CONFIG-error
+			// row whose own class is the long floor, collapsing a paced target's
+			// stuck population onto a 5 s loop.
+			if !e.admitGap(target, targetID, entityID, col, resolved.Adapter, row) {
+				e.logger.Debug("weaver: gap dispatch deferred by admission control",
+					"targetId", targetID, "entityId", entityID, "gap", col)
+				return nil, "", substrate.NakWithDelay
+			}
 			return pl, actionRef, substrate.Ack
 		}
 	}
@@ -578,13 +698,27 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			"target "+targetID+" entity "+entityID+" gap "+col+" dispatch deferred for redelivery: "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
+		// The fault is template × row: a template reference that resolves null
+		// against THIS row. One of its two fix paths — an edit to the action
+		// template or the playbook — projects no new row, so the row would
+		// never be re-evaluated after an Ack. The long floor covers both paths
+		// (a corrected projection supersedes the pending revision and delivers
+		// on its own; a corrected template is picked up by the next
+		// redelivery).
 		e.alertPaced(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError",
 			"target "+targetID+" entity "+entityID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.Ack
+		return nil, "", substrate.NakWithLongDelay
 	default:
-		e.alertPaced(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
+		// A CONFIG error — an action the deployment cannot dispatch. Only a
+		// package re-author fixes it and that produces no new row delivery, so
+		// the long redelivery floor is the automatic uptake path, exactly as
+		// for a gap with no playbook entry. `warning` for the same reason:
+		// a standing `error` would pin the whole component `unhealthy`
+		// (aggregateStatus) over one target's authoring fault while every
+		// other target dispatches normally.
+		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.Ack
+		return nil, "", substrate.NakWithLongDelay
 	}
 }
 
@@ -617,26 +751,25 @@ func (e *Engine) admitGap(target *Target, targetID, entityID, col, adapter strin
 // (the dispatch OCC) and fire the episode op. rec/markRev/found/stale are the
 // caller's own already-read mark snapshot (dispatchGap reads it once, up
 // front, so the Fire 5 candidate-pin resolution and the fire decision made
-// here never see two different mark states). redelivered selects the
-// genuinely-in-flight disposition — false drops (the anti-storm gate:
-// another episode is in flight), true re-publishes the SAME episode
-// requestId (idempotent at the Contract #4 tracker). stale (staleMark)
-// reclaims the mark in place instead — see that branch. The reconciler
-// sweep's OWN reclaim does not pass through here for its lease-expiry case:
-// it replaces the expired mark in place under a revision condition and
-// fires directly, independently. action is recorded on the mark (the §10.3
-// value shape) so a later reclaim can re-dispatch the right episode.
+// here never see two different mark states). stale (staleMark) reclaims the
+// mark in place — see that branch. The reconciler sweep's OWN reclaim does not
+// pass through here for its lease-expiry case: it replaces the expired mark in
+// place under a revision condition and fires directly, independently. action is
+// recorded on the mark (the §10.3 value shape) so a later reclaim can
+// re-dispatch the right episode.
+//
+// A live mark (found && !stale) reaches here only from dispatchGap, and only
+// when the republish set says this gap's last publish FAILED — the anti-storm
+// drop for every other live-mark delivery is taken there, above planning. This
+// arm is therefore the re-publish and nothing else. Every other caller passes
+// found=false, so none of them can reach it.
 func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey, col, action string,
-	pl *plan, redelivered bool, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
+	pl *plan, rec *mark, markRev uint64, found, stale bool) substrate.Decision {
 
 	if found && !stale {
-		if !redelivered {
-			// A fresh delivery while the episode is genuinely in flight — the
-			// anti-storm drop.
-			return substrate.Ack
-		}
-		// Redelivery retry path: re-publish the same episode with the existing
-		// mark's preserved claimId (so the userTask identity stays stable).
+		// Re-publish the same episode with the existing mark's preserved
+		// claimId, so the userTask identity — and the derived requestId — stay
+		// stable and the Processor collapses the duplicate.
 		return e.fire(ctx, targetID, entityID, col, markRev, rec.ClaimID, pl)
 	}
 
@@ -773,11 +906,22 @@ func planOptionalReads(pl *plan, claimID string) []string {
 	return pl.optionalReads(claimID)
 }
 
-// fire materializes one episode's op and fire-and-forget publishes it. A
-// publish failure Naks: the mark already exists, so the redelivery re-derives
-// the SAME requestId and re-publishes (idempotent at the Processor). The op's
-// requestId is episode-scoped (markRevision) UNLESS the plan overrides it
-// (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
+// fire materializes one episode's op and fire-and-forget publishes it, and it
+// is the SOLE writer of the republish set — the record of which gaps owe a
+// re-publish.
+//
+// A primary-op publish failure Naks, which asks for the row back immediately,
+// and records the obligation. On that redelivery dispatchGap finds the mark
+// present with a live lease and would take the anti-storm drop; the recorded
+// obligation is what makes it re-publish this same episode instead, with the
+// mark's preserved claimId so the requestId is unchanged and the duplicate
+// collapses on the Contract #4 tracker. A successful publish retires the
+// obligation at the same key. If the obligation cannot be recorded (the target
+// is at its cap) the key simply degrades to the restart behaviour — the sweep's
+// lease-expiry reclaim re-derives the same episode identity from the mark.
+//
+// The op's requestId is episode-scoped (markRevision) UNLESS the plan overrides
+// it (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
 // per-open-episode token the payload folds into the STABLE userTask identity
 // (§10.3).
 //
@@ -788,17 +932,23 @@ func planOptionalReads(pl *plan, claimID string) []string {
 // dispatched-flip whose loss self-heals on the reconciler's next sweep
 // (design augur-dispatch-pickup §3.4); Nak-ing here would needlessly re-fire
 // the ALREADY-SUCCEEDED primary op's redelivery path for a purely cosmetic
-// flip delay.
+// flip delay. For the same reason it records no obligation: the republish set
+// exists to re-fire an episode whose op was lost, and this episode's op landed.
 func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markRevision uint64, claimID string, pl *plan) substrate.Decision {
 	requestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
 	if pl.requestID != nil {
 		requestID = pl.requestID(claimID)
 	}
 	if err := e.act.submit(ctx, requestID, pl.operationType, pl.class, pl.payload(claimID), pl.authTarget, pl.reads, planOptionalReads(pl, claimID), pl.enumerations); err != nil {
+		if !e.republish.add(targetID, entityID, col) {
+			e.logger.Warn("weaver: republish obligations at their per-target cap; this lost publish falls back to the reclaim ladder",
+				"targetId", targetID, "entityId", entityID, "gap", col, "cap", republishCapPerTarget)
+		}
 		e.logger.Error("weaver: op publish failed; nak for retry",
 			"targetId", targetID, "entityId", entityID, "gap", col, "requestId", requestID, "err", err)
 		return substrate.Nak
 	}
+	e.republish.clear(targetID, entityID, col)
 	if fu := pl.followUp; fu != nil {
 		fuRequestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
 		if fu.requestID != nil {
@@ -844,13 +994,33 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// retire the data ones on a value that parses, but a deleted entity
 		// projects no values at all, so this is the only pass that can retire
 		// them — by prefix, since the set of columns that raised is not knowable
-		// from an empty body.
+		// from an empty body. The prefix is also what retires the synthetic
+		// rowBodyColumn entry: an entity whose last projected body was
+		// unparseable can end by deletion instead of by a parseable revision,
+		// and the tombstone's empty body needs no parsing to get here.
+		//
+		// The `gap:` family is retired by the same prefix and for a stronger
+		// reason: its entries are raised at whatever openGapColumns enumerated,
+		// which is every true missing_* column WHETHER OR NOT the playbook names
+		// it, while the candidate walk below yields only the playbook's keys
+		// unioned with the (now empty) row's. A gap entry raised at an orphan
+		// column is therefore reachable by no per-key clear once the entity is
+		// gone, and the prefix is its only retirement.
+		e.issues.clearPrefix(issuePrefixGapEntity + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
 	}
 	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
-		if row != nil && e.boolColumn(targetID, entityID, row, col) {
+		// readable answers only the config-latch retirement below: a tombstone
+		// row says the whole entity is gone, and a row that carries the column
+		// as an explicit bool or drops it entirely has stated its value, but a
+		// PRESENT non-bool has said nothing this pass can act on.
+		open, readable := false, true
+		if row != nil {
+			open, readable = e.boolColumnRead(targetID, entityID, row, col)
+		}
+		if open {
 			// anyOpen answers exactly one question — is any gap left that could
 			// READ the admission priority column — so only a gap that can reach
 			// the admission gate may hold it true. A `surface` gap cannot:
@@ -880,8 +1050,21 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// which the sweep, holding one mark, does not have — observes a column
 		// leaving rather than one entity's gap ending. Idempotent when none
 		// stands.
+		//
+		// It is also the only retirement here that turns on the column having
+		// genuinely CLOSED rather than merely not reading true, and the only
+		// one whose key is shared with every other entity of the target. An
+		// unreadable column (present, non-bool) is not evidence of closure, and
+		// retiring a target-scoped fact on it would let one repeatedly
+		// re-projecting broken row clear the latch at its projection rate,
+		// re-stamping the `since` of a config fault every other row is still
+		// raising. The per-entity retirements below are unaffected: they are
+		// this row's own facts, and a row that cannot state the column has no
+		// use for them either way.
 		e.retireClosedGapIssues(targetID, entityID, col)
-		e.issues.clear(issueKeyGapConfig(targetID, col))
+		if readable {
+			e.issues.clear(issueKeyGapConfig(targetID, col))
+		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column.
@@ -912,6 +1095,14 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
 		}
+		// The gap ended, so nothing is owed against its episode any more: retire
+		// any republish obligation with the mark it was owed against. Runs on the
+		// same not-currently-true condition as the mark and count deletes, so it
+		// covers a gap that closed, a column the row dropped, and a deleted
+		// entity alike. It cannot race the `fire` that ADDS one: this pass runs
+		// in handleRow's preamble and only names columns the row is NOT reporting
+		// open, while the dispatch leg below only fires columns it IS.
+		e.republish.clear(targetID, entityID, col)
 		if markCleared {
 			if cErr := e.marks.recordEffectClose(ctx, targetID, col, rec.Action); cErr != nil {
 				e.logger.Warn("weaver: effect close record failed",
@@ -982,14 +1173,16 @@ func (e *Engine) retireGapPlanIssues(targetID, entityID, gapColumn string) {
 
 // retireClosedGapIssues retires everything a gap ACTUALLY ENDING retires: the
 // plan-side facts above, plus the gap's own entity-scoped latch (a `surface`
-// gap standing open, a spent retry budget).
+// gap standing open, a spent retry budget, a budget spent and escalated to the
+// reasoning tier).
 //
 // The split from retireGapPlanIssues is the difference between "this gap ended"
 // and "this gap is no longer dispatchable", and it is load-bearing. A gap the
 // playbook dropped is undispatchable but may still read TRUE in the row, and
 // lane-1 goes on raising at issueKeyGapEntity for exactly that column —
 // openGapColumns enumerates every true missing_* whether the playbook names it
-// or not, and escalateExhaustedGap raises there through alertStanding. Clearing
+// or not, and escalateExhaustedGap raises there on both its arms (an
+// un-escalated budget, and an escalation dispatched). Clearing
 // that latch from a leg that only knows the gap left the PLAYBOOK makes it flap:
 // the next delivery re-raises, the arrival test sees an empty latch and logs a
 // spurious Error, and the fresh stamp destroys the age of a fact that never
@@ -1083,11 +1276,32 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 // clearClosedMarks retires theirs at the close instead; issueKeyDataEntity's
 // doc holds the whole family's teardown map.
 func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
+	value, _ := e.boolColumnRead(targetID, entityID, row, col)
+	return value
+}
+
+// boolColumnRead is boolColumn's full result: the column's bool value, plus
+// whether that value is READABLE — whether the row actually said something
+// about the column.
+//
+// Readable covers the two §10.2-conformant shapes and only those. An explicit
+// bool speaks for itself. An ABSENT (or null) column is the §10.2 retraction
+// shape and reads as a closed column — the whole basis on which clearClosedMarks
+// treats a column the row stopped reporting as a gap that ended, tombstone
+// included. A PRESENT value of any other type is neither: the false returned
+// with it is a conservative default, not a fact about the row, so a caller whose
+// decision turns on the column genuinely being false must not act on it.
+//
+// One caller needs the distinction — clearClosedMarks' retirement of the
+// TARGET-scoped config latch, which an unreadable column would otherwise retire
+// on every projection of a broken row. Every other caller wants the
+// conservative false and takes boolColumn.
+func (e *Engine) boolColumnRead(targetID, entityID string, row map[string]any, col string) (value, readable bool) {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
 	if !ok || v == nil {
 		e.issues.clear(key)
-		return false
+		return false, true
 	}
 	b, isBool := v.(bool)
 	if !isBool {
@@ -1095,10 +1309,10 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
 		e.issues.set(key, "warning", "RowDataError", msg)
-		return b
+		return b, false
 	}
 	e.issues.clear(key)
-	return b
+	return b, true
 }
 
 // intColumn reads a §10.2 integer column off a row, returning ok=false when the
@@ -1329,12 +1543,13 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 		// A surface gap has no remediation chain, so it has no budget to have
 		// spent: the count that reached this call is stranded from the action
 		// the package replaced (surfaceOnlyGap). Both branches below would be
-		// wrong for it. The un-escalated one raises GapBudgetExhausted at
-		// issueKeyGapEntity — the SAME latch lane-1 holds this column's surface
-		// issue on, so the two would overwrite each other and re-stamp `since`
-		// on every round trip, the flap the orphan-column arm was amended to
-		// stop. The escalated one dispatches a real Augur reasoning episode for
-		// a gap whose whole contract is that Weaver never dispatches for it.
+		// wrong for it. Both write issueKeyGapEntity — GapBudgetExhausted on the
+		// un-escalated arm, GapEscalatedToAugur on the escalated one — and that
+		// is the SAME latch lane-1 holds this column's surface issue on, so
+		// either would overwrite it and re-stamp `since` on every round trip,
+		// the flap the orphan-column arm was amended to stop. The escalated one
+		// also dispatches a real Augur reasoning episode for a gap whose whole
+		// contract is that Weaver never dispatches for it.
 		// Ack: nothing to do, and nothing to redeliver for.
 		//
 		// The latch is left exactly as found. It is lane-1's here, and a clear
@@ -1358,7 +1573,16 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 			"target "+targetID+" entity "+entityID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
 		return substrate.Ack
 	}
-	e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	// Retire a GapBudgetExhausted raised for this row BEFORE the augur policy
+	// covered the gap — that fact is superseded the moment an escalation is the
+	// disposition. The guard is what keeps the clear to that one job: this
+	// function's own escalation record lives at the same latch, and clearing
+	// unconditionally would wipe it on every derivation that short-circuits below
+	// on a live mark, leaving a "standing" record that never stands for longer
+	// than one delivery.
+	if !e.issues.standingAs(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur) {
+		e.issues.clear(issueKeyGapEntity(targetID, entityID, gapColumn))
+	}
 
 	// The exhausted gap's OWN mark, if one survives, occupies the SAME
 	// <targetId>.<entityId>.<gapColumn> key the escalation's fresh CAS-create
@@ -1373,11 +1597,20 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	//     subsequent redelivery of this still-open gap would tear down and
 	//     re-fire a brand-new escalation episode on top of one already
 	//     running (a self-inflicted storm this function must not cause).
+	//     This arm is ALSO what bounds the cost of re-deriving the same
+	//     exhaustion: a decline-floor redelivery, a sweep pass and an operator
+	//     replay all reach this function, and every one of them that finds a
+	//     live mark costs one mark read and no model call.
 	//   - A STALE mark (expired lease) or none at all belongs to the
 	//     original action's now-spent retry lineage (or a prior escalation
 	//     attempt that never completed) — clear it, revision-conditioned on
 	//     the read just taken so a genuinely concurrent fresh episode is
-	//     never clobbered, then fire fresh.
+	//     never clobbered, then fire fresh. This is the ONLY recovery a dead
+	//     escalation episode has: the reasoning claim's own Loom instance or
+	//     bridge call can be lost, and nothing else re-derives it, so this arm
+	//     must stay reachable from every derivation. Its re-fire rate is one per
+	//     mark lease per gap, because each re-fire mints a fresh live mark —
+	//     which is what keeps it from becoming a per-pass model call.
 	rec, markRev, found, err := e.marks.get(ctx, targetID, entityID, gapColumn)
 	if err != nil {
 		e.logger.Warn("weaver: mark read failed ahead of exhausted-gap escalation; nak with delay",
@@ -1403,7 +1636,58 @@ func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targe
 	if pl == nil {
 		return dec
 	}
-	return e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false)
+	dec = e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false)
+	if dec != substrate.Ack {
+		// A publish failure inside `fire` records a republish obligation at this
+		// gap's key, and for an escalation that obligation is both useless and
+		// unsafe, so it is withdrawn here rather than left to age out.
+		//
+		// Useless: handleRow routes an exhausted gap through THIS function and
+		// never reaches dispatchGap, which is the set's only reader — so the
+		// entry can never be consulted while the gap stays exhausted, and it
+		// occupies one of the target's 256 slots meanwhile.
+		//
+		// Unsafe: it does not stay unreachable. An operator `resetBudget`, or a
+		// lens raising maxretries_<g>, makes the gap dispatchable again while the
+		// escalation's own mark is still present — and dispatchGap's live-mark
+		// arm falls through on `owes`, re-planning against that mark's pinned
+		// actionRef and re-publishing an episode nothing asked for. Beyond the
+		// Contract #4 tracker's 24 h horizon that is a genuine second dispatch.
+		//
+		// Nothing is lost by withdrawing it: this episode's retry is the
+		// lease-expiry re-fire above, which is reached by every derivation of the
+		// exhaustion, not the republish set.
+		e.republish.clear(targetID, entityID, gapColumn)
+		return dec
+	}
+	// The escalation is now a standing FACT about this gap, recorded as one so an
+	// operator can see which gaps are on the reasoning tier and how long they
+	// have been there. It replaces, at the same latch, the GapBudgetExhausted the
+	// un-escalated branch raises: both state what a spent budget led to for this
+	// one row, they are mutually exclusive, and sharing the latch is what puts
+	// them on the same retirement machinery.
+	//
+	// It is a RECORD, not a gate. Nothing reads it back to decide whether to
+	// escalate: what bounds the re-escalation of one gap is the mark lease read
+	// above — a live mark Acks, an expired one re-fires — and a latch consulted
+	// as a gate there would suppress the expired-mark arm too, which is the only
+	// recovery a dead reasoning episode has.
+	//
+	// The raise sits BELOW planGap, which clears this latch for any gap whose
+	// plan builds — including this escalation's own. Written above the plan it
+	// would be erased on the way out and record nothing.
+	//
+	// `warning`, not `error`: an escalated gap is one Weaver could not remediate
+	// conventionally and has handed to the reasoning tier, which is degraded
+	// service for that row, not a Weaver that cannot fulfil its responsibility
+	// (Contract #5 §5.2) — every other row still remediates. It is set rather
+	// than alerted because the dispatch this line follows is already logged, and
+	// alertStanding's arrival level is Error, which no successful escalation
+	// deserves.
+	e.issues.set(issueKeyGapEntity(targetID, entityID, gapColumn), "warning", codeGapEscalatedToAugur,
+		"target "+targetID+" entity "+entityID+": row column "+gapColumn+" exhausted its retry budget and was "+
+			"escalated to Augur reasoning")
+	return substrate.Ack
 }
 
 // markCandidateColumns is the union of the playbook's gaps keys and the row's
@@ -1555,6 +1839,17 @@ const (
 	issuePrefixTemplate  = "template:"
 )
 
+// codeGapEscalatedToAugur is the issueKeyGapEntity code recording that one
+// row's gap spent its retry budget and was handed to the Augur reasoning tier —
+// the operator-facing counterpart of GapBudgetExhausted, which the same latch
+// carries when no augur policy takes the gap.
+//
+// It is a record and nothing gates on it. What bounds a gap's re-escalation is
+// the escalation mark's own lease (escalateExhaustedGap's live/expired arms);
+// gating on this latch instead would suppress the expired-mark arm, which is the
+// only recovery a reasoning episode that died has.
+const codeGapEscalatedToAugur = "GapEscalatedToAugur"
+
 // issueKeyTargetPrefixes lists the per-target issue-key families that a target
 // teardown must retire wholesale (Engine.Revoke) — the gap-entity, gap-config,
 // row-data and template families. These are the families whose keys carry a
@@ -1626,14 +1921,21 @@ func issueKeyGapConfig(targetID, col string) string {
 // (Revoke or registry removal via reconcileConsumers) prefix-clears the target
 // (issueKeyTargetPrefixes).
 //
-// Two exits from handleRow retire nothing, and neither strands an entry. A row
-// whose body does not parse returns before the reconcile: that is unreadable
+// One member of the family is keyed at a SYNTHETIC column: rowBodyColumn, whose
+// fact is "this row's body does not parse at all". It has no column reader, so
+// its retirement is not a read — the successful json.Unmarshal of a later
+// revision of the same row clears it at the raise site, and the two prefix
+// teardowns cover a subject that leaves (the entity's deletion tombstone, whose
+// empty body needs no parsing, and the target's Revoke or registry removal).
+//
+// Two exits from handleRow retire nothing else, and neither strands an entry. A
+// row whose body does not parse returns before the reconcile: that is unreadable
 // evidence, not evidence of repair (the sweep takes the same posture on the same
 // input), and every retirement above stays reachable by the next delivery that
-// does parse — including the deletion tombstone, whose empty body needs no
-// parsing. A row for an unregistered target returns at the registry miss, and
-// its target's whole issue set is retired wholesale by the reconcileConsumers
-// teardown that made the registration go away.
+// does parse — including the deletion tombstone. A row for an unregistered
+// target returns at the registry miss, and its target's whole issue set is
+// retired wholesale by the reconcileConsumers teardown that made the
+// registration go away.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
 }
@@ -1665,4 +1967,63 @@ func issueKeyTemplateEntity(targetID, entityID, col string) string {
 
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
 	return "effect:" + targetID + "." + gapColumn + "." + actionRef
+}
+
+// rowIssuesCappedSegment is the trailing segment of the per-target overflow
+// entry the issue cache maintains once a target's per-ROW issue set reaches
+// rowIssueCapPerTarget. It cannot be mistaken for a member of that family by
+// SHAPE: a per-row key is `data:<targetId>.<entityId>.<column>` and this one is
+// a segment short of it, which is exactly the test rowIssueTarget applies. The
+// `__` prefix is the same engine-synthetic reading convention as
+// rowBodyColumn's — legible, not load-bearing.
+const rowIssuesCappedSegment = "__capped"
+
+// issueKeyRowIssuesCapped keys that overflow entry. It deliberately sits inside
+// the `data:` family so the two teardowns that retire a target's per-row issues
+// wholesale — Revoke and the reconcileConsumers removal, both walking
+// issueKeyTargetPrefixes — carry it away with them; and it deliberately sits
+// ABOVE the entity segment, because the fact is the target's, not any one row's,
+// so the per-entity tombstone clear must not retire it.
+func issueKeyRowIssuesCapped(targetID string) string {
+	return issuePrefixData + targetID + "." + rowIssuesCappedSegment
+}
+
+// rowIssueTarget reports whether key is a member of a PER-ROW issue family — a
+// `gap:`, `data:` or `template:` entry keyed per (target, entity, column) — and
+// if so which target's budget it counts against.
+//
+// The test is the key SHAPE, not a list of raise sites: every member carries an
+// entity segment and a column segment below the target, so a key whose family
+// tail has fewer than two separators is not one. That is what excludes the
+// overflow entry itself (target + reserved segment only) without special-casing
+// it, and what keeps a future target-scoped member of any family from silently
+// consuming a per-row budget.
+//
+// `gap:` belongs here for the same reason the other two do, and its omission
+// would leave the bound describing less than it names. Every member of that
+// family — a `surface` gap standing open, a spent retry budget, a budget spent
+// and escalated — is one fact about one (entity, column) and multiplies with the
+// lens exactly like a row-data fault, so a systemically-broken target grows the
+// in-memory map and the per-heartbeat sort over it without limit. Capping it
+// costs an operator nothing they could otherwise see: the heartbeat DOCUMENT is
+// already truncated to maxHeartbeatIssues severity-first, far below this cap,
+// and a refused raise still carries its severity into the overflow entry, so
+// aggregateStatus reaches the same verdict either way.
+func rowIssueTarget(key string) (string, bool) {
+	tail := ""
+	switch {
+	case strings.HasPrefix(key, issuePrefixGapEntity):
+		tail = key[len(issuePrefixGapEntity):]
+	case strings.HasPrefix(key, issuePrefixData):
+		tail = key[len(issuePrefixData):]
+	case strings.HasPrefix(key, issuePrefixTemplate):
+		tail = key[len(issuePrefixTemplate):]
+	default:
+		return "", false
+	}
+	targetID, rest, ok := strings.Cut(tail, ".")
+	if !ok || targetID == "" || !strings.Contains(rest, ".") {
+		return "", false
+	}
+	return targetID, true
 }

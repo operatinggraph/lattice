@@ -162,7 +162,12 @@ func TestPackage_NeverGrantsAnyWriteOp(t *testing.T) {
 		"ctrl.weaver.resetConfidence": true,
 		// A budget reset re-arms one gap's retry budget, which makes Weaver
 		// DISPATCH again — the furthest thing from inspect-only.
-		"ctrl.weaver.resetBudget":   true,
+		"ctrl.weaver.resetBudget": true,
+		// A target replay recreates the lane-1 durable so every row of the target
+		// is re-evaluated and every still-violating one dispatches — the same
+		// dispatch-causing authority as a budget reset, at a whole target's
+		// blast radius.
+		"ctrl.weaver.replayTarget":  true,
 		"ctrl.loom.pause":           true,
 		"ctrl.loom.resume":          true,
 		"ctrl.refractor.rebuild":    true,

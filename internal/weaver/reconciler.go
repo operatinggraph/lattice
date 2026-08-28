@@ -738,7 +738,7 @@ func (s *sweeper) sweepCount(ctx context.Context, key string, listed map[string]
 	e.logger.Warn("weaver sweep: dispatching a markless open gap",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
 		"action", actionRef, "reason", sweepReasonBudgetReArm)
-	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
+	if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
 		// Either the CAS-create failed outright (still markless — the next pass
 		// retries) or its op publish failed (the mark exists and its lease
 		// bounds the retry, like any other stuck episode). Bounded and retried
@@ -899,7 +899,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "decision", dec)
 			return
 		}
-		if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, false, nil, 0, false, false) != substrate.Ack {
+		if e.fireEpisode(ctx, targetID, entityID, entityKey, gapColumn, actionRef, pl, nil, 0, false, false) != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
 			// its op publish failed (the mark exists; the lease/reclaim
@@ -1122,11 +1122,15 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Fresh episode: the requestId derives from the replace revision (a real new
 	// dispatch attempt). claimID (preserved or freshly minted, above) seeds the
 	// dispatch identity. A publish failure here leaves the fresh mark holding a
-	// live lease, so the retry is real — the sweep re-attempts at that lease's
-	// expiry, and a lane-1 redelivery re-fires the same fresh requestId before
-	// then.
+	// live lease, so the retry is real: the sweep re-attempts at that lease's
+	// expiry. A lane-1 redelivery in the meantime finds that live mark and takes
+	// the anti-storm drop, so it neither duplicates the attempt nor brings it
+	// forward.
 	if e.fire(ctx, targetID, entityID, gapColumn, newRev, claimID, pl) != substrate.Ack {
-		e.logger.Warn("weaver sweep: reclaim re-dispatch did not publish; the fresh mark's lease bounds the retry",
+		// The failure is recorded in the republish set by fire itself, so the
+		// gap's next lane-1 delivery re-publishes this same fresh episode rather
+		// than dropping it; the fresh mark's lease bounds the retry either way.
+		e.logger.Warn("weaver sweep: reclaim re-dispatch did not publish; a lane-1 delivery or the fresh mark's lease bounds the retry",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 	}
 }

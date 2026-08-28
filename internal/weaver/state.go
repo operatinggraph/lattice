@@ -33,6 +33,31 @@ const (
 	maxretriesColumnPrefix = "maxretries_"
 )
 
+// rowBodyColumn names the SYNTHETIC column the unparseable-row-body data error
+// is keyed at (issueKeyDataEntity's `data:<targetId>.<entityId>.<column>`
+// family). The fault is "this row's JSON body does not parse", which is about
+// the whole body rather than any one column, so it needs a column segment that
+// cannot collide with a projected one — otherwise a lens projecting a column
+// called `body` would share one latch with the parse error, and either fault's
+// clear would silently retire the other's.
+//
+// What makes it un-collidable is the READER WHITELIST, not the name. Refractor's
+// output descriptor accepts any non-blank bodyColumn (projection.ParseOutputDescriptor),
+// so no reservation is enforced at projection time; a lens may legally project a
+// column called `__body`. But a column segment only reaches the `data:` family by
+// being PASSED to a reader, and every such call site passes either an engine
+// constant (`violating`, `entityKey`, freshUntilColumn, admissionPriorityColumn,
+// inflightColumnPrefix+g, maxretriesColumnPrefix+g) or a gap column — and a gap
+// column is either one of the row's own `missing_*` keys or a playbook gaps key,
+// which validateTarget rejects unless it matches the same `missing_<gap>`
+// convention. A lens-authored name therefore reaches this family only when it
+// starts with `missing_`, which this constant does not.
+//
+// The `__` prefix is kept for readability, mirroring the `__count` / `__control`
+// weaver-state key tails: it reads as engine-synthetic at a glance. It is a
+// convention here, not the guarantee.
+const rowBodyColumn = "__body"
+
 // markTTLBackstopFactor sizes the mark's NATS per-key TTL relative to its
 // lease: TTL = markTTLBackstopFactor × lease. The TTL must be STRICTLY longer
 // than the lease — the reconciler sweep is the prompt reclaim and the TTL is
