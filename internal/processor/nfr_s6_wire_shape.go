@@ -42,6 +42,22 @@ func isNFRS6Operation(operationType string) bool {
 	return ok
 }
 
+// IsNFRS6Operation reports whether operationType's rejections are equalized to
+// the generic NFR-S6 wire shape.
+//
+// It is the predicate another package asserts containment against. Membership
+// means every rejection of the operation reached after authorization answers
+// ErrCodeClaimKeyInvalid with nil details and one fixed message, whatever
+// actually failed — so nothing a caller can observe distinguishes one cause
+// from another. A component that submits an operation under a RAW credential,
+// where the script hashes that credential into an index key, therefore depends
+// on this being true of the operation: without the collapse, its rejections
+// separate a bound credential from an unbound one, and the pair becomes an
+// enumeration oracle.
+func IsNFRS6Operation(operationType string) bool {
+	return isNFRS6Operation(operationType)
+}
+
 // claimRejectionMessage is the single message every NFR-S6 rejection carries.
 //
 // It names no step, no key and no underlying error, because each of those is

@@ -200,6 +200,38 @@
 //     `MaxReconnects: -1` for a daemon that must reconnect indefinitely, or
 //     an explicit small finite value for a short-lived CLI that should fail
 //     fast — only the omission.
+//   - Package-owned operation-name declaration (BLOCKING;
+//     package-op-name-declaration-gate-design.md §2.1). A package OWNS the
+//     operation names it declares in its DDLs' `PermittedCommands`. A non-test
+//     `internal/**` engine file writing one of those names as a bare Go string
+//     literal is default-DENIED until the author declares what the literal is:
+//     (policy) the core decides something ABOUT this op — a policy set, a
+//     carve-out, a reserved-verb list, or a branch keyed on the name;
+//     (submits) this engine constructs and submits the operation itself;
+//     (routes) this engine dispatches inbound work on this operation name.
+//     The hazard is (policy): a core-owned set keyed on names the core does not
+//     own is a coupling with no declared counterparty, and nothing tells a
+//     reader — or a reviewer — that it exists. Two such sets shipped
+//     byte-identical in two packages, maintained independently, with no gate;
+//     an op added to one and not the other turns a deliberately-equalized
+//     rejection back into an enumeration oracle. So a (policy) declaration must
+//     additionally carry `pin=<test or gate>` naming what catches that drift —
+//     the same required-sub-field idiom `# read-posture: (e)` uses for
+//     `relation=`. Every category needs a trailing `<why>`.
+//     The universe is DERIVED, never listed: the gate reads every non-test
+//     `packages/**/*.go`, collects the literals inside `PermittedCommands:
+//     []string{…}`, and treats exactly that set as package-owned. A
+//     hand-maintained list rots the day a package adds a verb, and a stale one
+//     cannot be told apart from a name that is genuinely not package-owned.
+//     There is deliberately NO exemption category, mirroring
+//     authCtxTargetShapes; a genuine name collision later is a deliberate
+//     amendment, made then. `cmd/**` is out of scope (a binary submitting
+//     operations is its whole job) and so is `internal/spike/` (standalone
+//     benchmark harnesses, whose one hit is a PermittedCommands fixture — a
+//     declaration, not a use). Kernel-seeded verbs — InstallPackage,
+//     UpgradePackage, UninstallPackage — are core-owned, declared by no
+//     package's PermittedCommands, and so fall outside the derived universe by
+//     construction.
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -217,6 +249,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var (
@@ -588,7 +621,87 @@ var (
 	kvListAssign = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*:?=\s*[^=\n]*\.(?:KVListKeysPrefix|KVListKeysFilter)\(`)
 	kvGetCall    = regexp.MustCompile(`\.KVGet\(`)
 	kvBatchShape = regexp.MustCompile(`//\s*kv-batch:\s*\(([a-z-]+)\)(.*)$`)
+
+	// permittedCommandsBlock captures the body of a package DDL's
+	// `PermittedCommands: []string{…}` — the canonical site where a package
+	// DECLARES the operation names it owns, and therefore the only honest source
+	// for the op-name gate's universe. The block spans as many lines as the
+	// package has verbs, so the pattern is dot-all and non-greedy: it stops at the
+	// literal's own closing brace, which is the first `}` after the opener because
+	// the elements are string literals and nothing nests inside them.
+	permittedCommandsBlock = regexp.MustCompile(`(?s)PermittedCommands:\s*\[\]string\{(.*?)\}`)
+	// goStringLiteral matches an identifier-shaped Go string literal — both the
+	// elements inside a PermittedCommands block and the candidate uses the gate
+	// tests against the derived universe. An operation name is an identifier by
+	// Contract #2, so a literal carrying anything else can never be one.
+	goStringLiteral = regexp.MustCompile(`"([A-Za-z0-9_]+)"`)
+	// opNameShape is the declaration a package-owned operation-name literal must
+	// carry. The host comment marker is either spelling: `//` in the Go engine
+	// files this gate scopes to, `#` for consistency with the Starlark-side
+	// `read-posture` / `authcontext-target` conventions whose grammar it copies.
+	opNameShape = regexp.MustCompile(`(?://|#)\s*op-name:\s*\(([a-z-]+)\)(.*)$`)
 )
+
+// opNameCategories are the declarations an engine file may make about a
+// package-owned operation-name literal. There is deliberately NO exemption
+// category, mirroring authCtxTargetShapes: every literal in the live census is a
+// real operation name, so an escape hatch would buy nothing but a lazy out, and
+// a genuine collision later is a deliberate amendment made then.
+var opNameCategories = map[string]bool{
+	// (policy): the core decides something ABOUT this op — a policy set, a
+	// carve-out, a reserved-verb list, or a branch keyed on the name. This is
+	// the one category that encodes a coupling to a package the core does not
+	// own, so it is the one that must additionally name its guard via `pin=`.
+	"policy": true,
+	// (submits): this engine constructs and submits this operation itself.
+	"submits": true,
+	// (routes): this engine dispatches inbound work on this operation name.
+	"routes": true,
+}
+
+// opNameUniverse caches the derived package-owned operation names for the
+// process. The scan walks thousands of files and every one of them would
+// otherwise re-read the whole packages/ tree.
+var (
+	opNameUniverseOnce sync.Once
+	opNameUniverseSet  map[string]string
+)
+
+// packageOwnedOpNames returns every operation name declared by a package,
+// mapped to the packages/ file that declares it.
+//
+// The set is DERIVED from the declaration sites rather than listed, and that is
+// the whole reason the gate's reach can be trusted: a hand-maintained list rots
+// the day a package adds a verb, and the reader of a stale list cannot tell the
+// difference between "not package-owned" and "nobody updated this". Non-test
+// packages/ sources only — a package's own tests exercise verbs they do not
+// declare.
+func packageOwnedOpNames() map[string]string {
+	opNameUniverseOnce.Do(func() {
+		opNameUniverseSet = map[string]string{}
+		for _, f := range trackedGoFilePaths() {
+			slash := filepath.ToSlash(f)
+			if !strings.HasPrefix(slash, "packages/") && !strings.Contains(slash, "/packages/") {
+				continue
+			}
+			if strings.HasSuffix(slash, "_test.go") {
+				continue
+			}
+			data, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+			for _, block := range permittedCommandsBlock.FindAllStringSubmatch(string(data), -1) {
+				for _, lit := range goStringLiteral.FindAllStringSubmatch(block[1], -1) {
+					if _, seen := opNameUniverseSet[lit[1]]; !seen {
+						opNameUniverseSet[lit[1]] = slash
+					}
+				}
+			}
+		}
+	})
+	return opNameUniverseSet
+}
 
 // kvBatchShapes are the declarable reasons a listed key set is read one key
 // at a time instead of batched with KVGetMulti.
@@ -1223,6 +1336,23 @@ func scanSource(path string, data []byte) []finding {
 	// weaver/loom state scans, the rule-engine anchor scans): that is the
 	// standing `[Perf]` row's own migration to do before this gate could
 	// widen (design §10).
+	// op-name scope: non-test internal/** engine files. cmd/** is out — a binary
+	// that submits operations is doing its whole job — and the hazard the rule
+	// names is engine policy keyed on a name the core does not own.
+	// internal/spike/ is out because it holds standalone benchmark harnesses
+	// (already excluded from this file's embedded-NATS gate for the same reason);
+	// its one hit is a literal PermittedCommands fixture — a declaration, not a
+	// use. The internal/ prefix also keeps this file's own self-test fixtures out
+	// of scope, which carry the banned shape as string literals; that is the same
+	// exemption derivedKeyScoped and historyScoped make explicitly.
+	opNameScoped := !isTest && strings.HasPrefix(slash, "internal/") &&
+		!strings.HasPrefix(slash, "internal/spike/")
+	var opNameAt map[int]annotation
+	var opNameUniverse map[string]string
+	if opNameScoped {
+		opNameAt = annotationSpans(strings.Split(string(data), "\n"), opNameShape)
+		opNameUniverse = packageOwnedOpNames()
+	}
 	kvBatchScoped := !isTest && (strings.HasPrefix(slash, "internal/processor/") || strings.HasPrefix(slash, "internal/substrate/"))
 	if kvBatchScoped {
 		out = append(out, checkListThenGet(path, string(data), annotationSpans(strings.Split(string(data), "\n"), kvBatchShape))...)
@@ -1313,6 +1443,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if grantChangeScoped {
 			out = append(out, checkGrantChangePosture(path, ln, line, grantChangeCall, grantChangeLines)...)
+		}
+		if opNameScoped {
+			out = append(out, checkOpName(path, ln, line, opNameAt[ln], opNameUniverse)...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -2128,6 +2261,70 @@ func checkAuthContextTarget(path string, ln int, line string, declared annotatio
 					"op.authTargetValidated on the same line — binding an UNVALIDATED target to the " +
 					"acted-on resource proves nothing about who may act on it (design §3.4.1)"})
 		}
+	}
+	return out
+}
+
+// checkOpName default-denies one engine line that writes a package-owned
+// operation name as a bare string literal unless the author declared what the
+// literal IS here (package-op-name-declaration-gate-design.md §2.1; all findings
+// BLOCKING). universe maps each package-owned name to the packages/ file whose
+// PermittedCommands declares it (packageOwnedOpNames); declared is the
+// `op-name:` annotation covering this line, resolved by annotationSpans.
+// Comment lines are skipped — prose ABOUT an operation is not a use of it.
+//
+// One finding per LINE, not per literal: a line naming two operations is one
+// decision by one author, and it takes one declaration to discharge.
+func checkOpName(path string, ln int, line string, declared annotation, universe map[string]string) []finding {
+	if isCommentLine(line) {
+		return nil
+	}
+	var names, owners []string
+	seen := map[string]bool{}
+	for _, m := range goStringLiteral.FindAllStringSubmatch(line, -1) {
+		owner, ok := universe[m[1]]
+		if !ok || seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		names = append(names, fmt.Sprintf("%q", m[1]))
+		owners = append(owners, owner)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	const remedy = "Declare what it is on the line or in its comment block: " +
+		"`// op-name: (policy) <why> pin=<test or gate>` (the core decides something ABOUT this op — a " +
+		"policy set, a carve-out, a reserved-verb list, or a branch keyed on the name — and `pin=` names " +
+		"the test or gate that catches drift between the core's set and the package's own declaration), " +
+		"`// op-name: (submits) <why>` (this engine constructs and submits the operation itself), or " +
+		"`// op-name: (routes) <why>` (this engine dispatches inbound work on this operation name)."
+
+	shape, why := declared.shape, declared.why
+	if shape == "" {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "op-name: undeclared package-owned operation name " + strings.Join(names, ", ") +
+				" — declared by " + owners[0] + " in its DDLs' PermittedCommands, so a bare literal here " +
+				"is a coupling to a package this core does not own, with no declared counterparty and " +
+				"nothing telling a reader it exists. " + remedy}}
+	}
+	if !opNameCategories[shape] {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "op-name: unknown category (" + shape + "). " + remedy}}
+	}
+	var out []finding
+	if strings.TrimSpace(why) == "" {
+		out = append(out, finding{file: path, line: ln, warn: false,
+			msg: "op-name: a (" + shape + ") declaration must state its `<why>` — what this operation " +
+				"name is doing here, in the author's own words"})
+	}
+	if shape == "policy" && !strings.Contains(declared.text, "pin=") {
+		out = append(out, finding{file: path, line: ln, warn: false,
+			msg: "op-name: a (policy) declaration must name `pin=<test or gate>` — a core-owned policy " +
+				"set keyed on names the core does not own is the one category that encodes a " +
+				"cross-package coupling, so it is the one that must name what catches the drift " +
+				"(the byte-identical pair maintained independently in two packages is the live " +
+				"instance this gate exists over)"})
 	}
 	return out
 }
@@ -3260,6 +3457,71 @@ func selfTest() []string {
 		{"a clean wrapped comment block passes", "internal/weaver/registry.go",
 			"// The planner-extension posture is frozen table-only for a target\n" +
 				"// that declares no Mode, and is always valid.\n", ""},
+		// The op-name gate. Its universe is derived from the real packages/
+		// tree (packageOwnedOpNames), so these fixtures name operations the
+		// packages actually declare — which makes the deny cases a live proof
+		// that the derivation reached the gate, not merely that the annotation
+		// parser works. The first PAIR is the positive-vector proof the
+		// Processor dossier asks for: the annotated and unannotated forms are
+		// the same line in the same in-scope file, so the clean case cannot be
+		// passing because the fixture was scoped out.
+		{"an annotated op-name literal in an in-scope engine file passes", "internal/weaver/strategist.go",
+			"\t// op-name: (submits) Weaver submits this to start the matched proposal's pattern\n" +
+				"\topStartLoomPattern = \"StartLoomPattern\"\n", ""},
+		{"the SAME line unannotated is denied — the fixture does reach the gate", "internal/weaver/strategist.go",
+			"\topStartLoomPattern = \"StartLoomPattern\"\n",
+			"op-name: undeclared package-owned operation name \"StartLoomPattern\""},
+		{"an undeclared literal in an inbound dispatch switch is denied", "internal/bridge/dispatch.go",
+			"\tcase \"RecordProposal\":\n",
+			"op-name: undeclared package-owned operation name \"RecordProposal\""},
+		{"an undeclared literal in a submitted op envelope is denied", "internal/objectmanager/cascade.go",
+			"\t\tOperationType: \"DetachObject\",\n",
+			"op-name: undeclared package-owned operation name \"DetachObject\""},
+		{"a declared (routes) literal passes", "internal/bridge/dispatch.go",
+			"\t// op-name: (routes) the Bridge dispatches inbound proposal replies on this name\n" +
+				"\tcase \"RecordProposal\":\n", ""},
+		{"an on-the-line declaration passes", "internal/objectmanager/cascade.go",
+			"\t\tOperationType: \"DetachObject\", // op-name: (submits) the cascade detaches each child object\n", ""},
+		{"a Starlark-spelled annotation host is accepted too", "internal/objectmanager/cascade.go",
+			"\t// # op-name: (submits) the cascade detaches each child object\n" +
+				"\tOperationType: \"DetachObject\",\n", ""},
+		{"an unknown op-name category is denied", "internal/loom/engine.go",
+			"\t// op-name: (uses) Loom needs the verb\n" +
+				"\topCreateTask = \"CreateTask\"\n",
+			"op-name: unknown category (uses)"},
+		{"an op-name declaration with no why is denied", "internal/loom/engine.go",
+			"\t// op-name: (submits)\n" +
+				"\topCreateTask = \"CreateTask\"\n",
+			"declaration must state its `<why>`"},
+		{"a (policy) declaration without a pin= is denied", "internal/processor/nfr_s6_wire_shape.go",
+			"\t// op-name: (policy) rejections of this op collapse to one wire shape\n" +
+				"\t\"ClaimIdentity\": {},\n",
+			"a (policy) declaration must name `pin=<test or gate>`"},
+		{"a (policy) declaration naming its pin passes", "internal/processor/nfr_s6_wire_shape.go",
+			"\t// op-name: (policy) rejections of this op collapse to one wire shape; " +
+				"pin=TestRawCredentialCarveOutIsNFRS6Equalized\n" +
+				"\t\"ClaimIdentity\": {},\n", ""},
+		{"a (submits) declaration needs no pin", "internal/privacyworker/manager.go",
+			"\t// op-name: (submits) the worker records its own shred finalization\n" +
+				"\topRecordShredFinalization = \"RecordShredFinalization\"\n", ""},
+		{"an annotation does NOT reach the next sibling literal", "internal/loom/engine.go",
+			"\t// op-name: (submits) Loom completes the pattern it drove\n" +
+				"\topCompletePattern = \"CompletePattern\"\n" +
+				"\topFailPattern = \"FailPattern\"\n",
+			"op-name: undeclared package-owned operation name \"FailPattern\""},
+		{"prose naming an operation is not a use of it", "internal/loom/engine.go",
+			"\t// CreateTask is submitted by the strategist, never here.\n" +
+				"\t// case \"CompletePattern\": handled upstream\n", ""},
+		{"a literal that no package declares is not gated", "internal/loom/engine.go",
+			"\topSomethingCoreOwns = \"InstallPackage\"\n", ""},
+		{"the gate is scoped off cmd/**", "cmd/loftspace-app/listings.go",
+			"\t\tOperationType: \"DetachObject\",\n", ""},
+		{"the gate is scoped off internal/spike/", "internal/spike/starlark/api_ergonomics.go",
+			"\tPermittedCommands: []string{\"CreateIdentity\", \"ClaimIdentity\"},\n", ""},
+		{"the gate is scoped off packages/, which is where the names are declared", "packages/identity-domain/ddls.go",
+			"\tPermittedCommands: []string{\"ClaimIdentity\"},\n", ""},
+		{"the gate skips internal test files", "internal/loom/engine_test.go",
+			"\topCreateTask := \"CreateTask\"\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -3278,6 +3540,7 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "capability-apply:") &&
 				!strings.HasPrefix(fd.msg, "refusal-sentinel:") &&
 				!strings.HasPrefix(fd.msg, "kv-batch:") &&
+				!strings.HasPrefix(fd.msg, "op-name:") &&
 				!strings.HasPrefix(fd.msg, "history/changelog") {
 				continue
 			}
@@ -3313,6 +3576,40 @@ func selfTest() []string {
 		}
 	}
 	failures = append(failures, historyLineSelfTest()...)
+	failures = append(failures, opNameCountSelfTest()...)
+	return failures
+}
+
+// opNameCountSelfTest pins how many findings one line earns. The table above
+// asserts only that SOME finding carried the expected text, so a line naming two
+// operations could quietly grow a second, duplicate finding — one author's one
+// decision reported twice, discharged by one annotation. It also pins the
+// inverse: a repeated name on one line is still one finding.
+func opNameCountSelfTest() []string {
+	var failures []string
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"two operation names on one line are one finding",
+			"\tops := []string{\"CreateTask\", \"CompletePattern\"}\n", 1},
+		{"the same name twice on one line is one finding",
+			"\tif ot == \"CreateTask\" || prev == \"CreateTask\" {\n", 1},
+		{"two operation names on two lines are two findings",
+			"\topCreateTask = \"CreateTask\"\n\topCompletePattern = \"CompletePattern\"\n", 2},
+	}
+	for _, tc := range cases {
+		var got int
+		for _, fd := range scanSource("internal/loom/engine.go", []byte(tc.src)) {
+			if strings.HasPrefix(fd.msg, "op-name:") {
+				got++
+			}
+		}
+		if got != tc.want {
+			failures = append(failures, fmt.Sprintf("%s: got %d op-name finding(s), want %d", tc.name, got, tc.want))
+		}
+	}
 	return failures
 }
 
@@ -3372,6 +3669,16 @@ func historyLineSelfTest() []string {
 }
 
 func trackedGoFiles(strict bool) []string {
+	files := trackedGoFilePaths()
+	reportUntrackedGoFiles(strict)
+	return files
+}
+
+// trackedGoFilePaths lists the repository's git-tracked .go files. It is the
+// scan set in CLI mode and the source packageOwnedOpNames derives its universe
+// from in BOTH modes — the hook scans one file but must still know the whole
+// tree's declared operation names, or its verdict would differ from CI's.
+func trackedGoFilePaths() []string {
 	out, err := exec.Command("git", "ls-files", "*.go").Output()
 	if err != nil {
 		return nil
@@ -3382,7 +3689,6 @@ func trackedGoFiles(strict bool) []string {
 			files = append(files, l)
 		}
 	}
-	reportUntrackedGoFiles(strict)
 	return files
 }
 
