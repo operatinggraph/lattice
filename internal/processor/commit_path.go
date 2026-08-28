@@ -44,8 +44,12 @@ type Deps struct {
 	// Nil when not wired (stub mode). Fire-and-forget: the emitter launches a
 	// goroutine so step 3 latency is unaffected.
 	TraceEmitter *AuthTraceEmitter
-	// ClaimEmitter records ClaimIdentity attempt outcomes to Health KV at
-	// health.processor.<instance>.claim-attempts.<outcome>. Nil safe: a nil
+	// ClaimEmitter records the outcome of every NFR-S6 operation to Health KV at
+	// health.processor.<instance>.claim-attempts.<outcome>. Those operations
+	// answer the caller with one fixed wire shape whatever happened, so this
+	// counter is the only place an operator can see what they actually did —
+	// which is why both the success and the rejection legs are keyed on the
+	// equalized set rather than on any one operation. Nil safe: a nil
 	// ClaimEmitter silently skips emission.
 	ClaimEmitter ClaimAttemptEmitter
 	// ConflictEmitter surfaces same-key commit conflicts (the §3.2 OCC
@@ -427,7 +431,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			// in the step-8 atomic batch (vtx.op.<id>.events) and the durable outbox
 			// consumer publishes it to `core-events`. There is no in-commit publish.
 			cp.deps.Metrics.OpsCommitted.Add(1)
-			if env.OperationType == "ClaimIdentity" && cp.deps.ClaimEmitter != nil {
+			if isNFRS6Operation(env.OperationType) && cp.deps.ClaimEmitter != nil {
 				cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, "success")
 			}
 			cp.replyTo(msg, BuildAcceptedReplyWithRevisions(env.RequestID, now, result.PrimaryKey, commitAck.Revisions))

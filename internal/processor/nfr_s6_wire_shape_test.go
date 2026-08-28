@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -324,4 +325,46 @@ func TestNFRS6_NonCollapsedClassesKeepTheirRealCodes(t *testing.T) {
 				reply.Error, ErrCodeEnvelopeMalformed)
 		}
 	})
+}
+
+// TestNFRS6_ClaimAttemptEmissionIsSymmetric pins that both legs of the
+// claim-attempts counter are keyed on the equalized SET, never on one operation.
+//
+// The counter is the operator's only view of what an NFR-S6 operation did: the
+// caller gets one fixed wire shape whatever happened, by construction. So an
+// operation whose rejections are counted while its successes are not does not
+// merely under-report — it reads as a flow that never succeeds, and a genuine
+// failure spike is invisible against a baseline that is already total failure.
+// The rejection leg (handleStubFailure) has always used isNFRS6Operation; the
+// success leg is asserted here to match it, over the whole set rather than over
+// the one operation a literal used to name.
+func TestNFRS6_ClaimAttemptEmissionIsSymmetric(t *testing.T) {
+	src, err := os.ReadFile("commit_path.go")
+	if err != nil {
+		t.Fatalf("read commit_path.go: %v", err)
+	}
+	text := string(src)
+
+	// The positive vector first: both emission legs must actually be present,
+	// or the assertions below pass over code that no longer exists.
+	if n := strings.Count(text, "ClaimEmitter.RecordClaimAttempt("); n < 3 {
+		t.Fatalf("found %d ClaimEmitter.RecordClaimAttempt call(s) in commit_path.go, want the 3 "+
+			"emission legs (one success, two rejection) — this test is asserting over code that moved", n)
+	}
+
+	for _, op := range []string{"ClaimIdentity", "CompleteCredentialLink"} {
+		if !isNFRS6Operation(op) {
+			t.Fatalf("%s must be in the equalized set for this assertion to mean anything", op)
+		}
+		if strings.Contains(text, `env.OperationType == "`+op+`"`) {
+			t.Errorf("commit_path.go gates a claim-attempt emission on the literal operation %q "+
+				"instead of on isNFRS6Operation(env.OperationType).\n"+
+				"Every operation in the equalized set answers its caller with one fixed wire shape, so "+
+				"health.processor.<instance>.claim-attempts.<outcome> is the ONLY place its real outcome "+
+				"becomes visible. Keying one leg on a single operation and the other on the set means the "+
+				"set's other members have their failures counted and their successes dropped — the counter "+
+				"then reports a working flow as totally failing, and hides a real spike behind that "+
+				"baseline. Key both legs on isNFRS6Operation.", op)
+		}
+	}
 }

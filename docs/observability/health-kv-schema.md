@@ -79,7 +79,7 @@ Source package: `internal/processor/`
 | `health.processor.<instance>` | ≥ 10s heartbeat | `internal/processor/health.go` | `HealthHeartbeater.emit()` | Category A — `interval×10`, re-armed |
 | `health.processor.<instance>.step3-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitCapabilityAuthSignals()` | Category A — same TTL, lock-step with the heartbeat |
 | `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — fixed 1h default, not re-armed |
-| `health.processor.<instance>.claim-attempts.<outcome>` | per `ClaimIdentity` call | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
+| `health.processor.<instance>.claim-attempts.<outcome>` | per NFR-S6 operation call (`ClaimIdentity`, `CompleteCredentialLink`) | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.commit-conflicts` | per same-key commit conflict | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordCommitConflict()` | Category B — 1h default, re-armed each write |
 | `health.alerts.security.<alertCode>` | on security event | `internal/processor/health_alerts.go` | `HealthAlertEmitter.EmitAlert()` | Category B — 1h default, re-armed each write |
 | `health.processor.<instance>.auth-trace.<requestId>` | per auth denial | `internal/processor/step3_auth_trace.go` | `AuthTraceEmitter.Emit()` | fixed 1h |
@@ -87,7 +87,16 @@ Source package: `internal/processor/`
 **`<instance>`** follows the convention `proc-<NanoID>` (Contract #5 §5.1).
 
 **`<outcome>` enum** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
-`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`.
+`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`,
+`internal-fault`.
+
+The counter spans the whole **NFR-S6 equalized set** (`internal/processor`'s `nfrS6Operations`), not
+`ClaimIdentity` alone — both the success leg (`commit_path.go`'s post-commit emission) and the
+rejection leg (`handleStubFailure`) key on `isNFRS6Operation`. That is deliberate and load-bearing:
+those operations answer every caller with one fixed wire shape, so this counter is an operator's
+**only** view of what they actually did. A per-operation split would also re-introduce the asymmetry
+the two legs exist to avoid — an operation whose failures are counted but whose successes are not
+reads as a totally-failing flow, and a real failure spike is then invisible against that baseline.
 
 `credential-not-provisioned` means the SUBMITTING credential has no live identity vertex — either
 never provisioned, or tombstoned (revoked). The claim emits a `boundTo` edge whose source is that
