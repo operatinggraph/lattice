@@ -667,6 +667,36 @@ def execute(state, op):
         if vertex_alive(state, sig_key):
             fail("AlreadySigned: " + app_key)
 
+        # The gap that dispatches this op (missing_signature, lenses.go) only
+        # fires while the unit is still available to THIS application:
+        # (unitStatus <> 'leased') OR (landlordDecision = 'approved'). Weaver
+        # stops DISPATCHING once that flips false, but does not RETRACT a
+        # grant already handed out, so a task dispatched before the unit
+        # leased to a rival (or was tombstoned) keeps a live signable grant
+        # until its own expiry. Re-verify the same condition here rather than
+        # trust the grant alone -- the live bug this closes: 13 rival
+        # applicants held a signable grant on a unit already leased to
+        # someone else, 6 more on a since-tombstoned unit.
+        #
+        unit_key = leaseapp_unit(app_key)
+        if unit_key == None:
+            fail("UnitNoLongerAvailable: application " + app_key + " names no live unit; cannot sign")
+        # read-posture: (e) per-candidate follow-up read off the appliesToUnit
+        # enumeration leaseapp_unit() just walked -- mirrors
+        # DecideLeaseApplication's own resolution of the unit + its .listing.
+        listing = kv.Read(unit_key + ".listing")
+        unit_status = None
+        if listing != None and not listing.isDeleted:
+            unit_status = listing.data.get("status")
+        # read-posture: (d) declared optionalReads at SignLease dispatch --
+        # absent is the common not-yet-decided case.
+        decision = kv.Read(app_key + ".decision")
+        decision_value = None
+        if decision != None and not decision.isDeleted:
+            decision_value = decision.data.get("value")
+        if unit_status == "leased" and decision_value != "approved":
+            fail("UnitNoLongerAvailable: unit " + unit_key + " is already leased to another applicant; application " + app_key + " was not the one approved")
+
         # The signature is a fact in an aspect (D5); the application root stays
         # {}. signedAt is the op's own timestamp, normalized to canonical UTC so
         # a downstream lexical compare is sound.

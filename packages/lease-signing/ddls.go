@@ -203,9 +203,11 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "SignLease — applicant signs the lease",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Validates the application is alive. Writes the .signature aspect {signedAt: <op.submittedAt, canonical UTC>} " +
-					"on the application (root data stays {} — D5). Emits leaseapp.leaseSigned{leaseAppKey}. Returns primaryKey. " +
-					"Rejects a non-existent application or one already signed (the .signature CreateOnly guard).",
+				ExpectedOutcome: "Validates the application is alive, then re-verifies (independent of the dispatched grant) that the applied-to " +
+					"unit is still live and either not leased or leased on THIS application's own approved decision. Writes the .signature aspect " +
+					"{signedAt: <op.submittedAt, canonical UTC>} on the application (root data stays {} — D5). Emits leaseapp.leaseSigned{leaseAppKey}. " +
+					"Returns primaryKey. Rejects a non-existent application, one already signed (the .signature CreateOnly guard), or one whose unit " +
+					"is now tombstoned or already leased to a different applicant (UnitNoLongerAvailable).",
 			},
 			{
 				Name:    "WithdrawLeaseApplication — applicant cancels / backs out of an application",

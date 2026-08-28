@@ -747,6 +747,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "leaseAppKey",
 				TargetType:  "leaseapp",
 				Reads:       []string{"{payload.leaseAppKey}"},
+				// .decision is absence-tolerant (the common not-yet-decided
+				// case) -- the script re-verifies the unit is still available
+				// to THIS application (unit leased to a rival, or tombstoned)
+				// before honoring an already-dispatched grant, scripts.go.
+				OptionalReads: []string{"{payload.leaseAppKey}.decision"},
 			},
 		},
 		// Engine legs — externalTask instanceOp/replyOp/dispatchOp — that

@@ -1663,7 +1663,7 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 		SubmittedAt:   "2026-06-18T16:00:00Z",
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{appKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
 	}
 	testutil.PublishOp(t, conn, signEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1688,13 +1688,117 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 		SubmittedAt:   "2026-06-18T17:00:00Z",
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{appKey, appKey + ".signature"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{appKey, appKey + ".signature"}, OptionalReads: []string{appKey + ".decision"}},
 	}
 	testutil.PublishOp(t, conn, sign2)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 
 	// keep the identity-domain dependency reference resolved.
 	_ = identitydomain.Package
+}
+
+// setUnitLeasedStatus overwrites unitKey's .listing aspect with status:leased
+// (preserving the fields seedUnit wrote), simulating a RIVAL applicant's
+// approval having already flipped the unit via SetListingStatus. Written
+// directly rather than through the op — these package tests don't install
+// loftspace-domain/location-domain (seedUnit's own doc comment).
+func setUnitLeasedStatus(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string) {
+	t.Helper()
+	listing := map[string]any{
+		"class": "listing", "isDeleted": false, "vertexKey": unitKey, "localName": "listing",
+		"data": map[string]any{
+			"availableFrom":   "2026-08-01T00:00:00Z",
+			"leaseTermMonths": 12,
+			"rentAmount":      2400,
+			"rentCurrency":    "USD",
+			"status":          "leased",
+		},
+	}
+	lb, _ := json.Marshal(listing)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, unitKey+".listing", lb); err != nil {
+		t.Fatalf("set unit .listing leased %s: %v", unitKey, err)
+	}
+}
+
+// tombstoneUnit soft-deletes unitKey's own vertex directly, simulating the
+// unit being withdrawn from the market after this application was created.
+func tombstoneUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string) {
+	t.Helper()
+	doc := map[string]any{"class": "location", "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, unitKey, b); err != nil {
+		t.Fatalf("tombstone unit %s: %v", unitKey, err)
+	}
+}
+
+// TestSignLease_RejectsUnitLeasedToRival closes the live gap: Weaver only
+// stops DISPATCHING new SignLease tasks once missing_signature's own gate
+// ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) flips false —
+// it does not retract a grant already handed out. A rival applicant holding
+// an unexpired ephemeral grant on a unit since leased to someone else must
+// still be rejected by the op itself, not merely by an eventually-expiring
+// grant.
+func TestSignLease_RejectsUnitLeasedToRival(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "sign-rival")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBsignrivaXtHJKMNPQR")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
+
+	// The unit leases -- to whichever applicant the landlord actually
+	// approved, not this one (this application never received a .decision).
+	setUnitLeasedStatus(t, ctx, conn, unitKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signrival0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-08-27T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if keyExists(t, ctx, conn, appKey+".signature") {
+		t.Fatalf("a rival applicant must NOT be able to sign a unit already leased to someone else")
+	}
+}
+
+// TestSignLease_RejectsTombstonedUnit mirrors the rival case for a unit
+// withdrawn from the market entirely (leaseapp_unit resolves None once the
+// unit vertex itself is tombstoned).
+func TestSignLease_RejectsTombstonedUnit(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "sign-tombstoned")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBsigntomb1ntHJKMNPQ")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
+
+	tombstoneUnit(t, ctx, conn, unitKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signtomb00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-08-27T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{appKey}, OptionalReads: []string{appKey + ".decision"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if keyExists(t, ctx, conn, appKey+".signature") {
+		t.Fatalf("signing an application whose unit is tombstoned must be rejected")
+	}
 }
 
 // decideReadsFor builds DecideLeaseApplication's declared ContextHint:
@@ -1749,7 +1853,7 @@ func signLease(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}, OptionalReads: []string{leaseAppKey + ".decision"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
