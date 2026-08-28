@@ -357,6 +357,30 @@ validation. The full openCypher engine is the only rule engine Refractor runs.
 - **Canonical engine for new lenses.** The bootstrap-seeded Capability Lens uses `engine: "full"`.
 - **Wiring**: `cmd/refractor/main.go` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+#### The pattern graph steps a ranged hop
+
+`AnchorHopIndex`/`ScanRootHopIndex` (`hopindex.go`) index a **variable-length** relationship
+rather than refusing it: `PatternHop`/`PatternStep` carry the hop's `[Min, Max]` range, clamped at
+index-build time by the same `maxVarLengthHops` the executor's own `traverseRel` applies
+(`executor.go`, `rel_traverse.go`). The derivation walk
+(`pipeline.walkToAnchors`) answers such a step with a bounded frontier expansion — the zero-hop
+admission when `Min == 0`, a closure-local cycle guard, and the far-end label prune applied **only at
+admission**, never to intermediates, because the executor filters intermediates by nothing either.
+Every read still goes through the walk's one `edgesOf` closure, so `DefaultDerivationReadCap` bounds
+it and a breach returns `ok == false` and runs the shipped `ActorEnumerator` BFS: no new budget, no
+truncation.
+
+The soundness statement is narrower than it looks and is what makes the shared clamp load-bearing:
+**the derivation is complete with respect to what the executor will evaluate, not with respect to the
+graph.** An anchor whose path crosses more than `maxVarLengthHops` of a ranged hop cannot produce a
+row, because the executor's walk stops there too.
+
+A ranged hop's distance is an interval, so it contributes no `HopIndex.Dist`. `Dist` is computed over
+non-ranged binding hops, and any position the anchor can reach across a ranged hop takes the
+incomparable `-1` sentinel — `AnchorSideSeeds` then seeds **both** endpoints, which only widens the
+derived set. An over-stated distance would be the unsound direction: `consider` drops the endpoint
+whose distance is larger.
+
 #### `OPTIONAL MATCH … WHERE` null-restore semantics
 
 When an `OPTIONAL MATCH` pattern matches real neighbors but a `WHERE` then excludes
