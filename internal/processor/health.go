@@ -44,26 +44,6 @@ type Metrics struct {
 	// key. Mirrors Weaver's sweepReclaims / sweepReclaimsSuppressed split.
 	CommitRetries        atomic.Uint64
 	CommitRetryExhausted atomic.Uint64
-	// ClaimFloorApplied counts rejections of an NFR-S6 operation
-	// (claim_reply_floor.go's nfrS6Operations) that were handed to the release
-	// quantizer. ClaimFloorDropped counts those the quantizer refused because
-	// maxPendingDeferredReplies was already in flight — refused, not answered
-	// early, so those callers time out.
-	//
-	// ClaimFloorLate counts the ones released in a quantum BEYOND the first,
-	// i.e. where the work outran the quantum. It is the operator's only way to
-	// know the anti-enumeration invariant is currently holding, and it is the
-	// direct detector for the padding attack the quantizer exists to defeat: a
-	// caller can inflate its own service time (up to
-	// opwire.MaxDeclaredReads declared reads, all resolved inside the window)
-	// to push its reply into a later quantum. Quantizing means that leaks
-	// nothing, but a rising ClaimFloorLate on an endpoint every consumer holds
-	// is either that probe or a genuinely degraded read path — both worth
-	// looking at. A steady zero means every rejection is landing on the first
-	// boundary.
-	ClaimFloorApplied atomic.Uint64
-	ClaimFloorLate    atomic.Uint64
-	ClaimFloorDropped atomic.Uint64
 }
 
 // healthIssue is one Contract #5 §5.5 issue record. since persists across
@@ -316,13 +296,6 @@ func (h *HealthHeartbeater) buildHealthDoc(ctx context.Context, lifecycle string
 		// surfaced RevisionConflict (a genuinely hot key).
 		"commit_retries_total":         h.metrics.CommitRetries.Load(),
 		"commit_retry_exhausted_total": h.metrics.CommitRetryExhausted.Load(),
-		// NFR-S6 anti-enumeration release quantizer (claim_reply_floor.go).
-		// claim_floor_late_total is the one to alert on: nonzero means some
-		// rejection's work outran the quantum, which is both the padding-probe
-		// signature and a degraded-read-path signal.
-		"claim_floor_applied_total": h.metrics.ClaimFloorApplied.Load(),
-		"claim_floor_late_total":    h.metrics.ClaimFloorLate.Load(),
-		"claim_floor_dropped_total": h.metrics.ClaimFloorDropped.Load(),
 	}
 
 	// Real per-lane consumer backlog (Contract #5 §5.4 lane_lag). Each lane has

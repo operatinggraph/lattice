@@ -4,34 +4,43 @@
 // (ErrCodeClaimKeyInvalid, no details) so a caller cannot enumerate which
 // cause it hit from the reply alone (claim_test.go's
 // TestClaimIdentity_RejectionCausesIndistinguishable is the residual proving
-// that on the wire). What the wire shape cannot hide is TIME: the three
-// causes do genuinely different amounts of work before answering.
+// that on the wire). What the wire shape cannot hide is TIME, and this
+// instrument reports the RAW per-cause service time each cause costs: the
+// interval from a submitter's publish to its reply, with nothing between the
+// script's answer and the publish of that answer.
 //
-//   - absent-target: the target vertex/state aspect are simply not present —
-//     no crypto, the cheapest branch (ddls.go's `fail_claim("no-target")`
-//     arms).
+// The three causes are the three facts about the graph a claim adjudicates:
+//
+//   - absent-target: the target vertex and its state aspect are not present,
+//     so step 4 hydrates fewer documents than either live cause does. That
+//     residue is substrate-rooted — a multi_last response carries one message
+//     per MATCHED subject — and is the gap
+//     nfr-s6-release-quantum-payload-design.md §6.3 accepts as a statistical
+//     channel against a confirmation oracle.
 //   - already-claimed: a live, claimed identity whose `.claimKey` aspect is
-//     tombstoned. The script's own state gate answers
-//     (`fail_claim("wrong-state")`, ddls.go's `current_state == "claimed"`
-//     arm) before ever touching the claim secret, but `.claimKey` is still
-//     declared in the op's floored read set, and step 4 hydrates every
-//     declared key up front regardless of which script branch eventually
-//     fires (starlark_kv.go's kvModule doc: "a key declared in
-//     contextHint.reads is hydrated at step 4"). For a TOMBSTONED sensitive
-//     aspect, decryptSensitiveDoc's `doc.IsDeleted` arm
-//     (sensitive_decrypt.go) scrubs the body and returns WITHOUT ever calling
-//     readPiiKeyEnvelope or Vault.Decrypt — so this cause pays hydration for
-//     the aspect but not a real decrypt.
+//     tombstoned. `.claimKey` is declared in the op's floored read set and
+//     step 4 hydrates every declared key up front regardless of which script
+//     branch eventually decides the outcome (starlark_kv.go's kvModule doc:
+//     "a key declared in contextHint.reads is hydrated at step 4"), and
+//     decryptSensitiveDoc's `doc.IsDeleted` arm performs the same
+//     readPiiKeyEnvelope round trip and AEAD open the live arm performs
+//     before scrubbing the body (sensitive_decrypt.go), so a tombstoned
+//     sensitive aspect costs what a live one costs.
 //   - wrong-key: a live, unclaimed identity with a LIVE `.claimKey` aspect.
-//     Step 4 hydrates it via the real envelope KVGet + AEAD decrypt path
-//     (decryptSensitiveDoc's non-tombstone branch), and the script goes on to
-//     hash the submitted secret and run `crypto.constant_time_equal` against
-//     the stored hash before answering.
+//     Step 4 hydrates it through the same envelope KVGet + AEAD decrypt path,
+//     and the script hashes the submitted secret and runs
+//     `crypto.constant_time_equal` against the stored hash.
 //
-// A prior fire measured these three sequentially (n=40) and found no
-// resolvable gap. This instrument re-measures under CONCURRENT submission —
-// the shape a real prober would actually use — at a sample size large enough
-// to extract a mean-difference bias smaller than the per-sample noise via
+// The script itself contributes nothing to the spread: both branches
+// accumulate an outcome and fail once at the bottom (ddls.go's first_outcome),
+// so every cause evaluates every check and runs both crypto calls. What is
+// left to measure is the hydration residue above plus the emitter confound
+// below.
+//
+// A prior measurement took these three sequentially (n=40) and found no
+// resolvable gap. This instrument measures under CONCURRENT submission — the
+// shape a real prober would actually use — at a sample size large enough to
+// extract a mean-difference bias smaller than the per-sample noise via
 // bootstrap resampling (Phase C below).
 //
 // It also separates a confound discovered while building this instrument:
@@ -42,11 +51,11 @@
 // health_alerts.go's RecordClaimAttempt does a KVGet followed by a
 // KVPutWithTTL, both synchronous, at health.processor.<instance>.
 // claim-attempts.<outcome>). That term is per-cause and easily larger than
-// the one KVGet + AEAD decrypt the tombstoned arm skips, so a measured gap
-// under the deployed (emitter-on) shape alone cannot be attributed to the
-// decrypt asymmetry with any confidence — it could just as well be emitter
-// key contention. LATTICE_PROBE_EMITTER selects which pipeline shape(s) to
-// measure so the two terms can be told apart.
+// the hydration residue, so a measured gap under the deployed (emitter-on)
+// shape alone cannot be attributed to the hydration asymmetry with any
+// confidence — it could just as well be emitter key contention.
+// LATTICE_PROBE_EMITTER selects which pipeline shape(s) to measure so the two
+// terms can be told apart.
 //
 // Gate: skips unless LATTICE_CLAIM_TIMING_PROBE is set — this file is inert
 // in CI and every other normal `go test` invocation.
@@ -65,16 +74,6 @@
 //	LATTICE_PROBE_SAMPLES     samples PER CAUSE, per emitter arm (default 900)
 //	LATTICE_PROBE_EMITTER     "on" | "off" | "both" (default "both") — which
 //	                          ClaimEmitter wiring(s) to measure
-//	LATTICE_PROBE_FLOOR       "off" (default) | "on" — whether the ClaimIdentity
-//	                          rejection reply floor
-//	                          (internal/processor/claim_reply_floor.go) is
-//	                          engaged. OFF is the default because this
-//	                          instrument's job is to expose the RAW per-cause
-//	                          service-time gap; with the floor on, the gap it
-//	                          would otherwise report is the very thing the floor
-//	                          erases. Run it "on" to confirm the erasure: the
-//	                          three causes' means collapse together and the
-//	                          pairwise CIs stop excluding zero.
 package identitydomain_test
 
 import (
@@ -125,12 +124,11 @@ const probeReplyWait = 30 * time.Second
 //
 // testutil.SetupPackageTestEnv hands back a 90-second context — a sane ceiling
 // for an ordinary package test, and far too short for this one: a run is
-// SAMPLES * 3 operations, and with the ClaimIdentity rejection floor engaged
-// each of those costs at least processor.DefaultClaimRejectionFloor, so even a
-// modest run outlives 90s and every subsequent JetStream publish fails with
-// "context deadline exceeded" rather than producing a sample. The probe
-// therefore runs on its own budget and leaves the real ceiling where the
-// operator sets it, on `go test -timeout`.
+// SAMPLES * 3 operations across up to two emitter arms, so even a modest run
+// outlives 90s and every subsequent JetStream publish fails with "context
+// deadline exceeded" rather than producing a sample. The probe therefore runs
+// on its own budget and leaves the real ceiling where the operator sets it, on
+// `go test -timeout`.
 const probeRunBudget = 2 * time.Hour
 
 // probeBootstrapIterations is the resample count for the mean-difference
@@ -179,7 +177,6 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	submitters := probeIntEnv(t, "LATTICE_PROBE_SUBMITTERS", 8)
 	samplesPerCause := probeIntEnv(t, "LATTICE_PROBE_SAMPLES", 900)
 	arms := probeEmitterArms(t, "LATTICE_PROBE_EMITTER")
-	floor := probeFloorSetting(t, "LATTICE_PROBE_FLOOR")
 
 	// The harness seeds under its own bounded context and is done with it by the
 	// time it returns; everything this instrument drives runs on probeRunBudget
@@ -192,7 +189,7 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	// Health KV counters that only exist when a ClaimEmitter is wired, and the
 	// wrong-key fixture's own setup (a real CreateUnclaimedIdentity op) needs
 	// some working pipeline to drive it through, so this one does double duty.
-	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true, probeSubjectOn, floor)
+	cpOn, consOn, instanceOn := probePipeline(t, ctx, conn, "probeon", true, probeSubjectOn)
 
 	// ---- fixtures — the deployed shapes, not a synthetic shortcut ----
 
@@ -263,21 +260,17 @@ func TestClaimRejectionTimingProbe(t *testing.T) {
 	var consOff jetstream.Consumer
 	for _, withEmitter := range arms {
 		if !withEmitter {
-			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false, probeSubjectOff, floor)
+			cpOff, consOff, _ = probePipeline(t, ctx, conn, "probeoff", false, probeSubjectOff)
 			break
 		}
 	}
 
-	floorLabel := "floor=off"
-	if floor == 0 {
-		floorLabel = fmt.Sprintf("floor=on(%s)", processor.DefaultClaimRejectionFloor)
-	}
 	for _, withEmitter := range arms {
-		label := "emitter=on " + floorLabel
+		label := "emitter=on"
 		cp, cons := cpOn, consOn
 		subject := probeSubjectOn
 		if !withEmitter {
-			label = "emitter=off " + floorLabel
+			label = "emitter=off"
 			cp, cons = cpOff, consOff
 			subject = probeSubjectOff
 		}
@@ -330,28 +323,6 @@ func probeEmitterArms(t *testing.T, name string) []bool {
 	}
 }
 
-// probeFloorSetting resolves LATTICE_PROBE_FLOOR to the
-// processor.Deps.ClaimRejectionFloor value the probe's pipelines are built
-// with: "off" (the default) yields the negative disable sentinel, "on" yields
-// zero, which NewCommitPath resolves to processor.DefaultClaimRejectionFloor.
-//
-// Defaulting to OFF is what makes the instrument measure what it claims to:
-// the floor's whole purpose is to make the three causes' completion times
-// indistinguishable, so a probe run with it engaged reports the floor's
-// effectiveness, not the underlying service-time gap.
-func probeFloorSetting(t *testing.T, name string) time.Duration {
-	t.Helper()
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
-	case "", "off":
-		return -1
-	case "on":
-		return 0
-	default:
-		t.Fatalf("%s=%q: want one of on|off", name, v)
-		return 0
-	}
-}
-
 // probeNanoID generates a fresh 20-char NanoID on the main test goroutine,
 // failing the test on entropy-source error.
 func probeNanoID(t *testing.T) string {
@@ -369,17 +340,13 @@ func probeNanoID(t *testing.T) string {
 // commit_path.go's handleStubFailure only calls it when non-nil, so leaving
 // cfg.ClaimEmitter unset is a genuine emitter-off path — no separate
 // CommitPath wiring is needed to isolate the two arms.
-//
-// floor is threaded straight to processor.Deps.ClaimRejectionFloor: negative
-// disables the rejection reply floor, zero takes its production default.
-func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool, filterSubject string, floor time.Duration) (*processor.CommitPath, jetstream.Consumer, string) {
+func probePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string, withEmitter bool, filterSubject string) (*processor.CommitPath, jetstream.Consumer, string) {
 	t.Helper()
 	instance := claimInstance + "-" + durable
 	cfg := testutil.PipelineConfig{
-		Durable:             durable,
-		Instance:            instance,
-		FilterSubjects:      []string{filterSubject},
-		ClaimRejectionFloor: floor,
+		Durable:        durable,
+		Instance:       instance,
+		FilterSubjects: []string{filterSubject},
 	}
 	if withEmitter {
 		cfg.ClaimEmitter = processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, testutil.TestLogger())

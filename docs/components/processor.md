@@ -160,7 +160,7 @@ by Gate 2 (`nfr_r1_test.go`).
 - **Cache-first.** A key listed in `contextHint.reads` is pre-fetched at step 4 and served from `state` at the step-4 OCC snapshot — `kv.Read` cannot force a fresher re-read of an already-hydrated key (echoing the snapshot revision as `expectedRevision` is what keeps the commit's OCC check sound). A key declared in `contextHint.optionalReads` and found **absent** at step 4 is served as `None` from the same snapshot (the *known-absent* record — no live GET, and a `create` derived off that absence is retry-attributable: a lost `CreateOnly` race re-hydrates, sees the key present, and the script re-branches). A key *not* declared at all falls through to a single on-demand GET (incurs latency, §2.5 — class (b) debt when the key was knowable at submit time).
 - **Absence is graceful.** Unlike a read of a `contextHint.reads` key recorded required-absent (a fatal `HydrationMiss`), `kv.Read` of an undeclared absent / hard-tombstoned key returns `None`, so a script can branch present-vs-absent — the read-before-create pattern a `createIfAbsent` mutation cannot express (events stay coherent with mutations because the script decides both in one branch). Declaring the key in `optionalReads` keeps this pattern **and** makes it declared/snapshotted/Edge-predictable — the §2.5 read-posture norm.
 - **The op-meta descriptor's disposition is a floor the envelope cannot raise** (§2.5, `descriptor_floor.go`, applied at the head of step 4 before `derive_reads`). Where an operation's `Dispatch` descriptor declares a key under `optionalReads`, an envelope naming that same key under `reads` is **demoted** rather than honoured; an `egressReads` key is marked absence-tolerant in place instead of moved, because relocating it would swap a bridge-opened `$sensitiveRef` for plaintext. A template compiling to a key *shape* or to nothing at all floors nothing, and a `{payload.<field>}` template contributes no *exclusion* from the floor — an exclusion the submitter can address is a bypass, not a precedence rule.
-- **For the NFR-S6 operations the declared set is CLOSED, not merely floored** (`refuseUndeclaredContextHint`, same file and same point in step 4). `ClaimIdentity` and `CompleteCredentialLink` may declare only the keys their own descriptor names — resolved to concrete keys; a shape admits nothing — and an envelope naming anything else, including **any** `egressReads` key or **any** enumeration (an `OpDispatchSpec` can name neither), is refused before hydration. The reason is the window, not the key: every declared read resolves inside step 4, i.e. inside the release quantum below, so an open set lets the submitter price the work a timing defence is drawn around. An operation with no descriptor admits nothing and refuses every declared key — a visible over-deny. Derived (class-(g)) keys are the DDL's own and are outside the rule. The refusal is a `HydrationError` carrying **no key**: the refused key is the submitter's own probe, so it goes to the Processor log alone, and the reply collapses to the generic `ClaimKeyInvalid` like every other rejection of these operations.
+- **For the NFR-S6 operations the declared set is CLOSED, not merely floored** (`refuseUndeclaredContextHint`, same file and same point in step 4). `ClaimIdentity` and `CompleteCredentialLink` may declare only the keys their own descriptor names — resolved to concrete keys; a shape admits nothing — and an envelope naming anything else, including **any** `egressReads` key or **any** enumeration (an `OpDispatchSpec` can name neither), is refused before hydration. The reason is the equalization, not the key: the rejection causes of these two operations are made to cost the same over the keys the DESCRIPTOR names, and a key the submitter adds is work nothing equalized — its cost turns on whether it exists, whether it is sensitive and whether it is tombstoned. Refusing every `egressReads` key also keeps `decryptSensitiveDoc`'s tombstone-dependent egress refusal unreachable for them. An operation with no descriptor admits nothing and refuses every declared key — a visible over-deny. Derived (class-(g)) keys are the DDL's own and are outside the rule. The refusal is a `HydrationError` carrying **no key**: the refused key is the submitter's own probe, so it goes to the Processor log alone, and the reply collapses to the generic `ClaimKeyInvalid` like every other rejection of these operations.
 - **Non-deterministic by design.** It reads *live* state, so a replayed (at-least-once) operation can branch differently. That is intentional: the Processor — not replay determinism — is the idempotency authority; the deterministic id + the `CreateOnly` commit backstop resolve the publish→commit race (Contract #10 §10.3 / [userTask-dispatch-idempotency design](../../_bmad-output/implementation-artifacts/usertask-dispatch-idempotency-design.md) §4.3–4.4).
 
 ### Forbidden
@@ -194,7 +194,7 @@ by Gate 2 (`nfr_r1_test.go`).
 
 ---
 
-## NFR-S6 anti-enumeration: the wire shape AND the clock
+## NFR-S6 anti-enumeration: the wire shape AND the cost
 
 `ClaimIdentity` and `CompleteCredentialLink` answer a caller who holds no valid
 secret. Both take a target key straight from the payload, both are granted to
@@ -204,7 +204,7 @@ requirement without qualification: **"All failure modes collapse to the generic
 `ClaimKeyInvalid` reply code (NFR-S6 anti-enumeration); specific outcomes surface
 only via Health KV."** That is two obligations, not one.
 
-The operation set is declared in `internal/processor/claim_reply_floor.go`
+The operation set is declared in `internal/processor/nfr_s6_wire_shape.go`
 (`nfrS6Operations`) and is keyed on **operationType**, never on the error code a
 particular failure happened to produce.
 
@@ -219,74 +219,125 @@ The real code, message and details go to the Processor log; the specific outcome
 goes to `health.processor.<instance>.claim-attempts.<outcome>`, with
 `internal-fault` covering the faults the script never reached.
 
-### 2. One release lattice
+### 2. One cost per rejection
 
 Identical replies are still separable if they arrive at different times. Measured
 at n=3000/cause, the three `ClaimIdentity` rejection causes differ by 0.3–0.7 ms
-of mean service time — absent-target hydrates three missing keys; already-claimed
-skips the envelope read and AEAD decrypt via `decryptSensitiveDoc`'s `IsDeleted`
-arm; wrong-key pays both — a bias that is monotone, invariant to load, and worth
-roughly 12 requests to extract.
+of mean service time, a bias that is monotone, invariant to load, and worth
+roughly 12 requests to extract. The difference is removed at the two places it is
+made, so there is nothing left to hide.
 
-So the reply is released on a **lattice of fixed offsets from message receipt**:
-`receipt + ceil(elapsed/Q)*Q`, with `Q = DefaultClaimRejectionFloor` (50 ms,
-sized against loaded p99 ≈ 17 ms, not against service time).
+**The package script fails once, at the bottom.** `packages/identity-domain`'s
+`ClaimIdentity` and `CompleteCredentialLink` branches evaluate every guard
+whatever the ones before it decided, accumulate the first failing condition's
+outcome word (`first_outcome`), and raise it in a single terminal `fail`. Every
+cause therefore executes the same instructions, including the `crypto.sha256` and
+the `crypto.constant_time_equal` — against fixed-length stand-ins when the real
+operands are absent, since `crypto.constant_time_equal` returns on a length
+mismatch before comparing. `TestClaimScript_GuardsFailOnceRatherThanCascading`
+pins the single-exit shape; an added early return reds it.
 
-Three properties carry the mechanism, and each exists because the obvious
-alternative fails:
+**The engine's tombstoned sensitive read costs what a live one costs.**
+`decryptSensitiveDoc`'s `IsDeleted` non-egress arm performs the live path's whole
+decrypt sequence — `ciphertextFromData`, `vault.KeyHolder`, `readPiiKeyEnvelope`
+(the round trip that dominates), `Decrypt`, the unmarshal — and discards the
+plaintext **and every error along the way**, then delivers the same scrubbed
+tombstone it always delivers. Without that, an already-claimed identity's
+tombstoned `.claimKey` costs ~0.36 ms less than an unclaimed one's live aspect,
+which is the enumeration signal exactly. Swallowing the errors is what keeps a
+shredded key envelope from turning a tombstoned read into an `InternalError` whose
+reachability depends on the target's state.
 
-- **Anchored at receipt**, captured at the top of `dispatch` before any
-  state-dependent work. Anchoring at the rejection would yield `Q + work` and
-  leave the per-cause gap fully intact.
-- **Quantized, not floored.** A floor answers `max(receipt+Q, done)`, so any
-  request whose work outruns `Q` is answered at its own service time. That is one
-  request away: `opwire.MaxDeclaredReads` permits 1000 declared reads, the
-  Gateway copies `contextHint` into the envelope verbatim, step 3 never inspects
-  it, and every declared read resolves inside the window — so a caller pads until
-  it escapes the floor and reads the raw timing back. Under quantization there is
-  no escape hatch; a padded request simply answers one quantum later.
-- **Off the pump worker.** A lane has 2–4 workers, so parking the wait there
-  would cap the whole lane — every operation on it — at `workers × (1s/Q)` ops/s,
-  with the attacker choosing how much of that budget to burn. The wait runs on
-  its own goroutine, bounded at 1024 concurrent deferrals; **at the bound the
-  reply is dropped, never answered early**, because an early answer restores the
-  signal exactly when an attacker is generating the load they are measuring.
+**What is not equalized, by decision.** An absent target returns fewer messages
+from the batched `KVGetMulti` than a present one — four fewer messages, parses and
+decrypt entries — because a `multi_last` response carries one message per *matched*
+subject. Equalizing it would need the engine to fabricate a synthetic snapshot per
+operation, which is more per-operation coupling than the mechanism it would
+protect. So the surviving question is **"does this key exist?"**, never "is it
+claimed?", and the price is ~0.63 ms for `ClaimIdentity` — a present target pays the
+envelope round trip whichever arm it takes, an absent one pays nothing — and ~1.0 ms
+for `CompleteCredentialLink`, whose descriptor names a second sensitive aspect. The
+*maximum* pairwise gap is what it always was; equalizing claimed-vs-wrong-key raises
+the *surviving* one, because it closes that pair by adding the round trip to the
+cheaper arm rather than removing it from the dearer.
+
+Against a ~17 ms loaded p99 that is still a *statistical* channel needing many
+samples, and it answers a **confirmation** oracle rather than an enumeration one:
+the caller must already hold a `vtx.identity.<NanoID>`, and that keyspace is ~2¹¹⁷.
+The deterministic single-request oracle is the wire code, and §1 closes it.
+
+Two further per-rejection terms, named because a residue table that claims to be
+exhaustive and is not is worse than no table:
+
+- **The Health-KV claim-attempts write is inside the measured interval.**
+  `handleStubFailure` records the outcome (`RecordClaimAttempt`, `health_alerts.go`)
+  *before* `replyRejection` publishes, and that is a blocking `KVGet` plus a blocking
+  `KVPutWithTTL` on a key whose last segment is the outcome word. Every
+  script-decided cause pays the identical two round trips, so it adds variance and
+  no per-cause offset — variance costs an attacker samples rather than saving them —
+  which is why it stays where it is. The post-commit rejection classes (step 6 / 6.5 / 8)
+  skip it and answer sooner, but each sits past the secret comparison.
+- **A tombstoned sensitive read now costs one `readPiiKeyEnvelope` round trip
+  platform-wide**, not only on these two operations — that is what makes the arms
+  equal, and it is the ratified trade (design §4.2). It carries no metric and no log,
+  and needs none: each of the discard's early returns mirrors the live path's own exit
+  at the same step, so the two arms stop together or not at all.
+
+See `_bmad-output/implementation-artifacts/nfr-s6-release-quantum-payload-design.md`
+§6.3 and §8 for the trade and the threat model it is priced against.
 
 ### 3. One declared-read set
 
-A lattice of fixed offsets holds only while the work fits inside a quantum, and
-`contextHint` is the submitter's own lever on that work: `opwire.MaxDeclaredReads`
-permits 1000 declared keys, each resolved inside step-4 hydration. So for these two
-operations the declared set is **closed** — the envelope may name only what the
-operation's op-meta descriptor names, and anything else is refused at the head of
-step 4 (`refuseUndeclaredContextHint`, see the `kv.Read` semantics above for the
-rule and its edges). Both descriptors already name the entire legitimate set: the
-six dispatch sites across the two operations — `cmd/facet/claim.go`,
-`cmd/lattice/identity`, `scripts/verify-claim-ceremony.go`,
-`scripts/verify-erasure-ceremony.go`, `cmd/facet/credentials.go` and
-`cmd/loftspace-app/credentials_link.go` — build their hint from
-`internal/identityceremony`, whose builders emit exactly the KEYS those templates
-compile to (the templates themselves live in `packages/identity-domain/opmetas.go`).
+§2's equality is a property of a **fixed** key set and only of a fixed one, and
+`contextHint` is the submitter's own lever on which keys those are:
+`opwire.MaxDeclaredReads` permits 1000 declared keys, the Gateway copies
+`contextHint` into the envelope verbatim, step 3 never inspects it, and every
+declared key resolves inside step-4 hydration. A key a submitter adds is work
+nothing has equalized — its cost turns on whether it exists, whether it is
+sensitive and whether it is tombstoned, which are the three facts §2 takes out of
+the descriptor-named set. So for these two operations the declared set is
+**closed**: the envelope may name only what the operation's op-meta descriptor
+names, and anything else is refused at the head of step 4
+(`refuseUndeclaredContextHint`, see the `kv.Read` semantics above for the rule and
+its edges).
 
-The refusal is an ordinary step-4 `HydrationError`, so it inherits both halves of
-the posture above — the generic `ClaimKeyInvalid` with nil details, released on the
-quantum — and it carries no key, because the key it would carry is the probe.
+Closing it is also what keeps the one remaining state-dependent arm out of reach.
+`decryptSensitiveDoc` refuses a tombstoned sensitive aspect outright under the
+**egress** disposition — a capability over a dead aspect must not leave the
+Processor — while serving a live one; refusing every declared `egressReads` key on
+these two operations is what makes that arm unreachable for them.
 
-### Deferred-reply state
+Both descriptors already name the entire legitimate set: the six dispatch sites
+across the two operations — `cmd/facet/claim.go`, `cmd/lattice/identity`,
+`scripts/verify-claim-ceremony.go`, `scripts/verify-erasure-ceremony.go`,
+`cmd/facet/credentials.go` and `cmd/loftspace-app/credentials_link.go` — build
+their hint from `internal/identityceremony`, whose builders emit exactly the KEYS
+those templates compile to (the templates themselves live in
+`packages/identity-domain/opmetas.go`).
 
-| Stage | What exists |
-|---|---|
-| Created | On rejection: the marshalled reply bytes, its reply subject, and the release deadline, captured synchronously off the pump worker's stack frame. |
-| Carried | In the waiting goroutine only. Nothing durable, nothing in KV, nothing replayed — a reply was never durable (`replyTo`'s contract is that the commit is already durable and a lost reply is observability-only), so deferring widens an already-lossy window rather than creating a new durability class. |
-| Flushed at shutdown | `CommitPath.DrainClaimReplies(budget)`, called by `cmd/processor` after `sup.Stop()` and before the NATS connection closes. Bounded (10×Q): a non-durable reply must not hold a shutdown open. Replies still deferred when the budget expires are lost, and the expiry is logged. |
+The refusal is an ordinary step-4 `HydrationError`, so it inherits §1's posture —
+the generic `ClaimKeyInvalid` with nil details — and it carries no key, because
+the key it would carry is the probe.
 
 ### Operator signals
 
-| Heartbeat counter | Meaning |
+The plane has no runtime counter of its own, and does not need one: the question
+that was watched at runtime — whether a rejection's work outran a masking window — is
+a question only a window poses. What replaces it is gated where each half lives. The
+script half is structural and CI-gated. The engine half is conditional on the discard
+completing, and completes exactly when the live path would have (§2) — so a stack can
+still lose the property one way the old mechanism could not: **the script half rides in
+a versioned package artifact.** A stack running an `identity-domain` older than 0.20.9
+has the guard cascade back, and nothing at runtime says so; the installed package
+version is the thing to read when this plane is in question.
+
+| Signal | What it tells you |
 |---|---|
-| `claim_floor_applied_total` | Rejections handed to the quantizer. |
-| `claim_floor_late_total` | Released in a quantum **beyond the first** — the work outran `Q`. The one to alert on: it is both the padding-probe signature and a degraded-read-path signal, and the only way to know the invariant is currently holding. A steady zero means every rejection lands on the first boundary. |
-| `claim_floor_dropped_total` | Refused at the 1024 bound; those callers time out. |
+| `health.processor.<instance>.claim-attempts.<outcome>` (`health_alerts.go`) | The real cause behind each collapsed reply — `invalid-key`, `no-target`, `wrong-state`, `flagged`, `merged`, `credential-not-provisioned`, `credential-already-bound`, `erased`, `internal-fault`, `success`. A climbing `invalid-key` against a flat `success` is the brute-force signature; a climbing `internal-fault` is a fault the script never reached and is the one to page on. **`success` and `flagged` are `ClaimIdentity` only** — `CompleteCredentialLink` increments no success counter, so read its `invalid-key` rate against lane throughput rather than against a denominator that is flat by construction. |
+| The `NFR-S6 rejection collapsed to the generic reply shape` WARN (`commit_path.go`) | The only per-rejection record of the actual code, message and details, since the caller is told none of them. |
+| The `contextHint declares a read this operation's descriptor does not name` WARN (`descriptor_floor.go`) | A submitter reaching past the closed declared-read set. `admitted=0` beside it means the descriptor itself failed to resolve — an over-deny, not a probe. |
+| `TestClaimScript_GuardsFailOnceRatherThanCascading` (`packages/identity-domain`) | CI, not runtime: the single-exit shape of both branches. An added early return reds it. |
+| `TestDecryptSensitiveDoc_DeletedNonEgress_StillDecryptsForTimingEqualization` (`internal/processor`) | CI: the tombstoned sensitive arm still performs the live path's decrypt. Removing the discard reds it on the Decrypt count. |
 
 ---
 
@@ -578,7 +629,7 @@ required by the `vertex_alive` liveness check), so the root document — and its
 | `SandboxViolation` / `ScriptError` | Step 5 | Reply with `ScriptFailed` code; term |
 | `ScriptTimeout` | Step 5 | Reply with `ScriptFailed` code; term |
 | `HydrationError` | Step 4 | Reply with `HydrationFailed` code; term |
-| Any rejection of an NFR-S6 operation | Steps 4–8 | Reply collapses to `ClaimKeyInvalid` with nil details, released on the receipt-anchored lattice; real cause to the log + Health KV (see *NFR-S6 anti-enumeration* above) |
+| Any rejection of an NFR-S6 operation | Steps 4–8 | Reply collapses to `ClaimKeyInvalid` with nil details; real cause to the log + Health KV (see *NFR-S6 anti-enumeration* above) |
 | `AuthDenied` | Step 3 | Reply with `AuthDenied` / `LaneUnauthorized` / `AuthContextMismatch` code; term; ack (no retry — this is a final decision) |
 | `AuthInfrastructureFailure` | Step 3 | `InternalError` reply; nak (retryable) |
 | `PublicationError` | Outbox publish | Nak; outbox consumer redelivers and republishes the persisted EventList (at-least-once) |
@@ -628,23 +679,20 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **A mechanism whose margin the SUBMITTER prices is not a margin** — the retired entry above closed the
   *disposition* a client may declare; nothing closes the *volume*. `opwire.MaxDeclaredReads` is 1000, the
   Gateway copies `contextHint` verbatim (`gateway.go:823-830`) and step 3 never inspects it, so every declared
-  read resolves inside step-4 hydration — i.e. inside whatever window a timing defence has drawn around it.
+  read resolves inside step-4 hydration — i.e. inside whatever window a timing defence draws around it.
   The first ClaimIdentity reply floor was sized against a measured loaded p99 and was defeatable in ONE request
   by padding reads until the work outran it and the already-late branch published raw service time. Minted:
-  claim-rejection timing oracle (`624d445`), cold review. Check: for any defence expressed as a duration —
-  floor, budget, deadline, timeout — name who controls the work inside it. If a submitter does, the constant
-  cannot hold and the shape must be one that has no escape branch (quantize to a lattice rather than floor),
-  plus a counter that fires when the window is exceeded (`claim_floor_late_total`). For the NFR-S6 operations
-  the volume itself is bounded rather than absorbed: `refuseUndeclaredContextHint` (`descriptor_floor.go`)
-  refuses any declared key, egress key or enumeration the operation's own descriptor does not name, so the work
-  inside the quantum is priced by the descriptor. Every other operation's declared set stays open, so the
-  question above is still the one to ask of each new defence — and it is asked per AXIS, not once: closing
-  the declared set bounds the KV work and nothing else, while `payload` bytes are still submitter-sized and
-  are deep-decoded three times inside the same window (the admitted-set compile, the `derive_reads` pre-pass,
-  the step-5 runner), under no server-side schema and no bound below the Gateway's body cap. Check: after
-  closing one lever, re-enumerate every remaining piece of step-4/step-5 work whose SIZE the submitter sets,
-  and say plainly which ones the defence does not cover rather than describing the axis you closed as the
-  window.
+  claim-rejection timing oracle (`624d445`), cold review. **Followed to its end** (NFR-S6 quantum deletion):
+  quantizing to a lattice removed the escape branch but not the boundary, and closing the declared set bounded
+  one axis while `payload` bytes stayed submitter-sized and deep-decoded three times inside the same window.
+  The answer to "who controls the work inside it" stayed *the submitter* on every axis but the one just closed,
+  so the durable fix was to delete the window and equalize the causes where the difference is made — the script
+  fails once at the bottom, the tombstoned sensitive read pays the live read's decrypt. Check, sharpened: for
+  any defence expressed as a duration — floor, budget, deadline, timeout — name who controls the work inside
+  it, per AXIS and not once. If a submitter controls **any** axis, a constant cannot hold it, and the question
+  to ask before reaching for a bigger constant is whether the difference can be removed where it is made
+  instead. The closed declared-read set survives the deletion, but on a different footing: it is what keeps the
+  equalized set fixed, not what bounds a window.
 - **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
   default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
   package-authoring debugging. Check: none yet.
@@ -672,6 +720,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   Corollary the same fire paid for: a LOWER-BOUND assertion cannot detect a mechanism anchored too late,
   because anchoring late makes a reply later, not earlier — the discriminator must be alignment or a
   two-case comparison.
+  **SIXTH sighting** (NFR-S6 quantum deletion), in the shape that no output-based test can reach: the
+  property was "every rejection cause executes the same instructions", and the mutation that breaks it —
+  wrapping the two `crypto` calls in a condition and setting the outcome in the `else` — leaves every
+  observable identical. Both operations' full behavioural suites stayed green under it; only a structural
+  assertion over the shipped script text reds. Mandated shape: when the property under test is UNIFORMITY
+  OF WORK rather than a value, the gate must read the artifact, not its outputs — assert the call sites
+  exist, exactly once, at the unnested indent — because the disabling mutation is output-invariant by
+  construction.
 - **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
   declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
   `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it

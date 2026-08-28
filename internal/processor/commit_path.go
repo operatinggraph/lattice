@@ -55,16 +55,6 @@ type Deps struct {
 	// MaxCommitAttempts bounds the Processor-internal retry on a retryable
 	// revision conflict (re-hydrate → re-execute → re-commit). 0 → default (3).
 	MaxCommitAttempts int
-	// ClaimRejectionFloor is the minimum interval between a ClaimIdentity
-	// operation's receipt in dispatch and the publication of its
-	// ClaimKeyInvalid rejection reply — the mechanism that equalizes the three
-	// rejection causes' otherwise measurably different service times (NFR-S6's
-	// timing half; see claim_reply_floor.go).
-	//
-	// 0 → DefaultClaimRejectionFloor. A NEGATIVE value disables the floor
-	// entirely, which is the posture a timing measurement needs in order to
-	// observe the raw per-cause gap; production leaves this zero.
-	ClaimRejectionFloor time.Duration
 	// CommitRetryBackoff returns the pause before retry attempt n (1-based: n=1 is
 	// the first retry). Capped well under the lane deadline. Nil → a small
 	// linear default; tests set it to a zero function for determinism.
@@ -83,9 +73,6 @@ type Deps struct {
 // CommitPath drives the full commit path (steps 1-9 + the 6.5 encryption pass) for a single envelope.
 type CommitPath struct {
 	deps Deps
-	// claimFloor releases ClaimIdentity ClaimKeyInvalid rejections at a fixed
-	// offset from message receipt, off the lane's pump worker.
-	claimFloor *claimReplyFloor
 }
 
 // NewCommitPath constructs the driver. Required fields must be non-nil;
@@ -124,13 +111,7 @@ func NewCommitPath(deps Deps) *CommitPath {
 	if deps.CommitRetryBackoff == nil {
 		deps.CommitRetryBackoff = defaultCommitRetryBackoff
 	}
-	if deps.ClaimRejectionFloor == 0 {
-		deps.ClaimRejectionFloor = DefaultClaimRejectionFloor
-	}
-	return &CommitPath{
-		deps:       deps,
-		claimFloor: newClaimReplyFloor(deps.ClaimRejectionFloor, deps.Metrics, deps.Logger),
-	}
+	return &CommitPath{deps: deps}
 }
 
 // defaultMaxCommitAttempts bounds the §3.2-OCC internal retry: the first attempt
@@ -203,23 +184,6 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 // disposition belongs to the caller (the supervisor, or HandleMessage's
 // jetstream adapter).
 func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (MessageOutcome, substrate.Decision) {
-	// The anchor for the ClaimIdentity rejection floor (claim_reply_floor.go),
-	// taken before any work at all — in particular before anything whose
-	// duration depends on the claimed target's state. A floor measured from
-	// anywhere later would be floor + variable-work and would preserve the very
-	// per-cause difference it exists to erase.
-	//
-	// A real clock, not deps.Clock: deps.Clock is the injectable wall clock for
-	// tracker timestamps and reply CommittedAt, and a fixture that freezes or
-	// offsets it must not silently disable a security mechanism. time.Now also
-	// carries a monotonic reading, so the elapsed computation cannot be moved
-	// by a wall-clock step.
-	//
-	// This value must never be normalized on its way to the quantizer —
-	// .UTC(), .Round(), .Truncate() and a round trip through any struct that
-	// serializes it all STRIP the monotonic reading, silently downgrading every
-	// release deadline to wall-clock arithmetic.
-	receipt := time.Now()
 	cp.deps.Metrics.OpsConsumed.Add(1)
 
 	// --- Step 1: consume + parse envelope. ---
@@ -317,7 +281,7 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 
 	// --- Steps 4-8: hydrate → execute → validate → commit, with a bounded
 	// internal retry on a §3.2-OCC revision conflict. ---
-	return cp.commitPipeline(ctx, msg, env, resolvedPermission, dedup.TombstonedRevision, receipt)
+	return cp.commitPipeline(ctx, msg, env, resolvedPermission, dedup.TombstonedRevision)
 }
 
 // commitPipeline runs steps 4-8 for one authorized operation and publishes the
@@ -344,11 +308,7 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 // tracker still occupying this requestId's subject (nil in the normal
 // no-residue case); it conditions the step-8 tracker write in place of
 // create-only (Tracker.SupersedesRevision).
-//
-// receipt is the dispatch-time arrival instant, threaded through so a floored
-// rejection reply is released relative to arrival rather than to the moment the
-// rejection was reached (claim_reply_floor.go).
-func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission, trackerSupersedes *uint64, receipt time.Time) (MessageOutcome, substrate.Decision) {
+func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission, trackerSupersedes *uint64) (MessageOutcome, substrate.Decision) {
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			// A lane deadline already hit before we even re-enter — surface
@@ -377,7 +337,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Hydrator != nil {
 			state, err = cp.deps.Hydrator.Hydrate(ctx, env)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "hydrate", err, receipt)
+				return cp.handleStubFailure(ctx, msg, env, "hydrate", err)
 			}
 		}
 		// --- Step 5: execute. ---
@@ -385,7 +345,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Executor != nil {
 			result, err = cp.deps.Executor.Execute(ctx, env, state)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "execute", err, receipt)
+				return cp.handleStubFailure(ctx, msg, env, "execute", err)
 			}
 		}
 		// --- Step 6: validate. ---
@@ -400,14 +360,14 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 						"constraint", ddlErr.ViolatedConstraint,
 						"mutationKey", ddlErr.MutationKey,
 						"detail", ddlErr.Detail)
-					cp.replyRejection(msg, env, receipt, ErrCodeDDLViolation,
+					cp.replyRejection(msg, env, ErrCodeDDLViolation,
 						ddlErr.Error(), map[string]any{
 							"constraint":  ddlErr.ViolatedConstraint,
 							"mutationKey": ddlErr.MutationKey,
 						})
 					return OutcomeRejected, substrate.Term
 				}
-				return cp.handleStubFailure(ctx, msg, env, "validate", err, receipt)
+				return cp.handleStubFailure(ctx, msg, env, "validate", err)
 			}
 		}
 
@@ -420,7 +380,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		if cp.deps.Vault != nil && cp.deps.DDLs != nil {
 			encrypted, minted, err := cp.encryptSensitiveMutations(ctx, result.Mutations, state)
 			if err != nil {
-				return cp.handleStubFailure(ctx, msg, env, "encrypt", err, receipt)
+				return cp.handleStubFailure(ctx, msg, env, "encrypt", err)
 			}
 			result.Mutations = encrypted
 			mintedPiiKey = minted
@@ -436,7 +396,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 			cp.deps.Metrics.OpsRejected.Add(1)
 			cp.deps.Logger.Warn("reply-constraint violation: response.primaryKey is not within the write footprint; rejecting before commit",
 				"requestId", env.RequestID, "primaryKey", result.PrimaryKey)
-			cp.replyRejection(msg, env, receipt, ErrCodeDDLViolation,
+			cp.replyRejection(msg, env, ErrCodeDDLViolation,
 				"response.primaryKey is not within the committed write footprint",
 				map[string]any{"primaryKey": result.PrimaryKey})
 			return OutcomeRejected, substrate.Term
@@ -492,7 +452,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"key", protErr.Key,
 				"root", protErr.Root,
 				"op", protErr.Op)
-			cp.replyRejection(msg, env, receipt, ErrCodeProtectedKey,
+			cp.replyRejection(msg, env, ErrCodeProtectedKey,
 				protErr.Error(), map[string]any{
 					"key":  protErr.Key,
 					"root": protErr.Root,
@@ -512,7 +472,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"requestId", env.RequestID,
 				"key", provErr.Key,
 				"field", provErr.Field)
-			cp.replyRejection(msg, env, receipt, ErrCodePermissionProvenance,
+			cp.replyRejection(msg, env, ErrCodePermissionProvenance,
 				provErr.Error(), map[string]any{
 					"key":   provErr.Key,
 					"field": provErr.Field,
@@ -533,7 +493,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"op", pkgErr.Op,
 				"reason", pkgErr.Reason,
 				"package", pkgErr.Package)
-			cp.replyRejection(msg, env, receipt, ErrCodePackageScope,
+			cp.replyRejection(msg, env, ErrCodePackageScope,
 				pkgErr.Error(), map[string]any{
 					"key":     pkgErr.Key,
 					"op":      pkgErr.Op,
@@ -556,7 +516,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				"limit", btlErr.Limit,
 				"actual", btlErr.Actual,
 				"key", btlErr.Key)
-			cp.replyRejection(msg, env, receipt, ErrCodeBatchTooLarge,
+			cp.replyRejection(msg, env, ErrCodeBatchTooLarge,
 				btlErr.Error(), map[string]any{
 					"reason": btlErr.Reason,
 					"limit":  btlErr.Limit,
@@ -631,7 +591,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 				cp.deps.Logger.Info("step 8: revision conflict; rejecting",
 					"requestId", env.RequestID,
 					"conflictingKey", conflictKey)
-				cp.replyRejection(msg, env, receipt, ErrCodeRevisionConflict,
+				cp.replyRejection(msg, env, ErrCodeRevisionConflict,
 					confErr.Error(), map[string]any{
 						"conflictingKey": conflictKey,
 					})
@@ -1005,10 +965,6 @@ func resolvedPermissionProjectedAt(rp *ResolvedPermission) string {
 
 // handleStubFailure rejects an operation a step-4/5/6/6.5 stage failed.
 //
-// receipt is the dispatch-time arrival instant, threaded to replyRejection so an
-// NFR-S6 operation's answer is released on a quantized offset from arrival
-// rather than as soon as the failure was reached.
-//
 // Two independent gates fire here, on deliberately separate predicates:
 //
 //   - The Health-KV outcome word is chosen from the ERROR. A script-minted
@@ -1017,8 +973,8 @@ func resolvedPermissionProjectedAt(rp *ResolvedPermission) string {
 //     and is recorded as such.
 //   - The reply posture is chosen from the OPERATION TYPE (replyRejection).
 //     Keying that on the error code instead is what let a step-4 hydrate fault
-//     escape both halves of NFR-S6 — see nfrS6Operations.
-func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Message, env *OperationEnvelope, step string, err error, receipt time.Time) (MessageOutcome, substrate.Decision) {
+//     escape the collapse — see nfrS6Operations.
+func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Message, env *OperationEnvelope, step string, err error) (MessageOutcome, substrate.Decision) {
 	cp.deps.Metrics.OpsRejected.Add(1)
 	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "operationType", env.OperationType, "error", err)
@@ -1035,7 +991,7 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Messa
 	}
 
 	code, details := classifyStepError(err)
-	cp.replyRejection(msg, env, receipt, code,
+	cp.replyRejection(msg, env, code,
 		fmt.Sprintf("step %s failed: %s", step, err.Error()), details)
 	return OutcomeRejected, substrate.Term
 }
@@ -1109,19 +1065,18 @@ func (cp *CommitPath) replyTo(msg substrate.Message, reply OperationReply) {
 
 // replyRejection publishes a rejection reply for an operation that failed after
 // authorization, applying the NFR-S6 posture when the operation is in the set
-// that requires it (claim_reply_floor.go's nfrS6Operations).
+// that requires it (nfr_s6_wire_shape.go's nfrS6Operations).
 //
 // For an NFR-S6 operation the caller's copy collapses to the generic code with
-// nil details and one fixed message — Contract #9 requires ALL failure modes of
-// those operations to answer alike — and its release is quantized against
-// receipt so the work behind that identical reply is not readable in the timing
-// either. The real code, message and details are logged here, so the collapse
-// costs an operator nothing; handleStubFailure additionally records the specific
-// outcome to Health KV, which is where the contract says specifics belong.
+// nil details and one fixed message — Contract #9 §9.3 requires ALL failure
+// modes of those operations to answer alike. The real code, message and details
+// are logged here, so the collapse costs an operator nothing; handleStubFailure
+// additionally records the specific outcome to Health KV, which is where the
+// contract says specifics belong.
 //
-// Every other operation keeps its real code and details on the fast path:
-// debuggability matters, and there is no target state to hide.
-func (cp *CommitPath) replyRejection(msg substrate.Message, env *OperationEnvelope, receipt time.Time, code ErrorCode, message string, details map[string]any) {
+// Every other operation keeps its real code and details: debuggability matters,
+// and there is no target state to hide.
+func (cp *CommitPath) replyRejection(msg substrate.Message, env *OperationEnvelope, code ErrorCode, message string, details map[string]any) {
 	if !isNFRS6Operation(env.OperationType) {
 		cp.replyTo(msg, BuildRejectedReply(env.RequestID, code, message, details))
 		return
@@ -1133,44 +1088,7 @@ func (cp *CommitPath) replyRejection(msg substrate.Message, env *OperationEnvelo
 	cp.deps.Logger.Warn("NFR-S6 rejection collapsed to the generic reply shape",
 		"requestId", env.RequestID, "operationType", env.OperationType,
 		"actualCode", string(code), "actualMessage", message, "actualDetails", details)
-	cp.replyToNoEarlierThan(msg,
-		BuildRejectedReply(env.RequestID, ErrCodeClaimKeyInvalid, claimRejectionMessage, nil), receipt)
-}
-
-// DrainClaimReplies waits, up to budget, for every deferred NFR-S6 rejection
-// reply this path has already accepted to be published. It reports whether the
-// drain completed. Shutdown calls it after the operation pump has stopped and
-// before the NATS connection closes; without it a SIGTERM or a rolling deploy
-// silently discards every reply still inside its release quantum.
-func (cp *CommitPath) DrainClaimReplies(budget time.Duration) bool {
-	return cp.claimFloor.Drain(budget)
-}
-
-// replyToNoEarlierThan marshals the reply on the caller's goroutine and hands it
-// to the release quantizer, which publishes it on the first quantum boundary
-// after the work finished. Like replyTo, a reply that never lands is
-// observability-only — the commit path's durable work is already finished by the
-// time either is called.
-func (cp *CommitPath) replyToNoEarlierThan(msg substrate.Message, reply OperationReply, receipt time.Time) {
-	subject := replySubjectFromMessage(msg)
-	if subject == "" {
-		return
-	}
-	if cp.claimFloor == nil {
-		// A CommitPath assembled as a bare struct literal rather than through
-		// NewCommitPath. Dropping the reply is the safe direction: publishing it
-		// inline would answer at the un-quantized offset this function exists to
-		// prevent.
-		cp.deps.Logger.Warn("NFR-S6 rejection dropped: CommitPath has no release quantizer (built without NewCommitPath)",
-			"subject", subject)
-		return
-	}
-	b, err := MarshalReply(reply)
-	if err != nil {
-		cp.deps.Logger.Warn("reply marshal failed", "error", err)
-		return
-	}
-	cp.claimFloor.publishNoEarlierThan(cp.deps.Conn.NATS(), subject, b, receipt)
+	cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeClaimKeyInvalid, claimRejectionMessage, nil))
 }
 
 func (cp *CommitPath) maybeReplyMalformed(msg substrate.Message, requestID, reason string) {

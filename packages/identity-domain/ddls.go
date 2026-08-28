@@ -963,6 +963,44 @@ def credential_bound_to_mutation(credential_actor_key, owner_identity_key, bound
     return {"op": "update", "key": credential_bound_to_key(credential_actor_key, owner_identity_key),
             "document": doc}
 
+# Fixed-length stand-ins the claim and credential-link branches hash and
+# compare against when the real operands are absent, so both crypto calls run
+# on every rejection cause (nfr-s6-release-quantum-payload-design.md §4.1).
+# Each is 64 characters for its OWN reason, and the two reasons are different.
+#
+# PLACEHOLDER_SECRET is a crypto.sha256 INPUT and never a compare operand. A
+# real claim or link secret is 32 random bytes hex-encoded -- 64 characters
+# (Contract #9 §9.4, cmd/lattice/identity/identity.go) -- so a digest of the
+# stand-in costs exactly what a digest of a real secret costs.
+#
+# PLACEHOLDER_STORED_HASH is a compare operand, and its 64 characters are what
+# make the comparison run at all: crypto.constant_time_equal returns on a
+# length mismatch before comparing, which would put the absence of a stored
+# hash straight back into the timing it is being taken out of.
+#
+# An identity armed with sha256(PLACEHOLDER_SECRET), claimed with no secret at
+# all, DOES pass constant_time_equal -- the stand-in digest equals the stored
+# hash. What refuses it is the accumulate shape rather than the constant: the
+# payload check sits ABOVE the compare, has already recorded "invalid-key",
+# and first_outcome keeps the first word whatever the compare then decides.
+# Moving that check below the compare would open exactly this hole.
+PLACEHOLDER_SECRET = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+PLACEHOLDER_STORED_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+
+def first_outcome(recorded, failed, word):
+    # The accumulate-then-fail-once shape the claim and credential-link
+    # branches require: every check is evaluated whatever the ones before it
+    # decided, and the FIRST one that fails supplies the outcome word Health KV
+    # records. A later failure is dropped, so the word is the one the check
+    # order ranks highest -- and no cause exits before another, which is what
+    # keeps the causes indistinguishable in the time domain
+    # (nfr-s6-release-quantum-payload-design.md §4.1).
+    if recorded != None:
+        return recorded
+    if failed:
+        return word
+    return None
+
 NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
 
 def is_identity_vertex_key(key):
@@ -1447,37 +1485,61 @@ def execute(state, op):
         def fail_claim(outcome):
             fail("ClaimKeyInvalid: " + outcome)
 
+        # This branch adjudicates three different facts about the graph -- no
+        # such identity, one that exists but is already claimed, one that
+        # exists and is unclaimed but whose secret the caller does not hold --
+        # and answers all of them with a single wire shape (Contract #9 §9.3).
+        # A cascade of early returns would make those answers separable in TIME
+        # instead: each exit does strictly less work than the next, and a few
+        # tenths of a millisecond of monotone bias is recoverable by averaging,
+        # which is an identity-existence oracle on an endpoint every consumer
+        # holds and nothing rate-limits.
+        #
+        # So nothing here returns early. Every check runs, the first failing
+        # one supplies the outcome word (first_outcome), and the branch fails
+        # once at the bottom. The checks are ordered by which outcome word
+        # takes precedence, so every vector records the same Health-KV outcome
+        # its cause is named by.
+        #
+        # What has to be uniform is the work that depends on the TARGET's
+        # state: that is the only fact the caller does not already hold. Work
+        # that varies with the caller's OWN payload -- an absent claimKey, a
+        # targetIdentityKey that is not an identity key at all -- tells them
+        # nothing they did not just type, which is why the stand-ins below can
+        # substitute for a malformed payload rather than a check being skipped
+        # for a target.
+        outcome = None
+
         claim_key_plaintext = p.claimKey if hasattr(p, "claimKey") else None
-        if claim_key_plaintext == None or type(claim_key_plaintext) != type("") or len(claim_key_plaintext) == 0:
-            fail_claim("invalid-key")
+        claim_key_usable = (claim_key_plaintext != None and
+                            type(claim_key_plaintext) == type("") and
+                            len(claim_key_plaintext) > 0)
+        outcome = first_outcome(outcome, not claim_key_usable, "invalid-key")
 
         target_identity_key = p.targetIdentityKey if hasattr(p, "targetIdentityKey") else None
-        if target_identity_key == None or type(target_identity_key) != type("") or len(target_identity_key) == 0:
-            fail_claim("no-target")
-        if not target_identity_key.startswith("vtx.identity."):
-            fail_claim("no-target")
+        target_key_usable = (target_identity_key != None and
+                             type(target_identity_key) == type("") and
+                             len(target_identity_key) > 0)
+        outcome = first_outcome(outcome, not target_key_usable, "no-target")
 
-        target_vtx = state[target_identity_key] if target_identity_key in state else None
-        if target_vtx == None or (hasattr(target_vtx, "isDeleted") and target_vtx.isDeleted):
-            fail_claim("no-target")
+        # Every lookup below needs a string operand. An unusable payload key
+        # becomes the empty string rather than a skipped block: "" is a legal
+        # dict key, a legal startswith receiver and a legal concatenation
+        # operand, and it matches nothing in the hydrated state.
+        lookup_key = target_identity_key if target_key_usable else ""
+        outcome = first_outcome(outcome, not lookup_key.startswith("vtx.identity."), "no-target")
+        outcome = first_outcome(outcome, not vertex_alive(state, lookup_key), "no-target")
 
-        state_aspect_key = target_identity_key + ".state"
+        state_aspect_key = lookup_key + ".state"
         state_aspect = state[state_aspect_key] if state_aspect_key in state else None
-        if state_aspect == None:
-            fail_claim("no-target")
-        current_state = state_aspect.data["value"] if state_aspect.data != None and "value" in state_aspect.data else None
-        if current_state == None:
-            fail_claim("no-target")
-
-        if current_state == "claimed":
-            fail_claim("wrong-state")
-        if current_state == "flagged-for-review":
-            fail_claim("flagged")
-        if current_state == "merged":
-            fail_claim("merged")
-        if current_state != "unclaimed":
-            fail_claim("wrong-state")
-
+        current_state = None
+        if state_aspect != None and state_aspect.data != None and "value" in state_aspect.data:
+            current_state = state_aspect.data["value"]
+        outcome = first_outcome(outcome, current_state == None, "no-target")
+        outcome = first_outcome(outcome, current_state == "claimed", "wrong-state")
+        outcome = first_outcome(outcome, current_state == "flagged-for-review", "flagged")
+        outcome = first_outcome(outcome, current_state == "merged", "merged")
+        outcome = first_outcome(outcome, current_state != "unclaimed", "wrong-state")
 
         actor_key = op.actor
         # The credential must be a LIVE vertex before its boundTo edge is
@@ -1501,25 +1563,34 @@ def execute(state, op):
         # ProvisionConsumerIdentity deliberately no-ops on a tombstoned actor
         # ("tombstoned stays tombstoned"), so a revoked credential must not be
         # able to claim. The refusal is permanent by design, not transient.
-        if not vertex_alive(state, actor_key):
-            fail_claim("credential-not-provisioned")
+        outcome = first_outcome(outcome, not vertex_alive(state, actor_key), "credential-not-provisioned")
 
         cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
-        if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
-            fail_claim("credential-already-bound")
+        outcome = first_outcome(outcome, vertex_alive(state, cred_index_key), "credential-already-bound")
 
-        claim_key_aspect_key = target_identity_key + ".claimKey"
+        claim_key_aspect_key = lookup_key + ".claimKey"
         claim_key_aspect = state[claim_key_aspect_key] if claim_key_aspect_key in state else None
-        if claim_key_aspect == None or (hasattr(claim_key_aspect, "isDeleted") and claim_key_aspect.isDeleted):
-            fail_claim("invalid-key")
-        if claim_key_aspect.data == None or "hash" not in claim_key_aspect.data:
-            fail_claim("invalid-key")
+        claim_key_alive = (claim_key_aspect != None and
+                           not (hasattr(claim_key_aspect, "isDeleted") and claim_key_aspect.isDeleted))
+        stored_hash = None
+        if claim_key_alive and claim_key_aspect.data != None and "hash" in claim_key_aspect.data:
+            stored_hash = claim_key_aspect.data["hash"]
+        outcome = first_outcome(outcome, stored_hash == None, "invalid-key")
+        # The compare's operands are typed here rather than left to the
+        # stand-in, so a stored hash of the wrong type is a refusal this check
+        # makes and not a coincidence of nothing hashing to the stand-in.
+        outcome = first_outcome(outcome, type(stored_hash) != type(""), "invalid-key")
 
-        submitted_hash = crypto.sha256(claim_key_plaintext)
-        stored_hash = claim_key_aspect.data["hash"]
-        if not crypto.constant_time_equal(submitted_hash, stored_hash):
-            fail_claim("invalid-key")
+        # Both crypto calls run on every cause, against the stand-ins when the
+        # real operands are absent, so a caller cannot separate "there was
+        # nothing to compare against" from "the comparison failed". The
+        # stand-in comparand is what keeps a wrongly-typed stored hash from
+        # raising a builtin argument error -- crypto builtins refuse a
+        # non-string operand -- while the typed check above supplies its word.
+        submitted_hash = crypto.sha256(claim_key_plaintext if claim_key_usable else PLACEHOLDER_SECRET)
+        comparand = stored_hash if type(stored_hash) == type("") else PLACEHOLDER_STORED_HASH
+        outcome = first_outcome(outcome, not crypto.constant_time_equal(submitted_hash, comparand), "invalid-key")
 
         # Erasure gate (§6), deliberately placed AFTER the secret comparison.
         # A claim writes a credentialindex vertex and a boundTo link at BOTH
@@ -1529,20 +1600,47 @@ def execute(state, op):
         # every credential bound to it and the SOURCE when it is itself someone
         # else's credential). So both positions are gated, not just the target.
         #
-        # Below the secret check for two reasons. The outcome word never
-        # reaches the wire -- the Processor reclassifies every ClaimKeyInvalid
-        # to one generic code (NFR-S6) -- so Health KV is the only channel that
-        # carries it, and a gate placed above the comparison would divert every
-        # WRONG-secret attempt against a sealed identity out of the
-        # claim-attempts.invalid-key counter an operator watches for brute
-        # force, and into claim-attempts.erased. It would also hand a caller
-        # holding no valid secret a measurably shorter path. Below it, only a
-        # caller who proved the secret learns anything, and the brute-force
-        # counter keeps counting brute force.
-        if write_path_closed(target_identity_key):
-            fail_claim("erased")
-        if write_path_closed(actor_key):
-            fail_claim("erased")
+        # Below the secret check, and the reason is counter attribution. The
+        # outcome word never reaches the wire -- the Processor reclassifies
+        # every ClaimKeyInvalid to one generic code (NFR-S6) -- so Health KV is
+        # the only channel that carries it, and a gate placed above the
+        # comparison would divert every WRONG-secret attempt against a sealed
+        # identity out of the claim-attempts.invalid-key counter an operator
+        # watches for brute force, and into claim-attempts.erased. Below it,
+        # only a caller who proved the secret learns the WORD, and the
+        # brute-force counter keeps counting brute force.
+        #
+        # The word, not the work: both write_path_closed calls run on every
+        # cause, and write_path_closed short-circuits on a present marker
+        # without going on to read .piiKey, so a sealed position costs one
+        # snapshot lookup where an unsealed one costs two. derive_reads
+        # hydrates both keys, so that residue is microseconds of Starlark
+        # rather than a round trip -- far under the substrate-rooted hydration
+        # difference §6.3 already accepts.
+        #
+        # Both positions are asked only about a key the Contract #1 grammar
+        # accepts, under is_identity_vertex_key -- the same predicate
+        # derive_reads applies through erasure_gate_keys. The gate reads
+        # through kv.Read, and a position the grammar rejects has no declared
+        # gate key behind it, so asking about one would fall through to a live
+        # Core KV GET on a malformed key and answer an internal fault where a
+        # named outcome belongs. Asking exactly what the derivation answered
+        # keeps the two in step. The predicate turns on the caller's own
+        # submitted strings rather than on any target's state, so it separates
+        # nothing an attacker does not already hold.
+        #
+        # That lockstep is load-bearing: a position this predicate skips was
+        # never hydrated either, so it has already failed vertex_alive above
+        # and carries a recorded outcome. Relaxing one predicate without the
+        # other -- widening the gate here, or narrowing the derivation there --
+        # silently opens the gate on a position nothing else refuses.
+        gate_target = lookup_key if is_identity_vertex_key(lookup_key) else None
+        outcome = first_outcome(outcome, gate_target != None and write_path_closed(gate_target), "erased")
+        gate_actor = actor_key if is_identity_vertex_key(actor_key) else None
+        outcome = first_outcome(outcome, gate_actor != None and write_path_closed(gate_actor), "erased")
+
+        if outcome != None:
+            fail_claim(outcome)
 
         observed_at = op.submittedAt
 
@@ -1729,26 +1827,37 @@ def execute(state, op):
             # §2.6 change requiring its own ratification).
             fail("ClaimKeyInvalid: " + outcome)
 
+        # The same accumulate-then-fail-once shape ClaimIdentity uses, for the
+        # same reason: this op redeems a secret against a target whose state a
+        # caller is not entitled to learn, and a cascade of early returns puts
+        # the causes it refuses to name on the wire back into the time domain
+        # (nfr-s6-release-quantum-payload-design.md §4.1). Every check runs,
+        # first_outcome keeps the highest-ranked failure, and the branch fails
+        # once at the bottom.
+        outcome = None
+
         link_key_plaintext = p.linkKey if hasattr(p, "linkKey") else None
-        if link_key_plaintext == None or type(link_key_plaintext) != type("") or len(link_key_plaintext) == 0:
-            fail_link("invalid-key")
+        link_key_usable = (link_key_plaintext != None and
+                           type(link_key_plaintext) == type("") and
+                           len(link_key_plaintext) > 0)
+        outcome = first_outcome(outcome, not link_key_usable, "invalid-key")
 
         target_identity_key = p.targetIdentityKey if hasattr(p, "targetIdentityKey") else None
-        if target_identity_key == None or type(target_identity_key) != type("") or len(target_identity_key) == 0:
-            fail_link("no-target")
-        if not target_identity_key.startswith("vtx.identity."):
-            fail_link("no-target")
+        target_key_usable = (target_identity_key != None and
+                             type(target_identity_key) == type("") and
+                             len(target_identity_key) > 0)
+        outcome = first_outcome(outcome, not target_key_usable, "no-target")
 
-        target_vtx = state[target_identity_key] if target_identity_key in state else None
-        if target_vtx == None or (hasattr(target_vtx, "isDeleted") and target_vtx.isDeleted):
-            fail_link("no-target")
+        # An unusable payload key becomes the empty string rather than a
+        # skipped block, so every lookup below still has a string operand that
+        # matches nothing in the hydrated state.
+        lookup_key = target_identity_key if target_key_usable else ""
+        outcome = first_outcome(outcome, not lookup_key.startswith("vtx.identity."), "no-target")
+        outcome = first_outcome(outcome, not vertex_alive(state, lookup_key), "no-target")
 
-        target_state = read_state(state, target_identity_key)
-        if target_state == "merged":
-            fail_link("merged")
-        if target_state != "claimed":
-            fail_link("wrong-state")
-
+        target_state = read_state(state, lookup_key)
+        outcome = first_outcome(outcome, target_state == "merged", "merged")
+        outcome = first_outcome(outcome, target_state != "claimed", "wrong-state")
 
         # The same one-credential-<=-one-identity dedup guard ClaimIdentity
         # applies (#11 §11.4): this is a declared-optionalReads guard for the
@@ -1764,32 +1873,64 @@ def execute(state, op):
         # Gateway's raw-credential carve-out, so the actor here is the NEW
         # credential -- exactly the one first-touch provisioning may have
         # skipped.
-        if not vertex_alive(state, actor_key):
-            fail_link("credential-not-provisioned")
+        outcome = first_outcome(outcome, not vertex_alive(state, actor_key), "credential-not-provisioned")
 
         cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
-        if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
-            fail_link("credential-already-bound")
+        outcome = first_outcome(outcome, vertex_alive(state, cred_index_key), "credential-already-bound")
 
-        link_key_aspect_key = target_identity_key + ".linkKey"
+        link_key_aspect_key = lookup_key + ".linkKey"
         link_key_aspect = state[link_key_aspect_key] if link_key_aspect_key in state else None
-        if link_key_aspect == None or (hasattr(link_key_aspect, "isDeleted") and link_key_aspect.isDeleted):
-            fail_link("invalid-key")
-        if link_key_aspect.data == None or "hash" not in link_key_aspect.data:
-            fail_link("invalid-key")
+        link_key_alive = (link_key_aspect != None and
+                          not (hasattr(link_key_aspect, "isDeleted") and link_key_aspect.isDeleted))
+        stored_hash = None
+        if link_key_alive and link_key_aspect.data != None and "hash" in link_key_aspect.data:
+            stored_hash = link_key_aspect.data["hash"]
+        outcome = first_outcome(outcome, stored_hash == None, "invalid-key")
+        # The compare's operands are typed here rather than left to the
+        # stand-in, so a stored hash of the wrong type is a refusal this check
+        # makes and not a coincidence of nothing hashing to the stand-in.
+        outcome = first_outcome(outcome, type(stored_hash) != type(""), "invalid-key")
 
-        submitted_hash = crypto.sha256(link_key_plaintext)
-        stored_hash = link_key_aspect.data["hash"]
-        if not crypto.constant_time_equal(submitted_hash, stored_hash):
-            fail_link("invalid-key")
+        # Both crypto calls run on every cause, against the stand-ins when the
+        # real operands are absent, so "nothing to compare against" and "the
+        # comparison failed" cost the same. The stand-in comparand is what
+        # keeps a wrongly-typed stored hash from raising a builtin argument
+        # error -- crypto builtins refuse a non-string operand -- while the
+        # typed check above supplies its word.
+        submitted_hash = crypto.sha256(link_key_plaintext if link_key_usable else PLACEHOLDER_SECRET)
+        comparand = stored_hash if type(stored_hash) == type("") else PLACEHOLDER_STORED_HASH
+        outcome = first_outcome(outcome, not crypto.constant_time_equal(submitted_hash, comparand), "invalid-key")
 
         # Erasure gate (§6) -- the same two link positions and the same
         # below-the-secret placement as ClaimIdentity, for the same reasons.
-        if write_path_closed(target_identity_key):
-            fail_link("erased")
-        if write_path_closed(actor_key):
-            fail_link("erased")
+        # The placement buys the counter attribution, and it buys it on the
+        # outcome WORD only: both write_path_closed calls run on every cause,
+        # and write_path_closed short-circuits on a present marker without
+        # reading .piiKey, so a sealed position costs one snapshot lookup where
+        # an unsealed one costs two. derive_reads hydrates both keys, so that
+        # residue is microseconds of Starlark rather than a round trip.
+        #
+        # Both positions are asked only about a key the Contract #1 grammar
+        # accepts, under the same is_identity_vertex_key predicate
+        # derive_reads applies through erasure_gate_keys: the gate reads
+        # through kv.Read, and a position the grammar rejects has no declared
+        # gate key behind it, so asking about one would fall through to a live
+        # Core KV GET and answer an internal fault where a named outcome
+        # belongs. The predicate turns on the caller's own submitted strings
+        # rather than on any target's state.
+        #
+        # The lockstep is load-bearing: a position this predicate skips was
+        # never hydrated either, so it has already failed vertex_alive above
+        # and carries a recorded outcome. Relaxing one predicate without the
+        # other opens the gate on a position nothing else refuses.
+        gate_target = lookup_key if is_identity_vertex_key(lookup_key) else None
+        outcome = first_outcome(outcome, gate_target != None and write_path_closed(gate_target), "erased")
+        gate_actor = actor_key if is_identity_vertex_key(actor_key) else None
+        outcome = first_outcome(outcome, gate_actor != None and write_path_closed(gate_actor), "erased")
+
+        if outcome != None:
+            fail_link(outcome)
 
         observed_at = op.submittedAt
         new_entry = {"actorKey": actor_key, "boundAt": observed_at}

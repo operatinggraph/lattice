@@ -151,6 +151,149 @@ func TestDecryptSensitiveDoc_DeletedEgress_Refuses(t *testing.T) {
 	}
 }
 
+// countingVault wraps a real Vault and counts Decrypt calls, optionally failing
+// them with decryptErr. It is what makes the tombstoned arm's decrypt visible:
+// the arm discards both the plaintext and the error, so the call count is the
+// only evidence the work happened.
+type countingVault struct {
+	vault.Vault
+	decrypts   int
+	decryptErr error
+}
+
+func (c *countingVault) Decrypt(ctx context.Context, keyHolderKey string, envelope vault.Envelope, ct vault.Ciphertext) ([]byte, error) {
+	c.decrypts++
+	if c.decryptErr != nil {
+		return nil, c.decryptErr
+	}
+	return c.Vault.Decrypt(ctx, keyHolderKey, envelope, ct)
+}
+
+// TestDecryptSensitiveDoc_DeletedNonEgress_StillDecryptsForTimingEqualization:
+// the tombstoned non-egress arm performs the same decrypt the live path
+// performs, and withholds every part of the result.
+//
+// The decrypt is the equalization (nfr-s6-release-quantum-payload-design.md
+// §4.2): skipping it makes a tombstoned sensitive read measurably cheaper than
+// a live one, and for an identity's `.claimKey` that difference separates an
+// already-claimed identity from an unclaimed one. The rest of the assertions
+// are the other half of the obligation — equalizing the TIME must not widen the
+// REACH.
+func TestDecryptSensitiveDoc_DeletedNonEgress_StillDecryptsForTimingEqualization(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache, v, aspectKey, body, ctB64 := deletedSensitiveFixture(t, ctx, conn)
+
+	counting := &countingVault{Vault: v}
+	doc := &VertexDoc{
+		Key:       aspectKey,
+		Class:     "ssn",
+		VertexKey: "vtx.identity." + testNanoID2,
+		LocalName: "ssn",
+		IsDeleted: true,
+		Data:      body,
+	}
+	assertNeedleFires(t, doc, ctB64)
+
+	tracker := &sensitiveReadTracker{}
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, counting, doc, false, tracker, "req1", nil); err != nil {
+		t.Fatalf("decryptSensitiveDoc on a deleted sensitive aspect must deliver, not error: %v", err)
+	}
+	if counting.decrypts != 1 {
+		t.Fatalf("Decrypt called %d times, want exactly 1 — the tombstoned arm must do the same work the live path does, "+
+			"or its cheaper path is itself the enumeration signal (design §4.2)", counting.decrypts)
+	}
+	assertScrubbed(t, doc, ctB64)
+	if _, ok := doc.Data["$sensitiveRef"]; ok {
+		t.Fatalf("the tombstoned non-egress arm authored an egress ref: %+v", doc.Data)
+	}
+	if _, ok := tracker.plaintextKeys[aspectKey]; ok {
+		t.Fatalf("plaintextKeys = %+v, want %q NOT recorded — the decrypted plaintext is discarded, never delivered",
+			tracker.plaintextKeys, aspectKey)
+	}
+}
+
+// TestDecryptSensitiveDoc_DeletedNonEgress_ShreddedKeyStillScrubs: the discard
+// swallows the ERROR as well as the plaintext.
+//
+// A shredded key envelope makes Decrypt fail mid-way. Propagating that would
+// turn a tombstoned read that succeeds today into an InternalError whose
+// reachability depends on the target's state — a new state-dependent class
+// invented by the very change that removes one (design §6.2).
+func TestDecryptSensitiveDoc_DeletedNonEgress_ShreddedKeyStillScrubs(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache, v, aspectKey, body, ctB64 := deletedSensitiveFixture(t, ctx, conn)
+
+	counting := &countingVault{Vault: v, decryptErr: vault.ErrKeyShredded}
+	doc := &VertexDoc{
+		Key:       aspectKey,
+		Class:     "ssn",
+		VertexKey: "vtx.identity." + testNanoID2,
+		LocalName: "ssn",
+		IsDeleted: true,
+		Data:      body,
+	}
+	assertNeedleFires(t, doc, ctB64)
+
+	tracker := &sensitiveReadTracker{}
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, counting, doc, false, tracker, "req1", nil); err != nil {
+		t.Fatalf("a shredded key on the tombstoned path must be swallowed, got %v", err)
+	}
+	if counting.decrypts != 1 {
+		t.Fatalf("Decrypt called %d times, want exactly 1", counting.decrypts)
+	}
+	assertScrubbed(t, doc, ctB64)
+	if _, ok := tracker.plaintextKeys[aspectKey]; ok {
+		t.Fatalf("plaintextKeys = %+v, want %q NOT recorded", tracker.plaintextKeys, aspectKey)
+	}
+}
+
+// TestDecryptSensitiveDoc_DeletedNonEgress_UnparseableCiphertextStillScrubs
+// pins the arm on its DEGRADATION path, not only on its happy one.
+//
+// A body that is not a ciphertext envelope is what a stack that ran without a
+// Vault leaves at rest, so the discard short-circuits and Decrypt is never
+// reached. It short-circuits at vault.KeyHolder rather than at
+// ciphertextFromData: that parse is a JSON round trip into a typed struct, so a
+// map carrying none of the envelope's fields decodes to a ZERO Ciphertext
+// without error, and it is the missing keyId that stops the sequence.
+//
+// That is not a hidden failure: the live path returns "resolve key holder for
+// %s" at the very same call, having done the very same work, so the two arms
+// still cost the same — which is the whole property. What the tombstoned arm may
+// not do is surface it, because an error here would be one more answer that
+// depends on the target's state.
+func TestDecryptSensitiveDoc_DeletedNonEgress_UnparseableCiphertextStillScrubs(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache, v, aspectKey, _, _ := deletedSensitiveFixture(t, ctx, conn)
+
+	counting := &countingVault{Vault: v}
+	const needle = "123-45-6789"
+	doc := &VertexDoc{
+		Key:       aspectKey,
+		Class:     "ssn",
+		VertexKey: "vtx.identity." + testNanoID2,
+		LocalName: "ssn",
+		IsDeleted: true,
+		Data:      map[string]interface{}{"value": needle},
+	}
+	assertNeedleFires(t, doc, needle)
+
+	tracker := &sensitiveReadTracker{}
+	if err := decryptSensitiveDoc(ctx, conn, testCoreBucket, cache, counting, doc, false, tracker, "req1", nil); err != nil {
+		t.Fatalf("a body that is not a ciphertext envelope must be swallowed on the tombstoned path, got %v", err)
+	}
+	if counting.decrypts != 0 {
+		t.Fatalf("Decrypt called %d times, want 0 — a body with no envelope to parse cannot reach it", counting.decrypts)
+	}
+	assertScrubbed(t, doc, needle)
+	if _, ok := tracker.plaintextKeys[aspectKey]; ok {
+		t.Fatalf("plaintextKeys = %+v, want %q NOT recorded", tracker.plaintextKeys, aspectKey)
+	}
+}
+
 // seedTombstonedRealCiphertextAspect writes the tombstone a spent sensitive
 // aspect leaves in Core KV: isDeleted true, prior body retained.
 func seedTombstonedRealCiphertextAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class, vertexKey string, body map[string]interface{}) {

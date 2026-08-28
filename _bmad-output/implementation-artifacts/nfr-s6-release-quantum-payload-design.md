@@ -34,9 +34,14 @@
 > | 2 | Equalize the script's 17 + 13 early returns | package, existing builtins | the script-half gaps |
 > | 3 | **Delete the release quantum** (~190 lines) | engine, subtractive | 50 ms/rejection, 3 metrics, a goroutine-per-reply, a 1024-deferral bound, a shutdown drain |
 >
-> **What that knowingly accepts, recorded once so it is not lost** (§6.3): the absent-vs-claimed gap
-> (~0.27 ms) is substrate-rooted and survives. It is a *statistical* channel — it needs averaging over
-> many samples — against a **confirmation** oracle, not an enumeration one: the attacker must already
+> **What that knowingly accepts, recorded once so it is not lost** (§6.3): the absent-vs-present gap is
+> substrate-rooted and survives. *(Corrected at build, 2026-08-28: this line read "the absent-vs-claimed
+> gap (~0.27 ms)". Move 1 closes claimed-vs-wrong-key by ADDING the envelope round trip to the claimed
+> arm, so what survives is absent-vs-**present** at ~0.63 ms for `ClaimIdentity` and ~1.0 ms for
+> `CompleteCredentialLink` — the maximum pairwise gap is unchanged, but the surviving one is ~2.3×
+> louder than the ratified text quoted. §6.3 carries the table.)* It is a *statistical* channel — it
+> needs averaging over many samples — against a **confirmation** oracle, not an enumeration one: the
+> attacker must already
 > hold a `vtx.identity.<NanoID>`, and that keyspace is ~2¹¹⁷ (58-char alphabet, 20 chars), so nothing
 > here is brute-forceable. §8 states the threat model the whole item is priced against. The
 > deterministic single-request oracle — the wire code — stays closed by Contract #9 §9.3, which is
@@ -115,6 +120,15 @@ envelope from a cached copy owes that comment an argument, and this one never en
 Net effect of declining it: a rejection pays one extra round trip (~0.36 ms) that it did not pay before,
 against the **50 ms** of quantum this fire deletes. Rejections get ~49.6 ms faster, not slower.
 
+*A cold review fairly asked why ground (b) refuses a platform-wide change here while §4.2 ships one —
+move 1 makes every package's tombstoned sensitive aspect decrypt, not only these two operations'. The
+two widenings are not the same kind. §4.2 adds WORK whose result is discarded and reaches no caller:
+what a reader receives is byte-identical to today, and the confidentiality rule ("a dead aspect must
+never yield plaintext") is honoured exactly as written. The snapshot read would change WHERE a key
+envelope comes from, on every sensitive read on the platform — a freshness property the shred gate
+rests on. Adding discarded work is reversible by deleting a call; moving the envelope's source is a
+change to what the gate means.*
+
 ---
 
 ## 3. Grounding ledger
@@ -175,12 +189,15 @@ Two obligations that ship with it, because "decrypt then throw away" is the kind
 reader deletes as pointless:
 
 - the discard is **stated in the code** as a timing-equalization requirement with a pointer to this
-  design, not left as an unexplained call;
+  design, not left as an unexplained call — including *why each of its early returns is safe*, which is
+  that every one mirrors the live path's own exit at the same step, having done the same work
+  (added 2026-08-28 after a cold review read the early returns as a silent runtime degradation; they
+  are not, but nothing in the file said so);
 - a test asserts the plaintext never reaches `doc.Data`, `markPlaintext`, or an egress ref on the
   tombstoned path — i.e. that equalizing the *time* did not widen the *reach*.
 
 R2 goes to zero and the engine's dominant gap is closed with roughly ten lines and no new concept.
-(*Amended 2026-08-28:* this sentence read "Combined with the snapshot read above, R2 goes to zero"; the
+(*Amended 2026-08-28:* this sentence read "R2 goes to zero"; the
 snapshot read is declined — see §2's struck paragraph — and it was never load-bearing for the
 equalization, only for the latency.)
 
@@ -295,12 +312,45 @@ declared keys *would* have been sensitive. **That is more per-operation coupling
 predicate the deletion set out to remove**, and it argues Contract #9 §9.4's genericity invariant in
 the wrong direction.
 
-**So R1 is accepted, by decision rather than by analysis.** Priced honestly: it is ~0.27 ms of bias
-under a ~17 ms loaded p99, so exploiting it means averaging many samples; and what it confirms is
-whether an identity key the attacker **already holds** exists and is unclaimed (§8). The
-alternative on the table was keeping 277 lines and 50 ms per rejection to mask it, which Andrew
-declined on 2026-08-27. Recorded here so a future reader finds the trade rather than assuming the
-channel was closed.
+**So R1 is accepted, by decision rather than by analysis.** What it confirms is whether an identity
+key the attacker **already holds** exists at all (§8). The alternative on the table was keeping 277
+lines and 50 ms per rejection to mask it, which Andrew declined on 2026-08-27. Recorded here so a
+future reader finds the trade rather than assuming the channel was closed.
+
+**Priced honestly, and the price is NOT the one the ratified text quoted** — *corrected at build,
+2026-08-28, by a cold review; the paragraph above said "~0.27 ms of bias" and that number belongs to
+the world before move 1.* Move 1 closes claimed-vs-wrong-key by **adding** `readPiiKeyEnvelope`'s
+round trip to the claimed arm, not by taking it off the wrong-key arm. The absent arm still pays
+nothing, so:
+
+| | before | after |
+|---|---|---|
+| absent target | 0 | 0 |
+| exists, already claimed | ~0.27 ms | ~0.63 ms |
+| exists, unclaimed, wrong key | ~0.63 ms | ~0.63 ms |
+
+The **maximum** pairwise gap is unchanged at ~0.63 ms — it was always absent-vs-wrong-key. What
+changes is which question the surviving gap answers and how loudly: "is this key claimed?" goes to
+zero, and "does this key exist?" goes from ~0.27 ms to ~0.63 ms, i.e. roughly five times fewer samples
+to read. `CompleteCredentialLink` is worse again, ~1.0 ms, because §6.1's second sensitive aspect
+means a present target pays two envelope round trips. That is the trade this design makes and it is
+the right one — a confirmation oracle over a ~2¹¹⁷ keyspace (§8) is worth far less than the claim-status
+bit it buys — but the number a future reader re-derives the decision from must be the post-change one.
+
+**A third engine-side term, unenumerated by §2's R1/R2 table and now on the wire.** Every rejection
+these operations reach through `handleStubFailure` records its outcome to Health KV
+*before* the reply is published (`commit_path.go`'s `RecordClaimAttempt` → `health_alerts.go`), and
+that is a blocking `KVGet` plus a blocking `KVPutWithTTL` on a subject
+(`claim-attempts.<outcome>`) whose last segment **is the outcome word**. The release quantum covered
+it: the reply was anchored at receipt, so everything up to and including the emitter sat inside the
+window. It does not bias the causes against each other — every script-decided cause pays the identical
+two round trips, so it adds variance rather than a per-cause offset, and variance costs the attacker
+samples rather than saving them — which is why it is left where it stands rather than moved after the
+publish (moving it would race every test that reads the counter on the reply's heels, for a term that
+carries no bias). Enumerated here because §2's residue table claimed to be exhaustive and was not.
+The post-commit rejection classes (step 6 / 6.5 / 8) skip the emitter and so answer two round trips
+sooner, but every one of them sits **past** the secret comparison: they separate nothing for a caller
+who does not already hold the secret.
 
 ### 6.4 The file splits; the op-name map survives
 

@@ -469,6 +469,8 @@ currently reserved-but-unemitted.
     "ops_rejected_total": <uint64>,
     "ops_duplicates_total": <uint64>,
     "ops_malformed_total": <uint64>,
+    "commit_retries_total": <uint64>,
+    "commit_retry_exhausted_total": <uint64>,
     "lane_lag": {"default": <uint64|null>, "urgent": <uint64|null>, "system": <uint64|null>, "meta": <uint64|null>},
     "lane_lag_total": <uint64|null>
   },

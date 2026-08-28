@@ -199,16 +199,11 @@ func TestCompleteCredentialLink_HardenedEnvelopeCannotEnumerate(t *testing.T) {
 		{"wrong-key", testutil.GenReqID("CmplHardWrong"), uKey, "a-guessed-wrong-secret"},
 		{"absent-target", testutil.GenReqID("CmplHardGone"), absentKey, "a-guessed-wrong-secret"},
 	} {
-		outcome, reply, elapsed := submitAndTimeRejection(t, ctx, conn, cp, cons,
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
 			hardenedCompleteLinkEnv(t, tc.reqID, secondCredActorKey, tc.target, tc.secret))
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
 		}
-		// CompleteCredentialLink is in the NFR-S6 op set in its own right, not
-		// by accident of its script reusing ClaimIdentity's fail prefix. This
-		// assertion is what makes that membership load-bearing: narrowing the
-		// mechanism back to ClaimIdentity alone fails here.
-		assertRejectionQuantized(t, tc.name, elapsed)
 		if reply == nil || reply.Error == nil {
 			t.Fatalf("%s: reply = %+v, want a rejection error", tc.name, reply)
 		}

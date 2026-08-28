@@ -160,8 +160,8 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		// never be handed onward as an egress ref the bridge can open. The
 		// tombstone RETAINS the aspect's body (step 8 preserves the prior
 		// document), so the deletion flag is the only thing standing between a
-		// dead aspect and a live decrypt; the body itself is never evidence of
-		// anything.
+		// dead aspect and a live decrypt's result reaching a caller; the body
+		// itself is never evidence of anything.
 		//
 		// The two dispositions fail closed differently, because they have
 		// different blast radii.
@@ -172,12 +172,36 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		if egress {
 			return fmt.Errorf("read deleted sensitive aspect %s", doc.Key)
 		}
-		// non-egress: deliver the tombstone with an EMPTY body. A sensitive
+		// non-egress: deliver the tombstone with an EMPTY body, having first
+		// performed the decrypt the live path performs and thrown the result
+		// away.
+		//
+		// The decrypt is a TIMING-EQUALIZATION REQUIREMENT
+		// (_bmad-output/implementation-artifacts/nfr-s6-release-quantum-payload
+		// -design.md §4.2) and must not be removed as pointless work: skipping
+		// it costs ~0.36 ms less than the live path — dominated by
+		// readPiiKeyEnvelope's round trip — and a caller that can compare those
+		// two timings can tell a tombstoned sensitive aspect from a live one.
+		// For an identity's `.claimKey` that is exactly the difference between
+		// an already-claimed identity and an unclaimed one, which is the
+		// enumeration signal Contract #9 §9.3's wire-shape collapse exists to
+		// deny. Doing the same work and withholding the result removes the
+		// difference where it is made.
+		//
+		// Every error is swallowed with it. A shredded key envelope makes
+		// Decrypt fail mid-way, so propagating would turn a tombstoned read that
+		// succeeds today into an InternalError whose reachability depends on the
+		// target's state — inventing a state-dependent class rather than
+		// removing one. This arm returns nil in every case.
+		//
+		// What the caller receives is byte-identical either way. A sensitive
 		// aspect is encrypted whole — step 6.5 replaces the entire `data` map
 		// with the ciphertext envelope (step65_encrypt.go) — so clearing Data
 		// scrubs exactly the set the live path would have decrypted, and with
-		// no Vault wired (data at rest as plaintext) it scrubs that too. No key
-		// is recorded on the plaintext tracker, because none is legible.
+		// no Vault wired (data at rest as plaintext) it scrubs that too. The
+		// plaintext never reaches doc.Data, no key is recorded on the plaintext
+		// tracker, and no `$sensitiveRef` is authored: equalizing the TIME must
+		// not widen the REACH.
 		//
 		// An empty map, not nil: parseVertexDoc normalizes every hydrated
 		// document to a non-nil Data, and a script reading `.data` on one and
@@ -199,6 +223,15 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		// happens to be tombstoned renders an internal error rather than the
 		// rejection its own script would have produced, which distinguishes
 		// "already spent" from every other rejection cause.
+		//
+		// With no Vault wired the live path does not decrypt either, so there is
+		// nothing to equalize against and the work is skipped. A nil conn is the
+		// test affordance this function's own doc advertises — every live layer
+		// disabled — and the envelope read is a live layer, so it is skipped on
+		// the same terms rather than dereferenced.
+		if v != nil && conn != nil {
+			discardTombstonedDecrypt(ctx, conn, bucket, v, doc.Data)
+		}
 		doc.Data = map[string]interface{}{}
 		return nil
 	}
@@ -274,6 +307,64 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	}
 	doc.Data = value
 	return nil
+}
+
+// discardTombstonedDecrypt runs the live read path's decrypt sequence over a
+// tombstoned sensitive aspect's retained ciphertext and throws away everything
+// it produces — the plaintext AND every error along the way.
+//
+// It exists so a tombstoned sensitive read costs what a live one costs. The
+// sequence is therefore the live path's sequence, step for step:
+// ciphertextFromData, vault.KeyHolder, readPiiKeyEnvelope (the round trip that
+// dominates the cost), Decrypt, and the unmarshal of the plaintext. See
+// _bmad-output/implementation-artifacts/nfr-s6-release-quantum-payload-design.md
+// §4.2 for what the gap it closes is worth to an attacker; the caller's comment
+// states the confidentiality rule the discard preserves.
+//
+// # Why the early returns cost nothing, and are not a silent degradation
+//
+// Each one stops at the same call the LIVE path stops at, having done the same
+// work — the arms differ in what they RETURN, never in what they COST:
+//
+//   - ciphertextFromData fails: a body whose envelope FIELDS are the wrong shape
+//     (the parse is a JSON round trip into the typed struct, so it is lenient
+//     about fields it does not know and strict only about the ones it does). The
+//     live path returns "parse ciphertext for %s" at that same call
+//     (decryptSensitiveDoc's own ciphertextFromData), having parsed the same map.
+//   - vault.KeyHolder fails: the envelope names no resolvable holder — including
+//     a body that is not an envelope at all, which round-trips to a ZERO
+//     Ciphertext and stops here on the missing keyId rather than at the parse.
+//     The live path returns "resolve key holder for %s" at that same call.
+//   - readPiiKeyEnvelope fails: no envelope for the holder. The live path
+//     returns "read piiKey for %s" at that same call — and both arms have paid
+//     the round trip by then, which is the cost this function exists to pay.
+//   - Decrypt fails (a shredded envelope, §6.2): the live path returns
+//     "decrypt %s" at that same call.
+//
+// So there is no stage at which the tombstoned arm is cheaper than the live one,
+// and nothing an operator is owed a signal for: a short-circuit that shortened
+// this arm shortened the live arm identically, on the same input. What must not
+// be done is turning any of these into a returned error — that is the swallow
+// the caller's comment requires, and §6.2 says why.
+func discardTombstonedDecrypt(ctx context.Context, conn *substrate.Conn, bucket string, v vault.Vault, data map[string]interface{}) {
+	ct, err := ciphertextFromData(data)
+	if err != nil {
+		return
+	}
+	keyHolderKey, err := vault.KeyHolder(ct)
+	if err != nil {
+		return
+	}
+	envelope, err := readPiiKeyEnvelope(ctx, conn, bucket, keyHolderKey)
+	if err != nil {
+		return
+	}
+	plaintext, err := v.Decrypt(ctx, keyHolderKey, envelope, ct)
+	if err != nil {
+		return
+	}
+	var value map[string]interface{}
+	_ = json.Unmarshal(plaintext, &value)
 }
 
 // refusableEgressHolder refuses an egress ref whose key holder the bridge

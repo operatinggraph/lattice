@@ -417,43 +417,60 @@ func (r *descriptorFloorResolver) admittedCount() int {
 }
 
 // refuseUndeclaredContextHint closes the declared-read set of an NFR-S6
-// operation (claim_reply_floor.go's nfrS6Operations): the SUBMITTER's own
+// operation (nfr_s6_wire_shape.go's nfrS6Operations): the SUBMITTER's own
 // contextHint may name only what this operation's descriptor names, and
 // anything else faults the operation before hydration instead of being demoted.
 //
 // # Why the set is closed here and nowhere else
 //
+// These operations' rejection causes are equalized rather than masked: the
+// package script and the hydrate path do the SAME work on every cause, over the
+// keys the DESCRIPTOR names. That equality is a property of a FIXED key set, and
+// only of a fixed one. An extra key a submitter names is work nothing has
+// equalized — its hydration cost turns on whether the key exists, whether it is
+// sensitive, and whether it is tombstoned, which are precisely the three facts
+// the equalization removes from the descriptor-named set — so admitting it
+// re-introduces per-cause divergence directly, in the caller's own choice of
+// declaration. Closing the set is what keeps "the same work on every cause" a
+// property of the OPERATION rather than of whoever submitted it.
+//
+// It is also what keeps the state-dependent egress arm out of reach.
+// decryptSensitiveDoc refuses a tombstoned sensitive aspect outright under the
+// egress disposition (a capability over a dead aspect must not leave the
+// Processor) while serving a live one — a refusal whose reachability depends on
+// the target's state. Refusing every declared `egressReads` key on these two
+// operations is what makes that arm unreachable for them.
+//
 // The floor above bounds a declared key's DISPOSITION. Nothing bounds the
 // COUNT: opwire.MaxDeclaredReads admits 1000 declared keys, the Gateway copies
 // contextHint into the envelope verbatim and step 3 authorizes without
-// inspecting it, so every declared key resolves inside step-4 hydration — that
-// is, inside the window the NFR-S6 release quantum draws around the work. A
-// submitter free to name arbitrary keys prices the work inside a timing defence
-// they are the adversary of. For these two operations the descriptor already
-// names the entire legitimate set — the shipped dispatchers build their hint
-// from exactly it (internal/identityceremony) — so the set can be closed
-// outright rather than merely floored.
+// inspecting it, so every declared key resolves inside step-4 hydration. For
+// these two operations the descriptor already names the entire legitimate set —
+// the shipped dispatchers build their hint from exactly it
+// (internal/identityceremony) — so the set can be closed outright rather than
+// merely floored.
 //
 // Refusal, not demotion, and the difference is the whole mechanism: a demoted
-// extra key is still hydrated, still enlarges the batched step-4 snapshot inside
-// the window, and still lands wherever the padding lands.
+// extra key is still hydrated, still enlarges the batched step-4 snapshot, and
+// still costs whatever its own target's state costs.
 //
 // # What is refused
 //
 //   - a `reads` or `optionalReads` key the descriptor does not name (admits).
 //   - EVERY `egressReads` key. OpDispatchSpec carries no EgressReads field
 //     (internal/pkgmgr/definition.go), so no descriptor can name one and the
-//     admitted egress set is empty by construction.
+//     admitted egress set is empty by construction — which is also what keeps
+//     the tombstone-dependent egress refusal above unreachable here.
 //   - EVERY `enumerations` entry, for the same structural reason. An
 //     enumeration is metadata: the Processor shape-validates it at parse and
-//     never hydrates it (Contract #2 §2.5 class (e)), so it buys no work inside
-//     the window. It is refused because the rule is CLOSED, not because it
-//     costs anything.
+//     never hydrates it (Contract #2 §2.5 class (e)), so it buys no work at all.
+//     It is refused because the rule is CLOSED, not because it costs anything.
 //
 // Repetition is not this rule's subject: MaxDeclaredReads still admits 1000
 // copies of an admitted key, each costing one map lookup, and distinctKeys
-// collapses them before any KV work — microseconds against the quantum.
-// MEMBERSHIP is what the rule closes.
+// collapses them before any KV work — and a repeat names no key the descriptor
+// did not already name, so it adds no state-dependent work. MEMBERSHIP is what
+// the rule closes.
 //
 // A nil resolver is an operation with no `Dispatch` descriptor: it admits
 // nothing, so every declared key is refused. An NFR-S6 operation whose
@@ -474,8 +491,8 @@ func (r *descriptorFloorResolver) admittedCount() int {
 // an over-deny reads as "admitted=0" where an over-declaring submitter reads as
 // a positive count.
 // On an NFR-S6 operation the fault is then collapsed by replyRejection into the
-// generic ClaimKeyInvalid with nil details and released on the quantum, exactly
-// like every other rejection of these operations.
+// generic ClaimKeyInvalid with nil details, exactly like every other rejection
+// of these operations.
 //
 // The logger is the caller's rather than the resolver's because the
 // no-descriptor case has no resolver, and that is the case an operator most

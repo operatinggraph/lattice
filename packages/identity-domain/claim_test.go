@@ -42,7 +42,6 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
-	"github.com/operatinggraph/lattice/internal/vault"
 	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 )
 
@@ -508,13 +507,13 @@ func hardenedClaimHint(t *testing.T, targetKey string) *processor.ContextHint {
 // For an NFR-S6 operation this envelope never reaches hydration. The declared
 // set of ClaimIdentity and CompleteCredentialLink is CLOSED — a rule the CODE
 // holds (internal/processor/descriptor_floor.go's refuseUndeclaredContextHint),
-// not the frozen contract: Contract #2 §2.5 still describes the descriptor's
-// disposition as a floor, and the closed-set clause is an unratified proposal on
-// branch claude/contract-2-5-nfr-s6-closed-declared-set. A key outside the
+// not the frozen contract: Contract #2 §2.5 describes the descriptor's
+// disposition as a floor and says nothing about a closed set, so this test is
+// the only place that behaviour is pinned. A key outside the
 // descriptor's own set is refused at the head of step 4 rather than demoted, so
-// the probe buys neither an answer nor any hydration work inside the rejection
-// quantum. What comes back is the same generic reply on the same release lattice
-// as every other cause, with the refused key in the Processor log alone.
+// the probe buys neither an answer nor any hydration work. What comes back is
+// the same generic reply as every other cause, with the refused key in the
+// Processor log alone.
 //
 // The arms using it therefore assert the closure, not the script: their
 // Health-KV outcome is `internal-fault` — the word handleStubFailure records
@@ -530,150 +529,6 @@ func hostileUnflooredReadsHint(t *testing.T, targetKey string) *processor.Contex
 // assertGenericClaimRejection pins NFR-S6's wire shape: the generic code, no
 // details map, and no outcome word anywhere in the message. Every claim
 // rejection cause must be indistinguishable through this surface.
-// submitAndTimeRejection submits env through the real pipeline and returns the
-// reply plus the interval from just before submission to the reply's arrival.
-//
-// This is the ONLY place the release quantizer
-// (internal/processor/claim_reply_floor.go) is exercised on the path production
-// actually takes. Every unit-tier test of the mechanism injects its failure
-// through a stub Hydrator — step 4 — but no real ClaimKeyInvalid is ever minted
-// there: it comes from classifyScriptError parsing the script's
-// fail("ClaimKeyInvalid: " + outcome) (identity-domain/ddls.go), which runs
-// inside the Executor at step 5. A regression that un-anchored the step-5
-// callsite alone would leave every one of those unit tests green.
-//
-// Measuring from before submission is the conservative direction: t0 precedes
-// the receipt instant dispatch captures, so an observed interval that clears the
-// quantum bounds the real receipt-to-publish offset from below.
-func submitAndTimeRejection(t *testing.T, ctx context.Context, conn *substrate.Conn,
-	cp *processor.CommitPath, cons jetstream.Consumer, env *processor.OperationEnvelope) (processor.MessageOutcome, *processor.OperationReply, time.Duration) {
-	t.Helper()
-	t0 := time.Now()
-	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
-	return outcome, reply, time.Since(t0)
-}
-
-// assertRejectionQuantized fails when a rejection of an NFR-S6 operation came
-// back before its first release boundary. `elapsed` must come from
-// submitAndTimeRejection.
-func assertRejectionQuantized(t *testing.T, label string, elapsed time.Duration) {
-	t.Helper()
-	if elapsed < processor.DefaultClaimRejectionFloor {
-		t.Fatalf("%s: rejection answered after %s, before the %s NFR-S6 release quantum — "+
-			"the reply is being published at its own service time, which is what makes the "+
-			"rejection causes separable in the time domain",
-			label, elapsed, processor.DefaultClaimRejectionFloor)
-	}
-}
-
-// slowDecryptVault wraps a real Vault and spends a fixed interval on every
-// Decrypt, so a test can make one rejection cause do substantially more work
-// than another WITHOUT leaving the deployed code path — the script still runs,
-// the aspect is still real ciphertext, and the decrypt still really happens.
-//
-// The interval is not synchronising anything; its duration is the quantity
-// under test.
-type slowDecryptVault struct {
-	vault.Vault
-	work time.Duration
-}
-
-func (v slowDecryptVault) Decrypt(ctx context.Context, keyHolderKey string, env vault.Envelope, ct vault.Ciphertext) ([]byte, error) {
-	time.Sleep(v.work)
-	return v.Vault.Decrypt(ctx, keyHolderKey, env, ct)
-}
-
-// TestClaimIdentity_RejectionReleaseIsAnchoredAtReceipt is the end-to-end proof
-// that the NFR-S6 release quantizer is anchored at message ARRIVAL, on the path
-// production takes.
-//
-// It compares two real causes whose work genuinely differs: `wrong-key` reads a
-// LIVE `.claimKey` aspect, so step 4 runs the envelope read and the AEAD decrypt
-// (inflated here by slowDecryptVault), while `absent-target` finds nothing to
-// decrypt at all. Anchored at receipt, both are answered on the same lattice
-// point and the difference collapses to publish jitter. Anchored anywhere later
-// — at the step-5 callsite, or at a receipt captured below dispatch's prologue —
-// the decrypt time reappears in the gap, which is precisely the oracle.
-//
-// A lower-bound "not before the quantum" assertion cannot see this: anchoring
-// late makes a reply LATER, never earlier. Only the comparison catches it.
-func TestClaimIdentity_RejectionReleaseIsAnchoredAtReceipt(t *testing.T) {
-	t.Parallel()
-	ctx, conn := setupTestEnv(t)
-
-	// The quantum is set well above the injected work so both causes land in the
-	// FIRST quantum however many times the path decrypts — the assertion must
-	// not depend on that count.
-	const quantum = 400 * time.Millisecond
-	const decryptWork = 150 * time.Millisecond
-	// Far below decryptWork, far above goroutine wakeup plus a NATS round trip.
-	const tolerance = 60 * time.Millisecond
-
-	instance := claimInstance + "-anchor"
-	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
-		Durable:             "clm-anchor",
-		Instance:            instance,
-		ClaimEmitter:        processor.NewClaimAttemptEmitter(conn, testutil.HarnessHealthBucket, instance, testutil.TestLogger()),
-		Vault:               slowDecryptVault{Vault: testutil.TestVault(t), work: decryptWork},
-		ClaimRejectionFloor: quantum,
-	})
-
-	// A live, unclaimed identity with a LIVE claimKey aspect: the cause that
-	// really decrypts.
-	wrongKeyTarget := "vtx.identity." + testutil.GenReqID("ClmAnchorLive0")
-	seedDirectIdentity(t, ctx, conn, wrongKeyTarget, "unclaimed", "")
-	seedClaimKeyAspect(t, ctx, conn, wrongKeyTarget, sha256HexOf("the-real-anchor-secret"))
-
-	// A target that was never provisioned: nothing to read, nothing to decrypt.
-	absentTarget := "vtx.identity." + testutil.GenReqID("ClmAnchorGone0")
-
-	claimAt := func(reqID, target, secret string) time.Duration {
-		t.Helper()
-		env := &processor.OperationEnvelope{
-			RequestID:     reqID,
-			Lane:          processor.LaneDefault,
-			OperationType: "ClaimIdentity",
-			Actor:         consumerActorKey,
-			SubmittedAt:   "2026-05-22T10:05:00Z",
-			Class:         "identity",
-			Payload:       json.RawMessage(`{"claimKey":"` + secret + `","targetIdentityKey":"` + target + `"}`),
-			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
-			ContextHint:   identityceremony.ClaimContextHint(target),
-		}
-		outcome, reply, elapsed := submitAndTimeRejection(t, ctx, conn, cp, cons, env)
-		if outcome != processor.OutcomeRejected {
-			t.Fatalf("%s: outcome = %q, want rejected", reqID, outcome)
-		}
-		assertGenericClaimRejection(t, reply)
-		if elapsed < quantum {
-			t.Fatalf("%s: answered after %s, before the %s quantum", reqID, elapsed, quantum)
-		}
-		return elapsed
-	}
-
-	wrongKeyElapsed := claimAt(testutil.GenReqID("ClmAnchorWrong"), wrongKeyTarget, "not-the-real-secret")
-	absentElapsed := claimAt(testutil.GenReqID("ClmAnchorAbsnt"), absentTarget, "irrelevant-secret")
-
-	gap := wrongKeyElapsed - absentElapsed
-	if gap < 0 {
-		gap = -gap
-	}
-	if gap > tolerance {
-		t.Fatalf("the two causes are separable in the time domain: wrong-key answered in %s, "+
-			"absent-target in %s, gap %s > %s — %s of injected decrypt work is visible in the reply "+
-			"timing, so the release is anchored after that work rather than at message receipt",
-			wrongKeyElapsed, absentElapsed, gap, tolerance, decryptWork)
-	}
-	// Both must also have landed in the FIRST quantum; if the injected work had
-	// pushed one into the second, the comparison above would be measuring the
-	// wrong thing.
-	if wrongKeyElapsed >= 2*quantum || absentElapsed >= 2*quantum {
-		t.Fatalf("a cause overran the first quantum (wrong-key %s, absent %s, quantum %s) — "+
-			"raise the quantum or lower the injected work so this test keeps testing anchoring",
-			wrongKeyElapsed, absentElapsed, quantum)
-	}
-}
-
 func assertGenericClaimRejection(t *testing.T, reply *processor.OperationReply) {
 	t.Helper()
 	if reply == nil || reply.Error == nil {
@@ -788,6 +643,23 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 	seedDirectIdentity(t, ctx, conn, spentKey, "unclaimed", "")
 	seedSpentClaimKeyAspect(t, ctx, conn, spentKey, sha256HexOf("indistinguishable-spent-secret"))
 
+	// An identity merged away into a survivor. `merged` is its own outcome
+	// word, ranked above the trailing wrong-state check, and this is the only
+	// vector on this branch that holds that ranking.
+	mergedKey := "vtx.identity." + testutil.GenReqID("IndstMergedKey")
+	seedDirectIdentity(t, ctx, conn, mergedKey, "merged", "vtx.identity.SurvivorVtxNPQRSTUVW")
+	seedClaimKeyAspect(t, ctx, conn, mergedKey, sha256HexOf("indistinguishable-merged-secret"))
+
+	// A live unclaimed identity whose `.claimKey` body carries a hash of the
+	// wrong TYPE. crypto.constant_time_equal refuses a non-string operand with
+	// a builtin argument error, so the branch types the operand itself and
+	// renders the ordinary invalid-key rather than a distinguishable script
+	// fault.
+	badHashKey := "vtx.identity." + testutil.GenReqID("IndstBadHash00")
+	seedDirectIdentity(t, ctx, conn, badHashKey, "unclaimed", "")
+	seedSensitiveAspect(t, ctx, conn, badHashKey, "claimKey",
+		map[string]any{"hash": 42, "algo": "sha256"})
+
 	cases := []struct {
 		name    string
 		reqID   string
@@ -797,17 +669,26 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// hint overrides the shipped builder for the hostile arms. nil means
 		// "submit exactly what a conforming dispatcher sends".
 		hint func(t *testing.T, target string) *processor.ContextHint
+		// omitSecret drops claimKey from the payload entirely. InputSchema
+		// marks it required but nothing enforces that server-side, so the
+		// branch is reachable — and it is the vector that exercises
+		// PLACEHOLDER_SECRET here, the stand-in the sha256 runs on when the
+		// caller submitted nothing to hash.
+		omitSecret bool
 	}{
-		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target", nil},
-		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key", nil},
-		{"spent-key", testutil.GenReqID("IndstSpentSbmt"), spentKey, "indistinguishable-spent-secret", "invalid-key", nil},
+		{"no-target", testutil.GenReqID("IndstNoTarget0"), absentKey, "irrelevant-secret", "no-target", nil, false},
+		{"wrong-key", testutil.GenReqID("IndstWrongSbmt"), wrongKeyKey, "not-the-real-secret", "invalid-key", nil, false},
+		{"spent-key", testutil.GenReqID("IndstSpentSbmt"), spentKey, "indistinguishable-spent-secret", "invalid-key", nil, false},
+		{"merged-target", testutil.GenReqID("IndstMergedSbmt"), mergedKey, "indistinguishable-merged-secret", "merged", nil, false},
+		{"stored-hash-wrong-type", testutil.GenReqID("IndstBadHashSb"), badHashKey, "irrelevant-secret", "invalid-key", nil, false},
+		{"absent-key", testutil.GenReqID("IndstNoKeySbmt"), wrongKeyKey, "", "invalid-key", nil, true},
 		// A target that fails the Contract #1 grammar. Right prefix, so the
 		// script's own `startswith` guard would accept it and its `no-target`
 		// branch is what should render — but a MALFORMED key declared in a
 		// ContextHint is rejected by step 4 as InvalidReadKey before the
 		// script runs at all. It reaches the script's branch only because the
 		// shared builder declines to declare a key the grammar rejects.
-		{"malformed-target", testutil.GenReqID("IndstMalformed"), "vtx.identity.x", "irrelevant-secret", "no-target", nil},
+		{"malformed-target", testutil.GenReqID("IndstMalformed"), "vtx.identity.x", "irrelevant-secret", "no-target", nil, false},
 		// The hostile arms. These bypass the shared builder entirely and
 		// hand-roll the declaration a conforming client no longer sends —
 		// `reads`, the fail-closed disposition, on the three target-derived
@@ -820,8 +701,8 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// contextHint is client-supplied and step 3 never inspects it — so the
 		// only thing that can make it answer like every other cause is the
 		// descriptor floor (Contract #2 §2.5) demoting it Processor-side.
-		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint},
-		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint},
+		{"hand-rolled-reads-absent", testutil.GenReqID("IndstHostAbsnt"), absentKey, "irrelevant-secret", "no-target", hardenedClaimHint, false},
+		{"hand-rolled-reads-wrong-key", testutil.GenReqID("IndstHostWrong"), wrongKeyKey, "not-the-real-secret", "invalid-key", hardenedClaimHint, false},
 		// The two arms that reach PAST the descriptor's set: they declare
 		// target-derived keys a SUBMITTER may not declare. The closed
 		// declared-read set refuses them at the head of step 4, before
@@ -843,8 +724,8 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 		// `optionalReads` exclusively (ddls.go), so no key on this path is ever
 		// recorded required-absent and no branch can fault HydrationMiss on
 		// one. The closure is what holds that surface.
-		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "internal-fault", hostileUnflooredReadsHint},
-		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "internal-fault", hostileUnflooredReadsHint},
+		{"hand-rolled-unfloored-reads-absent", testutil.GenReqID("IndstHostUnfAb"), absentKey, "irrelevant-secret", "internal-fault", hostileUnflooredReadsHint, false},
+		{"hand-rolled-unfloored-reads-wrong-key", testutil.GenReqID("IndstHostUnfWr"), wrongKeyKey, "not-the-real-secret", "internal-fault", hostileUnflooredReadsHint, false},
 	}
 
 	instance := claimInstance + "-indst"
@@ -876,17 +757,14 @@ func TestClaimIdentity_RejectionCausesIndistinguishable(t *testing.T) {
 			AuthContext:   &processor.AuthContext{Target: consumerActorKey},
 			ContextHint:   hint,
 		}
-		outcome, reply, elapsed := submitAndTimeRejection(t, ctx, conn, cp, cons, env)
+		if tc.omitSecret {
+			env.Payload = json.RawMessage(`{"targetIdentityKey":"` + tc.target + `"}`)
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 		if outcome != processor.OutcomeRejected {
 			t.Fatalf("%s: outcome = %q, want rejected", tc.name, outcome)
 		}
 		assertGenericClaimRejection(t, reply)
-		// The timing half of NFR-S6, across both depths a rejection is decided
-		// at: the script's own branches at step 5 — the callsite production
-		// takes for every conforming cause — and the closed declared-read set's
-		// refusal at the head of step 4. Both release on the same lattice or
-		// the depth itself is readable.
-		assertRejectionQuantized(t, tc.name, elapsed)
 		shapes = append(shapes, fmt.Sprintf("%s|%d", reply.Error.Code, len(reply.Error.Details)))
 
 		if count, ok := readClaimHealthCounter(t, ctx, conn, instance, tc.outcome); !ok || count <= before {
