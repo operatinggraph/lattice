@@ -17,6 +17,25 @@ import (
 // laneConsumerPrefix prefixes a lane-1 durable name: weaver-target-<targetId>.
 const laneConsumerPrefix = "weaver-target-"
 
+// laneMaxAckPending caps how many un-acked rows one lane-1 durable holds.
+//
+// A row declined by a config-error class is Nak'd on the long redelivery floor,
+// and a delayed Nak holds its pending slot continuously until the row is acked
+// or its message is superseded — so the pending set is no longer just what is
+// momentarily in flight, it is the target's whole stuck population. The cap is
+// what that population may reach before NEW entities of the same target stall
+// (redeliveries are served ahead of the cap; only fresh deliveries stall), so it
+// is set explicitly rather than left at the server's 1000 default.
+//
+// It is deliberately modest rather than generous. Past roughly a thousand
+// pending messages the server's redelivery timer walks the entire pending map on
+// every fire and defers itself under ack load, so a large cap buys stall headroom
+// by paying redelivery latency for every consumer on the box. 2000 sits ~70×
+// above the worst stuck population observed on the shipped corpus while staying
+// inside that walk's comfortable range; the signal that it is wrong for a
+// deployment is a durable whose num_ack_pending sits pinned at it.
+const laneMaxAckPending = 2000
+
 // Config parameterizes the engine. Bucket/stream names default to the
 // platform-standard values; callers (cmd/weaver, tests) override only what
 // they need.
@@ -87,6 +106,24 @@ type Config struct {
 	// Contract #4 §4.3 op-tracker TTL horizon, beyond which a duplicate re-dispatch
 	// would no longer collapse on the tracker anyway. Values <= 0 take the default.
 	ReclaimBackoffCap time.Duration
+	// LongRedeliveryDelay is the lane-1 redelivery floor for a row declined by a
+	// CONFIG-error class — no playbook entry for an open gap column, a template
+	// that resolves null against the row, an action the deployment cannot
+	// dispatch. Such a row is Nak'd rather than Acked, because its fix arrives
+	// as a package/target re-author that projects no new row: the redelivery IS
+	// the automatic uptake path, and the floor is that path's re-poll cadence.
+	// A DATA error takes no floor at all — it Acks with a standing Health issue,
+	// because its fix is necessarily a re-projection, which supersedes the row
+	// and delivers on its own.
+	//
+	// Sized against the cost of the whole stuck set expiring as one batch
+	// through a serial worker, not against fix latency (a re-projected fix is
+	// picked up immediately either way). Values <= 0 take the 5m
+	// substrate.DefaultLongRedeliveryDelay; a value below
+	// substrate.DefaultRedeliveryDelay is clamped up to it (with a Warn) — a
+	// "long" floor shorter than the transient one would turn a config error into
+	// a hot loop.
+	LongRedeliveryDelay time.Duration
 	// Instance distinguishes this engine process; it is one segment of the
 	// per-boot registry-source durable name (a separate per-boot nonce is
 	// what actually guarantees full-replay uniqueness — see registry.go — so
@@ -192,6 +229,17 @@ func (c *Config) withDefaults() {
 		// A cap below the base would invert the backoff (the first repeat would be
 		// clamped below the lease). Clamp the cap up so the floor is always >= base.
 		c.ReclaimBackoffCap = c.ReclaimBackoffBase
+	}
+	if c.LongRedeliveryDelay <= 0 {
+		c.LongRedeliveryDelay = substrate.DefaultLongRedeliveryDelay
+	}
+	if c.LongRedeliveryDelay < substrate.DefaultRedeliveryDelay {
+		// The long floor paces the config-error decline loop; below the
+		// transient floor it would re-poll a fault only a package re-author can
+		// fix faster than the substrate re-polls a fault the next retry fixes.
+		c.Logger.Warn("weaver: LongRedeliveryDelay is below the transient redelivery floor; clamping",
+			"longRedeliveryDelay", c.LongRedeliveryDelay, "floor", substrate.DefaultRedeliveryDelay)
+		c.LongRedeliveryDelay = substrate.DefaultRedeliveryDelay
 	}
 	if c.Instance == "" {
 		c.Instance = defaultInstance()
@@ -414,13 +462,15 @@ func supervisedHandler(h func(context.Context, substrate.Message) substrate.Deci
 func (e *Engine) targetSpec(targetID string) substrate.ConsumerSpec {
 	name := laneConsumerPrefix + targetID
 	return substrate.ConsumerSpec{
-		Name:          name,
-		Stream:        "KV_" + e.cfg.WeaverTargetsBucket,
-		FilterSubject: e.rowSubjectPrefix + targetID + ".>",
-		DeliverPolicy: substrate.DeliverLastPerSubject,
-		Handler:       supervisedHandler(e.handleRow),
-		Health:        healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
-		Logger:        e.logger,
+		Name:                name,
+		Stream:              "KV_" + e.cfg.WeaverTargetsBucket,
+		FilterSubject:       e.rowSubjectPrefix + targetID + ".>",
+		DeliverPolicy:       substrate.DeliverLastPerSubject,
+		Handler:             supervisedHandler(e.handleRow),
+		MaxAckPending:       laneMaxAckPending,
+		LongRedeliveryDelay: e.cfg.LongRedeliveryDelay,
+		Health:              healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", name, e.states),
+		Logger:              e.logger,
 	}
 }
 

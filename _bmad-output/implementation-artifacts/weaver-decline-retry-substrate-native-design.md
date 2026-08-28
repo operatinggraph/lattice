@@ -289,12 +289,24 @@ After (a)+(b), `msg.NumDelivered` has no reader (C3 narrows to `msg.Sequence` on
 
 ### 3.5 The `gapConfig:` latch self-heals (symptom 2)
 
-Per the direction, the per-entity clear stays at its site — **narrowed to a column read as an
-explicit bool `false`** (V19's `isBool`, threaded out of `boolColumn`): today the clear also fires
+Per the direction, the per-entity clear stays at its site — **narrowed to exclude a PRESENT
+non-bool read** (V19's `isBool`, threaded out of `boolColumn`): today the clear also fires
 for a *non-bool* value — a read that is not evidence of closure — so a repeatedly re-projecting
 broken row would clear the target-scoped latch at its projection rate. With the narrowing, the
 flap is what the direction accepted: at most one clear per genuinely closing entity, re-raised
 within ≤ one long floor by a still-open row's next delivery.
+
+**Amended at build, 2026-08-28.** This paragraph first said "narrowed to a column read as an
+explicit bool `false`", which taken literally also stops the clear for an **absent/null** column —
+and that would have been a real harm the design never argues for. An absent column is §10.2's
+**retraction** shape and is precisely the basis on which `clearClosedMarks` treats a column the row
+stopped reporting as a gap that ended (a tombstone row included); it is also, per the block's own
+comment, the only clear a `GapWithoutPlaybook` / `UnresolvedReference` / `PlaybookConfigError` can
+reach once the rows stop reporting the column. Excluding it would strand the target-scoped latch
+permanently on a target whose rows all retracted the column — and with §8's demotion that is a
+standing `warning`, i.e. a component held `degraded` with no operator remedy. The narrowing
+implemented is the one this section's own argument names: **a present, non-bool read is not evidence
+of closure**; absent/null and explicit `false` both still clear.
 
 Re-raise conditionality, per code (the adversarial pass's enumeration):
 
@@ -358,6 +370,7 @@ DeliverPolicy-at-first-create.
 |---|---|---|
 | The republish set (§3.4b) | process, in-memory, per (target, entity, col) | entry added on a `fire` publish failure; removed on that key's next successful publish and by `clearClosedMarks`' mark clear; **lost on restart → reclaim ladder is the backstop**; evicted with the target on unregister/revoke |
 | Nak'd-pending set + delay timestamps | JetStream consumer (server-side) | the substrate's own machinery — created by the Nak, freed by ack/Term (V1, V3), discarded whole by the verb's durable delete (§3.3); the V16 restart-strand is repaired by the verb or any fresh delivery; no engine mirror exists |
+| The per-row issue-cache budget (§3.6) — `issueCache.rowIssues` (tracked count) + `refused` (raises turned away), one pair per target | process, in-memory, per target | **created** lazily at the target's first `data:`/`template:` per-row raise. **Incremented**: `rowIssues` on each newly-tracked per-row key; `refused` on each raise past `rowIssueCapPerTarget` (500), which is also what maintains the single overflow entry at `data:<targetId>.__capped` in place. **Decremented** on each per-row key's `clear` / `clearPrefix` removal. **Reset**: `refused` and its overflow entry retire as soon as `rowIssues` falls back under the cap — every untracked fact is level-driven and re-raised by its own row's next delivery, so a carried total would state a backlog nothing can retire. **Ordering**: none is promised — the cap admits whichever keys raise first, so the tracked set is a SAMPLE, not a ranking, and the overflow entry is what says so. **Crash / restart**: empty, like the latch it counts; the cache is rebuilt from redeliveries, so the cap re-fills in delivery order and the overflow entry re-arrives when it is re-reached. **Replay** (`ReplayTarget`, cold boot): identical to restart for a fresh process, and for a live one the replay's raises simply re-enter the same budget — the cap is exactly what bounds a replay of a systemically-broken lens. **Reconnect**: untouched (in-memory, no substrate dependency). **Tombstone**: the entity's `data:`/`template:` prefix clears free that entity's slots. **Target unregister / revoke**: the `issueKeyTargetPrefixes` walk frees the target's whole set — the overflow entry included, since it sits inside the `data:<targetId>.` prefix — and drops both counters. Loss of the pair degrades to an unbounded cache until the next raise re-derives it, never to a wrong verdict: `aggregateStatus` and `boundIssues` are computed over whatever the cache holds |
 
 No cursor, no cycle set, no observed-column set, no budget, no eviction sweep, no boot-phase
 machinery — the held design's six structures, dissolved. Loss of anything above degrades to a

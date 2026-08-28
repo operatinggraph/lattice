@@ -36,12 +36,26 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 
 	// An empty body is the entity-deletion tombstone (§10.2 IsDeleted path):
 	// no row columns remain true, so the level reconcile clears every mark.
+	//
+	// A body that does not parse is a per-row DATA error, and the only thing
+	// that can fix it is a re-projection — which supersedes this revision and
+	// delivers on its own, so the row Acks rather than holding a pending slot.
+	// What the Ack must not do is lose the fact: the standing issue at the
+	// row's synthetic body column is the durable "acked but declined" record,
+	// and the successful parse below is its repair. Nothing else can retire it
+	// — no column reader ever names rowBodyColumn — except the two prefix
+	// teardowns that retire the whole `data:` family for a subject that leaves
+	// (the deletion tombstone in clearClosedMarks, and a target's Revoke /
+	// registry removal).
 	var row map[string]any
 	if len(msg.Body) != 0 {
 		if err := json.Unmarshal(msg.Body, &row); err != nil {
-			e.logger.Warn("weaver: row value unparseable; dropping", "key", key, "err", err)
+			unparseable := "weaver-targets row " + key + " does not parse as JSON: " + err.Error()
+			e.logger.Warn("weaver: " + unparseable)
+			e.issues.set(issueKeyDataEntity(targetID, entityID, rowBodyColumn), "warning", "RowDataError", unparseable)
 			return substrate.Ack
 		}
+		e.issues.clear(issueKeyDataEntity(targetID, entityID, rowBodyColumn))
 	}
 
 	// Level-reconciled mark-clearing runs on EVERY row update first, violating
@@ -131,8 +145,17 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		return substrate.Ack
 	}
 
+	// The three retry accumulators, collapsed at the tail with precedence
+	// Nak > NakWithDelay > NakWithLongDelay > Ack: a message carries ONE
+	// decision for the whole row, so the shortest floor any gap asked for wins
+	// — a gap needing an immediate retry must not wait out another gap's
+	// config-error floor, and the long floor's own gap is re-evaluated by
+	// whichever redelivery arrives first either way. Each switch below names
+	// every non-Ack Decision explicitly, because a value that falls through to
+	// `default` is silently downgraded to Ack rather than failing to compile.
 	nak := false
 	delayed := false
+	longDelayed := false
 	for _, col := range e.openGapColumns(targetID, entityID, row) {
 		// The static playbook entry for this gap (zero value when the column has
 		// no gaps entry at all — the "no playbook entry" dead-end dispatchGap
@@ -174,6 +197,8 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 					nak = true
 				case substrate.NakWithDelay:
 					delayed = true
+				case substrate.NakWithLongDelay:
+					longDelayed = true
 				default:
 				}
 			}
@@ -184,6 +209,8 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 			nak = true
 		case substrate.NakWithDelay:
 			delayed = true
+		case substrate.NakWithLongDelay:
+			longDelayed = true
 		default:
 		}
 	}
@@ -197,6 +224,14 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		// Only delayed-retry gaps (unresolved references, metadata gaps) —
 		// redeliver on the bounded cadence, never a hot loop.
 		return substrate.NakWithDelay
+	}
+	if longDelayed {
+		// Only config-error gaps (no playbook entry, an unbuildable template,
+		// an undispatchable action). Their fix arrives as a package/target
+		// change that projects no new row, so the redelivery IS the uptake
+		// path — held on the long floor, which prices the re-poll cadence of a
+		// row that stays declined until an author fixes it.
+		return substrate.NakWithLongDelay
 	}
 	return substrate.Ack
 }
@@ -226,9 +261,23 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// skipped (FR29 discipline).
 		esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col)
 		if !escalated {
-			e.alert(issueKeyGapConfig(targetID, col), "error", "GapWithoutPlaybook",
+			// A CONFIG error: the fix is a package re-author adding the gaps
+			// entry, which projects no new row — so nothing would ever
+			// re-deliver this row and an Ack would strand it violating forever.
+			// Hold it on the long redelivery floor instead: each redelivery
+			// re-evaluates against the CURRENT playbook, so the fix is picked
+			// up automatically within one floor with no rebuild.
+			//
+			// `warning`, not `error`: the fact now stands for as long as it
+			// holds (the loop re-raises it every floor), and aggregateStatus
+			// maps any `error` over the whole issue set to `unhealthy` — so an
+			// `error` here would report "cannot fulfil its primary
+			// responsibility" (Contract #5 §5.2) for a Weaver that is
+			// dispatching normally for every other target. The severity is one
+			// value for every caller of this raise, lane 1 included.
+			e.alert(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
 				"target "+targetID+": row column "+col+" is true but the playbook defines no gaps entry for it")
-			return substrate.Ack
+			return substrate.NakWithLongDelay
 		}
 		// The augur policy now covers this gap — clear any GapWithoutPlaybook
 		// alert raised before the policy was added, and dispatch the reasoning
@@ -578,13 +627,27 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			"target "+targetID+" entity "+entityID+" gap "+col+" dispatch deferred for redelivery: "+perr.msg)
 		return nil, "", substrate.NakWithDelay
 	case errData:
+		// The fault is template × row: a template reference that resolves null
+		// against THIS row. One of its two fix paths — an edit to the action
+		// template or the playbook — projects no new row, so the row would
+		// never be re-evaluated after an Ack. The long floor covers both paths
+		// (a corrected projection supersedes the pending revision and delivers
+		// on its own; a corrected template is picked up by the next
+		// redelivery).
 		e.alertPaced(issueKeyTemplateEntity(targetID, entityID, col), "warning", "TemplateDataError",
 			"target "+targetID+" entity "+entityID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.Ack
+		return nil, "", substrate.NakWithLongDelay
 	default:
-		e.alertPaced(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError",
+		// A CONFIG error — an action the deployment cannot dispatch. Only a
+		// package re-author fixes it and that produces no new row delivery, so
+		// the long redelivery floor is the automatic uptake path, exactly as
+		// for a gap with no playbook entry. `warning` for the same reason:
+		// a standing `error` would pin the whole component `unhealthy`
+		// (aggregateStatus) over one target's authoring fault while every
+		// other target dispatches normally.
+		e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "PlaybookConfigError",
 			"target "+targetID+" gap "+col+": "+perr.msg)
-		return nil, "", substrate.Ack
+		return nil, "", substrate.NakWithLongDelay
 	}
 }
 
@@ -844,13 +907,24 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// retire the data ones on a value that parses, but a deleted entity
 		// projects no values at all, so this is the only pass that can retire
 		// them — by prefix, since the set of columns that raised is not knowable
-		// from an empty body.
+		// from an empty body. The prefix is also what retires the synthetic
+		// rowBodyColumn entry: an entity whose last projected body was
+		// unparseable can end by deletion instead of by a parseable revision,
+		// and the tombstone's empty body needs no parsing to get here.
 		e.issues.clearPrefix(issuePrefixData + targetID + "." + entityID + ".")
 		e.issues.clearPrefix(issuePrefixTemplate + targetID + "." + entityID + ".")
 	}
 	anyOpen := false
 	for _, col := range markCandidateColumns(target, row) {
-		if row != nil && e.boolColumn(targetID, entityID, row, col) {
+		// readable answers only the config-latch retirement below: a tombstone
+		// row says the whole entity is gone, and a row that carries the column
+		// as an explicit bool or drops it entirely has stated its value, but a
+		// PRESENT non-bool has said nothing this pass can act on.
+		open, readable := false, true
+		if row != nil {
+			open, readable = e.boolColumnRead(targetID, entityID, row, col)
+		}
+		if open {
 			// anyOpen answers exactly one question — is any gap left that could
 			// READ the admission priority column — so only a gap that can reach
 			// the admission gate may hold it true. A `surface` gap cannot:
@@ -880,8 +954,21 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		// which the sweep, holding one mark, does not have — observes a column
 		// leaving rather than one entity's gap ending. Idempotent when none
 		// stands.
+		//
+		// It is also the only retirement here that turns on the column having
+		// genuinely CLOSED rather than merely not reading true, and the only
+		// one whose key is shared with every other entity of the target. An
+		// unreadable column (present, non-bool) is not evidence of closure, and
+		// retiring a target-scoped fact on it would let one repeatedly
+		// re-projecting broken row clear the latch at its projection rate,
+		// re-stamping the `since` of a config fault every other row is still
+		// raising. The per-entity retirements below are unaffected: they are
+		// this row's own facts, and a row that cannot state the column has no
+		// use for them either way.
 		e.retireClosedGapIssues(targetID, entityID, col)
-		e.issues.clear(issueKeyGapConfig(targetID, col))
+		if readable {
+			e.issues.clear(issueKeyGapConfig(targetID, col))
+		}
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
 			// e.marks.get) — nothing further to clear for this column.
@@ -1083,11 +1170,32 @@ func (e *Engine) releaseCompletedLeg(ctx context.Context, targetID, entityID, co
 // clearClosedMarks retires theirs at the close instead; issueKeyDataEntity's
 // doc holds the whole family's teardown map.
 func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col string) bool {
+	value, _ := e.boolColumnRead(targetID, entityID, row, col)
+	return value
+}
+
+// boolColumnRead is boolColumn's full result: the column's bool value, plus
+// whether that value is READABLE — whether the row actually said something
+// about the column.
+//
+// Readable covers the two §10.2-conformant shapes and only those. An explicit
+// bool speaks for itself. An ABSENT (or null) column is the §10.2 retraction
+// shape and reads as a closed column — the whole basis on which clearClosedMarks
+// treats a column the row stopped reporting as a gap that ended, tombstone
+// included. A PRESENT value of any other type is neither: the false returned
+// with it is a conservative default, not a fact about the row, so a caller whose
+// decision turns on the column genuinely being false must not act on it.
+//
+// One caller needs the distinction — clearClosedMarks' retirement of the
+// TARGET-scoped config latch, which an unreadable column would otherwise retire
+// on every projection of a broken row. Every other caller wants the
+// conservative false and takes boolColumn.
+func (e *Engine) boolColumnRead(targetID, entityID string, row map[string]any, col string) (value, readable bool) {
 	key := issueKeyDataEntity(targetID, entityID, col)
 	v, ok := row[col]
 	if !ok || v == nil {
 		e.issues.clear(key)
-		return false
+		return false, true
 	}
 	b, isBool := v.(bool)
 	if !isBool {
@@ -1095,10 +1203,10 @@ func (e *Engine) boolColumn(targetID, entityID string, row map[string]any, col s
 			targetID, entityID, col, v)
 		e.logger.Warn("weaver: " + msg)
 		e.issues.set(key, "warning", "RowDataError", msg)
-		return b
+		return b, false
 	}
 	e.issues.clear(key)
-	return b
+	return b, true
 }
 
 // intColumn reads a §10.2 integer column off a row, returning ok=false when the
@@ -1626,14 +1734,21 @@ func issueKeyGapConfig(targetID, col string) string {
 // (Revoke or registry removal via reconcileConsumers) prefix-clears the target
 // (issueKeyTargetPrefixes).
 //
-// Two exits from handleRow retire nothing, and neither strands an entry. A row
-// whose body does not parse returns before the reconcile: that is unreadable
+// One member of the family is keyed at a SYNTHETIC column: rowBodyColumn, whose
+// fact is "this row's body does not parse at all". It has no column reader, so
+// its retirement is not a read — the successful json.Unmarshal of a later
+// revision of the same row clears it at the raise site, and the two prefix
+// teardowns cover a subject that leaves (the entity's deletion tombstone, whose
+// empty body needs no parsing, and the target's Revoke or registry removal).
+//
+// Two exits from handleRow retire nothing else, and neither strands an entry. A
+// row whose body does not parse returns before the reconcile: that is unreadable
 // evidence, not evidence of repair (the sweep takes the same posture on the same
 // input), and every retirement above stays reachable by the next delivery that
-// does parse — including the deletion tombstone, whose empty body needs no
-// parsing. A row for an unregistered target returns at the registry miss, and
-// its target's whole issue set is retired wholesale by the reconcileConsumers
-// teardown that made the registration go away.
+// does parse — including the deletion tombstone. A row for an unregistered
+// target returns at the registry miss, and its target's whole issue set is
+// retired wholesale by the reconcileConsumers teardown that made the
+// registration go away.
 func issueKeyDataEntity(targetID, entityID, col string) string {
 	return issuePrefixData + targetID + "." + entityID + "." + col
 }
@@ -1665,4 +1780,49 @@ func issueKeyTemplateEntity(targetID, entityID, col string) string {
 
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
 	return "effect:" + targetID + "." + gapColumn + "." + actionRef
+}
+
+// rowIssuesCappedSegment is the reserved column segment of the per-target
+// overflow entry the issue cache maintains once a target's per-ROW issue set
+// reaches rowIssueCapPerTarget. It cannot collide with a real member of the
+// family: an entity segment is a bare NanoID and substrate.Alphabet carries no
+// underscore (the same reservation the `__control` / `__count` weaver-state key
+// tails rest on), and the key is one segment SHORT of a per-row key besides.
+const rowIssuesCappedSegment = "__capped"
+
+// issueKeyRowIssuesCapped keys that overflow entry. It deliberately sits inside
+// the `data:` family so the two teardowns that retire a target's per-row issues
+// wholesale — Revoke and the reconcileConsumers removal, both walking
+// issueKeyTargetPrefixes — carry it away with them; and it deliberately sits
+// ABOVE the entity segment, because the fact is the target's, not any one row's,
+// so the per-entity tombstone clear must not retire it.
+func issueKeyRowIssuesCapped(targetID string) string {
+	return issuePrefixData + targetID + "." + rowIssuesCappedSegment
+}
+
+// rowIssueTarget reports whether key is a member of a PER-ROW issue family — a
+// `data:` or `template:` entry keyed per (target, entity, column) — and if so
+// which target's budget it counts against.
+//
+// The test is the key SHAPE, not a list of raise sites: every member carries an
+// entity segment and a column segment below the target, so a key whose family
+// tail has fewer than two separators is not one. That is what excludes the
+// overflow entry itself (target + reserved segment only) without special-casing
+// it, and what keeps a future target-scoped member of either family from
+// silently consuming a per-row budget.
+func rowIssueTarget(key string) (string, bool) {
+	tail := ""
+	switch {
+	case strings.HasPrefix(key, issuePrefixData):
+		tail = key[len(issuePrefixData):]
+	case strings.HasPrefix(key, issuePrefixTemplate):
+		tail = key[len(issuePrefixTemplate):]
+	default:
+		return "", false
+	}
+	targetID, rest, ok := strings.Cut(tail, ".")
+	if !ok || targetID == "" || !strings.Contains(rest, ".") {
+		return "", false
+	}
+	return targetID, true
 }

@@ -33,6 +33,18 @@ const (
 	maxretriesColumnPrefix = "maxretries_"
 )
 
+// rowBodyColumn names the SYNTHETIC column the unparseable-row-body data error
+// is keyed at (issueKeyDataEntity's `data:<targetId>.<entityId>.<column>`
+// family). The fault is "this row's JSON body does not parse", which is about
+// the whole body rather than any one column, so it needs a column segment no
+// projection can ever produce: the `__` prefix reserves it exactly as the
+// `__count` / `__control` weaver-state key tails do, and a §10.2 projected
+// column reaching this family through boolColumn/intColumn always carries a
+// lens-authored name. Without the reservation a lens that happened to project a
+// column called `body` would share one latch with the parse error, and either
+// fault's clear would silently retire the other's.
+const rowBodyColumn = "__body"
+
 // markTTLBackstopFactor sizes the mark's NATS per-key TTL relative to its
 // lease: TTL = markTTLBackstopFactor × lease. The TTL must be STRICTLY longer
 // than the lease — the reconciler sweep is the prompt reclaim and the TTL is

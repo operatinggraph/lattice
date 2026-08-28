@@ -98,6 +98,36 @@ package (`lease-signing`):
 - **External actions** — `triggerLoom` of a Loom `externalTask` pattern: the call is dispatched and
   executed idempotently by the **bridge** (`docs/components/bridge.md`), never by Weaver itself.
 
+### Lane-1 decline classes — what a row that cannot be dispatched costs
+
+A lane-1 delivery ends in exactly one substrate Decision, and which one is decided by **where the
+fix can come from**. An Ack is final: the durable is `DeliverLastPerSubject` with a stable name, so
+an Acked row is never delivered again until its key is written. That is why a decline is not
+automatically an Ack.
+
+| Class | Exits | Decision | Why |
+|---|---|---|---|
+| **Config error** | an open gap column the playbook does not name (`GapWithoutPlaybook`); an action the deployment cannot dispatch (`PlaybookConfigError`); a template that resolves null against the row (`TemplateDataError`) | **Nak on the LONG floor** (`Config.LongRedeliveryDelay`, default 5 m) | the fix is a package/target re-author, which projects **no new row** — the redelivery is the only automatic uptake path. Each redelivery re-evaluates against the *current* playbook, so the fix lands within one floor with no rebuild and no re-projection |
+| **Transient** | an unresolved pattern/op reference mid-convergence (`UnresolvedReference`); missing JetStream metadata; a KV read/CAS failure; an admission deferral | **Nak on the transient floor** (5 s) | the retry itself is the fix |
+| **Data error** | a body that does not parse; a non-bool `violating` or `missing_*`; a violating row with no `entityKey` echo; an unusable `freshUntil` | **Ack + a standing `RowDataError`** | every fix is a re-projection, and the fresh revision supersedes the pending one and delivers on its own — so a Nak would buy no retry value, only a held pending slot. The standing issue is the durable "acked but declined" record |
+| **Nothing owed** | a malformed row key; an unregistered target; a deletion tombstone; a **disabled** target; `violating` reading a genuine `false`; a live in-flight mark (the anti-storm drop) | **Ack** | there is no work to redeliver for. A frozen target owes nothing while frozen, and `Enable`'s Resume redelivers whatever was already Nak'd-pending on its own timestamps |
+
+A row's gaps are evaluated in one pass and their decisions collapse with precedence
+**`Nak > NakWithDelay > NakWithLongDelay > Ack`**: the shortest floor any gap asked for wins, so a
+transient gap never waits out a config gap's floor.
+
+Two consequences worth holding:
+
+- **A Nak'd row holds its `MaxAckPending` slot continuously** until it is acked or its message is
+  superseded. Lane-1 therefore sets the cap explicitly (2000) rather than taking the server's 1000
+  default: the pending set is now a target's whole stuck population, and past the cap it is **new**
+  entities that stall (redeliveries are served ahead of the cap). A durable whose `num_ack_pending`
+  sits pinned at the cap is the signal.
+- **Overwriting a declined row's key frees its slot immediately.** `weaver-targets` keeps KV
+  history 1, so an overwrite compacts the previous revision out of the backing stream and the server
+  Terms its pending delivery eagerly — only the latest revision of a subject can ever redeliver. That
+  history pin is load-bearing and asserted by Weaver's own e2e test.
+
 ---
 
 ## Targets as Lenses (D4)

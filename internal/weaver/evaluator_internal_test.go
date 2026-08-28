@@ -264,11 +264,17 @@ func issueSeverity(issues []healthIssue, code string) string {
 }
 
 // TestHandleRow_MalformedAnchorDegradesNotErrors pins the Contract #5 §5.2
-// severity of a single malformed/incomplete anchor row: a per-row DATA error
-// (a template reference that resolves null, or a violating row missing its
-// entityKey echo) is surfaced as a `warning` (degraded) and the row is skipped
-// (Ack, no op) — it must NOT raise an `error` (unhealthy) and pin the whole
-// Weaver component red while every other row still remediates.
+// severity of a single malformed/incomplete anchor row: a template reference
+// that resolves null, or a violating row missing its entityKey echo, is
+// surfaced as a `warning` (degraded) and dispatches nothing — it must NOT raise
+// an `error` (unhealthy) and pin the whole Weaver component red while every
+// other row still remediates.
+//
+// The two rows take different retry classes, which the subtests pin alongside
+// the severity: the missing entityKey echo is a pure data error only a
+// re-projection can fix, so it Acks; the template fault is fixable by a
+// template edit that projects no new row, so it rides the long redelivery
+// floor.
 func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -298,8 +304,8 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 		}
 
 		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 5, 1))
-		if dec != substrate.Ack {
-			t.Fatalf("a malformed-row data error must Ack (skip), got %v", dec)
+		if dec != substrate.NakWithLongDelay {
+			t.Fatalf("a template fault must ride the long redelivery floor, got %v", dec)
 		}
 		h.requireNoOp(t)
 		if sev := issueSeverity(h.engine.issues.snapshot(), "TemplateDataError"); sev != "warning" {
@@ -1564,8 +1570,10 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 		"entityKey": "vtx.task." + entityID, "violating": true,
 		"missing_claim": true, "missing_orphan": true,
 	}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("dispatch must Ack, got %v", dec)
+	// The config dead-end is a config-error class: the row rides the long
+	// redelivery floor rather than being Acked away.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a gap with no playbook entry must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); !ok {
@@ -1848,8 +1856,8 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 
 	entityID := testNanoID(t)
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a gap with no playbook entry must Ack, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a gap with no playbook entry must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); !ok {
@@ -2083,8 +2091,8 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
 	first, ok := issueAt(h.engine.issues, key)
@@ -2096,8 +2104,8 @@ func TestPlanGap_TemplateFaultSinceSurvivesRedelivery(t *testing.T) {
 	}
 
 	// The same unrepaired row, delivered again: the fault is the same fault.
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.Ack {
-		t.Fatalf("the redelivery must Ack, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("the redelivery must ride the long floor again, got %v", dec)
 	}
 	second, ok := issueAt(h.engine.issues, key)
 	if !ok {
@@ -2129,8 +2137,8 @@ func TestClearClosedMarks_RetiresTemplateFaultOnTheGapClose(t *testing.T) {
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
 	key := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	if _, ok := issueAt(h.engine.issues, key); !ok {
 		t.Fatalf("setup: the template fault must stand, issues = %+v", h.engine.issues.snapshot())
@@ -2166,8 +2174,8 @@ func TestHandleRow_EntityTombstoneRetiresTemplateFaults(t *testing.T) {
 
 	const targetID = "fixtureTemplateTombstone"
 	entityID, row := seedTemplateFaultTarget(t, h, targetID)
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
-		t.Fatalf("a null template reference must Ack (skip), got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("a null template reference must ride the long floor, got %v", dec)
 	}
 	live := issueKeyTemplateEntity(targetID, entityID, templateFaultGap)
 	if _, ok := issueAt(h.engine.issues, live); !ok {
@@ -2513,9 +2521,9 @@ func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
 		entityID := testNanoID(t)
 		row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_z": true}
 
-		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap missing_z:")
-		if len(levels) != 2 || levels[0] != slog.LevelError || levels[1] != slog.LevelDebug {
-			t.Fatalf("levels = %v, want [Error Debug]: an `error` raise keeps its own loud level", levels)
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithLongDelay, "gap missing_z:")
+		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
+			t.Fatalf("levels = %v, want [Warn Debug]: the arrival is loud, the re-derivation behind it is damped", levels)
 		}
 		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
 			t.Fatalf("the latch is not paced; it must stand after both passes, issues = %+v",
@@ -2528,7 +2536,7 @@ func TestPlanGap_FailureArmsAreLogPaced(t *testing.T) {
 		const targetID = "fixturePacedTemplateGap"
 		entityID, row := seedTemplateFaultTarget(t, h, targetID)
 
-		levels := deliver(t, h, targetID, entityID, row, substrate.Ack, "gap "+templateFaultGap+":")
+		levels := deliver(t, h, targetID, entityID, row, substrate.NakWithLongDelay, "gap "+templateFaultGap+":")
 		if len(levels) != 2 || levels[0] != slog.LevelWarn || levels[1] != slog.LevelDebug {
 			t.Fatalf("levels = %v, want [Warn Debug]", levels)
 		}

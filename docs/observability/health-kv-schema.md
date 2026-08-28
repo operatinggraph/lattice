@@ -908,8 +908,9 @@ decides whose close retires the issue. The key never appears on the wire — it 
 | Key shape | Scope | Codes |
 |---|---|---|
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
-| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
-| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
+| `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` — all three `warning` |
+| `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo, a row body that does not parse as JSON) |
+| `data:<targetId>.__capped` | the target's per-ROW issue budget | `RowIssuesCapped` |
 | `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
 
@@ -942,9 +943,32 @@ entity, so no sweep leg retires it.
 never reads the column. An entity whose only remaining open gap is a `surface` one therefore *does*
 retire its priority entry — the entry describes a column nothing will read again.
 
+One member of the family names no projected column at all. A row whose **body does not parse as
+JSON** raises `RowDataError` at the reserved column `__body` — the fault is about the whole body, so
+it needs a segment no projection can produce (the `__` prefix reserves it; an entity segment is a
+bare NanoID, which carries no underscore). Its retirement is not a read either: the next revision of
+that row that *does* parse clears it, and the entity and target teardowns cover a row that ends
+without ever parsing again. Read an entry at `__body` as "this row's last projected value was not
+JSON", so N such rows are N entries.
+
 Without a retirement that does not depend on a further read, these entries would stand one per
-`(row, column)` for the process's lifetime. The listing cap below bounds the *document*, never the
-cache behind it.
+`(row, column)` for the process's lifetime. Two separate bounds apply, and they bound different
+things. The listing cap below bounds the **document**. The **cache** behind it is bounded per target:
+at most 500 per-row entries (the `data:` and `template:` families together) are tracked for one
+target, after which further raises for rows outside that set are refused and counted into one entry
+at `data:<targetId>.__capped`:
+
+```json
+{"severity": "warning", "code": "RowIssuesCapped",
+ "message": "target <targetId>: per-row issue tracking is at its cap of 500 entries; <n> further raises for rows outside that set were not tracked",
+ "since": "<RFC3339 — when the cap was first reached>"}
+```
+
+The tracked set is a **sample, not a ranking** — whichever rows raised first hold the slots. Slots are
+freed as their entries retire (a repaired row, an entity tombstone, a target teardown), and once the
+target is back under the cap the `RowIssuesCapped` entry retires with its count: every untracked fact
+is level-driven, so each one is re-raised by its own row's next delivery. The cap never affects
+`status`, which is still aggregated over every entry the cache holds.
 
 `template:` is a separate family for the same reason those retirements are separate. A gap's plan
 whose template references resolve null is a different fact from that gap column carrying a non-bool
