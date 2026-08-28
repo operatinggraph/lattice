@@ -30,8 +30,8 @@
 >
 > | | Move | Layer | Removes |
 > |---|---|---|---|
-> | 1 | Decrypt-and-discard on `decryptSensitiveDoc`'s `IsDeleted` arm, served from the step-4 snapshot | engine, ~10 lines | the ~0.36 ms dominant gap |
-> | 2 | Equalize the script's 18 + 15 early returns | package, existing builtins | the script-half gaps |
+> | 1 | Decrypt-and-discard on `decryptSensitiveDoc`'s `IsDeleted` arm ~~, served from the step-4 snapshot~~ | engine, ~10 lines | the ~0.36 ms dominant gap |
+> | 2 | Equalize the script's 17 + 13 early returns | package, existing builtins | the script-half gaps |
 > | 3 | **Delete the release quantum** (~190 lines) | engine, subtractive | 50 ms/rejection, 3 metrics, a goroutine-per-reply, a 1024-deferral bound, a shutdown drain |
 >
 > **What that knowingly accepts, recorded once so it is not lost** (§6.3): the absent-vs-claimed gap
@@ -78,9 +78,10 @@ difference is fixable where it is made.
 ## 2. Where the difference is actually made
 
 **Overwhelmingly in the package's own Starlark script.** `packages/identity-domain/ddls.go`'s
-`ClaimIdentity` branch is a cascade of early returns: **18** `fail_claim(...)` calls in strict order
-(`:1447-1523`), and `CompleteCredentialLink` has **15** more (`:1700-1800`). An absent target exits at
-the fourth; an already-claimed identity exits at the ninth; a wrong key runs to the eighteenth,
+`ClaimIdentity` branch is a cascade of early returns: **17** `fail_claim(...)` call sites in strict order
+(`:1450-1545`), and `CompleteCredentialLink` has **13** more (`:1732-1793`). *(Corrected at build,
+2026-08-28: the ratified text said 18 and 15 over rotted line ranges — see §13's C2.)* An absent target exits at
+the fourth; an already-claimed identity exits at the seventh; a wrong key runs to the fifteenth,
 paying the `crypto.sha256` and the `crypto.constant_time_equal` on the way. Each early exit is
 strictly less work than the next.
 
@@ -94,12 +95,25 @@ strictly less work than the next.
 R2 is the one that matters and it is **not** fixable in the script: the script never sees it, because
 it happens during hydration before the script runs. **R1 is not fixable anywhere** — see §6.3.
 
-A free reduction rides along with R2's fix: `readPiiKeyEnvelope` re-reads `<target>.piiKey` live even
-though the package's `derive_reads` already put that key in the step-4 snapshot
-(`packages/identity-domain/ddls.go:1052`). The function's own doc calls it *"internal Processor
-bookkeeping — never declared in a script's contextHint.reads"*, which is true of the *script's*
-declaration and not of the snapshot's contents. Serving it from the snapshot removes the round trip
-from **both** arms rather than adding it to one.
+~~A free reduction rides along with R2's fix: `readPiiKeyEnvelope` re-reads `<target>.piiKey` live even
+though the package's `derive_reads` already put that key in the step-4 snapshot. Serving it from the
+snapshot removes the round trip from **both** arms rather than adding it to one.~~
+
+**Struck at build, 2026-08-28 (Winston).** The reduction is real but is **not part of this fire**, and
+the paragraph overstated it as riding along. Three grounds, decided at the scope-diff gate:
+(a) it is **not required for the equalization** — once the tombstoned arm decrypts and discards, *both*
+arms pay the identical `readPiiKeyEnvelope` round trip, so R2 goes to zero with or without it;
+(b) `decryptSensitiveDoc` receives one parsed `*VertexDoc`, never the snapshot, so serving the envelope
+from it means threading the step-4 snapshot into the **platform-wide** sensitive-read path — every
+package's sensitive aspect, not these two operations — which is exactly the widening this fire's
+"simplify, add nothing" mandate refuses;
+(c) the same file states the deliberate rule that a key envelope is **resolved live at decrypt time**,
+never from a frozen copy, because that is what makes the shred gate restart- and replay-proof
+(`sensitive_decrypt.go:206-209`). That rule is written about the egress ref marker rather than about a
+same-operation snapshot, so this is a tension rather than a contradiction — but a design that reads the
+envelope from a cached copy owes that comment an argument, and this one never engaged with it.
+Net effect of declining it: a rejection pays one extra round trip (~0.36 ms) that it did not pay before,
+against the **50 ms** of quantum this fire deletes. Rejections get ~49.6 ms faster, not slower.
 
 ---
 
@@ -110,7 +124,7 @@ from **both** arms rather than adding it to one.
 | 1 | The masking machinery: `Q = 50 ms`, `releaseAt = receipt + ceil(elapsed/Q)·Q`, goroutine-plus-timer per reply, 1024-deferral bound that **drops** on overflow, shutdown drain | `claim_reply_floor.go:33`, `:164-176`, `:224-238`, `:88`, `:203-223`, `:251-270` |
 | 2 | 277 lines, referenced from `cmd/processor/main.go`, `commit_path.go`, `health.go`, `internal/testutil/pipeline.go` | `wc -l`; census C1 |
 | 3 | The measured oracle: n=3000, OFF → monotone, 0.27–0.70 ms; ON → every CI includes zero, p50 spread 10.6 µs | `auth-plane-projection-latency-design.md:2510-2519` |
-| 4 | **18** `fail_claim` early returns in `ClaimIdentity`; **15** in `CompleteCredentialLink` | `packages/identity-domain/ddls.go:1447-1523`, `:1700-1800`; census C2 |
+| 4 | **17** `fail_claim` early returns in `ClaimIdentity`; **13** in `CompleteCredentialLink` *(corrected 2026-08-28 from 18/15)* | `packages/identity-domain/ddls.go:1450-1545`, `:1732-1793`; census C2 |
 | 5 | `crypto.sha256` and `crypto.constant_time_equal` are **already** sandbox builtins — the equalization needs no new primitive | `internal/processor/starlark_builtins.go:101-103` |
 | 6 | The declared read set is three `{payload.*}` `OptionalReads`, identical for every cause | `packages/identity-domain/opmetas.go:283-287` |
 | 7 | `.claimKey` is declared **sensitive** — encrypted at rest, hydration decrypts it | `packages/identity-domain/ddls.go:73`, `:394` |
@@ -130,7 +144,7 @@ from **both** arms rather than adding it to one.
 
 ### 4.1 Equalize the script (package work, no new primitive)
 
-Replace the 18 + 15 early returns with one shape: **accumulate an outcome, never return early, fail
+Replace the 17 + 13 early returns with one shape: **accumulate an outcome, never return early, fail
 once at the end.** Every path then executes the same instructions:
 
 - read all three hydrated documents unconditionally;
@@ -165,8 +179,17 @@ reader deletes as pointless:
 - a test asserts the plaintext never reaches `doc.Data`, `markPlaintext`, or an egress ref on the
   tombstoned path — i.e. that equalizing the *time* did not widen the *reach*.
 
-Combined with the snapshot read above, R2 goes to zero and the engine's dominant gap is closed with
-roughly ten lines and no new concept.
+R2 goes to zero and the engine's dominant gap is closed with roughly ten lines and no new concept.
+(*Amended 2026-08-28:* this sentence read "Combined with the snapshot read above, R2 goes to zero"; the
+snapshot read is declined — see §2's struck paragraph — and it was never load-bearing for the
+equalization, only for the latency.)
+
+A third obligation, found at build and not by this design: the decrypt must **discard its error as well
+as its plaintext**. A shredded key envelope makes `Vault.Decrypt` return `ErrKeyShredded` mid-way
+(§6.2), so a decrypt-and-discard that propagated the error would turn a tombstoned read that succeeds
+today into an `InternalError` **whose reachability depends on the target's state** — inventing the
+fourth timing class this design merely reports. The arm therefore decrypts, ignores both results, and
+returns the byte-identical scrubbed document it returns today.
 
 ### 4.3 Delete the release quantum — a split, not a delete
 
@@ -354,8 +377,10 @@ with nothing to mask or an equalized script still paying 50 ms per rejection. §
 the closed declared-read set ships in the same increment — it must not survive on the rationale the
 deletion removes.
 
-**Posture-changing — full review depth.** It removes a shipped security mechanism and changes an
-aspect's sensitivity declaration.
+**Posture-changing — full review depth.** It removes a shipped security mechanism.
+(*Amended 2026-08-28:* this sentence also said "and changes an aspect's sensitivity declaration". It does
+not — correction 7 withdrew the declassification, and `.claimKey` keeps `Sensitive: true`. The review
+depth stands on the removal alone.)
 
 **Package-version discipline:** `identity-domain`'s manifest version and its mirroring `Version`
 constant must bump for both the script rewrite and the DDL flag change, or a running stack no-ops the
@@ -370,8 +395,10 @@ install (`DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`).
 | T1 | Every cause executes the same instructions | per-cause instruction/step-count assertion on the equalized script — not a timing test, a structural one |
 | T2 | The sha256 and the constant-time compare run on **all** causes | including absent target and malformed payload, against the placeholder and dummy hash |
 | T3 | No behavioural regression | every existing `ClaimIdentity` / `CompleteCredentialLink` outcome still produces its same Health-KV outcome word and the same generic wire reply |
-| T4 | The equalized script still refuses everything it refused | one vector per accumulated outcome — 18 for claim, 15 for link |
-| T6 | A `.claimKey` that is no longer sensitive still cannot be read by an unauthorized actor | the read path's own authorization is unchanged — pin it, because removing an encryption flag invites the assumption that it was the access control |
+| T4 | The equalized script still refuses everything it refused | one vector per accumulated outcome — 17 for claim, 13 for link |
+| ~~T6~~ | ~~A `.claimKey` that is no longer sensitive…~~ | **Withdrawn 2026-08-28** — nothing declassifies `.claimKey` (correction 7), so there is no removed encryption flag to pin. Replaced by **T9** below. |
+| T9 | The tombstoned sensitive arm really performs the decrypt, and the equalization did not widen the reach | a counting `vault.Vault` asserts `Decrypt` is called exactly once on a tombstoned sensitive doc, `doc.Data` still comes back the empty map, nothing is recorded on the plaintext tracker, and no `$sensitiveRef` is authored. Revert-proof: restore the early `return nil` and the Decrypt count goes to zero. |
+| T10 | A shredded key on the tombstoned path still answers exactly as it does today | the counting Vault returns `ErrKeyShredded`; the arm must still return nil with a scrubbed body, or §6.2's fourth class has been widened rather than left alone |
 | T7 | The pre-step-4 paths are unaffected | malformed / duplicate / auth-denied still answer with their real codes, as they already do (ledger row 14) |
 | T8 | Nothing references the deleted symbols | build + `grep` census C1 returns empty |
 
@@ -387,9 +414,10 @@ flaky benchmark.
 untouched; it says nothing about timing, the quantum, or payload size (ledger row 16). §9.4's
 invariants describe the secret's minting and the hash's shape — neither changes.
 
-**One thing to note rather than change:** §9.4 does not say `.claimKey` is stored encrypted, so
-dropping `Sensitive: true` falsifies no contract sentence. It does change an observable property of
-the stored data, which is why §4.2 is a decision rather than an edit.
+~~**One thing to note rather than change:** §9.4 does not say `.claimKey` is stored encrypted, so
+dropping `Sensitive: true` falsifies no contract sentence.~~ **Struck 2026-08-28** — a leftover of the
+withdrawn declassification (correction 7). Nothing drops `Sensitive: true`; there is nothing here to
+note.
 
 ---
 
@@ -426,11 +454,108 @@ claim_reply_floor_test.go,commit_path.go,health.go}`, `internal/testutil/pipelin
 empty after the increment.
 
 **C2 — the early-return count.**
-`awk 'NR>=1446 && NR<=1545' packages/identity-domain/ddls.go | grep -c 'fail_claim('`
-*Run this fire:* **18** for `ClaimIdentity`; **15** for `CompleteCredentialLink`. Must be **1** each
-after §4.1 — a single terminal `fail`.
+`awk 'NR>=1446 && NR<=1608' packages/identity-domain/ddls.go | grep -c 'fail_claim('`
+`awk 'NR>=1722 && NR<=1851' packages/identity-domain/ddls.go | grep -c 'fail_link('`
+*Run 2026-08-28:* **18** matches for `ClaimIdentity` and **14** for `CompleteCredentialLink` — but each
+count includes the helper's own `def` line, so the real figures are **17** and **13** CALL SITES. Must be
+**2** and **2** after §4.1 (the `def` plus one terminal call).
+*(Corrected 2026-08-28: the design said 18 and 15 call sites. 18 double-counted the definition, and 15 was
+simply wrong — its stated `:1700-1800` window does not even contain the branch, which runs 1722–1851.)*
 
 **C3 — sensitive-aspect blast radius.** Every reader of `.claimKey` and every gate keyed on its
 sensitivity, before the flag moves:
 `grep -rn 'claimKey' --include='*.go' packages/ internal/ | grep -v _test`. The flag change must not
 be assumed to be local.
+
+---
+
+### NFR-S6 fire brief (build note, 2026-08-28)
+
+Compiled by the Lattice Steward at selection, from three read-only scouts over
+`internal/processor`, `internal/vault` and `packages/identity-domain`. Committed before the first edit.
+
+#### 1. Scope sentence (verbatim, §9)
+
+> **One increment, ungated.** Moves 1, 2 and 3 land together: splitting them would leave either a mask
+> with nothing to mask or an equalized script still paying 50 ms per rejection. §6.5's re-derivation of
+> the closed declared-read set ships in the same increment — it must not survive on the rationale the
+> deletion removes.
+
+Green bar: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`go run ./scripts/lint-package-version.go`, `go test ./internal/processor/... ./internal/testutil/... ./packages/identity-domain/... ./packages/identity-hygiene/... ./cmd/processor/...`,
+plus the build-tagged harnesses `make test-control-plane-authz test-system-actor-capability test-crypto-shred`
+(they build `internal/processor` interfaces) and a full `go test ./... -p 4` with `POSTGRES_TEST_DSN` set.
+
+#### 2. Verified touch-list (checked live 2026-08-28; design citations re-verified)
+
+| File | Anchor | Note |
+|---|---|---|
+| `internal/processor/claim_reply_floor.go` | 1–277 | 277 lines confirmed. Splits: 4 wire-shape identifiers move out, the rest goes. |
+| `internal/processor/commit_path.go` | `:58-67` Deps field · `:88` `claimFloor` · `:127-132` ctor · `:222` `receipt` · `:320,351,380,388,403,410,423,439,495,515,536,559,634` receipt thread · `:1021` `handleStubFailure` · `:1124-1138` collapse · `:1140-1147` `DrainClaimReplies` · `:1154-1174` `replyToNoEarlierThan` | all verified |
+| `internal/processor/health.go` | `:47-66` fields · `:323-325` heartbeat | 3 metrics + their doc block |
+| `cmd/processor/main.go` | `:61-66` `claimReplyDrainBudget` · `:374` drain call | verified |
+| `internal/testutil/pipeline.go` | `:261-267` field · `:324` wiring | verified |
+| `internal/processor/claim_reply_floor_test.go` | 749 lines, 11 tests | 6 die with the mechanism; 5 carry wire-shape assertions that must survive |
+| `internal/processor/sensitive_decrypt.go` | `:158-203` `IsDeleted` arm · `:255-271` live path · `:303-319` `readPiiKeyEnvelope` | design's `:154-171` / `:307-308` = **close, re-anchored above** |
+| `internal/processor/descriptor_floor.go` | `:419-434` justification prose · `:483-515` body | the quantum rationale is at `:429-434`, not `:429-437` |
+| `internal/processor/step4_hydrate.go` | `:214-231` the closure call site + its quantum prose | |
+| `packages/identity-domain/ddls.go` | `ClaimIdentity` **1446–1608** · `CompleteCredentialLink` **1722–1851** · `derive_reads` 1007–1058 · `erasure_gate_keys` 992–1005 | design's `:1447-1523` / `:1700-1800` / `:1052` are **rotted leads** |
+| `packages/identity-domain/opmetas.go` | `:282-286` ClaimIdentity OptionalReads · `:494-499` CCL | design said `:283-287` |
+| `packages/identity-domain/manifest.yaml` `:2` + `package.go` `:33` | `0.20.8` | both bump |
+| `packages/identity-domain/claim_test.go` | `:520-712` timing helpers + anchor test · `:790-900` cause table | **not in the design's inventory** — C1 was scoped to `internal/ cmd/` |
+| `packages/identity-domain/claim_timing_probe_test.go` | `:129,273,334,336,373,382` | same omission; env-gated, must still compile |
+| `docs/components/processor.md` | `:285-289` operator-signal rows · `:628-647` dossier entry | same omission |
+| `docs/observability/health-kv-schema.md` | `:466-473` heartbeat metrics block | **pre-existing drift**: omits `commit_retries_total`, `commit_retry_exhausted_total` and the three `claim_floor_*` — this fire fixes it |
+
+#### 3. Censuses re-run live (the design's numbers are premises)
+
+| Census | Design says | Live | Verdict |
+|---|---|---|---|
+| C1 `internal/ cmd/` | six files | six files — exactly the design's list | **holds** |
+| C1 extended to `packages/` + `docs/` | *(not run)* | `claim_test.go`, `claim_timing_probe_test.go`, `processor.md` | **gap** — the design's C1 grep never left `internal/ cmd/`; three more consumers exist |
+| C2 `fail_claim(` | 18 | **18 matches = 17 call sites + 1 `def`** | design counted the definition |
+| C2 `fail_link(` | 15 | **14 matches = 13 call sites + 1 `def`** | design's count is wrong; its `:1700-1800` window also misses the branch (1722–1851) |
+| `wc -l claim_reply_floor.go` | 277 | 277 | holds |
+
+#### 4. Increment order
+
+1. **Engine, subtractive + behavioural** (`internal/processor`, `cmd/processor`, `internal/testutil`): delete the
+   quantum, split the four wire-shape identifiers into their own file, re-derive `refuseUndeclaredContextHint`,
+   make `decryptSensitiveDoc`'s tombstoned non-egress arm decrypt-and-discard.
+   Green: `go test ./internal/processor/... ./internal/testutil/... ./cmd/processor/...`
+2. **Package** (`packages/identity-domain`): equalize both branches to accumulate-then-fail-once, bump 0.20.8 → 0.20.9,
+   rework `claim_test.go` + the timing probe.
+   Green: `go test ./packages/identity-domain/... ./packages/identity-hygiene/...`, `go run ./scripts/lint-package-version.go`
+3. **Docs**: dossier entry, health-KV schema metrics block, design-body amendments.
+   Green: `STRICT=1 go run ./scripts/lint-board.go`, `STRICT=1 go run ./scripts/lint-conventions.go`
+
+#### 5. In-scope gotchas
+
+- **Package-version lockstep**: `manifest.yaml` `version:` and `package.go` `Version:` both bump, or a running stack no-ops the install.
+- **Build-tagged harnesses never compile under `go test ./...`** — `Deps` loses a field, so every pipeline builder is reached.
+- **`POSTGRES_TEST_DSN` must be set** or the suite is falsely green (REMOTE.md §3).
+- **Decrypt-and-discard must swallow its error**, or a shredded-key envelope turns a today-succeeds tombstoned read into an `InternalError` — a *new* target-state-dependent class, the opposite of the fire's purpose (§6.2).
+- **`markPlaintext` must NOT be called on the tombstoned path** and no egress ref may be authored: equalizing the *time* must not widen the *reach* (§4.2's second obligation).
+- **Outcome-word order must be preserved**: first-failing-condition wins, so the erasure gate still ranks below `invalid-key` (`ddls.go:1524-1541`'s counter-attribution argument survives; its "measurably shorter path" clause does not and is amended).
+- **`crypto.sha256` / `crypto.constant_time_equal` raise on a non-string argument** (`internal/starlarksandbox/modules.go:30-52`) — every placeholder must be a real string.
+
+Dossier entries copied from `docs/components/processor.md` (the touched component):
+- *A mechanism whose margin the SUBMITTER prices is not a margin* — this fire deletes the margin; the entry's closing question ("name who controls the work inside it") is what §6.5's re-derivation must answer without a window.
+- *A gate's negative test must first prove its positive vector reaches the gate* (5 sightings; the fifth was **this very mechanism**, `624d445` — every one of its 459 test lines drove a stub `Hydrator`, not the step-5 call site production takes).
+- *A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked declaration as live* — directly load-bearing: the retained ciphertext is what move 2 decrypts.
+- *"Degrade instead of refuse" on a cache load path is fail-open when the cache has ONE load point.*
+- Standing checklist #4 (**removal needs a transport AND an observer; a demoted mechanism needs EVERY obligation enumerated**) is the governing item — three metrics, a drain, a bound, a goroutine and a doc row are all obligations of the thing being deleted.
+
+#### 6. Adjacent finds (each absorbed into this run's batch — no deferral rows)
+
+1. `docs/observability/health-kv-schema.md`'s processor heartbeat block is stale independently of this fire (missing `commit_retries_total` / `commit_retry_exhausted_total`). **Fixed in increment 3.**
+2. `docs/components/processor.md`'s operator-signal table and its first dossier entry both describe the quantum as live. **Rewritten in increment 3.**
+3. The script's `stored_hash` is never type-checked before `crypto.constant_time_equal` (`ddls.go:1516-1521`), so a malformed `.claimKey` body raises a builtin error rather than rendering `invalid-key`. Latent today, **closed by the equalization's dummy-hash default** in increment 2.
+
+#### 7. Non-goals (drift fence)
+
+- **The wire-shape collapse stays** (Contract #9 §9.3) — no contract edit; this fire proposes none.
+- **`.claimKey` stays `Sensitive: true`** — the declassification was withdrawn (§ corrections 7). §9's "changes an aspect's sensitivity declaration", §11's second paragraph and T6 are stale body text, amended below.
+- **R1 (absent-vs-claimed) is not equalized** — accepted by Andrew (§6.3).
+- **`readPiiKeyEnvelope` is NOT re-plumbed to read from the step-4 snapshot** — see the amendment below.
+- No change to `write_path_closed`'s five other callers.
