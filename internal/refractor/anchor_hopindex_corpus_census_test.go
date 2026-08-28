@@ -46,7 +46,6 @@ const (
 	// hopIndexed is the answer, not a refusal: the pattern graph is
 	// authoritative and the pipeline seeds from it instead of enumerating.
 	hopIndexed        = ""
-	hopVarLengthHop   = "pattern carries a variable-length relationship"
 	hopUntypedHop     = "pattern carries an untyped relationship"
 	hopUngroundedSeed = "not reached from the anchor"
 	hopMultiAnchor    = "several pattern positions bind $actorKey"
@@ -78,39 +77,57 @@ const (
 // ruleengine/full's TestAnchorHopIndex_WithScope, which does not need a lens to
 // be written badly in order to cover them.
 var corpusAnchorIndexVerdicts = map[string]string{
-	"appointmentReminders":              hopIndexed,
-	"augurDispatchPending":              hopIndexed,
-	"cafeStaleTabSettlement":            hopIndexed,
-	"cafeTabSettlement":                 hopIndexed,
-	"capability":                        hopIndexed,
-	"capabilityAuthorPending":           hopIndexed,
-	"capabilityEphemeral":               hopIndexed,
-	"capabilityRead":                    hopIndexed,
-	"capabilityRoles":                   hopIndexed,
-	"capabilityServiceAccess":           hopVarLengthHop,
-	"clauseSatisfaction":                hopIndexed,
-	"clinicNoShowSettlement":            hopIndexed,
-	"clinicSiteBackfill":                hopIndexed,
-	"edgeCatalog#0":                     hopVarLengthHop,
-	"edgeCatalog#1":                     hopIndexed,
-	"edgeCatalog#2":                     hopIndexed,
-	"edgeEntityBookings":                hopIndexed,
-	"edgeEntityMenuItems":               hopVarLengthHop,
-	"edgeEntityProviders":               hopVarLengthHop,
-	"edgeEntitySessions#0":              hopVarLengthHop,
-	"edgeEntitySessions#1":              hopIndexed,
-	"edgeEntityStudios":                 hopVarLengthHop,
-	"edgeEntityTabs":                    hopIndexed,
-	"edgeIdentity":                      hopIndexed,
-	"edgeInstances":                     hopIndexed,
-	"edgeManifestProviderReadGrants":    hopIndexed,
-	"edgeManifestReadGrants":            hopVarLengthHop,
-	"edgeManifestStaffReadGrants":       hopVarLengthHop,
+	"appointmentReminders":    hopIndexed,
+	"augurDispatchPending":    hopIndexed,
+	"cafeStaleTabSettlement":  hopIndexed,
+	"cafeTabSettlement":       hopIndexed,
+	"capability":              hopIndexed,
+	"capabilityAuthorPending": hopIndexed,
+	"capabilityEphemeral":     hopIndexed,
+	"capabilityRead":          hopIndexed,
+	"capabilityRoles":         hopIndexed,
+	// The lens Increment 1 exists for. Its two `containedIn*0..` walks are now
+	// indexed, so the auth plane's `cap.svc.<actor>` producer derives its
+	// affected anchors instead of re-executing the cypher once per actor a BFS
+	// reaches. This row moving to indexed means the pipeline DOES now act on
+	// this lens's derived set, which is the intended conversion.
+	"capabilityServiceAccess": hopIndexed,
+	"clauseSatisfaction":      hopIndexed,
+	"clinicNoShowSettlement":  hopIndexed,
+	"clinicSiteBackfill":      hopIndexed,
+	// Multi-walk (`len(branches) > 1`, ruleinstall.go): the pipeline installs no
+	// HopIndex for it at all, so this row records the index's own verdict and
+	// nothing downstream consumes it. The conjunct that holds the lens is
+	// unchanged and no cypher edit reaches it.
+	"edgeCatalog#0":      hopIndexed,
+	"edgeCatalog#1":      hopIndexed,
+	"edgeCatalog#2":      hopIndexed,
+	"edgeEntityBookings": hopIndexed,
+	// Personal lens: held by `patternClosedOutput` and `sweeper != nil`
+	// (derivationIndexForAct), inputs outside the compiled pattern that no index
+	// change can reach. The row moves; the behaviour does not.
+	"edgeEntityMenuItems":            hopIndexed,
+	"edgeEntityProviders":            hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeEntitySessions#0":           hopIndexed, // Multi-walk — see edgeCatalog#0.
+	"edgeEntitySessions#1":           hopIndexed,
+	"edgeEntityStudios":              hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeEntityTabs":                 hopIndexed,
+	"edgeIdentity":                   hopIndexed,
+	"edgeInstances":                  hopIndexed,
+	"edgeManifestProviderReadGrants": hopIndexed,
+	// The completeness switch reports the FIRST declining conjunct and orders
+	// varlength ahead of the WITH refusal, so lifting the varlength arm reveals
+	// what was masked behind it: `generateProducerSpec` stages one WITH per walk
+	// and four base walks re-open `chainResidence`, dropping `container` at one
+	// stage boundary and re-binding it at the next. Increment 2 is what converts
+	// these two, and it is HELD at ratification.
+	"edgeManifestReadGrants":            hopWithDropped,
+	"edgeManifestStaffReadGrants":       hopWithDropped, // Same shape, dropping `role`.
 	"edgeProviderQueue":                 hopIndexed,
 	"edgeProviderSchedule":              hopIndexed,
-	"edgeServices":                      hopVarLengthHop,
+	"edgeServices":                      hopIndexed, // Personal — see edgeEntityMenuItems.
 	"edgeStaffPanes":                    hopIndexed,
-	"edgeStaffWorkOrders":               hopVarLengthHop,
+	"edgeStaffWorkOrders":               hopIndexed, // Personal — see edgeEntityMenuItems.
 	"edgeTasks#0":                       hopIndexed,
 	"edgeTasks#1":                       hopIndexed,
 	"followUpReminders":                 hopIndexed,
@@ -253,7 +270,6 @@ func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testi
 // nobody pinned.
 func TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct(t *testing.T) {
 	known := []string{
-		hopVarLengthHop,
 		hopUntypedHop,
 		hopUngroundedSeed,
 		hopMultiAnchor,
