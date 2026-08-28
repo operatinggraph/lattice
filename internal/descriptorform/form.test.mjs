@@ -208,6 +208,23 @@ test("renderOpForm refuses a row with no inputSchema, no dispatch class, or a vi
     "this module's context shape carries no service key to build authContext:service from");
 });
 
+// A "type":"array" property has no fieldKind case: left unguarded it would
+// fall through to a plain text input and submit a STRING where the script
+// expects a list — a silent wrong-shaped write the person submitting it has
+// no way to notice. Refusing the whole row is the honest answer until a real
+// array kind ships (fieldKind has no way to omit just the one bad field and
+// still assemble a submittable envelope).
+test("renderOpForm refuses a row with an array-typed schema property", () => {
+  const schema = {
+    type: "object",
+    properties: { renewalKey: { type: "string" }, windows: { type: "array", items: { type: "object" } } },
+    required: [],
+  };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  assert.equal(renderOpForm(row, { target: TARGET }, new FakeElement("div")), null);
+  assert.equal(canRender(row), false);
+});
+
 // ---- canRender: the same structural refusal, before there is a mount ----
 
 test("canRender agrees with renderOpForm's own refusal, without needing a context or a mount", () => {

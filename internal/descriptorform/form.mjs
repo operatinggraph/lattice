@@ -292,8 +292,12 @@ function buildClassChoiceField(choices, prefillVal) {
 // context shape (`{ target, me, taskKey, workplace, row, prefill, selfVoice }`
 // carries no service key) — refusing it here means a caller never gets a
 // handle back for it, rather than one whose submit() always fails at the
-// Processor. canRender (below) is this same refusal, exposed for a caller
-// deciding whether to enable an offer before it has a mount to render into.
+// Processor. A `"type":"array"` property is refused the same way: fieldKind
+// has no array case, so it would fall through to a plain text control that
+// submits a string where the script expects a list — a silent wrong-shaped
+// write, not a rejection the person could see and correct. canRender (below)
+// is this same refusal, exposed for a caller deciding whether to enable an
+// offer before it has a mount to render into.
 function normalizeCatalogRow(row) {
   if (!row || !row.inputSchema || !row.dispatch) return null;
   const dispatch = row.dispatch;
@@ -307,6 +311,7 @@ function normalizeCatalogRow(row) {
     return null;
   }
   if (!schema || typeof schema !== "object") return null;
+  if (Object.values(schema.properties || {}).some((p) => p && p.type === "array")) return null;
   return {
     operationType: row.operationType,
     schema,
