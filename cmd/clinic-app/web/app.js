@@ -59,6 +59,9 @@ const state = {
   editProviderHandle: null, // the mounted SetProviderProfile descriptor-form handle saveProviderEdit submits
   addProviderHandle: null, // the mounted CreateProvider descriptor-form handle submitAddProvider submits
   assignSiteHandle: null, // the mounted AssignProviderSite descriptor-form handle submitAssignProviderSite submits
+  startSeriesPatient: undefined, // the patient key the StartVisitSeries descriptor form was last rendered for — re-render only on change
+  startSeriesHandle: null, // the mounted StartVisitSeries descriptor-form handle submitStartSeries submits
+  startSeriesContext: null, // the renderOpForm context passed at mount; .row.providerKey is set from #series-provider just before submit
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -2836,6 +2839,7 @@ async function loadSeries() {
 // the PROTECTED, RLS-scoped /api/my-visit-series (D1.5) — the sibling of
 // loadSeries' clinic-wide staff fetch.
 async function loadMySeries() {
+  renderStartSeriesForm();
   if (!state.patient) {
     state.mySeries = [];
     renderMySeries();
@@ -3297,52 +3301,86 @@ async function endSeries(s) {
   }
 }
 
-// submitStartSeries submits StartVisitSeries for the selected patient against the
-// chosen provider, then closes the inline form and reloads.
-async function submitStartSeries() {
+// renderStartSeriesForm mounts StartVisitSeries's descriptor form
+// (intervalDays/startAt/activeUntil) for the selected patient — re-rendered
+// only when state.patient changes, mirroring renderProviderEditForm's own
+// change guard. Provider stays the existing hand-built, name-searchable
+// <select> outside the mount (entity-ref has no picker in this module yet,
+// per form.mjs's own note) — the op's dispatch.contextParams fills
+// providerKey from context.row at submit time, so this form never asks
+// anyone to type a raw provider key.
+async function renderStartSeriesForm() {
+  if (state.patient === state.startSeriesPatient) return;
+  state.startSeriesPatient = state.patient;
+  const mount = $("#start-series-fields");
+  const btn = $("#series-start-submit");
+  state.startSeriesHandle = null;
+  btn.disabled = true;
   if (!state.patient) {
-    toast("Select a patient first.", "err");
+    mount.innerHTML = "";
     return;
   }
+  await loadOpCatalogQuiet();
+  let renderOpForm;
+  try {
+    ({ renderOpForm } = await loadDescriptorform());
+  } catch (e) {
+    mount.innerHTML = "";
+    toast("Could not load the start-series form: " + e.message, "err");
+    return;
+  }
+  // The selection may have moved on while these awaits were in flight.
+  if (state.patient !== state.startSeriesPatient) return;
+  const row = (state.opCatalog || {}).StartVisitSeries;
+  const context = { target: state.patient, row: {} };
+  const handle = row && renderOpForm(row, context, mount);
+  if (!handle) {
+    mount.innerHTML = "";
+    toast("The start-series form is unavailable.", "err");
+    return;
+  }
+  state.startSeriesHandle = handle;
+  state.startSeriesContext = context;
+  btn.textContent = handle.descriptor.submitLabel;
+  btn.disabled = false;
+}
+
+// submitStartSeries submits the mounted StartVisitSeries form for the
+// selected patient against the chosen provider, then re-renders a fresh
+// draft and reloads. The guard-aspect dedup optionalRead
+// (activeVisitSeriesWith<providerId>) assembles from the op's own Dispatch
+// declaration now — submitOp's hand-built optionalReads array this replaced
+// is gone.
+async function submitStartSeries() {
+  const handle = state.startSeriesHandle;
+  if (!handle) return;
   const providerKey = $("#series-provider").value;
   if (!providerKey) {
     toast("Choose a provider.", "err");
     return;
   }
-  const intervalDays = parseInt($("#series-interval").value, 10);
-  if (!intervalDays || intervalDays <= 0) {
-    toast("Enter a positive interval in days.", "err");
-    return;
-  }
-  const startDate = $("#series-start").value;
-  if (!startDate) {
-    toast("Pick a first-occurrence date.", "err");
-    return;
-  }
-  const payload = { patientKey: state.patient, providerKey, intervalDays, startAt: startDate + "T09:00:00Z" };
-  const endDate = $("#series-end").value;
-  if (endDate) payload.activeUntil = endDate + "T09:00:00Z";
+  state.startSeriesContext.row.providerKey = providerKey;
 
   const submit = $("#series-start-submit");
   submit.disabled = true;
   try {
-    // The op claims a deterministic per-patient+provider guard aspect
-    // (activeVisitSeriesWith<providerId>) that rejects ActiveVisitSeriesExists
-    // for a second concurrently-active series on the same pair — class-(d)
-    // declared optionalReads (absence is the common case: this pair's first-ever
-    // series). Mirrors clinic-domain's slotClaimKeys dispatch pattern.
-    const optionalReads = [state.patient + ".activeVisitSeriesWith" + vtxId(providerKey)];
-    const reply = await submitOp("StartVisitSeries", "", payload, [state.patient, providerKey], { optionalReads });
+    let envelope;
+    try {
+      envelope = handle.submit();
+    } catch (e) {
+      toast(e.message || String(e), "err");
+      return;
+    }
+    const reply = await submitCatalogOp(envelope);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast(msg, "err");
       return;
     }
     toast("Recurring visit series started.", "ok");
-    $("#series-interval").value = "30";
-    $("#series-start").value = "";
-    $("#series-end").value = "";
     $("#start-series").open = false;
+    state.startSeriesPatient = undefined; // force a fresh draft on next render
+    renderStartSeriesForm();
     loadSeries();
   } catch (e) {
     toast("Could not start series: " + e.message, "err");
@@ -4783,7 +4821,6 @@ function init() {
   $("#reload-series").addEventListener("click", loadSeries);
   $("#series-filter").addEventListener("change", renderSeries);
   $("#series-start-submit").addEventListener("click", submitStartSeries);
-  $("#series-start").min = localDateStr(0);
   $("#reload-schedule").addEventListener("click", loadSchedule);
   $("#sched-provider").addEventListener("change", loadSchedule);
   $("#sched-week").addEventListener("click", () => setSchedView("week"));

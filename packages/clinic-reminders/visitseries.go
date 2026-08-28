@@ -1128,7 +1128,14 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "patientKey",
 				TargetType:  "patient",
-				Reads:       []string{"{payload.patientKey}", "{payload.providerKey}"},
+				// providerKey is picked from a name-searchable roster select, not typed —
+				// staff apps have no entity-ref picker yet (internal/descriptorform/form.mjs's
+				// own note), so leaving it schema-rendered would ask for a raw NanoID. The
+				// caller fills it from its own picker via the companion-row template
+				// (the same {context.<field>} seam lease-signing's SignRenewal/VerifyGuarantor
+				// completions use), excluding it from the generic render entirely.
+				ContextParams: map[string]string{"providerKey": "{context.providerKey}"},
+				Reads:         []string{"{payload.patientKey}", "{payload.providerKey}"},
 				OptionalReads: []string{
 					"{payload.patientKey}.activeVisitSeriesWith{payload.providerKey:id}",
 				},

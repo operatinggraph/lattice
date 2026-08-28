@@ -214,11 +214,12 @@ var appOpDebt = map[string]string{}
 // census of every possible hand-wired op.
 var appOpCeilings = map[string]int{
 	"cmd/cafe-app": 6,
-	// 16: EndVisitSeries (verticals.md "A recurring visit series started
-	// without an end date can never be ended") — a new staff-hand-wired op,
-	// same shape as its 15 predecessors; no op-catalog rendering exists for
-	// this app yet.
-	"cmd/clinic-app": 16,
+	// 15: StartVisitSeries moved off this app's own hardcoded literal onto
+	// internal/descriptorform (verticals-designer-triage-2026-08-27.md §2 work-
+	// list item 2) — its intervalDays/startAt/activeUntil now render from the
+	// op catalog; providerKey fills from dispatch.contextParams instead of a
+	// schema-rendered entity-ref, since this app has no entity-ref picker yet.
+	"cmd/clinic-app": 15,
 	// 18: AttachObject/DetachObject moved off this app's own hardcoded
 	// literals onto internal/descriptorform/attachments.mjs (design §22) —
 	// the shared ceremony module lives outside this gate's cmd/*-app scan
