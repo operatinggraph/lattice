@@ -207,8 +207,8 @@
 //     literal is default-DENIED until the author declares what the literal is:
 //     (policy) the core decides something ABOUT this op — a policy set, a
 //     carve-out, a reserved-verb list, or a branch keyed on the name;
-//     (submits) this engine constructs and submits the operation itself;
-//     (routes) this engine dispatches inbound work on this operation name.
+//     (submits) the operation is submitted — built and published by this engine,
+//     or named in the remedy an operator submits on its instruction.
 //     The hazard is (policy): a core-owned set keyed on names the core does not
 //     own is a coupling with no declared counterparty, and nothing tells a
 //     reader — or a reviewer — that it exists. Two such sets shipped
@@ -223,6 +223,11 @@
 //     []string{…}`, and treats exactly that set as package-owned. A
 //     hand-maintained list rots the day a package adds a verb, and a stale one
 //     cannot be told apart from a name that is genuinely not package-owned.
+//     Deriving it also buys the rename half: when a package retires a verb the
+//     engine's literal leaves the universe and every check above goes quiet on
+//     the site, so a declaration whose covered span names no package-owned
+//     operation at all is itself denied — the orphaned declaration is the only
+//     remaining trace that the coupling it described is gone.
 //     There is deliberately NO exemption category, mirroring
 //     authCtxTargetShapes; a genuine name collision later is a deliberate
 //     amendment, made then. `cmd/**` is out of scope (a binary submitting
@@ -653,10 +658,10 @@ var opNameCategories = map[string]bool{
 	// the one category that encodes a coupling to a package the core does not
 	// own, so it is the one that must additionally name its guard via `pin=`.
 	"policy": true,
-	// (submits): this engine constructs and submits this operation itself.
+	// (submits): this engine names this operation because it is submitted —
+	// built and published by the engine itself, or named in the remedy an
+	// operator submits on its instruction.
 	"submits": true,
-	// (routes): this engine dispatches inbound work on this operation name.
-	"routes": true,
 }
 
 // opNameUniverse caches the derived package-owned operation names for the
@@ -1350,8 +1355,10 @@ func scanSource(path string, data []byte) []finding {
 	var opNameAt map[int]annotation
 	var opNameUniverse map[string]string
 	if opNameScoped {
-		opNameAt = annotationSpans(strings.Split(string(data), "\n"), opNameShape)
+		opNameLines := strings.Split(string(data), "\n")
+		opNameAt = annotationSpans(opNameLines, opNameShape)
 		opNameUniverse = packageOwnedOpNames()
+		out = append(out, checkStaleOpNameDeclarations(path, opNameLines, opNameAt, opNameUniverse)...)
 	}
 	kvBatchScoped := !isTest && (strings.HasPrefix(slash, "internal/processor/") || strings.HasPrefix(slash, "internal/substrate/"))
 	if kvBatchScoped {
@@ -2297,8 +2304,8 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 		"`// op-name: (policy) <why> pin=<test or gate>` (the core decides something ABOUT this op — a " +
 		"policy set, a carve-out, a reserved-verb list, or a branch keyed on the name — and `pin=` names " +
 		"the test or gate that catches drift between the core's set and the package's own declaration), " +
-		"`// op-name: (submits) <why>` (this engine constructs and submits the operation itself), or " +
-		"`// op-name: (routes) <why>` (this engine dispatches inbound work on this operation name)."
+		"or `// op-name: (submits) <why>` (the operation is submitted — built and published by this " +
+		"engine, or named in the remedy an operator submits on its instruction)."
 
 	shape, why := declared.shape, declared.why
 	if shape == "" {
@@ -2325,6 +2332,56 @@ func checkOpName(path string, ln int, line string, declared annotation, universe
 				"cross-package coupling, so it is the one that must name what catches the drift " +
 				"(the byte-identical pair maintained independently in two packages is the live " +
 				"instance this gate exists over)"})
+	}
+	return out
+}
+
+// checkStaleOpNameDeclarations flags an `op-name:` declaration whose covered
+// span names no package-owned operation at all.
+//
+// This is the rename half of the gate, and it exists because the universe is
+// DERIVED. When a package renames or retires a verb, the literal in the engine
+// silently leaves the universe: checkOpName stops matching it, so the site that
+// was declared against a real counterparty now points at nothing and no longer
+// trips anything. The declaration outliving its subject is the only remaining
+// trace, so that is what is checked. A correctly placed declaration always
+// covers at least one member, which is why the rule cannot fire on a live site.
+//
+// universe maps each package-owned name to its declaring packages/ file.
+func checkStaleOpNameDeclarations(path string, lines []string, covered map[int]annotation, universe map[string]string) []finding {
+	var out []finding
+	for i, line := range lines {
+		if !opNameShape.MatchString(line) {
+			continue
+		}
+		live := false
+		for ln, a := range covered {
+			if a.text != line || ln-1 < 0 || ln-1 >= len(lines) {
+				continue
+			}
+			body := lines[ln-1]
+			if isCommentLine(body) {
+				continue
+			}
+			for _, m := range goStringLiteral.FindAllStringSubmatch(body, -1) {
+				if _, ok := universe[m[1]]; ok {
+					live = true
+					break
+				}
+			}
+			if live {
+				break
+			}
+		}
+		if live {
+			continue
+		}
+		out = append(out, finding{file: path, line: i + 1, warn: false,
+			msg: "op-name: stale declaration — this `op-name:` annotation covers no package-owned " +
+				"operation name. Either the operation was renamed or retired by its package (in which " +
+				"case this engine's literal is now dead or wrong and the coupling this declaration " +
+				"described is gone), or the annotation drifted off the statement it was written for. " +
+				"Re-point it at the live literal, or remove it with the code it described"})
 	}
 	return out
 }
@@ -3477,9 +3534,13 @@ func selfTest() []string {
 		{"an undeclared literal in a submitted op envelope is denied", "internal/objectmanager/cascade.go",
 			"\t\tOperationType: \"DetachObject\",\n",
 			"op-name: undeclared package-owned operation name \"DetachObject\""},
-		{"a declared (routes) literal passes", "internal/bridge/dispatch.go",
-			"\t// op-name: (routes) the Bridge dispatches inbound proposal replies on this name\n" +
+		{"a declared literal in a dispatch switch passes", "internal/bridge/dispatch.go",
+			"\t// op-name: (submits) the reads the Bridge attaches to the reply op it posts\n" +
 				"\tcase \"RecordProposal\":\n", ""},
+		{"a retired category is denied like any other unknown one", "internal/bridge/dispatch.go",
+			"\t// op-name: (routes) the Bridge dispatches inbound work on this name\n" +
+				"\tcase \"RecordProposal\":\n",
+			"op-name: unknown category (routes)"},
 		{"an on-the-line declaration passes", "internal/objectmanager/cascade.go",
 			"\t\tOperationType: \"DetachObject\", // op-name: (submits) the cascade detaches each child object\n", ""},
 		{"a Starlark-spelled annotation host is accepted too", "internal/objectmanager/cascade.go",
@@ -3522,6 +3583,22 @@ func selfTest() []string {
 			"\tPermittedCommands: []string{\"ClaimIdentity\"},\n", ""},
 		{"the gate skips internal test files", "internal/loom/engine_test.go",
 			"\topCreateTask := \"CreateTask\"\n", ""},
+		// The rename half. A declaration is only meaningful while the operation
+		// it names is still declared by a package; when the package retires the
+		// verb the literal leaves the derived universe and every other check
+		// goes quiet on the site, so the orphaned declaration is the signal.
+		{"a declaration covering a retired operation is denied", "internal/loom/engine.go",
+			"\t// op-name: (submits) Loom submits this to close the pattern\n" +
+				"\topRetiredVerb = \"CompletePatternOldSpelling\"\n",
+			"op-name: stale declaration"},
+		{"a declaration that drifted off its statement is denied", "internal/loom/engine.go",
+			"\t// op-name: (submits) Loom completes the pattern it drove\n" +
+				"\n" +
+				"\topCompletePattern = \"CompletePattern\"\n",
+			"op-name: stale declaration"},
+		{"a declaration covering a live operation is not stale", "internal/loom/engine.go",
+			"\t// op-name: (submits) Loom completes the pattern it drove\n" +
+				"\topCompletePattern = \"CompletePattern\"\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
