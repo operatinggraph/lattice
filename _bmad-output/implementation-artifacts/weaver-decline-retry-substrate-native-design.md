@@ -641,3 +641,199 @@ MaxDeliver) is now stated explicitly with its bounds (§3.1).
 Andrew (2026-08-27) and folded · decline taxonomy corrected and folded · **✅ RATIFIED (Andrew,
 2026-08-27) — build-ready**; §8 demote and the dropped update-rebuild lever are settled in the
 banner.
+
+---
+
+## 16. Build fire brief (Phase 0, 2026-08-28)
+
+Compiled once for the whole item (`agents/fire-brief-template.md`); resumes run a delta-scout, not
+a recompile. Environment: Claude Code remote container (`agents/steward/REMOTE.md`) — native
+Postgres on :5433, no shared live stack.
+
+### 1. Scope sentence (verbatim, §14)
+
+> **Inc 1 — substrate.** `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns
+> T1. Weaver-inert until Inc 2. **Inc 2 — decline classes.** §3.2's table + the `isBool` threading
+> + the row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear
+> narrowing + (if ratified) the §8 severity demotion. Owns T3, T4, T5, T8. **Inc 3 — dispatch-path
+> restructure.** Early anti-storm ahead of `planGap`; retire `redelivered`; the republish set; the
+> three comment rewrites. Owns T2, T9. **Inc 4 — the `ReplayTarget` verb.** Engine verb +
+> capability verb + Loupe surface + Augur re-fire suppression + the contraction/component-doc
+> sentence rewrites. Owns T6, T7, T10, T11.
+
+Green bar: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./internal/weaver/... ./internal/substrate/...
+./internal/processor/...` with `POSTGRES_TEST_DSN` set, plus the build-tagged harnesses the
+`substrate.Decision` signature change reaches (below).
+
+### 2. Census results — every design premise re-run live
+
+| Census | Design's expectation | Live result | Verdict |
+|---|---|---|---|
+| C1 — production weaver targets | 26 (9 literals + 17 constants) | **26** (9 quoted + 17 constants) | ✅ confirmed |
+| C6 — `substrate.Ack` sites in `evaluator.go` | 21, at `27,34,43,93,115,120,131,201,231,257,552,583,587,636,688,704,812,1344,1359,1388,1398` | **21, at exactly those lines** | ✅ zero drift |
+| C5 (static half) — declared gaps per target | "most targets declare 1–3 gaps" | **every target declares exactly 1** | ✅ §7's cost formula is conservative |
+| C5 (live half) — `weaver-targets` row counts, per-target max | needs a live stack | **not runnable in this container** | ⛔ carried, below |
+| C2 — the clinic population + its decline class | needs a live stack | **not runnable in this container** | ⛔ carried, below |
+| C3 — post-preamble `msg.` reads | `msg.Sequence` only after §3.4 | deferred to Inc 3 (it *is* T2) | — |
+
+**C2/C5-live are not runnable here and are not faked.** They read a live Core-KV population
+(the clinic 26/29) that exists only on the attended stack; this container's stack is fresh and
+empty (`REMOTE.md` §3). What this changes and what it does not:
+
+- **It does not gate Inc 1–4's code.** Every §3.2 reclassification, the severity demotion, the
+  latch narrowing, the cache bound, the restructure and the verb are correct independent of which
+  class the clinic rows took — C2's stop-rule is a *design-validity* check ("does this design fix
+  its motivating symptom?"), not a safety check on the diff.
+- **It does gate the one-time heal.** C2's stop-rule and its affected-target run-book are carried
+  forward as a **post-deploy gate on the attended stack**, to be run before the one-time
+  `ReplayTarget` invocation: if the stranded class lands in a row §3.2 leaves at Ack
+  (rows 1/2/4/5/6), the clinic symptom is NOT closed by this item and needs a follow-on row.
+  Recorded here rather than filed as a residual because it has no code deliverable.
+
+### 3. Verified touch-list (checked live at HEAD; design citations re-verified)
+
+**Inc 1 — substrate**
+
+| Site | Design cited | **Actual** | What |
+|---|---|---|---|
+| `internal/substrate/consumer.go` | `:50-56` | **`:39-57`** | `Decision` type + iota; append `NakWithLongDelay` (=4) after `NakWithDelay` |
+| `internal/substrate/consumer.go` | `:448-471` | **`:449-472`** | `applyDecision`; `default:` at **`:468`** is the silent-Ack arm |
+| `internal/substrate/consumer.go` | `:319`, `:395` | **`:319`, `:395`** | the two `applyDecision` call sites (signature grows a second floor) |
+| `internal/substrate/consumer.go` | — | **`:59-65`**, **`:145-148`** | `DefaultRedeliveryDelay`; `DurableConsumerConfig.RedeliveryDelay` |
+| `internal/substrate/consumer.go` | — | **`:233`** | `runDurableLoop` call — carries the floor through |
+| `internal/substrate/consumer_supervisor_spec.go` | — | **`:174-176`** | `ConsumerSpec.RedeliveryDelay` |
+| `internal/substrate/consumer_supervisor_pump.go` | `:704`, `:710` | **`:704`, `:710`** | `:704` passes a literal `NakWithDelay` + probe interval; `:710` the handler decision + `spec.RedeliveryDelay` |
+| `internal/processor/commit_path.go` | `:850-869` | **`:809-829`** | `disposeJetstream`; `default:` at **`:823`** is the second silent-Ack arm |
+| `internal/processor/outbox/consumer_decisions_test.go` | *not in the design* | **`:28-40`** | **third** `Decision` switch (`decisionName`) — a test diagnostic, not an Ack risk, but it stringifies an unnamed value as `Decision(4)` |
+| `internal/substrate/nak_with_delay_test.go` | `:13-26` | **`:14-26`** | the iota pin — extend, do not rewrite |
+
+**Inc 2 — weaver decline classes** (all 21 C6 sites verified; only these change)
+
+| Site | Row | Change |
+|---|---|---|
+| `evaluator.go:40-43` | 3 | on `json.Unmarshal` failure raise `RowDataError` at `issueKeyDataEntity(targetID, entityID, "body")`; **clear it immediately after a successful `Unmarshal` of the same row** |
+| `evaluator.go:229-231` | 8 | `alert(..., "error", "GapWithoutPlaybook", ...)` → **`"warning"`** (§8) and `substrate.Ack` → **`NakWithLongDelay`** |
+| `evaluator.go:580-583` | 10 | `TemplateDataError` `substrate.Ack` → **`NakWithLongDelay`** (severity stays `warning`) |
+| `evaluator.go:584-587` | 11 | `PlaybookConfigError` `"error"` → **`"warning"`** (§8) and `substrate.Ack` → **`NakWithLongDelay`** |
+| `evaluator.go:171-179`, `:182-188` | — | both aggregation switches gain an explicit `case substrate.NakWithLongDelay:`; accumulators at `:134-135` gain the third (`longDelayed`), precedence `Nak > NakWithDelay > NakWithLongDelay > Ack` |
+| `evaluator.go:1085-1102` | §3.5 | `boolColumn` threads `isBool` out to its caller |
+| `evaluator.go:883-884` | §3.5 | the `gapConfig:` clear fires **only** on an explicit bool `false` read |
+| `engine.go:414-425` | §6 | `targetSpec` gains `MaxAckPending: 2000` — **currently unset** (server default 1000, V4) |
+| `health.go:132`, `:147-164`, `:303-316` | §3.6 | per-target cap on the per-entity `data:`/`template:` issue families in the map itself, with one overflow counter entry per target maintained in place; `boundIssues` (`:616-637`) untouched |
+
+Issue-key helpers verified present: `issueKeyDataEntity` `evaluator.go:1637`, `issueKeyTemplateEntity`
+`:1662`, `issueKeyGapEntity` `:1589`, `issueKeyGapConfig` `:1599`.
+
+**Inc 3** — `evaluator.go:632-636` (anti-storm), `:776-778`, `:190-193`, `reconciler.go:1126-1128`
+(the three comments), plus the `redelivered` parameter's whole thread.
+**Inc 4** — `internal/weaver/control.go:87-460` (verb family), `contraction.go:22-25` (the false
+restart sentence), `docs/components/weaver.md` (lane-1 section + the `Enable` sentence).
+
+### 4. Precedents to mirror
+
+- `NakWithLongDelay` mirrors `NakWithDelay`'s own shape at `consumer.go:449-472` — the floor is
+  read from config and clamped in `applyDecision`, never carried on the Decision (V8).
+- `LongRedeliveryDelay`'s clamp mirrors `engine.go:157-184`'s pattern verbatim:
+  `if x <= 0 { x = default }` then `if x < floor { x = floor; Logger.Warn(...) }`.
+- The `MaxAckPending` application already exists at `consumer_supervisor.go:608-610` (guarded on
+  `> 0`) and is pinned by `lane_seam_test.go:14-40` — Inc 2 only sets the spec field.
+- Inc 4's verb mirrors `ResetRetryBudget` in `control.go`; `supervisor.Reset` (`recreateDurable`
+  under `resetMu`) is at `consumer_supervisor.go:211-231`.
+- The overflow-counter shape mirrors `boundIssues`' own overflow entry (`health.go:616-637`) and
+  `installer.go`'s `sampleWithOverflow`.
+
+### 5. In-scope gotchas
+
+**Environment / gates**
+
+- `go test ./...` is NOT the gate set. This item changes a `substrate` interface signature, which
+  reaches every build-tagged harness: run `make test-unrouted-convergence` (a Weaver target e2e —
+  the closest thing to this item's own e2e), `make test-lease-convergence`,
+  `make test-augur-convergence`, `make test-object-gc`, `make test-system-actor-capability`,
+  `make test-control-plane-authz`. Enumerate with
+  `grep -rl "^//go:build " --include=*_test.go internal/`.
+- `POSTGRES_TEST_DSN` must be set or the suite is falsely green (`REMOTE.md` §3).
+- `golangci-lint` must be the CI-pinned v2.11.4 built with go1.26.1, from `$(go env GOPATH)/bin`
+  ahead of the stale system binary (`REMOTE.md` §7).
+- **No `exhaustive` linter is enabled** (`.golangci.yml` — `default: standard`, only `errcheck`
+  disabled). A missed `case` is a silent Ack that no gate catches. T1 is the only mechanism.
+- No `packages/` content changes in Inc 1–3, so no manifest version bump. Inc 4's capability verb
+  does touch a package — bump its manifest **and** the mirroring `Version` constant, and run
+  `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`.
+- Fixture `targetId`s stay **under 20 characters** — `lint-conventions` reads a 20-char value on an
+  `…ID` identifier as a NanoID.
+
+**Weaver dossier — `docs/components/weaver.md`, the entries this fire trips**
+
+1. **A Health issue key is a LATCH: scope it to the fact it states, and split it only with every
+   clear re-paired.** Row 3 adds a raise at `issueKeyDataEntity(t, e, "body")` — a *synthetic*
+   column no other leg raises at. **Before adding its clear, enumerate every other leg that raises
+   at that key**: `boolColumn:1097` and `intColumn:1141` both raise `RowDataError` at
+   `issueKeyDataEntity` for *real* columns. `"body"` cannot collide with a real column name only
+   if no lens ever projects a column literally named `body` — state that premise or pick a
+   name that cannot collide.
+2. **A fact ends by more routes than the one you are editing — enumerate the LEGS, not the verb.**
+   The row-3 clear must also be reachable from the sweep and from teardown, or a row that stops
+   being delivered strands the issue. `clearClosedMarks` runs on a DELIVERY; the sweep observes
+   the same endings at `deleteMark`/`deleteCount`/the row-gone arm.
+3. **A presence assertion cannot pin a clear whose caller re-raises in the same pass — the STAMP
+   is the observable.** T3's row-3 raise/clear test and T8's latch test both assert on `since`,
+   never on membership.
+4. **Segmenting a Health key by entity is safe only where a clear site names that exact COLUMN.**
+   The §3.6 cap exists because these families are already O(entities); the cap bounds the CACHE,
+   `boundIssues` bounds the DOCUMENT — do not conflate them.
+5. **An `error`-severity Health issue must not fire on a self-healing condition.** This is exactly
+   §8's demotion; it also means the new Long loop must not introduce a *new* `error`.
+6. **Prove each changed line by reverting THAT LINE, not the feature** — and anchor each mutation
+   to its own function (three identical-looking sites exist). Where the claim is about WHERE a
+   block sits (Inc 3's early anti-storm), **the mutation is a MOVE, not a revert**.
+7. **A leg's arms are a lattice: every RETIRE belongs above every "cannot act" GUARD.** Inc 2's
+   new Long returns sit below the disabled-target and registry guards — confirm no retire is
+   pushed below a guard by the reordering.
+
+**Substrate dossier — the entries this fire trips**
+
+8. **Narrowing a JetStream consumer's filter strands its pending set** — Inc 4's verb is a
+   delete-then-create, which is the sanctioned escape; do not reach for an update.
+9. **A server-immutable consumer field needs delete-then-create in BOTH directions** —
+   `DeliverPolicy` is non-updatable (V6); the verb must not degrade to an update on any path.
+10. **A vendor-behaviour claim in a comment needs a pinned `file:line` on a path this code
+    actually executes.** Every V-row citation copied into a comment is version-matched to
+    `nats-server@v2.14.0` and must stay so.
+
+**Standing checklist (the six)**
+
+1. New state needs a LIFETIME: Inc 3's republish set — its state table is §5, already written
+   (added on publish failure, removed on success and by `clearClosedMarks`' mark clear, lost on
+   restart → reclaim ladder, evicted with the target).
+2. Every census is a premise → §2 above; C2/C5-live carried explicitly.
+3. A negative test needs its positive vector proven first; every fix proven by reverting it.
+4. Removal needs a transport AND an observer — Inc 3 *replaces* the `NumDelivered` branch, so
+   enumerate everything it silently did (V18 names one; look for more) and account for each.
+5. One deterministic key, one writer — the republish set's key is `(targetID, entityID, col)`.
+6. Precedent may carry debt — verify a mirrored pattern against the rule it claims to follow.
+
+### 6. Adjacent finds
+
+- **The third `Decision` switch** (`internal/processor/outbox/consumer_decisions_test.go:28-40`)
+  the design's V8 census missed. Absorbed into Inc 1 (it is one `case`), not filed.
+- **No `exhaustive` linter.** V8's "a missed site is a silent no-op, not a compile error" is
+  therefore permanent, not incidental. Absorbed as a brief gotcha + T1's mutation coverage; a
+  standing gate for it is out of this item's ratified scope and, if it proves warranted at the
+  close pass, files as its own row.
+
+### 7. Non-goals (the drift fence)
+
+The row sweep (shelved fallback, §11 Row 2); any automatic durable rebuild (per-boot, per-update,
+per-reconnect — withdrawn, §11 Row 3); `AckWait` (withdrawn, §6); `MaxDeliver` (untouched, V5);
+rows 1/2/4/5/6/7/9/12–17 of §3.2; the `weaver-targets` KV `History: 1` pin itself (T4 *asserts*
+it, does not change it); Contract #10 (§10 — no contract surface).
+
+### Scope-diff gate — PASSED
+
+Parts 2–4 diff item-by-item against part 1 with no widening. Two narrowings recorded: the
+`decisionName` case (part 6) is an addition *inside* Inc 1's stated "all V8 touch points", not a
+new mechanism; and C2/C5-live are carried as a post-deploy gate rather than a build-time stop,
+argued in part 2. Declared dependencies re-verified both ways: Inc 2 depends on Inc 1's Decision
+value (load-bearing); Inc 3 and Inc 4 do **not** depend on C2 (verified — no code path reads it).
