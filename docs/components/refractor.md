@@ -1242,9 +1242,16 @@ rows.
   the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
   turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
   opposite directions. Minted: dynamic-type-taxonomy B1 (`capabilityServiceAccess`'s `exLoc`, which mints
-  `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
-  (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
-  second sighting.
+  `cap.svc.<actor>`; reproduced as a failing test before removal). **Second sighting: the RANGE BOUND, one
+  level up from the label** — once the pattern graph steps a bounded ranged hop, "bound your `*0..` to gain
+  indexing" is an attractive package edit that is fail-closed on a positive arm (a too-shallow bound drops a
+  service) and fail-OPEN on a negated one (it drops an exclusion, granting access). Same edit, opposite
+  directions. Check: that half is **MECHANIZED** — `scripts/lint-lens-anchors.go` refuses a finite upper
+  bound below the engine's own `maxVarLengthHops` clamp inside a negated extent, and runs its own
+  positive-and-negative vectors on every invocation because the corpus ships no violating lens for it to
+  catch. The **sigil** half still has only the per-lens string pin (`service-location/package_test.go`) — the
+  entry retires when that one is mechanized too. Generalize before writing either: ask which direction the
+  edit fails in on each arm, not whether it is "tighter".
 - **A two-layer seam can be green at each layer and broken across it — the interposed step is where it dies**
   — a restored structural pause's diagnosis was stashed by the health sink and read back at the announcement,
   and both halves had passing tests: the substrate side drove `Load → probe → announce`, the Refractor side
