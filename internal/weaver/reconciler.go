@@ -1122,9 +1122,10 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Fresh episode: the requestId derives from the replace revision (a real new
 	// dispatch attempt). claimID (preserved or freshly minted, above) seeds the
 	// dispatch identity. A publish failure here leaves the fresh mark holding a
-	// live lease, so the retry is real — the sweep re-attempts at that lease's
-	// expiry, and a lane-1 redelivery re-fires the same fresh requestId before
-	// then.
+	// live lease, so the retry is real: the sweep re-attempts at that lease's
+	// expiry. A lane-1 redelivery in the meantime finds that live mark and takes
+	// the anti-storm drop, so it neither duplicates the attempt nor brings it
+	// forward.
 	if e.fire(ctx, targetID, entityID, gapColumn, newRev, claimID, pl) != substrate.Ack {
 		e.logger.Warn("weaver sweep: reclaim re-dispatch did not publish; the fresh mark's lease bounds the retry",
 			"targetId", targetID, "entityId", entityID, "gap", gapColumn)

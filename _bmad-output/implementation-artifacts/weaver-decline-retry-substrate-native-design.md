@@ -326,7 +326,11 @@ the latch is a `warning` after §8, so it pins nothing `unhealthy`, and a live `
 section's heading is not unconditional, and a reader should not assume absent / false / non-bool are
 all covered — only the first two are.
 
-`since` semantics (V14): `GapWithoutPlaybook` (via `alert`) re-mints `since` on a flap; the two
+`since` semantics (V14) — **amended at build, 2026-08-28:** all three codes now keep their original
+onset across a flap. `GapWithoutPlaybook` moved from `alert` to `alertPaced` (its `alert` hardcodes
+`logger.Error` for every caller, which after §8's demotion would have emitted an ERROR line per stuck
+row per floor, forever — defeating the demotion at the log layer). Its `since` is therefore
+clock-borne like its siblings' rather than latch-borne, so it no longer re-mints on a flap. The two
 paced codes keep their original onset across flaps because the pace memory survives `clear`.
 
 ### 3.6 The issue-cache bound
@@ -411,9 +415,8 @@ Re-derived, not inherited (V4, V17):
   failure mode. Nak'd-pending
   declines hold slots (V1); V2/V3 keep the decline cycle and fix-uptake flowing at the cap, so the
   starved class is **new entities** on a target already carrying ≥cap distinct simultaneously-stuck
-  rows. The cap is deliberately modest: above ~1 024 pending the server's `checkPending` walks the
-  whole map per timer fire and defers under ack load (`consumer.go:5916-5921`, `:5964-5973`).
-  2 000 is ~70× today's worst observed stuck population — and with data errors Acking (§3.2),
+  rows. 1 024 is ~36× today's worst observed stuck population, and the pending set can reach it
+  exactly without ever crossing the server's defer threshold — and with data errors Acking (§3.2),
   the pending mass is the config-error classes only; C5 re-derives it if the corpus says
   otherwise. Honest limits, both stated: the >cap new-entity stall (signal: `num_ack_pending`
   pinned at the cap — Lamplighter surface), and the V2 head-of-line drain — each floor tick
@@ -575,7 +578,7 @@ republish set at strictly narrower scope. Rejected.
   Ships as T2.
 - **C5 (build Phase 0, live stack):** total `weaver-targets` rows, per-target max, and **declared
   gaps per target** — sizes the verb's burst, the §7 steady-state formula, and the §6 cap. If a
-  target exceeds ~2 000 rows, re-derive §6 before building.
+  target exceeds the §6 cap (1 024) in simultaneously-stuck rows, re-derive §6 before building.
 - **C6 — RE-RUN post-Inc-2, 2026-08-28: now 18 sites, not 21.** Rows 8/10/11 left the Ack census by
   construction (they return `NakWithLongDelay`); the remaining 18 map 1:1 onto the old list with no
   site added, moved into an unclassified position, or lost: `27, 34, 56, 107, 129, 134, 145` (rows
@@ -675,7 +678,8 @@ landed:
   errors Ack, so the flag and its precedence machinery deleted.
 - The draft's `AckWait: 2m` rationale was defeated by the pump's own prefetch-1 + `keepAckAlive`
   (V17) → withdrawn.
-- `MaxAckPending: 10000` ignored the server's >1024 `checkPending` scan behavior → 2 000 (§6).
+- `MaxAckPending: 10000` ignored the server's >1024 `checkPending` scan behavior → 2 000, itself
+  corrected to **1 024** at build once the threshold's actual semantics were read (§6).
 - Marked rows burned an admission token per redelivery inside `planGap` → early anti-storm
   (§3.4a).
 - The steady-state cost table omitted V13's per-cycle preamble term; the C6 census undercounted
@@ -998,10 +1002,10 @@ that one operator run is what closes the existing damage. The run is live-stack 
 container has no such stack — it is the item's one carried-forward action, and the board row says so.
 
 **Residual, stated rather than assumed:** what a live C2/C5 would still add is the row *count* per
-target and the per-target max/gaps-per-target that size §6's `MaxAckPending: 2000` and §7's
-steady-state formula. Both are sizing inputs, not correctness inputs, and §6 already prices 2 000 at
-~70× the worst observed stuck population; §12 C5's own re-derive trigger ("if a target exceeds
-~2 000 rows, re-derive §6") stands as the check to run when a live stack is next available.
+target and the per-target max/gaps-per-target that size §6's `MaxAckPending` and §7's
+steady-state formula. Both are sizing inputs, not correctness inputs, and §6 prices the shipped
+1 024 at ~36× the worst observed stuck population; §12 C5's own re-derive trigger ("if a target
+exceeds the cap, re-derive §6") stands as the check to run when a live stack is next available.
 
 **§3.2 row 10's body claim is amended (2026-08-28, the falsified-claim rule).** The row's *"Plausibly
 the clinic class itself"* aside is **wrong** and is struck: the trace above rules `TemplateDataError`

@@ -216,8 +216,10 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	}
 	if nak {
 		// At least one gap needs an immediate retry; redelivery re-evaluates
-		// every gap idempotently (existing marks re-fire the same episode
-		// requestId).
+		// every gap idempotently — a gap whose episode is already in flight is
+		// dropped at dispatchGap's anti-storm mark read, and one that plans
+		// afresh derives its requestId from the mark it creates, so nothing is
+		// double-acted and nothing is re-published.
 		return substrate.Nak
 	}
 	if delayed {
@@ -239,15 +241,17 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 // dispatchGap runs Evaluator L2 + Strategist + Actuator for one open gap.
 //
 // Dispatch OCC (§10.8): the weaver-state CAS-create is the anti-storm gate —
-// create wins → dispatch; create loses → the winner dispatched, drop. The
-// in-flight skip applies to FIRST deliveries only: on a redelivery
-// (msg.NumDelivered > 1, i.e. a prior delivery Nak'd or crashed before ack)
-// EVERY in-flight gap on the row re-fires its episode requestId — the
-// redelivery signal is per-message, not per-gap, so the retry is a blanket
-// re-fire across the row's in-flight gaps. Each re-fire derives the same
-// requestId from its mark's create revision and collapses on the Contract #4
-// tracker, so the blanket retry never double-acts and a lost publish is not
-// wedged behind its own mark.
+// create wins → dispatch; create loses → the winner dispatched, drop.
+//
+// The anti-storm decision is taken EARLY, from the mark read, before anything
+// plans or admits: a gap whose mark is present and whose lease is live has an
+// episode genuinely in flight, and there is nothing this delivery may do for it.
+// That ordering is load-bearing now that a row's OTHER gap can hold the whole
+// row on a redelivery loop — a config-error gap Naks the message, and every
+// redelivery it causes re-enters this function for every open gap on the row.
+// Planning a marked gap on each of those passes would consume an admission
+// token per cycle and, worse, re-publish the in-flight episode's op every cycle
+// for as long as the row keeps coming back.
 func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	row map[string]any, msg substrate.Message) substrate.Decision {
 
@@ -275,7 +279,22 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 			// responsibility" (Contract #5 §5.2) for a Weaver that is
 			// dispatching normally for every other target. The severity is one
 			// value for every caller of this raise, lane 1 included.
-			e.alert(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
+			//
+			// alertPaced, not alert: this raise is now re-derived on a CADENCE —
+			// once per long floor per stuck row, for as long as the playbook is
+			// wrong — and alert logs every call at Error. It is the third raise at
+			// this target-scoped key, and it needs its two siblings' seam for the
+			// same reason they do: clearClosedMarks retires the key as soon as ANY
+			// one entity's column closes, so an arrival test built on the latch
+			// (alertStanding) would report an arrival on essentially every pass and
+			// damp nothing. A clock survives that clear.
+			//
+			// The message stays a pure function of the key — the playbook is wrong
+			// for the target, identically for every row — so nothing is lost to a
+			// damped pass, exactly as for the PlaybookConfigError sibling. (The
+			// UnresolvedReference sibling names its entity because ITS fault
+			// genuinely differs per row; this one does not.)
+			e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
 				"target "+targetID+": row column "+col+" is true but the playbook defines no gaps entry for it")
 			return substrate.NakWithLongDelay
 		}
@@ -351,19 +370,6 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		pinnedAction = ""
 	}
 
-	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
-	if pl == nil {
-		return dec
-	}
-
-	// redelivered classifies this delivery for the in-flight branch: only
-	// NumDelivered 1 is a definitively FRESH delivery (the anti-storm drop).
-	// NumDelivered 0 (metadata unavailable) deliberately counts as a
-	// redelivery: it may be a retry whose prior delivery never published, and
-	// re-firing is the safe side (the same episode requestId collapses on the
-	// Contract #4 tracker; a drop could wedge a lost publish behind its own
-	// mark).
-	//
 	// staleMark reports whether col is an EXTERNAL gap (Contract #10 §10.3: "a
 	// legitimate close→reopen... mints a new claimId ⇒ a fresh artifact...
 	// External gaps are unchanged — their reclaim re-dispatch is intended
@@ -385,13 +391,56 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// and its claim vertex exist) and .dispatch landing, a call is
 	// committed-and-queued while inflight_<g> still reads false, so a reclaim
 	// in that window mints a genuinely second call. What bounds the exposure is
-	// the `!leaseLive` requirement below: the mark's whole lease must have
+	// the `!leaseLive` requirement here: the mark's whole lease must have
 	// expired first (production default 30 minutes), which is orders of
 	// magnitude longer than a bridge turnaround. It is a window, not an
 	// impossibility — tests that shorten the mark lease have to keep it well
 	// clear of that turnaround (see asyncConvergeOpts in
 	// internal/leaseconvergence).
 	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, entityID, row, col, ga)
+
+	if found && !stale {
+		// The anti-storm drop: a live mark means an episode for THIS gap is
+		// genuinely in flight, so this delivery has nothing to do for it and
+		// must not plan, admit or publish. Taken here rather than after
+		// planning, because a row that keeps being redelivered — for its own
+		// sake or for a sibling gap's config-error floor — would otherwise
+		// burn one admission token and re-publish one op per cycle, forever,
+		// for a gap whose episode is already running.
+		//
+		// Nothing owed is skipped by returning above planGap. planGap's three
+		// retires all describe facts a LIVE mark has already disproved: the
+		// mark exists only because an earlier pass built and fired a plan for
+		// this row and gap, which cleared the config and template entries then;
+		// and the gap's own GapBudgetExhausted entry, if one stands, is retired
+		// by the episode's completion closing the column (retireClosedGapIssues)
+		// or by the next delivery once the mark clears. releaseCompletedLeg runs
+		// above this, so a goal leg that finished is released rather than
+		// mistaken for an in-flight one.
+		//
+		// RESIDUAL, named: `fire`'s publish-failure Nak used to be re-fired by
+		// this delivery's redelivery, and no longer is — a lost publish now
+		// waits for the sweep's lease-expiry reclaim (≤ MarkLease). Telling
+		// "the redelivery my own publish failure caused" from "the redelivery a
+		// sibling gap caused" needs the per-(target, entity, gap) republish set,
+		// which lands with the dispatch-path restructure.
+		return substrate.Ack
+	}
+
+	pl, action, dec := e.planGap(ctx, target, targetID, entityID, col, ga, row, msg.Sequence, pinnedAction)
+	if pl == nil {
+		return dec
+	}
+
+	// redelivered classifies this delivery for fireEpisode's in-flight branch:
+	// only NumDelivered 1 is a definitively FRESH delivery. NumDelivered 0
+	// (metadata unavailable) deliberately counts as a redelivery: it may be a
+	// retry whose prior delivery never published, and re-firing is the safe side
+	// (the same episode requestId collapses on the Contract #4 tracker; a drop
+	// could wedge a lost publish behind its own mark). The early drop above
+	// means lane 1 now only ever reaches that branch with found=false or a stale
+	// mark, so the flag decides nothing here — the other callers of fireEpisode
+	// still pass it.
 	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, msg.NumDelivered != 1, rec, markRev, found, stale)
 }
 
@@ -533,16 +582,20 @@ func surfaceOnlyGap(ga GapAction) bool {
 }
 
 // planGap resolves one gap's plan (Evaluator L2 + Strategist), routing a
-// failure by its class: an unresolved reference defers on the bounded
-// redelivery cadence; a config or data error is surfaced and the gap skipped
-// (retrying cannot fix it). The two carry different Contract #5 §5.2
-// severities: a per-row DATA error (a malformed/incomplete anchor row whose
-// template references resolve null) is a `warning` (degraded) — one bad row,
-// every other row still remediates, so Weaver fulfils its responsibility; a
-// CONFIG error (a package playbook missing a gaps entry, an un-dispatchable
-// action) is an `error` (unhealthy) — it affects every row of the target and
-// only a package re-author can fix it. pl == nil means do not dispatch — the
-// returned Decision is the caller's disposition for this gap.
+// failure by WHERE ITS FIX CAN COME FROM: an unresolved reference is transient
+// mid-convergence and defers on the short redelivery cadence; a template fault
+// and an un-dispatchable action both have a fix path that projects no new row
+// (an edit to the template, the playbook, or the package), so redelivery is
+// their only automatic uptake and they defer on the LONG floor instead. None of
+// the three is skipped-and-forgotten: pl == nil means do not dispatch on THIS
+// pass, and the returned Decision is the caller's disposition.
+//
+// All three raise at `warning`. A per-row DATA error is one bad row while every
+// other row still remediates; a CONFIG error affects every row of the target but
+// is now a STANDING fact, re-derived for as long as it holds, and
+// aggregateStatus maps any `error` over the whole issue set to `unhealthy` — so
+// an `error` here would report "cannot fulfil its primary responsibility"
+// (Contract #5 §5.2) for a Weaver dispatching normally for every other target.
 //
 // pinnedAction (Fire 5/6) is the mark's currently-recorded actionRef, or ""
 // for a genuinely fresh episode — the sole input resolvePlannedAction needs
@@ -574,23 +627,16 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 		}
 	}
 	if perr == nil {
-		if !e.admitGap(target, targetID, entityID, col, resolved.Adapter, row) {
-			// Fire 8 admission control (design §3.4): a declared budget has no
-			// spare capacity for this gap right now. No mark, no plan, no
-			// issue — this is ordinary pacing, not a fault; the redelivery
-			// cadence is the retry, exactly like an unresolved-reference defer.
-			e.logger.Debug("weaver: gap dispatch deferred by admission control",
-				"targetId", targetID, "entityId", entityID, "gap", col)
-			return nil, "", substrate.NakWithDelay
-		}
 		var pl *plan
 		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
-			// A plan built and about to fire disproves THREE standing facts: the
-			// playbook resolves (the config issue), this entity's gap has an
-			// attempt left after all (its GapBudgetExhausted, which a raised
-			// maxretries_<g> or an escalation can make stale without the gap ever
-			// having closed), and this row's template references resolve (the
-			// template issue — building the plan IS the resolution).
+			// A plan that BUILT disproves THREE standing facts, whether or not
+			// admission lets it fire on this pass: the playbook resolves (the
+			// config issue), this entity's gap has an attempt left after all (its
+			// GapBudgetExhausted, which a raised maxretries_<g> or an escalation
+			// can make stale without the gap ever having closed), and this row's
+			// template references resolve (the template issue — building the plan
+			// IS the resolution). The build is what settles all three, so the
+			// retires belong above the admission gate, not below it.
 			//
 			// The gap column's own `data:` entry is deliberately NOT cleared here:
 			// a built plan says nothing about whether missing_<g> carries a §10.2
@@ -598,6 +644,26 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 			e.issues.clear(issueKeyGapConfig(targetID, col))
 			e.issues.clear(issueKeyGapEntity(targetID, entityID, col))
 			e.issues.clear(issueKeyTemplateEntity(targetID, entityID, col))
+
+			// Fire 8 admission control (design §3.4): a declared budget has no
+			// spare capacity for this gap right now. No mark, no episode, no
+			// issue — this is ordinary pacing, not a fault; the redelivery
+			// cadence is the retry, exactly like an unresolved-reference defer.
+			//
+			// The gate sits BELOW the build, not above it, and both halves of that
+			// ordering matter. A token is a permit to DISPATCH, so it must only be
+			// drawn for a plan that would actually fire — above the build, a row
+			// whose plan can never build (a template fault, an un-dispatchable
+			// action) would draw one on every one of its redeliveries for as long
+			// as the fault stood. And a deferral is the 5 s transient class, so
+			// deciding it above the build would hand that class to a CONFIG-error
+			// row whose own class is the long floor, collapsing a paced target's
+			// stuck population onto a 5 s loop.
+			if !e.admitGap(target, targetID, entityID, col, resolved.Adapter, row) {
+				e.logger.Debug("weaver: gap dispatch deferred by admission control",
+					"targetId", targetID, "entityId", entityID, "gap", col)
+				return nil, "", substrate.NakWithDelay
+			}
 			return pl, actionRef, substrate.Ack
 		}
 	}
@@ -837,8 +903,11 @@ func planOptionalReads(pl *plan, claimID string) []string {
 }
 
 // fire materializes one episode's op and fire-and-forget publishes it. A
-// publish failure Naks: the mark already exists, so the redelivery re-derives
-// the SAME requestId and re-publishes (idempotent at the Processor). The op's
+// publish failure Naks, which asks for the row back immediately; what recovers
+// the lost publish is the mark's own lease — the redelivery finds the mark
+// present and live and takes dispatchGap's anti-storm drop, so the re-attempt
+// is the sweep's reclaim at lease expiry, re-deriving the same episode identity
+// from the mark (idempotent at the Processor either way). The op's
 // requestId is episode-scoped (markRevision) UNLESS the plan overrides it
 // (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
 // per-open-episode token the payload folds into the STABLE userTask identity
@@ -1782,12 +1851,13 @@ func issueKeyEffect(targetID, gapColumn, actionRef string) string {
 	return "effect:" + targetID + "." + gapColumn + "." + actionRef
 }
 
-// rowIssuesCappedSegment is the reserved column segment of the per-target
-// overflow entry the issue cache maintains once a target's per-ROW issue set
-// reaches rowIssueCapPerTarget. It cannot collide with a real member of the
-// family: an entity segment is a bare NanoID and substrate.Alphabet carries no
-// underscore (the same reservation the `__control` / `__count` weaver-state key
-// tails rest on), and the key is one segment SHORT of a per-row key besides.
+// rowIssuesCappedSegment is the trailing segment of the per-target overflow
+// entry the issue cache maintains once a target's per-ROW issue set reaches
+// rowIssueCapPerTarget. It cannot be mistaken for a member of that family by
+// SHAPE: a per-row key is `data:<targetId>.<entityId>.<column>` and this one is
+// a segment short of it, which is exactly the test rowIssueTarget applies. The
+// `__` prefix is the same engine-synthetic reading convention as
+// rowBodyColumn's — legible, not load-bearing.
 const rowIssuesCappedSegment = "__capped"
 
 // issueKeyRowIssuesCapped keys that overflow entry. It deliberately sits inside

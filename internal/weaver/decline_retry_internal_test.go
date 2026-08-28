@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,6 +73,48 @@ func TestHandleRow_GapWithoutPlaybookRidesLongFloor(t *testing.T) {
 		t.Fatalf("severity = %q, want \"warning\": the Nak loop re-raises this fact for as long as it holds, "+
 			"and an `error` over a standing fact pins the whole component unhealthy while it dispatches "+
 			"normally for every other target", is.Severity)
+	}
+}
+
+// TestHandleRow_GapWithoutPlaybookIsLogPaced is the log-volume side of the same
+// change. Making this raise STANDING makes it re-derive once per long floor per
+// stuck row, for as long as the playbook is wrong — so a seam that logs every
+// call at Error would write one ERROR line per stuck row per floor, forever, for
+// a condition this severity is `warning`. It belongs on the same paced seam its
+// two siblings at this key already use.
+func TestHandleRow_GapWithoutPlaybookIsLogPaced(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixturePacedNoPlaybook"
+	h.seedTarget(&Target{TargetID: targetID})
+	entityID := testNanoID(t)
+
+	logs := &logCapture{}
+	h.engine.logger = slog.New(logs)
+	for i, seq := range []uint64{1, 2, 3} {
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, noPlaybookRow(entityID), seq, uint64(i+1))); dec != substrate.NakWithLongDelay {
+			t.Fatalf("delivery %d = %v, want the long floor", i+1, dec)
+		}
+	}
+	levels := logs.levelsContaining("the playbook defines no gaps entry")
+	if len(levels) != 3 {
+		t.Fatalf("every re-derivation must still emit a record (never dropped, only lowered), got %v", levels)
+	}
+	if levels[0] != slog.LevelWarn {
+		t.Fatalf("the arrival must be loud at the raise's own severity, got %v — an Error record for a "+
+			"`warning` fact contradicts the demotion in the same breath", levels[0])
+	}
+	for i, lvl := range levels[1:] {
+		if lvl != slog.LevelDebug {
+			t.Fatalf("re-derivation %d = %v, want Debug: one loud record per pace interval per key, or a "+
+				"stuck target writes one line per row per floor forever", i+2, lvl)
+		}
 	}
 }
 
@@ -187,13 +230,27 @@ func TestHandleRow_UnparseableBodyKeyCannotCollideWithAProjectedColumn(t *testin
 	defer cancel()
 	h := newHandlerHarness(t, ctx)
 
-	if !strings.HasPrefix(rowBodyColumn, "__") {
-		t.Fatalf("rowBodyColumn = %q: the synthetic column must carry the reserved `__` prefix, "+
-			"which is the only thing keeping it out of the projected column namespace", rowBodyColumn)
+	// The invariant is the READER WHITELIST, not the name. Refractor's output
+	// descriptor accepts any non-blank bodyColumn, so a lens may legally project
+	// a column called `__body`; what makes the key un-collidable is that a column
+	// segment only reaches the `data:` family by being PASSED to a reader, and
+	// every call site passes either an engine constant or a gap column — and a
+	// gap column is either one of the row's own `missing_*` keys or a playbook
+	// gaps key, which validateTarget rejects unless it matches the same
+	// convention. So a lens-authored name reaches this family only when it starts
+	// with `missing_`.
+	if strings.HasPrefix(rowBodyColumn, gapColumnPrefix) {
+		t.Fatalf("rowBodyColumn = %q is %s-shaped, which IS the one lens-authored shape that reaches this "+
+			"issue family — pick a name outside it", rowBodyColumn, gapColumnPrefix)
 	}
-	if strings.ContainsAny(substrate.Alphabet, "_") {
-		t.Fatalf("substrate.Alphabet contains '_' — the reserved `__` segment may now collide with a " +
-			"NanoID-derived entityId; escalate as a structural finding")
+	for _, engineColumn := range []string{
+		"violating", "entityKey", freshUntilColumn, admissionPriorityColumn,
+		inflightColumnPrefix, maxretriesColumnPrefix,
+	} {
+		if rowBodyColumn == engineColumn || strings.HasPrefix(rowBodyColumn, engineColumn) {
+			t.Fatalf("rowBodyColumn = %q collides with the engine column %q, which a reader already passes "+
+				"into this family", rowBodyColumn, engineColumn)
+		}
 	}
 
 	const targetID = "fixtureBodyColumnCollision"
@@ -437,6 +494,133 @@ func TestHandleRow_ExhaustedBranchCarriesTheLongFloor(t *testing.T) {
 	h.requireNoOp(t)
 }
 
+// TestHandleRow_ConfigErrorGapDoesNotRePublishASiblingsLiveEpisode is the
+// interaction the long floor introduces, and the one it must not pay for. A row
+// carries two gaps: A dispatched and its episode is in flight; B has no playbook
+// entry, so the ROW is Nak'd every long floor and comes back forever.
+//
+// Every one of those redeliveries re-enters dispatchGap for A as well. A also
+// suppresses nothing — it declares no inflight_ companion, and the re-fire path
+// never bumps the dispatch count, so no retry cap is ever reached — so without
+// the early anti-storm drop A's op would be re-published once per floor for as
+// long as B's playbook stayed wrong. Those collapse on the Contract #4 tracker
+// only inside its 24h TTL; a playbook fault outlives that, and then each one is
+// a genuine second execution.
+func TestHandleRow_ConfigErrorGapDoesNotRePublishASiblingsLiveEpisode(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureMixedRow"
+	// missing_a dispatches (a bare directOp — no inflight_/maxretries_
+	// companions, exactly the clinicSiteBackfill shape); missing_b has no
+	// playbook entry at all.
+	//
+	// The target also declares an admission budget, because the drop's placement
+	// decides a second cost: a token is drawn inside planGap, so a marked gap
+	// planned on every redelivery would burn one per cycle too.
+	h.seedTarget(&Target{
+		TargetID:  targetID,
+		Admission: &AdmissionPolicy{GlobalRate: 100},
+		Gaps:      map[string]GapAction{"missing_a": {Action: actionDirectOp, Operation: "FixA"}},
+	})
+	entityID := testNanoID(t)
+	row := map[string]any{
+		"entityKey": "vtx.leaseapp." + entityID,
+		"violating": true,
+		"missing_a": true,
+		"missing_b": true,
+	}
+
+	// First delivery: A dispatches, B declines, so the ROW rides the long floor.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
+		t.Fatalf("the config-error gap must hold the row on the long floor, got %v", dec)
+	}
+	first := h.nextOp(t)
+	if first["operationType"] != "FixA" {
+		t.Fatalf("expected the dispatchable gap to fire, got %v", first["operationType"])
+	}
+	if _, _, inFlight, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a"); err != nil || !inFlight {
+		t.Fatalf("setup: the dispatched gap must hold a mark (err=%v inFlight=%v)", err, inFlight)
+	}
+	admittedAfterDispatch, _ := h.engine.admission.metrics()
+
+	// The floor expires and the row comes back — twice, as it will forever until
+	// the playbook is fixed. A's episode is still in flight, so nothing is
+	// re-published for it; B still rides the long floor.
+	for i, numDelivered := range []uint64{2, 3} {
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, numDelivered)); dec != substrate.NakWithLongDelay {
+			t.Fatalf("redelivery %d must still ride the long floor, got %v", i+1, dec)
+		}
+		h.requireNoOp(t)
+	}
+	if _, _, inFlight, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a"); err != nil || !inFlight {
+		t.Fatalf("the drop must leave the live mark alone (err=%v inFlight=%v)", err, inFlight)
+	}
+	if admitted, _ := h.engine.admission.metrics(); admitted != admittedAfterDispatch {
+		t.Fatalf("admission tokens drawn during the redeliveries: %d -> %d. A marked gap must not re-enter "+
+			"planGap at all, or a stuck row costs its target one token per gap per floor forever",
+			admittedAfterDispatch, admitted)
+	}
+}
+
+// TestPlanGap_AdmissionDeferralDoesNotDowngradeAConfigError pins the second half
+// of the admission gate's placement. A denied token is the 5 s transient class,
+// and the gate now sits BELOW the build — so a row whose plan cannot build at
+// all never reaches it, and keeps its own (long) class instead of collapsing
+// onto a 5 s loop on any target that declares an admission budget.
+func TestPlanGap_AdmissionDeferralDoesNotDowngradeAConfigError(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// A budget with no capacity at all: every admit() call denies.
+	starved := &AdmissionPolicy{GlobalRate: 0.000001}
+
+	t.Run("an un-dispatchable action keeps the long floor", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixtureStarvedConfig"
+		h.seedTarget(&Target{
+			TargetID:  targetID,
+			Admission: starved,
+			Gaps:      map[string]GapAction{"missing_a": {Action: "notAnAction"}},
+		})
+		entityID := testNanoID(t)
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, noPlaybookRow(entityID), 1, 1)); dec != substrate.NakWithLongDelay {
+			t.Fatalf("a config error on an admission-paced target must keep the long floor, got %v — "+
+				"a 5 s deferral here is the hot loop the design says cannot happen", dec)
+		}
+		h.requireNoOp(t)
+	})
+
+	t.Run("a buildable plan still defers on the transient floor", func(t *testing.T) {
+		h := newHandlerHarness(t, ctx)
+		const targetID = "fixtureStarvedBuildable"
+		h.seedTarget(&Target{
+			TargetID:  targetID,
+			Admission: starved,
+			Gaps:      map[string]GapAction{"missing_a": {Action: actionDirectOp, Operation: "FixA"}},
+		})
+		entityID := testNanoID(t)
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, noPlaybookRow(entityID), 1, 1)); dec != substrate.NakWithDelay {
+			t.Fatalf("an admission deferral is ordinary pacing and stays the transient class, got %v", dec)
+		}
+		h.requireNoOp(t)
+		// No mark: the gate still prevents the dispatch, it only moved below the
+		// build.
+		if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_a"); err != nil || found {
+			t.Fatalf("a deferred gap must claim no mark (err=%v found=%v)", err, found)
+		}
+	})
+}
+
 // --- T8: the gapConfig latch self-heals --------------------------------------
 
 // TestClearClosedMarks_ConfigLatchSelfHeals is §3.5. The `gapConfig:` latch is
@@ -616,16 +800,122 @@ func TestIssueCache_PerRowFamiliesAreBoundedPerTarget(t *testing.T) {
 		t.Fatalf("a tracked key's refresh was refused, got %q", is.Message)
 	}
 
-	// Clearing back under the cap readmits, and retires the overflow entry: the
-	// untracked facts are level-driven and re-raise on their next delivery, so
-	// there is no backlog for a carried counter to describe.
+	// Clearing back under the cap readmits — but does NOT retire the overflow
+	// entry. A refused `data:` fact has no other record and no way back: those
+	// exits Ack, and lane 1 is DeliverLastPerSubject on a stable durable, so the
+	// row is never delivered again until it re-projects. Retiring the count the
+	// moment one tracked row repaired would delete the only surviving evidence
+	// that the others are broken.
 	c.clear(issueKeyDataEntity(targetA, entity(0), "violating"))
-	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetA)); ok {
-		t.Fatalf("under the cap again, the overflow entry must retire")
-	}
 	c.set(issueKeyDataEntity(targetA, entity(9999), "violating"), "warning", "RowDataError", "readmitted")
 	if _, ok := issueAt(c, issueKeyDataEntity(targetA, entity(9999), "violating")); !ok {
 		t.Fatalf("a freed slot must be readmitted")
+	}
+	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetA)); !ok {
+		t.Fatalf("dropping under the cap must NOT retire the overflow entry — the raises it stands for "+
+			"are not re-derivable, so it is their only record; issues = %d", len(c.issues))
+	}
+
+	// It retires only when the target's per-row set drains to nothing.
+	for i := 0; i < rowIssueCapPerTarget+25; i++ {
+		c.clear(issueKeyDataEntity(targetA, entity(i), "violating"))
+	}
+	c.clear(issueKeyDataEntity(targetA, entity(9999), "violating"))
+	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetA)); ok {
+		t.Fatalf("with no per-row entry left for the target, the overflow entry must retire")
+	}
+	if _, tracked := c.rowIssues[targetA]; tracked {
+		t.Fatalf("a drained target must leave no slot accounting behind, rowIssues=%v", c.rowIssues)
+	}
+	if len(c.refused) != 0 || len(c.refusedWorst) != 0 {
+		t.Fatalf("a drained target must leave no refusal accounting behind, refused=%v worst=%v",
+			c.refused, c.refusedWorst)
+	}
+}
+
+// TestIssueCache_RefusedErrorSeverityReachesTheStatus is the severity leak the
+// cap would otherwise open. aggregateStatus only ever sees c.issues, so a raise
+// the cap REFUSES is invisible to it — and an `error` refused that way would let
+// a component that cannot fulfil its responsibility report `degraded`. The two
+// per-row families are warning-dominated today, but nothing constrains them:
+// temporal.go's timer-payload marshal failure already raises `error` at a
+// per-ENTITY data key.
+func TestIssueCache_RefusedErrorSeverityReachesTheStatus(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetRefusedError"
+	for i := 0; i < rowIssueCapPerTarget; i++ {
+		c.set(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
+	}
+	// Past the cap, a warning first: the overflow entry stands at its severity.
+	c.set(issueKeyDataEntity(targetID, "eWarn", "violating"), "warning", "RowDataError", "bad")
+	if is, _ := issueAt(c, issueKeyRowIssuesCapped(targetID)); is.Severity != "warning" {
+		t.Fatalf("overflow severity = %q, want warning while only warnings were refused", is.Severity)
+	}
+	if got := aggregateStatus("running", c.snapshot()); got != "degraded" {
+		t.Fatalf("status = %q, want degraded while only warnings are open", got)
+	}
+
+	// Now an ERROR is refused. It never enters the map, so the overflow entry is
+	// the only thing that can carry it to the status.
+	c.set(issueKeyDataEntity(targetID, "eErr", "violating"), "error", "RowDataError", "unmarshalable timer payload")
+	if _, ok := issueAt(c, issueKeyDataEntity(targetID, "eErr", "violating")); ok {
+		t.Fatalf("the cap must still refuse the insertion — admitting errors would unbound the map")
+	}
+	if is, _ := issueAt(c, issueKeyRowIssuesCapped(targetID)); is.Severity != "error" {
+		t.Fatalf("overflow severity = %q, want error: a refused error must not be downgraded", is.Severity)
+	}
+	if got := aggregateStatus("running", c.snapshot()); got != "unhealthy" {
+		t.Fatalf("status = %q, want unhealthy: a refused error must still escalate the document", got)
+	}
+
+	// The worst severity is sticky for as long as the overflow entry stands — a
+	// later warning refusal must not walk it back down.
+	c.set(issueKeyDataEntity(targetID, "eWarn2", "violating"), "warning", "RowDataError", "bad")
+	if is, _ := issueAt(c, issueKeyRowIssuesCapped(targetID)); is.Severity != "error" {
+		t.Fatalf("overflow severity = %q, want error: a later warning refusal must not downgrade it", is.Severity)
+	}
+}
+
+// TestIssueCache_PacedMapIsBoundedPerTarget closes §3.6's other half. The pace
+// clock is a second per-key map, and prunePaced — which drops entries unraised
+// for two staleness windows — cannot bound it once a per-row fault is re-derived
+// on a redelivery floor SHORTER than that window, which is exactly what a stuck
+// TemplateDataError now is. Without its own budget the map would be sized by the
+// consumer's MaxAckPending rather than by the cap the design advertises.
+func TestIssueCache_PacedMapIsBoundedPerTarget(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "targetPacedBound"
+	now := time.Now()
+	for i := 0; i < rowIssueCapPerTarget+40; i++ {
+		c.pacedRaise(issueKeyTemplateEntity(targetID, "e"+strconv.Itoa(i), "missing_a"),
+			"warning", "TemplateDataError", now)
+	}
+	if got := len(c.paced); got != rowIssueCapPerTarget {
+		t.Fatalf("pace map holds %d entries, want the cap %d", got, rowIssueCapPerTarget)
+	}
+	// A refused key is reported not-loud: an untracked key has no clock to tell
+	// arrival from continuation, and the safe side for a map deliberately not
+	// grown is the quiet one (the record is lowered to Debug, never dropped).
+	loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
+		"warning", "TemplateDataError", now)
+	if loud {
+		t.Fatalf("a refused pace key must not report loud — every raise would then log at Warn forever")
+	}
+	// A target-scoped key is never counted against the per-row budget, so the
+	// config latch keeps pacing even under a per-row flood.
+	if loud, _ := c.pacedRaise(issueKeyGapConfig(targetID, "missing_a"), "warning", "PlaybookConfigError", now); !loud {
+		t.Fatalf("a target-scoped paced key must not be refused by the per-ROW budget")
+	}
+	// The prune returns slots, so a target whose faults age out can pace again.
+	c.prunePaced(now.Add(3 * logPaceInterval))
+	if len(c.paced) != 0 || len(c.rowPaced) != 0 {
+		t.Fatalf("prunePaced must return every slot it drops, paced=%d rowPaced=%v", len(c.paced), c.rowPaced)
+	}
+	if loud, _ := c.pacedRaise(issueKeyTemplateEntity(targetID, "eOverflow", "missing_a"),
+		"warning", "TemplateDataError", now.Add(3*logPaceInterval)); !loud {
+		t.Fatalf("a freed pace slot must be readmitted")
 	}
 }
 
@@ -672,15 +962,24 @@ func TestIssueCache_CapLeavesTheDocumentBoundHonest(t *testing.T) {
 	t.Parallel()
 	c := newIssueCache()
 	const targetID = "targetHonest"
-	for i := 0; i < rowIssueCapPerTarget+3; i++ {
-		c.set(issueKeyDataEntity(targetID, "e"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
+	// One error-severity fact, TRACKED and inside the CAPPED family — the vector
+	// an error placed in an uncapped family would not exercise at all. Raised
+	// first so it holds a slot; the flood behind it then fills the rest and
+	// overflows.
+	//
+	// The entity segments deliberately sort BEFORE the overflow key's reserved
+	// `__capped` segment (an uppercase letter precedes '_'), which is the shape a
+	// real NanoID entity id takes — so key order alone would bury the marker
+	// behind all five hundred of them.
+	c.set(issueKeyDataEntity(targetID, "A1", freshUntilColumn), "error", "RowDataError", "loud")
+	for i := 1; i < rowIssueCapPerTarget+3; i++ {
+		c.set(issueKeyDataEntity(targetID, "A"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
 	}
-	// One error-severity fact, which must survive both bounds.
-	c.set(issueKeyGapConfig(targetID, "missing_a"), "error", "ConsumerReconcileError", "loud")
 
 	snap := c.snapshot()
-	if got, want := len(snap), rowIssueCapPerTarget+2; got != want {
-		t.Fatalf("snapshot has %d entries, want %d (the cap, the overflow entry, the error)", got, want)
+	if got, want := len(snap), rowIssueCapPerTarget+1; got != want {
+		t.Fatalf("snapshot has %d entries, want %d (the cap's worth of tracked entries, the error among "+
+			"them, plus one overflow entry)", got, want)
 	}
 	if aggregateStatus("running", snap) != "unhealthy" {
 		t.Fatalf("the status is computed over every entry the cache holds; an error must still escalate it")
@@ -700,6 +999,14 @@ func TestIssueCache_CapLeavesTheDocumentBoundHonest(t *testing.T) {
 	if bounded[0].Severity != "error" {
 		t.Fatalf("severity-first selection must survive the cap, got %q", bounded[0].Severity)
 	}
+	// The overflow entry must survive the DOCUMENT cut too. It is a warning in
+	// the same family as the hundreds of warnings that caused it, so severity
+	// alone would sort it among them in key order and truncate away the one entry
+	// saying "N further rows are broken and are not tracked".
+	if !hasIssueCode(bounded, rowIssuesCappedCode) {
+		t.Fatalf("the cache-overflow marker must be pinned into the listed set; listed codes = %v",
+			listedCodes(bounded))
+	}
 }
 
 // TestIssueCache_PrefixClearFreesPerRowSlots pins the cap's teardown legs. The
@@ -718,10 +1025,15 @@ func TestIssueCache_PrefixClearFreesPerRowSlots(t *testing.T) {
 		t.Fatalf("setup: the overflow entry must stand")
 	}
 
-	// One entity's tombstone clear frees exactly its own slot.
+	// One entity's tombstone clear frees exactly its own slot — and leaves the
+	// overflow entry standing, because the raises it stands for are still lost.
 	c.clearPrefix(issuePrefixData + targetID + ".e0.")
-	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetID)); ok {
-		t.Fatalf("one freed slot puts the target back under the cap; the overflow entry must retire")
+	if _, ok := issueAt(c, issueKeyRowIssuesCapped(targetID)); !ok {
+		t.Fatalf("one freed slot must not retire the overflow entry")
+	}
+	c.set(issueKeyDataEntity(targetID, "eFresh", "violating"), "warning", "RowDataError", "bad")
+	if _, ok := issueAt(c, issueKeyDataEntity(targetID, "eFresh", "violating")); !ok {
+		t.Fatalf("a tombstone must return its entity's slot to the budget")
 	}
 
 	// The target's teardown frees the rest.
@@ -731,9 +1043,9 @@ func TestIssueCache_PrefixClearFreesPerRowSlots(t *testing.T) {
 	if len(c.issues) != 0 {
 		t.Fatalf("a target teardown must leave nothing standing, got %d entries", len(c.issues))
 	}
-	if len(c.rowIssues) != 0 || len(c.refused) != 0 {
-		t.Fatalf("a target teardown must leave no slot accounting behind, rowIssues=%v refused=%v",
-			c.rowIssues, c.refused)
+	if len(c.rowIssues) != 0 || len(c.refused) != 0 || len(c.refusedWorst) != 0 {
+		t.Fatalf("a target teardown must leave no slot accounting behind, rowIssues=%v refused=%v worst=%v",
+			c.rowIssues, c.refused, c.refusedWorst)
 	}
 	for i := 0; i < rowIssueCapPerTarget; i++ {
 		c.set(issueKeyDataEntity(targetID, "f"+strconv.Itoa(i), "violating"), "warning", "RowDataError", "bad")
@@ -764,6 +1076,116 @@ func TestTargetSpec_DeclinePendingEnvelope(t *testing.T) {
 			"would fall back to the substrate default rather than the engine's configured floor",
 			spec.LongRedeliveryDelay, substrate.DefaultLongRedeliveryDelay)
 	}
+}
+
+// TestLaneMaxAckPending_StaysUnderTheServersDeferThreshold pins the cap against
+// the server behaviour that chose it.
+//
+// nats-server walks the WHOLE pending map on every redelivery-timer fire, at any
+// size; the `len(o.pending) > 1024` test inside that walk gates only an early
+// BAIL — past it, any inbound ack/nak/+WPI makes checkPending abandon the scan,
+// throw away the expiries it had already collected, and reschedule 100 ms out. A
+// consumer that is both large and continuously acking can keep re-entering that
+// regime. Under the server's own 1000 default the branch is unreachable, because
+// getNextMsg stalls new deliveries once the pending set reaches MaxAckPending, so
+// raising this cap past 1024 would make lane 1 the only consumer in the
+// deployment that can get there.
+func TestLaneMaxAckPending_StaysUnderTheServersDeferThreshold(t *testing.T) {
+	t.Parallel()
+	// The literal is the server's, not ours: consumer.go's `check := len(o.pending) > 1024`.
+	const serverPendingWalkDeferThreshold = 1024
+	if laneMaxAckPending > serverPendingWalkDeferThreshold {
+		t.Fatalf("laneMaxAckPending = %d exceeds the server's %d pending-walk defer threshold: the pending "+
+			"set could then exceed it, and lane 1 would be the only consumer able to enter the "+
+			"abandon-and-retry redelivery regime — in a band where ConsumerSaturated is still silent",
+			laneMaxAckPending, serverPendingWalkDeferThreshold)
+	}
+	if laneMaxAckPending <= 0 {
+		t.Fatalf("laneMaxAckPending = %d: a non-positive value is not passed to the durable at all, "+
+			"silently restoring the server's 1000 default", laneMaxAckPending)
+	}
+}
+
+// TestHeartbeat_SaturatedLaneConsumerRaisesAnError is the wedged-target signal.
+// One mis-authored gap column parks every violating row of its target in the
+// pending set; at the cap, getNextMsg stops handing out NEW deliveries for that
+// target entirely, so entities that appear from then on are never evaluated.
+// Nothing else in the platform observes that — the per-consumer health sink
+// reports the durable as running throughout.
+func TestHeartbeat_SaturatedLaneConsumerRaisesAnError(t *testing.T) {
+	t.Parallel()
+	const targetID = "fixtureSaturated"
+	name := laneConsumerPrefix + targetID
+	states := map[string]string{name: "running", "weaver-sweep": "running"}
+
+	newHB := func(pending uint64) *heartbeater {
+		h := &heartbeater{
+			issues:                 newIssueCache(),
+			logger:                 discardLogger(),
+			consumerPausedSince:    map[string]string{},
+			consumerSaturatedSince: map[string]string{},
+			ackStats:               stubAckStats{pending: pending},
+		}
+		return h
+	}
+
+	// Below the cap: no issue, but the gradient is exposed as a metric so an
+	// operator can see a target filling up before it wedges.
+	metrics := map[string]any{}
+	if got := newHB(laneMaxAckPending-1).saturatedIssues(context.Background(), states, time.Now(), metrics); len(got) != 0 {
+		t.Fatalf("below the cap the consumer is not wedged; want no issue, got %+v", got)
+	}
+	pending, ok := metrics["laneAckPending"].(map[string]uint64)
+	if !ok || pending[targetID] != uint64(laneMaxAckPending-1) {
+		t.Fatalf("the raw ack-pending count must be exposed as a metric, got %+v", metrics["laneAckPending"])
+	}
+
+	// At the cap: an error-severity, target-naming issue.
+	hb := newHB(laneMaxAckPending)
+	issues := hb.saturatedIssues(context.Background(), states, time.Now(), map[string]any{})
+	if len(issues) != 1 {
+		t.Fatalf("a saturated lane-1 durable must raise exactly one issue, got %+v", issues)
+	}
+	if issues[0].Code != "ConsumerSaturated" {
+		t.Fatalf("code = %q, want ConsumerSaturated", issues[0].Code)
+	}
+	if issues[0].Severity != "error" {
+		t.Fatalf("severity = %q, want error: at the cap this target's deliveries have STOPPED — that is "+
+			"not the self-healing degradation the config-error classes describe", issues[0].Severity)
+	}
+	if !strings.Contains(issues[0].Message, targetID) {
+		t.Fatalf("the issue must name its target, got %q", issues[0].Message)
+	}
+	if aggregateStatus("healthy", issues) != "unhealthy" {
+		t.Fatalf("a wedged target must escalate the document status")
+	}
+
+	// It is built inline from live state, so it needs no teardown leg: a target
+	// that leaves simply stops appearing, and the since map drains with it.
+	if got := hb.saturatedIssues(context.Background(), map[string]string{}, time.Now(), map[string]any{}); len(got) != 0 {
+		t.Fatalf("a consumer no longer present must stop being reported, got %+v", got)
+	}
+	if len(hb.consumerSaturatedSince) != 0 {
+		t.Fatalf("the since map must drain with the consumer, got %v", hb.consumerSaturatedSince)
+	}
+
+	// A paused consumer is reported by pausedIssues, not twice.
+	if got := newHB(laneMaxAckPending).saturatedIssues(context.Background(),
+		map[string]string{name: "pausedStructural"}, time.Now(), map[string]any{}); len(got) != 0 {
+		t.Fatalf("a paused consumer is not a saturated one; got %+v", got)
+	}
+	// A non-lane-1 durable is never polled at all.
+	if got := newHB(laneMaxAckPending).saturatedIssues(context.Background(),
+		map[string]string{"weaver-temporal": "running"}, time.Now(), map[string]any{}); len(got) != 0 {
+		t.Fatalf("only lane-1 durables carry the decline loop's pending set; got %+v", got)
+	}
+}
+
+// stubAckStats reports a fixed ack-pending count for every consumer.
+type stubAckStats struct{ pending uint64 }
+
+func (s stubAckStats) AckStatsForConsumer(context.Context, string) (substrate.AckStats, error) {
+	return substrate.AckStats{AckPending: s.pending}, nil
 }
 
 // TestConfig_LongRedeliveryDelayDefaultsAndClamps pins the knob's end-to-end

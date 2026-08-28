@@ -25,16 +25,28 @@ const laneConsumerPrefix = "weaver-target-"
 // momentarily in flight, it is the target's whole stuck population. The cap is
 // what that population may reach before NEW entities of the same target stall
 // (redeliveries are served ahead of the cap; only fresh deliveries stall), so it
-// is set explicitly rather than left at the server's 1000 default.
+// is worth naming explicitly rather than inheriting the server's 1000 default.
 //
-// It is deliberately modest rather than generous. Past roughly a thousand
-// pending messages the server's redelivery timer walks the entire pending map on
-// every fire and defers itself under ack load, so a large cap buys stall headroom
-// by paying redelivery latency for every consumer on the box. 2000 sits ~70×
-// above the worst stuck population observed on the shipped corpus while staying
-// inside that walk's comfortable range; the signal that it is wrong for a
-// deployment is a durable whose num_ack_pending sits pinned at it.
-const laneMaxAckPending = 2000
+// 1024 is chosen to sit on the near side of a server behaviour change, not for
+// headroom. The redelivery timer's walk of the pending map is unconditional at
+// every size (`for seq, p := range o.pending`, nats-server@v2.14.0
+// server/consumer.go:5915). What `len(o.pending) > 1024` gates is a BAIL: past
+// that size, if any ack/nak/+WPI is inbound while the walk is running, the timer
+// abandons the scan, discards the expiries it had already collected, and
+// reschedules 100 ms out. A consumer that is both large and continuously acking
+// can therefore keep re-entering that abandon-and-retry regime — and under the
+// server default of 1000 the branch is structurally unreachable, because
+// getNextMsg stalls new deliveries at `len(o.pending) >= o.maxp` (:4796) before
+// the pending set can exceed 1024. Setting the cap ABOVE 1024 would make lane 1
+// the only consumer in the deployment able to enter that regime, and it would do
+// so in a band where the operator signal below is still silent. At 1024 the
+// pending set can reach the cap exactly and never exceed it, so the bail stays
+// unreachable and the walk stays whole.
+//
+// The signal that the cap is wrong for a deployment — or that a target is wedged
+// — is a lane-1 durable whose ack-pending count sits AT the cap; the heartbeat
+// raises ConsumerSaturated for exactly that (health.go).
+const laneMaxAckPending = 1024
 
 // Config parameterizes the engine. Bucket/stream names default to the
 // platform-standard values; callers (cmd/weaver, tests) override only what
@@ -413,6 +425,7 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 
 	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, e.cfg.HeartbeatEvery,
 		e.states, e.issues, e.source, e.marks, e.sweep, e.temporal, e.shadow, e.contraction, e.admission, e.logger)
+	hb.SetAckStatsReader(e.supervisor)
 	go hb.run(ctx)
 	// A startup warm sweep runs once so a cold start does not wait a full
 	// interval; the recurring cadence is the durable @every sweep schedule

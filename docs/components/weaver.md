@@ -119,14 +119,36 @@ transient gap never waits out a config gap's floor.
 Two consequences worth holding:
 
 - **A Nak'd row holds its `MaxAckPending` slot continuously** until it is acked or its message is
-  superseded. Lane-1 therefore sets the cap explicitly (2000) rather than taking the server's 1000
-  default: the pending set is now a target's whole stuck population, and past the cap it is **new**
-  entities that stall (redeliveries are served ahead of the cap). A durable whose `num_ack_pending`
-  sits pinned at the cap is the signal.
+  superseded. Lane-1 therefore names the cap explicitly (**1024**) rather than inheriting the
+  server's 1000 default: the pending set is now a target's whole stuck population, and past the cap
+  it is **new** entities that stall (redeliveries are served ahead of the cap). 1024 is the near side
+  of a server behaviour change, not headroom — nats-server walks the whole pending map on every
+  redelivery-timer fire at any size, and `len(pending) > 1024` gates only an early *bail*, after
+  which an inbound ack makes the timer abandon the scan, discard the expiries it had collected and
+  retry 100 ms later. Staying at or below 1024 keeps that regime unreachable, exactly as it is for
+  every other consumer in the deployment.
+- **A target that reaches the cap is wedged, and says so.** At the cap the server stops handing out
+  new deliveries for that durable, so entities appearing from then on are never evaluated at all. The
+  heartbeat raises an `error`-severity **`ConsumerSaturated`** issue naming the target, and carries
+  each lane-1 durable's raw ack-pending count as the `laneAckPending` metric so the gradient is
+  visible before the cliff. This is deliberately an `error` while the config-error classes are
+  `warning`s: those describe a target that is degraded but still evaluated and self-healing, this one
+  describes a target whose deliveries have stopped.
 - **Overwriting a declined row's key frees its slot immediately.** `weaver-targets` keeps KV
   history 1, so an overwrite compacts the previous revision out of the backing stream and the server
   Terms its pending delivery eagerly — only the latest revision of a subject can ever redeliver. That
   history pin is load-bearing and asserted by Weaver's own e2e test.
+- **A gap whose episode is in flight is dropped from the mark read alone**, ahead of planning and
+  admission. That ordering is what keeps the loop cheap and safe on a MIXED row: a config-error gap
+  Naks the whole message, and every redelivery it causes re-enters the dispatch path for the row's
+  other gaps too. Deciding the anti-storm drop after planning would burn one admission token per gap
+  per floor and re-publish each in-flight episode's op per floor — collapsing on the Contract #4
+  tracker only inside its 24 h TTL, and becoming genuine duplicate executions beyond it. The cost of
+  the drop is that a lost op publish is recovered by the mark's lease expiring into the sweep's
+  reclaim rather than by the next redelivery.
+- **Admission control paces a plan that would actually fire.** The gate runs *after* the plan builds,
+  so a row whose plan can never build never draws a token, and a deferral (which is the 5 s transient
+  class) can never be handed to a row whose own class is the long floor.
 
 ---
 

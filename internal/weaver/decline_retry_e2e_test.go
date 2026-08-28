@@ -135,14 +135,20 @@ func TestWeaverE2E_DeclinedRowStaysPendingAndIsSupersededByItsOverwrite(t *testi
 	// The overwrite: a new revision of the SAME key, still declining. The old
 	// pending revision is compacted out of the stream and Term'd eagerly, so the
 	// pending set holds the fresh revision and nothing else.
+	//
+	// The count is part of the POLL condition, not an assertion after it. The
+	// server Terms the compacted revision on its own goroutine, unordered against
+	// the new revision's delivery, so a snapshot taken the instant the new
+	// delivery lands can legitimately still show the old one pending. What must
+	// hold is that the pending set SETTLES at one; a wait that timed out here
+	// would be the real V3 failure, and the message says so.
 	putRow(t, ctx, conn, targetID, entityID, row)
-	superseded := waitConsumerState(t, ctx, conn, durable, 20*time.Second,
-		"delivery of the overwriting revision", func(i *jetstream.ConsumerInfo) bool {
-			return i.Delivered.Stream > firstDelivered && i.NumAckPending > 0
+	waitConsumerState(t, ctx, conn, durable, 20*time.Second,
+		"the overwriting revision delivered with a pending set of exactly 1 "+
+			"(a set of 2 means the compacted revision was never Term'd and a stale revision is still owed)",
+		func(i *jetstream.ConsumerInfo) bool {
+			return i.Delivered.Stream > firstDelivered && i.NumAckPending == 1
 		})
-	require.Equal(t, 1, superseded.NumAckPending,
-		"the overwritten revision must be Term'd when per-subject compaction removes it — a pending set "+
-			"of 2 means a stale revision is still owed beside the fresh one")
 
 	// Once the playbook covers the gap, the fresh revision dispatches through the
 	// unchanged ladder and the slot is released.

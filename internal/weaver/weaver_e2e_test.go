@@ -687,10 +687,37 @@ func TestWeaverE2E_InstallValidations(t *testing.T) {
 		"rejected targets must surface a Health KV issue, got: %v", issues)
 	require.True(t, hasIssue(issues, "GapWithoutPlaybook"),
 		"a true gap with no playbook entry must surface a Health KV issue, got: %v", issues)
-	// Contract #5 §5.3: error-severity issues (TargetRejected, GapWithoutPlaybook)
-	// must drive status to "unhealthy" — never false-healthy alongside open issues.
+	// The two carry DIFFERENT severities, and each is load-bearing.
+	//
+	// A rejected target is an `error`: its rows are not projected into any
+	// consumer at all, so Weaver cannot act on that target by any route, and
+	// nothing it does later fixes it — Contract #5 §5.2's "cannot fulfil its
+	// primary responsibility". A gap with no playbook entry is a `warning`: the
+	// row is evaluated on every redelivery against the CURRENT playbook, so the
+	// fault degrades that target until a package author fixes it and then heals
+	// itself with no operator action. An `error` there would pin the whole
+	// component unhealthy on one authoring typo while it dispatched normally for
+	// every other target.
+	require.Equal(t, "error", issueSeverityAt(issues, "TargetRejected"),
+		"a rejected target is not recoverable by any redelivery; it must stay an error, issues: %v", issues)
+	require.Equal(t, "warning", issueSeverityAt(issues, "GapWithoutPlaybook"),
+		"a standing, self-healing config fault must not be an `error`; issues: %v", issues)
+	// Contract #5 §5.3: the error above must still drive status to "unhealthy" —
+	// never false-healthy alongside open issues.
 	require.Equal(t, "unhealthy", status,
-		"a heartbeat carrying error issues must report status:unhealthy, got %q with issues %v", status, issues)
+		"a heartbeat carrying an error issue must report status:unhealthy, got %q with issues %v", status, issues)
+}
+
+// issueSeverityAt returns the severity of the first issue carrying code, or ""
+// when the document lists none.
+func issueSeverityAt(issues []map[string]any, code string) string {
+	for _, i := range issues {
+		if i["code"] == code {
+			sev, _ := i["severity"].(string)
+			return sev
+		}
+	}
+	return ""
 }
 
 func hasIssue(issues []map[string]any, code string) bool {
