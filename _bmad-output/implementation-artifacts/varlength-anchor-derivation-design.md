@@ -820,7 +820,10 @@ Branch `claude/great-lamport-kxa2su`. Landed and pushed, in order:
 | dossier · polarity entry's second sighting | `5659744` | ✅ |
 | 5a · the 16 census pin moves | `e7f7dfd` | ✅ |
 | 1 + 2 + 3 · index, walk, tally | `397786e` | ✅ |
-| 5b · T1–T8, T11 | — | in flight |
+| 5b · T1–T8, T11 | `bd0d3f4` (with the fix round) | ✅ |
+| blocking-fix round · seeding limit, empty expansion, work budget | `bd0d3f4` | ✅ |
+| lint fail-open holes · case-folded NOT, unverifiable Spec warns | `b40aa1b` | ✅ |
+| **MERGED to main** | `77650a8` | ✅ CI run 1560 green |
 
 **C4 is NOT re-derived, and that is a REMOTE-environment limit, not an omission.** §12 C4 reads Health KV
 on a *running* stack for the capability pipeline's rebuild/suppression state and per-lens lag. This fire ran
@@ -832,4 +835,25 @@ live**". That trigger therefore remains **unmet** until someone re-reads Health 
 deployment after this ships. Increment 2 stays held; the Steward does not pull it on the strength of a green
 suite.
 
-**The deviations in §17.6 are now amended into the body where they stand** — §4.3 carries both, dated.
+**The deviations in §17.6 are amended into the body where they stand** — §4.3 carries both, dated. The fix
+round added two more, likewise amended in place: §4.2/§7.1's *"no new budget"* (the read cap counts
+documents, and `edgesOf` memoises, so it cannot see the closure's work) and §4.1's implication that any
+bounded range is indexable (a lower bound above one hop is refused on a seeding argument). The same refuted
+reason was struck in three sibling designs — the parent `auth-plane-projection-latency-design.md` §16.2's
+completeness predicate, `typed-relation-signatures-design.md` §6, and
+`plain-lens-neighbour-anchor-derivation-design.md`'s "can never be indexed" list and its ≤36 ceiling.
+
+**Review round: three cold adversarial passes (opus), each returning a BLOCKING finding proven by a probe
+rather than argued** — the ranged-hop seeding limit at `Min > 2` (13 counterexample graphs), the
+present-but-empty taxonomy expansion deriving nothing on `cap.svc.<actor>` (which §15 had predicted and §13
+never turned into a task), and the ranged closure's unbounded work (4,092 expansions / 86,050 edge visits
+for one anchor, 12× the BFS it replaces). All three closed in `bd0d3f4`, each pinned by a test proven
+against its own mutation. Two findings classified as second sightings of existing
+`docs/components/refractor.md` dossier classes, whose entries were extended and one of whose checks is now
+mechanized as a mandated test shape (`15d24ef`).
+
+**CI:** run 1560 green. Its first attempt failed one job on `TestLeaseConvergence_BgcheckFreshness_EagerReopen`
+— the `found=map[...]` partial-activation signature of the board's standing "suite reddens under parallel
+load" row (b), owned by the Whetstone, not this change: the lens that failed to activate is `hopIndexed`
+before and after this diff, the run's own tally shows `fellBack=0`, and the test passes 3/3 in isolation
+locally plus a full `make test-lease-convergence`. Green on the one sanctioned re-run.
