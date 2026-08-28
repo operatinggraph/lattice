@@ -35,6 +35,8 @@ func decisionName(d substrate.Decision) string {
 		return "Term"
 	case substrate.NakWithDelay:
 		return "NakWithDelay"
+	case substrate.NakWithLongDelay:
+		return "NakWithLongDelay"
 	}
 	return fmt.Sprintf("Decision(%d)", int(d))
 }

@@ -54,6 +54,15 @@ const (
 	// on the Decision. Use this instead of Nak when immediate redelivery would
 	// spin the handler against a still-failing dependency.
 	NakWithDelay
+	// NakWithLongDelay is identical to NakWithDelay — redeliver, but no sooner
+	// than a floor — applied with the consumer's LONG floor
+	// (DurableConsumerConfig.LongRedeliveryDelay or a ConsumerSpec) instead of
+	// the short one. As with NakWithDelay, the floor is configuration, not
+	// data, never carried on the Decision. Use this for a decline whose fix
+	// arrives via a config/registry/template change that produces no new
+	// message delivery, so the redelivery loop is the only automatic uptake
+	// path — a short retry cadence there buys nothing but redelivery churn.
+	NakWithLongDelay
 )
 
 // DefaultRedeliveryDelay is the floor applied to a NakWithDelay decision when
@@ -63,6 +72,16 @@ const (
 // to this package default rather than plain Nak. Same order of magnitude as
 // durableReconnect.
 const DefaultRedeliveryDelay = 5 * time.Second
+
+// DefaultLongRedeliveryDelay is the floor applied to a NakWithLongDelay
+// decision when the consumer config leaves LongRedeliveryDelay at its zero
+// value. It prices a pure re-poll cadence for a config-error decline — one
+// whose fix (a registry/target/template change) produces no new message
+// delivery, so this floor alone decides how soon the redelivery loop retries
+// the fix. Far coarser than DefaultRedeliveryDelay: a config fix is rare
+// enough that a five-second cadence buys nothing but churn against a
+// still-broken configuration.
+const DefaultLongRedeliveryDelay = 5 * time.Minute
 
 // Message is the minimal view of a delivered JetStream message handed to a
 // HandlerFunc. Routing/identity is read from Body (read-from-body discipline),
@@ -146,6 +165,12 @@ type DurableConsumerConfig struct {
 	// A zero value falls back to DefaultRedeliveryDelay. It has no effect on
 	// plain Nak (immediate redelivery) decisions.
 	RedeliveryDelay time.Duration
+	// LongRedeliveryDelay is the floor applied when a handler returns
+	// NakWithLongDelay. A zero value falls back to DefaultLongRedeliveryDelay,
+	// and the resolved value is floored at the effective RedeliveryDelay — it
+	// can never end up shorter than the short floor. It has no effect on
+	// plain Nak or NakWithDelay decisions.
+	LongRedeliveryDelay time.Duration
 	// AckWait is how long JetStream waits for a Decision before treating the
 	// message as un-acked and redelivering it. A zero value leaves JetStream's
 	// 30s default, which is right for a handler that returns promptly and wrong
@@ -230,7 +255,7 @@ func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig
 			cfg.Durable, cfg.Stream, err)
 	}
 
-	c.runDurableLoop(ctx, cons, cfg.Durable, cfg.RedeliveryDelay, cfg.MaxPrefetch, logger, handler)
+	c.runDurableLoop(ctx, cons, cfg.Durable, cfg.RedeliveryDelay, cfg.LongRedeliveryDelay, cfg.MaxPrefetch, logger, handler)
 	return nil
 }
 
@@ -241,6 +266,7 @@ func (c *Conn) runDurableLoop(
 	cons jetstream.Consumer,
 	durable string,
 	redeliveryDelay time.Duration,
+	longRedeliveryDelay time.Duration,
 	maxPrefetch int,
 	logger *slog.Logger,
 	handler HandlerFunc,
@@ -264,7 +290,7 @@ func (c *Conn) runDurableLoop(
 			}
 			continue
 		}
-		c.drainDurable(ctx, mc, durable, redeliveryDelay, logger, handler)
+		c.drainDurable(ctx, mc, durable, redeliveryDelay, longRedeliveryDelay, logger, handler)
 	}
 }
 
@@ -289,6 +315,7 @@ func (c *Conn) drainDurable(
 	mc jetstream.MessagesContext,
 	durable string,
 	redeliveryDelay time.Duration,
+	longRedeliveryDelay time.Duration,
 	logger *slog.Logger,
 	handler HandlerFunc,
 ) {
@@ -313,10 +340,10 @@ func (c *Conn) drainDurable(
 			}
 			logger.Error("substrate: durable consumer: receive error, will reconnect",
 				"durable", durable, "error", err)
-			c.drainBuffered(ctx, mc, durable, redeliveryDelay, logger, handler)
+			c.drainBuffered(ctx, mc, durable, redeliveryDelay, longRedeliveryDelay, logger, handler)
 			return
 		}
-		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, logger)
+		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, longRedeliveryDelay, logger)
 	}
 }
 
@@ -344,6 +371,7 @@ func (c *Conn) drainBuffered(
 	mc jetstream.MessagesContext,
 	durable string,
 	redeliveryDelay time.Duration,
+	longRedeliveryDelay time.Duration,
 	logger *slog.Logger,
 	handler HandlerFunc,
 ) {
@@ -392,7 +420,7 @@ func (c *Conn) drainBuffered(
 		}
 		consecutiveErrs = 0
 		drained++
-		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, logger)
+		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, longRedeliveryDelay, logger)
 	}
 }
 
@@ -442,23 +470,44 @@ func newMessage(msg jetstream.Msg) Message {
 	return m
 }
 
+// effectiveDelay resolves a configured floor: delay when positive, otherwise
+// def.
+func effectiveDelay(delay, def time.Duration) time.Duration {
+	if delay <= 0 {
+		return def
+	}
+	return delay
+}
+
 // applyDecision applies the handler's Decision to the underlying JetStream
 // message. A failed Ack is logged, not retried (a redelivery re-runs the
-// handler, which must be idempotent). redeliveryDelay is the floor applied to a
-// NakWithDelay decision; a zero value falls back to DefaultRedeliveryDelay.
-func applyDecision(d Decision, msg jetstream.Msg, durable string, redeliveryDelay time.Duration, logger *slog.Logger) {
+// handler, which must be idempotent). redeliveryDelay is the floor applied to
+// a NakWithDelay decision (falls back to DefaultRedeliveryDelay when <= 0);
+// longRedeliveryDelay is the floor applied to a NakWithLongDelay decision
+// (falls back to DefaultLongRedeliveryDelay when <= 0, and is then floored at
+// the effective redeliveryDelay — it can never resolve shorter than the short
+// floor).
+func applyDecision(d Decision, msg jetstream.Msg, durable string, redeliveryDelay, longRedeliveryDelay time.Duration, logger *slog.Logger) {
 	switch d {
 	case Nak:
 		if err := msg.Nak(); err != nil {
 			logger.Error("substrate: durable consumer: nak failed", "durable", durable, "error", err)
 		}
 	case NakWithDelay:
-		delay := redeliveryDelay
-		if delay <= 0 {
-			delay = DefaultRedeliveryDelay
-		}
+		delay := effectiveDelay(redeliveryDelay, DefaultRedeliveryDelay)
 		if err := msg.NakWithDelay(delay); err != nil {
 			logger.Error("substrate: durable consumer: nak-with-delay failed", "durable", durable, "error", err)
+		}
+	case NakWithLongDelay:
+		short := effectiveDelay(redeliveryDelay, DefaultRedeliveryDelay)
+		long := effectiveDelay(longRedeliveryDelay, DefaultLongRedeliveryDelay)
+		if long < short {
+			logger.Warn("substrate: durable consumer: LongRedeliveryDelay below the short floor; clamping",
+				"durable", durable, "longRedeliveryDelay", long, "redeliveryDelay", short)
+			long = short
+		}
+		if err := msg.NakWithDelay(long); err != nil {
+			logger.Error("substrate: durable consumer: nak-with-long-delay failed", "durable", durable, "error", err)
 		}
 	case Term:
 		if err := msg.Term(); err != nil {

@@ -820,6 +820,10 @@ func (cp *CommitPath) disposeJetstream(ctx context.Context, d substrate.Decision
 		if err := msg.NakWithDelay(substrate.DefaultRedeliveryDelay); err != nil {
 			cp.deps.Logger.Warn("nak-with-delay failed", "error", err)
 		}
+	case substrate.NakWithLongDelay:
+		if err := msg.NakWithDelay(substrate.DefaultLongRedeliveryDelay); err != nil {
+			cp.deps.Logger.Warn("nak-with-long-delay failed", "error", err)
+		}
 	default: // substrate.Ack — step-9 explicit Acker boundary.
 		acker := cp.deps.AckerFactory(msg, cp.deps.Logger)
 		if ackErr := acker.Ack(ctx); ackErr != nil {

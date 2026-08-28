@@ -701,13 +701,18 @@ func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, 
 				// latency exceeds AckWait/2; closing it means making
 				// stopHeartbeat synchronous, which changes the ack path of every
 				// consumer in the system for a slow-path optimisation.
-				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), specLogger(spec))
+				// The Decision here is always NakWithDelay, never
+				// NakWithLongDelay, so the long floor is inert on this call —
+				// but applyDecision still reads it against a live config
+				// field rather than a bare zero, which would read as "no long
+				// floor configured" to a future caller of this function.
+				applyDecision(NakWithDelay, msg, spec.Name, effectiveProbeInterval(spec), spec.LongRedeliveryDelay, specLogger(spec))
 			}
 			return class, herr, false
 		}
 		// Transient/Terminal handler error: fall back to the returned Decision.
 	}
-	applyDecision(decision, msg, spec.Name, spec.RedeliveryDelay, specLogger(spec))
+	applyDecision(decision, msg, spec.Name, spec.RedeliveryDelay, spec.LongRedeliveryDelay, specLogger(spec))
 	return ClassTransient, nil, true
 }
 
