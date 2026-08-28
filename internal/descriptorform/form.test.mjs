@@ -516,6 +516,15 @@ test("a {context.<field>} read resolves against the caller's companion row", () 
   assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
 });
 
+test("{entity.<field>} is accepted as an alias for {context.<field>} against the same companion row", () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.reads = ["{entity.leaseApp}"];
+
+  const handle = renderOpForm(row, { target: TARGET, row: { leaseApp: "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC" } }, new FakeElement("div"));
+  assert.deepEqual(handle.submit().reads, ["vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC", TARGET]);
+});
+
 // ---- dispatch.contextParams — a field the CLIENT fills and never renders ----
 
 const LEASE_APP = "vtx.leaseapp.CCCCCCCCCCCCCCCCCCCC";
@@ -682,7 +691,7 @@ test("{me:id} and {taskKey:id} also take the modifier", () => {
 test("an unrecognized read template throws instead of silently dropping", () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });
-  row.dispatch.reads = ["{entity.leaseApp}"]; // Facet's vocabulary, not this module's
+  row.dispatch.reads = ["{scopedTo}"]; // not a form this module recognizes
 
   const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
   assert.throws(() => handle.submit(), /unrecognized read template/);

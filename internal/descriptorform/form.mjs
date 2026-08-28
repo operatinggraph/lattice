@@ -386,13 +386,15 @@ function keyType(key) {
 // caller-supplied context. Five forms: `{me}` / `{actor}`
 // (aliases — both read straight off `context.me`) / `{taskKey}` (bare
 // tokens), `{payload.<field>}` (the payload just assembled), and
-// `{context.<field>}` (a column of the caller's companion row — the staff
-// analog of Facet's `{entity.<column>}`, the seam loftspace's hand-built
-// SignRenewal/VerifyGuarantor completions need for their composite link-key
-// reads, ready for a caller that supplies `context.row`). Any of the five
-// may carry a trailing `:id` modifier (`{payload.renewalKey:id}`) to
-// substitute the bare NanoID instead of the full key — what makes a
-// 6-segment link key expressible as a declared read.
+// `{context.<field>}` / `{entity.<field>}` (aliases — both read a column of
+// the caller's companion row via `context.row`; the packages that declare
+// these templates spell it both ways today — Facet-facing packages write
+// `{entity.<column>}`, lease-signing/clinic-reminders write
+// `{context.<field>}` — so the module accepts either rather than forcing one
+// spelling on packages that already ship the other). Any of the five may
+// carry a trailing `:id` modifier (`{payload.renewalKey:id}`) to substitute
+// the bare NanoID instead of the full key — what makes a 6-segment link key
+// expressible as a declared read.
 //
 // A placeholder this function does not recognize at all — a typo, or a
 // vocabulary form this module has not adopted — throws rather than
@@ -413,8 +415,9 @@ function substituteTemplate(str, context, payload) {
       value = context.taskKey;
     } else if (expr.startsWith("payload.")) {
       value = payload[expr.slice("payload.".length)];
-    } else if (expr.startsWith("context.")) {
-      value = context.row ? context.row[expr.slice("context.".length)] : undefined;
+    } else if (expr.startsWith("context.") || expr.startsWith("entity.")) {
+      const field = expr.startsWith("context.") ? expr.slice("context.".length) : expr.slice("entity.".length);
+      value = context.row ? context.row[field] : undefined;
     } else {
       throw new Error("descriptorform: unrecognized read template " + whole);
     }
