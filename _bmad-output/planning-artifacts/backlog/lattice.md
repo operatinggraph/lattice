@@ -134,7 +134,7 @@ Rolled to [archive/lattice-parked.md](archive/lattice-parked.md) — real but lo
 effort without an Andrew greenlight. A row that acquires a real driver comes back here.
 
 ## Done log — lattice (newest first)
-- 2026-08-28 · `PENDING` · [Weaver] decline-retry CLOSED — declines Nak on a 5m floor by fix path + `ReplayTarget` verb; live `ReplayTarget clinicSiteBackfill` still owed (needs a live stack)
+- 2026-08-28 · `81a1c94` · [Weaver] decline-retry CLOSED — declines Nak on a 5m floor by fix path + `ReplayTarget` verb; live `ReplayTarget clinicSiteBackfill` still owed (needs a live stack)
 
 - 2026-08-28 · `2d1b7ef` · [Processor] NFR-S6 release quantum DELETED — timing equalized where it is made (script fails once, tombstoned sensitive read pays the live decrypt); 3 cold reviews, 2 MAJOR + T2 unmet found and closed
 - 2026-08-27 · (triage, no code) · [Refractor] "wedged rebuild / event loss" row retired — refuted by `e63cff5` + a live Health-KV re-check; residue folded into the varlength-anchor row.
