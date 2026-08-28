@@ -251,9 +251,36 @@ re-enumeration. The verb pays it exactly when an operator has evidence.
 
 **What one invocation costs — stated, bounded (V15):** O(current rows of the target) through the
 full preamble, and for a violating row whose mark is stale (lease-expired) it re-fires the episode
-— budget-counted (`bumpDispatchCount` → exhaustion), with the Augur arm **suppressed when the
-escalation issue already stands** (a level check at the raise site; re-deriving a standing fact
-must not re-pay the model — ships with the verb, T11).
+— budget-counted (`bumpDispatchCount` → exhaustion). ~~with the Augur arm suppressed when the
+escalation issue already stands (a level check at the raise site)~~ — **WITHDRAWN AT BUILD,
+2026-08-28. The suppression this design asked for is both unimplementable as stated and unnecessary
+for the cost it was meant to bound.**
+
+*Unimplementable:* the check would have to sit below the mark read and require
+`found && leaseLive`, which makes it co-extensive with the `found && leaseLive → Ack` line already
+above it — a branch that can never be reached. Placed anywhere it IS reachable, it is permanent, and
+it then silently retires the lease-expiry re-escalation: an Augur episode that publishes and then
+*dies* (Loom instance lost, the bridge drops it, the claim never converges) would never be retried
+from any derivation — lane 1's exhausted branch and both sweep legs route through the same function.
+The gap would stay open and violating forever behind a `warning`. A cold close-pass reviewer found
+this; it was shipped and then removed.
+
+*Unnecessary:* the cost premise is weaker than this section assumed. The sweep's mark leg reaches
+the same function on every pass, so a stale-marked exhausted gap **already** re-escalates once per
+`MarkLease` with or without a replay — a replay does not add a re-fire, it brings forward one the
+next sweep pass owed within ≤1 minute. And the real bound on model *spend* is not a Weaver latch at
+all: `deriveAugurHandle` (`actuator.go`) is not claimId-seeded, so the claim vertex is create-only
+and the bridge dedups on `idempotencyKey`, giving **≤1 billed model call per stuck gap**,
+permanently, across close→reopen. That bound is downstream and survives a Weaver restart; the
+in-process latch never could.
+
+**What ships instead:** no suppression. The re-payment bound is the escalation mark's own lease —
+live ⇒ one mark read and no model call; expired ⇒ re-fire, and each re-fire mints a fresh live mark,
+pacing it to one per lease. `GapEscalatedToAugur` remains as a **record** (an escalated gap
+previously left nothing standing in Health at all); nothing gates on it, and the code says so.
+**Named residual:** if a real bound on escalation re-fire cost is wanted, it is an
+escalation-specific backoff — the shape `collapseOnlyReclaim` already has for human artifacts — and
+that is a design change, not this item's.
 
 **Multi-replica note (Weaver is single-instance in every shipped deployment):** lane-1 is a shared
 **pull** durable, so N replicas **split** the replayed rows; the verb's cross-replica
@@ -384,7 +411,9 @@ DeliverPolicy-at-first-create.
 
 | State | Scope | Created / reset / carried |
 |---|---|---|
-| The republish set (§3.4b) | process, in-memory, per (target, entity, col) — the key is `markKey`, so it cannot drift from the identity the §10.3 mark owns | **Amended at build, 2026-08-28** (this row was right but incomplete in three ways the build found). **Added** by `fire`, and only on a **PRIMARY-op** publish failure — a `followUp` failure deliberately does not add, because it does not Nak the episode and its loss self-heals on the sweep; the original "a `fire` publish failure" was too broad. **Removed** on that key's next successful primary publish, by `clearClosedMarks`' mark clear (the same not-currently-open condition as the mark and count deletes, so it covers a closed gap, a dropped column and a deleted entity alike), and by `clearTarget` at **two** teardown sites — `reconcileConsumers`' removal branch and `control.go`'s `Revoke`, the same pair that walk `issueKeyTargetPrefixes`. **Refused** past a per-target cap (256), which degrades that key to exactly the restart behaviour. **Lost on restart → the reclaim ladder is the backstop** (≤ one `MarkLease`). **Inert strand, named rather than left to be rediscovered:** the sweep's own `deleteMark` legs remove a mark without touching the set, leaving an entry — it can never cause a wrong action, because the only reader sits behind `found && !stale` and an entry whose mark is gone is never consulted; it occupies a slot until that key's next successful publish, the target teardown, or a restart |
+| The republish set (§3.4b) | process, in-memory, per (target, entity, col) — the key is `markKey`, so it cannot drift from the identity the §10.3 mark owns | **Amended at build, 2026-08-28** (this row was right but incomplete in three ways the build found). **Added** by `fire`, and only on a **PRIMARY-op** publish failure — a `followUp` failure deliberately does not add, because it does not Nak the episode and its loss self-heals on the sweep; the original "a `fire` publish failure" was too broad. **Removed** on that key's next successful primary publish, by `clearClosedMarks`' mark clear (the same not-currently-open condition as the mark and count deletes, so it covers a closed gap, a dropped column and a deleted entity alike), and by `clearTarget` at **two** teardown sites — `reconcileConsumers`' removal branch and `control.go`'s `Revoke`, the same pair that walk `issueKeyTargetPrefixes`. **Refused** past a per-target cap (256), which degrades that key to exactly the restart behaviour. **Lost on restart → the reclaim ladder is the backstop** (≤ one `MarkLease`). **Strand — the "can never cause a wrong action" claim is FALSIFIED (2026-08-28, close pass).** It holds only where the mark is *gone*. It is not gone after `escalateExhaustedGap`'s failed publish: that path reached `fire` and recorded an obligation no reader could consult while the gap stayed exhausted — and once an operator `resetBudget` made the gap dispatchable again, `dispatchGap` read the escalation's still-present mark and re-published against it. **Fixed:** the escalation path now clears the obligation on a non-Ack, since its retry is the lease-expiry re-fire, not the republish set. The remaining strand routes, all inert because their mark IS gone: the sweep's `deleteMark` legs, `releaseCompletedLeg`'s revision-conditioned delete, `escalateExhaustedGap`'s `deleteRevision`, and a column that leaves BOTH the playbook and the row (so `markCandidateColumns` no longer names it and `clearClosedMarks` never reaches its `republish.clear`). **`ReplayTarget` deliberately does NOT clear the set** — the replay re-presents the row, the obligation is consulted, and the episode is re-published idempotently. |
+| The issue cache's per-target budgets | process, in-memory | **Added 2026-08-28 — four maps, not the two an earlier draft of this table implied:** `rowIssues` and `rowPaced` (the tracked counts) and `refused` / `refusedWorst` (the overflow count and the worst severity refused, so a refused `error` still reaches `aggregateStatus`). Their retirement legs differ: `rowPaced` is returned only by `prunePaced` and `clearPrefix`; `clear` deliberately does not. The budget covers **three** per-entity families — `data:`, `template:` and, since the close pass, `gap:` — because shape, not scope, is what grows with the lens. |
+| `heartbeater.consumerSaturatedSince` | process, in-memory, per consumer | onset stamp for the `ConsumerSaturated` issue; empty at restart and re-derived from live `AckStats` on the next heartbeat |
 | Nak'd-pending set + delay timestamps | JetStream consumer (server-side) | the substrate's own machinery — created by the Nak, freed by ack/Term (V1, V3), discarded whole by the verb's durable delete (§3.3); a restart re-arms the timer from restored pending and redelivery resumes on the original schedule (V16, falsified 2026-08-28); no engine mirror exists |
 | The per-row issue-cache budget (§3.6) — `issueCache.rowIssues` (tracked count) + `refused` (raises turned away), one pair per target | process, in-memory, per target | **created** lazily at the target's first `data:`/`template:` per-row raise. **Incremented**: `rowIssues` on each newly-tracked per-row key; `refused` on each raise past `rowIssueCapPerTarget` (500), which is also what maintains the single overflow entry at `data:<targetId>.__capped` in place. **Decremented** on each per-row key's `clear` / `clearPrefix` removal. **Reset**: `refused` and its overflow entry retire as soon as `rowIssues` falls back under the cap — every untracked fact is level-driven and re-raised by its own row's next delivery, so a carried total would state a backlog nothing can retire. **Ordering**: none is promised — the cap admits whichever keys raise first, so the tracked set is a SAMPLE, not a ranking, and the overflow entry is what says so. **Crash / restart**: empty, like the latch it counts; the cache is rebuilt from redeliveries, so the cap re-fills in delivery order and the overflow entry re-arrives when it is re-reached. **Replay** (`ReplayTarget`, cold boot): identical to restart for a fresh process, and for a live one the replay's raises simply re-enter the same budget — the cap is exactly what bounds a replay of a systemically-broken lens. **Reconnect**: untouched (in-memory, no substrate dependency). **Tombstone**: the entity's `data:`/`template:` prefix clears free that entity's slots. **Target unregister / revoke**: the `issueKeyTargetPrefixes` walk frees the target's whole set — the overflow entry included, since it sits inside the `data:<targetId>.` prefix — and drops both counters. Loss of the pair degrades to an unbounded cache until the next raise re-derives it, never to a wrong verdict: `aggregateStatus` and `boundIssues` are computed over whatever the cache holds |
 
@@ -633,8 +662,13 @@ republish set at strictly narrower scope. Rejected.
 - **T10 (Inc 4, embedded NATS e2e — pins V16):** restart the embedded server under a quiet
   long-Nak'd row; assert no redelivery arrives on its own, then `ReplayTarget` recovers it. The
   test documents the strand and pins the verb as its repair.
-- **T11 (Inc 4):** the verb does not re-pay Augur — a row with a standing escalation issue and a
-  stale mark replays without a second reasoning dispatch.
+- **T11 (Inc 4) — RESTATED at build, 2026-08-28.** The original ("a row with a standing escalation
+  issue and a stale mark replays without a second reasoning dispatch") asserts the behaviour §3.3's
+  withdrawn suppression would have produced, and it is the wrong behaviour: a stale mark IS a dead
+  episode, and not re-firing it is the defect, not the guarantee. Ships as
+  `TestEscalateExhaustedGap_LiveEscalationIsNotRePaidAndADeadOneIsRetried`, pinning both halves —
+  a LIVE escalation is not re-paid (the pre-existing `found && leaseLive → Ack`), and a DEAD one
+  (lease expired, or the mark TTL-collected) IS retried.
 
 ---
 
@@ -647,7 +681,7 @@ pass; Inc 1 and Inc 4 standard.
 - **Inc 1 — substrate.** `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns
   T1. Weaver-inert until Inc 2.
 - **Inc 2 — decline classes.** §3.2's table + the `isBool` threading + the
-  row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
+  row-3 raise/clear + the map-level cache bound + `MaxAckPending: 1024` (corrected from 2 000 at build — §6) + the §3.5 clear narrowing +
   (if ratified) the §8 severity demotion. Owns T3, T4, T5, T8. Phase 0 runs C1/C2/C5 with C2's
   stop-rule.
 - **Inc 3 — dispatch-path restructure.** Early anti-storm ahead of `planGap`; retire
@@ -715,7 +749,7 @@ recompile.
 
 > Inc 1 — substrate. `NakWithLongDelay` + `LongRedeliveryDelay` (all V8 touch points). Owns T1.
 > Weaver-inert until Inc 2. · Inc 2 — decline classes. §3.2's table + the `isBool` threading + the
-> row-3 raise/clear + the map-level cache bound + `MaxAckPending: 2000` + the §3.5 clear narrowing +
+> row-3 raise/clear + the map-level cache bound + `MaxAckPending: 1024` (corrected from 2 000 at build — §6) + the §3.5 clear narrowing +
 > the §8 severity demotion. Owns T3, T4, T5, T8. Phase 0 runs C1/C2/C5 with C2's stop-rule. ·
 > Inc 3 — dispatch-path restructure. Early anti-storm ahead of `planGap`; retire `redelivered`; the
 > republish set; the three comment rewrites. Owns T2, T9. · Inc 4 — the `ReplayTarget` verb. Engine
@@ -800,7 +834,7 @@ arm at `:580-583`, default at `:584-587`); `admitGap` → **`:600-614`**, its to
 precedence `Nak > NakWithDelay > NakWithLongDelay > Ack`; `boolColumn:1085-1102` threads its
 existing `isBool` local out; `clearClosedMarks:853` narrows its clear to an explicit-bool-false
 read; severity `"error"` → `"warning"` at `:228` (`alert`) and `:585` (`alertPaced`);
-`weaver/engine.go:414-425` `targetSpec` gains `MaxAckPending: 2000` + `LongRedeliveryDelay`;
+`weaver/engine.go:414-425` `targetSpec` gains `MaxAckPending: 1024` (corrected from 2 000 at build — §6) + `LongRedeliveryDelay`;
 `internal/weaver/health.go` (`issueCache` `:130-135`, `set` `:147`, `snapshot` `:303-316`) gains the
 per-target per-family map cap.
 

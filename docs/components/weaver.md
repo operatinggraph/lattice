@@ -805,8 +805,13 @@ The mutating verbs form one operator-severity ladder: `disable` (pause, delete n
 only) · `revoke` (delete everything under the target prefix + disable).
 
 **Where each verb is reachable from.** All of them over NATS and through the `lattice weaver` CLI.
-Loupe's component page surfaces `disable`/`enable`, `replayTarget` and `resetConfidence` as per-row
-buttons, plus `revoke` behind an arm-then-confirm click. `resetBudget` is deliberately **not** a
+Loupe's component page surfaces `disable`/`enable`, `replayTarget`, `resetConfidence` and `revoke` as
+per-row buttons. All but the enable/disable toggle **arm on the first click and only run on a
+confirming second one**: they sit in one row next to a toggle an operator clicks routinely, and a
+misclick one button off it would otherwise re-dispatch a whole target, delete its confidence windows
+or tear it down. The toggle stays unarmed deliberately — it is the reversible one, and arming
+everything trains an operator to double-click every button, which is what defeats arming on the rest.
+`resetBudget` is deliberately **not** a
 Loupe button: it is per-(target, entity, gap) and carries its `entityId` + `gapColumn` in the request
 body, while Loupe's control proxy forwards a bodyless request for every op — a button for it would
 return the plane's body-parse error every time. It stays a CLI verb until that proxy forwards a body.
@@ -977,8 +982,10 @@ the remedy there is on the data side, not another reset.
 `replayTarget <targetId>` recreates the target's lane-1 durable — a delete-then-create under the
 supervisor's per-consumer `resetMu` — so `DeliverLastPerSubject` re-delivers the target's **current**
 row set through the unchanged evaluation ladder, and every row still violating dispatches again. It
-returns how many rows the recreated durable had queued when it answered: a snapshot taken while the
-pump is already draining, so a busy target replays more than it reports.
+returns how many rows the recreated durable had queued when it answered. The recreate signals the
+pump to re-open and does not wait for it, so that count is normally the whole replay set — a lower
+bound rather than a promise, since a pump that reopened before the count was read will have drained
+some of it.
 
 Why it exists: a row **acked** while still violating is owed a redelivery by nothing, and the durable
 never re-presents it. Two populations land there. Every row declined-and-acked before the lane-1 Nak
@@ -1018,14 +1025,22 @@ retry budget. Each lifts or is owed on its own, and re-presenting the row is exa
 pump paused by the supervisor's own failure-class probe loop is likewise not refused — that pause
 lifts when the probe succeeds.
 
-**What a replay must not re-pay.** A replayed row whose mark has aged past its lease reaches the
-exhausted-gap arm, which would otherwise clear the mark and fire a fresh Augur reasoning episode —
-a real per-call cost, paid again on every replay. A gap that has already escalated records a standing
-`GapEscalatedToAugur` at `gap:<targetId>.<entityId>.<gapColumn>`, and the escalation arm checks that
-latch before firing: re-deriving a standing fact never re-asks the model. The latch retires where the
-fact ends — the column going false, the row leaving, a plan building for the gap again (which is what
-an operator's `resetBudget` reaches through the sweep's re-arm), or the target's teardown — and a
-fresh exhaustion after any of those escalates afresh.
+**What a replay costs at an escalated gap.** A replayed row of an exhausted gap reaches the
+exhausted-gap arm, and what that arm does is decided by the escalation's own mark. A LIVE mark means
+the reasoning episode is in flight: the delivery costs one mark read and no model call, which is what
+bounds the cost of a replay over a target whose gaps have escalated. An EXPIRED mark means the episode
+is presumed dead, and it is re-fired — a reasoning claim that never converges has no other recovery,
+and the re-fire mints a fresh live mark, so the rate is one per mark lease per gap whether the
+derivation came from a replay, a decline-floor redelivery or a sweep pass. A replay therefore does not
+add a re-fire that was not already owed; it brings forward one the next sweep pass would have made.
+
+The escalation also leaves a standing `GapEscalatedToAugur` at
+`gap:<targetId>.<entityId>.<gapColumn>` — the operator-facing record of which gaps are on the
+reasoning tier, and how long they have been there, where previously an escalated gap left nothing
+standing at all. It is a record and **nothing gates on it**: a suppression keyed on it would be
+permanent and would retire the expired-mark recovery above. It retires where the fact ends — the
+column going false, the row leaving, a plan building for the gap again (which is what an operator's
+`resetBudget` reaches through the sweep's re-arm), or the target's teardown.
 
 ### Capability authorization
 
@@ -1151,7 +1166,14 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   wording for both misdirects. Minted 2026-08-25, four times on one verb: `reset-budget` accepted
   collapse-only, then orphan-column, and still accepted `surface` and plan-time-resolved (`Action == ""`)
   gaps. Check: enumerate the arm's permanent declines, assert the verb refuses each with its own message —
-  one vector per decline, plus a control that resets.
+  one vector per decline, plus a control that resets. **The same rule on the FAILURE axis: a verb's
+  PARTIAL failure must be observable, and healable by the remedy its own message names.** Minted
+  2026-08-28: `ReplayTarget` ran the supervisor's delete-then-create on the control plane's 5 s handler
+  deadline, so a deadline landing between the two left the durable deleted and not recreated — the pump
+  retried forever without setting a pause reason, the per-consumer health sink still read `running`, and
+  `enable`, which the verb's own error names as the remedy, could not heal it. Check: for every
+  destructive verb ask what a failure BETWEEN its steps leaves behind, assert that state raises a standing
+  issue, and assert the named remedy actually reaches it.
 - **An `error`-severity Health issue must not fire on a self-healing condition** — an unreplayed pattern is
   replay lag, not a package bug, and the sweep reaches that branch on every restart. Minted: the `!known`
   branch of the same classifier. Check: `TestSweep_InflightMarkerIgnoredForUnindexedPattern` asserts no issue.

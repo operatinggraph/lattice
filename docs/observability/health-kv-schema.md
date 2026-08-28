@@ -934,11 +934,16 @@ retry budget, and they share that latch deliberately. A gap whose budget is spen
 policy for `exhausted` raises the first (`warning`: a loud stop, never a silent park). One whose
 target does escalate raises the second (`warning` too — the row is on the reasoning tier because
 conventional remediation ran out, which is degraded service for that row while every other row still
-remediates) and, because it is a level fact rather than an event, the escalation arm reads it back:
-while it stands, a re-derivation of the same exhaustion — a decline-floor redelivery, a sweep pass,
-an operator `replayTarget` — does NOT dispatch a second reasoning episode. Both retire on the same
-event, the gap actually ending, so a fresh exhaustion afterwards raises whichever branch applies
-again.
+remediates). Both retire on the same event, the gap actually ending, so a fresh exhaustion afterwards
+raises whichever branch applies again.
+
+`GapEscalatedToAugur` is a **record, and nothing gates on it.** What stops a re-derivation of the same
+exhaustion — a decline-floor redelivery, a sweep pass, one row of an operator `replayTarget` — from
+minting a second reasoning episode is the escalation's own mark: while its lease is live the episode
+is in flight and the derivation costs one mark read. Once that lease expires the episode is presumed
+dead and IS re-fired, because a reasoning claim that never converges has no other recovery, and each
+re-fire mints a fresh live mark, which paces the re-fires to one per lease. A suppression keyed on
+this latch instead would be permanent and would retire that recovery.
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
@@ -986,15 +991,25 @@ JSON", so N such rows are N entries.
 Without a retirement that does not depend on a further read, these entries would stand one per
 `(row, column)` for the process's lifetime. Two separate bounds apply, and they bound different
 things. The listing cap below bounds the **document**. The **cache** behind it is bounded per target:
-at most 500 per-row entries (the `data:` and `template:` families together) are tracked for one
-target, after which further raises for rows outside that set are refused and counted into one entry
-at `data:<targetId>.__capped`:
+at most 500 per-row entries are tracked for one target, after which further raises for rows outside
+that set are refused and counted into one entry at `data:<targetId>.__capped`:
+
+Membership in that budget is decided by key SHAPE — an entity segment AND a column segment below the
+target — because that shape is exactly what makes a family grow with the subject count. All three
+per-row families qualify: `gap:`, `data:` and `template:`. A target-scoped fact (`gapConfig:`, the
+overflow entry itself, `consumer:`, `effect:`) never consumes a slot, or a flood of row faults would
+start refusing the very entries that explain them.
 
 ```json
-{"severity": "warning", "code": "RowIssuesCapped",
- "message": "target <targetId>: per-row issue tracking is at its cap of 500 entries; <n> further raises for rows outside that set were not tracked",
+{"severity": "<the worst severity among the raises it refused — warning or error>",
+ "code": "RowIssuesCapped",
+ "message": "target <targetId>: per-row issue tracking reached its cap of 500 entries; <n> further raises for rows outside the tracked set were not recorded, and are not re-derivable until those rows project again",
  "since": "<RFC3339 — when the cap was first reached>"}
 ```
+
+`severity` is **not** fixed at `warning`, and that is the entry's whole point: it carries the worst
+severity of the raises it turned away, so a refused `error` still escalates the document's `status`
+(see below). A sample showing `warning` would read as the only value it takes.
 
 The tracked set is a **sample, not a ranking** — whichever rows raised first hold the slots. Slots are
 freed as their entries retire (a repaired row, an entity tombstone, a target teardown), and admission
@@ -1003,8 +1018,10 @@ resumes as soon as the target is back under the cap.
 The `RowIssuesCapped` entry itself retires only once the target holds **no** per-row entries at all,
 not merely when it drops back under the cap. A refused raise is not re-derivable on demand: the
 `data:` exits all Ack, and lane 1 delivers the last revision per subject from a stable durable, so a
-row that was refused is never delivered again until something writes its key. Retiring the entry at
-the boundary would delete the only surviving record that those rows are broken.
+row that was refused is never delivered again until something writes its key. (A refused `gap:` raise
+IS re-derived — its row keeps being delivered — but it is re-derived only into the same full budget,
+so the entry stays honest for it too.) Retiring the entry at the boundary would delete the only
+surviving record that those rows are broken.
 
 Two properties the cap must not cost, and does not. Its `severity` is the **worst severity among the
 raises it refused**, so a refused `error` still escalates the document (`status` is aggregated over
