@@ -376,7 +376,7 @@ graph.** An anchor whose path crosses more than `maxVarLengthHops` of a ranged h
 row, because the executor's walk stops there too.
 
 A ranged hop's distance is an interval, so it contributes no `HopIndex.Dist`. `Dist` is computed over
-non-ranged binding hops, and any position the anchor can reach across a ranged hop takes the
+binding hops, and any position the anchor can reach across a ranged **binding** hop takes the
 incomparable `-1` sentinel — `AnchorSideSeeds` then seeds **both** endpoints, which only widens the
 derived set. An over-stated distance would be the unsound direction: `consider` drops the endpoint
 whose distance is larger.

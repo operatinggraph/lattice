@@ -71,6 +71,7 @@ type lens struct {
 	hasOutput      bool
 	outputKey      string // Output.OutputKeyPattern, "" when not statically resolvable
 	grantTable     bool
+	hasSpec        bool   // a Spec field was present in the literal, resolvable or not
 	spec           string // resolved cypher (the presentation tail only, with Walks)
 	pos            token.Position
 }
@@ -123,6 +124,16 @@ func main() {
 	if strict && issues > 0 {
 		os.Exit(1)
 	}
+}
+
+// describeLens names a lens for a diagnostic. A CanonicalName that is itself a
+// non-literal expression leaves l.name empty, and the position alone is a
+// weaker pointer than it looks in a file declaring a dozen lenses.
+func describeLens(l lens) string {
+	if l.name != "" {
+		return l.name
+	}
+	return "(name not statically resolvable)"
 }
 
 // checkPackage parses one package directory and enforces both invariants over
@@ -223,8 +234,17 @@ const maxVarLengthHops = 10
 // same edit is fail-closed on a positive pattern and fail-open on a negated
 // one, so only the negated occurrence is a violation.
 func checkNegatedRangeBound(l lens) (issues, warns int) {
-	if l.spec == "" {
+	if !l.hasSpec {
 		return 0, 0
+	}
+	if l.spec == "" {
+		// Fail closed, matching outputKeyPattern's contract on the same
+		// unresolvable-expression shape: a Spec this gate cannot read
+		// statically (a concatenation, a fmt.Sprintf, a cross-package const)
+		// is UNVERIFIABLE, not "no NOT (...) pattern to worry about".
+		fmt.Printf("%s: warn: lens %s has a Spec that is not a string literal or a resolvable local const, so this gate cannot check it for a narrowing range bound inside a negated pattern — check it by hand\n",
+			posOf(l), describeLens(l))
+		return 0, 1
 	}
 	extents, unparsed := negatedExtents(l.spec)
 	if unparsed {
@@ -269,7 +289,7 @@ func minOf(hopText string) int {
 }
 
 var (
-	reNotKeyword = regexp.MustCompile(`\bNOT\b`)
+	reNotKeyword = regexp.MustCompile(`(?i)\bNOT\b`)
 	reBracket    = regexp.MustCompile(`\[[^\[\]]*\]`)
 	reRangeSpec  = regexp.MustCompile(`\*(\d*)(\.\.)?(\d*)`)
 )
@@ -351,7 +371,7 @@ func relArrowEnd(s string, i int) (end int, ok bool) {
 }
 
 // negatedExtents finds every `NOT (...)` pattern predicate in spec — a `NOT`
-// keyword immediately (module whitespace) followed by a chain of one or more
+// keyword immediately (modulo whitespace) followed by a chain of one or more
 // `(node)` groups linked by relationship arrows — and returns each one's byte
 // range. A `NOT` not followed by `(` (e.g. a plain boolean negation) is not a
 // pattern predicate and is skipped, not reported. unparsed reports whether
@@ -432,7 +452,7 @@ func rangedHops(spec string) []rangedHop {
 			h.finite = err == nil
 			h.max = n
 		default:
-			h.finite = false // bare "*", "*n..", "*..", or "*.." — open
+			h.finite = false // bare "*", "*n..", or "*.." — open
 		}
 		out = append(out, h)
 	}
@@ -527,6 +547,7 @@ func collectLenses(fset *token.FileSet, f *ast.File, consts map[string]string) [
 					l.hasOutput = true
 					l.outputKey = outputKeyPattern(kv.Value, consts)
 				case "Spec":
+					l.hasSpec = true
 					switch v := kv.Value.(type) {
 					case *ast.Ident:
 						l.spec = consts[v.Name]
@@ -636,6 +657,16 @@ var Lenses = []pkgmgr.LensSpec{
 		Adapter:       "nats-subject",
 		Spec: ` + "`" + `MATCH (a) WHERE NOT (a)-[:containedIn]->(b) RETURN a` + "`" + `,
 	},
+	{
+		CanonicalName: "lowercaseNotVector_flagged",
+		Adapter:       "nats-subject",
+		Spec: ` + "`" + `MATCH (a) WHERE not ( (a)-[:containedIn*0..3]->(b) ) RETURN a` + "`" + `,
+	},
+	{
+		CanonicalName: "unresolvableSpec_warns",
+		Adapter:       "nats-subject",
+		Spec: "MATCH (a) " + "WHERE NOT (a)-[:containedIn*0..3]->(b) RETURN a",
+	},
 }
 `
 	if err := os.WriteFile(filepath.Join(dir, "lenses.go"), []byte(src), 0o644); err != nil {
@@ -676,8 +707,12 @@ var Lenses = []pkgmgr.LensSpec{
 		"a *0..10 hop (at the executor's own clamp) inside NOT is not flagged")
 	check(!strings.Contains(out, "plainHopNegated_notFlagged"),
 		"a plain, non-ranged hop inside NOT is not flagged")
-	check(issues == 1, fmt.Sprintf("exactly one issue total (got %d)", issues))
-	check(warns == 0, fmt.Sprintf("zero warns total (got %d)", warns))
+	check(strings.Contains(out, "lowercaseNotVector_flagged") && strings.Contains(out, "narrows a variable-length hop"),
+		"a lowercase `not (` is flagged exactly like `NOT (` — the cypher keyword match is case-insensitive")
+	check(strings.Contains(out, "unresolvableSpec_warns") && strings.Contains(out, "warn:") && strings.Contains(out, "not a string literal or a resolvable local const"),
+		"a Spec this gate cannot resolve statically (here, a concatenation) is flagged as an advisory warn, not silently passed")
+	check(issues == 2, fmt.Sprintf("exactly two issues total (got %d)", issues))
+	check(warns == 1, fmt.Sprintf("exactly one warn total (got %d)", warns))
 
 	if !pass {
 		fmt.Fprintln(os.Stderr, "lint-lens-anchors: self-test failure(s) — the gate does not behave as documented")
