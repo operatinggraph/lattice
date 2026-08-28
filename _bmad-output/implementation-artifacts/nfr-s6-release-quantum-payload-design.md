@@ -1,6 +1,6 @@
 # NFR-S6 — remove the timing difference where it is made, and delete what then has no reason to exist
 
-> **📐 awaiting-Andrew (ratification)** — *Winston (Designer fire, 2026-08-27. Third framing: the
+> **✅ RATIFIED — Andrew, 2026-08-27. Build-ready.** — *Winston (Designer fire, 2026-08-27. Third framing: the
 > payload-cap draft was rejected by Andrew in favour of deletion; an adversarial grounding pass then
 > falsified two load-bearing claims in the deletion draft. This version is what survives both.)*
 >
@@ -25,22 +25,22 @@
 > **withdraws the data-sensitivity decision the last version put to you.** You do not need to
 > declassify `.claimKey`.
 >
-> **So the shape is: remove the difference where it is made, measure what is left, and delete the
-> masking only if the remainder is below the noise floor.** That is a conditional deletion gated on
-> §7's measurement, not a promised one. Three moves:
+> **Andrew ratified the direction on 2026-08-27: the deletion is not optional, and the measurement is
+> skipped.** So the shape is three moves, all unconditional:
 >
 > | | Move | Layer | Removes |
 > |---|---|---|---|
-> | 1 | Decrypt-and-discard on `decryptSensitiveDoc`'s `IsDeleted` arm | engine, ~10 lines | the ~0.36 ms dominant gap |
+> | 1 | Decrypt-and-discard on `decryptSensitiveDoc`'s `IsDeleted` arm, served from the step-4 snapshot | engine, ~10 lines | the ~0.36 ms dominant gap |
 > | 2 | Equalize the script's 18 + 15 early returns | package, existing builtins | the script-half gaps |
-> | 3 | Delete the release quantum (~190 lines) **iff** §7 says the residue is unmeasurable | engine, subtractive | 50 ms/rejection, 3 metrics, a goroutine-per-reply |
+> | 3 | **Delete the release quantum** (~190 lines) | engine, subtractive | 50 ms/rejection, 3 metrics, a goroutine-per-reply, a 1024-deferral bound, a shutdown drain |
 >
-> **The decision for Andrew is now a risk judgement, not a data one** (§8): move 3 trades an
-> *enforced* engine `if` for an *unenforceable* per-package authoring obligation. Nothing stops the
-> next author of a secret-bearing op from writing an early return, and no lint can reasonably check
-> Starlark control flow for timing equality. **My recommendation: do moves 1 and 2 now, run §7, and
-> treat move 3 as a separate decision made against real numbers** — moves 1 and 2 are strict
-> improvements whether or not the quantum ever goes.
+> **What that knowingly accepts, recorded once so it is not lost** (§6.3): the absent-vs-claimed gap
+> (~0.27 ms) is substrate-rooted and survives. It is a *statistical* channel — it needs averaging over
+> many samples — against a **confirmation** oracle, not an enumeration one: the attacker must already
+> hold a `vtx.identity.<NanoID>`, and that keyspace is ~2¹¹⁷ (58-char alphabet, 20 chars), so nothing
+> here is brute-forceable. §8 states the threat model the whole item is priced against. The
+> deterministic single-request oracle — the wire code — stays closed by Contract #9 §9.3, which is
+> untouched.
 >
 > **Also newly known and unpriced anywhere:** `CompleteCredentialLink` has **never been measured**,
 > and its profile is worse than `ClaimIdentity`'s — its descriptor declares a second sensitive aspect,
@@ -126,7 +126,7 @@ from **both** arms rather than adding it to one.
 
 ---
 
-## 4. The shape — three moves; the third is conditional
+## 4. The shape — three moves
 
 ### 4.1 Equalize the script (package work, no new primitive)
 
@@ -168,12 +168,11 @@ reader deletes as pointless:
 Combined with the snapshot read above, R2 goes to zero and the engine's dominant gap is closed with
 roughly ten lines and no new concept.
 
-### 4.3 Delete the release quantum — conditionally, and it is a split not a delete
+### 4.3 Delete the release quantum — a split, not a delete
 
-With §4.1 and §4.2 in place the *known* gaps are closed. **R1 is not**, so whether the quantum can go
-is §7's measurement to answer, not this section's. What follows is the inventory for the case where
-it can. Note the file **splits**: ~190 of its 277 lines are timing machinery; the rest is wire-shape
-that survives (§6.4).
+With §4.1 and §4.2 in place the two largest gaps are closed and R1 is accepted (§6.3). The file
+**splits**: ~190 of its 277 lines are timing machinery and go; the rest is wire-shape and survives
+(§6.4).
 
 - **`internal/processor/claim_reply_floor.go`** — the whole file, 277 lines: `claimReplyFloor`,
   `releaseAt`, `publishNoEarlierThan`, `Drain`, `DefaultClaimRejectionFloor`,
@@ -197,8 +196,8 @@ of its three current supports are already universal, not membership-keyed: the s
 itself (ledger row 11) and `classifyStepError` strips details from any `ClaimKeyInvalid` for every
 operation (row 12). What the membership map still buys is the **step-4 fault** case — a hydrate or
 decrypt failure before the script runs, which returns a bare error and classifies `InternalError`.
-§7's measurement decides whether that residue needs the map at all; if it does, the map shrinks to
-one behaviour from four, which is already most of what the original row asked for.
+The map therefore survives, dropping from four consumers to two — which is most of what the original
+row asked for, and §6.4 explains why the remainder is correct rather than a shortfall.
 
 ---
 
@@ -220,9 +219,10 @@ explicitly declined to claim (*"a Bernoulli one, raising the cost by roughly two
 rather than removing it"*). Whatever else is decided, that correction is owed — and under this design
 the comments are deleted with the code, which is the cleanest form of correcting them.
 
-**D. Equalize the script only, keep the mask for R1+R2.** The honest fallback if Andrew keeps the
-sensitive flag. It removes the largest and most numerous divergences and keeps 277 lines to hide one
-RPC. **Not recommended**, but §7 quantifies what it would leave.
+**D. Equalize the script only, keep the mask.** Removes the most numerous divergences and keeps 277
+lines to hide the rest. **Rejected by Andrew on 2026-08-27** — the deletion is the point of the item,
+and keeping a 277-line mask over a residue that needs averaging to exploit is the machinery-for-its-
+own-sake this fire exists to remove.
 
 **E. Make the *engine* constant-time generically** — pad every rejection to a fixed budget. **Rejected**:
 that is the masking mechanism again, generalized, applied to every operation in the platform. Strictly
@@ -248,7 +248,7 @@ The n=3000 study covers `ClaimIdentity` only (`packages/identity-domain/claim_ti
 only `ddlResolutionMemo` is shared — so a *claimed* target pays **two** `readPiiKeyEnvelope` round
 trips where an unclaimed one pays zero. Its cause profile is therefore different from the one that was
 measured, and the mechanism has been covering it on the strength of the *other* operation's numbers.
-§4.2's fix helps both, and §7 adds the missing arm.
+§4.2's fix helps both. It is recorded here because the mechanism has been covering `CompleteCredentialLink` on the *other* operation's numbers, and after the deletion it is covered by §4.1/§4.2 on its own terms — which is a better basis than it ever had.
 
 ### 6.2 There is a fourth timing class, and equalizing three causes does not cover it
 
@@ -258,8 +258,9 @@ A **shredded** key envelope makes `checkAndDeriveDEK` return `ErrKeyShredded` mi
 unclaimed identity whose key has been shredded has a live `.claimKey` ciphertext and a shredded
 `.piiKey`, a population the identity-domain DDL's own comment says exists (`ddls.go:713-718`). This is
 exactly the hole `claim_reply_floor.go:52-62` documents as the reason for keying on `operationType`
-rather than on the error code, and **no amount of equalizing the three known causes closes it.** §7
-adds a fixture; the wire-shape collapse is what contains it, which is one more reason that half stays.
+rather than on the error code, and **no amount of equalizing the three known causes closes it.** The
+wire-shape collapse is what contains it — it answers `ClaimKeyInvalid` like everything else — which is
+one more reason that half stays and a reason the map cannot be dissolved.
 
 ### 6.3 R1 is not equalizable, and trying would add coupling rather than remove it
 
@@ -269,7 +270,14 @@ An absent target means four fewer messages come back from `multi_last`
 and a synthetic decrypt for keys that do not exist — which requires knowing, per operation, which
 declared keys *would* have been sensitive. **That is more per-operation coupling than the one-line
 predicate the deletion set out to remove**, and it argues Contract #9 §9.4's genericity invariant in
-the wrong direction. So R1 is measured (§7), not fixed.
+the wrong direction.
+
+**So R1 is accepted, by decision rather than by analysis.** Priced honestly: it is ~0.27 ms of bias
+under a ~17 ms loaded p99, so exploiting it means averaging many samples; and what it confirms is
+whether an identity key the attacker **already holds** exists and is unclaimed (§8). The
+alternative on the table was keeping 277 lines and 50 ms per rejection to mask it, which Andrew
+declined on 2026-08-27. Recorded here so a future reader finds the trade rather than assuming the
+channel was closed.
 
 ### 6.4 The file splits; the op-name map survives
 
@@ -300,7 +308,7 @@ it is the version that did not need a deferral.
 **"Is the script rewrite riskier than the mask?"** Different risk, and it is measurable in the same
 harness. The mask's correctness rests on a timer; the equalized script's rests on both branches
 executing the same instructions, which is a property a per-cause study tests directly — the same
-n=3000 study that validated the mask (§7).
+n=3000 harness that validated the mask, which still ships (`packages/identity-domain/claim_timing_probe_test.go`) and defaults to floor-off — available to anyone who later wants the number, without gating this fire on it.
 
 **"Does this introduce new state?"** No. It removes state: a goroutine per deferred reply, a pending
 counter, a drop counter, a `WaitGroup`, three metrics, and a shutdown drain.
@@ -310,40 +318,41 @@ The board row's payload half closes as *dissolved*, not as *fixed*.
 
 ---
 
-## 8. The measurement — the acceptance gate, and it can refute the design
+## 8. The threat model this is all priced against
 
-The harness already exists in the shape `624d445` used, and `Deps.ClaimRejectionFloor` accepts a
-**negative** value to disable the quantizer (ledger row 15) — which is exactly the posture needed.
+Recorded because everything above and below is valued against it, and the previous versions of this
+doc inherited *"NFR-S6 anti-enumeration"* as a settled premise without ever saying what it buys.
 
-**Run the n=3000 per-cause study with the floor disabled, at three points:**
+**It is a confirmation oracle, not an enumeration one.** An attacker must supply a
+`targetIdentityKey` — a 20-character NanoID over a 58-character alphabet
+(`internal/substrate/keys/nanoid.go:13`), so ~2¹¹⁷. The keyspace is not walkable. The oracle is only
+useful over keys the attacker **already holds**: from a log, a URL, an export, or an insider's view
+of a lens projection. What it then tells them is whether each key exists and whether it is still
+*unclaimed* — i.e. which identities still have a live claim secret outstanding, worth phishing or
+intercepting.
 
-| Point | What it tells us |
-|---|---|
-| **P0 — today, floor off** | Reproduces the baseline: monotone ordering, 0.27–0.70 ms spread. Confirms the harness still measures what it measured. |
-| **P1 — after §4.1 (script equalized), floor off, flag kept** | Isolates R1+R2. The remaining spread **is** the engine-side residue, measured rather than argued. |
-| **P2 — after §4.2 (decrypt-and-discard + snapshot read), floor off** | The acceptance test for the deletion. R2 is closed, so what remains is **R1 alone**. All three CIs must include zero. |
-| **P3 — `CompleteCredentialLink`, all points** | The arm that has never been run (§6.1). Its two-sensitive-aspect profile means P2 clearing for `ClaimIdentity` says nothing about it. |
-| **P4 — the shredded-envelope fixture** | The fourth class (§6.2). Not equalizable and not expected to clear; measured so its magnitude is on the record rather than assumed. |
+**Two channels, very different value per line:**
 
-**Acceptance:** P2 **and** P3 clear ⇒ move 3 is available and the quantum can go (§4.3), with §6.5's
-re-derivation in the same increment. **Either fails ⇒ moves 1 and 2 still land and the quantum
-stays** — they are strict improvements regardless, and the item closes as *"equalization insufficient
-for R1; masking retained on a measured basis rather than an assumed one."* Stated in advance as a
-success: the current mechanism would then be justified by numbers instead of by the sentence in
-`releaseAt`'s doc that this fire proved false.
+| | Wire code (Contract #9 §9.3) | Release timing |
+|---|---|---|
+| Oracle | **Deterministic — one probe, one bit** | Statistical — needs averaging over many samples |
+| Cost to keep | ~14 lines: one `if`, a generic reply, a Warn log | 277 lines, a goroutine + timer per reply, a 1024 bound, a drop path, 3 metrics, a shutdown drain, 50 ms per rejection |
 
-**P1 is what isolates the two engine gaps.** The previous version claimed R2 was a Vault RPC and it is
-not (§2) — the hop is a KV read. The magnitude conclusion survives the correction, but the mechanism
-did not, which is why P1 measures rather than argues.
+That asymmetry is the whole disposition. The collapse stays because it closes the strong channel for
+almost nothing; the quantum goes because it closes the weak one for a great deal. §5 F's original
+rejection of "delete the collapse too" cited the frozen contract, which is a statement about who
+decides — this table is the actual argument, and it holds independently of the contract.
 
----
+**No timing measurement gates this fire.** Andrew's call, 2026-08-27. The harness remains
+(`packages/identity-domain/claim_timing_probe_test.go`, floor-off by default) for anyone who later
+wants the residual number.
 
 ## 9. Decomposition for the Steward
 
-**One increment, gated on the measurement.** Phase 0 runs P0 and P1. Then, per Andrew's answer on
-§4.2: run P2, and if it clears, land the script equalization, the flag removal, and the deletion
-together. Splitting them would leave either a mask with nothing to mask or an equalized script still
-paying 50 ms.
+**One increment, ungated.** Moves 1, 2 and 3 land together: splitting them would leave either a mask
+with nothing to mask or an equalized script still paying 50 ms per rejection. §6.5's re-derivation of
+the closed declared-read set ships in the same increment — it must not survive on the rationale the
+deletion removes.
 
 **Posture-changing — full review depth.** It removes a shipped security mechanism and changes an
 aspect's sensitivity declaration.
@@ -362,14 +371,13 @@ install (`DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`).
 | T2 | The sha256 and the constant-time compare run on **all** causes | including absent target and malformed payload, against the placeholder and dummy hash |
 | T3 | No behavioural regression | every existing `ClaimIdentity` / `CompleteCredentialLink` outcome still produces its same Health-KV outcome word and the same generic wire reply |
 | T4 | The equalized script still refuses everything it refused | one vector per accumulated outcome — 18 for claim, 15 for link |
-| T5 | **P2**: all three CIs include zero, floor disabled | the n=3000 harness; the acceptance gate |
 | T6 | A `.claimKey` that is no longer sensitive still cannot be read by an unauthorized actor | the read path's own authorization is unchanged — pin it, because removing an encryption flag invites the assumption that it was the access control |
 | T7 | The pre-step-4 paths are unaffected | malformed / duplicate / auth-denied still answer with their real codes, as they already do (ledger row 14) |
 | T8 | Nothing references the deleted symbols | build + `grep` census C1 returns empty |
 
 **Mutation discipline:** T1's claim is structural, so the proof is to reintroduce one early return and
-assert T5 reds. **Fixture discipline:** T5 must run under the concurrent-submission load the original
-study used; an unloaded run passes vacuously.
+assert T1 reds — a structural assertion, not a timing one, which is what makes it a gate rather than a
+flaky benchmark.
 
 ---
 
@@ -402,8 +410,10 @@ the stored data, which is why §4.2 is a decision rather than an edit.
 7. **The declassification of `.claimKey` is withdrawn** — unnecessary once the tombstone's retained
    ciphertext is used (§4.2). The data-sensitivity question put to Andrew in the previous version is
    void.
-8. **The deletion is conditional, not promised** — R1 is not equalizable (§6.3), so §8's measurement
-   decides, and the file splits rather than deletes (§6.4).
+8. **The file splits rather than deletes** (§6.4) — ~190 lines of the 277 are timing machinery; the
+   op-name map survives for the wire collapse and the closed read set.
+9. **R1 is accepted, not closed** (§6.3), and the measurement is skipped — both Andrew's decisions on
+   2026-08-27, recorded rather than argued.
 
 ---
 
