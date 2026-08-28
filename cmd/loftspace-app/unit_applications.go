@@ -17,9 +17,14 @@ import (
 // gap closed but the landlord has not decided), "declined" (a standing business
 // rejection OR a landlord decline), or "in_review" (still converging). signed
 // reflects whether the applicant has executed the lease (the .signature aspect).
+// qualified mirrors the RLS-enforced protectedLandlordRow's own `qualified`
+// column bit for bit (lenses.go's applicantApproved: every one of the four
+// applicant gaps closed) — independent of the landlord's decision, so it
+// stays true through approved/leased/declined too. Use status, not qualified,
+// to ask "is this application still awaiting a landlord decision".
 // This console is informational only; the RLS-enforced protectedLandlordRow
-// carries the equivalent qualified/landlordApproved/landlordDeclined columns
-// the FE drives the Approve/Decline buttons off (landlord_applications.go).
+// carries the landlordApproved/landlordDeclined columns the FE drives the
+// Approve/Decline buttons off (landlord_applications.go).
 type applicantSummary struct {
 	LeaseAppKey      string `json:"leaseAppKey"`
 	Applicant        string `json:"applicant"`
@@ -153,7 +158,7 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 			Signed:                   !a.MissingSignature,
 			Approved:                 a.ApplicantApproved,
 			Declined:                 a.Declined,
-			Qualified:                a.ApplicantApproved && !a.LandlordApproved && !a.LandlordDeclined,
+			Qualified:                a.ApplicantApproved,
 			LandlordApproved:         a.LandlordApproved,
 			LandlordDeclined:         a.LandlordDeclined,
 			DeclineReason:            a.DeclineReason,

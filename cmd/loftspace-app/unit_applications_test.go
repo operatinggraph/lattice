@@ -86,6 +86,17 @@ func TestGroupByUnit_GroupsAndJoins(t *testing.T) {
 	if alice.ApplicantName != "Alice Renter" || alice.Status != "leased" || !alice.Approved || !alice.Signed || !alice.LandlordApproved {
 		t.Errorf("u1 alice: want Alice Renter/leased/signed/landlordApproved, got %+v", alice)
 	}
+	// alice's applicant gaps are ALL closed (ApplicantApproved: true) even though
+	// the unit already leased — qualified must mirror the RLS protectedLandlordRow's
+	// own column (lenses.go's applicantApproved), not fold in the landlord decision.
+	// A prior version conjuncted !LandlordApproved && !LandlordDeclined here, making
+	// this SAME-NAMED field disagree with the RLS view on every decided application.
+	if !bob.Declined || bob.Qualified {
+		t.Errorf("u1 bob: declined and never qualified (bg check failed), got qualified=%v", bob.Qualified)
+	}
+	if !alice.Qualified {
+		t.Errorf("u1 alice: qualified must stay true post-decision (mirrors the RLS view's applicantApproved), got %+v", alice)
+	}
 	if u1.UnitRent == nil || *u1.UnitRent != 2400 || u1.UnitAddress != "1 Market St" || u1.UnitStatus != "leased" {
 		t.Errorf("u1 facets: want 1 Market St/2400/leased, got addr=%q rent=%v status=%q",
 			u1.UnitAddress, u1.UnitRent, u1.UnitStatus)
