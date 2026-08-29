@@ -3046,7 +3046,7 @@ def execute(state, op):
         # read-posture: (a) declared in contextHint.reads — unlike
         # SetAppointmentStatus's human dispatcher, this op's only caller (the
         # pastDueAppointments playbook) always needs this read, so it is required,
-        # not optional (Weaver's directOp carries no OptionalReads channel).
+        # not optional: absence here is a correctness error, not a branch.
         cur_status = kv.Read(appt_key + ".status")
         if cur_status != None and not cur_status.isDeleted:
             cur_val = cur_status.data.get("value")

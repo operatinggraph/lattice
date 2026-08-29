@@ -73,16 +73,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // script's vertex_alive(state, subject_key) call, which reads the hydrated
 // snapshot rather than issuing a live GET). Every other key each script reads
 // — the erasureRequested marker, piiKey, erasure, mergedInto, .state — is
-// read through an UNDECLARED kv.Read: GapActionSpec carries no OptionalReads
-// field (only Reads), so a Weaver directOp cannot pre-declare an
-// absence-tolerant read the way a Loom systemOp step can. That is not a gap
-// in this playbook: internal/processor/starlark_kv.go's kv.Read documents an
-// undeclared read as tolerating absence exactly like a declared optionalRead
-// does — it costs one live-read-budget unit and a round trip instead of a
-// step-4 prefetch, nothing more — so the three DDL doc comments' "declared in
-// contextHint.optionalReads by every dispatcher" overstates what THIS
-// dispatcher does; the marker and its siblings still resolve correctly, just
-// lazily.
+// read through an UNDECLARED kv.Read. GapActionSpec does carry an
+// OptionalReads field, so a Weaver directOp CAN pre-declare an
+// absence-tolerant read the way a Loom systemOp step does; these three gaps
+// deliberately do not. Declaring a key is not bookkeeping — the Processor
+// serves it from the step-4 snapshot instead of a live read, it stops costing
+// a live-read-budget unit, and a create off its observed absence becomes a
+// CreateOnly assertion whose conflict the commit path absorbs on retry — so
+// converting these three is a change to how the ERASURE path commits, and it
+// owns the review that goes with that rather than riding in as a comment fix.
+// Until then the reads resolve correctly, just lazily, and the three DDL doc
+// comments' "declared in contextHint.optionalReads by every dispatcher"
+// overstates what THIS dispatcher does.
 //
 // Enumerations on all three directOp gaps declare the class-(e) kv.Links walks
 // those ops run (Contract #2 §2.5), each the set its own script annotates
