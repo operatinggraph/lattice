@@ -6,23 +6,26 @@
 // Connects to a running Lattice NATS instance and checks that the lease-signing
 // package has been correctly installed. Asserts:
 //
-//	13 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
+//	14 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
 //	  WithdrawLeaseApplication/DecideLeaseApplication/SetApplicantProfile);
 //	  applicantProfile / underwritingParties / applicationSignals (aspectType —
-//	  the three-way split SetApplicantProfile writes, up to one batch); the externalTask
-//	  wrapper triad leaseServiceInstance/leaseServiceReply/leaseServiceDispatch
-//	  (vertexType) + leaseServiceOutcome/leaseServiceDispatchMarker (aspectType);
-//	  the docGen triad leaseDocInstance/leaseDocReply (vertexType) +
-//	  leaseDocOutcome (aspectType); renewal (vertexType — OpenRenewal/
-//	  SetRenewalTerms/VerifyGuarantor/SignRenewal/CancelRenewal).
+//	  the three-way split SetApplicantProfile writes, up to one batch);
+//	  decidedProfileSnapshot (aspectType — the fair-housing preservation record
+//	  DecideLeaseApplication CREATE-ONLY-stamps on the FIRST decision of either
+//	  value); the externalTask wrapper triad
+//	  leaseServiceInstance/leaseServiceReply/leaseServiceDispatch (vertexType) +
+//	  leaseServiceOutcome/leaseServiceDispatchMarker (aspectType); the docGen
+//	  triad leaseDocInstance/leaseDocReply (vertexType) + leaseDocOutcome
+//	  (aspectType); renewal (vertexType — OpenRenewal/SetRenewalTerms/
+//	  VerifyGuarantor/SignRenewal/CancelRenewal).
 //	The underwritingRecord retention class + the custody chain it confers on
-//	.profile and .underwritingParties: the holder vertex exists, its
-//	.retentionPolicy names the class + policy, and both sensitive aspect DDLs'
-//	.sensitive is true with .custody naming that holder key — the same shape as
-//	clinic-domain's clinicalRecord chain (retention-class-key-custody-design.md
-//	Fire 2 item 2). applicationSignals is asserted the OPPOSITE: no .sensitive,
-//	no .custody — the split's whole point (the three shipped lenses read it
-//	directly, unencrypted).
+//	.profile, .underwritingParties, and .decidedProfileSnapshot: the holder
+//	vertex exists, its .retentionPolicy names the class + policy, and all
+//	three sensitive aspect DDLs' .sensitive is true with .custody naming that
+//	holder key — the same shape as clinic-domain's clinicalRecord chain
+//	(retention-class-key-custody-design.md Fire 2 item 2). applicationSignals
+//	is asserted the OPPOSITE: no .sensitive, no .custody — the split's whole
+//	point (the three shipped lenses read it directly, unencrypted).
 //	1 package vertex + manifest aspect (name=lease-signing).
 //
 // Run via: go run ./scripts/verify-package-lease-signing.go
@@ -122,6 +125,7 @@ func main() {
 		{canonical: "applicantProfile", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
+		{canonical: "decidedProfileSnapshot", class: "meta.ddl.aspectType", ops: []string{"DecideLeaseApplication"}},
 		{canonical: "leaseServiceInstance", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseServiceInstance"}},
 		{canonical: "leaseServiceReply", class: "meta.ddl.vertexType", ops: []string{"RecordLeaseServiceOutcome"}},
 		{canonical: "leaseServiceDispatch", class: "meta.ddl.vertexType", ops: []string{"RecordServiceDispatch"}},
@@ -188,13 +192,15 @@ func main() {
 	}
 
 	// The underwritingRecord retention class + the custody it confers on the
-	// applicant's raw financials (.profile) and the guarantor/co-applicant's
-	// own identifiers (.underwritingParties). A diff-apply that installs the
-	// DDLs but drops either the holder vertex or a .custody aspect leaves that
-	// DDL marked Sensitive with no resolvable holder, which the Processor
-	// refuses at commit — the package would install clean and every
-	// SetApplicantProfile would fail. Assert the whole chain for BOTH sensitive
-	// aspects, plus that applicationSignals carries neither.
+	// applicant's raw financials (.profile), the guarantor/co-applicant's own
+	// identifiers (.underwritingParties), and the fair-housing preservation
+	// record (.decidedProfileSnapshot). A diff-apply that installs the DDLs
+	// but drops either the holder vertex or a .custody aspect leaves that DDL
+	// marked Sensitive with no resolvable holder, which the Processor refuses
+	// at commit — the package would install clean and every
+	// SetApplicantProfile / DecideLeaseApplication would fail. Assert the
+	// whole chain for ALL THREE sensitive aspects, plus that
+	// applicationSignals carries neither.
 	holderKey := pkgmgr.RetentionClassKey("lease-signing", "underwritingRecord")
 	if env, err := pkgverify.GetEnvelope(ctx, coreKV, holderKey); err != nil {
 		fail(holderKey, fmt.Sprintf("underwritingRecord retention-class holder missing: %v", err))
@@ -218,7 +224,7 @@ func main() {
 		}
 	}
 
-	for _, sensitive := range []string{"applicantProfile", "underwritingParties"} {
+	for _, sensitive := range []string{"applicantProfile", "underwritingParties", "decidedProfileSnapshot"} {
 		ddlKey, found := ddlKeyByCanonical[sensitive]
 		if !found {
 			fail(sensitive+" custody", "DDL not found above; skipping custody assertions")

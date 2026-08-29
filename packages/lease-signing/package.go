@@ -82,7 +82,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.31.9",
+	Version: "0.31.10",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -99,7 +99,10 @@ var Package = pkgmgr.Definition{
 		".underwritingParties are SENSITIVE, DEK custodied on the package's own underwritingRecord retention class rather than " +
 		"any identity — the applicant's own raw financials and the guarantor/co-applicant's third-party identifiers " +
 		"respectively (retention-class-key-custody-design.md §8.7, RetentionClasses()) — while .applicationSignals is the " +
-		"NON-sensitive derived half the three shipped lenses project), and the lease-renewal chain: a create-only .tenancy aspect (DecideLeaseApplication's " +
+		"NON-sensitive derived half the three shipped lenses project), the fair-housing .decidedProfileSnapshot aspect " +
+		"(SENSITIVE, same underwritingRecord custody — DecideLeaseApplication CREATE-ONLY-stamps it on the FIRST decision " +
+		"of either value, copying .profile/.underwritingParties/.applicationSignals as they stood then, since " +
+		"SetApplicantProfile stays freely re-submittable), and the lease-renewal chain: a create-only .tenancy aspect (DecideLeaseApplication's " +
 		"first approve), the renewal vertex type + its five ops, the leaseExpiry frozen-table target (opens a " +
 		"cycle), and the renewalComplete mode:planned target — the first goal-authored Weaver target (Contract #10 " +
 		"§10.8 Planner extension), sequencing a per-tenant-variable chain (conditional bgcheck refresh, conditional " +

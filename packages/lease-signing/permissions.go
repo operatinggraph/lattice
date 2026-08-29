@@ -299,16 +299,29 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// a required Read: .decision and .tenancy are absent on a first
 				// decision (they ARE the read-before-write terminal and create-only
 				// guards), .signature is absent on an unsigned application (the
-				// NotReadyToApprove check). The unit + its .listing are NOT declared
-				// here at all — the script resolves them itself from the
-				// application's own appliesToUnit link (a class-(e) follow-up,
-				// scripts.go), never a payload field, so there is no
-				// only-present-on-approve field left to build a malformed key
-				// around on a decline (Standard §readTemplateDebt).
+				// NotReadyToApprove check). .decidedProfileSnapshot is absent on a
+				// first decision too — it is ITS OWN create-only guard (scripts.go),
+				// declared here (not derived from the .decision read) so a
+				// concurrent double-decide's losing create can gracefully retry/
+				// no-op at commit (commit_path.go's absentConditionedCreates)
+				// instead of hard-rejecting the whole batch. .profile /
+				// .underwritingParties / .applicationSignals are absent whenever a
+				// landlord decides before the applicant ever submits a profile — the
+				// snapshot then captures an empty/partial record rather than failing
+				// the decision. The unit + its .listing are NOT declared here at
+				// all — the script resolves them itself from the application's own
+				// appliesToUnit link (a class-(e) follow-up, scripts.go), never a
+				// payload field, so there is no only-present-on-approve field left
+				// to build a malformed key around on a decline (Standard
+				// §readTemplateDebt).
 				OptionalReads: []string{
 					"{payload.leaseAppKey}.decision",
 					"{payload.leaseAppKey}.tenancy",
 					"{payload.leaseAppKey}.signature",
+					"{payload.leaseAppKey}.decidedProfileSnapshot",
+					"{payload.leaseAppKey}.profile",
+					"{payload.leaseAppKey}.underwritingParties",
+					"{payload.leaseAppKey}.applicationSignals",
 				},
 			},
 		},

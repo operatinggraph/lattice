@@ -3,14 +3,15 @@ package leasesigning
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // underwritingRecordRetentionClass is the canonicalName of the retention-class
-// key holder the .profile and .underwritingParties aspect DDLs' Custody names.
+// key holder the .profile, .underwritingParties, and .decidedProfileSnapshot
+// aspect DDLs' Custody names.
 const underwritingRecordRetentionClass = "underwritingRecord"
 
 // RetentionClasses returns the package's one retention-class key holder: the
-// underwritingRecord class the .profile / .underwritingParties aspects'
-// Custody names (mirrors clinic-domain/retention.go — a package's own list of
-// key holders, addressable by canonicalName from any DDL this same package
-// ships).
+// underwritingRecord class the .profile / .underwritingParties /
+// .decidedProfileSnapshot aspects' Custody names (mirrors
+// clinic-domain/retention.go — a package's own list of key holders,
+// addressable by canonicalName from any DDL this same package ships).
 func RetentionClasses() []pkgmgr.RetentionClassSpec {
 	return []pkgmgr.RetentionClassSpec{
 		{

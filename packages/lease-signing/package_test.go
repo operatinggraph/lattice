@@ -173,7 +173,7 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 13; got != want {
+	if got, want := len(Package.DDLs), 14; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 6; got != want {
@@ -209,6 +209,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"applicantProfile", "meta.ddl.aspectType"},
 		{"underwritingParties", "meta.ddl.aspectType"},
 		{"applicationSignals", "meta.ddl.aspectType"},
+		{"decidedProfileSnapshot", "meta.ddl.aspectType"},
 		{"leaseServiceInstance", "meta.ddl.vertexType"},
 		{"leaseServiceReply", "meta.ddl.vertexType"},
 		{"leaseServiceDispatch", "meta.ddl.vertexType"},

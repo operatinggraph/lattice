@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.31.9
+version: 0.31.10
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -25,6 +25,11 @@ description: |
   .underwritingParties are SENSITIVE, DEK custodied on the package's own
   underwritingRecord retention class rather than any identity; .applicationSignals
   is the NON-sensitive derived half the three shipped lenses project.
+  DecideLeaseApplication's first decision (approve or decline) also
+  create-only-stamps a SENSITIVE .decidedProfileSnapshot aspect (same
+  underwritingRecord custody as .profile) copying those three aspects as they
+  stood at that moment — the fair-housing preservation record of what the
+  landlord actually saw, since SetApplicantProfile stays freely re-submittable.
   Also the lease-renewal chain: a create-only .tenancy aspect stamped by
   DecideLeaseApplication's first approve, the renewal vertex type + its five
   ops (OpenRenewal / SetRenewalTerms / VerifyGuarantor / SignRenewal /
@@ -45,6 +50,8 @@ declares:
     - canonicalName: underwritingParties
       class: meta.ddl.aspectType
     - canonicalName: applicationSignals
+      class: meta.ddl.aspectType
+    - canonicalName: decidedProfileSnapshot
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType

@@ -24,6 +24,14 @@ import (
 //     §8.7, RetentionClasses()). `applicationSignals` (NON-sensitive) carries
 //     the derived qualification booleans/counts the three shipped lenses
 //     project. See RetentionClasses().
+//   - `decidedProfileSnapshot` — the fair-housing preservation aspect-type DDL
+//     DecideLeaseApplication write-gates (the leaseapp vertexType script owns
+//     the write). SENSITIVE, same underwritingRecord retention class as
+//     `applicantProfile`. CREATE-ONLY-stamped on the FIRST .decision write of
+//     either value, copying the then-current .profile / .underwritingParties
+//     / .applicationSignals data maps so the record of what the landlord
+//     actually saw at decision time survives a later SetApplicantProfile
+//     re-submission.
 //   - `leaseServiceInstance` — CreateLeaseServiceInstance, the externalTask
 //     instanceOp Loom submits: mints the claim vertex vtx.service.<handle>,
 //     records its family + the providedTo link, and emits external.<adapter>.
@@ -63,6 +71,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		profileAspectDDL(),
 		underwritingPartiesAspectDDL(),
 		applicationSignalsAspectDDL(),
+		decidedProfileSnapshotAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -119,6 +128,13 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"+ leaseTermMonths (calendar months); renewalOpensAt = leaseEnd - the package's renewalWindow. Idempotent " +
 			"re-approves and declines never touch .tenancy once it exists, so a landlord who approved, and a tenant who " +
 			"later signs a renewal extending leaseEnd, is never silently truncated back to the original term. " +
+			"On the FIRST decision of EITHER value (approve or decline), it also CREATE-ONLY-stamps a .decidedProfileSnapshot " +
+			"aspect (class decidedProfileSnapshot, SENSITIVE, same underwritingRecord retention class as .profile) copying the " +
+			"then-current .profile / .underwritingParties / .applicationSignals data maps (each keyed under its own name, " +
+			"{} when the corresponding aspect was never submitted) — the fair-housing preservation record of what the " +
+			"landlord actually saw when they decided, since SetApplicantProfile stays a freely re-submittable upsert and a " +
+			"later submission would otherwise silently overwrite it. A re-decision (idempotent re-submit or a later approve " +
+			"after a decline is rejected by the terminal-decision guard) never re-derives or overwrites the snapshot. " +
 			"SetApplicantProfile{leaseAppKey, unit, annualIncome, employmentStatus, employerName?, references?, hasCoApplicant?, " +
 			"hasGuarantor?, guarantorName?, guarantorRelationship?, guarantorAnnualIncome?, coApplicantName?, coApplicantContact?} " +
 			"captures the applicant's qualification profile so the landlord has something to decide on, split three ways along the " +
@@ -477,6 +493,82 @@ func applicationSignalsAspectDDL() pkgmgr.DDLSpec {
 				Name:            "applicant qualification-signals aspect",
 				Payload:         map[string]any{"submittedAt": "2026-06-27T10:00:00Z", "employmentVerified": true, "referenceCount": 2, "hasCoApplicant": false, "hasGuarantor": true},
 				ExpectedOutcome: "Stored PLAINTEXT as vtx.leaseapp.<NanoID>.applicationSignals, written by SetApplicantProfile. Read by leaseApplicationComplete / leaseApplicationsRead / landlordLeaseApplicationsRead.",
+			},
+		},
+	}
+}
+
+// decidedProfileSnapshotAspectDDL declares the .decidedProfileSnapshot aspect
+// (class decidedProfileSnapshot) — the fair-housing preservation record
+// DecideLeaseApplication CREATE-ONLY-stamps on the FIRST .decision write of
+// either value (the leaseapp vertexType DDL owns the script). Declaration-only.
+//
+// SetApplicantProfile stays a freely re-submittable, unconditioned upsert
+// (design §5: profile-terminal-state guard shapes were tried and empirically
+// falsified — every .decision-keyed guard breaks the renewal chain, which
+// re-reads .applicationSignals off the ORIGINAL leaseapp years after the
+// decision). Without a snapshot, the record of what the landlord actually saw
+// when THEY decided is lost the moment a later submission overwrites .profile
+// / .underwritingParties / .applicationSignals — the exact fact a fair-housing
+// review needs to reconstruct. This aspect exists solely to preserve it.
+//
+// SENSITIVE, SAME underwritingRecord retention-class custody as .profile /
+// .underwritingParties (RetentionClasses) — its data map nests copies of both
+// sensitive source aspects' raw content, so it can be no less protected than
+// either. CREATE-ONLY: the op stamps it once, on the first .decision write;
+// a re-decision (idempotent re-submit, or a later approve after the
+// terminal-decision guard has already rejected a value change) never
+// re-derives or overwrites it, so the snapshot always reflects the ORIGINAL
+// decision's inputs even as .profile is re-submitted afterward.
+//
+// No shipped lens reads this aspect: retention-class-key-custody-design.md
+// §9.1's Secure Lens (over the underwritingRecord class) does not exist yet
+// (design §5 residual) — the preserved record is captured, not yet
+// inspectable. The reader fire (an authorized fair-housing review surface) is
+// its own item, filed when that consumer is real.
+func decidedProfileSnapshotAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "decidedProfileSnapshot",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"DecideLeaseApplication"},
+		Sensitive:         true,
+		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: underwritingRecordRetentionClass},
+		Description: "Fair-housing decided-profile-snapshot aspect (lease-signing). Stored as " +
+			"vtx.leaseapp.<NanoID>.decidedProfileSnapshot (class decidedProfileSnapshot) = {profile, " +
+			"underwritingParties, applicationSignals} — a nested, point-in-time COPY of the leaseapp's own " +
+			".profile / .underwritingParties / .applicationSignals data maps, taken by DecideLeaseApplication " +
+			"on the FIRST .decision write of either value (approve OR decline). Each nested key holds the " +
+			"corresponding source aspect's data map verbatim, or {} when that aspect was never submitted " +
+			"(a landlord may decide before SetApplicantProfile is ever called; the decision still succeeds " +
+			"and stamps an empty/partial snapshot rather than failing). SENSITIVE, custodied on the SAME " +
+			"underwritingRecord retention-class holder as .profile (RetentionClasses) — never the applicant's " +
+			"identity, so the record survives the applicant's erasure exactly as .profile does. CREATE-ONLY: " +
+			"stamped exactly once per application, on the first decision; SetApplicantProfile remains a freely " +
+			"re-submittable upsert on .profile / .underwritingParties / .applicationSignals themselves, so " +
+			"without this snapshot the qualification data a landlord's decision was actually based on would be " +
+			"unrecoverable the moment a later submission overwrote it. No shipped lens reads this aspect's " +
+			"content — no Secure Lens exists yet over the underwritingRecord retention class (residual, " +
+			"design §5): the record is preserved, not yet inspectable. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"profile":{"type":"object","description":"Verbatim copy of the leaseapp's .profile data map at decision time, or {} if never submitted."},` +
+			`"underwritingParties":{"type":"object","description":"Verbatim copy of the leaseapp's .underwritingParties data map at decision time, or {} if never submitted."},` +
+			`"applicationSignals":{"type":"object","description":"Verbatim copy of the leaseapp's .applicationSignals data map at decision time, or {} if never submitted."}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"profile":             "Point-in-time copy of the applicant's raw-financials .profile aspect (annualIncome, employmentStatus, employerName, guarantorRelationship, guarantorAnnualIncome) as it stood at the FIRST decision. {} if the applicant never submitted a profile before the landlord decided. Never projected by any lens.",
+			"underwritingParties": "Point-in-time copy of the .underwritingParties aspect (references, guarantorName, coApplicantName, coApplicantContact) as it stood at the FIRST decision. {} if never submitted. Never projected by any lens.",
+			"applicationSignals":  "Point-in-time copy of the derived .applicationSignals aspect (incomeToRentMet, employmentVerified, referenceCount, hasCoApplicant, hasGuarantor, guarantorIncomeToRentMet, submittedAt) as it stood at the FIRST decision. {} if never submitted. Never projected by any lens.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "decided-profile-snapshot aspect (fair-housing record)",
+				Payload: map[string]any{
+					"profile":             map[string]any{"annualIncome": 96000, "employmentStatus": "employed"},
+					"underwritingParties": map[string]any{},
+					"applicationSignals":  map[string]any{"employmentVerified": true, "referenceCount": 2},
+				},
+				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.decidedProfileSnapshot, written CREATE-ONLY by DecideLeaseApplication on the first decision, DEK custodied on the SAME underwritingRecord retention-class holder as .profile. Never re-written by a later decision or SetApplicantProfile re-submission. Never projected by any lens.",
 			},
 		},
 	}

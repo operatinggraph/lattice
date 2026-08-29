@@ -3855,7 +3855,23 @@ async function decideApplication(a, decision) {
   // call — the terminal-decision guard's prior-value check; absent is the
   // common first-decide case. .signature is read only on an approve (the
   // readiness floor); .tenancy only on an approve too (hard case 4, above).
-  const optionalReads = [a.leaseAppKey + ".decision"];
+  // .decidedProfileSnapshot is read on EVERY call (both approve and
+  // decline) — it is its OWN create-only guard (scripts.go), read
+  // independently of .decision so a concurrent double-decide (e.g. a
+  // double-clicked approve/decline button, which this UI does not yet
+  // disable during submit) has its losing create gracefully retry/no-op at
+  // commit instead of hard-rejecting the whole batch. .profile /
+  // .underwritingParties / .applicationSignals are read on every call too —
+  // the data the snapshot copies on the first decision; absent is the
+  // common case when a landlord decides before a profile was ever
+  // submitted.
+  const optionalReads = [
+    a.leaseAppKey + ".decision",
+    a.leaseAppKey + ".decidedProfileSnapshot",
+    a.leaseAppKey + ".profile",
+    a.leaseAppKey + ".underwritingParties",
+    a.leaseAppKey + ".applicationSignals",
+  ];
   if (decision === "approved") optionalReads.push(a.leaseAppKey + ".signature", a.leaseAppKey + ".tenancy");
   try {
     const reply = await submitOp({

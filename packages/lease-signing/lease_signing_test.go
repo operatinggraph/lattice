@@ -1805,16 +1805,31 @@ func TestSignLease_RejectsTombstonedUnit(t *testing.T) {
 // leaseAppKey itself is the only required read. .tenancy, .decision (the
 // terminal-decision guard's prior-value check), and .signature (the
 // approve-readiness floor) are all (d) optionalReads — None is the expected
-// first-decide / first-approve case. The appliesToUnit link + unit.listing are
-// declared nowhere here — the script resolves the unit itself from the
-// application's own appliesToUnit link on the FIRST approve (a class-(e)
-// follow-up, scripts.go), never from a client-declared read, unit param kept
-// for call-site symmetry with decide()'s signature though unused here.
+// first-decide / first-approve case. .decidedProfileSnapshot is declared too
+// — it is its OWN create-only guard (scripts.go), read independently of
+// .decision so a concurrent double-decide's losing create gracefully
+// retries/no-ops at commit (commit_path.go's absentConditionedCreates)
+// instead of hard-rejecting the whole batch; .profile / .underwritingParties
+// / .applicationSignals are the data it copies on the first decision, absent
+// whenever a landlord decides before a profile was ever submitted. The
+// appliesToUnit link + unit.listing are declared nowhere here — the script
+// resolves the unit itself from the application's own appliesToUnit link on
+// the FIRST approve (a class-(e) follow-up, scripts.go), never from a
+// client-declared read, unit param kept for call-site symmetry with
+// decide()'s signature though unused here.
 func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
 	_ = unit
 	return &processor.ContextHint{
-		Reads:         []string{leaseAppKey},
-		OptionalReads: []string{leaseAppKey + ".tenancy", leaseAppKey + ".decision", leaseAppKey + ".signature"},
+		Reads: []string{leaseAppKey},
+		OptionalReads: []string{
+			leaseAppKey + ".tenancy",
+			leaseAppKey + ".decision",
+			leaseAppKey + ".signature",
+			leaseAppKey + ".decidedProfileSnapshot",
+			leaseAppKey + ".profile",
+			leaseAppKey + ".underwritingParties",
+			leaseAppKey + ".applicationSignals",
+		},
 	}
 }
 
@@ -2197,5 +2212,126 @@ func TestSetApplicantProfile_ConsumerSelfScope(t *testing.T) {
 	pdata := lsDecryptAspect(t, ctx, conn, appKey+".profile")
 	if got, _ := pdata["annualIncome"].(float64); got != 90000 {
 		t.Fatalf("self SetApplicantProfile should write annualIncome=90000, got %v", pdata["annualIncome"])
+	}
+}
+
+// decidedSnapshot reads back the leaseapp's .decidedProfileSnapshot aspect —
+// SENSITIVE, custodied on the SAME underwritingRecord retention-class holder
+// as .profile (lsDecryptAspect opens it the same way) — and returns its three
+// nested data maps (each {} when the corresponding source aspect was never
+// submitted).
+func decidedSnapshot(t *testing.T, ctx context.Context, conn *substrate.Conn, appKey string) (profile, underwritingParties, applicationSignals map[string]any) {
+	t.Helper()
+	data := lsDecryptAspect(t, ctx, conn, appKey+".decidedProfileSnapshot")
+	profile, _ = data["profile"].(map[string]any)
+	underwritingParties, _ = data["underwritingParties"].(map[string]any)
+	applicationSignals, _ = data["applicationSignals"].(map[string]any)
+	return
+}
+
+// TestDecideLeaseApplication_StampsDecidedProfileSnapshotOnFirstDecisionOnly
+// proves the fair-housing preservation snapshot (design §5 "Applicant-profile
+// terminal state", build note 2026-08-29): DecideLeaseApplication CREATE-ONLY
+// stamps .decidedProfileSnapshot on the FIRST .decision write of EITHER value
+// — approve OR decline — copying the then-current .profile /
+// .underwritingParties / .applicationSignals data. A DECLINE with a
+// previously-submitted profile stamps it with that data present; a
+// SetApplicantProfile submitted AFTER the decision (which stays freely
+// re-submittable — the guard-shape falsification in design §5 means
+// .decision can never confine it) overwrites the LIVE aspects but must NOT
+// change the already-stamped snapshot — proven both by a direct read-back
+// and by a SUBSEQUENT idempotent same-value re-decline, which must neither
+// hard-reject (the create-only gate reads the snapshot's OWN key, scripts.go,
+// not merely .decision) nor re-derive the snapshot from the now-changed live
+// .profile; and a decision reached with no profile ever submitted still
+// succeeds, stamping an empty snapshot rather than failing the decision.
+func TestDecideLeaseApplication_StampsDecidedProfileSnapshotOnFirstDecisionOnly(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decidedsnapshot")
+
+	// (a) decline with a previously-submitted profile stamps the snapshot,
+	// create-only, with the nested profile/underwritingParties/
+	// applicationSignals data present.
+	applicantKey := seedApplicant(t, ctx, conn, "BBdecsnap1cntHJKMNPQ")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
+	seedVertex(t, ctx, conn, unitKey+".listing", "listing", map[string]any{"rentAmount": 2000})
+
+	setProfile(t, ctx, conn, cp, cons, "decsnapProf1", appKey, unitKey, map[string]any{
+		"annualIncome":     96000,
+		"employmentStatus": "employed",
+		"employerName":     "Acme Corp",
+		"references":       []any{"Prior landlord"},
+	}, processor.OutcomeAccepted)
+
+	decideReason(t, ctx, conn, cp, cons, "decsnapDecl1", appKey, "declined",
+		"Income below the 3x-rent threshold.", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	profile, underwritingParties, signals := decidedSnapshot(t, ctx, conn, appKey)
+	if got, _ := profile["annualIncome"].(float64); got != 96000 {
+		t.Fatalf("decidedProfileSnapshot.profile.annualIncome = %v, want 96000", profile["annualIncome"])
+	}
+	if got, _ := profile["employerName"].(string); got != "Acme Corp" {
+		t.Fatalf("decidedProfileSnapshot.profile.employerName = %q, want Acme Corp", got)
+	}
+	if refs, _ := underwritingParties["references"].([]any); len(refs) != 1 {
+		t.Fatalf("decidedProfileSnapshot.underwritingParties.references = %v, want [\"Prior landlord\"]", underwritingParties["references"])
+	}
+	if got, _ := signals["employmentVerified"].(bool); !got {
+		t.Fatalf("decidedProfileSnapshot.applicationSignals.employmentVerified = %v, want true", signals["employmentVerified"])
+	}
+	if got, _ := signals["referenceCount"].(float64); got != 1 {
+		t.Fatalf("decidedProfileSnapshot.applicationSignals.referenceCount = %v, want 1", signals["referenceCount"])
+	}
+
+	// (b) a SECOND SetApplicantProfile issued AFTER the decision overwrites
+	// the LIVE .profile aspect (it stays an unconditioned upsert), but must
+	// NOT change the already-stamped (create-only) snapshot.
+	setProfile(t, ctx, conn, cp, cons, "decsnapProf2", appKey, unitKey, map[string]any{
+		"annualIncome":     40000,
+		"employmentStatus": "unemployed",
+	}, processor.OutcomeAccepted)
+	livePdata := lsDecryptAspect(t, ctx, conn, appKey+".profile")
+	if got, _ := livePdata["annualIncome"].(float64); got != 40000 {
+		t.Fatalf("live .profile must reflect the post-decision re-submit: annualIncome = %v, want 40000", livePdata["annualIncome"])
+	}
+
+	// A legitimate SERIAL re-decision — the SAME decision value re-submitted
+	// (idempotent under the terminal-decision guard) — must neither hard-
+	// reject (proving the create-only gate reads the snapshot's OWN key, not
+	// just SetApplicantProfile's unrelated upsert) nor re-derive the
+	// snapshot from the now-changed LIVE .profile: it must still read the
+	// ORIGINAL decision-time values (96000), never the post-decision
+	// re-submitted 40000.
+	decideReason(t, ctx, conn, cp, cons, "decsnapDecl2", appKey, "declined",
+		"Income below the 3x-rent threshold.", unitKey, "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
+
+	profile, _, signals = decidedSnapshot(t, ctx, conn, appKey)
+	if got, _ := profile["annualIncome"].(float64); got != 96000 {
+		t.Fatalf("decidedProfileSnapshot.profile.annualIncome must stay the DECISION-TIME value 96000 after a post-decision re-submit AND an idempotent re-decline, got %v", profile["annualIncome"])
+	}
+	if got, _ := signals["employmentVerified"].(bool); !got {
+		t.Fatalf("decidedProfileSnapshot.applicationSignals.employmentVerified must stay the decision-time value true, got %v", signals["employmentVerified"])
+	}
+
+	// (c) a decision reached with NO profile ever submitted still succeeds
+	// and stamps an EMPTY snapshot — a landlord may decide before
+	// SetApplicantProfile is ever called; the decision must not fail on
+	// missing profile data.
+	noProfileApplicant := seedApplicant(t, ctx, conn, "BBdecsnapEmptHJKRSTU")
+	noProfileAppKey := createApplication(t, ctx, conn, cp, cons, noProfileApplicant)
+	noProfileUnitKey := unitKeyFor(noProfileApplicant)
+	decide(t, ctx, conn, cp, cons, "decsnapEmpty1", noProfileAppKey, "declined", noProfileUnitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	emptyProfile, emptyParties, emptySignals := decidedSnapshot(t, ctx, conn, noProfileAppKey)
+	if len(emptyProfile) != 0 {
+		t.Fatalf("decidedProfileSnapshot.profile with no profile ever submitted must be empty, got %v", emptyProfile)
+	}
+	if len(emptyParties) != 0 {
+		t.Fatalf("decidedProfileSnapshot.underwritingParties with no profile ever submitted must be empty, got %v", emptyParties)
+	}
+	if len(emptySignals) != 0 {
+		t.Fatalf("decidedProfileSnapshot.applicationSignals with no profile ever submitted must be empty, got %v", emptySignals)
 	}
 }

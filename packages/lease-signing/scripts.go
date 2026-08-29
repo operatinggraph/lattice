@@ -716,6 +716,10 @@ def execute(state, op):
         # aspect {value, decidedAt} on the leaseapp. The convergence lens reads
         # app.decision.data.value: approved opens missing_listingLeased (→ the unit
         # leases); declined is a terminal disposition (declined OR'd in the lens).
+        # On the FIRST decision of either value, it also CREATE-ONLY-stamps a
+        # .decidedProfileSnapshot aspect preserving the qualification profile as
+        # it stood at that moment — the fair-housing record of what the
+        # landlord actually saw (below).
         app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
 
@@ -855,6 +859,54 @@ def execute(state, op):
                 renewal_opens_at = time.rfc3339_add(lease_end, "-__RENEWAL_WINDOW__")
                 mutations.append(make_aspect(app_key, "tenancy", "tenancy",
                     {"leaseStart": lease_start, "leaseEnd": lease_end, "renewalOpensAt": renewal_opens_at}))
+
+        # .decidedProfileSnapshot: the fair-housing preservation record —
+        # stamped exactly once, on the FIRST .decision write of EITHER value
+        # (approve OR decline; a decline is the more fair-housing-salient
+        # case, and a declined application stays just as rewritable) —
+        # CREATE-ONLY, mirroring the .tenancy read-then-create-only idiom
+        # above FOR REAL: the gate reads the SNAPSHOT'S OWN key
+        # (existing_snapshot below), never .decision (prior, above), because
+        # the commit path only lets a losing concurrent CREATE gracefully
+        # retry/no-op instead of hard-rejecting the whole mutation batch
+        # (including the otherwise-fine .decision write) when the create's
+        # OWN key was declared optionalReads and observed absent at step 4
+        # (commit_path.go's absentConditionedCreates) — gating on a read of a
+        # DIFFERENT key (.decision) leaves this create unconditioned from the
+        # commit path's point of view, so two concurrent first-decides (e.g.
+        # a double-clicked approve/decline button) would both pass the gate
+        # and the loser would hard-reject instead of harmlessly no-opping.
+        # SetApplicantProfile stays a freely re-submittable upsert (a
+        # landlord may ask an applicant to update details after deciding, a
+        # renewal cycle re-submits it years later), so without this snapshot
+        # the record of what the landlord actually saw when THEY decided is
+        # lost the moment a later submission overwrites .profile /
+        # .underwritingParties / .applicationSignals. A sibling if to the
+        # approve-only .tenancy block above (NOT nested inside the decision
+        # == "approved" branch): this must fire on BOTH approve and decline.
+        # read-posture: (d) declared optionalReads at DecideLeaseApplication
+        # dispatch — None is the expected, common first-decision case.
+        existing_snapshot = kv.Read(app_key + ".decidedProfileSnapshot")
+        if existing_snapshot == None or existing_snapshot.isDeleted:
+            # read-posture: (d) declared optionalReads at DecideLeaseApplication
+            # dispatch — a decision reached before any profile was ever
+            # submitted is the expected absent case, not an error: a landlord
+            # may decide before SetApplicantProfile is ever called, and the
+            # snapshot then captures an empty/partial record rather than
+            # failing the decision.
+            profile = kv.Read(app_key + ".profile")
+            # read-posture: (d) declared optionalReads at DecideLeaseApplication
+            # dispatch — same absence tolerance as .profile above.
+            underwriting_parties = kv.Read(app_key + ".underwritingParties")
+            # read-posture: (d) declared optionalReads at DecideLeaseApplication
+            # dispatch — same absence tolerance as .profile above.
+            application_signals = kv.Read(app_key + ".applicationSignals")
+            snapshot_data = {
+                "profile": profile.data if profile != None and not profile.isDeleted else {},
+                "underwritingParties": underwriting_parties.data if underwriting_parties != None and not underwriting_parties.isDeleted else {},
+                "applicationSignals": application_signals.data if application_signals != None and not application_signals.isDeleted else {},
+            }
+            mutations.append(make_aspect(app_key, "decidedProfileSnapshot", "decidedProfileSnapshot", snapshot_data))
 
         events = [{"class": "leaseapp.applicationDecided",
                    "data": {"leaseAppKey": app_key, "decision": decision}}]
