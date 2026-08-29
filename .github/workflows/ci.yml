@@ -245,7 +245,7 @@ jobs:
         run: STRICT=1 go run ./scripts/lint-capability-kv-readers.go
 
       - name: Weaver gap-column declaration lint (projected missing_* ⊆ declared gaps)
-        # A `missing_*` column a weaver-target-bound lens projects but the
+        # A `missing_*` column that lands in a weaver target's rows but which the
         # target's gaps map does not declare is held by dispatchGap on the
         # 5-minute long redelivery floor indefinitely: the row occupies a
         # MaxAckPending slot and re-runs the whole clearClosedMarks preamble
@@ -253,10 +253,14 @@ jobs:
         # from a column a package projects deliberately with no remediation, so
         # the deliberate case is made declarable (a `surface` gap, which raises a
         # standing Health issue and Acks) and this gate asserts the invariant.
-        # Keyed on the lens's Output.BodyColumns — the row Weaver evaluates, not
-        # the cypher proxy — read from the compiled pkgregistry Definitions, and
-        # looped over targets so unbound read-model lenses stay out of scope.
-        # One exemption: a target escalating `unplannable` to the Augur tier.
+        # The row body is the UNION of the feeding lens's Output.BodyColumns and
+        # Output.StaticEmptyColumns (Refractor's driver writes both), and the
+        # feeding lenses are every weaver-targets lens in the package whose
+        # OutputKeyPattern prefix equals the targetId — a targetId IS the row
+        # prefix, and lane-1 dispatch watches the bucket, not LensRef. Read from
+        # the compiled pkgregistry Definitions. One exemption: a target
+        # escalating `unplannable` to the Augur tier. Self-tests on every run and
+        # refuses an all-clear over zero examined columns.
         run: STRICT=1 go run ./scripts/lint-gap-column-declaration.go
 
       - name: Board lint (the backlog is an index, not a journal)

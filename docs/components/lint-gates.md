@@ -18,7 +18,7 @@ non-advisory finding.
 | `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding |
 | `lint-doc-orphan` | A doc comment names the declaration it sits above |
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
-| `lint-gap-column-declaration` | Every `missing_*` column a weaver-target-bound lens projects is declared in that target's `gaps` map |
+| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map |
 | `lint-board` | The backlog is an index, not a journal |
 
 ## The author-declares shape

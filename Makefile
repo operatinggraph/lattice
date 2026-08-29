@@ -2232,19 +2232,25 @@ lint-capability-kv-readers:
 	@echo "==> Linting Capability-KV single-read-path..."
 	go run ./scripts/lint-capability-kv-readers.go
 
-## lint-gap-column-declaration — every missing_* column a weaver-target-bound lens
-## projects is declared in that target's gaps map (Contract #10 §10.8). Weaver's
-## dispatchGap holds an undeclared open gap column on the 5-minute long redelivery
-## floor indefinitely — it occupies a MaxAckPending slot and re-runs the whole
-## clearClosedMarks preamble every floor, forever — because the engine cannot tell
-## an authoring omission from a column a package projects deliberately with no
+## lint-gap-column-declaration — every missing_* column that lands in a weaver
+## target's rows is declared in that target's gaps map (Contract #10 §10.8).
+## Weaver's dispatchGap holds an undeclared open gap column on the 5-minute long
+## redelivery floor indefinitely — it occupies a MaxAckPending slot and re-runs the
+## whole clearClosedMarks preamble every floor, forever — because the engine cannot
+## tell an authoring omission from a column a package projects deliberately with no
 ## remediation. The deliberate case is declarable (a `surface` gap, which raises a
 ## standing Health issue and Acks), so this gate asserts the resulting invariant.
-## Keyed on the lens's Output.BodyColumns (the row Weaver actually evaluates), read
-## from the COMPILED pkgregistry Definitions, and looped over targets so unbound
-## read-model lenses are out of scope. One exemption: a target whose Augur policy
-## escalates `unplannable` routes an undeclared column to the reasoning tier.
-## An unresolvable LensRef is reported, never silently passed.
+## The row body is the UNION of the feeding lens's Output.BodyColumns and
+## Output.StaticEmptyColumns (Refractor's driver writes both into the envelope);
+## the feeding lenses are every weaver-targets lens in the package whose
+## OutputKeyPattern prefix equals the targetId, since a targetId IS the row prefix
+## and lane-1 dispatch watches the bucket, not LensRef. Read from the COMPILED
+## pkgregistry Definitions. One exemption: a target whose Augur policy escalates
+## `unplannable` routes an undeclared column to the reasoning tier. An unresolvable
+## LensRef, a prefix/targetId mismatch, and a lens whose columns the gate cannot
+## read (non-actorAggregate, or no Output) are each reported, never silently
+## passed. Runs an embedded self-test on every invocation (--selftest to see it)
+## and refuses an all-clear over zero examined columns.
 ## Advisory by default; STRICT=1 exits non-zero.
 lint-gap-column-declaration:
 	@echo "==> Linting weaver gap-column declarations..."
