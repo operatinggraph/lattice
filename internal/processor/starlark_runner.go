@@ -461,11 +461,28 @@ func starlarkDictToGoMap(d *starlarklib.Dict) map[string]interface{} {
 // (lib/json), and only falls through to Iterable — which yields key names alone —
 // because that method is absent. A value-yielding surface has to record a
 // whole-set consumption, like String/items/values do.
+// readRecorder is the drift-detection record of what this execution read. The
+// `state` global is the second read path into Core KV alongside the `kv`
+// builtins, so a record that only saw kv.Read would under-report every script
+// that consumes its contextHint through `state`.
 type stateMapValue struct {
 	d              *starlarklib.Dict
 	requiredAbsent map[string]struct{}
 	deferredMiss   *deferredMissTracker
 	sensitiveReads *sensitiveReadTracker
+	readRecorder   *scriptReadRecorder
+}
+
+// snapshotKeys returns the key names of the hydrated dict — exactly the set a
+// whole-set exposure hands the script.
+func (s *stateMapValue) snapshotKeys() []string {
+	keys := make([]string, 0, s.d.Len())
+	for _, k := range s.d.Keys() {
+		if ks, ok := k.(starlarklib.String); ok {
+			keys = append(keys, string(ks))
+		}
+	}
+	return keys
 }
 
 // String implements starlarklib.Value. A dict renders its VALUES, so this is a
@@ -482,6 +499,7 @@ type stateMapValue struct {
 // it in a log line, or every external-egress op that got logged would reject.
 func (s *stateMapValue) String() string {
 	s.sensitiveReads.consumeAll()
+	s.readRecorder.recordAllDeclaredReads(s.snapshotKeys()...)
 	return s.d.String()
 }
 
@@ -492,9 +510,14 @@ func (s *stateMapValue) Hash() (uint32, error)   { return 0, fmt.Errorf("state i
 
 // Get implements starlarklib.Mapping — supports `state[key]` and `key in state`.
 func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found bool, err error) {
-	if ks, ok := k.(starlarklib.String); ok {
+	ks, isString := k.(starlarklib.String)
+	if isString {
 		if _, required := s.requiredAbsent[string(ks)]; required {
 			s.deferredMiss.fault(string(ks))
+			// The operation declared this key — that is why it is fail-closed —
+			// so the read is recorded before the fault, exactly as kv.Read's
+			// required-absent branch records it.
+			s.readRecorder.recordDeclaredRead(string(ks))
 			return nil, false, fmt.Errorf("state: declared read is absent: %s", string(ks))
 		}
 		// Naming a key is the script consuming that document. `in` routes through
@@ -502,7 +525,15 @@ func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found boo
 		// consumption — conservative, and never weaker than flipping at hydration.
 		s.sensitiveReads.consume(string(ks))
 	}
-	return s.d.Get(k)
+	v, found, err = s.d.Get(k)
+	if isString && found {
+		// The snapshot ANSWERED with a document, so the key was hydrated and
+		// therefore declared. A probe the snapshot cannot answer records
+		// nothing: the script learned only that its own declared set lacks the
+		// key, which is not a read of Core KV at all.
+		s.readRecorder.recordDeclaredRead(string(ks))
+	}
+	return v, found, err
 }
 
 // Iterate implements starlarklib.Iterable — supports `for k in state`.
@@ -517,6 +548,9 @@ func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found boo
 // A prefix scan that finds nothing is therefore the script's own to handle, on
 // the same footing as any guard: `find_assigned_link` in orchestration-base
 // returns None and its caller fails closed (`UnknownAssignedLink`).
+//
+// A dict's iterator yields KEYS, never entries, so no document crosses here and
+// nothing is recorded — the value the loop body then names routes through Get.
 func (s *stateMapValue) Iterate() starlarklib.Iterator {
 	return s.d.Iterate()
 }
@@ -589,9 +623,13 @@ func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
 		}
 		return starlarklib.NewBuiltin(name, func(thread *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
 			s.sensitiveReads.consumeAll()
+			s.readRecorder.recordAllDeclaredReads(s.snapshotKeys()...)
 			return starlarklib.Call(thread, fn, args, kwargs)
 		}), nil
 	case "keys":
+		// Records nothing, for the same reason it delegates untouched: it
+		// yields key NAMES the script already declared, never a document. The
+		// asymmetry with items/values is that those two hand over the values.
 		return s.d.Attr(name)
 	default:
 		// Not in stateAttrs — no such attribute (default-deny; see stateAttrs).
@@ -612,6 +650,7 @@ func vertexMapToStarlarkWithHydrated(sc ScriptContext) *stateMapValue {
 		requiredAbsent: sc.RequiredAbsent,
 		deferredMiss:   sc.DeferredMiss,
 		sensitiveReads: sc.SensitiveReads,
+		readRecorder:   sc.ReadRecorder,
 	}
 }
 

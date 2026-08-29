@@ -6,15 +6,17 @@ import (
 	"slices"
 )
 
-// scriptReadRecorder records what one Starlark execution ACTUALLY read through
-// the `kv` builtins, so the record can be compared against what the operation's
+// scriptReadRecorder records what one Starlark execution ACTUALLY read — through
+// the `state` global and through the `kv` builtins, the two paths a script has
+// into Core KV — so the record can be compared against what the operation's
 // `contextHint` DECLARED (Contract #2 §2.5 / §2.5.1).
 //
 // It separates the two dispositions structurally rather than by diffing sets:
-//   - declaredReads — keys kv.Read served out of the step-4 snapshot
-//     (`contextHint.reads` / `egressReads` present or absent, `optionalReads`
-//     present or absent). Reaching one of those branches IS the proof the key
-//     was declared;
+//   - declaredReads — keys the step-4 snapshot answered: kv.Read served from
+//     Hydrated / RequiredAbsent / KnownAbsent, and every `state` exposure that
+//     hands the script a document (`state[K]`, `state.get(K)`, and the whole-set
+//     `items`/`values`/`str`). The snapshot holds only what `contextHint`
+//     named, so a key it answers IS declared — no set difference needed;
 //   - liveReads — keys kv.Read served through the lazy on-demand fallthrough.
 //     That branch is reached only when the key is in none of Hydrated /
 //     RequiredAbsent / KnownAbsent, so every key recorded there is undeclared by
@@ -56,6 +58,23 @@ func (r *scriptReadRecorder) recordDeclaredRead(key string) {
 		r.declaredReads = make(map[string]struct{})
 	}
 	r.declaredReads[key] = struct{}{}
+}
+
+// recordAllDeclaredReads records an exposure that hands the script every
+// hydrated document without naming a key — `state.items()` / `state.values()`,
+// and `String()`, through which `str`/`repr`/`%`/`.format`/`+` render every
+// document. The whole snapshot reached the script, so the whole snapshot is
+// read, on the same footing as sensitiveReadTracker.consumeAll.
+func (r *scriptReadRecorder) recordAllDeclaredReads(keys ...string) {
+	if r == nil || len(keys) == 0 {
+		return
+	}
+	if r.declaredReads == nil {
+		r.declaredReads = make(map[string]struct{}, len(keys))
+	}
+	for _, k := range keys {
+		r.declaredReads[k] = struct{}{}
+	}
 }
 
 // recordLiveRead records that the script read key through the lazy on-demand
@@ -147,8 +166,8 @@ type ScriptEnumeration struct {
 	Direction string
 }
 
-// ScriptReadRecord is the sorted snapshot of one execution's `kv` builtin reads
-// (see scriptReadRecorder for what each field means and why the record is
+// ScriptReadRecord is the sorted snapshot of one execution's reads (see
+// scriptReadRecorder for what each field means and why the record is
 // observation only). Slices are sorted and nil when empty.
 type ScriptReadRecord struct {
 	DeclaredReads      []string

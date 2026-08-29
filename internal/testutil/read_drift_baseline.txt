@@ -1,0 +1,290 @@
+# MEASURED RESIDUE, NOT A PERMISSION LIST.
+#
+# Every row is a shape some script read or walked live in a test run while the
+# submitting envelope declared nothing that covers it. The file exists so the
+# drift guard (read_drift_guard.go) can be armed on every CapabilityPipeline
+# TODAY: no NEW undeclared read or walk can land, whatever these rows say.
+#
+# A row is a shape the guard TOLERATES, never one it endorses. Reads already
+# sanctioned as Contract #2 §2.5 class-(e) follow-ups on an enumeration are
+# admitted by the guard itself and never appear here.
+#
+# WHAT THESE ROWS ACTUALLY ARE — four different things, and only the first two
+# are removable. Do not read the file as one undifferentiated debt pile; the
+# classification below was measured against the declaring sources, not assumed.
+#
+#  1. The envelope the TEST builds under-declares what the real dispatcher
+#     already sends — 42 of the 102 read shapes, ~61% of occurrences. The
+#     script is fine and production declares correctly; the fixture omits it,
+#     which means the test drives the lazy live-read path production never
+#     takes. Fix the fixture, drop the row.
+#  2. A genuine declaration gap, payload-direct and therefore declarable —
+#     CreateStudio / CreateMenuItem's `worksAt` confinement reads. Fix the
+#     descriptor, drop the row.
+#  3. Sanctioned and undeclarable BY DESIGN — class-(c) config reads
+#     (clinic-domain's provider `.hours`/`.timeOff`, deliberately outside OCC)
+#     and reads chained off a value only a prior read resolves. Nothing should
+#     ever declare these; the rows record where the guard must stay quiet.
+#  4. WALK rows: 49 of the 52 operations here have no declaration channel at
+#     all — `pkgmgr.OpDispatchSpec` carries no Enumerations field
+#     (internal/pkgmgr/definition.go), so an ordinary descriptor-dispatched op
+#     CANNOT declare a kv.Links walk. Only Loom StepSpec and Weaver
+#     GapActionSpec can, and the three ops that do declare theirs use exactly
+#     those. These rows are a missing vocabulary, not script debt.
+#
+# Rows are REMOVED when a dispatcher declares the key or walk, and are added
+# ONLY by regenerating from a fresh census — never by hand to silence a failing
+# test. A guard failure means a script started reading something new; the fix is
+# the declaration the failure names.
+#
+# Format: <kind> TAB <operationType> TAB <normalized shape>, sorted.
+# GENERATED — regenerate with the census + command in
+# scripts/gen-read-drift-baseline.go.
+
+# read rows: per operationType, the live Core KV reads no declaration covers.
+#
+read	CancelBooking	lnk.identity.<id>.worksAt.building.<id>
+read	CancelRenewal	lnk.identity.<id>.manages.unit.<id>
+read	Charge	vtx.leaseapp.<id>
+read	ClinicCreditAccount	lnk.patient.<id>.identifiedBy.identity.<id>
+read	CreateAppointment	lnk.identity.<id>.worksAt.building.<id>
+read	CreateAppointment	lnk.patient.<id>.identifiedBy.identity.<id>
+read	CreateAppointment	vtx.provider.<id>.hours
+read	CreateAppointment	vtx.provider.<id>.timeOff
+read	CreateAugurReasoningClaim	vtx.leaseapp.<id>
+read	CreateAugurReasoningClaim	vtx.meta.<id>
+read	CreateAuthoringClaim	vtx.capabilityproposal.<id>
+read	CreateAuthoringClaim	vtx.capabilityproposal.<id>.request
+read	CreateBooking	lnk.identity.<id>.worksAt.building.<id>
+read	CreateBooking	vtx.identity.<id>.slot<t>
+read	CreateBooking	vtx.session.<id>.schedule
+read	CreateBooking	vtx.session.<id>.seat1
+read	CreateLeaseApplication	lnk.identity.<id>.appliedToUnit.unit.<id>
+read	CreateLeaseDocInstance	vtx.leaseapp.<id>.signature
+read	CreateMenuItem	lnk.identity.<id>.worksAt.building.<id>
+read	CreatePatient	vtx.identity.<id>.patientClaim
+read	CreateSession	lnk.identity.<id>.worksAt.building.<id>
+read	CreateStudio	lnk.identity.<id>.worksAt.building.<id>
+read	CreateStudio	lnk.identity.<id>.worksAt.unit.<id>
+read	CreateTask	vtx.identity.<id>.availability
+read	CreateTask	vtx.task.<id>
+read	CreateUnclaimedIdentity	vtx.identity.<id>.erasureRequested
+read	CreateUnclaimedIdentity	vtx.identity.<id>.piiKey
+read	CreditAccount	lnk.leaseapp.<id>.applicationFor.identity.<id>
+read	CreditCafeAccount	lnk.identity.<id>.worksAt.building.<id>
+read	CreditCafeAccount	lnk.identity.<id>.worksAt.floor.<id>
+read	CreditCafeAccount	lnk.identity.<id>.worksAt.unit.<id>
+read	CreditCafeAccount	lnk.leaseapp.<id>.applicationFor.identity.<id>
+read	DecideLeaseApplication	lnk.identity.<id>.manages.unit.<id>
+read	DecideLeaseApplication	lnk.identity.<id>.worksAt.building.<id>
+read	DecideLeaseApplication	lnk.identity.<id>.worksAt.unit.<id>
+read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+read	JoinWaitlist	vtx.identity.<id>.slot<t>
+read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.building.<id>
+read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.unit.<id>
+read	MarkCapabilityProposalApplied	vtx.capabilityproposal.<id>.review
+read	MarkCapabilityProposalApplied	vtx.capabilityproposal.<id>.target
+read	MarkCapabilityProposalApplied	vtx.package.<id>
+read	MarkCapabilityProposalApplied	vtx.package.<id>.manifest
+read	MergeIdentity	lnk.identityindex.<id>.indexes.identity.<id>
+read	MergeIdentity	vtx.credentialindex.<id>
+read	OpenTab	lnk.identity.<id>.worksAt.building.<id>
+read	OpenTab	lnk.identity.<id>.worksAt.unit.<id>
+read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+read	ProvisionConsumerIdentity	vtx.identity.<id>
+read	ProvisionConsumerIdentity	vtx.role.<id>
+read	ReassignSession	lnk.session.<id>.atStudio.studio.<id>
+read	ReassignSession	lnk.session.<id>.ledBy.instructor.<id>
+read	ReassignSession	vtx.instructor.<id>.slot<t>
+read	ReassignSession	vtx.studio.<id>.slot<t>
+read	RecordCapabilityInstallReceipt	vtx.capabilityproposal.<id>.review
+read	RecordCapabilityInstallReceipt	vtx.capabilityproposal.<id>.target
+read	RecordCapabilityInstallReceipt	vtx.package.<id>
+read	RecordCapabilityInstallReceipt	vtx.package.<id>.manifest
+read	RecordCapabilityProposal	vtx.capabilityauthorclaim.<id>.target
+read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
+read	RecordProposal	vtx.augurproposal.<id>.gap
+read	RecordProposal	vtx.augurproposal.BBaugurNoclHJKMNPQRS.gap
+read	RecordProposalDispatch	vtx.augurproposal.<id>.review
+read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
+read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
+read	ReportIssue	lnk.identity.<id>.worksAt.building.<id>
+read	ReportIssue	lnk.identity.<id>.worksAt.unit.<id>
+read	RescheduleAppointment	lnk.appointment.<id>.forPatient.patient.<id>
+read	RescheduleAppointment	lnk.appointment.<id>.withProvider.provider.<id>
+read	RescheduleAppointment	vtx.appointment.<id>.schedule
+read	RescheduleAppointment	vtx.provider.<id>.hours
+read	RescheduleAppointment	vtx.provider.<id>.timeOff
+read	ResolveWorkOrder	lnk.identity.<id>.worksAt.building.<id>
+read	ResolveWorkOrder	lnk.identity.<id>.worksAt.unit.<id>
+read	ResumeVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+read	RetireMenuItem	lnk.identity.<id>.worksAt.building.<id>
+read	ReviewCapabilityProposal	vtx.capabilityproposal.<id>.review
+read	SetAppointmentSite	lnk.identity.<id>.worksAt.building.<id>
+read	SetAppointmentSite	lnk.provider.<id>.identifiedBy.identity.<id>
+read	SetAppointmentSite	lnk.provider.<id>.practicesAt.building.<id>
+read	SetAppointmentSite	vtx.building.<id>
+read	SetAppointmentStatus	lnk.appointment.<id>.forPatient.patient.<id>
+read	SetAppointmentStatus	lnk.appointment.<id>.withProvider.provider.<id>
+read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
+read	SetAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
+read	SetAppointmentStatus	vtx.appointment.<id>.schedule
+read	SetAppointmentStatus	vtx.appointment.<id>.status
+read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
+read	SetVisitSeriesSite	lnk.identity.<id>.worksAt.building.<id>
+read	Settle	vtx.leaseapp.<id>
+read	ShredIdentityKey	vtx.identity.<id>.piiKey
+read	StartVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+read	StartVisitSeries	vtx.patient.<id>.activeVisitSeriesWith<id>
+read	StartVisitSeries	vtx.visitseries.<id>.paused
+read	StartVisitSeries	vtx.visitseries.<id>.series
+read	TombstoneAppointment	lnk.appointment.<id>.forPatient.patient.<id>
+read	TombstoneAppointment	lnk.appointment.<id>.withProvider.provider.<id>
+read	TombstoneAppointment	vtx.appointment.<id>.schedule
+read	VerifyGuarantor	lnk.identity.<id>.manages.unit.<id>
+read	VoidCharge	lnk.identity.<id>.worksAt.building.<id>
+read	VoidCharge	lnk.identity.<id>.worksAt.unit.<id>
+read	VoidCharge	vtx.leaseapp.<id>
+
+# walk rows: per operationType, the kv.Links enumerations no contextHint declares.
+#
+walk	AssignUnitOwner	vtx.identity.<id> holdsRole out
+walk	BackfillAppointmentSite	vtx.appointment.<id> atSite out
+walk	BackfillAppointmentSite	vtx.appointment.<id> withProvider out
+walk	BackfillAppointmentSite	vtx.provider.<id> practicesAt out
+walk	BackfillVisitSeriesSite	vtx.provider.<id> practicesAt out
+walk	BackfillVisitSeriesSite	vtx.visitseries.<id> atSite out
+walk	BackfillVisitSeriesSite	vtx.visitseries.<id> withProvider out
+walk	CancelBooking	vtx.booking.<id> settlesClassPrice in
+walk	CancelBooking	vtx.building.<id> containedIn out
+walk	CancelBooking	vtx.identity.<id> holdsRole out
+walk	CancelBooking	vtx.session.<id> atStudio out
+walk	CancelBooking	vtx.session.<id> forSession in
+walk	CancelBooking	vtx.studio.<id> locatedAt out
+walk	CancelBooking	vtx.wellnesstransaction.<id> postedTo out
+walk	CancelRenewal	vtx.leaseapp.<id> appliesToUnit out
+walk	CancelRenewal	vtx.renewal.<id> renews out
+walk	Charge	vtx.identity.<id> holdsRole out
+walk	Charge	vtx.leaseapp.<id> appliesToUnit out
+walk	Charge	vtx.menuitem.<id> servedAt out
+walk	Charge	vtx.unit.<id> containedIn out
+walk	ClinicCreditAccount	vtx.clinicaccount.<id> heldFor out
+walk	ClinicCreditAccount	vtx.clinicaccount.<id> postedTo in
+walk	CreateAppointment	vtx.building.<id> containedIn out
+walk	CreateAppointment	vtx.identity.<id> holdsRole out
+walk	CreateAppointment	vtx.leaseapp.<id> applicationFor out
+walk	CreateAppointment	vtx.provider.<id> practicesAt out
+walk	CreateBooking	vtx.building.<id> containedIn out
+walk	CreateBooking	vtx.identity.<id> holdsRole out
+walk	CreateBooking	vtx.session.<id> atLocation out
+walk	CreateBooking	vtx.session.<id> atStudio out
+walk	CreateBooking	vtx.studio.<id> locatedAt out
+walk	CreateLeaseDocInstance	vtx.leaseapp.<id> applicationFor out
+walk	CreateLeaseDocInstance	vtx.leaseapp.<id> appliesToUnit out
+walk	CreateLeaseDocInstance	vtx.unit.<id> manages in
+walk	CreateMenuItem	vtx.building.<id> containedIn out
+walk	CreateMenuItem	vtx.identity.<id> holdsRole out
+walk	CreateSession	vtx.building.<id> containedIn out
+walk	CreateSession	vtx.identity.<id> holdsRole out
+walk	CreateSession	vtx.studio.<id> locatedAt out
+walk	CreateSessionSeries	vtx.identity.<id> holdsRole out
+walk	CreateSessionSeries	vtx.studio.<id> locatedAt out
+walk	CreateStudio	vtx.building.<id> containedIn out
+walk	CreateStudio	vtx.identity.<id> holdsRole out
+walk	CreateStudio	vtx.unit.<id> containedIn out
+walk	CreditAccount	vtx.account.<id> heldFor out
+walk	CreditAccount	vtx.account.<id> postedTo in
+walk	CreditCafeAccount	vtx.building.<id> containedIn out
+walk	CreditCafeAccount	vtx.cafeaccount.<id> heldFor out
+walk	CreditCafeAccount	vtx.cafeaccount.<id> postedTo in
+walk	CreditCafeAccount	vtx.floor.<id> containedIn out
+walk	CreditCafeAccount	vtx.identity.<id> holdsRole out
+walk	CreditCafeAccount	vtx.leaseapp.<id> appliesToUnit out
+walk	CreditCafeAccount	vtx.unit.<id> containedIn out
+walk	DecideLeaseApplication	vtx.building.<id> containedIn out
+walk	DecideLeaseApplication	vtx.identity.<id> holdsRole out
+walk	DecideLeaseApplication	vtx.leaseapp.<id> appliesToUnit out
+walk	DecideLeaseApplication	vtx.unit.<id> containedIn out
+walk	EndVisitSeries	vtx.building.<id> containedIn out
+walk	EndVisitSeries	vtx.identity.<id> holdsRole out
+walk	EndVisitSeries	vtx.provider.<id> practicesAt out
+walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
+walk	JoinWaitlist	vtx.identity.<id> holdsRole out
+walk	LoftspaceCreateAccount	vtx.building.<id> containedIn out
+walk	LoftspaceCreateAccount	vtx.identity.<id> holdsRole out
+walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
+walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out
+walk	MarkPastDueNoShow	vtx.appointment.<id> forPatient out
+walk	MarkPastDueNoShow	vtx.appointment.<id> withProvider out
+walk	MergeIdentity	vtx.identity.<id> assignedTo in
+walk	MergeIdentity	vtx.identity.<id> indexes in
+walk	OpenTab	vtx.building.<id> containedIn out
+walk	OpenTab	vtx.identity.<id> holdsRole out
+walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
+walk	OpenTab	vtx.unit.<id> containedIn out
+walk	PauseVisitSeries	vtx.building.<id> containedIn out
+walk	PauseVisitSeries	vtx.identity.<id> holdsRole out
+walk	PauseVisitSeries	vtx.provider.<id> practicesAt out
+walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
+walk	ReassignSession	vtx.identity.<id> holdsRole out
+walk	ReassignSession	vtx.session.<id> atStudio out
+walk	ReassignSession	vtx.session.<id> ledBy out
+walk	RecordEncounter	vtx.identity.<id> holdsRole out
+walk	RecordIdentityPII	vtx.identity.<id> holdsRole out
+walk	RecordServiceOutcome	vtx.identity.<id> holdsRole out
+walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
+walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
+walk	RemoveUnitOwner	vtx.identity.<id> holdsRole out
+walk	ReportIssue	vtx.building.<id> containedIn out
+walk	ReportIssue	vtx.identity.<id> holdsRole out
+walk	ReportIssue	vtx.unit.<id> containedIn out
+walk	RescheduleAppointment	vtx.identity.<id> holdsRole out
+walk	ResolveWorkOrder	vtx.building.<id> containedIn out
+walk	ResolveWorkOrder	vtx.identity.<id> holdsRole out
+walk	ResolveWorkOrder	vtx.unit.<id> containedIn out
+walk	ResolveWorkOrder	vtx.workorder.<id> locatedAt out
+walk	ResumeVisitSeries	vtx.identity.<id> holdsRole out
+walk	ResumeVisitSeries	vtx.provider.<id> practicesAt out
+walk	ResumeVisitSeries	vtx.visitseries.<id> withProvider out
+walk	RetireMenuItem	vtx.building.<id> containedIn out
+walk	RetireMenuItem	vtx.identity.<id> holdsRole out
+walk	RetireMenuItem	vtx.menuitem.<id> servedAt out
+walk	SetAppointmentSite	vtx.appointment.<id> atSite out
+walk	SetAppointmentSite	vtx.appointment.<id> withProvider out
+walk	SetAppointmentSite	vtx.building.<id> containedIn out
+walk	SetAppointmentSite	vtx.identity.<id> holdsRole out
+walk	SetAppointmentSite	vtx.provider.<id> practicesAt out
+walk	SetAppointmentStatus	vtx.appointment.<id> atSite out
+walk	SetAppointmentStatus	vtx.appointment.<id> withProvider out
+walk	SetAppointmentStatus	vtx.identity.<id> holdsRole out
+walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
+walk	SetBookingAttendance	vtx.identity.<id> holdsRole out
+walk	SetInstructorProfile	vtx.identity.<id> holdsRole out
+walk	SetProviderHours	vtx.identity.<id> holdsRole out
+walk	SetProviderTimeOff	vtx.identity.<id> holdsRole out
+walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
+walk	SetRenewalTerms	vtx.renewal.<id> renews out
+walk	SetServiceProviderProfile	vtx.identity.<id> holdsRole out
+walk	SetVisitSeriesSite	vtx.building.<id> containedIn out
+walk	SetVisitSeriesSite	vtx.identity.<id> holdsRole out
+walk	SetVisitSeriesSite	vtx.provider.<id> practicesAt out
+walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out
+walk	SetVisitSeriesSite	vtx.visitseries.<id> withProvider out
+walk	Settle	vtx.identity.<id> holdsRole out
+walk	Settle	vtx.leaseapp.<id> appliesToUnit out
+walk	SettleStaleTab	vtx.tab.<id> chargedTo out
+walk	SignLease	vtx.leaseapp.<id> appliesToUnit out
+walk	StartVisitSeries	vtx.building.<id> containedIn out
+walk	StartVisitSeries	vtx.identity.<id> holdsRole out
+walk	StartVisitSeries	vtx.provider.<id> practicesAt out
+walk	TombstoneSession	vtx.identity.<id> holdsRole out
+walk	TombstoneSession	vtx.session.<id> ledBy out
+walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out
+walk	VerifyGuarantor	vtx.renewal.<id> renews out
+walk	VoidCharge	vtx.building.<id> containedIn out
+walk	VoidCharge	vtx.identity.<id> holdsRole out
+walk	VoidCharge	vtx.leaseapp.<id> appliesToUnit out
+walk	VoidCharge	vtx.unit.<id> containedIn out
+walk	WellnessCreditAccount	vtx.wellnessaccount.<id> heldFor out
+walk	WellnessCreditAccount	vtx.wellnessaccount.<id> postedTo in
+

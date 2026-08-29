@@ -23,6 +23,7 @@ import (
 const (
 	readRecDeclaredID = "Rd4kPmRtw9nbCxz5vQ2y"
 	readRecLiveID     = "Rv6mP3qBn4rT8wYxK7Vc"
+	readRecStateID    = "Rs7kQmBtw4nbCxz5vP2y"
 )
 
 // assertRecordedKeys compares one classification of a record against the exact
@@ -167,6 +168,175 @@ def execute(state, op):
 	assertRecordedKeys(t, "DeclaredReads", got.DeclaredReads, nil)
 }
 
+// stateSnapshotContext builds a context whose step-4 snapshot holds two
+// hydrated documents, with a live reader that would serve both. The reader is
+// the non-vacuity control for the `state` tests: nothing they record may come
+// from a live read.
+func stateSnapshotContext(rec *scriptReadRecorder) (ScriptContext, string, string) {
+	k1 := "vtx.identity." + readRecDeclaredID
+	k2 := "vtx.identity." + readRecStateID
+	return ScriptContext{
+		Hydrated: map[string]VertexDoc{
+			k1: {Key: k1, Class: "identity", Data: map[string]interface{}{"n": "one"}},
+			k2: {Key: k2, Class: "identity", Data: map[string]interface{}{"n": "two"}},
+		},
+		KVReader: &fakeKVReader{docs: map[string]*VertexDoc{
+			k1: {Key: k1, Class: "identity"},
+			k2: {Key: k2, Class: "identity"},
+		}},
+		ReadRecorder: rec,
+	}, k1, k2
+}
+
+// TestScriptReadRecord_StateSubscriptRecordsOnlyThatKey is the positive vector
+// for the second read path: `state` is a read of Core KV that never touches
+// kv.Read, and a record that missed it would under-report every script that
+// consumes its contextHint through the snapshot. Naming ONE of two hydrated keys
+// records that key ALONE — a seam that recorded the whole snapshot on any
+// subscript would pass a mere non-emptiness check while making the record
+// useless for drift.
+func TestScriptReadRecord_StateSubscriptRecordsOnlyThatKey(t *testing.T) {
+	rec := &scriptReadRecorder{}
+	sc, k1, _ := stateSnapshotContext(rec)
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    v = state["`+k1+`"]
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := rec.record()
+	assertRecordedKeys(t, "DeclaredReads", got.DeclaredReads, []string{k1})
+	assertRecordedKeys(t, "LiveReads", got.LiveReads, nil)
+}
+
+// TestScriptReadRecord_StateGetRecordsNamedKey — `state.get(K)` is re-bound onto
+// the wrapper's Get, so it records exactly as a subscript does.
+func TestScriptReadRecord_StateGetRecordsNamedKey(t *testing.T) {
+	rec := &scriptReadRecorder{}
+	sc, _, k2 := stateSnapshotContext(rec)
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    v = state.get("`+k2+`")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := rec.record()
+	assertRecordedKeys(t, "DeclaredReads", got.DeclaredReads, []string{k2})
+}
+
+// TestScriptReadRecord_StateProbeOfUnansweredKeyRecordsNothing — a membership
+// test or defaulted get for a key the snapshot does NOT hold answers from the
+// script's own declared set, not from Core KV. Recording it would be the
+// fail-open direction for a drift check: an undeclared key would appear as a
+// declared read.
+func TestScriptReadRecord_StateProbeOfUnansweredKeyRecordsNothing(t *testing.T) {
+	rec := &scriptReadRecorder{}
+	sc, _, _ := stateSnapshotContext(rec)
+	undeclared := "vtx.identity." + readRecLiveID
+	res, err := runKVScript(t, sc, `
+def execute(state, op):
+    present = "`+undeclared+`" in state
+    v = state.get("`+undeclared+`", None)
+    return {"mutations": [], "events": [{"class": "probe", "data": {"present": present, "none": v == None}}]}
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	d := res.Events[0].Data
+	if d["present"] != false || d["none"] != true {
+		t.Fatalf("probe of an unheld key: %+v, want absent", d)
+	}
+	got := rec.record()
+	assertRecordedKeys(t, "DeclaredReads", got.DeclaredReads, nil)
+	assertRecordedKeys(t, "LiveReads", got.LiveReads, nil)
+}
+
+// TestScriptReadRecord_StateRequiredAbsentSubscriptRecorded — the `state` half of
+// the fail-closed declared read. The subscript faults with the deferred
+// HydrationMiss, and the key the operation depends on is in the record.
+func TestScriptReadRecord_StateRequiredAbsentSubscriptRecorded(t *testing.T) {
+	key := "vtx.identity." + readRecDeclaredID
+	rec := &scriptReadRecorder{}
+	sc, _ := requiredAbsentContext(key)
+	sc.ReadRecorder = rec
+
+	_, err := runKVScript(t, sc, `
+def execute(state, op):
+    v = state["`+key+`"]
+    return {"mutations": [], "events": []}
+`)
+	assertDeferredMiss(t, err, key)
+	got := rec.record()
+	assertRecordedKeys(t, "DeclaredReads", got.DeclaredReads, []string{key})
+	assertRecordedKeys(t, "LiveReads", got.LiveReads, nil)
+}
+
+// TestScriptReadRecord_StateWholeSetExposuresRecordEverything — `items()`,
+// `values()` and every rendering path through String() hand the script EVERY
+// hydrated document without naming a key, so each records the whole snapshot.
+// A record that only counted named keys would read as "this script touched
+// nothing" for a script that dumped the lot.
+func TestScriptReadRecord_StateWholeSetExposuresRecordEverything(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"items", `    for k, v in state.items():
+        pass`},
+		{"values", `    for v in state.values():
+        pass`},
+		{"str", `    s = str(state)`},
+		{"format", `    s = "{}".format(state)`},
+		{"percent", `    s = "%s" % state`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &scriptReadRecorder{}
+			sc, k1, k2 := stateSnapshotContext(rec)
+			if _, err := runKVScript(t, sc, `
+def execute(state, op):
+`+tc.body+`
+    return {"mutations": [], "events": []}
+`); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			want := []string{k1, k2}
+			slices.Sort(want)
+			assertRecordedKeys(t, "DeclaredReads", rec.record().DeclaredReads, want)
+		})
+	}
+}
+
+// TestScriptReadRecord_StateKeyOnlySurfacesRecordNothing — `keys()` and iterating
+// `state` yield key NAMES the operation already declared, never a document, so
+// neither is a read. This is the asymmetry with items/values, and recording here
+// would report every script that loops over its own contextHint as having read
+// the whole snapshot.
+func TestScriptReadRecord_StateKeyOnlySurfacesRecordNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"keys", `    ks = state.keys()`},
+		{"iterate", `    for k in state:
+        pass`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &scriptReadRecorder{}
+			sc, _, _ := stateSnapshotContext(rec)
+			if _, err := runKVScript(t, sc, `
+def execute(state, op):
+`+tc.body+`
+    return {"mutations": [], "events": []}
+`); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertRecordedKeys(t, "DeclaredReads", rec.record().DeclaredReads, nil)
+		})
+	}
+}
+
 // TestScriptReadRecord_EnumerationAndEndpointsRecorded — a completed kv.Links
 // walk records the (hub, relation, direction) triple in the same terms a
 // contextHint enumeration declares it, plus every endpoint vertex key the page
@@ -303,6 +473,10 @@ def execute(state, op):
     kv.Read("vtx.task.hydrated")
     kv.Read("vtx.task.undeclared")
     kv.Links("`+hub+`", "hasBooking", "out")
+    v = state["vtx.task.hydrated"]
+    for k, e in state.items():
+        pass
+    s = str(state)
     return {"mutations": [], "events": []}
 `); err != nil {
 		t.Fatalf("an unwired recorder must not affect execution: %v", err)

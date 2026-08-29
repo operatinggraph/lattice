@@ -317,6 +317,15 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	if cfg.ClaimEmitter != nil {
 		deps.ClaimEmitter = cfg.ClaimEmitter
 	}
+	// The drift guard is armed unconditionally — a read-posture guard nobody
+	// turns on protects nothing. The census rides alongside it only when
+	// LATTICE_READ_CENSUS names a file, since it is what regenerates the
+	// guard's baseline.
+	observers := multiScriptReadObserver{NewReadDriftGuard(t)}
+	if census := SharedReadCensus(); census != nil {
+		observers = append(observers, census)
+	}
+	deps.ScriptReadObserver = observers
 	cp := processor.NewCommitPath(deps)
 	filterSubjects := cfg.FilterSubjects
 	if len(filterSubjects) == 0 {
