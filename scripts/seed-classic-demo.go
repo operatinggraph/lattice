@@ -455,19 +455,61 @@ func servedAtIsLive(ctx context.Context, conn *substrate.Conn, menuItemKey strin
 	return false
 }
 
-// reapDuplicateProviders tombstones every live "Dr. Classic Demo" provider
-// other than the checked-in canonical one (keep) — adbf2571 pinned the
-// seed's provider id going forward but never reaped the pre-pin duplicates,
-// so the patient booking picker still offers all of them, none carrying
-// hours or a practicesAt site (verticals.md). Name-filtered only (no
-// location join at CreateProvider time to filter on, unlike menu items) —
-// safe because only this script ever mints a provider with this exact
-// fullName (seed-showcase.go's own provider uses a different name/id).
+// reapableProviderNames is the exact set of provider fullNames this seed
+// tombstones on sight: "Dr. Classic Demo" for the pre-pin duplicate clones
+// (only this script ever mints a provider with that fullName — seed-showcase.go's
+// own provider uses a different name/id) and "Dr Proof" for a live-injected
+// sentinel outside any seed script's control.
+var reapableProviderNames = map[string]bool{
+	"Dr. Classic Demo": true,
+	"Dr Proof":         true,
+}
+
+// reapProviderLitterAppointments tombstones every live appointment linked to
+// providerKey via withProvider, whether or not providerKey's own vertex is
+// still alive — TombstoneAppointment's require_matching_provider check reads
+// only the withProvider link's liveness, never the target provider vertex's,
+// so a provider already tombstoned by an earlier run still leaves its
+// appointments reapable (and otherwise permanently dangling, since nothing
+// else ever visits them).
+func reapProviderLitterAppointments(ctx context.Context, conn *substrate.Conn, adminKey, providerKey string) {
+	providerID := strings.TrimPrefix(providerKey, "vtx.provider.")
+	withProviderSuffix := ".withProvider.provider." + providerID
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.appointment.")
+	must(err, "list vtx.appointment. keys")
+	for _, apptKey := range keys {
+		if strings.Count(apptKey, ".") != 2 || !alive(ctx, conn, apptKey) {
+			continue
+		}
+		withProviderKey := "lnk." + strings.TrimPrefix(apptKey, "vtx.") + withProviderSuffix
+		if !alive(ctx, conn, withProviderKey) {
+			continue
+		}
+		patientKey, providerKeyResolved, found := findAppointmentPatientProvider(ctx, conn, apptKey)
+		if !found {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneAppointment", "appointment",
+			map[string]any{"appointmentKey": apptKey, "patient": patientKey, "provider": providerKeyResolved},
+			&processor.ContextHint{Reads: []string{apptKey, patientKey, providerKeyResolved}})
+		fmt.Printf("==> reaped provider's litter appointment: %s\n", apptKey)
+	}
+}
+
+// reapDuplicateProviders tombstones every provider whose fullName is in
+// reapableProviderNames, other than the checked-in canonical one (keep) —
+// adbf2571 pinned the seed's provider id going forward but never reaped the
+// pre-pin duplicates, so the patient booking picker still offers all of
+// them, none carrying hours or a practicesAt site (verticals.md). A
+// reapable provider's litter appointments are cleaned up (see
+// reapProviderLitterAppointments) even when the provider vertex is already
+// tombstoned from an earlier run — TombstoneProvider itself only runs when
+// the vertex is still alive, so this converges whichever half already ran.
 func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
 	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.provider.")
 	must(err, "list vtx.provider. keys")
 	for _, key := range keys {
-		if key == keep || !alive(ctx, conn, key) {
+		if key == keep {
 			continue
 		}
 		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".profile")
@@ -483,7 +525,11 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
 			continue
 		}
-		if aspect.Data.FullName != "Dr. Classic Demo" {
+		if !reapableProviderNames[aspect.Data.FullName] {
+			continue
+		}
+		reapProviderLitterAppointments(ctx, conn, adminKey, key)
+		if !alive(ctx, conn, key) {
 			continue
 		}
 		submitOp(ctx, conn, adminKey, "TombstoneProvider", "provider",
