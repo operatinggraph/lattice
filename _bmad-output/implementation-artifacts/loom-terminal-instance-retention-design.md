@@ -306,3 +306,53 @@ above: 0). This fire's close pass creates it (adjacent find 1).
 **7. Non-goals.** `ListInstances`' semantics (§4 — deviation from triage §7, with its reason). Any new
 control-plane verb or `internal/controlauth` change. The `token.*` / `outbox.*` / `deadline.*` key shapes.
 Contract #10 text (§2 establishes no edit is needed). Fires beyond this one — there are none.
+
+---
+
+### Build note — what Inc 1 surfaced (2026-08-29)
+
+**A pre-existing production defect: `RedriveInstance` cannot redrive any instance that actually failed.**
+
+Inc 1's `TestRedrive_ClearsRetentionTTL` was the first test in the tree to drive a *real* terminal
+transition and then redrive the result. It failed — and not on the TTL. The atomic batch is rejected:
+
+```
+loom: redrive instance "…": substrate: atomic batch rejected: code=400 err_code=10071: wrong last sequence: 4
+```
+
+**Mechanism.** The terminal batch deletes `instance.<id>.pattern` (`state.go:372-376`), which writes a KV
+delete marker on that subject. `redrive` (`state.go:453-470`) then re-creates the pin with `CreateOnly`,
+whose wire form is expected-last-subject-sequence 0 — "this subject must be empty". A subject carrying a
+delete marker is not empty, so the server rejects it, and because the pin rides the same `AtomicBatch` as
+the status flip, the *whole* redrive is rejected. The operator's only documented recovery path for a failed
+flow (the `redrive` control RPC and the `lattice loom` CLI) therefore fails closed, every time, for exactly
+the instances it exists to recover.
+
+**It is not caused by this design.** Reproduced with `instanceRetention = 0` — today's shipped behaviour,
+no TTL stamped anywhere. Inc 1 only made it visible.
+
+**Why no test caught it.** `TestRedriveInstance_HappyPath_ResumesAtCursor`
+(`control_internal_test.go:398`) seeds its failed instance with `putInstance`, so the pin subject is one
+that was **never created**; its comment nevertheless claims "(pin already deleted, as production leaves it
+at terminal)". A never-created subject accepts `CreateOnly`; a deleted one does not. The fixture could not
+reach the state the test says it is testing — standing-checklist item 3 (a negative test needs its positive
+vector proven first) and item 5 (a create-only writer bricks the second write), both landing on one test.
+
+**Fix, in this fire** (it owns the terminal batch and the pin lifecycle, so this is in-fire work, not a
+filed row — steward §4). The `CreateOnly` is load-bearing: it is the race guard that makes two concurrent
+redrives safe. So the guard MOVES rather than disappears — onto `instance.<id>`, which is never deleted and
+therefore expresses a clean CAS: `redrive` writes the instance op revision-conditioned
+(`BatchOp.HasRevision`/`Revision`) and the pin as an unconditional put. Two concurrent redrives read the
+same revision; the first commits and bumps it, the second is rejected. Identical guarantee, on a key with no
+delete marker. The shipped happy-path test is rebuilt to drive a real terminal transition first.
+
+**`createInstance` was checked for the same exposure** and does not have it: it also writes both keys
+`CreateOnly`, but a re-triggered `instanceId` is rejected by the *instance* record's own presence — which is
+Contract #10 §10.9's dedup guard doing its job — before the pin's state matters. Its posture is unchanged by
+this fire.
+
+**Upstream corroboration for §3 Inc 1's TTL-clearing claim.** Read at the pin rather than inferred: the
+server skips clamping a message TTL up to `SubjectDeleteMarkerTTL` when `MaxMsgsPer == 1`, commenting
+"MaxMsgsPer=1 is an exception, because we'll only ever have one message"
+(`nats-server@v2.14.0 server/stream.go:6890-6897`). A KV bucket at History:1 is exactly that case, so an
+8-day retention is stored verbatim and an untagged rewrite leaves nothing behind to expire.
