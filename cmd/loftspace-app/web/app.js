@@ -1969,9 +1969,11 @@ function renderTaskCard(t) {
   desc.className = "addr-sub";
   desc.textContent = t.operationDescription || "";
 
+  const expired = t.expiresAt && new Date(t.expiresAt).getTime() < Date.now();
+
   const meta = document.createElement("div");
   meta.className = "meta";
-  if (t.expiresAt) meta.textContent = "due " + fmtDate(t.expiresAt);
+  if (t.expiresAt) meta.textContent = (expired ? "expired " : "due ") + fmtDate(t.expiresAt);
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -1986,7 +1988,8 @@ function renderTaskCard(t) {
     btn.textContent = "Claim";
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
-    badge.textContent = "open";
+    badge.textContent = expired ? "expired" : "open";
+    if (expired) badge.className = "badge expired";
     const canComplete = canCompleteOp(t.operationName);
     btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
     btn.disabled = !canComplete;
