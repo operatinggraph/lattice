@@ -283,6 +283,29 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			}
 			reads = append(reads, r)
 		}
+		// The dispatched op's declared absence-tolerant reads: same resolver
+		// and template grammar as Reads, so a directOp can route a
+		// row.<column> candidate key into ContextHint.OptionalReads exactly as
+		// it routes one into Reads.
+		var optionalReads []string
+		for i, rt := range ga.OptionalReads {
+			r, perr := resolveReadKey(fmt.Sprintf("optionalReads[%d]", i), rt, row)
+			if perr != nil {
+				return nil, perr
+			}
+			optionalReads = append(optionalReads, r)
+		}
+		// plan.optionalReads is a closure like plan.payload's own
+		// func(string) map[string]any — ignoring claimID here, since a
+		// directOp's declared reads are pure row-templates, unlike
+		// assignTask's claimId-seeded dedup key. Left nil when the playbook
+		// declares nothing: planOptionalReads treats nil as "none", and a
+		// non-nil closure returning an empty slice is a different, worse
+		// thing (it would attach an empty contextHint.optionalReads key).
+		var optionalReadsFn func(claimID string) []string
+		if len(optionalReads) > 0 {
+			optionalReadsFn = func(string) []string { return optionalReads }
+		}
 		// The dispatched op's declared link walks: the hub travels the SAME
 		// resolver as a declared read (it is a key, in the same template
 		// grammar), while relation and direction are literals the playbook
@@ -308,6 +331,7 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			authTarget:    authTarget,
 			payload:       func(string) map[string]any { return params },
 			reads:         reads,
+			optionalReads: optionalReadsFn,
 			enumerations:  enumerations,
 		}, nil
 
@@ -423,16 +447,17 @@ func candidateGapAction(c GapCandidate) GapAction {
 // action-contract shape as GapCandidate").
 func catalogEntryGapAction(entry ActionCatalogEntry) GapAction {
 	return GapAction{
-		Action:       entry.Action,
-		Pattern:      entry.Pattern,
-		Subject:      entry.Subject,
-		Adapter:      entry.Adapter,
-		Operation:    entry.Operation,
-		Assignee:     entry.Assignee,
-		Target:       entry.Target,
-		Params:       entry.Params,
-		Reads:        entry.Reads,
-		Enumerations: entry.Enumerations,
+		Action:        entry.Action,
+		Pattern:       entry.Pattern,
+		Subject:       entry.Subject,
+		Adapter:       entry.Adapter,
+		Operation:     entry.Operation,
+		Assignee:      entry.Assignee,
+		Target:        entry.Target,
+		Params:        entry.Params,
+		Reads:         entry.Reads,
+		OptionalReads: entry.OptionalReads,
+		Enumerations:  entry.Enumerations,
 	}
 }
 

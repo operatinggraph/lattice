@@ -444,6 +444,21 @@ type GapActionSpec struct {
 	// the candidate vertex it must read). Used by directOp; the candidate id is
 	// already in the target lens row, so this just routes it into the op's reads.
 	Reads []string
+	// OptionalReads are the dispatched op's ContextHint.OptionalReads — the
+	// absence-tolerant half of Contract #2 §2.5's declared read posture. Same
+	// template grammar as Reads (a literal or a row.<column> template resolved
+	// from the violation row), for a key whose absence is a normal branch in
+	// the script rather than a correctness error — a per-entity uniqueness
+	// guard whose prior claim was released, a link that simply may not exist
+	// yet. Used by directOp only.
+	//
+	// The split is semantic, not stylistic, and mis-filing it breaks the op in
+	// opposite directions: a key the script REQUIRES belongs in Reads (absence
+	// is a correctness error), while a key whose absence the script branches on
+	// belongs here — declaring such a key as a required Read fails the whole
+	// dispatch the first time it is legitimately absent. Never for a key the
+	// script requires.
+	OptionalReads []string
 	// Enumerations are the dispatched op's ContextHint.Enumerations — the
 	// Contract #2 §2.5 class-(e) kv.Links walks its script runs, declared onto
 	// the envelope as metadata. Used by directOp. Each Hub is a literal or a
@@ -524,6 +539,12 @@ type ActionCatalogEntrySpec struct {
 	Target    string
 	Params    map[string]string
 	Reads     []string
+	// OptionalReads are the entry's declared absence-tolerant reads, same
+	// grammar and same purpose as GapActionSpec.OptionalReads: a chosen entry
+	// dispatches through the engine's ordinary action contract, so a
+	// declaration it cannot carry here is one silently dropped from the
+	// envelope for every planner-synthesized dispatch.
+	OptionalReads []string
 	// Enumerations are the entry's declared kv.Links walks, same grammar and
 	// same purpose as GapActionSpec.Enumerations: a chosen entry dispatches
 	// through the engine's ordinary action contract, so a walk it cannot

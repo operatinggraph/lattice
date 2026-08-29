@@ -101,6 +101,14 @@ type GapAction struct {
 	// directOp that must read its candidate vertex (e.g. TombstoneObject) routes
 	// the candidate key from the lens row (row.entityKey) into the op's reads.
 	Reads []string `json:"reads,omitempty"`
+	// OptionalReads are the dispatched op's ContextHint.OptionalReads (Contract
+	// #2 §2.5) — the absence-tolerant half of the declared read posture, same
+	// template grammar as Reads. Valid only on a directOp: every other action's
+	// optionalReads is the engine's own to set (e.g. assignTask's stable task
+	// dedup key + assignee availability aspect), and validateTarget refuses a
+	// non-directOp gap that declares this field rather than let the two
+	// writers collide.
+	OptionalReads []string `json:"optionalReads,omitempty"`
 	// Enumerations are the Contract #2 §2.5 class-(e) link walks the dispatched
 	// op runs (`kv.Links`), declared onto the envelope as metadata. Each Hub is
 	// a literal or a row.<column> template resolved from the violation row
@@ -253,6 +261,13 @@ type ActionCatalogEntry struct {
 	Target    string            `json:"target,omitempty"`
 	Params    map[string]string `json:"params,omitempty"`
 	Reads     []string          `json:"reads,omitempty"`
+	// OptionalReads are the chosen entry's declared absence-tolerant reads,
+	// carried for the same reason Reads is: a synthesized plan's step
+	// dispatches through the same buildPlan as an explicit GapAction, so
+	// anything the action contract can declare it must be able to declare
+	// too. Valid only on an entry whose Action is directOp — the same
+	// install-time refusal GapAction.OptionalReads carries applies here.
+	OptionalReads []string `json:"optionalReads,omitempty"`
 	// Enumerations are the chosen entry's declared kv.Links walks, carried for
 	// the same reason Reads is: a synthesized plan's step dispatches through
 	// the same buildPlan as an explicit GapAction, so anything the action
@@ -681,6 +696,9 @@ func validateTarget(t *Target) error {
 		if _, reserved := ga.Params["expectedRevision"]; reserved {
 			return fmt.Errorf("gaps key %q: param \"expectedRevision\" is reserved (the engine writes the OCC revision-condition under that payload field)", col)
 		}
+		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q", col), ga.Action, ga.OptionalReads); err != nil {
+			return err
+		}
 		if ga.Action == actionSurface && ga.IssueSeverity != "" && ga.IssueSeverity != "warning" && ga.IssueSeverity != "error" {
 			return fmt.Errorf("gaps key %q action %q issueSeverity %q must be \"warning\" or \"error\" (omit for the \"warning\" default) — aggregateStatus only escalates those two",
 				col, ga.Action, ga.IssueSeverity)
@@ -729,6 +747,20 @@ func validateGapEnumerations(where string, ens []GapEnumeration) error {
 		}
 	}
 	return nil
+}
+
+// validateOptionalReadsScope refuses a declared OptionalReads set on any
+// action arm other than directOp. Every other arm's ContextHint.OptionalReads
+// is the engine's OWN to set at dispatch (buildPlan's assignTask arm already
+// builds one from the stable task dedup key + the assignee availability
+// aspect); a package-declared value on that same arm would collide with it,
+// and letting one silently win would make the outcome order-dependent instead
+// of a loud, permanent install-time refusal.
+func validateOptionalReadsScope(where, action string, optionalReads []string) error {
+	if len(optionalReads) == 0 || action == actionDirectOp {
+		return nil
+	}
+	return fmt.Errorf("%s: action %q declares optionalReads, but optionalReads is only meaningful for directOp — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it", where, action)
 }
 
 // Link directions a declared enumeration may name (Contract #2 §2.5): the hub
@@ -922,6 +954,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 			return fmt.Errorf("gaps key %q: actions[%d] (ref %q): cost %d must be >= 0", col, i, entry.Ref, entry.Cost)
 		}
 		if err := validateGapEnumerations(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Enumerations); err != nil {
+			return err
+		}
+		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Action, entry.OptionalReads); err != nil {
 			return err
 		}
 		if entry.Cost == 0 {
