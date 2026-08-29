@@ -17,14 +17,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // Each InputSchema below is the narrow, consumer/provider-facing slice of the
 // DDL's full merged schema (appointmentVertexTypeDDL's / providerVertexTypeDDL's
-// InputSchema) — the fields a self-service caller actually supplies, not the
-// operator-only ones (site/leaseAppKey on CreateAppointment; every non-cancel
-// status value on SetAppointmentStatus, which the self grant rejects in-script
-// anyway). SetAppointmentStatus's op-meta describes ONLY the cancel path: the
-// operator continues to call the op directly (no descriptor needed — the
-// trusted admin tool hardcodes its own status transitions), so narrowing the
-// one op-meta to what a consumer can actually submit is honest, not a loss of
-// operator capability.
+// InputSchema) — the fields a self-service or staff caller actually supplies,
+// not the true operator-only ones (site on CreateAppointment). CreateAppointment
+// and SetAppointmentStatus describe the FULL patient-or-staff reachable
+// surface, not just the self-scope grant's slice — `{me.patient?}` on
+// CreateAppointment and the widened `status` enum on SetAppointmentStatus both
+// mirror wellness-domain's ReassignSession OPTIONAL-self-anchor idiom: one
+// op-meta serves both hats, and the actual authority stays entirely in-script
+// (workplace confinement + the self-scope status=cancelled restriction) —
+// widening the op-meta only makes it stop underselling what the script already
+// permits. The trusted admin tool still calls SetProviderHours/SetProviderTimeOff/
+// etc. directly for its true operator-only surface (no descriptor needed there).
 //
 // Adding these op-metas does not by itself make the ops Facet-visible: the
 // edge-manifest catalog lens (edgeCatalogSpec) only reaches an op-meta via a
@@ -60,20 +63,20 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "CreateAppointment",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Book appointment",
-				Description: "Book an appointment for yourself with a provider.",
+				Description: "Book an appointment with a provider.",
 				Icon:        "calendar",
 				Tone:        "primary",
 				SubmitLabel: "Book",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"patient":{"type":"string","title":"Patient","description":"vtx.patient.<NanoID> of your own patient record."},` +
+				`{"patient":{"type":"string","title":"Patient","description":"vtx.patient.<NanoID> — your own patient record if you're a patient, or the patient to book for if you're front-desk/provider staff."},` +
 				`"provider":{"type":"string","description":"vtx.provider.<NanoID> of the provider to book with — auto-filled from the provider being viewed."},` +
 				`"startsAt":{"type":"string","format":"date-time","title":"Starts","description":"Appointment start, aligned to the 15-minute booking grid."},` +
 				`"endsAt":{"type":"string","format":"date-time","title":"Ends","description":"Appointment end, aligned to the 15-minute booking grid."},` +
 				`"reason":{"type":"string","title":"Reason","description":"Optional visit reason."}},` +
 				`"required":["patient","provider","startsAt","endsAt"]}`,
 			FieldDescriptions: map[string]string{
-				"patient":  "Your own patient record — you can only book for yourself.",
+				"patient":  "Your own patient record — auto-filled from your identity's own patient self-anchor when you're a patient. Front-desk/provider staff select any patient at their workplace here.",
 				"provider": "The provider this appointment is with — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
 				"startsAt": "When the appointment starts. Must land in the future and align to the clinic's 15-minute grid.",
 				"endsAt":   "When the appointment ends. Must align to the 15-minute grid; span capped at 24 hours.",
@@ -84,14 +87,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "provider",
 				TargetType:  "provider",
-				// `{me.patient}` addresses the `patient` selfAnchor
-				// edgeIdentity projects for an identity a patient record is
-				// identifiedBy-bound to — the script requires exactly that
-				// binding, so the unmarked (offer-gating) form is correct:
-				// an identity with no patient record could only ever be
-				// rejected server-side, and now sees the honest "needs your
-				// own Patient" card instead of a form that cannot succeed.
-				ContextParams: map[string]string{"patient": "{me.patient}"},
+				// `{me.patient?}` — the ReassignSession/TombstoneSession
+				// pattern: OPTIONAL, so this one op-meta serves both grantees.
+				// A patient-self actor gets `patient` auto-filled/overridden
+				// from their own selfAnchor (identical to the old hard
+				// `{me.patient}` bind). A front-desk/provider actor has no
+				// patient selfAnchor, so the binding is silently skipped and
+				// the payload's own explicit `patient` value (the staff
+				// caller's patient picker) passes through untouched — the
+				// script's workplace-confinement branch (ddls.go
+				// enforce_workplace_confined on CreateAppointment) is what
+				// actually authorizes that path, exactly as it already does
+				// live; the op-meta was previously underselling it.
+				ContextParams: map[string]string{"patient": "{me.patient?}"},
 				// Both endpoints are required, live, class-checked reads
 				// (appointmentDDLScript's require_live_typed on patient and
 				// provider) — every CreateAppointment call validates them
@@ -161,36 +169,46 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "SetAppointmentStatus",
 			Presentation: &pkgmgr.OpPresentationSpec{
-				Title:       "Cancel appointment",
-				Description: "Cancel this appointment.",
-				Icon:        "cancel",
-				Tone:        "destructive",
-				SubmitLabel: "Cancel appointment",
+				Title:       "Update status",
+				Description: "Set this appointment's status.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Save",
 			},
-			// The self-scope grant is restricted, in-script, to status=cancelled
-			// only — this op-meta describes exactly that consumer-reachable
-			// slice, not the operator's full status-transition surface (see
-			// package doc comment above).
-			// provider/patient are required: cancelling is always a terminal
-			// transition (the self-scope grant's only reachable value), and the
-			// script's terminal branch requires both — validated against the
-			// appointment's own withProvider/forPatient links — to release the
-			// held slot-claim cells (appointmentDDLScript's SetAppointmentStatus
-			// terminal branch). RescheduleAppointment, in this same package,
-			// requires the identical pair for the identical reason.
+			// The op-meta now describes the FULL script-reachable status
+			// surface, not just the self-scope grant's slice — mirroring
+			// CreateAppointment's `{me.patient?}` widening above. The actual
+			// authority stays entirely in-script (appointmentDDLScript's
+			// SetAppointmentStatus branch): a self-scoped caller
+			// (op.authContextTarget set) is rejected with AuthDenied for any
+			// status but "cancelled"; a staff/operator caller may set any of
+			// APPOINTMENT_STATUSES, workplace-confined to their own site. A
+			// descriptor client (Facet) renders the same widened form for
+			// every actor; the non-cancel options simply AuthDeny for a
+			// patient, same as attempting them via any other client already
+			// does today.
+			// provider/patient are required by this schema unconditionally,
+			// though the script only reads them on a terminal transition
+			// (appointmentDDLScript's SetAppointmentStatus terminal branch,
+			// to release the held slot-claim cells) — both are cheap,
+			// already-known values (auto-filled from the appointment being
+			// viewed), so requiring them up front costs nothing and keeps one
+			// schema for every transition. RescheduleAppointment, in this
+			// same package, requires the identical pair for the identical
+			// reason.
 			InputSchema: `{"type":"object","properties":` +
-				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to cancel — auto-filled from the appointment being viewed."},` +
-				`"status":{"type":"string","title":"Status","enum":["cancelled"],"default":"cancelled","description":"Fixed to cancelled — the only self-service transition."},` +
-				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider. Required to release the appointment's held slot-claim cells."},` +
-				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient. Required to release the appointment's held slot-claim cells."},` +
-				`"note":{"type":"string","title":"Note","description":"Optional cancellation reason."}},` +
+				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
+				`"status":{"type":"string","title":"Status","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"default":"cancelled","description":"The appointment's new status. Self-service patients may only cancel; front-desk/provider staff may set any status."},` +
+				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
+				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
+				`"note":{"type":"string","title":"Note","description":"Optional status note (e.g. cancellation or no-show reason)."}},` +
 				`"required":["appointmentKey","status","provider","patient"]}`,
 			FieldDescriptions: map[string]string{
-				"appointmentKey": "The appointment being cancelled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "Fixed to \"cancelled\" — cancelling is the only change you can make here.",
+				"appointmentKey": "The appointment being updated — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
+				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status.",
 				"provider":       "The appointment's own provider — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual provider.",
 				"patient":        "The appointment's own patient — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual patient.",
-				"note":           "Optional cancellation reason, kept with the appointment.",
+				"note":           "Optional status note, kept with the appointment.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "appointment",
