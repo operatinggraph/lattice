@@ -162,7 +162,7 @@ Every action's params are resolved per row (templating below). The Actuator subm
 |----------|--------|--------|
 | `triggerLoom` | `{ pattern, subject }` | submit `StartLoomPattern{ patternRef: pattern, subjectKey: subject }` → Loom (§10.5). `subject` must resolve to a vertex of the pattern's `subjectType`. **Auth: see below.** Also the path for **external remediation** (since 2026-06-18, 13.1): `triggerLoom` a pattern whose body is an `externalTask` (§10.5) — this **replaces the retired `nudge` action**. |
 | `assignTask` | `{ operation, assignee, target }` | `CreateTask` (§10.1): `assignedTo`→`assignee`, `forOperation`→`operation`, `scopedTo`→`target`. |
-| `directOp` | `{ operation, target?, params?, reads? }` | submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. Additive + `omitempty`: a `directOp` that omits it dispatches read-free exactly as before. A clause-billing target is a canonical consumer: `operation` is the literal `DebitAccount`, `target`/`params`/`reads` row-templated (the amount as a numeric param column; clause + account keys routed into `reads` for hydration). |
+| `directOp` | `{ operation, target?, params?, reads?, optionalReads? }` | **📐 PROPOSED — UNRATIFIED (2026-08-29): `optionalReads?` is new.** It is the dispatched op's `contextHint.optionalReads` (Contract #2 §2.5's absence-tolerant half) — same template grammar as `reads?`, for a key whose absence is a legitimate branch in the script rather than a correctness error. Additive + `omitempty`: a `directOp` that omits it dispatches exactly as before. **`directOp` only** — every other action's `optionalReads` is the engine's own to set (`assignTask` derives its stable task dedup key), so a package-declared value on another action is a second writer to one field and is refused at install and at load. A `row.<column>` entry that resolves null/absent **drops that entry** rather than failing the gap: the rows where such a column is null are precisely the rows an absence-tolerant declaration was written for. submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. Additive + `omitempty`: a `directOp` that omits it dispatches read-free exactly as before. A clause-billing target is a canonical consumer: `operation` is the literal `DebitAccount`, `target`/`params`/`reads` row-templated (the amount as a numeric param column; clause + account keys routed into `reads` for hydration). |
 | `proposedOp` | *(none — sourced from the row)* | **Additive, opt-in (Augur dispatch, Fire 2b).** Dispatch the **row-carried** `proposedAction` + `proposedParams` (materialised into a `GapAction`) after a **dispatch-time deterministic re-validation** (action ∈ the escalation catalog `{triggerLoom, assignTask, directOp}` · live-registry resolution via the existing `buildPlan` · **default-deny scope** to the row's TRUSTED candidate `candidateKey` · op ∈ Weaver's service-actor authority). Unlike the three static actions, the op + params are *data per row*, not playbook config; the proposed op carries a **proposal-scoped deterministic requestId** so a sweep re-dispatch collapses on the Contract #4 tracker (at-most-once). Used **only** by the `augur` package's primordial `augurDispatch` convergence target (see "Augur dispatch" below); wiring `proposedOp` to a row whose source is not a §5-validated approved proposal is a package bug. The `directOp`-must-be-literal guard stays intact for ordinary playbooks — `proposedOp` is the gated sibling for the one §5-validated dynamic-op surface. |
 | `surface` | `{ issueCode, issueSeverity? }` | **Additive (FR28/FR29 Fire 3).** Dispatch **nothing** — no op, no mark, no OCC, no episode. While the gap column stays true, raises a Contract #5 §5.5 `issues[]` entry keyed `issueCode` at `issueSeverity` (default `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column. `issueCode` is required; `issueSeverity` ∈ `{warning, error}`. Manual-intervention-only — the sibling of `triggerLoom`/`assignTask`/`directOp`/`proposedOp` for a gap the playbook author wants surfaced, never remediated. Used by `orchestration-base`'s primordial `unroutedTasks` target (`missing_claim` → `{action:"surface", issueCode:"UnroutedTasks"}` — an open role-queued task left unclaimed past its own `expiresAt`). |
 
@@ -179,8 +179,34 @@ above) and the `proposedOp` action row (in Action contracts above) are its Weave
 
 ### Templating
 
-A param value is **either a literal** (`pattern: "onboarding"`) **or the token `row.<column>`**
-(`subject: "row.applicant"`) — no expressions. The Strategist substitutes `row.<column>` with that
+> **📐 PROPOSED — UNRATIFIED (2026-08-29).** This section and the `directOp` action-table row above are
+> amended below to match what the engine now implements. Ratify by merging; reject by dropping this
+> branch. Precedent: the `reads?` field on that same row was itself a ratified §10.8 amendment
+> (`docs/decisions/contract-10-revision-history.md`, 2026-06-19).
+
+A param value takes one of **three arms**, resolved in this order — no expressions:
+
+1. **`row.<column>`** (`subject: "row.applicant"`) — substituted with that column's value from the
+   violation row. A substituted value is **never re-scanned** for a token, so a column literally
+   holding `json:5` dispatches as that string.
+2. **`json:<literal>`** (`limit: "json:5"`, `active: "json:true"`) — decoded into the JSON value its
+   suffix encodes, so a params map typed `map[string]string` on the wire can still carry a number, a
+   bool or a structured value. A value that must itself begin with the token is written as its own
+   JSON string: `json:"json:foo"` resolves to `json:foo`.
+3. Otherwise a **plain string literal** (`pattern: "onboarding"`), passed through byte-for-byte.
+
+Arm 2 is admitted in the **`params` bag only**. Every other authored value — `subject`, `pattern`,
+`operation`, `assignee`, `target`, and each `reads` / `optionalReads` / `enumerations[].hub` entry —
+is a key, an operationType or a pattern ref, always a string, and **refuses the token**. That split is
+a trust boundary, not a convenience: admission gates upstream of dispatch (the authored-capability
+dispatch-scope check, the Augur proposal scope check) compare those fields as **raw authored
+strings**, so a field that decoded at dispatch would be one the gate never saw.
+
+A `json:` suffix that does not decode, the literal `null`, an empty string, and an integer whose
+decimal spelling `float64` cannot hold exactly are **config errors**: the defect is authored and
+row-independent, so it is refused **at install and at engine load**, not merely at dispatch.
+
+The Strategist substitutes `row.<column>` with that
 column's value from the violation row. A `row.<column>` that resolves null/absent is a **data error**
 — surface, do not fire a malformed remediation. (This is why §10.2 requires the Lens to **project
 every column the playbook templates name**.) Substitution is **type-preserving**: a `row.<column>`
