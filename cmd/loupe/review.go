@@ -768,7 +768,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 			// wrote what is there). It must therefore NOT be advertised
 			// resumable: that flag is what sends the operator to mark-applied,
 			// and mark-applied is exactly the close being refused.
-			s.writeError(w, http.StatusConflict, unprovenNewPackageReason(cols, resolved))
+			s.writeError(w, http.StatusConflict, unprovenNewPackageReason(id, proposalKey, cols, resolved))
 			return
 		case resolved.Installed:
 			s.writeJSON(w, http.StatusConflict, map[string]any{
@@ -779,10 +779,19 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 				"packageKey": resolved.PackageKey,
 			})
 			return
-		case resolved.ReceiptStale:
+		case resolved.ReceiptStale && resolved.PackageKey != "" && resolved.PackageKey != resolved.ReceiptPackageKey:
+			// A DIFFERENT live package holds this proposal's target name, so an
+			// apply would write into an artifact this proposal did not produce.
 			// Not resumable and not re-appliable: say which, here, rather than
 			// letting the plan builder answer with a refusal that never
 			// mentions the receipt.
+			//
+			// A stale receipt on its own is NOT a refusal. Its commonest shape
+			// is a receipted package rolled back out of band to the version an
+			// upgradeExisting proposal declares as its baseVersion — a plan the
+			// builder builds and an apply that rolls forward. Re-appliability
+			// is the plan builder's question, and refusing here would answer it
+			// for a case it answers yes to.
 			s.writeError(w, http.StatusConflict, staleReceiptReason(cols, resolved))
 			return
 		}
@@ -803,7 +812,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	status, body := s.closeApply(ctx, id, proposalKey, res)
+	status, body := s.closeApply(ctx, id, proposalKey, cols, res)
 	s.writeJSON(w, status, body)
 }
 
@@ -850,7 +859,11 @@ const (
 // succeed end to end while the provenance binding silently never lands, which
 // is a state no later reader can distinguish from a proposal that never had a
 // receipt at all.
-func (s *server) closeApply(ctx context.Context, id, proposalKey string, res *pkgmgr.ApplyResult) (int, map[string]any) {
+//
+// cols is read for one decision only — whether the mark-applied recovery this
+// endpoint's failure reply points at can actually run for THIS proposal, which
+// turns on its declared target mode.
+func (s *server) closeApply(ctx context.Context, id, proposalKey string, cols capabilityProposalCols, res *pkgmgr.ApplyResult) (int, map[string]any) {
 	installRequestID := applyInstallRequestID(res)
 	receipt, receiptFailure := s.submitInstallReceipt(ctx, id, proposalKey, res)
 	if receipt != receiptRecorded {
@@ -881,11 +894,28 @@ func (s *server) closeApply(ctx context.Context, id, proposalKey string, res *pk
 		body["receiptFailure"] = receiptFailure
 	}
 	if failure := markOpFailure(reply, err); failure != "" {
+		body["packageKey"] = res.PackageKey
+		// `resumable` is not a description of the state, it is an INSTRUCTION:
+		// the console latches the mark-applied control on it. So it may only be
+		// set when that control can actually finish the job. A newPackage
+		// proposal left with no receipt is precisely what the recovery refuses
+		// — a package at this name and version proves nothing about which
+		// writer produced it — so arming the control here would hand the
+		// operator a button whose only possible outcome is that refusal, on the
+		// one path where no other exit is offered.
+		if cols.TargetMode == "newPackage" && receipt != receiptRecorded {
+			body["error"] = fmt.Sprintf(
+				"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s%s. "+
+					"This proposal declares mode newPackage and carries no install receipt, so the console's mark-applied "+
+					"recovery refuses it rather than closing it over a package nothing shows it wrote. %s",
+				res.PackageKey, installRequestID, failure, receiptRecoveryNote(receipt, receiptFailure),
+				manualCloseRemedy(id, proposalKey, res.PackageKey))
+			return http.StatusBadGateway, body
+		}
 		body["error"] = fmt.Sprintf(
 			"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s%s — the package IS already installed; recover with mark-applied rather than re-applying",
 			res.PackageKey, installRequestID, failure, receiptRecoveryNote(receipt, receiptFailure))
 		body["resumable"] = true
-		body["packageKey"] = res.PackageKey
 		return http.StatusBadGateway, body
 	}
 	body["apply"] = applyReply(res)
@@ -1367,22 +1397,44 @@ func unprovenNewPackageClose(cols capabilityProposalCols, resolved installResolu
 	return cols.TargetMode == "newPackage" && resolved.Installed && !resolved.ByReceipt
 }
 
+// manualCloseRemedy is the one exit from a close this console will not make on
+// an operator's behalf: submitting MarkCapabilityProposalApplied themselves,
+// naming the package explicitly.
+//
+// `lattice op submit` is named because it is the only tool that can actually do
+// it. `lattice-pkg apply-proposal` cannot: it runs ApplyCapabilityPlan first,
+// and for a newPackage proposal whose name is already claimed that returns
+// ErrPackageNameClaimed and never reaches the close at all — so pointing an
+// operator there would be a remedy that defeats itself.
+//
+// The four read keys are spelled out rather than left implied: the op hydrates
+// from its declared set alone, so a submission missing any of them dies on a
+// hydration miss, and an operator following a remedy that fails on its own
+// instructions is worse off than one told nothing.
+func manualCloseRemedy(id, proposalKey, packageKey string) string {
+	return fmt.Sprintf(
+		"If you know this proposal's install DID commit, submit the close yourself, naming the package explicitly: "+
+			"lattice op submit --operation-type MarkCapabilityProposalApplied "+
+			"--payload '{\"proposalId\":\"%s\",\"packageKey\":\"%s\",\"installRequestId\":\"<the requestId of the install op that landed it>\"}' "+
+			"--context-hint-reads '%s' — all four read keys are required, because the op hydrates from its declared "+
+			"set alone and fails on a hydration miss without them. Naming that package is your decision to make and "+
+			"to sign; it is not one this console may guess at.",
+		id, packageKey, strings.Join(capabilityCloseReads(proposalKey, packageKey), ","))
+}
+
 // unprovenNewPackageReason is what an operator is told instead. It states the
 // gap (no receipt binds this proposal to that package), why the match is not
-// evidence (anything can install a name), and the one path that is a decision
-// rather than a guess: submitting MarkCapabilityProposalApplied with an
-// explicit packageKey through lattice-pkg, where naming the package is the
-// operator's own authorized act.
-func unprovenNewPackageReason(cols capabilityProposalCols, resolved installResolution) string {
+// evidence (anything can install a name), and the one submission that is a
+// decision rather than a guess.
+func unprovenNewPackageReason(id, proposalKey string, cols capabilityProposalCols, resolved installResolution) string {
 	return fmt.Sprintf(
 		"%s is installed at version %s as %s, but nothing records that THIS proposal's install produced it: "+
 			"no install receipt is recorded against the proposal, and a package of that name and version can have been "+
 			"installed by anything — another proposal, or an operator's own `lattice-pkg install`. This proposal declares "+
 			"mode newPackage, so closing it over that package would bind it, permanently and in the audit record, to an "+
-			"artifact it may never have written. If you know this proposal's install DID commit (an apply that predates "+
-			"install receipts, say), submit MarkCapabilityProposalApplied directly with `lattice-pkg` naming the packageKey "+
-			"explicitly — that is your decision to make and to sign; it is not one this console may guess at.",
-		cols.TargetPackageName, resolved.Version, resolved.PackageKey)
+			"artifact it may never have written. %s",
+		cols.TargetPackageName, resolved.Version, resolved.PackageKey,
+		manualCloseRemedy(id, proposalKey, resolved.PackageKey))
 }
 
 // staleReceiptReason states what a stale receipt actually means for one
@@ -1504,7 +1556,7 @@ func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Requ
 	}
 
 	if unprovenNewPackageClose(cols, resolved) {
-		s.writeError(w, http.StatusConflict, unprovenNewPackageReason(cols, resolved))
+		s.writeError(w, http.StatusConflict, unprovenNewPackageReason(id, proposalKey, cols, resolved))
 		return
 	}
 

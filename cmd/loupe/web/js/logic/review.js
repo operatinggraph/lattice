@@ -277,6 +277,15 @@ function applyOutcome(body) {
       hint: "the package IS installed — close the proposal with “Mark applied (recover)”; re-applying cannot succeed now.",
     };
   }
+  // A failure reply naming the packageKey the apply produced is saying the
+  // INSTALL committed and only the close did not. Re-arming "Apply now" there
+  // walks the operator into the plan builder's own refusal — for a newPackage
+  // target the name is now claimed — so the control stays down even when the
+  // recovery is unavailable too. The server's message carries the exit in that
+  // case; this only stops the console from offering a worse one.
+  if (body && body.packageKey) {
+    return { message: "apply failed: " + reason, resumable: false, retryable: false, hint: "" };
+  }
   return { message: "apply failed: " + reason, resumable: false, retryable: true, hint: "" };
 }
 

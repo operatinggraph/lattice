@@ -43,12 +43,16 @@ reconstructed from the same name+version* the heuristic already failed to distin
 
 Three moves, in dependency order.
 
-1. **Thread the real receipt.** `InstallResult`, `UpgradeResult` and `ApplyResult` carry the
-   Processor reply's `RequestID` and `OpTrackerKey`. `submitUpgradeOp` returns the reply.
+1. **Thread the real receipt.** `InstallResult` and `ApplyResult` carry the requestId the
+   install/upgrade committed under, echoed back by the Processor. `submitUpgradeOp` returns the
+   reply so `Apply`'s in-place arm can read it. `UpgradeResult` does **not** carry it —
+   `Installer.Upgrade` has no production caller, and a field nothing reads is a seam with no owner.
+   Nor is `OpTrackerKey` carried: nothing consumes it, and a no-TTL aspect storing a pointer to a
+   key the Processor purges after `TrackerTTL` (24h) dangles by construction.
 2. **A narrow new op stamps it durably.** `RecordCapabilityInstallReceipt`, added to the
    `capabilityproposal` DDL's `PermittedCommands`, writes a **no-TTL, create-only** aspect
-   `vtx.capabilityproposal.<id>.install` = `{packageKey, installRequestId, opTrackerKey,
-   recordedAt}`. It mirrors `MarkCapabilityProposalApplied`'s grant shape and re-uses its three
+   `vtx.capabilityproposal.<id>.install` = `{packageKey, installRequestId, recordedAt}`. It
+   mirrors `MarkCapabilityProposalApplied`'s grant shape and re-uses its
    guards verbatim (approved-only `.review`; `.target.packageName` cross-checked against the live
    `<packageKey>.manifest`; `vtx.package.<id>` key shape). Both apply paths submit it **immediately
    after the apply commits and before** `MarkCapabilityProposalApplied`.
@@ -71,13 +75,21 @@ mark-applied flip. A failure of the **receipt** op is not a failure of the apply
 live and the proposal is still closable. So the receipt submission is **non-fatal**: its failure is
 reported in the resumable error the apply already returns, and recovery falls back to the
 name+version heuristic — i.e. exactly today's behaviour, which is the accepted class the existing
-two-commit boundary already lives with. The receipt strictly *adds* precision; it never gates.
+two-commit boundary already lives with. On the **apply** endpoint the receipt therefore never gates:
+a stale receipt (its package uninstalled or moved version) refuses only when a *different* live
+package now holds the target name — otherwise the plan builder, which owns re-appliability, decides.
+The one place the receipt does gate is the **mark-applied** close, deliberately and fail-closed: that
+transition is write-once, so refusing a close whose provenance cannot be established is recoverable
+where making it is not.
 
 ### 2.3 Read posture
 
 The op declares `contextHint.reads` = `{proposalKey}.review`, `{proposalKey}.target`,
-`{packageKey}.manifest` — the same three `MarkCapabilityProposalApplied` declares, absence of any of
-which is a correctness error (class (a), not `optionalReads`). It reads nothing else: it does not
+`{packageKey}` and `{packageKey}.manifest` — the same four `MarkCapabilityProposalApplied` declares,
+absence of any of which is a correctness error (class (a), not `optionalReads`). The package **root**
+is read alongside its manifest because a manifest-only liveness check is looser than the Go-side
+reader it feeds: an uninstall tombstones both, and the write gate must not admit what the read gate
+then refuses. It reads nothing else: it does not
 read `.install`, because create-only conditioning, not a read-before-create branch, is what makes the
 write once-only.
 
@@ -121,22 +133,19 @@ refusal can.
 - **No read-model / lens column** for the receipt. Loupe reads the aspect from Core KV under its P5
   exception; adding a `capability-proposals` lens column would widen the fire into DDL + refresh for
   a value only this one decision consumes.
-- **No change to `MarkCapabilityProposalApplied`'s** `appliedAs` link or its `review.state`
-  transition. **Amended 2026-08-29, during the build:** this clause originally covered that op's
-  *guards* too, and the build falsified it. Mirroring its name cross-check into the receipt op
-  surfaced that mark-applied reads `target.packageName` **raw** while the installer folds the
-  declared name with `.strip()` (`proposal_package_name`'s own documented reason for existing). A
-  proposal whose target name carried surrounding whitespace would be installable but never
-  closable: the install records the folded spelling and the raw comparison always mismatches.
-  **Reachability, measured rather than asserted:** that state cannot be reached through the op path
-  at all — `RecordCapabilityProposal` and `SubmitCapabilityProposal` both fold `packageName` through
-  the same helper when they write `.target`, so the regression test has to patch Core KV directly to
-  construct it. The raw read was latent, not live: a guard that disagreed with every writer feeding
-  it. Building the receipt op to the raw form would have preserved this non-goal by propagating that
-  disagreement into new code; building it folded and leaving mark-applied alone would have shipped
-  two close-ops that differ on the same name. Both ops now use `proposal_package_name`. It grants no
-  new reach — an author who wants the folded name can always submit it directly — so it is a
-  narrowing of divergence, not a widening of the guard.
+- **No change to `MarkCapabilityProposalApplied`'s guards**, its `appliedAs` link, or its
+  `review.state` transition — beyond the package-root read of §2.3, which both close ops take
+  together. **A mid-build amendment here was withdrawn.** Mirroring the op's name cross-check into
+  the receipt surfaced that it reads `target.packageName` raw while `proposal_package_name` folds,
+  and the fold was briefly propagated to both ops before cold review falsified every premise for it:
+  `Definition.validatePackageName` refuses a non-normalized name at install, so the "installable but
+  never closable" bug cannot occur; `findInstalledPackage`'s own doc comment says matching is
+  **deliberately** not folded, because widening the match set widens what an install or uninstall
+  mutates; and both `.target` writers already fold at write time, so no reachable input carries a
+  padded name. Folding at match time would have made the Starlark write gate looser than every Go
+  reader. Both branches read raw; the helper's doc comment now states it is a write-time fold and
+  must not be reached for on a read path; `TestCapAuthor_Target_PackageNameStrippedAtWrite` pins the
+  real invariant.
 - **No change to `upgradeExisting` apply semantics**, `findInstalledPackageByName`, or
   `CapabilityApplyPlanForProposal`'s `newPackage`-vs-live-catalog guard.
 - **`reply.Revisions` is NOT threaded.** The triage named it alongside `RequestID`/`OpTrackerKey`,
@@ -240,8 +249,12 @@ mark-applied guards were re-read against Contract #1/#3, not copied on trust.
 Both defects the build surfaced were fixed in this run (steward §4 — what a fire discovers, this run
 fixes); neither was filed.
 
-- **`MarkCapabilityProposalApplied` compared `target.packageName` raw** while the installer folds it.
-  Fixed, with the non-goal amended where it stood (§3) and a paired padded/unpadded regression test.
+- **`MarkCapabilityProposalApplied` compared `target.packageName` raw** while `proposal_package_name`
+  folds. Investigated, and the apparent bug was **refuted** — a padded name is refused at install, the
+  installer deliberately does not fold at match time, and both `.target` writers fold at write time.
+  The fold this fire briefly propagated was reverted; see §3. The pin is
+  `TestCapAuthor_Target_PackageNameStrippedAtWrite`, and the helper's own doc comment (which made the
+  false claim, and would have justified re-introducing the fold next time) is corrected.
 - **`cmd/lattice-pkg`'s rejection-reporting line dereferenced `reply.Error` unguarded**, panicking
   the CLI on the one path whose job is to report a failure. Fixed via the nil-safe accessors, tested
   against nil reply / nil Error / empty Error plus a populated-Error positive vector.
