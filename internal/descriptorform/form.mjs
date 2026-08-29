@@ -699,12 +699,19 @@ function substituteTemplates(templates, context, payload) {
 // There is no optional-read-style fallback here: an op declares its
 // enumerations or it doesn't, and nothing is pushed after substitution the
 // way the two Facet-parity reads are (see the reads/optionalReads call site).
+// Deduped on the resolved triple for the same reason substituteTemplates
+// dedupes its keys: two declarations that resolve to one walk are one walk, and
+// the Processor's read-drift record keys on the shape either way.
 function substituteEnumerations(entries, context, payload) {
   const out = [];
+  const seen = new Set();
   for (const entry of entries || []) {
     if (!entry || !entry.relation || !entry.direction) continue;
     const hub = substituteTemplate(entry.hub, context, payload);
     if (!wholeKey(hub)) continue;
+    const shape = hub + " " + entry.relation + " " + entry.direction;
+    if (seen.has(shape)) continue;
+    seen.add(shape);
     out.push({ hub, relation: entry.relation, direction: entry.direction });
   }
   return out;

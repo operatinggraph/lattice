@@ -11,7 +11,10 @@ Board row: `[Pkgmgr] A descriptor-dispatched op cannot declare a kv.Links walk`
 ## 1. The gap
 
 Contract #2 §2.5 class (e) sanctions a bounded, paged, live `kv.Links` walk **provided the walk is declared**
-as `{hub, relation, direction}` in `contextHint.enumerations`. Three surfaces can populate it today:
+as `{hub, relation, direction}` in `contextHint.enumerations`. Three surfaces can populate it today — four
+declaration *sites*, since Weaver validates a gap's own entry and a goal-catalog entry's separately
+(`ActionCatalogEntrySpec.Enumerations`, `internal/pkgmgr/definition.go:617-621`, through the same
+`validateGapEnumerations`):
 
 | surface | hub grammar | resolver | validation |
 |---|---|---|---|
@@ -22,8 +25,10 @@ as `{hub, relation, direction}` in `contextHint.enumerations`. Three surfaces ca
 `pkgmgr.OpDispatchSpec` — the op meta's machine-readable submission recipe, and the surface every ordinary
 descriptor-driven client dispatches from — carries `Reads` and `OptionalReads` but **no `Enumerations`**
 (`internal/pkgmgr/definition.go:872`). An ordinary descriptor-dispatched op therefore cannot declare a walk
-at all. The read-drift census measured the consequence: of 139 baselined walk shapes, all but three sit on
-ops with no declaration channel — a missing vocabulary, not script debt
+at all. The read-drift census measured the consequence: the baseline carries **139** walk shapes
+(`grep -c "^walk" internal/testutil/read_drift_baseline.txt`, re-run live), and the census attributes all of
+them but the three ops that declare through Loom/Weaver/a hand-built envelope to having no declaration
+channel — a missing vocabulary, not script debt
 (`internal/testutil/read_drift_baseline.txt`, the "WHAT THE WALK ROWS ACTUALLY ARE" comment block;
 `docs/reviews/verticals-designer-triage-2026-08-27.md` §"no declaration channel exists").
 
@@ -44,20 +49,44 @@ OpDispatchSpec.Enumerations          (package definition, validated at install)
 
 ## 3. Decisions (Winston, all implementation-level)
 
-**D1 — Hub grammar is the surface's own *required*-Reads grammar.** `EnumerationSpec`'s own doc already
+**D1 — A hub is a whole vertex key a descriptor-driven client can actually resolve.** `EnumerationSpec`'s doc
 states the general rule: "Hub's template grammar belongs to the surface carrying it … each the same grammar
-that surface's Reads use" (`internal/pkgmgr/definition.go:569`). So a dispatch enumeration's Hub takes the
-`OpDispatchSpec.Reads` vocabulary — `{actor}`, `{service}`, `{scopedTo}`, `{payload.*}`, the `:id` modifier,
-or a literal key — validated by `opdispatchtemplates.go`'s existing validator, not a second one.
+that surface's Reads use" (`internal/pkgmgr/definition.go:569`). The dispatch surface's hub grammar is
+therefore drawn from `OpDispatchSpec.Reads`' vocabulary, validated by `opdispatchtemplates.go`'s existing
+validator rather than a second one — but it is a **strict subset** of it, on two counts.
 
-A hub is held to the **required** half of that grammar, which excludes the client-only `{me.<type>}` form
-(legal in `OptionalReads` alone, e.g. `packages/cafe-domain/opmetas.go:131`). The reason is the declaration's
-whole purpose: Contract #2 §2.5 buys *static* classification of an op's read posture, and a hub that resolves
-for a caller with an `edgeIdentity` projection and vanishes for one without would make the envelope's declared
-posture caller-dependent — the walk still runs, now undeclared, for exactly the callers the declaration was
-meant to cover. A server-resolvable hub declares the same walk for every caller or fails loudly at install.
-No shipped walk shape wants a `{me.<type>}` hub: the 39 actor-role walks are all `{actor}`, and the rest hang
-off payload keys or link-discovered vertices (§5.6).
+*Server-resolvable only.* The client-only `{me.<type>}` form (legal in `OptionalReads` alone, e.g.
+`packages/cafe-domain/opmetas.go:131`) is refused. Contract #2 §2.5 buys *static* classification of an op's
+read posture, and a hub that resolves for a caller with an `edgeIdentity` projection and vanishes for one
+without would make the envelope's declared posture caller-dependent — the walk still runs, now undeclared,
+for exactly the callers the declaration was meant to cover.
+
+*Client-resolvable only, and a whole key.* Close review established two further gaps the general grammar
+would have admitted. `{scopedTo}` and `{service}` pass the Reads vocabulary but **no shipped
+descriptor-driven renderer resolves them**: `internal/descriptorform/form.mjs` throws
+`unrecognized read template` (aborting the whole submission with a developer string in front of a user) and
+`cmd/facet/web/app.js` silently drops the entry. A hub no client can resolve is a declaration that can never
+reach an envelope — declared on paper, undeclared in fact — so install refuses it. And the `:id` modifier,
+though documented and accepted by the general grammar, is *inert-but-wrong* on a hub: `{actor:id}` resolves
+to a bare NanoID, passes the whole-key check, and lands on the envelope, but `kv.Links` walks from a full
+vertex key, so the declaration can never match the walk it names and retiring its baseline row would redden
+with no visible cause. Refused, along with any mid-segment placeholder.
+
+The admitted hub grammar is therefore: `{actor}`, `{payload.<field>}`, or a literal key. No shipped walk
+shape wants more — the 39 actor-role walks are all `{actor}`, and the rest hang off payload keys or
+link-discovered vertices (§5.6).
+
+**D8 — An NFR-S6 operation may not declare an enumeration, and install says so.** `descriptor_floor.go`
+refuses *every* `contextHint.enumerations` entry for the equalized-rejection set (`ClaimIdentity`,
+`CompleteCredentialLink`) terminally, at the head of step 4. Before this fire that refusal's stated reason was
+structural — no descriptor could name an enumeration, so the case was unreachable — and this fire makes it
+reachable. Left alone, a later author applying the actor-role pattern to `ClaimIdentity` would install
+cleanly and take identity claiming down completely and un-attributably, since NFR-S6 collapses the resulting
+fault into a generic `ClaimKeyInvalid` with nil details, on every redelivery. Install refuses the declaration
+instead (calling `processor.IsNFRS6Operation`, never duplicating the set), and the floor's now-false
+rationale — and the test case name asserting it — are rewritten to the true reason: the equalization closes
+these operations' declared read set, so an enumeration a submitter adds prices work the equalization has no
+subject for.
 
 **D2 — Refuse a malformed declaration at install, not at dispatch.** Mirrors `validateGapEnumerations`'s
 stated doctrine: the Processor refuses the *whole envelope* on a malformed enumeration, terminally, so a bad
@@ -88,8 +117,14 @@ comment claimed a field-for-field mirror of `OpDispatchSpec` that it never was �
 `VisibleWhen` are absent from both the struct and `knownDispatchFields`, so an authored op declaring either is
 refused as a smuggled key. The build found this and briefly closed it; that was reverted.
 
-`Enumerations` is admitted because it is this item's subject and confers nothing — envelope metadata that
-hydrates no key and grants no authority. `ClassChoices` and `VisibleWhen` stay out: the evidence admits two
+`Enumerations` is admitted because it is this item's subject and grants **no production authority** — envelope
+metadata that hydrates no key, moves no permission, and reaches no authorizer decision (traced at close
+through `starlark_kv.go`, `opwire.go`, `descriptor_floor.go` and `ddl_cache.go`, which decodes only
+`reads`/`optionalReads` off the aspect). It is not literally inert: D4's payoff *is* admission by the
+test-time `ReadDriftGuard` without a baseline row. That admission covers the declared walk only — the guard
+builds its follow-up-read allowance from `record.EnumeratedVertices`, what the script observably walked, never
+from the declaration — so a declaration cannot launder an undeclared read past it.
+`ClassChoices` and `VisibleWhen` stay out: the evidence admits two
 readings (forgotten, or a deliberate narrowing of what AI may author), nothing in the tree distinguishes them,
 and this plane carries a shelved ★★★ admission-model row (`[capability-author] Authored-artifact admission
 holes`). Widening a security-sensitive surface on an unsourceable premise is not this item's work. The false
@@ -97,6 +132,9 @@ comment is fixed instead, naming the exclusions, and the test that pinned the *m
 pins the **subset**: the artifact's field set equals `OpDispatchSpec`'s minus a named exclusion list, and
 every admitted field has a `knownDispatchFields` entry and vice versa. That is the stronger gate — it makes
 the narrowing explicit and reviewable, and it mechanizes the struct-vs-allowlist drift that bit this fire.
+No prior test pinned the artifact's field set at all (close review deepened the clone to 791 commits and
+found the struct was introduced already lacking `VisibleWhen`), so this adds a gate where none existed rather
+than replacing one.
 
 **D6 — The baseline's comment block is amended in the same commit as the channel.** Its "the channel that
 does NOT exist is the descriptor one" paragraph becomes false the moment Inc 1 lands. The
@@ -113,14 +151,19 @@ message points builders straight at it.
   supports one, and inventing it is a designer's call, not this fire's (§6).
 - No sweep of the `read` rows (a different class with a different fix).
 - **No `enumerations` member in `lint-facet-renderer-drift`, and no change to the SwiftUI spike renderer.**
-  That gate's charter is *rendering* fidelity — the field kinds and the dispatch columns that change what a
-  person sees or fills (`contextParams`, `ceremony`, `selfAnchor`, `entityColumn`). The envelope-declaration
-  columns are deliberately outside it: `reads`, `optionalReads`, `classChoices` and `visibleWhen` are all
-  absent from its member list, and `clients/facet-swiftui-spike` honours `reads` alone. `enumerations` is the
-  next member of that same family, so it is handled exactly as its siblings are — the two submitting
-  renderers (`cmd/facet/web/app.js`, `internal/descriptorform/form.mjs`) carry it and the spike does not.
-  This fire therefore neither creates nor widens a drift class there; the spike is exactly as complete as it
-  was. Named here so a later reader sees a decision rather than an oversight.
+  The argument is **precedent**, not charter: every envelope-declaration column is already outside that
+  gate's member list — `reads`, `optionalReads`, `classChoices` and `visibleWhen` are all absent, and
+  `clients/facet-swiftui-spike` honours `reads` alone. `enumerations` is the next member of that family and is
+  handled exactly as its siblings are: the two submitting renderers (`cmd/facet/web/app.js`,
+  `internal/descriptorform/form.mjs`) carry it, the spike does not. So this fire neither creates nor widens a
+  drift class there; the spike is exactly as complete as it was.
+
+  Do **not** read this as "the gate is only about rendering" — its own doc comment says a member may be
+  "a `dispatch` column a renderer has to honour for one descriptor to mean the same thing wherever it is
+  rendered", and `contextParams`/`selfAnchor` are members on submission grounds. Close review used that
+  standard to find a real disagreement: `{scopedTo}`/`{service}` hubs made `form.mjs` throw and `app.js` drop
+  silently. That is closed by narrowing the hub grammar (D1) so no admitted hub can be resolved differently by
+  the two renderers — closed at the source rather than policed by the gate.
 
 ## 5. Fire brief (build note, 2026-08-29)
 

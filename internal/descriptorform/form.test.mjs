@@ -555,6 +555,21 @@ test("submit() drops an enumeration whose hub template does not resolve to a who
   assert.equal("enumerations" in envelope, false, "an unresolvable hub drops the entry, leaving no enumerations on the envelope");
 });
 
+test("submit() sends one enumeration when two declarations resolve to the same walk", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.enumerations = [
+    { hub: "{actor}", relation: "holdsRole", direction: "out" },
+    { hub: "{me}", relation: "holdsRole", direction: "out" },
+  ];
+  const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
+
+  const handle = renderOpForm(row, { target: TARGET, me: ME }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.deepEqual(envelope.enumerations, [{ hub: ME, relation: "holdsRole", direction: "out" }],
+    "two spellings of one hub resolve to one walk, and one walk is sent once");
+});
+
 test("submit() drops an enumeration missing relation or direction", async () => {
   const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
   const row = baseRow({ inputSchema: JSON.stringify(schema) });

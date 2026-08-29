@@ -138,7 +138,13 @@ which both a `duplicate` (an earlier submission claimed that requestId, so the e
 secret's hash never landed) and the Gateway's status-less reply-timeout `202` satisfy without the write
 being confirmed. `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
 OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
-that previously forced clients to branch by op name. `manifest.ent` rows (and both session-typed hat
+that previously forced clients to branch by op name. `dispatchEnumerations` (a nullable array of
+`{hub, relation, direction}`) carries the Contract #2 §2.5 class-(e) `kv.Links` walks the op's script
+runs, for the client to resolve and put on the envelope's `contextHint.enumerations`: the hub is a
+whole-key template in the same vocabulary `dispatchReads` uses, narrowed to what a descriptor-driven
+client can actually resolve (`{actor}`, `{payload.<field>}`, or a literal key), while relation and
+direction are literals. Metadata, not a hydration directive — the walk stays a bounded paged live read
+inside the script. `manifest.ent` rows (and both session-typed hat
 lenses) carry `typeLabel`, the per-type display word the renderer's label ladder consumes instead of
 a hardcoded client-side type map.
 
