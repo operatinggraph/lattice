@@ -542,8 +542,14 @@ func TestPackage_ScriptGuards(t *testing.T) {
 	if strings.Contains(clinicEncountersReadSpec, "a.encounter.data.") {
 		t.Error("clinicEncountersRead must not reach INTO the ciphertext envelope; the decryptor's Field selects the plaintext key")
 	}
-	if !strings.Contains(clinicEncountersReadSpec, "[nanoIdFromKey(pr.key)]           AS authz_anchors") {
-		t.Error("clinicEncountersRead must anchor on the treating provider alone — no workplace token, so the clinical note is not front-desk readable")
+	if !strings.Contains(clinicEncountersReadSpec, "[nanoIdFromKey(pr.key)]") {
+		t.Error("clinicEncountersRead must anchor on the treating provider's bare NanoID")
+	}
+	if !strings.Contains(clinicEncountersReadSpec, "[(a)-[:forPatient]->(p2:patient) | nanoIdFromKey(p2.key)]") {
+		t.Error("clinicEncountersRead must ALSO anchor on the appointment's own patient (self-anchor, via a pattern comprehension so a patient-less appointment degrades to [] not [null]) — the patient can read their own note")
+	}
+	if strings.Contains(clinicEncountersReadSpec, "building") || strings.Contains(clinicEncountersReadSpec, "practicesAt") || strings.Contains(clinicEncountersReadSpec, "atSite") {
+		t.Error("clinicEncountersRead must still carry no workplace token — the clinical note is not front-desk readable")
 	}
 
 	// A patient's NAME is PHI: it must NEVER be PROJECTED by an OPEN (unauthenticated,

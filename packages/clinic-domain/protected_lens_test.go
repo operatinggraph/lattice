@@ -951,7 +951,7 @@ func (f *lensFixture) seedEncounter(t *testing.T, apptName, holderID string) map
 // TestClinicEncountersRead_ProjectsEnvelopePerColumnUnderProviderAnchor — the
 // clinical record's read model projects one row per DOCUMENTED appointment,
 // hands the same ciphertext envelope to each of the three secure columns, and
-// anchors on the treating provider alone.
+// anchors on the treating provider plus the appointment's own patient.
 func TestClinicEncountersRead_ProjectsEnvelopePerColumnUnderProviderAnchor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -981,8 +981,8 @@ func TestClinicEncountersRead_ProjectsEnvelopePerColumnUnderProviderAnchor(t *te
 	require.NotContains(t, v, "patient_name",
 		"the clinical record's own table must not carry the patient name")
 
-	require.Equal(t, []string{f.ids["drsam"]}, anchorStrings(t, v["authz_anchors"]),
-		"authz_anchors must be exactly the treating provider's bare NanoID — no workplace token, so the note is not front-desk readable")
+	require.Equal(t, []string{f.ids["drsam"], f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
+		"authz_anchors must be the treating provider's bare NanoID plus the appointment's own patient self-anchor — no workplace token, so the note is not front-desk readable")
 }
 
 // TestClinicEncountersRead_UndocumentedAppointmentProducesNoRow — an appointment
@@ -1044,9 +1044,10 @@ func TestClinicEncountersRead_AnchorScopesPerProvider(t *testing.T) {
 	for _, r := range rows {
 		byAppt[r.Values["appointment_id"].(string)] = anchorStrings(t, r.Values["authz_anchors"])
 	}
-	require.Equal(t, []string{f.ids["drsam"]}, byAppt[f.ids["apptA"]])
-	require.Equal(t, []string{f.ids["drlee"]}, byAppt[f.ids["apptB"]])
+	require.Equal(t, []string{f.ids["drsam"], f.ids["alice"]}, byAppt[f.ids["apptA"]])
+	require.Equal(t, []string{f.ids["drlee"], f.ids["bob"]}, byAppt[f.ids["apptB"]])
 	require.NotContains(t, byAppt[f.ids["apptA"]], f.ids["drlee"], "one provider's note must not carry another's anchor")
+	require.NotContains(t, byAppt[f.ids["apptA"]], f.ids["bob"], "one patient's note must not carry another patient's anchor")
 }
 
 // seedIdentifiedPatient links a patient to an identity carrying the sensitive

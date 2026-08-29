@@ -3919,16 +3919,18 @@ function renderApptCard(a, opts) {
 
   // The clinical note itself, when the signed-in actor is entitled to read it
   // back (state.myEncounters, populated by loadMyEncounters from the
-  // PROTECTED, provider-self-or-WildcardAnchor /api/my-encounters). Gated on
-  // a.documentedAt && !opts.asSelf — a patient's own self-service card
-  // (opts.asSelf) never shows clinical content, only the "documented"
-  // presence signal above; the Document-visit button below is gated
-  // separately (opts.cancelable && !opts.asSelf && status === completed). An
-  // appointment this reader is not granted for simply has no entry in the
-  // map, which renders as nothing here — never an error, since RLS's silence
-  // is not a failure.
+  // PROTECTED, provider-self-or-patient-self-or-WildcardAnchor
+  // /api/my-encounters). The patient's own self-service card (opts.asSelf)
+  // renders the note the same way the provider's card does — the backend's
+  // authz_anchors already scopes state.myEncounters to what this actor may
+  // see (clinicEncountersReadSpec, packages/clinic-domain/lenses.go), so no
+  // separate FE suppression is needed. The Document-visit button below is
+  // still gated separately (opts.cancelable && !opts.asSelf && status ===
+  // completed). An appointment this reader is not granted for simply has no
+  // entry in the map, which renders as nothing here — never an error, since
+  // RLS's silence is not a failure.
   let noteBlock = null;
-  const note = a.documentedAt && !opts.asSelf ? state.myEncounters[a.appointmentKey] : null;
+  const note = a.documentedAt ? state.myEncounters[a.appointmentKey] : null;
   if (note) {
     // A crypto-shredded record (ShredRetentionClassKey on the clinicalRecord
     // retention class) still projects a row — documentedAt survives, but
