@@ -487,7 +487,7 @@ func TestResolveSubjectHats_WorksAtNoFrontOfHouse_IsNotFrontDesk(t *testing.T) {
 
 // TestResolveSubjectHats_OperatorRoleExempted: the primordial operator role,
 // with NO workplace anchor at all, still resolves as staff — the same
-// exemption CreateAppointment's require_workplace gives on the write side.
+// exemption CreateAppointment's enforce_workplace call-site gate gives on the write side.
 func TestResolveSubjectHats_OperatorRoleExempted(t *testing.T) {
 	testutil.EnsurePrimordials(t)
 	if bootstrap.RoleOperatorKey == "" {

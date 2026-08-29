@@ -116,8 +116,8 @@ func TestHandleResidents_StaffSeesFullRoster(t *testing.T) {
 }
 
 // TestHandleResidents_OperatorSeesFullRoster: the operator role, with no
-// workplace anchor at all, is exempted the same way require_workplace
-// exempts it on the write side.
+// workplace anchor at all, is exempted the same way enforce_workplace's
+// call-site gate exempts it on the write side.
 func TestHandleResidents_OperatorSeesFullRoster(t *testing.T) {
 	testutil.EnsurePrimordials(t)
 	if bootstrap.RoleOperatorKey == "" {
