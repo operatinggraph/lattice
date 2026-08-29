@@ -503,3 +503,74 @@ enforcement point.
 **§2's work-list (items 1–9) is now CLOSED.** The two specced-but-unconsumed field kinds (per-field
 conditional visibility beyond `RecordEncounter`, array-of-objects) stay build-ready with no open row
 demanding them — revive when a consumer needs one.
+
+## §5 fire brief — snapshot-at-decision (build note, 2026-08-29)
+
+**Scope sentence (verbatim, verticals.md):** "The decided-on fair-housing record is never preserved …
+Resolved: snapshot-at-decision — a create-only sensitive aspect stamped on the first `.decision` write
+of either value; `SetApplicantProfile` stays untouched."
+
+**Verified touch-list** (re-checked live at this commit):
+- `packages/lease-signing/scripts.go` — `DecideLeaseApplication` handler (`ot == "DecideLeaseApplication"`,
+  starts ~L712). The terminal-decision guard already reads `prior = kv.Read(app_key + ".decision")`
+  (~L772); `prior == None or prior.isDeleted` IS the "first `.decision` write" predicate — no new read
+  needed to detect it, reuse `prior`. Add three optional reads (`.profile`, `.underwritingParties`,
+  `.applicationSignals`) + one `make_aspect` (create-only) call, gated on that same predicate, alongside
+  the existing `.tenancy` create-only block (~L826-857) — both fire on approve; the profile snapshot must
+  ALSO fire on decline (the more fair-housing-salient case per the design), so it is its own `if` on
+  `prior == None or prior.isDeleted`, not nested inside the `if decision == "approved":` branch.
+- `packages/lease-signing/ddls.go` — add `decidedProfileSnapshotAspectDDL()`, mirroring
+  `profileAspectDDL()` (~L321-364) / `underwritingPartiesAspectDDL()` (~L383-426): `CanonicalName:
+  "decidedProfileSnapshot"`, `Class: "meta.ddl.aspectType"`, `PermittedCommands:
+  []string{"DecideLeaseApplication"}`, `Sensitive: true`, `Custody: {Kind: CustodyKindRetentionClass,
+  RetentionClass: underwritingRecordRetentionClass}` (const at `retention.go:7`), `Script:
+  aspectDeclarationOnlyScript` (const at `ddls.go:79`). Register it in `DDLs()` (~L60-74).
+- `packages/lease-signing/manifest.yaml` — add `decidedProfileSnapshot` / `meta.ddl.aspectType` under
+  `declares.ddls`; bump `version: 0.31.9` → `0.31.10`.
+- `packages/lease-signing/package.go` — bump `Version: "0.31.9"` → `"0.31.10"` (`L85`) to mirror the
+  manifest (lockstep — `scripts/lint-package-version.go`).
+- `packages/lease-signing/lease_signing_test.go` or a new `_test.go` — one test proving: (a) a decline
+  with a submitted profile stamps `.decidedProfileSnapshot` create-only; (b) a SECOND `SetApplicantProfile`
+  call after decision does NOT change the snapshot; (c) a decision with no `.profile` ever submitted
+  stamps an empty/partial snapshot rather than failing (the applicant may be decided on before
+  submitting — `.profile` reads are optional, mirroring `.tenancy`'s `existing_tenancy` pattern).
+
+**Precedents to mirror:** `.tenancy`'s read-then-create-only idiom
+(`packages/lease-signing/scripts.go:826-857`) for the create-only-on-first-decision shape;
+`profileAspectDDL`/`underwritingPartiesAspectDDL` (`ddls.go:321-426`) for the new aspect DDL's shape
+(Sensitive + Custody + `aspectDeclarationOnlyScript`); `TestDecideLeaseApplication_StampsTenancyOnFirstApproveOnly`
+(`renewal_ops_test.go:170`) for the test shape (first-vs-second-decision assertion).
+
+**Data shape decision (Winston, in-brief):** the snapshot aspect nests the three source aspects' `.data`
+dicts verbatim under `profile` / `underwritingParties` / `applicationSignals` keys, rather than
+flattening or re-listing every field by name — a faithful whole-aspect copy that needs no edit when
+`SetApplicantProfile`'s schema evolves, matching the design note's "copying the three profile aspects'
+fields as they stood at decision time" literally. `StarlarkValueToGo` (`internal/starlarksandbox/convert.go:91-92`)
+recurses through nested `*starlarklib.Dict` values, so embedding `existing_profile.data` etc. directly
+converts correctly to a nested Go map at mutation-apply time — verified by reading the conversion path,
+not assumed.
+
+**In-scope gotchas:** package version bump is lockstep (manifest.yaml + package.go) — the diff-base lint
+(`scripts/lint-package-version.go`) will catch a miss. No `docs/components/<c>.md` dossier exists for
+`lease-signing` (a vertical package, not a Lattice component) — no dossier entries to copy. This is a
+new SENSITIVE aspect, so `validateSensitiveClassScope`/custody validation
+(`internal/pkgmgr/sensitivescope.go`, `custodyscope.go`) will reject the DDL if `Class` isn't
+`meta.ddl.aspectType` or `Custody.Kind` isn't set correctly — verify `go build ./...` + `make vet` catch
+any misconfiguration, and add a package_test.go-level DDL-validity assertion only if one doesn't already
+cover new aspectType DDLs generically.
+
+**Adjacent finds:** none anticipated; report any in the builder's final report per
+`agents/fire-brief-template.md` "Builder conduct" — do not file or widen scope mid-build.
+
+**Non-goals:** no Secure Lens over the `underwritingRecord` retention class (the design's own residual —
+"the reader fire … is its own item, filed by the PO when that consumer is real"); do not build a read
+path for `.decidedProfileSnapshot`. `SetApplicantProfile` stays an unconditioned upsert — do not add any
+guard there.
+
+**Standing checklist walked:** #5 (one deterministic key, one writer) — `.decidedProfileSnapshot` has
+exactly one writer (`DecideLeaseApplication`, create-only via `make_aspect`), so a second concurrent
+decide can only race the SAME create — the Processor's create-only semantics reject the loser, matching
+`.tenancy`'s existing race shape. #1 (state needs a lifetime) — the snapshot is create-only / immutable
+once stamped, spans the vertex's whole life, never reset or carried across a tombstone (leaseapp
+tombstone leaves aspects dangling, matching `.tenancy`/`.profile`'s existing behavior — no new handling
+needed). #6 (precedent may carry debt) — `.tenancy`'s pattern was re-read line-by-line above, not assumed.
