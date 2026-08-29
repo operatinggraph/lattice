@@ -23,10 +23,21 @@ import (
 var baselineData string
 
 // baselineTables returns the baselined read and walk shapes, keyed by
-// operationType then shape. Parsed once per process.
-func baselineTables() (reads, walks map[string]map[string]struct{}) {
-	baselineOnce.Do(func() { baselineSets = parseBaseline(baselineData) })
-	return baselineSets[baselineKindRead], baselineSets[baselineKindWalk]
+// operationType then shape. Parsed once per process; a parse failure is
+// returned to every caller, not just the first.
+//
+// The error is a return value rather than a panic because the parse happens
+// inside a sync.Once: a panic there unwinds the first caller and leaves the
+// Once "done" with nil tables, so every later guard in the binary would run
+// against an EMPTY baseline — the guard reddening the whole corpus for a reason
+// stated only in the first goroutine's stack trace. A returned error reaches
+// each guard's own t.Fatalf, naming the bad line where the test can see it.
+func baselineTables() (reads, walks map[string]map[string]struct{}, err error) {
+	baselineOnce.Do(func() { baselineSets, baselineErr = parseBaseline(baselineData) })
+	if baselineErr != nil {
+		return nil, nil, baselineErr
+	}
+	return baselineSets[baselineKindRead], baselineSets[baselineKindWalk], nil
 }
 
 // baselineKind distinguishes the two tables the one file carries.
@@ -40,36 +51,46 @@ const (
 var (
 	baselineOnce sync.Once
 	baselineSets map[baselineKind]map[string]map[string]struct{}
+	baselineErr  error
 )
 
-// parseBaseline reads the generated table: blank lines and `#` comments are
-// prose, every other line is `<kind> TAB <operationType> TAB <shape>`. A
-// malformed line panics rather than being skipped — the file is generated and
-// checked in, so a line this cannot read means the generator and the guard have
-// diverged, and silently ignoring it would widen the guard's blind spot exactly
-// where it is least visible.
-func parseBaseline(data string) map[baselineKind]map[string]map[string]struct{} {
+// parseBaseline reads the table: blank lines and `#` comments are prose, every
+// other line is `<kind> TAB <operationType> TAB <shape>`. A malformed line is an
+// error rather than a skip — a row this cannot read is a row the guard silently
+// stops honouring, which is the one failure mode nobody would notice.
+//
+// Every field is whitespace-trimmed, and a comment may be indented. Both make
+// the file survive being hand-edited, which is the sanctioned way to add a row
+// with its reason: a Windows checkout's trailing \r would otherwise leave every
+// shape parsed-but-unmatchable (three fields, none of them equal to anything the
+// guard computes), and an indented `#` annotation under a row would be read as
+// data.
+func parseBaseline(data string) (map[baselineKind]map[string]map[string]struct{}, error) {
 	out := map[baselineKind]map[string]map[string]struct{}{
 		baselineKindRead: {},
 		baselineKindWalk: {},
 	}
 	for n, line := range strings.Split(data, "\n") {
-		if line == "" || strings.HasPrefix(line, "#") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) != 3 {
-			panic(fmt.Sprintf("testutil: read_drift_baseline.txt line %d: want 3 tab-separated fields, got %d: %q", n+1, len(parts), line))
+			return nil, fmt.Errorf("read_drift_baseline.txt line %d: want 3 tab-separated fields, got %d: %q", n+1, len(parts), line)
 		}
-		kind := baselineKind(parts[0])
+		kind, op, shape := baselineKind(strings.TrimSpace(parts[0])), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
 		byOp, ok := out[kind]
 		if !ok {
-			panic(fmt.Sprintf("testutil: read_drift_baseline.txt line %d: unknown kind %q", n+1, parts[0]))
+			return nil, fmt.Errorf("read_drift_baseline.txt line %d: unknown kind %q, want %q or %q", n+1, kind, baselineKindRead, baselineKindWalk)
 		}
-		if byOp[parts[1]] == nil {
-			byOp[parts[1]] = map[string]struct{}{}
+		if op == "" || shape == "" {
+			return nil, fmt.Errorf("read_drift_baseline.txt line %d: operationType and shape must both be non-empty: %q", n+1, line)
 		}
-		byOp[parts[1]][parts[2]] = struct{}{}
+		if byOp[op] == nil {
+			byOp[op] = map[string]struct{}{}
+		}
+		byOp[op][shape] = struct{}{}
 	}
-	return out
+	return out, nil
 }

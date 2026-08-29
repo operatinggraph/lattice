@@ -66,6 +66,10 @@ func main() {
 
 	reads := map[string]map[string]struct{}{}
 	walks := map[string]map[string]struct{}{}
+	// everDeclared records, per operationType, every enumeration shape some
+	// execution's envelope DID declare — the evidence that a declaring channel
+	// exists for that op at all.
+	everDeclared := map[string]map[string]struct{}{}
 	add := func(m map[string]map[string]struct{}, op, shape string) {
 		if m[op] == nil {
 			m[op] = map[string]struct{}{}
@@ -88,14 +92,16 @@ func main() {
 			walked[v] = struct{}{}
 		}
 		for _, k := range l.LiveReads {
-			if _, ok := walked[vertexRoot(k)]; ok {
+			if _, ok := walked[testutil.VertexRoot(k)]; ok {
 				continue
 			}
 			add(reads, l.OperationType, testutil.NormalizeReadKey(k))
 		}
 		declared := map[string]struct{}{}
 		for _, h := range l.HintEnumerations {
-			declared[testutil.NormalizeEnumeration(h.Hub, h.Relation, h.Direction)] = struct{}{}
+			shape := testutil.NormalizeEnumeration(h.Hub, h.Relation, h.Direction)
+			declared[shape] = struct{}{}
+			add(everDeclared, l.OperationType, shape)
 		}
 		for _, e := range l.Enumerations {
 			shape := testutil.NormalizeEnumeration(e.Hub, e.Relation, e.Direction)
@@ -123,6 +129,24 @@ func main() {
 	fmt.Printf("gen-read-drift-baseline: %d executions -> %s\n", lines, out)
 	fmt.Printf("  reads: %d operations, %d shapes\n", len(reads), count(reads))
 	fmt.Printf("  walks: %d operations, %d shapes\n", len(walks), count(walks))
+
+	// The walk split the header points at: a baselined walk shape whose own op
+	// is seen declaring that exact shape somewhere is fixture under-declaration
+	// (a declaring channel demonstrably exists); the rest have none observed.
+	fixable, unfixable := 0, 0
+	fixableOps := map[string]struct{}{}
+	for op, shapes := range walks {
+		for shape := range shapes {
+			if _, ok := everDeclared[op][shape]; ok {
+				fixable++
+				fixableOps[op] = struct{}{}
+				continue
+			}
+			unfixable++
+		}
+	}
+	fmt.Printf("  walk split: %d shape(s) across %d op(s) are fixture under-declaration (that op declares the same shape elsewhere); %d have no observed declaring channel\n",
+		fixable, len(fixableOps), unfixable)
 }
 
 func count(m map[string]map[string]struct{}) int {
@@ -131,19 +155,6 @@ func count(m map[string]map[string]struct{}) int {
 		n += len(s)
 	}
 	return n
-}
-
-// vertexRoot mirrors the guard's own rule: the 3-segment vertex key an aspect
-// belongs to, and "" for anything that is not a vertex key.
-func vertexRoot(key string) string {
-	if !strings.HasPrefix(key, "vtx.") {
-		return ""
-	}
-	p := strings.Split(key, ".")
-	if len(p) < 3 {
-		return ""
-	}
-	return strings.Join(p[:3], ".")
 }
 
 func writeTable(b *strings.Builder, kind, what string, m map[string]map[string]struct{}) {
@@ -166,27 +177,61 @@ func writeTable(b *strings.Builder, kind, what string, m map[string]map[string]s
 	b.WriteString("\n")
 }
 
-const header = `# MEASURED DEBT, NOT A PERMISSION LIST.
+const header = `# MEASURED RESIDUE, NOT A PERMISSION LIST.
 #
-# Every row below is a packages/ script reading or walking Core KV that the
-# operation's dispatcher never declared — the class-(b) read-posture debt
-# Contract #2 §2.5 and CLAUDE.md name, counted rather than described. The file
-# exists so the drift guard (read_drift_guard.go) can be armed on every
-# CapabilityPipeline TODAY: new drift cannot land, while the sweep that removes
-# these rows runs at its own pace.
+# Every row is a shape some script read or walked live in a test run while the
+# submitting envelope declared nothing that covers it. The file exists so the
+# drift guard (read_drift_guard.go) can be armed on every CapabilityPipeline
+# TODAY: no NEW undeclared read or walk can land, whatever these rows say.
 #
 # A row is a shape the guard TOLERATES, never one it endorses. Reads already
-# sanctioned as Contract #2 §2.5 class-(e) follow-ups on an enumeration are
-# admitted by the guard itself and never appear here — what remains is the
-# residue, and the file only shrinks as declarations land.
+# sanctioned as Contract #2 §2.5 class-(e) follow-ups on an enumeration — the
+# key's vertex root was DISCOVERED by this execution's own kv.Links walk, hubs
+# excluded — are admitted by the guard itself and never appear here.
 #
-# Rows are REMOVED when a dispatcher declares the key or walk, and are added
-# ONLY by regenerating from a fresh census — never by hand to silence a failing
-# test. A guard failure means a script started reading something new; the fix is
-# the declaration the failure names.
+# WHAT THE READ ROWS ACTUALLY ARE — three different things, and only the first
+# two are removable. Do not read the file as one undifferentiated debt pile; the
+# classification was measured against the declaring sources, not assumed.
 #
-# Format: <kind> TAB <operationType> TAB <normalized shape>, sorted.
-# GENERATED — regenerate with the census + command in
-# scripts/gen-read-drift-baseline.go.
+#  1. The envelope the TEST builds under-declares what the real dispatcher
+#     already sends. The script is fine and production declares correctly; the
+#     fixture omits it, which means the test drives the lazy live-read path
+#     production never takes. Fix the fixture, drop the row.
+#  2. A genuine declaration gap, payload-direct and therefore declarable —
+#     the worksAt confinement reads reachable from the submitted payload. Fix
+#     the descriptor, drop the row.
+#  3. Sanctioned and undeclarable BY DESIGN — class-(c) config reads
+#     (deliberately outside OCC) and reads chained off a value only a prior read
+#     resolves. Nothing should ever declare these; the rows record where the
+#     guard must stay quiet.
+#
+# WHAT THE WALK ROWS ACTUALLY ARE. A walk is declarable through
+# ContextHint.Enumerations, and four channels populate it: Loom StepSpec, Weaver
+# GapActionSpec, a hand-built envelope (cmd/lattice/candidates/candidates.go
+# does this for MergeIdentity), and a client passing enumerations through the
+# gateway or Loupe (internal/gateway/gateway.go, cmd/loupe/op.go). The channel
+# that does NOT exist is the descriptor one: pkgmgr.OpDispatchSpec carries Reads
+# and OptionalReads but no Enumerations field (internal/pkgmgr/definition.go),
+# so an ordinary descriptor-dispatched op cannot declare a walk at all. Those
+# rows are a missing vocabulary, not script debt.
+#
+# The two are not the same fix and the split is measurable: a walk row whose op
+# is ALSO seen declaring that exact shape in some other execution is a fixture
+# under-declaration (class 1 applied to walks), because a declaring channel
+# demonstrably exists for it. The rest have no observed declaring channel. The
+# generator prints both counts each time it runs — read them off that output
+# rather than trusting a number frozen into this comment.
+#
+# Rows are REMOVED when a dispatcher declares the key or walk. A row may be ADDED
+# BY HAND, under a comment line stating why, when a read or walk is sanctioned and
+# undeclarable — that is the path the guard failure itself points at.
+# REGENERATING is not that path: it re-records everything the run observed,
+# including drift that has just landed, so its DIFF must be reviewed row by row
+# and it must never be run to make a failing test pass.
+#
+# Format: <kind> TAB <operationType> TAB <normalized shape>, sorted. Fields are
+# whitespace-trimmed and an indented # comment is prose, so hand annotation is
+# safe.
+# Regenerate with the census + command in scripts/gen-read-drift-baseline.go.
 
 `

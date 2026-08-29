@@ -27,6 +27,9 @@ const (
 type driftProbe struct {
 	guard    *ReadDriftGuard
 	findings []string
+	// lockDropped records that the guard reported a finding without holding
+	// its own mutex. See TestReadDriftGuard_HoldsItsLockWhileReporting.
+	lockDropped bool
 }
 
 func newDriftProbe(reads, walks map[string]map[string]struct{}) *driftProbe {
@@ -37,6 +40,14 @@ func newDriftProbe(reads, walks map[string]map[string]struct{}) *driftProbe {
 		seen:  map[string]struct{}{},
 	}
 	p.guard.errorf = func(format string, args ...any) {
+		// TryLock succeeding means the guard let go of g.mu before reporting —
+		// the window that lets a late finding race t.Cleanup and panic the
+		// binary. Checked on every report rather than in one test, so no arm
+		// can regress it quietly.
+		if p.guard.mu.TryLock() {
+			p.guard.mu.Unlock()
+			p.lockDropped = true
+		}
 		p.findings = append(p.findings, fmt.Sprintf(format, args...))
 	}
 	return p
@@ -51,6 +62,7 @@ func (p *driftProbe) observe(op string, record processor.ScriptReadRecord, hint 
 
 func (p *driftProbe) assertNoFindings(t *testing.T, what string) {
 	t.Helper()
+	p.assertHeldItsLock(t)
 	if len(p.findings) != 0 {
 		t.Fatalf("%s: expected the guard to admit this, got:\n%s", what, strings.Join(p.findings, "\n"))
 	}
@@ -58,6 +70,7 @@ func (p *driftProbe) assertNoFindings(t *testing.T, what string) {
 
 func (p *driftProbe) assertOneFinding(t *testing.T, contains ...string) string {
 	t.Helper()
+	p.assertHeldItsLock(t)
 	if len(p.findings) != 1 {
 		t.Fatalf("expected exactly 1 finding, got %d:\n%s", len(p.findings), strings.Join(p.findings, "\n"))
 	}
@@ -67,6 +80,26 @@ func (p *driftProbe) assertOneFinding(t *testing.T, contains ...string) string {
 		}
 	}
 	return p.findings[0]
+}
+
+// assertHeldItsLock fails when the guard reported without holding g.mu.
+func (p *driftProbe) assertHeldItsLock(t *testing.T) {
+	t.Helper()
+	if p.lockDropped {
+		t.Fatal("the guard released g.mu before calling errorf: a report can then race the t.Cleanup that sets closed, and t.Errorf on a finished test panics the whole binary")
+	}
+}
+
+// TestReadDriftGuard_HoldsItsLockWhileReporting states the invariant the probe
+// checks on every report: the closed flag only closes the post-test window if
+// "not closed" stays true for the whole report, which means holding g.mu across
+// errorf rather than merely across the checks.
+func TestReadDriftGuard_HoldsItsLockWhileReporting(t *testing.T) {
+	p := newDriftProbe(nil, nil)
+	p.observe("DriftOp", processor.ScriptReadRecord{
+		LiveReads: []string{"vtx.thing." + driftIDA + ".secret"},
+	}, nil)
+	p.assertOneFinding(t, "vtx.thing.<id>.secret")
 }
 
 // shapeSet is the per-op table shape the guard reads.
@@ -125,6 +158,52 @@ func TestReadDriftGuard_WalkFollowUpReadIsAdmitted(t *testing.T) {
 	q := newDriftProbe(nil, nil)
 	q.observe("DriftOp", unwalked, hint)
 	q.assertOneFinding(t, "vtx.thing.<id>.detail")
+}
+
+// TestReadDriftGuard_HubIsNotAWalkFollowUp is the regression for the hole this
+// guard shipped with. `vtx.identity.<actor> holdsRole out` is the standard
+// confinement preamble, baselined or declared on most of the corpus; when the
+// walked set included every returned link's BOTH endpoints, the hub was in it
+// whenever the walk returned anything, and every subsequent read of any aspect
+// on the actor was admitted with no shape check at all — the exact regression
+// the guard exists to catch, invisible across most operations.
+//
+// Both halves matter and are asserted together: a read on the HUB fires, a read
+// on the vertex the walk DISCOVERED does not.
+func TestReadDriftGuard_HubIsNotAWalkFollowUp(t *testing.T) {
+	actor := "vtx.identity." + driftIDA
+	role := "vtx.role." + driftIDB
+	walk := []processor.ScriptEnumeration{{Hub: actor, Relation: "holdsRole", Direction: "out"}}
+	hint := &processor.ContextHint{Enumerations: []processor.EnumerationHint{
+		{Hub: actor, Relation: "holdsRole", Direction: "out"},
+	}}
+
+	p := newDriftProbe(nil, nil)
+	p.observe("DriftOp", processor.ScriptReadRecord{
+		// What kv.Links records after the fix: the far endpoint only.
+		LiveReads:          []string{actor + ".piiKey", role + ".canonicalName"},
+		Enumerations:       walk,
+		EnumeratedVertices: []string{role},
+	}, hint)
+	f := p.assertOneFinding(t, "vtx.identity.<id>.piiKey")
+	if strings.Contains(f, "canonicalName") {
+		t.Fatalf("a read on the DISCOVERED vertex must still be admitted:\n%s", f)
+	}
+
+	// The other half of the invariant, stated where it can be seen: the guard
+	// admits on EnumeratedVertices membership and nothing else, so a record that
+	// put the hub in that set would blind it exactly as before. That is why the
+	// exclusion lives in the RECORDER, and why
+	// processor.TestScriptReadRecord_EnumerationAndFarEndpointsRecorded asserts
+	// the hub's absence there. If this ever stops holding, the two tests
+	// disagree and one of them is wrong.
+	q := newDriftProbe(nil, nil)
+	q.observe("DriftOp", processor.ScriptReadRecord{
+		LiveReads:          []string{actor + ".piiKey"},
+		Enumerations:       walk,
+		EnumeratedVertices: []string{actor, role},
+	}, hint)
+	q.assertNoFindings(t, "a read whose root IS in the walked set")
 }
 
 // TestReadDriftGuard_UndeclaredReadFires — the rejecting arm, plus the finding's
@@ -267,6 +346,15 @@ func TestNormalizeReadKey(t *testing.T) {
 		{"relation stays", "lnk.identity." + driftIDA + ".holdsRole.role." + driftIDB, "lnk.identity.<id>.holdsRole.role.<id>"},
 		{"static localName stays", "vtx.provider." + driftIDA + ".timeOff", "vtx.provider.<id>.timeOff"},
 		{"trailing digit is not an instant", "vtx.session." + driftIDA + ".seat1", "vtx.session.<id>.seat1"},
+		// The alphabet-lottery vectors. Both are 21 characters whose LAST 20
+		// happen to contain no l/I/O/0, so a "trailing 20 chars parse as a
+		// NanoID" rule would reduce each to `e<id>` — one baseline row then
+		// admitting every 21-character aspect on the vertex beginning with `e`.
+		// A localName only collapses when it matches a named composite prefix.
+		{"21-char ordinary name stays (1)", "vtx.identity." + driftIDA + ".emergencyContactPhone", "vtx.identity.<id>.emergencyContactPhone"},
+		{"21-char ordinary name stays (2)", "vtx.identity." + driftIDA + ".erasureRequestedAtNow", "vtx.identity.<id>.erasureRequestedAtNow"},
+		{"long name off the prefix list stays", "vtx.identity." + driftIDA + ".someUnlistedPrefix" + driftIDB, "vtx.identity.<id>.someUnlistedPrefix" + driftIDB},
+		{"listed prefix without an id stays", "vtx.patient." + driftIDA + ".activeVisitSeriesWithNobody", "vtx.patient.<id>.activeVisitSeriesWithNobody"},
 		{"short digit run is not an instant", "vtx.session." + driftIDA + ".slot2026", "vtx.session.<id>.slot2026"},
 		{"instant with no static prefix stays whole", "vtx.session." + driftIDA + ".20260708t090000z", "vtx.session.<id>.20260708t090000z"},
 		// nanoid-alphabet: (reject) this id is 20 characters but carries an 'l',
@@ -299,24 +387,55 @@ func TestNormalizeEnumeration(t *testing.T) {
 }
 
 // TestBaselineTable_ParsesAndRoundTrips — the embedded table is the guard's
-// grounding, so a malformed row must be loud rather than silently dropped.
+// grounding, so a malformed row must be loud rather than silently dropped, and
+// the hand-annotation the guard's own remedy text recommends must survive a
+// round trip.
 func TestBaselineTable_ParsesAndRoundTrips(t *testing.T) {
-	sets := parseBaseline("# prose\n\nread\tOpA\tvtx.thing.<id>\nwalk\tOpB\tvtx.hub.<id> rel out\n")
+	sets, err := parseBaseline("# prose\n\n  # an indented annotation\nread\tOpA\tvtx.thing.<id>\nwalk\tOpB\tvtx.hub.<id> rel out\n")
+	if err != nil {
+		t.Fatalf("parseBaseline: %v", err)
+	}
 	if _, ok := sets[baselineKindRead]["OpA"]["vtx.thing.<id>"]; !ok {
 		t.Fatal("read row not parsed")
 	}
 	if _, ok := sets[baselineKindWalk]["OpB"]["vtx.hub.<id> rel out"]; !ok {
 		t.Fatal("walk row not parsed")
 	}
-	for _, bad := range []string{"read\tOnlyTwoFields\n", "nonsense\tOpA\tshape\n"} {
-		t.Run("rejects "+bad, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("a malformed row must panic, not be skipped: %q", bad)
-				}
-			}()
-			parseBaseline(bad)
+
+	// A CRLF checkout must not leave every shape parsed-but-unmatchable: three
+	// fields would still be found, and the trailing \r would make the shape
+	// equal to nothing the guard ever computes — a baseline that silently
+	// stopped covering anything.
+	crlf, err := parseBaseline("read\tOpA\tvtx.thing.<id>\r\n")
+	if err != nil {
+		t.Fatalf("parseBaseline(CRLF): %v", err)
+	}
+	if _, ok := crlf[baselineKindRead]["OpA"]["vtx.thing.<id>"]; !ok {
+		t.Fatalf("a CRLF line must parse to the same shape, got %v", crlf[baselineKindRead]["OpA"])
+	}
+
+	for name, bad := range map[string]string{
+		"two fields":   "read\tOnlyTwoFields\n",
+		"unknown kind": "nonsense\tOpA\tshape\n",
+		"empty shape":  "read\tOpA\t   \n",
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			if _, err := parseBaseline(bad); err == nil {
+				t.Fatalf("a malformed row must be an error, not a skip: %q", bad)
+			}
 		})
+	}
+}
+
+// TestBaselineTable_ErrorReachesEveryGuard — the parse runs inside a sync.Once,
+// so a panic there would leave every later guard in the binary holding an EMPTY
+// baseline. baselineTables returns the error instead; NewReadDriftGuard turns it
+// into a t.Fatalf naming the line.
+func TestBaselineTable_ErrorReachesEveryGuard(t *testing.T) {
+	if _, err := parseBaseline("read\tOpA\n"); err == nil {
+		t.Fatal("want an error value a caller can surface")
+	} else if !strings.Contains(err.Error(), "line 1") {
+		t.Fatalf("error must name the offending line: %v", err)
 	}
 }
 
@@ -340,29 +459,5 @@ func TestCapabilityPipeline_ArmsTheDriftGuard(t *testing.T) {
 		if !strings.Contains(string(src), want) {
 			t.Fatalf("CapabilityPipeline no longer arms the read-drift guard: %q is gone from pipeline.go", want)
 		}
-	}
-}
-
-// TestReadDriftGuard_EmptyWalkedEndpointAdmitsNothing pins the fail-closed
-// direction of the class-(e) admission: a link key has no vertex root, so an
-// empty root must never match a walked endpoint. Without the guard's non-empty
-// check a single malformed endpoint in EnumeratedVertices would admit EVERY
-// undeclared link-key read for that execution.
-func TestReadDriftGuard_EmptyWalkedEndpointAdmitsNothing(t *testing.T) {
-	var got []string
-	g := &ReadDriftGuard{
-		errorf: func(format string, args ...any) { got = append(got, fmt.Sprintf(format, args...)) },
-		reads:  map[string]map[string]struct{}{},
-		walks:  map[string]map[string]struct{}{},
-		seen:   map[string]struct{}{},
-	}
-	g.ObserveScriptReads(context.Background(),
-		&processor.OperationEnvelope{OperationType: "OpUnderTest"},
-		processor.ScriptReadRecord{
-			LiveReads:          []string{"lnk.identity.SecCredSingNPQRSTUVW.worksAt.building.BBcandidateHJKMNPQRS"},
-			EnumeratedVertices: []string{""},
-		})
-	if len(got) != 1 {
-		t.Fatalf("an undeclared link-key read alongside an empty walked endpoint must still fire; got %d findings: %v", len(got), got)
 	}
 }

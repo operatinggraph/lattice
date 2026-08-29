@@ -238,8 +238,24 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		page := starlarklib.NewList(nil)
 		for _, l := range links {
 			_ = page.Append(linkDocToStarlark(l))
-			sc.ReadRecorder.recordEnumeratedVertex(l.SourceVertex)
-			sc.ReadRecorder.recordEnumeratedVertex(l.TargetVertex)
+			// Record the FAR endpoint only — the vertex the walk DISCOVERED.
+			// The subject filter pins the hub to one end of every returned
+			// link ("out" filters on the hub as source, "in" on the hub as
+			// target), so the hub is on every link by construction and the
+			// script already knew it: it named the hub to start the walk.
+			// Recording it would make "an enumeration surfaced this vertex"
+			// true of the hub for free, which is exactly the wrong thing for a
+			// consumer trying to tell a discovered key from a named one. The
+			// hub is not lost — it is the enumeration's own Hub field. A
+			// self-link's far endpoint IS the hub, and is skipped for the same
+			// reason.
+			far := l.TargetVertex
+			if direction == "in" {
+				far = l.SourceVertex
+			}
+			if far != hubKey {
+				sc.ReadRecorder.recordEnumeratedVertex(far)
+			}
 		}
 		// Recorded here, at the page the script receives, so a walk that failed
 		// upstream is never recorded as one the script performed.

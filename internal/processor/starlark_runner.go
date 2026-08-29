@@ -473,6 +473,20 @@ type stateMapValue struct {
 	readRecorder   *scriptReadRecorder
 }
 
+// recordWholeSnapshot records every hydrated key as read — what a whole-set
+// exposure hands the script.
+//
+// The nil check is here rather than left to the recorder's own nil-safe
+// receiver: snapshotKeys allocates a slice of every hydrated key, and the
+// argument is evaluated before the call. Most harnesses wire no recorder, and
+// `str(state)` inside a loop would otherwise pay for a record nobody keeps.
+func (s *stateMapValue) recordWholeSnapshot() {
+	if s.readRecorder == nil {
+		return
+	}
+	s.readRecorder.recordAllDeclaredReads(s.snapshotKeys()...)
+}
+
 // snapshotKeys returns the key names of the hydrated dict — exactly the set a
 // whole-set exposure hands the script.
 func (s *stateMapValue) snapshotKeys() []string {
@@ -499,7 +513,7 @@ func (s *stateMapValue) snapshotKeys() []string {
 // it in a log line, or every external-egress op that got logged would reject.
 func (s *stateMapValue) String() string {
 	s.sensitiveReads.consumeAll()
-	s.readRecorder.recordAllDeclaredReads(s.snapshotKeys()...)
+	s.recordWholeSnapshot()
 	return s.d.String()
 }
 
@@ -623,7 +637,7 @@ func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
 		}
 		return starlarklib.NewBuiltin(name, func(thread *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
 			s.sensitiveReads.consumeAll()
-			s.readRecorder.recordAllDeclaredReads(s.snapshotKeys()...)
+			s.recordWholeSnapshot()
 			return starlarklib.Call(thread, fn, args, kwargs)
 		}), nil
 	case "keys":

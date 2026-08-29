@@ -15,15 +15,20 @@ import (
 //   - declaredReads — keys the step-4 snapshot answered: kv.Read served from
 //     Hydrated / RequiredAbsent / KnownAbsent, and every `state` exposure that
 //     hands the script a document (`state[K]`, `state.get(K)`, and the whole-set
-//     `items`/`values`/`str`). The snapshot holds only what `contextHint`
-//     named, so a key it answers IS declared — no set difference needed;
+//     `items`/`values`/`str`). The snapshot is built from the DECLARED read set
+//     — `contextHint`'s three lists PLUS the class-(g) keys step 4's
+//     `derive_reads` pre-pass resolves from the script itself (derive_reads.go).
+//     So a key the snapshot answers was declared through one channel or the
+//     other, and a consumer that wants to attribute it to `contextHint`
+//     specifically has to consult the envelope: this record does not separate
+//     the two;
 //   - liveReads — keys kv.Read served through the lazy on-demand fallthrough.
 //     That branch is reached only when the key is in none of Hydrated /
-//     RequiredAbsent / KnownAbsent, so every key recorded there is undeclared by
-//     construction;
+//     RequiredAbsent / KnownAbsent, so every key recorded there was declared by
+//     NEITHER channel — undeclared by construction;
 //   - enumerations / enumeratedVertices — the kv.Links walks the script actually
-//     performed and the endpoint vertex keys those walks yielded, the §2.5.1
-//     set-valued counterpart to a named key read.
+//     performed and the FAR endpoint each walk yielded, the §2.5.1 set-valued
+//     counterpart to a named key read.
 //
 // OBSERVATION ONLY — never a runtime control. `contextHint` is submitter-supplied
 // and step 3 authorizes without inspecting it, so a Processor that rejected an
@@ -101,9 +106,11 @@ func (r *scriptReadRecorder) recordEnumeration(hub, relation, direction string) 
 	r.enumerations[ScriptEnumeration{Hub: hub, Relation: relation, Direction: direction}] = struct{}{}
 }
 
-// recordEnumeratedVertex records a vertex key an enumeration surfaced as a link
-// endpoint — the keys a walk exposed to the script without any of them being
-// named in a declaration.
+// recordEnumeratedVertex records a vertex an enumeration DISCOVERED — the far
+// end of one returned link, never the hub. See starlark_kv.go's kv.Links loop
+// for why the hub is excluded: it is pinned to every link by the subject filter
+// and was named by the script to start the walk, so recording it would make
+// "an enumeration surfaced this vertex" vacuously true of the hub.
 func (r *scriptReadRecorder) recordEnumeratedVertex(key string) {
 	if r == nil {
 		return
@@ -170,9 +177,14 @@ type ScriptEnumeration struct {
 // scriptReadRecorder for what each field means and why the record is
 // observation only). Slices are sorted and nil when empty.
 type ScriptReadRecord struct {
-	DeclaredReads      []string
-	LiveReads          []string
-	Enumerations       []ScriptEnumeration
+	DeclaredReads []string
+	LiveReads     []string
+	Enumerations  []ScriptEnumeration
+	// EnumeratedVertices are the vertices the enumerations DISCOVERED: the far
+	// end of each returned link, excluding every walk's own hub. A consumer may
+	// therefore read membership here as "this key was surfaced by a walk rather
+	// than named by the script" — which it could not if the hub were included,
+	// since the subject filter puts the hub on every link a walk returns.
 	EnumeratedVertices []string
 }
 

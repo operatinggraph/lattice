@@ -337,11 +337,17 @@ def execute(state, op):
 	}
 }
 
-// TestScriptReadRecord_EnumerationAndEndpointsRecorded — a completed kv.Links
+// TestScriptReadRecord_EnumerationAndFarEndpointsRecorded — a completed kv.Links
 // walk records the (hub, relation, direction) triple in the same terms a
-// contextHint enumeration declares it, plus every endpoint vertex key the page
-// exposed to the script.
-func TestScriptReadRecord_EnumerationAndEndpointsRecorded(t *testing.T) {
+// contextHint enumeration declares it, plus the FAR endpoint of each returned
+// link.
+//
+// The hub's ABSENCE is the load-bearing assertion. The subject filter pins the
+// hub to one end of every link a walk returns, so recording it would make
+// "an enumeration surfaced this vertex" true of the hub whenever the walk
+// returns anything at all — and a consumer using this set to tell a discovered
+// key from a named one would then admit every read of every aspect on the hub.
+func TestScriptReadRecord_EnumerationAndFarEndpointsRecorded(t *testing.T) {
 	hub := "vtx.provider." + linkProvID
 	rec := &scriptReadRecorder{}
 	lister := &fakeLinkLister{links: []LinkDoc{
@@ -374,8 +380,53 @@ def execute(state, op):
 	assertRecordedKeys(t, "EnumeratedVertices", got.EnumeratedVertices, []string{
 		"vtx.appointment." + linkApptID1,
 		"vtx.appointment." + linkApptID2,
-		hub,
 	})
+}
+
+// TestScriptReadRecord_InboundWalkRecordsSourceAsFarEndpoint — direction "in"
+// filters on the hub as the link TARGET, so the far endpoint is the SOURCE.
+// Getting this backwards would record the hub (the thing the guard must not
+// see) and drop the vertex the walk actually discovered.
+func TestScriptReadRecord_InboundWalkRecordsSourceAsFarEndpoint(t *testing.T) {
+	hub := "vtx.appointment." + linkApptID1
+	far := "vtx.provider." + linkProvID
+	rec := &scriptReadRecorder{}
+	sc := ScriptContext{ReadRecorder: rec, LinkLister: &fakeLinkLister{links: []LinkDoc{{
+		Key:          "lnk.provider." + linkProvID + ".withProvider.appointment." + linkApptID1,
+		Class:        "withProvider",
+		SourceVertex: far,
+		TargetVertex: hub,
+	}}}}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    page, nxt = kv.Links("`+hub+`", "withProvider", "in")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRecordedKeys(t, "EnumeratedVertices", rec.record().EnumeratedVertices, []string{far})
+}
+
+// TestScriptReadRecord_SelfLinkDoesNotRecordTheHub — a link whose two endpoints
+// are the same vertex would otherwise smuggle the hub back into the discovered
+// set through the far-endpoint path.
+func TestScriptReadRecord_SelfLinkDoesNotRecordTheHub(t *testing.T) {
+	hub := "vtx.provider." + linkProvID
+	rec := &scriptReadRecorder{}
+	sc := ScriptContext{ReadRecorder: rec, LinkLister: &fakeLinkLister{links: []LinkDoc{{
+		Key:          "lnk.provider." + linkProvID + ".supersedes.provider." + linkProvID,
+		Class:        "supersedes",
+		SourceVertex: hub,
+		TargetVertex: hub,
+	}}}}
+	if _, err := runKVScript(t, sc, `
+def execute(state, op):
+    page, nxt = kv.Links("`+hub+`", "supersedes", "out")
+    return {"mutations": [], "events": []}
+`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRecordedKeys(t, "EnumeratedVertices", rec.record().EnumeratedVertices, nil)
 }
 
 // TestScriptReadRecord_FailedEnumerationNotRecorded — a kv.Links call whose
@@ -480,6 +531,24 @@ def execute(state, op):
     return {"mutations": [], "events": []}
 `); err != nil {
 		t.Fatalf("an unwired recorder must not affect execution: %v", err)
+	}
+}
+
+// TestScriptReadRecord_NilRecorderSkipsSnapshotWork — the whole-set exposures
+// must cost NOTHING when no recorder is wired. Every harness that does not care
+// is in that state, and `str(state)` inside a script loop would otherwise
+// allocate a slice of every hydrated key per iteration for a record nobody
+// keeps. Nil-safety alone does not give this: the argument is built before the
+// call, so the check has to sit at the call site.
+func TestScriptReadRecord_NilRecorderSkipsSnapshotWork(t *testing.T) {
+	sc := ScriptContext{Hydrated: map[string]VertexDoc{}}
+	for i := range 32 {
+		key := "vtx.task." + string(rune('a'+i%26)) + readRecStateID
+		sc.Hydrated[key] = VertexDoc{Key: key, Class: "task"}
+	}
+	state := vertexMapToStarlarkWithHydrated(sc)
+	if got := testing.AllocsPerRun(50, state.recordWholeSnapshot); got != 0 {
+		t.Fatalf("recordWholeSnapshot allocated %v times with no recorder wired, want 0", got)
 	}
 }
 
