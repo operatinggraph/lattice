@@ -2667,9 +2667,35 @@ function renderStatementPanel(leaseAppKey) {
   return wrap;
 }
 
+// groupOneBillEntriesByPeriod buckets statement entries by calendar month
+// (each entry's own postedAt, chronological within a period) and sums each
+// period's net (debit minus credit), newest period first.
+function groupOneBillEntriesByPeriod(entries) {
+  const byKey = new Map();
+  for (const e of entries) {
+    const d = new Date(e.postedAt);
+    const key = isNaN(d.getTime())
+      ? "unknown"
+      : d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+    if (!byKey.has(key)) byKey.set(key, { key, entries: [], netCents: 0 });
+    const g = byKey.get(key);
+    g.entries.push(e);
+    g.netCents += e.type === "debit" ? e.amountCents : -e.amountCents;
+  }
+  return Array.from(byKey.values()).sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+}
+
+// fmtOneBillPeriodLabel renders a "YYYY-MM" grouping key as "Month YYYY".
+function fmtOneBillPeriodLabel(key) {
+  if (key === "unknown") return "Undated";
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
 // refreshStatementBody loads and renders the combined statement: the running
-// balance across both ledgers and the transaction list (oldest first), each
-// entry tagged by its source ledger.
+// balance across all four ledgers, then the transaction list grouped by
+// month (newest first) with a per-month subtotal, each entry tagged by its
+// source ledger.
 async function refreshStatementBody(body, leaseAppKey) {
   body.textContent = "Loading…";
   let data;
@@ -2696,19 +2722,32 @@ async function refreshStatementBody(body, leaseAppKey) {
     none.textContent = "No charges or payments recorded yet.";
     body.append(none);
   } else {
-    const list = document.createElement("ul");
-    list.className = "ledger-list";
-    for (const e of entries) {
-      const li = document.createElement("li");
-      li.className = "ledger-entry " + e.type;
-      const sign = e.type === "debit" ? "+" : "−";
-      const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
-      li.textContent =
-        fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
-        (e.memo ? " — " + e.memo : "");
-      list.append(li);
+    for (const g of groupOneBillEntriesByPeriod(entries)) {
+      const period = document.createElement("div");
+      period.className = "ledger-period";
+
+      const header = document.createElement("div");
+      header.className = "ledger-period-header";
+      const netSign = g.netCents > 0 ? "+" : g.netCents < 0 ? "−" : "";
+      const netAbs = moneyAmount(Math.abs(g.netCents) / 100);
+      header.textContent = fmtOneBillPeriodLabel(g.key) + " · " + netSign + netAbs;
+      period.append(header);
+
+      const list = document.createElement("ul");
+      list.className = "ledger-list";
+      for (const e of g.entries) {
+        const li = document.createElement("li");
+        li.className = "ledger-entry " + e.type;
+        const sign = e.type === "debit" ? "+" : "−";
+        const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
+        li.textContent =
+          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
+          (e.memo ? " — " + e.memo : "");
+        list.append(li);
+      }
+      period.append(list);
+      body.append(period);
     }
-    body.append(list);
   }
 }
 
