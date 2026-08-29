@@ -180,3 +180,106 @@ func TestVisitSeriesDue_NoLinks(t *testing.T) {
 	require.Nil(t, v["patientKey"])
 	require.Nil(t, v["providerKey"])
 }
+
+// projectSeriesSite runs the anchored visitSeriesSiteBackfill spec for one
+// series. Unlike the due lens this gap is not time-gated at all — it converges a
+// MISSING RELATIONSHIP — but $now is still supplied, exactly as
+// executeFullForActor supplies it to every anchored projection.
+func (f *remFixture) projectSeriesSite(t *testing.T, seriesName string) map[string]any {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(visitSeriesSiteBackfillSpec)
+	require.NoError(t, err, "visitSeriesSiteBackfill cypher must parse on the full engine")
+	seriesKey := "vtx.visitseries." + f.ids[seriesName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    seriesKey,
+		"now":         remNow,
+		"projectedAt": remNow,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "exactly one row per series")
+	return out[0].Values
+}
+
+// TestVisitSeriesSiteBackfill_MissingSite — a series with no atSite link is the
+// gap: missing_series_site and violating both true, and providerKey names the
+// provider whose site assignment the remediation will consult.
+func TestVisitSeriesSiteBackfill_MissingSite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "withProvider", "series", "drsam")
+
+	v := f.projectSeriesSite(t, "series")
+	require.Equal(t, "vtx.visitseries."+f.ids["series"], v["entityKey"])
+	require.Equal(t, "vtx.provider."+f.ids["drsam"], v["providerKey"])
+	require.Equal(t, true, v["missing_series_site"], "no atSite link → the gap is open")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestVisitSeriesSiteBackfill_Sited — a series that already names its site is
+// converged, and stays converged.
+func TestVisitSeriesSiteBackfill_Sited(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
+	f.vtx(t, "drsam", "provider")
+	f.vtx(t, "riverside", "building")
+	f.edge(t, "withProvider", "series", "drsam")
+	f.edge(t, "atSite", "series", "riverside")
+
+	v := f.projectSeriesSite(t, "series")
+	require.Equal(t, false, v["missing_series_site"], "a live atSite link closes the gap")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestVisitSeriesSiteBackfill_NotGatedOnLifecycle — a paused series, and one
+// past its own activeUntil, are each as invisible to their front desk as a live
+// one once the provider is tombstoned, and staff still need to reach a finished
+// cadence to read its history. So the gap is deliberately NOT gated on the
+// series' lifecycle state, unlike visitSeriesDue's own `active` predicate.
+func TestVisitSeriesSiteBackfill_NotGatedOnLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	yes := true
+	cases := []struct {
+		name        string
+		paused      *bool
+		activeUntil string
+	}{
+		{"paused", &yes, ""},
+		{"ended", nil, "2026-06-01T09:00:00Z"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkVisitSeries(t, "series", 30, c.activeUntil, "2026-07-15T09:00:00Z", 0, c.paused)
+
+			v := f.projectSeriesSite(t, "series")
+			require.Equal(t, true, v["missing_series_site"],
+				"a %s series with no site is still missing one — staff visibility outlives the cadence", c.name)
+		})
+	}
+}
+
+// TestVisitSeriesSiteBackfill_NoProviderStillProjects — withProvider is OPTIONAL:
+// a series with no provider link still projects a violating row (providerKey
+// null). The remediation resolves zero sites for it and cleanly no-ops, which is
+// exactly the permanently-open-but-harmless shape the lens doc records.
+func TestVisitSeriesSiteBackfill_NoProviderStillProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2026-07-15T09:00:00Z", 0, nil)
+
+	v := f.projectSeriesSite(t, "series")
+	require.Nil(t, v["providerKey"], "no withProvider link → null providerKey")
+	require.Equal(t, true, v["missing_series_site"])
+}
