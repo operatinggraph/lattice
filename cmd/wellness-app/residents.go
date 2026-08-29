@@ -130,15 +130,16 @@ type memberRow struct {
 }
 
 // computeCoveredMembers decodes every wellnessMembers row and keeps the ones
-// this caller's workplace reaches, sorted for a stable picker order. A row
+// this caller's front desk reaches, sorted for a stable picker order. A row
 // that fails to decode or names no member is skipped (the tombstoned-entry
 // guard computeBookings uses).
 //
 // Fails CLOSED throughout, the same construction cmd/cafe-app's
-// staffCoveredLeases uses: an operator alone is unrestricted, a caller with no
-// workplace covers nothing, and a member whose lease has not converged — or
-// whose unit is unwired — is simply absent from the answer rather than
-// defaulting to visible.
+// staffCoveredLeases uses: an operator alone is unrestricted, a workplace
+// covers nothing without isFrontDesk alongside it (covers is a structural
+// fact, never sufficient on its own — readauth.go), and a member whose lease
+// has not converged — or whose unit is unwired — is simply absent from the
+// answer rather than defaulting to visible.
 func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memberRow {
 	rows := make([]memberRow, 0)
 	for _, k := range keys {
@@ -158,7 +159,7 @@ func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memb
 		if strings.EqualFold(strings.TrimSpace(p.LandlordDecision), declinedDecision) {
 			continue
 		}
-		if !hats.isOperator && !hats.covers(p.CoveringLocations) {
+		if !hats.isOperator && !(hats.isFrontDesk() && hats.covers(p.CoveringLocations)) {
 			continue
 		}
 		rows = append(rows, memberRow{BookerKey: p.BookerKey, LeaseAppKey: p.LeaseAppKey})
@@ -198,7 +199,7 @@ func (s *server) handleMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	if !hats.isFrontDesk() && !hats.isOperator {
 		s.writeError(w, http.StatusForbidden,
-			"the member directory is a staff surface for the place you work at")
+			"the member directory is a front-desk surface for the place you work at")
 		return
 	}
 	ctx, cancel := s.reqContext(r)
