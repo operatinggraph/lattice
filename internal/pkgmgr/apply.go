@@ -114,6 +114,16 @@ type ApplyResult struct {
 	// the operator-visible surface for `lattice-pkg install`/`upgrade`, which
 	// route through Apply rather than Install directly.
 	LeafBudgetWarnings []string
+
+	// InstallRequestID and OpTrackerKey are the Processor reply's own durable
+	// receipt (Contract #4) for the commit that actually produced this apply —
+	// the only record a caller can later use to prove THIS apply, and not some
+	// other write at the same name/version, is the one it holds a reference
+	// to. Populated only on an arm that committed (the fresh-install and
+	// in-place-upgrade arms); the skip and dry-run arms committed nothing and
+	// leave them zero-valued.
+	InstallRequestID string
+	OpTrackerKey     string
 }
 
 // Apply is the upgrade-aware entry point for `lattice-pkg install` / `upgrade`
@@ -271,9 +281,12 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 			return nil, err
 		}
 	}
-	if err := i.submitUpgradeOp(ctx, def, existing.Version, mutations); err != nil {
+	reply, err := i.submitUpgradeOp(ctx, def, existing.Version, mutations)
+	if err != nil {
 		return nil, err
 	}
+	res.InstallRequestID = reply.RequestID
+	res.OpTrackerKey = reply.OpTrackerKey
 	return res, nil
 }
 
@@ -335,6 +348,8 @@ func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts 
 		Created:            len(r.DeclaredKeys),
 		DependencyWarnings: r.DependencyWarnings,
 		LeafBudgetWarnings: r.LeafBudgetWarnings,
+		InstallRequestID:   r.InstallRequestID,
+		OpTrackerKey:       r.OpTrackerKey,
 	}
 	// Defensive: a fresh-branch install should never skip (existing == nil),
 	// but mirror the reason if it ever does so the CLI reports it faithfully.
