@@ -178,12 +178,12 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 // computeRosterSessions is computeSessions narrowed to the sessions this
 // caller may read — mirroring mayReadRoster's own per-row test exactly
 // (bookings.go), the authority behind this picker: an operator reads every
-// row, a workplace staffer reads the sessions their workplace covers, and a
-// bound instructor reads the sessions their own instructor entity leads, on
-// top of any workplace they also hold. A row that fails to decode, or that
-// none of the three answers reach, is simply absent rather than answered and
-// then refused: the same distinction handleMembers draws for the front
-// desk's member picker.
+// row, a FRONT-DESK staffer (isFrontDesk — worksAt AND frontOfHouse) reads the
+// sessions their workplace covers, and a bound instructor reads the sessions
+// their own instructor entity leads, on top of any front-desk workplace they
+// also hold. A row that fails to decode, or that none of the three answers
+// reach, is simply absent rather than answered and then refused: the same
+// distinction handleMembers draws for the front desk's member picker.
 func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]int, hats subjectHats) []sessionRow {
 	rows := make([]sessionRow, 0, len(keys))
 	for _, k := range keys {
@@ -196,7 +196,11 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 			continue
 		}
 		leadsIt := p.InstructorKey != "" && p.InstructorKey == hats.instructorKey
-		if !hats.isOperator && !hats.covers(p.CoveringLocations) && !leadsIt {
+		// The workplace answer is the FRONT DESK's, isFrontDesk AND coverage
+		// together — a caller admitted here on the instructor hat who also holds
+		// a bare `worksAt` link is offered the classes they lead, not every class
+		// at that building.
+		if !hats.isOperator && !(hats.isFrontDesk() && hats.covers(p.CoveringLocations)) && !leadsIt {
 			continue
 		}
 		var capacity int64
@@ -253,7 +257,7 @@ func (s *server) handleRosterSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !hats.isOperator && !hats.isFrontDesk() && hats.instructorKey == "" {
 		s.writeError(w, http.StatusForbidden,
-			"the roster is a staff surface for the place you work at, or an instructor's own classes")
+			"the roster is a front-desk surface for the place you work at, or an instructor's own classes")
 		return
 	}
 	conn, ok := s.requireConn(w)

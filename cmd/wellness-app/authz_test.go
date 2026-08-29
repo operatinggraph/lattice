@@ -48,6 +48,11 @@ const (
 	// roster's own union case: their own led class anywhere, plus every class
 	// at the building they work.
 	instrStaffSubj = "hhhhhhhhhhhhhhhhhhhh"
+	// instrNoFrontDeskSubj holds the instructor binding and a workplace but NO
+	// frontOfHouse role: staff structurally, front desk not at all. Served by
+	// instructorNoFrontOfHouseGateway rather than fakeGatewayActor, which
+	// grants that role to everyone.
+	instrNoFrontDeskSubj = "jjjjjjjjjjjjjjjjjjjj"
 )
 
 // The instructor entity instrSubj is identifiedBy-bound to, and the session
@@ -203,12 +208,53 @@ func fakeGatewayActor(t *testing.T) string {
 	return srv.URL
 }
 
+// instructorNoFrontOfHouseGateway answers /v1/actor for the caller who is a
+// bound instructor AND carries a workplace, holding no role at all. It is the
+// combination fakeGatewayActor structurally cannot express — that one stamps
+// frontOfHouse on every subject — and it is the combination that separates
+// "this caller works here" from "this caller may read everything here".
+func instructorNoFrontOfHouseGateway(t *testing.T) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		var claims jwt.RegisteredClaims
+		if _, _, err := jwt.NewParser().ParseUnverified(tok, &claims); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + claims.Subject,
+			"resolvedActorId": "vtx.identity." + claims.Subject,
+			"roles":           []string{},
+			"anchors": []appsession.ActorAnchor{
+				{Relation: "worksAt", Key: staffWorkplace, Name: "Riverside Building"},
+				{Relation: "identifiedBy", Key: instructorKeyFixture},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 // devSessionServer builds a server whose session surface is the real
 // appsession kit in the demo posture (the shared dev key) — carrying the
 // SHIPPED publicReadPaths exemption list, so the public-read tests assert the
 // real value rather than a copy — over a real embedded JetStream server.
 // Returns the helper that mints a session cookie for a bare identity id.
 func devSessionServer(t *testing.T) (*server, func(subject string) *http.Cookie) {
+	t.Helper()
+	return devSessionServerWithGateway(t, fakeGatewayActor(t))
+}
+
+// devSessionServerWithGateway is devSessionServer over a caller-supplied
+// /v1/actor door. fakeGatewayActor grants frontOfHouse to every subject, so
+// the hat combinations that TURN ON the absence of that role — a worksAt
+// caller who is staff but not front desk — need their own double while still
+// driving the real read path over a seeded JetStream.
+func devSessionServerWithGateway(t *testing.T, gatewayURL string) (*server, func(subject string) *http.Cookie) {
 	t.Helper()
 	// The read boundary compares a role entry against the primordial operator
 	// role KEY, which main() resolves from the bootstrap ids at boot. Without
@@ -218,7 +264,6 @@ func devSessionServer(t *testing.T) (*server, func(subject string) *http.Cookie)
 	if bootstrap.RoleOperatorKey == "" {
 		t.Fatal("primordial ids loaded but the operator role key is empty")
 	}
-	gatewayURL := fakeGatewayActor(t)
 	t.Setenv(envPrefix+"_DEV_AUTH", "1")
 	signer, err := appsession.NewDevSigner(discardLogger(), envPrefix, true)
 	if err != nil {
@@ -507,6 +552,41 @@ func TestHandleBookings_Roster_InstructorOwnClassOnly(t *testing.T) {
 	rec = sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+otherSessionKey, cookieFor(instrSubj))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("another instructor's class: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// A workplace is not a licence to read every roster at it. The caller here
+// reaches the roster surface as an INSTRUCTOR — a bound instructor needs no
+// front-desk role for their own class — and happens to also hold a `worksAt`
+// link to the building both seeded sessions run at. The whole-workplace answer
+// belongs to the front desk (isFrontDesk: worksAt AND frontOfHouse, the
+// app-side mirror of wellness-domain's `GrantsTo: [operator, frontOfHouse]`),
+// so the workplace this caller holds without that role widens nothing: they
+// read the class they lead and no other, exactly as if they held no workplace
+// at all.
+func TestHandleBookings_Roster_InstructorWithWorkplaceNoFrontOfHouse_SeesOnlyOwnClass(t *testing.T) {
+	s, cookieFor := devSessionServerWithGateway(t, instructorNoFrontOfHouseGateway(t))
+	// Both sessions run at the building this caller works at; only the first
+	// is led by their instructor entity. The shared location is the point —
+	// coverage is what must NOT decide the answer.
+	seedSession(t, s.conn, ledSessionKey, "Evening Flow with Sam", instructorKeyFixture, staffWorkplace)
+	seedSession(t, s.conn, otherSessionKey, "House class at the same building", "", staffWorkplace)
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+	seedBooking(t, s.conn, "vtx.booking.bT5qWnZxKvMpL2wHdGcy", otherSessionKey, memberB)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+otherSessionKey, cookieFor(instrNoFrontDeskSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a class at this caller's workplace they do not lead: status = %d, want 403; body=%s",
+			rec.Code, rec.Body.String())
+	}
+
+	rec = sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(instrNoFrontDeskSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("own led class: status = %d, want 200 — the instructor hat stands on its own; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if rows := decodeBookings(t, rec); len(rows) != 1 {
+		t.Fatalf("instructor read %d rows of their own class's roster, want 1; %+v", len(rows), rows)
 	}
 }
 
@@ -1224,6 +1304,31 @@ func TestHandleRosterSessions_TwoHatSeesTheUnion(t *testing.T) {
 	}
 	if len(got) != 2 || !got[ledSessionKey] || !got[otherSessionKey] {
 		t.Fatalf("got %+v, want exactly the led session and the worked-building session", got)
+	}
+}
+
+// The picker's half of the same invariant
+// TestHandleBookings_Roster_InstructorWithWorkplaceNoFrontOfHouse_SeesOnlyOwnClass
+// pins for the roster itself: this caller reaches the surface as a bound
+// instructor and also holds a `worksAt` link to the building both sessions run
+// at, but no frontOfHouse role — so the picker offers the one class they lead
+// and not the house class beside it. A picker that listed both would name
+// every class at the building to somebody licensed to read none of them.
+func TestHandleRosterSessions_InstructorWithWorkplaceNoFrontOfHouse_SeesOnlyOwnClass(t *testing.T) {
+	s, cookieFor := devSessionServerWithGateway(t, instructorNoFrontOfHouseGateway(t))
+	seedSession(t, s.conn, ledSessionKey, "Evening Flow with Sam", instructorKeyFixture, staffWorkplace)
+	seedSession(t, s.conn, otherSessionKey, "House class at the same building", "", staffWorkplace)
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(instrNoFrontDeskSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	sessions := decodeRosterSessions(t, rec)
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1 (only the class this caller leads); %+v", len(sessions), sessions)
+	}
+	if sessions[0].SessionKey != ledSessionKey {
+		t.Fatalf("got %+v, want %s", sessions[0], ledSessionKey)
 	}
 }
 

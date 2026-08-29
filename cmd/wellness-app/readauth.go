@@ -80,12 +80,13 @@ func (s *server) authenticateRead(r *http.Request) (string, error) {
 }
 
 // subjectHats is the caller's read-boundary role, resolved from the signed-in
-// session. workplaces holds the location keys the caller `worksAt` — a staffer
-// reads the rosters those locations cover and no others; instructorKey is the
-// vtx.instructor entity an `identifiedBy` anchor binds this login to, empty for
-// everyone else — an instructor sees the roster of the sessions they lead and
-// no others. Neither is set for a plain member, who is scoped to their own
-// bookings.
+// session. workplaces holds the location keys the caller `worksAt` — a
+// front-desk staffer reads the rosters those locations cover and no others,
+// the workplace being one half of isFrontDesk rather than the whole answer;
+// instructorKey is the vtx.instructor entity an `identifiedBy` anchor binds
+// this login to, empty for everyone else — an instructor sees the roster of
+// the sessions they lead and no others. Neither is set for a plain member, who
+// is scoped to their own bookings.
 type subjectHats struct {
 	identityID    string
 	workplaces    []string
@@ -126,6 +127,14 @@ func (h subjectHats) isFrontDesk() bool { return h.isStaff() && h.frontOfHouse }
 // set intersection. Fails CLOSED on both empty sides: a caller with no
 // workplace covers nothing, and a row whose topology is unwired is covered by
 // nobody — the denial require_workplace gives an empty location list.
+//
+// Necessary, never sufficient. Like isStaff it is a structural fact, not an
+// authorization answer: reach at a workplace is the FRONT DESK's, so every
+// surface that answers workplace-wide — the roster (mayReadRoster,
+// bookings.go), its picker (computeRosterSessions, sessions.go), the member
+// directory and another member's ledger — conjoins this with isFrontDesk. A
+// caller admitted to those surfaces on the instructor hat instead is scoped by
+// their instructor-key match, whatever workplace they may separately hold.
 func (h subjectHats) covers(coveringLocations []string) bool {
 	for _, loc := range coveringLocations {
 		// Compare the TRIMMED value, not merely test it for emptiness: the
