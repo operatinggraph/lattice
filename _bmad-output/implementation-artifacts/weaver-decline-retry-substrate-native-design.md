@@ -207,6 +207,30 @@ C6 (§12); sites not listed here are success paths or anti-storm/CAS-lost drops,
 (`evaluator.go:172-180`, `:181-188`) gain an explicit case; their `default:` arms are exactly
 where a missed value silently downgrades to Ack (V8), so T3's mutations flip each.
 
+**Row 8 has a population whose fix NEVER arrives — FOUND AFTER SHIP, 2026-08-29 (cold review).**
+The row-8 Long rests on the fix-path rule: a playbook edit produces no new delivery, so the loop is
+the only automatic uptake. That holds *when a playbook edit is coming*. It is false for a column a
+package projects **deliberately** with no `gaps` entry, and one is live and shipped:
+`packages/lease-signing/lenses.go:810`/`:812` project `missing_decision` and `missing_manager`, both
+ORed into `violating` (`:815`), neither among `leaseApplicationComplete`'s seven declared gaps
+(`packages/lease-signing/targets.go:91-102`). The lens's own doc states the intent — *"maps to NO
+playbook entry ... so it keeps the row violating without dispatching anything"* — and that target's
+`Augur.Escalate` is `["exhausted"]`, so `augurEscalation` declines and the row reaches this exit.
+
+Such a row now holds a `MaxAckPending` slot and re-runs the whole `clearClosedMarks` preamble every
+floor, forever for `missing_manager`, which nothing in Weaver ever closes — against a configuration
+that is already correct. That is precisely §4.2's argument for leaving the unregistered-target exit
+at Ack (*"a Long here holds pending forever for a target that will never register"*), never applied
+to this row. §7's cost estimate also under-prices it: it assumes ~1 closed candidate column per row,
+and this target has nine.
+
+Weaver cannot distinguish a deliberate orphan column from a genuinely missing entry, so the fix is
+to make the deliberate case **declarable** — the sanctioned form already exists (a `surface` gap,
+which Acks with its own standing issue) — plus a gate asserting lens-projected `missing_*` ⊆ declared
+gaps. Only then is row 8's Long sound. Filed on `backlog/lattice.md`; flipping row 8 to Ack instead
+is the smaller alternative and costs a re-vector of the eleven tests that drive their decline
+through this exit.
+
 **Fix-uptake is automatic for every Nak'd class.** A Nak'd row's redelivery is a fresh
 `handleRow` against the **current** registry target and the **current** row body — so a playbook
 fix, an augur-block addition, or a corrected projection reaches every declined row within one
