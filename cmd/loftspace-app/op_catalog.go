@@ -39,6 +39,15 @@ type opCatalogProjection struct {
 	DispatchReads         []string `json:"dispatchReads"`
 	DispatchOptionalReads []string `json:"dispatchOptionalReads"`
 
+	// DispatchEnumerations names the class-(e) kv.Links walks the dispatched
+	// op runs (Contract #2 §2.5): each a {hub, relation, direction} the
+	// Starlark submitter is allowed to enumerate live rather than declare as a
+	// Reads/OptionalReads key. Dropping it here would not degrade the FE — it
+	// never renders — but would desync the descriptor from what the package
+	// actually declared, defeating this projection's purpose as the one place
+	// the wire spelling and the vocabulary meet.
+	DispatchEnumerations []opEnumeration `json:"dispatchEnumerations"`
+
 	// DispatchContextParams names the schema fields the CLIENT fills from its
 	// own context and never renders, each mapped to the template it fills them
 	// from (pkgmgr.OpDispatchSpec.ContextParams: "how a self-scope entity-key
@@ -90,6 +99,15 @@ type opVisibleWhen struct {
 	Equals any    `json:"equals"`
 }
 
+// opEnumeration is pkgmgr.EnumerationSpec's projected form: one declared
+// kv.Links walk the dispatched op runs, named by its hub, the link relation
+// walked, and the direction the hub sits in the link.
+type opEnumeration struct {
+	Hub       string `json:"hub"`
+	Relation  string `json:"relation"`
+	Direction string `json:"direction"`
+}
+
 // opDescriptor is the shape the FE renders from: the flat projection row
 // re-nested back into the descriptor vocabulary the owning package declared
 // (presentation / inputSchema / fieldDescriptions / dispatch), so the browser
@@ -124,6 +142,7 @@ type opDispatch struct {
 	ContextParams map[string]string `json:"contextParams,omitempty"`
 	Reads         []string          `json:"reads,omitempty"`
 	OptionalReads []string          `json:"optionalReads,omitempty"`
+	Enumerations  []opEnumeration   `json:"enumerations,omitempty"`
 	VisibleWhen   *opVisibleWhen    `json:"visibleWhen,omitempty"`
 }
 
@@ -185,7 +204,7 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 	if p.DispatchClass != "" || len(p.DispatchClassChoices) > 0 || p.DispatchAuthContext != "" ||
 		p.DispatchTargetField != "" ||
 		p.DispatchTargetType != "" || len(p.DispatchContextParams) > 0 || len(p.DispatchReads) > 0 ||
-		len(p.DispatchOptionalReads) > 0 || p.DispatchVisibleWhen != nil {
+		len(p.DispatchOptionalReads) > 0 || len(p.DispatchEnumerations) > 0 || p.DispatchVisibleWhen != nil {
 		d.Dispatch = &opDispatch{
 			Class:         p.DispatchClass,
 			ClassChoices:  p.DispatchClassChoices,
@@ -195,6 +214,7 @@ func (p opCatalogProjection) toDescriptor() opDescriptor {
 			ContextParams: p.DispatchContextParams,
 			Reads:         p.DispatchReads,
 			OptionalReads: p.DispatchOptionalReads,
+			Enumerations:  p.DispatchEnumerations,
 			VisibleWhen:   p.DispatchVisibleWhen,
 		}
 	}

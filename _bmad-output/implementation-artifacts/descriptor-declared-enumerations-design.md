@@ -44,11 +44,20 @@ OpDispatchSpec.Enumerations          (package definition, validated at install)
 
 ## 3. Decisions (Winston, all implementation-level)
 
-**D1 — Hub grammar is the surface's own Reads grammar.** `EnumerationSpec`'s own doc already states the rule:
-"Hub's template grammar belongs to the surface carrying it … each the same grammar that surface's Reads use"
-(`internal/pkgmgr/definition.go:569`). So a dispatch enumeration's Hub takes the `OpDispatchSpec.Reads`
-vocabulary — `{actor}`, `{service}`, `{scopedTo}`, `{payload.*}`, `{me.<type>}`, the `:id` modifier, or a
-literal key. No new grammar is invented, and `opdispatchtemplates.go`'s existing validator is reused verbatim.
+**D1 — Hub grammar is the surface's own *required*-Reads grammar.** `EnumerationSpec`'s own doc already
+states the general rule: "Hub's template grammar belongs to the surface carrying it … each the same grammar
+that surface's Reads use" (`internal/pkgmgr/definition.go:569`). So a dispatch enumeration's Hub takes the
+`OpDispatchSpec.Reads` vocabulary — `{actor}`, `{service}`, `{scopedTo}`, `{payload.*}`, the `:id` modifier,
+or a literal key — validated by `opdispatchtemplates.go`'s existing validator, not a second one.
+
+A hub is held to the **required** half of that grammar, which excludes the client-only `{me.<type>}` form
+(legal in `OptionalReads` alone, e.g. `packages/cafe-domain/opmetas.go:131`). The reason is the declaration's
+whole purpose: Contract #2 §2.5 buys *static* classification of an op's read posture, and a hub that resolves
+for a caller with an `edgeIdentity` projection and vanishes for one without would make the envelope's declared
+posture caller-dependent — the walk still runs, now undeclared, for exactly the callers the declaration was
+meant to cover. A server-resolvable hub declares the same walk for every caller or fails loudly at install.
+No shipped walk shape wants a `{me.<type>}` hub: the 39 actor-role walks are all `{actor}`, and the rest hang
+off payload keys or link-discovered vertices (§5.6).
 
 **D2 — Refuse a malformed declaration at install, not at dispatch.** Mirrors `validateGapEnumerations`'s
 stated doctrine: the Processor refuses the *whole envelope* on a malformed enumeration, terminally, so a bad
@@ -73,6 +82,22 @@ the Edge mirror-coverage gate and static classification of the op's read posture
 `{actor}`. This fire declares it for **cafe-domain's** ops and retires precisely those baseline rows; the
 remaining shapes are swept as their own units (§6), not filed as a deferral.
 
+**D7 — The AI-authored artifact surface gains `enumerations` and nothing else.** `OpDispatchArtifact`
+(`capabilitymaterializer_starlark.go`) is the surface an AI-authored capability proposal may declare, and its
+comment claimed a field-for-field mirror of `OpDispatchSpec` that it never was — `ClassChoices` and
+`VisibleWhen` are absent from both the struct and `knownDispatchFields`, so an authored op declaring either is
+refused as a smuggled key. The build found this and briefly closed it; that was reverted.
+
+`Enumerations` is admitted because it is this item's subject and confers nothing — envelope metadata that
+hydrates no key and grants no authority. `ClassChoices` and `VisibleWhen` stay out: the evidence admits two
+readings (forgotten, or a deliberate narrowing of what AI may author), nothing in the tree distinguishes them,
+and this plane carries a shelved ★★★ admission-model row (`[capability-author] Authored-artifact admission
+holes`). Widening a security-sensitive surface on an unsourceable premise is not this item's work. The false
+comment is fixed instead, naming the exclusions, and the test that pinned the *mirror* is replaced by one that
+pins the **subset**: the artifact's field set equals `OpDispatchSpec`'s minus a named exclusion list, and
+every admitted field has a `knownDispatchFields` entry and vice versa. That is the stronger gate — it makes
+the narrowing explicit and reviewable, and it mechanizes the struct-vs-allowlist drift that bit this fire.
+
 **D6 — The baseline's comment block is amended in the same commit as the channel.** Its "the channel that
 does NOT exist is the descriptor one" paragraph becomes false the moment Inc 1 lands. The
 design-doc-body-stays-true rule (`agents/steward/SKILL.md` §4) binds a measured-residue file's prose the
@@ -87,6 +112,15 @@ message points builders straight at it.
   e.g. `vtx.building.<id> containedIn out` reached from a unit's `containedIn` target). Neither precedent
   supports one, and inventing it is a designer's call, not this fire's (§6).
 - No sweep of the `read` rows (a different class with a different fix).
+- **No `enumerations` member in `lint-facet-renderer-drift`, and no change to the SwiftUI spike renderer.**
+  That gate's charter is *rendering* fidelity — the field kinds and the dispatch columns that change what a
+  person sees or fills (`contextParams`, `ceremony`, `selfAnchor`, `entityColumn`). The envelope-declaration
+  columns are deliberately outside it: `reads`, `optionalReads`, `classChoices` and `visibleWhen` are all
+  absent from its member list, and `clients/facet-swiftui-spike` honours `reads` alone. `enumerations` is the
+  next member of that same family, so it is handled exactly as its siblings are — the two submitting
+  renderers (`cmd/facet/web/app.js`, `internal/descriptorform/form.mjs`) carry it and the spike does not.
+  This fire therefore neither creates nor widens a drift class there; the spike is exactly as complete as it
+  was. Named here so a later reader sees a decision rather than an oversight.
 
 ## 5. Fire brief (build note, 2026-08-29)
 

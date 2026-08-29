@@ -2811,13 +2811,26 @@ async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, con
   const optionalReads = (op.dispatchOptionalReads || [])
     .map((t) => substituteTemplate(t, ctx, payload))
     .filter(wholeKey);
+  // dispatch.enumerations (Contract #2 §2.5 class (e)): each declared entry's
+  // `hub` is a whole-key template in the exact vocabulary a read uses, so it
+  // goes through the same substituteTemplate/wholeKey pair; `relation` and
+  // `direction` are literals and pass through unchanged. An entry missing
+  // either literal, or whose hub fails to resolve to a whole key, is dropped
+  // — a malformed enumeration on the wire is a TERMINAL refusal of the whole
+  // operation by the Processor, so sending fewer is strictly better than
+  // sending one broken. Nothing is auto-pushed here the way targetField is
+  // for reads above: an op declares its enumerations or it doesn't.
+  const enumerations = (op.dispatchEnumerations || [])
+    .filter((e) => e && e.relation && e.direction)
+    .map((e) => ({ hub: substituteTemplate(e.hub, ctx, payload), relation: e.relation, direction: e.direction }))
+    .filter((e) => wholeKey(e.hub));
   const authContext = buildAuthContext(op.dispatchAuthContext, ctx);
   const touchedKey = resolveTouchedKey(op, ctx);
 
   // enqueue through the live source — POST /api/enqueue on the Go host, the
   // wasm engine's api.enqueue in-page — so the same descriptor form drives
   // either host unchanged (the W4 swap contract).
-  return enqueueOperation({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, authContext, touchedKey })
+  return enqueueOperation({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, enumerations, authContext, touchedKey })
     .then((body) => {
       if (body && body.error) { toast(body.error, false); return; }
       hideModal();

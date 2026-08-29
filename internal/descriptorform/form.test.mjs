@@ -532,6 +532,52 @@ test("submit() drops an optionalRead the same way", async () => {
   assert.deepEqual((await handle.submit()).envelope.optionalReads, []);
 });
 
+// ---- dispatch.enumerations -> envelope.enumerations ----
+
+test("submit() resolves a declared enumeration's {actor} hub and passes relation/direction through verbatim", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.enumerations = [{ hub: "{actor}", relation: "holdsRole", direction: "out" }];
+  const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
+
+  const handle = renderOpForm(row, { target: TARGET, me: ME }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.deepEqual(envelope.enumerations, [{ hub: ME, relation: "holdsRole", direction: "out" }]);
+});
+
+test("submit() drops an enumeration whose hub template does not resolve to a whole key", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.enumerations = [{ hub: "{payload.missingField}", relation: "holdsRole", direction: "out" }];
+
+  const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.equal("enumerations" in envelope, false, "an unresolvable hub drops the entry, leaving no enumerations on the envelope");
+});
+
+test("submit() drops an enumeration missing relation or direction", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) });
+  row.dispatch.enumerations = [
+    { hub: "{actor}", direction: "out" },
+    { hub: "{actor}", relation: "holdsRole" },
+  ];
+  const ME = "vtx.identity.BBBBBBBBBBBBBBBBBBBB";
+
+  const handle = renderOpForm(row, { target: TARGET, me: ME }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.equal("enumerations" in envelope, false, "an entry missing relation or direction is never sent on the wire");
+});
+
+test("submit() sends no enumerations field when the descriptor declares none", async () => {
+  const schema = { type: "object", properties: { renewalKey: { type: "string" } }, required: [] };
+  const row = baseRow({ inputSchema: JSON.stringify(schema) }); // dispatch.enumerations unset
+
+  const handle = renderOpForm(row, { target: TARGET }, new FakeElement("div"));
+  const envelope = (await handle.submit()).envelope;
+  assert.equal("enumerations" in envelope, false);
+});
+
 // ---- required-field validation ----
 
 test("submit() throws for a missing required field and never for an unset optional one", async () => {

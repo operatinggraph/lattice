@@ -601,6 +601,9 @@ func emOpCatalogWorld(t *testing.T) *emFixture {
 		"targetType":    "workorder",
 		"reads":         []any{"{payload.workOrderKey}"},
 		"optionalReads": []any{"{payload.workOrderKey}.resolution"},
+		"enumerations": []any{
+			map[string]any{"hub": "{payload.workOrderKey}", "relation": "assignedTo", "direction": "out"},
+		},
 	})
 	f.aspect(t, "fullOp", "sensitive", "sensitive", map[string]any{"value": true})
 	f.aspect(t, "fullOp", "ceremony", "ceremony", map[string]any{
@@ -692,6 +695,9 @@ func TestOpCatalog_FullVocabularyOpProjectsEveryColumn(t *testing.T) {
 	require.Equal(t, "workorder", row["dispatchTargetType"])
 	require.Equal(t, []any{"{payload.workOrderKey}"}, row["dispatchReads"])
 	require.Equal(t, []any{"{payload.workOrderKey}.resolution"}, row["dispatchOptionalReads"])
+	require.Equal(t, []any{
+		map[string]any{"hub": "{payload.workOrderKey}", "relation": "assignedTo", "direction": "out"},
+	}, row["dispatchEnumerations"])
 	require.Equal(t, true, row["sensitive"],
 		"the masking rule the modal keys on — absent, a client renders an SSN in the clear")
 

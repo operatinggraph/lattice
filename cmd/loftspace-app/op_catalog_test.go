@@ -18,6 +18,7 @@ func TestComputeOpCatalog_ReNestsTheDescriptorVocabulary(t *testing.T) {
 			`"dispatchClass":"workOrder","dispatchAuthContext":"task","dispatchTargetField":"workOrderKey",` +
 			`"dispatchTargetType":"workorder","dispatchReads":["{payload.workOrderKey}"],` +
 			`"dispatchOptionalReads":["{payload.workOrderKey}.resolution"],` +
+			`"dispatchEnumerations":[{"hub":"{payload.workOrderKey}","relation":"assignedTo","direction":"out"}],` +
 			`"sensitive":true,"grantedToRoles":["backOfHouse","operator"]}`,
 	}
 
@@ -52,6 +53,11 @@ func TestComputeOpCatalog_ReNestsTheDescriptorVocabulary(t *testing.T) {
 	}
 	if len(d.Dispatch.OptionalReads) != 1 {
 		t.Errorf("dispatch optionalReads: %+v", d.Dispatch.OptionalReads)
+	}
+	if len(d.Dispatch.Enumerations) != 1 || d.Dispatch.Enumerations[0] != (opEnumeration{
+		Hub: "{payload.workOrderKey}", Relation: "assignedTo", Direction: "out",
+	}) {
+		t.Errorf("dispatch enumerations: %+v", d.Dispatch.Enumerations)
 	}
 	if !d.Sensitive {
 		t.Error("sensitive must survive — it is the modal's masking rule")

@@ -24,7 +24,7 @@
 // `catalogRow` is the raw `/api/op-catalog` row shape: `operationType`,
 // `presentation`, `inputSchema` (a JSON string), `fieldDescriptions`,
 // `dispatch.{class,classChoices,authContext,targetField,targetType,
-// contextParams,reads,optionalReads,visibleWhen}`,
+// contextParams,reads,optionalReads,enumerations,visibleWhen}`,
 // `ceremony.{mintedSecretHashField,revealTitle,revealHelp}`, `sensitive`.
 //
 // `dispatch.classChoices` is the mutually-exclusive alternative to a static
@@ -686,6 +686,30 @@ function substituteTemplates(templates, context, payload) {
   return out;
 }
 
+// substituteEnumerations resolves a declared `dispatch.enumerations` list
+// (Contract #2 §2.5 class (e) — each entry `{hub, relation, direction}`) into
+// the envelope's `enumerations`. `hub` is a whole-key template in the exact
+// vocabulary a `reads` entry uses, so it goes through the same
+// substituteTemplate/wholeKey pair reads do; `relation` and `direction` are
+// literals declared on the descriptor and pass through unchanged. An entry
+// whose hub does not resolve to a whole key is dropped, and so is an entry
+// missing `relation` or `direction` — the Processor's envelope parse
+// (opwire.go) refuses the WHOLE operation terminally on either shape, so
+// sending fewer enumerations is strictly better than sending a malformed one.
+// There is no optional-read-style fallback here: an op declares its
+// enumerations or it doesn't, and nothing is pushed after substitution the
+// way the two Facet-parity reads are (see the reads/optionalReads call site).
+function substituteEnumerations(entries, context, payload) {
+  const out = [];
+  for (const entry of entries || []) {
+    if (!entry || !entry.relation || !entry.direction) continue;
+    const hub = substituteTemplate(entry.hub, context, payload);
+    if (!wholeKey(hub)) continue;
+    out.push({ hub, relation: entry.relation, direction: entry.direction });
+  }
+  return out;
+}
+
 // buildAuthContext assembles the envelope's authContext per the op's
 // declared dispatch.authContext — the exact leg a Contract #10 grant path
 // checks: "task" rides the task's own ephemeral grant (throws when
@@ -921,6 +945,7 @@ export function renderOpForm(catalogRow, context, mount) {
 
       const reads = substituteTemplates(dispatch.reads, context, payload);
       const optionalReads = substituteTemplates(dispatch.optionalReads, context, payload);
+      const enumerations = substituteEnumerations(dispatch.enumerations, context, payload);
 
       // Two Facet-side fallbacks this module mirrors (design §2.2), pushed
       // AFTER template substitution so they land alongside whatever the
@@ -963,6 +988,7 @@ export function renderOpForm(catalogRow, context, mount) {
           payload,
           reads,
           optionalReads,
+          ...(enumerations.length ? { enumerations } : {}),
           authContext: buildAuthContext(dispatch.authContext, context),
         },
         reveal,

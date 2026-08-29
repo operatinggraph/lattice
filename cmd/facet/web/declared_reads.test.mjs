@@ -128,3 +128,48 @@ test("optionalReads is its own list and never spills into reads", async () => {
   assert.deepEqual([...enqueued.reads], [TARGET]);
   assert.deepEqual([...enqueued.optionalReads], [TARGET + ".state", TARGET + ".claimKey"]);
 });
+
+// ---- dispatchEnumerations -> enqueued.enumerations ----
+
+test("a declared enumeration's {actor} hub is substituted and relation/direction pass through verbatim", async () => {
+  const withEnum = {
+    ...THREE_TEMPLATES,
+    dispatchReads: [],
+    dispatchEnumerations: [{ hub: "{actor}", relation: "holdsRole", direction: "out" }],
+  };
+  const enqueued = await submitCapture(withEnum, { targetIdentityKey: TARGET });
+  // JSON round-trip strips the vm sandbox's own Object prototype from each
+  // entry so deepEqual compares structure, not cross-realm identity — the
+  // entries themselves are plain data, never anything JSON can't round-trip.
+  assert.deepEqual(JSON.parse(JSON.stringify(enqueued.enumerations)), [{ hub: SELF, relation: "holdsRole", direction: "out" }]);
+});
+
+test("an enumeration whose hub template fails to substitute is dropped", async () => {
+  const withEnum = {
+    ...THREE_TEMPLATES,
+    dispatchReads: [],
+    dispatchEnumerations: [{ hub: "{payload.note}", relation: "holdsRole", direction: "out" }],
+  };
+  const enqueued = await submitCapture(withEnum, { targetIdentityKey: TARGET });
+  assert.deepEqual([...enqueued.enumerations], []);
+});
+
+test("an enumeration missing relation or direction is dropped", async () => {
+  const withEnum = {
+    ...THREE_TEMPLATES,
+    dispatchReads: [],
+    dispatchEnumerations: [
+      { hub: "{actor}", direction: "out" },
+      { hub: "{actor}", relation: "holdsRole" },
+    ],
+  };
+  const enqueued = await submitCapture(withEnum, { targetIdentityKey: TARGET });
+  assert.deepEqual([...enqueued.enumerations], []);
+});
+
+test("a missing dispatchEnumerations column reads as no enumerations, not as an error", async () => {
+  const noColumn = { ...THREE_TEMPLATES, dispatchReads: [] };
+  delete noColumn.dispatchEnumerations;
+  const enqueued = await submitCapture(noColumn, { targetIdentityKey: TARGET });
+  assert.deepEqual([...enqueued.enumerations], []);
+});
