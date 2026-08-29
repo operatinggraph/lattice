@@ -574,3 +574,96 @@ decide can only race the SAME create — the Processor's create-only semantics r
 once stamped, spans the vertex's whole life, never reset or carried across a tombstone (leaseapp
 tombstone leaves aspects dangling, matching `.tenancy`/`.profile`'s existing behavior — no new handling
 needed). #6 (precedent may carry debt) — `.tenancy`'s pattern was re-read line-by-line above, not assumed.
+
+## 14. Reads drift-guard fire brief (build note, 2026-08-29)
+
+Fire brief for the consolidated Lattice-lane row (`backlog/lattice.md`, `[Processor] Nothing records
+what a DDL script actually read`). Compiled from two read-only scouts + lead verification of every
+anchor below.
+
+**Scope sentence (verbatim, §6 above):** *record the actually-read key set on `ScriptContext`
+(a `map[string]struct{}` populated at the ~4 return points of the `kv.Read`/`kv.Links` builtins —
+the exact plumbing shape `LiveReads`/`SensitiveReads` already ship twice), expose it through
+`internal/testutil`'s pipeline driver, and each dispatch package's **existing** e2e tests assert
+`actual ⊆ declared ∪ sanctioned(op)`.*
+
+**Green bar (runnable):** `go test ./internal/processor/... ./internal/testutil/... ./packages/...`
+green with the guard armed by default in `testutil.CapabilityPipeline`; deleting the recorder, the
+observer call, or the guard reds at least one named test.
+
+**Verified touch-list** (`file:line` checked live 2026-08-29):
+
+| Site | What |
+|---|---|
+| `internal/processor/starlark_kv.go:65-137` | `kv.Read`. Four *serving* returns: `:88` hydrated-hit, `:112` known-absent, `:128` live-absent, `:136` live-present. `:115-136` is the lazy fallthrough — **reached only when the key is in none of `Hydrated`/`RequiredAbsent`/`KnownAbsent`, so every key that reaches it is undeclared by construction.** That set *is* the drift. |
+| `internal/processor/starlark_kv.go:149-238` | `kv.Links`. One serving return `:237`; `hubType/hubID` parsed at `:161`, `relation` validated `:166`, `direction` switched `:174-181`. |
+| `internal/processor/script_context.go:33-109` | `ScriptContext` — add the recorder field beside `SensitiveReads:85` / `LiveReads:91`. |
+| `internal/processor/step4_hydrate.go:427-450` | the sole construction site; recorder allocated here per hydrate (so a step-8 commit retry gets a fresh one — the retry loop re-enters `Hydrate` at `commit_path.go:341`). |
+| `internal/processor/commit_path.go:23-76` | `Deps` — add the nil-safe optional observer beside `ClaimEmitter`/`ConflictEmitter`. |
+| `internal/processor/commit_path.go:349-354` | step-5 call site; observe immediately after `Executor.Execute` returns, **before** the error branch (an aborted script still performed its reads). |
+| `internal/testutil/pipeline.go:270` | `CapabilityPipeline` — arms the guard by default. |
+| `internal/testutil/embedded_nats.go:58` | `DriveOne` — the shared drive helper all 42 dispatch e2e files already call. |
+| `internal/processor/opwire/opwire.go:66-71` | `ContextHint{Reads,OptionalReads,Enumerations,EgressReads}` — the declared side. |
+| `internal/processor/opwire/opwire.go:107-118` | `EnumerationHint` — **"Metadata, not a hydration directive — the Processor validates the shape at parse and otherwise ignores it."** Nothing checks a declared enumeration is the one walked, or that a walked one was declared. |
+
+**Precedents to mirror:**
+
+- `sensitiveReadTracker` (`internal/processor/sensitive_decrypt.go:29-70`) — shared pointer on
+  `ScriptContext`, nil-safe receivers, lazily-allocated `map[string]struct{}`, mutated from the kv
+  builtins, consulted after execution. The recorder copies this shape field-for-field.
+- `liveReadBudgetTracker` (`internal/processor/live_read_budget.go:31-47`) — the nil-safe
+  accumulator idiom and its `charge` call sites are the exact return points to instrument.
+- `Deps.ClaimEmitter` / `Deps.ConflictEmitter` (`commit_path.go:47-62`) — optional, nil-safe
+  observers on a public `Deps`, production-wired or not.
+- `TestPurgeDeclaredReadSetMatchesThePatternStep`
+  (`packages/privacy-base/purge_identity_dedup_footprint_test.go:1047-1085`) — the shipped
+  declared-set-vs-fixture assertion; this fire is its runtime counterpart.
+
+**Increment order:**
+
+1. **Recorder seam.** `scriptReadRecorder` + exported `ScriptReadRecord` snapshot; instrument the
+   five serving returns; allocate in step 4; `Deps.ScriptReadObserver` invoked after step 5.
+   Green: `go test ./internal/processor/ -run 'ScriptRead|Starlark|KV'`.
+2. **Census (report mode).** Arm a reporting observer in `testutil`, run the corpus, and emit the
+   real per-`operationType` set of undeclared live reads + undeclared enumerations.
+   Green: the census runs and the numbers are pinned in this note.
+3. **Guard + sanctioned allowlist.** `testutil` guard armed by default in `CapabilityPipeline`;
+   class-(e) follow-up reads auto-sanctioned from the *declared* enumerations the script actually
+   walked; the residue named per-op in a reviewable allowlist file.
+   Green: `go test ./internal/processor/... ./internal/testutil/... ./packages/...`.
+4. **Revert-proofs** + `docs/components/processor.md` dossier/close pass.
+
+**In-scope gotchas.**
+
+- The recorder must NOT see step 6's governing-DDL walk: that shares `connKVReader` but not the
+  Starlark builtin, and `starlark_kv.go:130-135` already documents exactly this boundary for
+  `SensitiveReads`. Instrument the builtin, never `ReadVertex`.
+- `kvModule(sc ScriptContext)` takes the context **by value** — only pointer fields are shared, so
+  the recorder must be a pointer (as `SensitiveReads`/`LiveReads` are).
+- `EgressReads` hydrate into `Hydrated` as `$sensitiveRef` markers, so an egress key served at
+  `:88` is declared, not drift — the guard's declared set is the union of all three lists.
+- Corpus-wide arming reds any package whose script live-reads undeclared keys (the class-(b) debt
+  CLAUDE.md names). The allowlist entry is the honest record of that debt, not a silencer: it names
+  the op and the keys, in a diff-reviewable file.
+
+*Dossier entries copied in (`docs/components/processor.md`):* **a gate's negative test must first
+prove its positive vector reaches the gate** (six sightings — the mandated shape here is: prove a
+*declared* read does NOT trip the guard before asserting an undeclared one does); **"degrade instead
+of refuse" is fail-open when there is one load point** — a nil observer must be a deliberate
+production default, not a silent test-side skip; **a guard whose SUBJECT is computed from
+submitter-supplied input is not a guard** — `contextHint` is submitter-supplied, so this guard is a
+*test-time drift detector over the corpus*, never a runtime control, and the code must say so.
+
+*Standing checklist:* **#1 (lifetime)** — created per `Hydrate`, so fresh on every commit-path retry
+attempt; never persisted, never carried across a redelivery; dies with the execution. **#3
+(revert-proof)** — this is a plumbing increment, the shape the checklist says is hardest: assert the
+recorded set *equals* what the script read, at the producer, not merely that it is non-empty.
+**#6 (precedent may carry debt)** — the mirrored trackers were re-read line-by-line above.
+
+**Adjacent finds:** none at brief time; anything the build surfaces is fixed in this run per
+`agents/steward/SKILL.md` §4.
+
+**Non-goals:** no static/regex extractor (§6 refuses it explicitly); no runtime enforcement of the
+declared set (that would be a Contract #2 change — this fire adds a *test* guard only); no change to
+`MaxDeclaredReads`, to hydration, or to any package's declarations beyond what the census proves
+wrong.
