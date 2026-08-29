@@ -249,47 +249,86 @@ func TestRenewalComplete_MissingGoalAgreement(t *testing.T) {
 }
 
 // TestLeaseSigning_MissingColumnsAreDeclaredGaps is
-// TestLeaseSigning_PlaybookColumnsMatchLens's converse: every missing_* column
-// the leaseApplicationComplete lens projects is a key in the target's Gaps map
-// — surface-declared where the package deliberately dispatches nothing for it.
-// A projected missing_* column with no Gaps entry is indistinguishable to
-// Weaver from an authoring omission and rides the long redelivery floor
-// forever.
+// TestLeaseSigning_PlaybookColumnsMatchLens's converse, over every target this
+// package declares: each missing_* column the target's bound lens projects is a
+// key in that target's Gaps map, and each declared gap names an action the
+// engine implements. A projected missing_* column with no Gaps entry is
+// indistinguishable to Weaver from an authoring omission — dispatchGap's
+// config-error arm holds the row on the long redelivery floor for as long as the
+// column stays true — so the deliberate case is declared `surface`, which raises
+// a standing Health issue and Acks.
+//
+// The column set is the UNION of Output.BodyColumns and
+// Output.StaticEmptyColumns: Refractor's projection driver writes every
+// BodyColumn into the envelope and then writes each StaticEmptyColumn as an
+// empty array, so both are keys Weaver's openGapColumns walks. The installer's
+// own companion-pair check reads the same union (internal/pkgmgr's
+// declaredRowBodyColumns); reading BodyColumns alone lets a StaticEmptyColumns
+// orphan through.
 func TestLeaseSigning_MissingColumnsAreDeclaredGaps(t *testing.T) {
-	var target pkgmgr.WeaverTargetSpec
-	var found bool
-	for _, wt := range WeaverTargets() {
-		if wt.TargetID == "leaseApplicationComplete" {
-			target = wt
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("leaseApplicationComplete weaverTarget not declared")
+	targets := WeaverTargets()
+	if len(targets) == 0 {
+		t.Fatal("no weaver targets declared — this test would assert a property of the empty set")
 	}
 
-	var lensCols []string
-	var lensFound bool
-	for _, l := range Lenses() {
-		if l.CanonicalName == target.LensRef {
-			lensCols = l.Output.BodyColumns
-			lensFound = true
-			break
+	checked := 0
+	for _, target := range targets {
+		// Last-wins, mirroring the canonicalName→id map the installer's batch
+		// build overwrites per duplicate.
+		var lens *pkgmgr.LensSpec
+		for i := range Lenses() {
+			if l := Lenses()[i]; l.CanonicalName == target.LensRef {
+				lens = &l
+			}
 		}
-	}
-	if !lensFound {
-		t.Fatalf("target %q's LensRef %q resolves to no declared lens", target.TargetID, target.LensRef)
+		if lens == nil {
+			t.Fatalf("target %q: LensRef %q resolves to no lens this package declares", target.TargetID, target.LensRef)
+		}
+		if lens.Output == nil {
+			t.Fatalf("target %q: bound lens %q declares no Output descriptor, so the row Weaver evaluates cannot be read here",
+				target.TargetID, lens.CanonicalName)
+		}
+
+		for _, col := range append(append([]string{}, lens.Output.BodyColumns...), lens.Output.StaticEmptyColumns...) {
+			if !strings.HasPrefix(col, "missing_") {
+				continue
+			}
+			checked++
+			if _, ok := target.Gaps[col]; !ok {
+				t.Errorf("target %q: lens %q projects gap column %q with no Gaps entry — Weaver cannot tell a "+
+					"deliberate orphan from an authoring omission and holds the row on the long redelivery "+
+					"floor forever; declare it (surface, if the package deliberately never dispatches for it)",
+					target.TargetID, lens.CanonicalName, col)
+			}
+		}
+
+		for col, ga := range target.Gaps {
+			switch ga.Action {
+			case "surface":
+				// The engine reads IssueCode/IssueSeverity only on this action,
+				// and refuses a severity outside the two aggregateStatus
+				// escalates.
+				if ga.IssueCode == "" {
+					t.Errorf("target %q gap %q: action surface with no IssueCode — the raised Health issue would carry the engine's placeholder instead of a name an operator can act on",
+						target.TargetID, col)
+				}
+				if ga.IssueSeverity != "warning" && ga.IssueSeverity != "error" {
+					t.Errorf("target %q gap %q: action surface issueSeverity %q must be warning or error",
+						target.TargetID, col, ga.IssueSeverity)
+				}
+			case "triggerLoom", "assignTask", "directOp", "proposedOp", "":
+				// "" is the goal-planner shape: the action is resolved at plan
+				// time from the gap's Goal + Actions catalog.
+			default:
+				t.Errorf("target %q gap %q: action %q is not one the engine implements", target.TargetID, col, ga.Action)
+			}
+		}
 	}
 
-	for _, col := range lensCols {
-		if !strings.HasPrefix(col, "missing_") {
-			continue
-		}
-		if _, ok := target.Gaps[col]; !ok {
-			t.Fatalf("lens BodyColumn %q is a missing_* column with no Gaps entry — Weaver cannot tell a "+
-				"deliberate orphan from an authoring omission and holds the row on the long redelivery "+
-				"floor forever; declare it (surface, if the package deliberately never dispatches for it)", col)
-		}
+	// The positive vector: without it this sweep passes vacuously the day the
+	// package stops projecting gap columns, or the day the union above stops
+	// resolving.
+	if checked == 0 {
+		t.Fatal("no missing_* columns examined across any target — the assertion above proved nothing")
 	}
 }
