@@ -16,6 +16,14 @@
 //	WEAVER_LANE          ops lane for remediation-op submission — a single
 //	                     dot-free subject token, rejected at engine start
 //	                     otherwise (default: system)
+//	WEAVER_REDELIVERY_DELAY       lane-1's SHORT redelivery floor — the minimum wait before a
+//	                              transiently-declined row is redelivered (Go duration, e.g. "5s";
+//	                              default: substrate.DefaultRedeliveryDelay)
+//	WEAVER_LONG_REDELIVERY_DELAY  lane-1's LONG redelivery floor — the cadence a config-error
+//	                              decline stands on, and therefore how fast a package edit is
+//	                              taken up by rows already declined (Go duration, e.g. "5m";
+//	                              default: substrate.DefaultLongRedeliveryDelay, floored at the
+//	                              short delay)
 //	LATTICE_AUTH_MODE    control-plane capability auth mode: "capability" (default) or "stub"
 //	LATTICE_CONTROL_JWT_KEYS_DIR       directory of <kid>.pem trusted actor-JWT public keys —
 //	                                   unset (and dev mode off) keeps Fire 1's self-asserted
@@ -120,6 +128,14 @@ func run(logger *slog.Logger) error {
 		ActorKey:            actorKey,
 		Instance:            instance,
 		Lane:                lane,
+		// Both lane-1 redelivery floors are operator-settable. The long one is
+		// the cadence every config-error decline stands on, so it decides both
+		// how fast a package fix reaches rows already declined and how much a
+		// stuck population costs per pass; a wrong value must be correctable
+		// without a rebuild. Zero means "unset" — Config.withDefaults resolves
+		// each to the substrate default and floors the long one at the short.
+		RedeliveryDelay:     envDuration("WEAVER_REDELIVERY_DELAY", 0, logger),
+		LongRedeliveryDelay: envDuration("WEAVER_LONG_REDELIVERY_DELAY", 0, logger),
 		Logger:              logger,
 	})
 
@@ -154,6 +170,26 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envDuration reads a Go duration from the environment, keeping def when the
+// variable is unset or unusable. An unparseable or non-positive value is
+// REFUSED rather than applied — a zero or negative floor would resolve back to
+// the default anyway, so accepting one would log an override that did not
+// happen — and the refusal is warned about rather than fatal: a typo in a
+// tuning knob must not stop the engine from starting on its defaults.
+// (cmd/object-store-manager's idiom.)
+func envDuration(key string, def time.Duration, logger *slog.Logger) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		logger.Warn("ignoring invalid duration env; using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return d
 }
 
 // wireControlChecker builds the control-plane capability checker

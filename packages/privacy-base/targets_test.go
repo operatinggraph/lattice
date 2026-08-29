@@ -89,11 +89,12 @@ func TestWeaverTargets_PlaybookColumnsMatchLens(t *testing.T) {
 
 // TestWeaverTargets_EveryLensGapHasPlaybookEntry is the reverse direction, and
 // the one that matters most: a `missing_<g>` column the lens projects with NO
-// matching Gaps entry raises a standing error-severity GapWithoutPlaybook
-// issue and escalates the whole Weaver component to unhealthy
-// (internal/weaver/evaluator.go's dispatchGap, health.go's aggregateStatus) —
-// silently, for every subject that ever opens the orphaned gap. Deleting any
-// one of this package's five Gaps entries must red this test.
+// matching Gaps entry is never remediated. Weaver acks the row with a standing
+// warning-severity GapWithoutPlaybook issue (internal/weaver/evaluator.go's
+// dispatchGap) — Weaver degrades, the obligation goes undispatched, and the only
+// surface saying so is one Health entry per (target, gap) that an operator has to
+// be looking at. Deleting any one of this package's five Gaps entries must red
+// this test.
 func TestWeaverTargets_EveryLensGapHasPlaybookEntry(t *testing.T) {
 	target := WeaverTargets()[0]
 	lens := findErasureLens(t)
@@ -105,7 +106,7 @@ func TestWeaverTargets_EveryLensGapHasPlaybookEntry(t *testing.T) {
 			continue
 		}
 		if _, ok := target.Gaps[col]; !ok {
-			t.Errorf("lens projects %q with no playbook entry — this is the GapWithoutPlaybook failure mode (evaluator.go dispatchGap): the row column is true, the Weaver finds no Gaps[%q], and it escalates the whole target to unhealthy instead of remediating", col, col)
+			t.Errorf("lens projects %q with no playbook entry — this is the GapWithoutPlaybook failure mode (evaluator.go dispatchGap): the row column is true, the Weaver finds no Gaps[%q], and it acks the row with a standing warning instead of remediating, so the obligation is never dispatched for any subject", col, col)
 		}
 	}
 }

@@ -1309,4 +1309,4 @@ func splitMarkKey(key string) (targetID, entityID, gapColumn string, ok bool) {
 	return targetID, entityID, gapColumn, true
 }
 
-func issueKeySweep(markKey string) string { return "sweep:" + markKey }
+func issueKeySweep(markKey string) string { return issuePrefixSweep + markKey }

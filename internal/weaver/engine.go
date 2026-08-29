@@ -581,4 +581,4 @@ func (e *Engine) reconcileConsumers() {
 	}
 }
 
-func issueKeyConsumer(targetID string) string { return "consumer:" + targetID }
+func issueKeyConsumer(targetID string) string { return issuePrefixConsumer + targetID }

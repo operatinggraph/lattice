@@ -56,5 +56,12 @@ func TestWeaverTargetsBucket_Provisioned(t *testing.T) {
 	require.False(t, info.Config.AllowAtomicPublish,
 		"weaver-targets has no AtomicBatch writer — AllowAtomicPublish must stay off")
 	require.EqualValues(t, 1, info.Config.MaxMsgsPerSubject,
-		"weaver-targets must keep the KV default history of 1 (DeliverLastPerSubject CDC)")
+		"weaver-targets must keep the KV default history of 1 (DeliverLastPerSubject CDC). This is "+
+			"also the keystone of Weaver's substrate-native decline loop "+
+			"(weaver-decline-retry-substrate-native-design.md §2 V7): a declined row is left Nak'd "+
+			"and PENDING, and what releases its slot promptly is a new revision COMPACTING the old "+
+			"message out of the backing stream. With history above 1 the declined delivery survives "+
+			"its own supersession and a stale retry races the fresh state — at which point the "+
+			"design has lost its keystone and the shelved row-sweep fallback "+
+			"(weaver-sweep-declared-work-enumeration-design.md) has to be revived.")
 }

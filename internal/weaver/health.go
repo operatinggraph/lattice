@@ -87,11 +87,18 @@ type weaverHealthDoc struct {
 }
 
 // healthIssue is one Contract #5 §5.2 issue entry.
+//
+// key is the issue-cache key the entry stands at. It is unexported, so it never
+// reaches the wire, and it has exactly one reader: boundIssues' listing cut,
+// which ranks on the key's FAMILY as well as on severity (issueFamilyBounded).
+// An entry built outside the cache carries a key in the family it belongs to,
+// so the cut classifies it like any other.
 type healthIssue struct {
 	Severity string `json:"severity"`
 	Code     string `json:"code"`
 	Message  string `json:"message"`
 	Since    string `json:"since"`
+	key      string
 }
 
 // logPaceInterval bounds how long one key's re-derived fault may go without a
@@ -166,13 +173,24 @@ type pacedLog struct {
 //	           | (a refresh grows nothing); capped on every refused raise, so it counts RAISE
 //	           | ATTEMPTS, not distinct rows — the refused keys are exactly what is not tracked
 //	decounted | clear and clearPrefix, per entry actually removed
-//	retired   | rowIssues when the target's count reaches zero; capped the moment the count
-//	           | drops back under the cap — the refused raises are level-driven and re-arrive
-//	           | on the next delivery, so a count kept past the suppression it describes would
-//	           | report a suppression that is no longer happening
+//	retired   | rowIssues when the target's count reaches zero; capped at the HEARTBEAT, when a
+//	           | snapshot observes that no raise was refused since the previous snapshot AND the
+//	           | target is back under its cap — a level check, not an edge on the count. The
+//	           | refused raises are level-driven and re-arrive on the next delivery, so a record
+//	           | retired the instant one entry turned over would be re-minted by the very next
+//	           | refusal with a fresh `since` and a count of 1, reporting a suppression that has
+//	           | run for days as seconds old (the same reasoning that refuses rather than evicts)
 //	retired   | (subject gone) clearPrefix takes both with the entries it removes — an entity
-//	           | tombstone, a Revoke, a registry teardown
+//	           | tombstone, a Revoke, a registry teardown; and rowIssues reaching zero retires the
+//	           | record outright, since nothing of the target is left to suppress
 //	restart   | empty, like the latch itself
+//
+// pacedRows is the same bound applied to the pace memory, which the issue bound
+// does not reach: `clear` deliberately leaves a pace entry standing (a clear is
+// not evidence the fault ended), so the paced map holds keys whose issue entries
+// are long gone, and the per-row `template:` family it serves is O(rows of the
+// target) exactly like the latch. prunePaced walks the whole map every heartbeat,
+// so an unbounded paced map is an unbounded per-heartbeat walk.
 type issueCache struct {
 	mu     sync.Mutex
 	issues map[string]healthIssue
@@ -181,6 +199,10 @@ type issueCache struct {
 	// rowIssues counts the entries of the per-row families (`data:`, `template:`)
 	// currently held, per targetID.
 	rowIssues map[string]int
+	// pacedRows counts the pace entries of the per-row families currently held,
+	// per targetID — the same cap, counted separately because the two maps have
+	// different lifetimes.
+	pacedRows map[string]int
 	// capped holds one overflow record per target at its cap, maintained in
 	// place; snapshot renders each as a single synthetic issue.
 	capped map[string]cappedRowIssues
@@ -189,9 +211,17 @@ type issueCache struct {
 // cappedRowIssues is the overflow record for one target whose per-row issue
 // families have reached maxPerTargetRowIssues: how many raises have been refused
 // since the cap engaged, and when it engaged.
+//
+// renderedRefused is the refused count the last snapshot reported, and it is what
+// makes the record's retirement level-driven: a snapshot that finds the count
+// unmoved has observed a whole heartbeat interval with no refusal, which is the
+// suppression actually being over. Tracking it as a count delta rather than a
+// clock keeps the record a pure function of the raises, with no second time
+// source to keep honest.
 type cappedRowIssues struct {
-	refused int
-	since   string
+	refused         int
+	renderedRefused int
+	since           string
 }
 
 func newIssueCache() *issueCache {
@@ -200,6 +230,7 @@ func newIssueCache() *issueCache {
 		since:     make(map[string]string),
 		paced:     make(map[string]pacedLog),
 		rowIssues: make(map[string]int),
+		pacedRows: make(map[string]int),
 		capped:    make(map[string]cappedRowIssues),
 	}
 }
@@ -249,8 +280,16 @@ func (c *issueCache) admitRowIssue(key string, now time.Time) bool {
 }
 
 // releaseRowIssue decounts one per-row entry that has been removed from the
-// cache, retiring the target's overflow record once the population is back under
-// the cap. Called with c.mu held.
+// cache. Called with c.mu held.
+//
+// It retires the target's overflow record only when the population reaches ZERO
+// — nothing of the target's per-row families is left, so there is nothing to
+// suppress. Dropping back merely UNDER the cap retires nothing here: one entry
+// turning over (a routine repair or tombstone in a live population) frees a slot
+// the next refusal retakes at once, so an edge-driven retirement would destroy
+// the record's `since` and count on every turnover and re-mint them a moment
+// later — an operator would read "1 raise suppressed, seconds ago" for a
+// suppression running for days. snapshot retires it on the level instead.
 func (c *issueCache) releaseRowIssue(key string) {
 	targetID, ok := rowIssueTarget(key)
 	if !ok {
@@ -259,12 +298,45 @@ func (c *issueCache) releaseRowIssue(key string) {
 	n := c.rowIssues[targetID] - 1
 	if n <= 0 {
 		delete(c.rowIssues, targetID)
-	} else {
-		c.rowIssues[targetID] = n
-	}
-	if n < maxPerTargetRowIssues {
 		delete(c.capped, targetID)
+		return
 	}
+	c.rowIssues[targetID] = n
+}
+
+// admitPacedRow decides whether a per-row insertion at key may grow the PACE
+// memory. Called with c.mu held, for a key that is not already present.
+//
+// A refusal is not recorded on the overflow record: the raise it damps is the
+// same raise admitRowIssue already counts there, and this seam decides a LOG
+// LEVEL, not a fact. The failure direction is therefore deliberately quieter —
+// a refused key logs at Debug for this raise, and a target at its cap is already
+// flooding, so the one thing a bound here must never do is make it louder.
+func (c *issueCache) admitPacedRow(key string) bool {
+	targetID, ok := rowIssueTarget(key)
+	if !ok {
+		return true
+	}
+	if c.pacedRows[targetID] >= maxPerTargetRowIssues {
+		return false
+	}
+	c.pacedRows[targetID]++
+	return true
+}
+
+// releasePacedRow decounts one per-row pace entry that has been removed.
+// Called with c.mu held.
+func (c *issueCache) releasePacedRow(key string) {
+	targetID, ok := rowIssueTarget(key)
+	if !ok {
+		return
+	}
+	n := c.pacedRows[targetID] - 1
+	if n <= 0 {
+		delete(c.pacedRows, targetID)
+		return
+	}
+	c.pacedRows[targetID] = n
 }
 
 // set raises or refreshes the issue at key, stamping a key that carries no
@@ -292,7 +364,7 @@ func (c *issueCache) setSince(key, severity, code, message string, arrivedAt tim
 		since = substrate.FormatTimestamp(arrivedAt)
 		c.since[key] = since
 	}
-	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since}
+	c.issues[key] = healthIssue{Severity: severity, Code: code, Message: message, Since: since, key: key}
 }
 
 // standingAs reports whether an issue with exactly this severity and code is
@@ -361,6 +433,14 @@ func (c *issueCache) pacedRaise(key, severity, code string, now time.Time) (loud
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	last, ok := c.paced[key]
+	if !ok && !c.admitPacedRow(key) {
+		// The target is at its per-row pace cap. The raise is damped rather than
+		// remembered: nothing is lost that the Health entry does not carry (the
+		// latch is decided by the caller's own set, on its own bound), and the
+		// arrival it reports is this instant, which is what a caller with no
+		// memory of the key can honestly say.
+		return false, now
+	}
 	if !ok || last.severity != severity || last.code != code ||
 		now.Sub(last.lastRaiseAt) > logPaceInterval {
 		c.paced[key] = pacedLog{
@@ -392,6 +472,7 @@ func (c *issueCache) prunePaced(now time.Time) int {
 	for k, p := range c.paced {
 		if now.Sub(p.lastRaiseAt) >= 2*logPaceInterval {
 			delete(c.paced, k)
+			c.releasePacedRow(k)
 			n++
 		}
 	}
@@ -422,6 +503,7 @@ func (c *issueCache) clearPrefix(prefix string) int {
 	for k := range c.paced {
 		if strings.HasPrefix(k, prefix) {
 			delete(c.paced, k)
+			c.releasePacedRow(k)
 		}
 	}
 	for k := range c.issues {
@@ -440,6 +522,15 @@ func (c *issueCache) clearPrefix(prefix string) int {
 // synthetic entries are rendered here rather than stored, so the cap's own
 // bookkeeping can never be mistaken for — or cleared as — a raised fact, and
 // they are ordered on the same key sort as everything else.
+//
+// This is also where an overflow record RETIRES, and the check is a level rather
+// than an edge: a record whose refused count has not moved since the previous
+// snapshot, for a target now under its cap, describes a suppression that is over
+// — a whole read interval passed with nothing refused. Retiring instead on the
+// count dropping under the cap would fire on every single entry turnover, and
+// since the freed slot is retaken by the next refusal the record would be
+// re-minted seconds later with `since = now` and `refused = 1`, so a suppression
+// running for days would read as one raise, moments old.
 func (c *issueCache) snapshot() []healthIssue {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -449,8 +540,15 @@ func (c *issueCache) snapshot() []healthIssue {
 	}
 	overflow := make(map[string]healthIssue, len(c.capped))
 	for targetID, ov := range c.capped {
+		if ov.refused == ov.renderedRefused && c.rowIssues[targetID] < maxPerTargetRowIssues {
+			delete(c.capped, targetID)
+			continue
+		}
+		ov.renderedRefused = ov.refused
+		c.capped[targetID] = ov
 		key := issuePrefixCapped + targetID
 		overflow[key] = healthIssue{
+			key: key,
 			// The refused families are all `warning`s (a RowDataError, a
 			// TemplateDataError), so the entry standing in for them is one too.
 			Severity: "warning",
@@ -703,6 +801,11 @@ func (h *heartbeater) pausedIssues(states map[string]string, now time.Time) []he
 				h.consumerPausedSince[name] = since
 			}
 			issues = append(issues, healthIssue{
+				// Built from live consumer state rather than through issueCache,
+				// so it carries the key it WOULD stand at: one entry per
+				// consumer, in the bounded `consumer:` family, which is what the
+				// listing cut ranks on.
+				key:      issueKeyConsumer(name),
 				Severity: "warning",
 				Code:     "ConsumerPaused",
 				Message:  "consumer " + name + " paused awaiting operator resume",
@@ -758,15 +861,23 @@ func (h *heartbeater) flagEffectMismatches(ctx context.Context, metrics map[stri
 // the whole set. Returns issues unchanged when it already fits (and when limit
 // is non-positive — a disabled cap).
 //
-// SELECTION IS BY SEVERITY FIRST, ties broken on the caller's incoming order
-// (the deterministic key order), because what a cap must not do is evict the
-// entry that explains the fault. The per-entity families are the ones that grow
-// without bound — one entry per violating subject — and they are all
-// `warning`s; the entries an operator needs in front of them (a
-// PlaybookConfigError, a LensEffectMismatch, a paused consumer) are single
-// `error`s that key order would sort behind fifty identical warnings. Sorting
-// by severity means a document can be truncated to fifty instances of one
-// warning only after every error has been listed.
+// SELECTION IS BY SEVERITY FIRST, THEN BY FAMILY SCOPE, ties broken on the
+// caller's incoming order (the deterministic key order), because what a cap must
+// not do is evict the entry that explains the fault.
+//
+// Severity is the first key: an `error` is never displaced by a warning,
+// whatever family either is in. The second key is what the ordering actually
+// rests on. The families that grow without bound are the per-ENTITY ones — one
+// entry per violating subject, `gap:`, `data:`, `template:`, `sweep:` — and the
+// entries an operator needs in front of them are the target-scoped ones bounded
+// by the deployment: a `gapConfig:` PlaybookConfigError, a `consumer:` failure,
+// a `timer:` fault, a paused consumer. In raw key order the unbounded families
+// sort AHEAD of `gapConfig:`, so a flood of per-row warnings evicts the single
+// entry that explains it — cross-target, since the issue set is per Weaver
+// instance. Ranking bounded families ahead of unbounded ones states that
+// directly, instead of resting it on a severity that is free to change: the
+// config codes this cut protects are `warning`s (weaver-decline-retry §8), and
+// UnresolvedReference always was one.
 //
 // The synthetic entry describes the issues it replaces: its severity is theirs
 // (an `error` in the unlisted tail must not present as a warning), its since is
@@ -780,7 +891,10 @@ func boundIssues(issues []healthIssue, limit int) []healthIssue {
 	ranked := make([]healthIssue, len(issues))
 	copy(ranked, issues)
 	sort.SliceStable(ranked, func(i, j int) bool {
-		return severityRank(ranked[i].Severity) < severityRank(ranked[j].Severity)
+		if severityRank(ranked[i].Severity) != severityRank(ranked[j].Severity) {
+			return severityRank(ranked[i].Severity) < severityRank(ranked[j].Severity)
+		}
+		return familyRank(ranked[i].key) < familyRank(ranked[j].key)
 	})
 	omitted := ranked[limit:]
 	out := make([]healthIssue, 0, limit+1)
@@ -804,6 +918,47 @@ func boundIssues(issues []healthIssue, limit int) []healthIssue {
 func severityRank(severity string) int {
 	if severity == "error" {
 		return 0
+	}
+	return 1
+}
+
+// familyRank orders issues within one severity for the listing cut: a family
+// bounded by the DEPLOYMENT ahead of one bounded only by the ROW POPULATION.
+// Every family Weaver raises is classified explicitly below, because the whole
+// hazard here is a family nobody classified silently landing on the wrong side.
+//
+// An unrecognised key ranks with the unbounded families, mirroring
+// severityRank's posture towards an unknown severity: a family this build cannot
+// name must not be able to displace the entries whose job is to explain a flood,
+// and the cost of the conservative answer is bounded (one unclassified entry
+// competing on key order, exactly as before), while the cost of the other is a
+// new unbounded family evicting everything above it.
+func familyRank(key string) int {
+	switch {
+	case
+		// One entry per (target, gap column) — the target's playbook is finite.
+		strings.HasPrefix(key, issuePrefixGapConfig),
+		// One entry per target: its lane-1 consumer, its temporal timer, its
+		// registration, its pending spec, and the cap's own overflow record.
+		strings.HasPrefix(key, issuePrefixConsumer),
+		strings.HasPrefix(key, issuePrefixTimer),
+		strings.HasPrefix(key, issuePrefixTarget),
+		strings.HasPrefix(key, issuePrefixPendingSpec),
+		strings.HasPrefix(key, issuePrefixCapped),
+		// One entry per (target, gap, declared action) and per fighting target
+		// PAIR — both bounded by what packages declare, never by rows.
+		strings.HasPrefix(key, issuePrefixEffect),
+		strings.HasPrefix(key, issuePrefixOscillation):
+		return 0
+	case
+		// One entry per violating SUBJECT: a surface gap, an exhausted budget,
+		// a malformed row column, a row whose plan will not build, and a
+		// corrupt mark (keyed by the mark, which carries the entity).
+		strings.HasPrefix(key, issuePrefixGapEntity),
+		strings.HasPrefix(key, issuePrefixData),
+		strings.HasPrefix(key, issuePrefixTemplate),
+		strings.HasPrefix(key, issuePrefixSweep):
+		return 1
 	}
 	return 1
 }

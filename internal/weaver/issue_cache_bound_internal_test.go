@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The issue-cache bound (design weaver-decline-retry-substrate-native-design.md
@@ -105,9 +106,17 @@ func TestIssueCache_PerRowFamiliesAreCappedPerTarget(t *testing.T) {
 
 // TestIssueCache_CapRefreshesAndReleases pins the cap's arithmetic at the two
 // points a count can go wrong: a REFRESH of a standing key is not growth and must
-// never be refused, and a clear must both decount and retire the overflow record
-// — a count kept past the suppression it describes would report a suppression
-// that is no longer happening.
+// never be refused, and the overflow record must survive the population moving
+// under and back over the cap while refusals keep arriving.
+//
+// The record's retirement is LEVEL-driven, read at the snapshot, not edge-driven
+// on the count. A live population turns entries over constantly — a repaired row,
+// an entity tombstone — and each turnover frees a slot the next refusal retakes
+// at once. Retiring on the count dipping under the cap therefore destroys the
+// record on every turnover and re-mints it moments later with `since = now` and
+// `refused = 1`, so a suppression running for days reads as one raise, seconds
+// old. The record is the same kind of thing as the entries it stands for: a fact
+// with an age.
 func TestIssueCache_CapRefreshesAndReleases(t *testing.T) {
 	t.Parallel()
 	c := newIssueCache()
@@ -126,19 +135,122 @@ func TestIssueCache_CapRefreshesAndReleases(t *testing.T) {
 
 	refused := issueKeyDataEntity(targetID, "entityRefused", "violating")
 	c.set(refused, "warning", "RowDataError", "refused")
-	if _, capped := cappedEntry(c.snapshot(), targetID); !capped {
+	first, capped := cappedEntry(c.snapshot(), targetID)
+	if !capped {
 		t.Fatalf("setup: the target must be standing at its cap")
 	}
-
-	// One entry clears: there is room again, so the suppression has ended.
-	c.clear(keys[0])
-	if _, capped := cappedEntry(c.snapshot(), targetID); capped {
-		t.Fatalf("the overflow record must retire the moment the target is back under its cap — the " +
-			"refused raises are level-driven and re-arrive on the next delivery")
+	if !strings.Contains(first.Message, "1 further") {
+		t.Fatalf("setup: the record must count the one refusal so far, got %q", first.Message)
 	}
-	c.set(refused, "warning", "RowDataError", "admitted now")
+
+	// A full turnover cycle: one entry clears (under the cap), the freed slot is
+	// retaken, and the next raise is refused again. Throughout, the suppression
+	// never stopped — so the record must be the SAME record, keeping its arrival
+	// stamp and carrying its count forward.
+	c.clear(keys[0])
+	c.set(refused, "warning", "RowDataError", "admitted into the freed slot")
 	if _, ok := issueAt(c, refused); !ok {
 		t.Fatalf("a raise must be admitted again once the population is under the cap")
+	}
+	c.set(issueKeyDataEntity(targetID, "entityRefusedAgain", "violating"), "warning", "RowDataError", "refused again")
+
+	second, capped := cappedEntry(c.snapshot(), targetID)
+	if !capped {
+		t.Fatalf("the record must survive a turnover that never interrupted the suppression — a refusal " +
+			"arrived on the other side of it")
+	}
+	if second.Since != first.Since {
+		t.Fatalf("since moved %q -> %q across one entry turning over: the record was destroyed and "+
+			"re-minted, so a suppression running for days reports as seconds old",
+			first.Since, second.Since)
+	}
+	if !strings.Contains(second.Message, "2 further") {
+		t.Fatalf("the refused count must carry forward across the turnover (1 then 2), got %q", second.Message)
+	}
+
+	// The suppression genuinely ends: room again, and a whole snapshot interval
+	// passes with nothing refused. THAT is what retires the record.
+	c.clear(keys[1])
+	if _, capped := cappedEntry(c.snapshot(), targetID); capped {
+		t.Fatalf("a snapshot that observes no refusal since the previous one, for a target back under " +
+			"its cap, must retire the record — the refusals are level-driven and would re-arrive")
+	}
+
+	// And a later refusal mints a FRESH record, dated from then: this suppression
+	// is a new one, not the old one resumed. One raise refills the freed slot;
+	// the next is the refusal.
+	c.set(issueKeyDataEntity(targetID, "entityRefill", "violating"), "warning", "RowDataError", "back to the cap")
+	c.set(issueKeyDataEntity(targetID, "entityLater", "violating"), "warning", "RowDataError", "refused later")
+	third, capped := cappedEntry(c.snapshot(), targetID)
+	if !capped {
+		t.Fatalf("a refusal after the record retired must mint a new one")
+	}
+	if third.Since == first.Since || !strings.Contains(third.Message, "1 further") {
+		t.Fatalf("a new suppression must start from its own arrival and its own count, got since=%q message=%q",
+			third.Since, third.Message)
+	}
+}
+
+// TestIssueCache_PaceMemoryIsCappedPerTarget pins the SAME bound on the pace
+// memory, which the latch's bound does not reach.
+//
+// `clear` deliberately leaves a pace entry standing — a clear is not evidence the
+// fault ended — so the paced map accumulates keys whose latch entries are long
+// gone, and the family it serves per row (`template:`, a TemplateDataError per
+// (target, entity, gap)) is O(rows of the target) exactly like the latch. Every
+// heartbeat walks that map in full, so an unbounded paced map is an unbounded
+// per-heartbeat walk. The refusal must also be QUIET: a target at its cap is
+// already flooding, so the one thing this bound must never do is make a raise
+// louder than it was.
+func TestIssueCache_PaceMemoryIsCappedPerTarget(t *testing.T) {
+	t.Parallel()
+	c := newIssueCache()
+	const targetID = "pacedCap"
+	now := time.Now()
+
+	for i := 0; i < maxPerTargetRowIssues; i++ {
+		key := issueKeyTemplateEntity(targetID, "entity"+strconv.Itoa(i), "missing_x")
+		c.pacedRaise(key, "warning", "TemplateDataError", now)
+		// The latch entries are cleared as fast as they are raised (a
+		// re-projection, a gap closing) — the pace memory is what keeps growing.
+		c.clear(key)
+	}
+	if got := len(c.paced); got != maxPerTargetRowIssues {
+		t.Fatalf("pace memory holds %d entries, want the full cap of %d", got, maxPerTargetRowIssues)
+	}
+
+	overflow := issueKeyTemplateEntity(targetID, "entityOverflow", "missing_x")
+	loud, _ := c.pacedRaise(overflow, "warning", "TemplateDataError", now)
+	if got := len(c.paced); got != maxPerTargetRowIssues {
+		t.Fatalf("pace memory grew to %d past its %d cap: every heartbeat walks this map in full",
+			got, maxPerTargetRowIssues)
+	}
+	if loud {
+		t.Fatalf("a refused pace raise must be QUIET — a target at its cap is already flooding, so the " +
+			"failure direction of a bound on the log has to be fewer records, never more")
+	}
+
+	// The bounded families are never refused: a target-scoped config fault is one
+	// entry per (target, gap), and it is the entry that explains the flood.
+	if loud, _ := c.pacedRaise(issueKeyGapConfig(targetID, "missing_x"), "warning", "PlaybookConfigError", now); !loud {
+		t.Fatalf("a target-scoped config fault is bounded by construction: its arrival must be loud " +
+			"however many rows of the target are stuck")
+	}
+
+	// A second target is unaffected, and the count is released with the entries:
+	// the target's teardown hands the whole allowance back.
+	other := issueKeyTemplateEntity("pacedQuiet", "e1", "missing_x")
+	if loud, _ := c.pacedRaise(other, "warning", "TemplateDataError", now); !loud {
+		t.Fatalf("the cap is per target: one broken lens must not silence another target's diagnostics")
+	}
+	for _, prefix := range issueKeyTargetPrefixes(targetID) {
+		c.clearPrefix(prefix)
+	}
+	if got := c.pacedRows[targetID]; got != 0 {
+		t.Fatalf("the teardown left the pace count at %d, so a re-registered target would start refused", got)
+	}
+	if loud, _ := c.pacedRaise(overflow, "warning", "TemplateDataError", now); !loud {
+		t.Fatalf("a target coming back must be admitted from an empty count")
 	}
 }
 

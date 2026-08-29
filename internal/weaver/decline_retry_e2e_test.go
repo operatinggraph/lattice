@@ -56,11 +56,18 @@ func waitAckPending(t *testing.T, ctx context.Context, conn *substrate.Conn, tar
 	t.Fatalf("lane-1 durable for %q: num_ack_pending = %d, want %d — %s", targetID, got, want, why)
 }
 
-// installDeclineTarget installs a target whose playbook names missing_known and
-// nothing else, so a row opening missing_unknown takes §3.2 row 8's config
-// dead-end. It returns the meta-vertex id, so a later spec re-install can define
-// the gap on the SAME vertex.
-func installDeclineTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID, patternRef string) string {
+// installDeclineTarget installs a target whose single gap resolves its Loom
+// subject through the row column named by subjectRef. A row that does not carry
+// that column takes §3.2 row 10's TemplateDataError dead-end: the plan cannot be
+// built, and one of its fix paths is a template edit that produces no new
+// delivery, so the row declines on the LONG floor and stands pending.
+//
+// Row 10, not row 8's orphaned column: an orphaned column Acks (its fix may
+// never come, so a Nak would park it forever), which is a different test.
+//
+// It returns the meta-vertex id, so a later spec re-install can correct the
+// template on the SAME vertex.
+func installDeclineTarget(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID, patternRef, subjectRef string) string {
 	t.Helper()
 	vtx := mustNanoID(t)
 	installWeaverTarget(t, ctx, conn, vtx, map[string]any{
@@ -68,7 +75,7 @@ func installDeclineTarget(t *testing.T, ctx context.Context, conn *substrate.Con
 		"lensRef":  mustNanoID(t),
 		"gaps": map[string]any{
 			"missing_known": map[string]any{
-				"action": "triggerLoom", "pattern": patternRef, "subject": "row.applicant",
+				"action": "triggerLoom", "pattern": patternRef, "subject": subjectRef,
 			},
 		},
 	})
@@ -87,10 +94,13 @@ func installDeclineTarget(t *testing.T, ctx context.Context, conn *substrate.Con
 //     stream and JetStream terminates its pending delivery rather than waiting
 //     out the floor. The fresh revision then delivers and dispatches on its own.
 //
-// The history-1 assertion is deliberate and Weaver-owned: the compaction
-// behaviour above is what makes a standing Nak safe here, so a bucket that
-// grew history would silently turn every declined row into a stale retry racing
-// its own fresh state.
+// The history-1 pin those two facts rest on is asserted where it can actually
+// red against Lattice's own provisioning —
+// internal/bootstrap/weaver_targets_bucket_test.go's TestWeaverTargetsBucket_Provisioned,
+// which reads the bucket the seeder created and carries the revive-the-fallback
+// failure message. Asserting it here as well would pin nothing: this test's own
+// provision() creates the bucket a few lines earlier, so the value read back
+// would be the jetstream client's default, not the platform's decision.
 func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -105,23 +115,11 @@ func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) 
 	provision(t, ctx, conn)
 	ops := subscribeOps(t, nc)
 
-	streamInfo, err := conn.JetStream().Stream(ctx, "KV_"+weaverTargetsBucket)
-	require.NoError(t, err)
-	info, err := streamInfo.Info(ctx)
-	require.NoError(t, err)
-	require.EqualValues(t, 1, info.Config.MaxMsgsPerSubject,
-		"weaver-targets must keep history 1: the standing decline loop relies on a new revision "+
-			"COMPACTING the old message out of the backing stream, which is what terminates the "+
-			"declined row's pending delivery eagerly instead of leaving a stale retry racing the "+
-			"fresh state. If this assertion reddens, the substrate-native decline design has lost "+
-			"its keystone and the shelved row-sweep fallback "+
-			"(weaver-sweep-declared-work-enumeration-design.md) has to be revived.")
-
 	patternVtx := mustNanoID(t)
 	installLoomPattern(t, ctx, conn, patternVtx, "onboarding")
 
 	targetID := "declinePending"
-	installDeclineTarget(t, ctx, conn, targetID, "onboarding")
+	installDeclineTarget(t, ctx, conn, targetID, "onboarding", "row.applicant")
 
 	engine := newEngine(conn, "e2e-decline-"+mustNanoID(t), declineFloors(200*time.Millisecond, 500*time.Millisecond))
 	engCtx, engCancel := context.WithCancel(ctx)
@@ -136,18 +134,19 @@ func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) 
 
 	entityID := mustNanoID(t)
 	applicant := "vtx.identity." + mustNanoID(t)
+	// The row opens the gap but carries no `applicant` column, so the gap's
+	// subject template resolves null and no episode can be built.
 	putRow(t, ctx, conn, targetID, entityID, map[string]any{
-		"entityKey":       "vtx.leaseApp." + entityID,
-		"violating":       true,
-		"missing_unknown": true,
-		"applicant":       applicant,
+		"entityKey":     "vtx.leaseApp." + entityID,
+		"violating":     true,
+		"missing_known": true,
 	})
 
 	requireNoOp(t, ops, 2*time.Second)
 	waitAckPending(t, ctx, conn, targetID, 1,
 		"a config-error decline must stand as an owed, pending message, not be acked away")
 
-	// The lens re-projects the row with the gap the playbook DOES name. The new
+	// The lens re-projects the row WITH the column the template reads. The new
 	// revision compacts the declined one out, so the pending slot is released
 	// without waiting out the floor, and the fresh row dispatches.
 	putRow(t, ctx, conn, targetID, entityID, map[string]any{
@@ -165,8 +164,8 @@ func TestWeaverE2E_DeclinedRowStaysPendingUntilTheRowIsSuperseded(t *testing.T) 
 }
 
 // TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop is §3.2's fix-uptake claim,
-// pinned: a row declined for a config error re-evaluates against the CURRENT
-// registry on its next redelivery, so adding the missing playbook entry
+// pinned: a row declined for a config-class error re-evaluates against the
+// CURRENT registry on its next redelivery, so correcting the gap's template
 // dispatches the already-declined row automatically — with no durable rebuild
 // and no re-projection of the row.
 //
@@ -193,7 +192,7 @@ func TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop(t *testing.T) {
 	installLoomPattern(t, ctx, conn, patternVtx, "onboarding")
 
 	targetID := "declineFixUp"
-	targetVtx := installDeclineTarget(t, ctx, conn, targetID, "onboarding")
+	targetVtx := installDeclineTarget(t, ctx, conn, targetID, "onboarding", "row.applicant")
 
 	const longFloor = time.Second
 	engine := newEngine(conn, "e2e-fixup-"+mustNanoID(t), declineFloors(200*time.Millisecond, longFloor))
@@ -203,34 +202,31 @@ func TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop(t *testing.T) {
 	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
 
 	entityID := mustNanoID(t)
-	applicant := "vtx.identity." + mustNanoID(t)
+	// No `applicant` column: the gap's subject template resolves null, so the
+	// plan cannot be built and the row declines on the long floor.
 	putRow(t, ctx, conn, targetID, entityID, map[string]any{
-		"entityKey":       "vtx.leaseApp." + entityID,
-		"violating":       true,
-		"missing_unknown": true,
-		"applicant":       applicant,
+		"entityKey":     "vtx.leaseApp." + entityID,
+		"violating":     true,
+		"missing_known": true,
 	})
 
 	requireNoOp(t, ops, 2*time.Second)
-	waitAckPending(t, ctx, conn, targetID, 1, "the declined row must stand pending while the playbook lacks the gap")
+	waitAckPending(t, ctx, conn, targetID, 1, "the declined row must stand pending while the template is unbuildable")
 
 	before := laneConsumerInfo(t, ctx, conn, targetID)
 	rowKey := targetID + "." + entityID
 	rowBefore, err := conn.KVGet(ctx, weaverTargetsBucket, rowKey)
 	require.NoError(t, err)
 
-	// The package is re-authored: the SAME target vertex gains the gaps entry.
-	// Nothing touches the row.
+	// The package is re-authored: the SAME target vertex now reads a column the
+	// row actually carries. Nothing touches the row.
 	fixedAt := time.Now()
 	installWeaverTarget(t, ctx, conn, targetVtx, map[string]any{
 		"targetId": targetID,
 		"lensRef":  mustNanoID(t),
 		"gaps": map[string]any{
 			"missing_known": map[string]any{
-				"action": "triggerLoom", "pattern": "onboarding", "subject": "row.applicant",
-			},
-			"missing_unknown": map[string]any{
-				"action": "triggerLoom", "pattern": "onboarding", "subject": "row.applicant",
+				"action": "triggerLoom", "pattern": "onboarding", "subject": "row.entityKey",
 			},
 		},
 	})
@@ -238,7 +234,7 @@ func TestWeaverE2E_ConfigFixIsTakenUpByTheDeclineLoop(t *testing.T) {
 	op := nextOp(t, ops, 20*time.Second)
 	elapsed := time.Since(fixedAt)
 	require.Equal(t, "StartLoomPattern", op.OperationType)
-	require.Equal(t, applicant, op.Payload["subjectKey"])
+	require.Equal(t, "vtx.leaseApp."+entityID, op.Payload["subjectKey"])
 	require.Less(t, elapsed, 10*longFloor,
 		"the fix must be taken up on the decline loop's own cadence (one long floor), not eventually")
 

@@ -910,8 +910,10 @@ decides whose close retires the issue. The key never appears on the wire — it 
 | `gap:<targetId>.<entityId>.<gapColumn>` | one ROW | `UnroutedTasks` and every other `surface` gap's declared `issueCode`; `GapBudgetExhausted` |
 | `gapConfig:<targetId>.<gapColumn>` | the target's PLAYBOOK / deployment | `GapWithoutPlaybook`, `UnresolvedReference`, `PlaybookConfigError` |
 | `data:<targetId>.<entityId>.<column>` | one ROW's data | `RowDataError` (a column whose value is not its §10.2 type, an unusable `freshUntil`, a violating row carrying no `entityKey` echo) |
+| `data:<targetId>.<entityId>.<body>` | one ROW's whole body | `RowDataError` for a value that is not readable JSON at all — no column name can be recovered from it, so the family's column segment is the synthetic literal `<body>`. The angle brackets are what make it safe to share the family's key space: a lens column name is a Cypher identifier and can carry none, so it can never collide with a real column. Sharing the family is what gives it the family's teardowns; it is retired by the next body that parses, at the same read |
 | `template:<targetId>.<entityId>.<gapColumn>` | one ROW's plan for one gap | `TemplateDataError` |
 | `effect:<targetId>.<gapColumn>.<actionRef>` | one declared remediation | `LensEffectMismatch` |
+| `capped:<targetId>` | one target's per-row issue CACHE | `IssueCacheCapped` — synthetic, rendered by the cache rather than raised (below) |
 
 A `surface` gap standing open is a fact about ONE subject, so N subjects violating the same
 `(target, gap)` raise N entries carrying the SAME `code` — an `issues[]` code is not unique within
@@ -969,6 +971,7 @@ not — so a repaired row retires its own entry. Read each entry as "this row pr
 | `effect:` | nothing — **self-reconciling** | `flagEffectMismatches` rebuilds its alert set from a scan every heartbeat and clears whatever the scan no longer lists; `Revoke` deletes the target's `__effect` windows, so its entries self-clear on the next heartbeat |
 | `sweep:` | nothing — **self-reconciling** | the sweep reconciles `corruptAlerted` against the marks each pass listed; `Revoke` deletes the target's marks, so its `CorruptMark` entries clear on the next pass |
 | `pendingSpec:` | nothing — **not target-keyed** | keyed by the meta-vertex id, and `Revoke` does not touch the vertex or its spec; it clears when the spec drains or is evicted |
+| `capped:` | **with the entries it counts** | derived state, never a raised fact: the prefix clear that removes a target's per-row entries takes its overflow record with it, so a target that has left cannot go on reporting a suppression |
 | `oscillation:` | **nothing — KNOWN STRANDED** | see below |
 
 Each prefix carries its trailing `.` separator, so revoking `t1` does not touch `t10`.
@@ -996,13 +999,26 @@ When more are open, one extra synthetic entry closes the list:
  "since": "<RFC3339 — the oldest unlisted issue's first-arose stamp>"}
 ```
 
-**Which 50 are listed is decided by severity first**, ties broken on the deterministic key order.
-That ordering is the point of the cap: the unbounded families are all `warning`s, and in key order
-they sort *ahead* of the entries that explain a fault — a `gapConfig:` `PlaybookConfigError`, a
-`timer:` failure, a paused consumer. Selecting by key alone would let sixty unrouted tasks evict the
-one `error` naming the cause, leaving a document that reports `unhealthy` while listing fifty
-identical warnings. With severity-first selection an `error` is dropped only once more than 50
-errors are open at once.
+**Which 50 are listed is decided by severity first, then by family scope**, with the deterministic
+key order breaking the remaining ties.
+
+That ordering is the point of the cap. The families that grow without bound are the **per-entity**
+ones — `gap:`, `data:`, `template:`, `sweep:`, one entry per violating subject — and in key order
+they sort *ahead* of the entries that explain them: a `gapConfig:` `PlaybookConfigError`, a
+`consumer:` or `timer:` failure, a paused consumer, a `target:` rejection. Selecting by key alone
+would let sixty unrouted tasks evict the one entry naming the cause, leaving a document that lists
+fifty identical warnings and explains none of them. So the cut ranks the **bounded, target-scoped
+families ahead of the unbounded per-entity ones** — a rule about SCOPE, stated directly rather than
+inferred from severity.
+
+Severity remains the first key, so an `error` is never displaced by a warning whatever family either
+is in; it is dropped only once more than 50 errors are open at once. What severity no longer does is
+carry the scope rule on its back: the config codes this ordering protects (`GapWithoutPlaybook`,
+`PlaybookConfigError`) are `warning`s — each self-heals on a package edit while Weaver goes on
+dispatching every other target — and `UnresolvedReference` always was one. Every family Weaver
+raises is classified explicitly in `internal/weaver/health.go`'s `familyRank`; a family it does not
+recognise ranks with the unbounded ones, so a new family can never displace an explanation by
+default.
 
 The marker names the distinct **codes** that went unlisted, with counts, most-numerous first — an
 operator who cannot see every instance can still see what kind of thing is missing. That code list
@@ -1012,6 +1028,42 @@ package-declared and the vocabulary is open-ended.
 Its `severity` is the worst among the issues it stands for, so an `error` among the unlisted is
 never presented as a warning. `status` is aggregated over **every** open issue, not over the listed
 sample, so §5.3's issues-empty-iff-healthy invariant holds against the full set.
+
+#### `IssueCacheCapped`
+
+`IssuesTruncated` bounds the DOCUMENT; this bounds the CACHE behind it. The two per-row families
+(`data:` and `template:`) are O(rows of the target), so one systemically broken lens over a
+100k-row projection would grow the in-memory map — and the per-heartbeat sort over it — without
+limit, for one repeated fault. Each target may therefore hold at most **500** per-row entries at
+once, counted across both families together.
+
+```json
+{"severity": "warning", "code": "IssueCacheCapped",
+ "message": "target <targetId>: per-row issue cache is at its 500-entry cap; <n> further per-row raises for this target have been suppressed since (raise attempts, not distinct rows — the suppressed keys are exactly what is not tracked)",
+ "since": "<RFC3339 — when the cap engaged>"}
+```
+
+Read it as three facts:
+
+- **Insertion past the cap is refused, never evicting.** An entry already standing is a fact with an
+  age (§5.5), and dropping one to admit an identical newer one would restamp the fault as young. The
+  entries an operator can see are therefore the OLDEST, not the newest.
+- **`<n>` counts raise ATTEMPTS, not distinct rows.** The refused keys are exactly what the cache
+  does not track, so the number says how loud the suppression is, not how many subjects are behind
+  it. Everything refused is level-driven and re-arrives on the next delivery.
+- **`since` is the age of the suppression, and it survives turnover.** The record retires when a
+  heartbeat observes that nothing was refused since the previous one and the target is back under
+  its cap — a level, not the count dipping under the cap for an instant. A live population turns
+  entries over constantly, and each freed slot is retaken by the next refusal, so an edge-driven
+  retirement would re-mint the record every few seconds and report a suppression running for days as
+  one raise, moments old.
+
+The cap sits far above the document's 50, on purpose: for any target an operator can actually read,
+the visible truncation must stay `IssuesTruncated`'s, with this one engaging only where the
+population is already past anything a heartbeat could list. The same 500 bounds Weaver's log-pacing
+memory for those families, whose entries outlive their issues (a cleared issue is not evidence the
+fault ended, so the pace clock deliberately survives the clear); a raise refused there is logged at
+`debug` rather than dropped, because a bound on a flood must never make it louder.
 
 ### `health.loom.<instance>` — Loom heartbeat
 

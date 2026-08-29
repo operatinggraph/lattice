@@ -1539,7 +1539,7 @@ func TestHandleRow_ExhaustedGapIssueIsPerEntity(t *testing.T) {
 }
 
 // TestClearClosedMarks_RetiresBothIssueScopes is the leak guard on the split.
-// A config fact (GapWithoutPlaybook here) is target-scoped, and every OTHER
+// A config fact (PlaybookConfigError here) is target-scoped, and every OTHER
 // clear site for it requires the config to have been FIXED — so a column that
 // simply stops being reported would strand it forever if clearClosedMarks
 // retired only the entity-scoped key. Both scopes retire on the close.
@@ -1557,22 +1557,25 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 		TargetID: targetID,
 		Gaps: map[string]GapAction{
 			"missing_claim": {Action: actionSurface, IssueCode: "UnroutedTasks", IssueSeverity: "warning"},
+			// Candidates-only on a non-planned target: buildPlan has no case for
+			// the empty action, which is planGap's errConfig arm.
+			"missing_z": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "SendReminder"}}},
 		},
 	})
 	entityID := testNanoID(t)
-	// missing_orphan has no gaps entry at all: the config dead-end.
 	open := map[string]any{
 		"entityKey": "vtx.task." + entityID, "violating": true,
-		"missing_claim": true, "missing_orphan": true,
+		"missing_claim": true, "missing_z": true,
 	}
-	// The surface gap Acks; the config dead-end declines on the long floor, and
-	// the row's aggregate is the shortest retry any of its gaps asked for.
+	// The surface gap Acks; the un-dispatchable action declines on the long
+	// floor, and the row's aggregate is the shortest retry any of its gaps
+	// asked for.
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.NakWithLongDelay {
 		t.Fatalf("dispatch must decline on the long floor, got %v", dec)
 	}
 	h.requireNoOp(t)
-	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); !ok {
-		t.Fatalf("expected a target-scoped GapWithoutPlaybook issue, issues = %+v", h.engine.issues.snapshot())
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); !ok {
+		t.Fatalf("expected a target-scoped PlaybookConfigError issue, issues = %+v", h.engine.issues.snapshot())
 	}
 	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); !ok {
 		t.Fatalf("expected an entity-scoped surface issue, issues = %+v", h.engine.issues.snapshot())
@@ -1580,12 +1583,12 @@ func TestClearClosedMarks_RetiresBothIssueScopes(t *testing.T) {
 
 	closed := map[string]any{
 		"entityKey": "vtx.task." + entityID, "violating": false,
-		"missing_claim": false, "missing_orphan": false,
+		"missing_claim": false, "missing_z": false,
 	}
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
 		t.Fatalf("gap-close row must Ack, got %v", dec)
 	}
-	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_orphan")); ok {
+	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_z")); ok {
 		t.Fatal("a column that stopped being reported must retire its target-scoped config issue too")
 	}
 	if _, ok := issueAt(h.engine.issues, issueKeyGapEntity(targetID, entityID, "missing_claim")); ok {
@@ -1851,8 +1854,8 @@ func TestDispatchGap_AugurPolicyRetiresGapWithoutPlaybook(t *testing.T) {
 
 	entityID := testNanoID(t)
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "violating": true, col: true}
-	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
-		t.Fatalf("a gap with no playbook entry must decline on the long floor, got %v", dec)
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("a gap with no playbook entry Acks with its issue standing, got %v", dec)
 	}
 	h.requireNoOp(t)
 	if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, col)); !ok {
@@ -1902,7 +1905,7 @@ func TestPlanGap_UnplannableEscalationRetiresConfigIssue(t *testing.T) {
 		Admission: &AdmissionPolicy{GlobalRate: 0.5},
 	}
 	entityID := testNanoID(t)
-	e.issues.set(issueKeyGapConfig(targetID, col), "error", "PlaybookConfigError", "the pin has vanished")
+	e.issues.set(issueKeyGapConfig(targetID, col), "warning", "PlaybookConfigError", "the pin has vanished")
 	e.issues.set(issueKeyGapEntity(targetID, entityID, col), "warning", "GapBudgetExhausted", "budget spent")
 
 	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID}

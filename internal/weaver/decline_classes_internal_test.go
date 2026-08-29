@@ -55,13 +55,75 @@ func seedGapWithoutPlaybookTarget(t *testing.T, h *handlerHarness, targetID stri
 	}
 }
 
-// TestHandleRow_ConfigErrorDeclinesOnTheLongFloor covers §3.2's three config-class
-// rows — 8 (GapWithoutPlaybook), 10 (TemplateDataError) and 11
-// (PlaybookConfigError). Each must decline on the long floor so the package edit
-// that fixes it is picked up with no rebuild and no re-projection, and each must
-// raise its fact at `warning`: the condition self-heals on that edit and Weaver
-// goes on dispatching every other target while it stands, which Contract #5 §5.2
-// separates from `unhealthy` ("cannot fulfil its primary responsibility").
+// TestHandleRow_GapWithoutPlaybookAcksWithAStandingWarning is §3.2 row 8, and it
+// is the row the table deliberately holds OUT of the long-Nak config class.
+//
+// The fix-path rule that puts a config error on the long floor assumes a
+// playbook edit is coming. For this exit it need not be: a package may project a
+// `missing_*` column with NO gaps entry on purpose, ORing it into `violating` so
+// the row stays violating without dispatching anything (packages/lease-signing
+// does exactly that for missing_decision and missing_manager, and says so in the
+// lens). Such a column's "fix" is a human decision, or nothing at all. A long Nak
+// would park those rows for the whole human-latency window — forever, for the
+// ones nothing ever closes — each holding a MaxAckPending slot and re-running the
+// entire clearClosedMarks preamble every floor for a configuration that is
+// already correct. That is the same argument §4.2 makes for leaving the
+// unregistered-target exit at Ack.
+//
+// So the audibility is the standing issue, and both halves of the raise are
+// asserted: the Ack, and the `warning` severity that keeps a package-authoring
+// dead-end from pinning the whole component unhealthy.
+func TestHandleRow_GapWithoutPlaybookAcksWithAStandingWarning(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureNoEntry8"
+	entityID, row := seedGapWithoutPlaybookTarget(t, h, targetID)
+
+	dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1))
+	if dec != substrate.Ack {
+		t.Fatalf("a column the package projects with no gaps entry has no fix that a redelivery can "+
+			"take up — a long Nak parks it forever holding a pending slot — so the row must Ack "+
+			"with its issue standing, got %v", dec)
+	}
+	h.requireNoOp(t)
+	is, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_unknown"))
+	if !ok {
+		t.Fatalf("the config dead-end must stand as a target-scoped issue — the Ack makes the issue "+
+			"the ONLY surface this fault has, issues = %+v", h.engine.issues.snapshot())
+	}
+	if is.Code != "GapWithoutPlaybook" {
+		t.Fatalf("issue code = %q, want GapWithoutPlaybook", is.Code)
+	}
+	if is.Severity != "warning" {
+		t.Fatalf("severity = %q, want warning: a package-authoring gap self-heals on the edit and "+
+			"must degrade Weaver, never pin the whole component unhealthy", is.Severity)
+	}
+
+	// The row redelivers (a re-projection, or any later delivery): the fact is
+	// re-derived and stands unmoved, still Acking.
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("every delivery of an orphaned column takes the same exit, got %v", dec)
+	}
+	again, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_unknown"))
+	if !ok || again.Since != is.Since {
+		t.Fatalf("the standing fact must keep its arrival stamp across deliveries: since %q -> %q "+
+			"(standing=%v)", is.Since, again.Since, ok)
+	}
+}
+
+// TestHandleRow_ConfigErrorDeclinesOnTheLongFloor covers §3.2's two long-floor
+// config-class rows — 10 (TemplateDataError) and 11 (PlaybookConfigError). Each
+// must decline on the long floor so the package edit that fixes it is picked up
+// with no rebuild and no re-projection, and each must raise its fact at
+// `warning`: the condition self-heals on that edit and Weaver goes on dispatching
+// every other target while it stands, which Contract #5 §5.2 separates from
+// `unhealthy` ("cannot fulfil its primary responsibility").
 func TestHandleRow_ConfigErrorDeclinesOnTheLongFloor(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -69,31 +131,6 @@ func TestHandleRow_ConfigErrorDeclinesOnTheLongFloor(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	t.Run("row 8: the gap has no playbook entry", func(t *testing.T) {
-		h := newHandlerHarness(t, ctx)
-		const targetID = "fixtureNoEntry8"
-		entityID, row := seedGapWithoutPlaybookTarget(t, h, targetID)
-
-		dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1))
-		if dec != substrate.NakWithLongDelay {
-			t.Fatalf("a gap with no playbook entry is a config error: it must decline on the long "+
-				"floor so the package edit that adds the entry is taken up automatically, got %v", dec)
-		}
-		h.requireNoOp(t)
-		is, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_unknown"))
-		if !ok {
-			t.Fatalf("the config dead-end must stand as a target-scoped issue, issues = %+v",
-				h.engine.issues.snapshot())
-		}
-		if is.Code != "GapWithoutPlaybook" {
-			t.Fatalf("issue code = %q, want GapWithoutPlaybook", is.Code)
-		}
-		if is.Severity != "warning" {
-			t.Fatalf("severity = %q, want warning: a package-authoring gap self-heals on the edit and "+
-				"must degrade Weaver, never pin the whole component unhealthy", is.Severity)
-		}
-	})
 
 	t.Run("row 10: the gap's template resolves null against the row", func(t *testing.T) {
 		h := newHandlerHarness(t, ctx)
@@ -290,18 +327,18 @@ func TestHandleRow_DataErrorsAckWithTheirIssue(t *testing.T) {
 	t.Run("a disabled target's row acks whatever its gaps say", func(t *testing.T) {
 		h := newHandlerHarness(t, ctx)
 		const targetID = "fixtureDisabled"
-		entityID, row := seedGapWithoutPlaybookTarget(t, h, targetID)
+		entityID, row := seedTemplateFaultTarget(t, h, targetID)
 		h.engine.disabled.set(targetID, true)
 
 		// The identical row on an ENABLED target declines on the long floor
-		// (row 8), so the Ack below is the freeze deciding, not an inert row.
+		// (row 10), so the Ack below is the freeze deciding, not an inert row.
 		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.Ack {
 			t.Fatalf("a disabled target's rows must Ack at the dispatch skip regardless of what their "+
 				"gaps would have decided — a Nak loop buys nothing during a freeze, got %v", dec)
 		}
 		h.requireNoOp(t)
-		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_unknown")); ok {
-			t.Fatalf("a disabled target's row never reaches the dispatch leg, so it raises no config fault")
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, templateFaultGap)); ok {
+			t.Fatalf("a disabled target's row never reaches the dispatch leg, so it raises no plan fault")
 		}
 	})
 }
@@ -326,10 +363,10 @@ func TestHandleRow_AggregatesDeclinesByShortestRetry(t *testing.T) {
 	t.Run("a config-error gap alone yields the long floor", func(t *testing.T) {
 		h := newHandlerHarness(t, ctx)
 		const targetID = "fixtureAggLong"
-		entityID, row := seedGapWithoutPlaybookTarget(t, h, targetID)
+		entityID, row := seedTemplateFaultTarget(t, h, targetID)
 		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithLongDelay {
-			t.Fatalf("the row's only decline is a config error, so the row's disposition is the long "+
-				"floor — an Ack here means the dispatch switch has no case for it, got %v", dec)
+			t.Fatalf("the row's only decline is a config-class error, so the row's disposition is the "+
+				"long floor — an Ack here means the dispatch switch has no case for it, got %v", dec)
 		}
 	})
 
@@ -337,26 +374,29 @@ func TestHandleRow_AggregatesDeclinesByShortestRetry(t *testing.T) {
 		h := newHandlerHarness(t, ctx)
 		const targetID = "fixtureAggMixed"
 		// missing_ref names an uninstalled pattern (the transient class);
-		// missing_unknown has no playbook entry at all (the config class).
+		// templateFaultGap's subject template resolves null against this row
+		// (the config class, row 10).
+		h.seedPattern("onboardFlow", testNanoID(t))
 		h.seedTarget(&Target{
 			TargetID: targetID,
 			Gaps: map[string]GapAction{
-				"missing_ref": {Action: actionTriggerLoom, Pattern: "neverInstalled", Subject: "row.entityKey"},
+				"missing_ref":    {Action: actionTriggerLoom, Pattern: "neverInstalled", Subject: "row.entityKey"},
+				templateFaultGap: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.applicant"},
 			},
 		})
 		entityID := testNanoID(t)
 		row := map[string]any{
-			"entityKey":       "vtx.leaseApp." + entityID,
-			"violating":       true,
-			"missing_ref":     true,
-			"missing_unknown": true,
+			"entityKey":      "vtx.leaseApp." + entityID,
+			"violating":      true,
+			"missing_ref":    true,
+			templateFaultGap: true,
 		}
 		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 1, 1)); dec != substrate.NakWithDelay {
 			t.Fatalf("a transient decline must not be paced at another gap's config floor, got %v", dec)
 		}
 		// Both facts stand: the aggregation picks one disposition, never one fault.
-		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_unknown")); !ok {
-			t.Fatalf("the config dead-end must still be raised, issues = %+v", h.engine.issues.snapshot())
+		if _, ok := issueAt(h.engine.issues, issueKeyTemplateEntity(targetID, entityID, templateFaultGap)); !ok {
+			t.Fatalf("the template fault must still be raised, issues = %+v", h.engine.issues.snapshot())
 		}
 		if _, ok := issueAt(h.engine.issues, issueKeyGapConfig(targetID, "missing_ref")); !ok {
 			t.Fatalf("the unresolved reference must still be raised, issues = %+v", h.engine.issues.snapshot())
@@ -520,10 +560,13 @@ func TestClearClosedMarks_ConfigLatchNarrowedToWellFormedReads(t *testing.T) {
 // being narrowed away (which would strand the latch of a column that simply
 // stops being reported).
 //
-// Every step is asserted on the STAMP as well as on membership.
-// GapWithoutPlaybook raises through alert, which mints `since` only for a key
-// that carries none, so a re-raise carrying a FRESH stamp is the only observable
-// that separates "retired and re-arose" from "stood the whole time".
+// Every step is asserted on the STAMP as well as on membership, and the two
+// surfaces say different things here. The latch's own membership flaps — it is
+// retired and re-raised — while the stamp does NOT move, because
+// PlaybookConfigError raises through alertPaced, whose arrival memory survives
+// the clear on purpose: a clear this key sees is routinely another entity's
+// close rather than a repair, so a stamp minted from the latch would report a
+// week-old config fault as seconds old on essentially every pass.
 func TestClearClosedMarks_ConfigLatchSelfHealsAcrossEntities(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -534,11 +577,8 @@ func TestClearClosedMarks_ConfigLatchSelfHealsAcrossEntities(t *testing.T) {
 	h := newHandlerHarness(t, ctx)
 
 	const targetID = "fixtureLatchFlap"
-	const gap = "missing_unknown"
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps:     map[string]GapAction{"missing_known": {Action: actionDirectOp, Operation: "SendReminder"}},
-	})
+	const gap = "missing_z"
+	seedUndispatchableGapTarget(t, h, targetID)
 	key := issueKeyGapConfig(targetID, gap)
 	entityA, entityB := testNanoID(t), testNanoID(t)
 	openRow := func(entityID string) map[string]any {
@@ -574,7 +614,8 @@ func TestClearClosedMarks_ConfigLatchSelfHealsAcrossEntities(t *testing.T) {
 	}
 
 	// B's next delivery — which the long floor bounds at one floor away — puts
-	// the fact straight back, with a fresh arrival stamp.
+	// the fact straight back, dated from its ORIGINAL arrival: the pace memory
+	// the stamp comes from is untouched by a clear.
 	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityB, openRow(entityB), 4, 1)); dec != substrate.NakWithLongDelay {
 		t.Fatalf("B's still-open gap must decline on the long floor, got %v", dec)
 	}
@@ -583,9 +624,11 @@ func TestClearClosedMarks_ConfigLatchSelfHealsAcrossEntities(t *testing.T) {
 		t.Fatalf("B's still-open gap must re-raise the latch within one floor, issues = %+v",
 			h.engine.issues.snapshot())
 	}
-	if reraised.Since == arrival.Since {
-		t.Fatalf("since = %q on both sides of the flap: the clear never ran, so nothing here pins it",
-			reraised.Since)
+	if reraised.Since != arrival.Since {
+		t.Fatalf("since moved %q -> %q across the flap: A's close is not evidence the config fault "+
+			"ended, so the re-raise must carry the ORIGINAL arrival — a stamp re-minted here would "+
+			"reset roughly once a pass and report a standing fault as newborn",
+			arrival.Since, reraised.Since)
 	}
 
 	// B closes too: the last row producing the fact is gone, so the retirement

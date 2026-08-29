@@ -1304,6 +1304,13 @@ func TestSweep_DisabledTargetExpiredMarkNotReclaimed(t *testing.T) {
 // mark must be observed before its 2×lease TTL deletes it unseen) and
 // SweepOrphanWarmup is clamped up to SweepInterval (a warm-up shorter than
 // one tick gates nothing), defaulting to 5m.
+//
+// It covers the two redelivery floors on the same terms. Their resolution is
+// what makes the value an operator READS BACK from the config the value the
+// consumer will actually use: the substrate re-applies the same fallbacks and
+// the same long≥short clamp when it resolves a floor, so a config left
+// unresolved here is not a wrong delay — it is a config that reports one delay
+// and runs another.
 func TestConfigClamps(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
@@ -1327,6 +1334,46 @@ func TestConfigClamps(t *testing.T) {
 	}
 	if def.SweepOrphanWarmup != defaultSweepOrphanWarmup {
 		t.Fatalf("default SweepOrphanWarmup = %v, want %v", def.SweepOrphanWarmup, defaultSweepOrphanWarmup)
+	}
+	if def.RedeliveryDelay != substrate.DefaultRedeliveryDelay {
+		t.Fatalf("default RedeliveryDelay = %v, want the substrate's short floor %v — an unresolved "+
+			"zero here is a config that reports no floor while the consumer runs one",
+			def.RedeliveryDelay, substrate.DefaultRedeliveryDelay)
+	}
+	if def.LongRedeliveryDelay != substrate.DefaultLongRedeliveryDelay {
+		t.Fatalf("default LongRedeliveryDelay = %v, want the substrate's long floor %v",
+			def.LongRedeliveryDelay, substrate.DefaultLongRedeliveryDelay)
+	}
+
+	// A long floor BELOW the short one is not honourable — the substrate floors
+	// the long delay at the effective short one whatever this says — so it is
+	// clamped here, where the operator can read the resolved value back.
+	inverted := Config{
+		RedeliveryDelay:     30 * time.Second,
+		LongRedeliveryDelay: time.Second,
+		Logger:              discardLogger(),
+	}
+	inverted.withDefaults()
+	if inverted.RedeliveryDelay != 30*time.Second {
+		t.Fatalf("a positive RedeliveryDelay must be kept verbatim, got %v", inverted.RedeliveryDelay)
+	}
+	if inverted.LongRedeliveryDelay != 30*time.Second {
+		t.Fatalf("LongRedeliveryDelay = %v, want it clamped up to the short floor (30s): the substrate "+
+			"applies that clamp anyway, so leaving it here makes the configured value a lie",
+			inverted.LongRedeliveryDelay)
+	}
+
+	// A long floor at or above the short one passes through untouched — the
+	// clamp is a floor, never a rewrite.
+	ordered := Config{
+		RedeliveryDelay:     2 * time.Second,
+		LongRedeliveryDelay: time.Hour,
+		Logger:              discardLogger(),
+	}
+	ordered.withDefaults()
+	if ordered.RedeliveryDelay != 2*time.Second || ordered.LongRedeliveryDelay != time.Hour {
+		t.Fatalf("a well-ordered pair must pass through verbatim, got short=%v long=%v",
+			ordered.RedeliveryDelay, ordered.LongRedeliveryDelay)
 	}
 }
 

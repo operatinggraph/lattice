@@ -229,8 +229,8 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 		// redeliver on the bounded cadence, never a hot loop.
 		return substrate.NakWithDelay
 	case longDelayed:
-		// Only config-error declines (§3.2's config class: no playbook entry, an
-		// unbuildable template, an un-dispatchable action). Their fix arrives as a
+		// Only config-error declines (§3.2's config class: an unbuildable
+		// template, an un-dispatchable action). Their fix arrives as a
 		// registry/package edit that produces NO new row delivery, so this
 		// redelivery loop is the only automatic uptake path — paced on the long
 		// floor, because a short cadence there buys nothing but churn.
@@ -264,20 +264,37 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		// skipped (FR29 discipline).
 		esc, escalated := augurEscalation(e.source, target, escalateUnplannable, targetID, entityID, entityKey, col)
 		if !escalated {
-			// A CONFIG error: the fix is a package re-author adding the gaps entry,
-			// and that edit produces no new delivery of this row — so the long
-			// redelivery floor is the only automatic uptake path, and the decline
-			// stands as pending until the config is fixed rather than being Acked
-			// away and never revisited.
+			// A config dead-end: the row names a column the playbook does not.
+			// The standing issue is the whole disposition — the row ACKS.
+			//
+			// Ack, not the config class's long redelivery floor, because this exit
+			// has a population whose fix never arrives. A package may project a
+			// `missing_*` column DELIBERATELY with no gaps entry, ORing it into
+			// `violating` to keep the row violating without dispatching anything
+			// (packages/lease-signing's missing_decision / missing_manager, whose
+			// closure is a human decision or nothing at all). A long Nak parks such
+			// a row for as long as the column stands — for missing_manager, forever
+			// — holding a MaxAckPending slot and re-running the whole
+			// clearClosedMarks preamble every floor for a configuration that is
+			// already correct. That is the same argument that leaves the
+			// unregistered-target exit at Ack. A genuinely missing entry is
+			// surfaced by the standing issue and taken up by the next projection of
+			// the row, which delivers on its own.
 			//
 			// `warning`, not `error`: the condition self-heals the moment the
 			// playbook names the column, and Weaver goes on dispatching every other
 			// target meanwhile — Contract #5 §5.2 reserves `unhealthy` (which any
 			// `error` drives, aggregateStatus) for "cannot fulfil its primary
 			// responsibility". A package-authoring typo is a degradation.
-			e.alert(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
+			//
+			// Raised through the paced seam, not alert: this fault is re-derived on
+			// every delivery of every violating row of the target for as long as the
+			// column stands, so its log record needs the same rationing planGap's
+			// config arms get — and the paced seam is the one that logs at the
+			// caller's own severity, so a `warning` fact is not written at Error.
+			e.alertPaced(issueKeyGapConfig(targetID, col), "warning", "GapWithoutPlaybook",
 				"target "+targetID+": row column "+col+" is true but the playbook defines no gaps entry for it")
-			return substrate.NakWithLongDelay
+			return substrate.Ack
 		}
 		// The augur policy now covers this gap — clear any GapWithoutPlaybook
 		// alert raised before the policy was added, and dispatch the reasoning
@@ -535,15 +552,16 @@ func surfaceOnlyGap(ga GapAction) bool {
 
 // planGap resolves one gap's plan (Evaluator L2 + Strategist), routing a
 // failure by its class: an unresolved reference defers on the bounded
-// redelivery cadence; a config or data error is surfaced and the gap skipped
-// (retrying cannot fix it). The two carry different Contract #5 §5.2
-// severities: a per-row DATA error (a malformed/incomplete anchor row whose
-// template references resolve null) is a `warning` (degraded) — one bad row,
-// every other row still remediates, so Weaver fulfils its responsibility; a
-// CONFIG error (a package playbook missing a gaps entry, an un-dispatchable
-// action) is an `error` (unhealthy) — it affects every row of the target and
-// only a package re-author can fix it. pl == nil means do not dispatch — the
-// returned Decision is the caller's disposition for this gap.
+// redelivery cadence; a config or data error is surfaced and the gap declines on
+// the long floor, since a package edit is what fixes it and that edit delivers
+// nothing. Both classes raise at `warning` (degraded), and their SCOPE is what
+// differs: a per-row DATA error (a malformed/incomplete anchor row whose
+// template references resolve null) is one bad row, keyed per entity, while a
+// CONFIG error (an un-dispatchable action, a vanished pin) is identical for
+// every row of the target and keyed per (target, gap). Neither pins the
+// component unhealthy — each self-heals on a package edit while Weaver goes on
+// dispatching every other target (Contract #5 §5.2). pl == nil means do not
+// dispatch — the returned Decision is the caller's disposition for this gap.
 //
 // pinnedAction (Fire 5/6) is the mark's currently-recorded actionRef, or ""
 // for a genuinely fresh episode — the sole input resolvePlannedAction needs
@@ -1630,14 +1648,27 @@ func (e *Engine) alertPaced(key, severity, code, message string) {
 	e.issues.setSince(key, severity, code, message, arrivedAt)
 }
 
-// The issue-key family prefixes. Every key constructor below and every
+// The issue-key family prefixes. Every key constructor in the package and every
 // teardown prefix in issueKeyTargetPrefixes is built from these, so a key shape
-// and the prefix that retires it cannot drift apart.
+// and the prefix that retires it cannot drift apart — and so the listing cut's
+// family classification (health.go's familyRank) names the same families the
+// constructors mint, rather than a second copy of the strings.
+//
+// The first four carry a segment below the target; the rest are keyed by the
+// target, the meta-vertex or the mark alone. Which of them are bounded by the
+// deployment and which by the row population is familyRank's subject.
 const (
-	issuePrefixGapEntity = "gap:"
-	issuePrefixGapConfig = "gapConfig:"
-	issuePrefixData      = "data:"
-	issuePrefixTemplate  = "template:"
+	issuePrefixGapEntity   = "gap:"
+	issuePrefixGapConfig   = "gapConfig:"
+	issuePrefixData        = "data:"
+	issuePrefixTemplate    = "template:"
+	issuePrefixEffect      = "effect:"
+	issuePrefixSweep       = "sweep:"
+	issuePrefixConsumer    = "consumer:"
+	issuePrefixTimer       = "timer:"
+	issuePrefixTarget      = "target:"
+	issuePrefixPendingSpec = "pendingSpec:"
+	issuePrefixOscillation = "oscillation:"
 )
 
 // rowBodyColumn is the column segment the `data:` family uses for a fault in
@@ -1766,5 +1797,12 @@ func issueKeyTemplateEntity(targetID, entityID, col string) string {
 }
 
 func issueKeyEffect(targetID, gapColumn, actionRef string) string {
-	return "effect:" + targetID + "." + gapColumn + "." + actionRef
+	return issuePrefixEffect + targetID + "." + gapColumn + "." + actionRef
+}
+
+// issueKeyTarget keys a Health issue about a target's REGISTRATION — a spec the
+// registry rejected — and is keyed by the owning meta-vertex id, which is what
+// the registry holds at the moment a spec fails to resolve to a targetId.
+func issueKeyTarget(ownerVertexID string) string {
+	return issuePrefixTarget + ownerVertexID
 }
