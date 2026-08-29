@@ -954,9 +954,13 @@ var issueKeyProbes = map[string]func() string{
 	"issueKeyRowIssuesCapped": func() string { return issueKeyRowIssuesCapped(censusTargetID) },
 	"issueKeyEffect":          func() string { return issueKeyEffect(censusTargetID, censusGapColumn, actionDirectOp) },
 	"issueKeyConsumer":        func() string { return issueKeyConsumer(censusTargetID) },
-	"issueKeyTimer":           func() string { return issueKeyTimer(censusTargetID) },
-	"issueKeyPendingSpec":     func() string { return issueKeyPendingSpec(censusTargetID) },
-	"issueKeySweep":           func() string { return issueKeySweep(markKey(censusTargetID, censusEntityID, censusGapColumn)) },
+	// issueKeyTarget is keyed by the vtx.meta.<id> OWNER vertex id, not by a
+	// targetId — a rejected spec may carry no usable targetId at all. The census
+	// only needs a stable single-segment id, so the target id serves.
+	"issueKeyTarget":      func() string { return issueKeyTarget(censusTargetID) },
+	"issueKeyTimer":       func() string { return issueKeyTimer(censusTargetID) },
+	"issueKeyPendingSpec": func() string { return issueKeyPendingSpec(censusTargetID) },
+	"issueKeySweep":       func() string { return issueKeySweep(markKey(censusTargetID, censusEntityID, censusGapColumn)) },
 	"issueKeyOscillation": func() string {
 		return issueKeyOscillation(censusTargetID, censusTargetID+"B", guardgrammar.Path{Field: "f"})
 	},

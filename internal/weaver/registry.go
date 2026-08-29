@@ -655,7 +655,7 @@ func (s *targetSource) dispatchTarget(id string, body []byte) {
 	s.ownerTargetID[id] = t.TargetID
 	s.mu.Unlock()
 
-	s.issues.clear("target:" + id)
+	s.issues.clear(issueKeyTarget(id))
 	if !exists {
 		s.logger.Info("weaver: target loaded", "targetId", t.TargetID, "gaps", len(t.Gaps))
 		if s.loadCB != nil {
@@ -689,7 +689,7 @@ func (s *targetSource) removeOwnedTargetLocked(id, newTargetID string) (old *Tar
 
 func (s *targetSource) rejectTarget(id, reason string) {
 	s.logger.Error("weaver: target rejected", "metaVertex", "vtx.meta."+id, "reason", reason)
-	s.issues.set("target:"+id, "error", "TargetRejected",
+	s.issues.set(issueKeyTarget(id), "error", "TargetRejected",
 		"meta.weaverTarget vtx.meta."+id+" rejected: "+reason)
 }
 
@@ -1235,7 +1235,7 @@ func (s *targetSource) removeVertex(id string) {
 	s.removeOpMetaLocked(id)
 	s.mu.Unlock()
 
-	s.issues.clear("target:" + id)
+	s.issues.clear(issueKeyTarget(id))
 	s.issues.clear(issueKeyPendingSpec(id))
 	if removed != nil {
 		s.logger.Info("weaver: target removed", "targetId", removed.TargetID)
@@ -1265,7 +1265,7 @@ func (s *targetSource) removeSpec(id string) {
 	s.removePatternLocked(id)
 	s.mu.Unlock()
 
-	s.issues.clear("target:" + id)
+	s.issues.clear(issueKeyTarget(id))
 	s.issues.clear(issueKeyPendingSpec(id))
 	if removed != nil {
 		s.logger.Info("weaver: target spec deleted; target removed", "targetId", removed.TargetID)
@@ -1275,7 +1275,13 @@ func (s *targetSource) removeSpec(id string) {
 	}
 }
 
-func issueKeyPendingSpec(id string) string { return "pendingSpec:" + id }
+// issueKeyTarget keys the registry's per-owner-vertex issue: a rejected spec,
+// or the clear that retires one when the vertex loads or goes away. Keyed by
+// the vtx.meta.<id> vertex id, not by targetId — a rejected spec may not have a
+// usable targetId at all.
+func issueKeyTarget(id string) string { return issuePrefixTarget + id }
+
+func issueKeyPendingSpec(id string) string { return issuePrefixPending + id }
 
 // flagOrphanedSpecs raises a Health issue for every spec aspect buffered past
 // pendingSpecWarnAfter still waiting for its parent vertex's class. Run on the
@@ -1641,7 +1647,7 @@ func (s *targetSource) targetMetaKey(targetID string) (string, bool) {
 }
 
 // ownerVertexID returns the vtx.meta.<id> vertex id that registered targetId,
-// the same id the "target:"+id issue-cache key is keyed by (registry.go's
+// the same id the issueKeyTarget(id) issue-cache key is keyed by (registry.go's
 // rejectTarget/load path). Used by Revoke to clear that target's standing
 // "target:" issue, if any.
 func (s *targetSource) ownerVertexID(targetID string) (string, bool) {
