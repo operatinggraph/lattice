@@ -667,3 +667,39 @@ recorded set *equals* what the script read, at the producer, not merely that it 
 declared set (that would be a Contract #2 change — this fire adds a *test* guard only); no change to
 `MaxDeclaredReads`, to hydration, or to any package's declarations beyond what the census proves
 wrong.
+
+### Build note — what the census actually measured (2026-08-29)
+
+The guard shipped as specified. The **census it required is the fire's larger result**: the first
+measurement of how far the `packages/` corpus is from Contract #2 §2.5's declared-read posture.
+2,755 executions over 158 operationTypes, from the whole set of packages that build a
+`CapabilityPipeline`.
+
+- **67 operations made at least one live (undeclared) read** — 2,769 occurrences. The class-(e)
+  walk-follow-up rule admits 54.3% of those before the baseline is consulted; the residue collapses
+  to **102 read shapes over 50 operations**.
+- **55 operations walked a `kv.Links` enumeration; 52 walked one nothing declared** — 139 shapes.
+  Exactly four operations ever declare `contextHint.enumerations` at all: `MergeIdentity`,
+  `PurgeIdentityDedupFootprint`, `SealIdentityForErasureComplete`, `UnbindIdentityCredentials`.
+
+**The residue is four different things, not one debt pile** — the classification matters more than
+the total, because a sweep that treated all 241 rows as script debt would chase the wrong 60%:
+
+| class | share of read occurrences | what it is |
+|---|---|---|
+| **(T) test fixture under-declares** | 42 shapes, ~767 occ (**61%**) | The real dispatcher already declares it; only the hand-built test envelope omits it. The test therefore drives the lazy live-read path production never takes — the fixture proves a read-set the dispatcher does not send, the same defect `TestPurgeDeclaredReadSetMatchesThePatternStep` was written to catch for privacy-base. Verified declaring sites include `packages/lease-signing/permissions.go:371`, `cmd/clinic-app/web/app.js:4137-4144`, `cmd/wellness-app/web/app.js:2089`, `cmd/loupe/review.go:978-985`, `internal/loom/engine.go:965,983`, `internal/loom/externaltask_params.go:43`, `internal/weaver/strategist.go:673`, `internal/bridge/dispatch.go:90-94`. |
+| **(P) genuine declarable gap** | 4 shapes, 19 occ | `CreateStudio` / `CreateMenuItem` read `lnk.identity.<a>.worksAt.<type>.<loc>` off a **payload-direct** location (`packages/wellness-domain/ddls.go:1711-1720`, `packages/cafe-domain/ddls.go:1700-1711`), so it is declarable and simply is not declared anywhere. |
+| **sanctioned, undeclarable by design** | ~439 occ | Class-(c) config reads (clinic-domain's provider `.hours` / `.timeOff`, "deliberately unsnapshotted … so an hours edit never conflicts a concurrent booking commit", `ddls.go:2329-2330`) and reads chained off a value only a prior read resolves (`capability-author/ddls.go:664-668`, `cafe-domain/ddls.go:828-843`). Nothing should ever declare these. |
+| **no declaration channel exists** | all 139 walk shapes bar 3 ops | **`pkgmgr.OpDispatchSpec` carries no `Enumerations` field** (`internal/pkgmgr/definition.go:872`). Only Loom `StepSpec` and Weaver `GapActionSpec` can declare a walk — and the three operations that declare theirs use exactly those. An ordinary descriptor-dispatched op *cannot* declare a `kv.Links` walk at all. This is a missing vocabulary, not debt. |
+
+**One false annotation found.** `packages/clinic-domain/ddls.go:2244-2247`
+(`actor_bound_to_appointment_provider`, shared by RescheduleAppointment / SetAppointmentStatus /
+SetAppointmentSite / RecordEncounter) carries `# read-posture: (d) declared in
+contextHint.optionalReads by the standing caller's dispatcher` — and none of the three dispatchers in
+`cmd/clinic-app/web/app.js` (4136-4161, 4243-4267, 4362-4377) declare that `identifiedBy` probe. The
+annotation asserts a declaration that does not exist. It reads as low-occurrence in the census (2)
+only because the provider-standing branch is rarely exercised, not because it is declared.
+
+The dominant undeclared walk, `vtx.identity.<id> holdsRole out`, is the shared
+`actor_holds_operator()` role check inside the `worksAt_covers` / `require_workplace` helpers pinned
+across 8-11 packages — one helper, not 50 independent decisions.
