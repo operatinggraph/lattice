@@ -247,3 +247,49 @@ func TestRenewalComplete_MissingGoalAgreement(t *testing.T) {
 		}
 	}
 }
+
+// TestLeaseSigning_MissingColumnsAreDeclaredGaps is
+// TestLeaseSigning_PlaybookColumnsMatchLens's converse: every missing_* column
+// the leaseApplicationComplete lens projects is a key in the target's Gaps map
+// — surface-declared where the package deliberately dispatches nothing for it.
+// A projected missing_* column with no Gaps entry is indistinguishable to
+// Weaver from an authoring omission and rides the long redelivery floor
+// forever.
+func TestLeaseSigning_MissingColumnsAreDeclaredGaps(t *testing.T) {
+	var target pkgmgr.WeaverTargetSpec
+	var found bool
+	for _, wt := range WeaverTargets() {
+		if wt.TargetID == "leaseApplicationComplete" {
+			target = wt
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("leaseApplicationComplete weaverTarget not declared")
+	}
+
+	var lensCols []string
+	var lensFound bool
+	for _, l := range Lenses() {
+		if l.CanonicalName == target.LensRef {
+			lensCols = l.Output.BodyColumns
+			lensFound = true
+			break
+		}
+	}
+	if !lensFound {
+		t.Fatalf("target %q's LensRef %q resolves to no declared lens", target.TargetID, target.LensRef)
+	}
+
+	for _, col := range lensCols {
+		if !strings.HasPrefix(col, "missing_") {
+			continue
+		}
+		if _, ok := target.Gaps[col]; !ok {
+			t.Fatalf("lens BodyColumn %q is a missing_* column with no Gaps entry — Weaver cannot tell a "+
+				"deliberate orphan from an authoring omission and holds the row on the long redelivery "+
+				"floor forever; declare it (surface, if the package deliberately never dispatches for it)", col)
+		}
+	}
+}

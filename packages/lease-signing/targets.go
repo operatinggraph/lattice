@@ -60,9 +60,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // External remediation is triggerLoom of an externalTask pattern (the retired
 // nudge action is never used). Every gap key is a column the lens projects, and
-// every row.<col> template (row.applicant, row.entityKey, row.unitKey, the
-// row.doc* pointers) is a lens BodyColumn — the §10.2↔§10.8 column seam
-// (cross-checked by TestLeaseSigning_PlaybookColumnsMatchLens). Literals
+// the converse holds too: every missing_* column the lens projects is a gap key
+// — surface-declared (missing_decision, missing_manager) where the package
+// deliberately dispatches nothing for it, so Weaver can tell a deliberate
+// orphan from an authoring omission. And every row.<col> template
+// (row.applicant, row.entityKey, row.unitKey, the row.doc* pointers) is a lens
+// BodyColumn — the §10.2↔§10.8 column seam (cross-checked by
+// TestLeaseSigning_PlaybookColumnsMatchLens and
+// TestLeaseSigning_MissingColumnsAreDeclaredGaps). Literals
 // (status=leased, linkName=signedLease) are passed verbatim (no row. prefix);
 // row.docSize resolves type-preserving (a number reaches AttachObject's
 // integer-validated size, Contract #10 §10.8 templating).
@@ -100,6 +105,17 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"storeName": "row.docStoreName", "filename": "row.docFilename",
 				"targetKey": "row.entityKey", "linkName": "signedLease",
 			}, Reads: []string{"row.entityKey"}},
+			// missing_decision and missing_manager keep the row violating for work
+			// Weaver deliberately never dispatches: a landlord decision Weaver has
+			// no assignee for, and an unmanaged approved unit that closes only when
+			// a `manages` link lands (lens_cypher_test.go's
+			// TestLeaseApplicationComplete_ManagerGap_OpensWhenApprovedAndUnmanaged
+			// pins that closure — an operator action, never a Weaver dispatch).
+			// `surface` is the declaration that says so: it raises a per-
+			// (target,entity,column) Health issue and Acks, instead of riding the
+			// long redelivery floor forever the way an undeclared column would.
+			"missing_decision": {Action: "surface", IssueCode: "LeaseDecisionAwaiting", IssueSeverity: "warning"},
+			"missing_manager":  {Action: "surface", IssueCode: "LeaseUnitUnmanaged", IssueSeverity: "warning"},
 		},
 	}}
 	return append(targets, RenewalTargets()...)
