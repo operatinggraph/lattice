@@ -1205,9 +1205,20 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `enable`, which the verb's own error names as the remedy, could not heal it. Check: for every
   destructive verb ask what a failure BETWEEN its steps leaves behind, assert that state raises a standing
   issue, and assert the named remedy actually reaches it.
-- **An `error`-severity Health issue must not fire on a self-healing condition** — an unreplayed pattern is
-  replay lag, not a package bug, and the sweep reaches that branch on every restart. Minted: the `!known`
-  branch of the same classifier. Check: `TestSweep_InflightMarkerIgnoredForUnindexedPattern` asserts no issue.
+- **A value grammar extended at a shared resolver reaches EVERY field that resolver serves — enumerate the
+  callers, not the bag you had in mind** — and the gate you write for the bag will not cover them. The reach
+  is what makes it a security question rather than a tidiness one: upstream admission gates compare authored
+  fields as RAW strings, so any field that gains a decode step at dispatch becomes a field the gate reads in
+  one spelling and dispatch honours in another. Minted 2026-08-29: the `json:<literal>` param token was added
+  to `resolveParam` while `resolveStringParam` wrapped it, so it went live on `subject`/`pattern`/
+  `operation`/`assignee`/`target` and every `reads`/`optionalReads`/`enumerations[].hub` entry, all ungated;
+  `authored_dispatch_scope.go` classifies by `protected.ops[ga.Operation]`, so an authored
+  `json:"AssignRole"` passed apply and decoded at dispatch under the operator@any service actor — turning a
+  pre-existing data-dependent evasion into a static, author-chosen one. A wrong-TYPE literal in a string
+  field was the second half: it resolved `errData`, the per-ENTITY issue class, minting a latch per violating
+  row. Check: for every resolver you extend, list its callers and classify each as value-typed or
+  string-typed; the string-typed ones refuse the new form, and the refusal is asserted at dispatch, at load
+  and at install. Ask separately which upstream gate compares that field raw.
 - **A Health issue key is a LATCH: scope it to the fact it states, and split it only with every clear
   re-paired** — a key naming `(target, column)` merges N subjects onto one latch, so the first subject to
   close retires the issue raised for the one still stuck, and the operator surface stops showing a
