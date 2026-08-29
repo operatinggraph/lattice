@@ -272,7 +272,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 |--------|--------|-------|
 | Step operations | Processor via `core-operations` | Submitted via the **command outbox**: written as `outbox.<token>` in the transition batch, fire-and-forget published by the relay (no dual write, no request-reply) |
 | `loom.patternStarted` / `Completed` / `Failed` | **lifecycle** ops (`StartLoomPattern`/`CompletePattern`/`FailPattern`) → outbox → `core-events` | Lifecycle on the first-class `loom` domain; no Core-KV business vertex (events ride the standard `vtx.op.<requestId>.events` outbox aspect); drives nesting + Weaver re-projection |
-| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
+| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor (retained while running; a terminal carries a retention TTL — see below) + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
 | Tasks | **Core KV** (via Processor) | Business state — queryable, UI-rendered, audited, read by Weaver target Lens |
 
 ---
@@ -291,6 +291,18 @@ prior `token.<oldToken>`, **writes the `outbox.<token>` op record, and arms `dea
 Because the op-to-submit lives in the same batch (the **command outbox**), submission is no longer a dual
 write: the relay publishes it fire-and-forget and deletes the record on publish-ack (re-publish idempotent
 via the chosen `requestId` + the Contract #4 tracker). Write-ahead therefore holds by construction.
+
+**The cursor's lifetime.** A running instance's `instance.<id>` record is unexpiring. The terminal batch
+stamps it with a per-key retention TTL (`Config.InstanceRetention`, default 8 days), so `loom-state` holds
+one retention window of instances rather than every instance ever run. The record's presence is Contract #10
+§10.9's redelivery-dedup guard — the `loom-trigger` consumer is `DeliverAll`, so a rebuilt consumer replays
+every `patternStarted` the events stream still holds — which is why the stamp is applied **only** when the
+window strictly exceeds that stream's configured `MaxAge`. Loom reads the stream's config at startup and
+resolves the window to zero (pruning off, `InstanceRetentionPruningDisabled` raised on the heartbeat) when
+it cannot prove the margin, including when the stream's config cannot be read at all. A terminal that still
+names a `pendingToken` is never stamped: expiring it would strand that token's `token.*`/`outbox.*` peer.
+Resuming a terminal instance un-expires it for free — `loom-state` is History:1, so the untagged instance
+PUT a redrive (or a transition back to running) performs evicts the TTL-bearing message.
 
 Correlation on a completion is a **direct `token.<token>` GET** — durable, domain-independent, and
 **multi-instance-safe**: any engine replica resolves any token via the bucket (no in-memory index, no

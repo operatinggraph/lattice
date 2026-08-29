@@ -11,6 +11,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -293,6 +294,16 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	case opInspect:
 		detail, err := s.engine.InspectInstance(ctx, name)
 		if err != nil {
+			if errors.Is(err, loom.ErrInstanceNotFound) {
+				// An ordinary answer, not a failure: the id never started, or its
+				// terminal record aged out of loom-state's retention window. Matched
+				// on the sentinel rather than the message so the operator gets both
+				// possibilities named instead of a bare "not found" they have to
+				// interpret against a KV read error.
+				s.respondMicro(req, ControlResponse{Error: fmt.Sprintf(
+					"loom: instance %q not found — it never started, or its terminal record aged out of loom-state", name)})
+				return
+			}
 			s.respondMicro(req, ControlResponse{Error: err.Error()})
 			return
 		}

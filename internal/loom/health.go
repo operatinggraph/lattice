@@ -100,6 +100,13 @@ type heartbeater struct {
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL.
 	ttlMultiplier int
 
+	// staticIssues are startup-resolved conditions that hold for the whole life
+	// of the process (today: terminal-instance pruning disabled by the retention
+	// gate). Each is stamped with the moment it was resolved and re-emitted
+	// unchanged on every tick — nothing at runtime can clear one, so unlike the
+	// consumer-state issues they are not rebuilt per tick.
+	staticIssues []healthIssue
+
 	// pausedSince tracks each pausedStructural consumer's first-arose
 	// timestamp (Contract #5 §5.5), since the ConsumerPaused issue is built
 	// inline from live consumer state. Owned solely by emit (single heartbeat
@@ -140,6 +147,13 @@ func (h *heartbeater) SetTTLMultiplier(n int) {
 	h.ttlMultiplier = n
 }
 
+// addStaticIssue registers a startup-resolved issue carried on every heartbeat
+// from now on. Must be called before run starts (the emit goroutine reads the
+// slice without a lock).
+func (h *heartbeater) addStaticIssue(issue healthIssue) {
+	h.staticIssues = append(h.staticIssues, issue)
+}
+
 // heartbeatTTL derives the current TTL from interval × ttlMultiplier
 // (Contract #5 §5.6) — 0 when TTL is disabled.
 func (h *heartbeater) heartbeatTTL() time.Duration {
@@ -178,7 +192,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		h.logger.Warn("loom heartbeat: running-instance scan failed", "err", err)
 	}
 
-	issues := h.pausedIssues(states, now)
+	issues := append(h.pausedIssues(states, now), h.staticIssues...)
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Message < issues[j].Message })
 
 	doc := loomHealthDoc{

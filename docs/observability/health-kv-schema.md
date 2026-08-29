@@ -283,7 +283,11 @@ Source package: `internal/loom/`
 
 The heartbeat `metrics` carry: `consumers` (map of consumer name → state) and `runningInstances` (count of
 loom-state `instance.<id>` records with status `running`, scanned on the heartbeat cadence). `issues[]` carry
-a `ConsumerPaused` warning for each `pausedStructural` consumer.
+a `ConsumerPaused` warning for each `pausedStructural` consumer, plus — for the whole life of the process —
+an `InstanceRetentionPruningDisabled` warning when the startup retention gate could not prove the configured
+`InstanceRetention` outlives the events stream's `MaxAge` (the message names which of the three cases applies:
+the window is too short, the stream retains events with no age limit, or its config could not be read). While
+that issue stands, terminal `instance.<id>` records are kept forever and `loom-state` grows without bound.
 
 ### Bridge
 

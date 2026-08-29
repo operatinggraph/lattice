@@ -45,6 +45,13 @@ type InstanceDetail struct {
 	Terminal    bool            `json:"terminal"`
 }
 
+// ErrInstanceNotFound reports that loom-state holds no instance.<id> cursor
+// record for the requested id: it never started, or it reached a terminal state
+// long enough ago that its record aged out of the retention window. Exported and
+// matchable so the control plane can tell that ordinary answer apart from a KV
+// read failure without matching on message text.
+var ErrInstanceNotFound = errors.New("not found")
+
 // errConsumerNotManaged reports that a Pause/Resume target is not a
 // currently-managed consumer. The supervisor's Pause/Resume are silent no-ops on
 // an unknown name, so the control surface validates against the authoritative
@@ -142,7 +149,7 @@ func (e *Engine) ListConsumers(_ context.Context) ([]ConsumerStatus, error) {
 // InspectInstance returns one instance plus its resolved current step. It is
 // terminal-safe and never panics on a missing/corrupt pin:
 //
-//   - A missing instance returns a not-found error.
+//   - A missing instance returns ErrInstanceNotFound wrapped with the id.
 //   - A TERMINAL instance (complete/failed) returns the summary with a nil
 //     CurrentStep and Terminal=true — the pin is deleted at terminal, so the
 //     absent pin is expected, never an error.
@@ -160,7 +167,7 @@ func (e *Engine) InspectInstance(ctx context.Context, instanceID string) (Instan
 		return InstanceDetail{}, err
 	}
 	if inst == nil {
-		return InstanceDetail{}, fmt.Errorf("loom: instance %q not found", instanceID)
+		return InstanceDetail{}, fmt.Errorf("loom: instance %q %w", instanceID, ErrInstanceNotFound)
 	}
 	return e.inspectResolved(ctx, inst)
 }
@@ -289,7 +296,7 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 //
 // Preconditions, each a distinct typed error so the operator sees why a
 // redrive was refused rather than a generic failure:
-//   - the instance must exist (not-found error);
+//   - the instance must exist (ErrInstanceNotFound);
 //   - status must be exactly StatusFailed (errInstanceNotFailed) — running is
 //     already progressing, complete has nothing to resume;
 //   - the instance's pattern must still be loaded in the live source
@@ -302,18 +309,19 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 //     could run the wrong step; redrive refuses rather than guess.
 //
 // On success: state.redrive re-pins the pattern and flips status back to
-// running in one AtomicBatch (the pin's CreateOnly is the race guard for two
-// concurrent redrives), domain consumers are reconciled for the pin's
+// running in one AtomicBatch, conditioned on the revision this call read the
+// instance record at (the race guard for two concurrent redrives — the loser's
+// batch is rejected whole), domain consumers are reconciled for the pin's
 // completion domain, and the step at the cursor is evaluated exactly like a
 // fresh trigger's step 0 — guard-skip straight to completion if every
 // remaining guard is now false, otherwise re-submit it.
 func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
-	inst, err := e.state.getInstance(ctx, instanceID)
+	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	if err != nil {
 		return err
 	}
 	if inst == nil {
-		return fmt.Errorf("loom: instance %q not found", instanceID)
+		return fmt.Errorf("loom: instance %q %w", instanceID, ErrInstanceNotFound)
 	}
 	if inst.Status != StatusFailed {
 		return fmt.Errorf("loom: %w: %q (status=%s)", errInstanceNotFailed, instanceID, inst.Status)
@@ -331,7 +339,7 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 
 	inst.Status = StatusRunning
 	// PendingToken is already "" — fail() cleared it on the terminal transition.
-	if err := e.state.redrive(ctx, inst, pattern); err != nil {
+	if err := e.state.redrive(ctx, inst, pattern, revision); err != nil {
 		return err
 	}
 	e.logger.Info("loom: instance redriven", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)
