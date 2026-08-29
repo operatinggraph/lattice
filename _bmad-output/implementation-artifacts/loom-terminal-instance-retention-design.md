@@ -1,9 +1,85 @@
 # Terminal Loom instances never leave `loom-state` — bound them against the window that makes it safe
 
-**Status: ✅ Winston-ratified — build-ready (2026-08-29).** No frozen-contract change and no architectural
-fork: the retention window is chosen so Contract #10 §10.9's dedup guarantee stays *true*, and the coupling
-that makes it true is enforced at runtime rather than asserted in prose. Winston (Lattice Steward, unattended
-remote fire).
+**Status: ⚠️ PARTIALLY WITHDRAWN 2026-08-29 — the pruning half is FALSIFIED and was not shipped.** Read §0
+before anything else; it supersedes §2 and §3's Inc 1/Inc 3 wherever they differ. What shipped is the
+heartbeat fix (§3 Inc 2) and the `RedriveInstance` repair the build found (build note). What did not is the
+retention TTL and its drain. Winston (Lattice Steward, unattended remote fire).
+
+**Superseded status line (2026-08-29, pre-review):** *"✅ Winston-ratified — build-ready. No frozen-contract
+change and no architectural fork: the retention window is chosen so Contract #10 §10.9's dedup guarantee stays
+true…"* — the second half of that sentence is wrong, and §0 says why.
+
+---
+
+## 0. What review falsified, and what shipped instead (2026-08-29)
+
+Three cold adversarial reviewers ran against the built increment. **Two independently falsified this
+design's central claim.** Recording it here, at the top, because an unamended body is a wrong instruction to
+the next fire.
+
+**The claim (§2):** pruning is safe when `R > MaxAge(core-events)`, because that makes the cursor outlive
+every `patternStarted` that could still be redelivered — so Contract #10 §10.9's dedup sentence stays true
+and no contract edit is needed.
+
+**Why it is false.** `MaxAge` bounds exactly one republication source: **redelivery of a stored message** to
+a rebuilt `DeliverAll` consumer. It does not bound a **re-published** one, and the platform has a live
+producer of those. `StartLoomPattern` accepts an optional caller-supplied stable `instanceId`, and Weaver's
+`triggerLoom` deliberately supplies a `claimId`-seeded one so re-dispatch collapses onto the existing
+instance (`internal/weaver/strategist.go:208-214`, `internal/weaver/actuator.go:147,162,174`). Each reclaim
+mints a *new* episode `requestId`, so the Contract #4 tracker does not collapse it: it genuinely commits and
+emits a **brand-new** `patternStarted`, with today's timestamp, carrying the **same** `instanceId`. Reclaims
+continue for as long as the gap column stays open — which is unbounded by construction.
+
+And this is not an inferred obligation. It is frozen contract text
+(`docs/contracts/10-orchestration-substrate.md:227-230`):
+
+> **`triggerLoom` → `StartLoomPattern`:** … `StartLoomPattern` carries the stable `claimId`-seeded
+> `instanceId` on `loom.patternStarted`, and Loom's instance presence check + `createInstance` `CreateOnly`
+> collapse a re-emitted trigger onto the existing instance (no new instance, hence no new userTask). **This
+> dedups the whole pattern.**
+
+So the cursor's presence backstops a horizon `MaxAge` cannot bound, and **no value of `R` can**. A failed
+cursor pruned at day 8 meets the next reclaim with nothing to collapse onto, and the outcome is one of two
+bad ones: the trigger consumer hot-loops on an unbounded immediate `Nak` (the pin's terminal DEL marker
+permanently refuses `createInstance`'s `CreateOnly`), or — if that marker is ever "fixed" the way redrive's
+was — the pattern silently re-runs from step 0 with its committed side effects re-executed.
+
+**The grounding miss that allowed it.** §2 was built by reading `docs/contracts/10-orchestration-loom.md`
+and not `docs/contracts/10-orchestration-substrate.md`, where the `triggerLoom` dedup clause and the
+`loom-state` keyspace lifetimes actually live. The fire brief's own standing-checklist item 4 asked for
+exactly this enumeration — *"pruning a record removes a dedup guard; enumerate every obligation the cursor's
+presence was silently discharging, not just the one this design found"* — and the enumeration stopped at the
+first obligation.
+
+**Two further frozen-contract contradictions** the same review surfaced, both in
+`10-orchestration-substrate.md`: `:115` states "the instance record itself persists" (a TTL contradicts it
+outright), and `:130` states the redrive pin's `CreateOnly` write "is both the re-pin and the concurrency
+guard" (the shipped repair removes it — and that sentence is *itself false*, describing a write that can
+never commit; the same document names the exact mechanism at `:223-225`).
+
+### What shipped
+
+- **The `RedriveInstance` repair** — a live production defect this fire found: redrive could never re-pin
+  over the terminal batch's delete marker, so the operator's only recovery path for a failed flow failed
+  closed every time. Guard moved to a cursor CAS. Requires the `:130` contract edit, prepared as a proposal.
+- **§3 Inc 2, the heartbeat fix** — the actual live failure in §1 fact 2: the running-instance count now
+  reads the pin index with no body fetch and under a per-tick deadline, so a large bucket can no longer let
+  `health.loom.<instance>` expire and make Loom read DOWN while healthy. This needed no pruning to work.
+- `ErrInstanceNotFound` as a matchable sentinel.
+
+### What did not, and why it is not merely deferred
+
+The **retention TTL (§3 Inc 1) and the drain (§3 Inc 3) are withdrawn.** Bounding `loom-state` requires
+durable dedup evidence that outlives the cursor and covers an unbounded external re-dispatch horizon. That is
+a change to *what backs Contract #10 §10.9's dedup guarantee* — a new platform primitive, not an application
+of a ratified pattern — so it is a designer pass, not a steward decision, and it is re-filed as one naming
+the absent primitive. Note the tempting shortcuts are both unsound: leaning on the pin's permanent DEL marker
+promotes an accidental NATS artifact to a correctness primitive *and* still grows without bound, and pruning
+only `complete` cursors does not help because a completed instance that did not close its gap column is
+re-dispatched just the same.
+
+**§1's diagnosis stands unchanged** — the accretion is real, the heartbeat exposure was real and is fixed.
+Only the remedy for the accretion was wrong.
 
 **Board row:** `backlog/lattice.md` → *[Loom] Terminal instance records are never pruned; the heartbeat
 1,024-cap breakdown is the alarm* (★★ / S–M) · resolved shape from
@@ -60,6 +136,13 @@ Under that inequality the contract's sentence stays true as written: the cursor 
 redelivery is possible. Nothing the contract promises changes, so **no contract edit is required** (this was
 checked before choosing the shape, not after).
 
+> **⚠️ FALSIFIED 2026-08-29 — see §0.** The paragraph above is wrong, and the rest of §2 is sound only for
+> the one republication source it reasons about. `MaxAge` bounds *redelivery* of a stored message; it does
+> not bound Weaver's `triggerLoom` reclaim, which **re-publishes a new** `patternStarted` carrying the same
+> `claimId`-seeded `instanceId` for as long as its gap stays open. `10-orchestration-substrate.md:227-230`
+> makes that collapse a frozen guarantee. No value of `R` is sufficient, and a contract edit *is* required.
+> The inequality below is necessary but not sufficient; do not build on it.
+
 **The inequality is enforced, not assumed.** A constant chosen against today's `MaxAge` goes silently wrong
 the day someone changes `MaxAge`. At startup the engine reads the events stream's configured `MaxAge` and
 compares it to the configured retention. If `R <= MaxAge`, or `MaxAge == 0` (unlimited retention — no window
@@ -73,7 +156,13 @@ the 7-day replay horizon, is a generous redrive window for a `failed` instance
 
 ## 3. Shape
 
-### Inc 1 — the terminal batch stamps a retention TTL
+### Inc 1 — the terminal batch stamps a retention TTL *(⚠️ WITHDRAWN 2026-08-29, §0 — built, reviewed, NOT shipped)*
+
+> The mechanics below are accurate and were proven by test (the TTL stamps, a resume clears it, no consumer
+> sees the expiry). They are withdrawn anyway: the *decision* to expire a terminal cursor at all is unsound
+> while cursor presence backstops Weaver's unbounded re-dispatch. Keep this section as the record of what was
+> measured; do not treat it as a build instruction. Only the `ErrInstanceNotFound` sentinel at the end of it
+> shipped.
 
 The batch already carries per-op TTL (`substrate.BatchOp.TTL` → the `Nats-TTL` header,
 `internal/substrate/batch.go:56-70,155-156`), and `loom-state` is provisioned `PerKeyTTL: true`
@@ -116,7 +205,12 @@ The emitted field is unchanged (`runningInstances`), but its documented derivati
 status=running, heartbeat-cadence scan" and must be corrected **in the same commit** — the standing rule that
 keeps a health-emission change L2-safe.
 
-### Inc 3 — drain the pre-existing residue once
+### Inc 3 — drain the pre-existing residue once *(⚠️ WITHDRAWN 2026-08-29, §0 — never built)*
+
+> Withdrawn with Inc 1: a drain that deletes cursors has the same unsoundness, and worse — an explicit DEL
+> leaves a *permanent* marker on the instance subject (unlike a TTL expiry's self-clearing rollup marker), so
+> it would break `createInstance` on both keys of the pair rather than one. Any future drain must land after
+> the dedup substrate is redesigned, not before.
 
 Inc 1 stops the bleeding; it cannot heal what is already there. The 9,260 existing terminal cursors carry no
 TTL and never will. A one-shot drain runs after engine start, off the startup path, gated by the same
