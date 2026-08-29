@@ -160,6 +160,7 @@ func TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny(t *testing.T) {
 		"InstallPackage", "UninstallPackage", "UpgradePackage",
 		"RequestCapabilityAuthoring", "SubmitCapabilityProposal",
 		"ReviewCapabilityProposal", "MarkCapabilityProposalApplied",
+		"RecordCapabilityInstallReceipt",
 	}
 	if len(Package.Permissions) != len(want) {
 		t.Fatalf("Permissions = %d, want %d", len(Package.Permissions), len(want))
@@ -215,7 +216,8 @@ func TestPackage_GrantedCtrlVerbsMatchControlauthOpTables(t *testing.T) {
 			p.OperationType == "InstallPackage" || p.OperationType == "UninstallPackage" ||
 			p.OperationType == "UpgradePackage" ||
 			p.OperationType == "RequestCapabilityAuthoring" || p.OperationType == "SubmitCapabilityProposal" ||
-			p.OperationType == "ReviewCapabilityProposal" || p.OperationType == "MarkCapabilityProposalApplied" {
+			p.OperationType == "ReviewCapabilityProposal" || p.OperationType == "MarkCapabilityProposalApplied" ||
+			p.OperationType == "RecordCapabilityInstallReceipt" {
 			continue
 		}
 		gotVerbs[p.OperationType] = struct{}{}

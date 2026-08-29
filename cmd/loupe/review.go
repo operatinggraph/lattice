@@ -751,14 +751,39 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	if haveRow && cols.ReviewState == "approved" {
-		if packageKey, installed, err := s.targetInstall(ctx, conn, cols); err == nil && installed {
+		resolved, err := s.targetInstall(ctx, conn, proposalKey, cols)
+		switch {
+		case err != nil:
+			// Not knowing is its own answer, and the wrong one to guess at:
+			// proceeding into the plan builder tells an operator whose install
+			// DID commit to Apply, and Apply then refuses because the name is
+			// live. mark-applied already reports this as a 502, so this
+			// endpoint does too and the two stay consistent.
+			s.writeError(w, http.StatusBadGateway,
+				"cannot determine whether this proposal's install committed: "+err.Error())
+			return
+		case unprovenNewPackageClose(cols, resolved):
+			// Neither appliable (the name is taken, which is what the plan
+			// builder refuses on) nor closable (nothing shows this proposal
+			// wrote what is there). It must therefore NOT be advertised
+			// resumable: that flag is what sends the operator to mark-applied,
+			// and mark-applied is exactly the close being refused.
+			s.writeError(w, http.StatusConflict, unprovenNewPackageReason(cols, resolved))
+			return
+		case resolved.Installed:
 			s.writeJSON(w, http.StatusConflict, map[string]any{
 				"error": fmt.Sprintf(
 					"%s is already installed at version %s, so this proposal's install has already committed — close it with mark-applied rather than re-applying",
-					cols.TargetPackageName, targetInstallVersion(cols)),
+					cols.TargetPackageName, resolved.Version),
 				"resumable":  true,
-				"packageKey": packageKey,
+				"packageKey": resolved.PackageKey,
 			})
+			return
+		case resolved.ReceiptStale:
+			// Not resumable and not re-appliable: say which, here, rather than
+			// letting the plan builder answer with a refusal that never
+			// mentions the receipt.
+			s.writeError(w, http.StatusConflict, staleReceiptReason(cols, resolved))
 			return
 		}
 	}
@@ -778,42 +803,197 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	installRequestID := res.Action + ":" + res.PackageName + "@" + res.ToVersion
+	status, body := s.closeApply(ctx, id, proposalKey, res)
+	s.writeJSON(w, status, body)
+}
+
+// applyInstallRequestID is the audit pointer an apply stamps as appliedByOp.
+//
+// The Processor reply's own InstallRequestID is preferred whenever the apply
+// committed one, because it names the actual commit: it tells this apply apart
+// from any other write landing at the same package name and version. The
+// composed "<action>:<name>@<version>" string is what a result carrying no
+// receipt has to offer — an arm that committed nothing (a skip, a dry run) —
+// and it cannot make that distinction, since name and version are all it holds.
+func applyInstallRequestID(res *pkgmgr.ApplyResult) string {
+	if res.InstallRequestID != "" {
+		return res.InstallRequestID
+	}
+	return res.Action + ":" + res.PackageName + "@" + res.ToVersion
+}
+
+// The three outcomes a close reports for its install receipt. They are distinct
+// facts an operator acts on differently, which is why they are not a bool:
+// "not-applicable" is an apply arm that committed nothing, so there was never
+// anything to bind; "failed" is a receipt that was submitted and refused, and
+// it is terminal — .install is create-only and the op requires an approved
+// proposal, which the mark-applied submit right behind it flips to applied, so
+// the binding cannot be obtained afterwards.
+const (
+	receiptRecorded      = "recorded"
+	receiptNotApplicable = "not-applicable"
+	receiptFailed        = "failed"
+)
+
+// closeApply performs the two submits an apply's close is made of, in order:
+// RecordCapabilityInstallReceipt, which binds this proposal to the install the
+// Processor just committed, then MarkCapabilityProposalApplied, which flips
+// review.state. It returns the HTTP status and body the endpoint answers with.
+//
+// The receipt never gates the close. Its failure leaves the package live and
+// the proposal closable — recovery then resolves the install by package name
+// and version, which is what a proposal carrying no receipt gets — so a failed
+// receipt is reported and the mark-applied submit still runs.
+//
+// Every response says which of the three receipt outcomes happened, and a
+// non-recorded one is logged as well as returned: the close can otherwise
+// succeed end to end while the provenance binding silently never lands, which
+// is a state no later reader can distinguish from a proposal that never had a
+// receipt at all.
+func (s *server) closeApply(ctx context.Context, id, proposalKey string, res *pkgmgr.ApplyResult) (int, map[string]any) {
+	installRequestID := applyInstallRequestID(res)
+	receipt, receiptFailure := s.submitInstallReceipt(ctx, id, proposalKey, res)
+	if receipt != receiptRecorded {
+		s.logger.Warn("capability install receipt not recorded — this proposal's provenance binding is missing, so any later recovery resolves its install by package name and version alone",
+			"proposalId", id, "packageKey", res.PackageKey, "receipt", receipt, "reason", receiptFailure)
+	}
+
 	markPayload, err := json.Marshal(map[string]any{
 		"proposalId":       id,
 		"packageKey":       res.PackageKey,
 		"installRequestId": installRequestID,
 	})
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "marshal mark-applied payload: "+err.Error())
-		return
+		return http.StatusInternalServerError, map[string]any{"error": "marshal mark-applied payload: " + err.Error()}
 	}
 	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
 		// op-name: (submits) reviewCapabilityApply submits this immediately after ApplyCapabilityPlan installs/upgrades the target package, closing the loop on the same request that just committed the install.
 		OperationType: "MarkCapabilityProposalApplied",
 		Lane:          string(processor.LaneDefault),
 		Payload:       markPayload,
-		Reads:         []string{proposalKey + ".review", proposalKey + ".target", res.PackageKey + ".manifest"},
+		Reads:         capabilityCloseReads(proposalKey, res.PackageKey),
 	})
-	if failure := markOpFailure(reply, err); failure != "" {
-		s.writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": fmt.Sprintf(
-				"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s — the package IS already installed; recover with mark-applied rather than re-applying",
-				res.PackageKey, installRequestID, failure),
-			"resumable":  true,
-			"packageKey": res.PackageKey,
-		})
-		return
-	}
-	s.writeJSON(w, http.StatusOK, map[string]any{
-		"apply":            applyReply(res),
-		"markApplied":      reply,
+	body := map[string]any{
 		"installRequestId": installRequestID,
-	})
+		"receipt":          receipt,
+	}
+	if receiptFailure != "" {
+		body["receiptFailure"] = receiptFailure
+	}
+	if failure := markOpFailure(reply, err); failure != "" {
+		body["error"] = fmt.Sprintf(
+			"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s%s — the package IS already installed; recover with mark-applied rather than re-applying",
+			res.PackageKey, installRequestID, failure, receiptRecoveryNote(receipt, receiptFailure))
+		body["resumable"] = true
+		body["packageKey"] = res.PackageKey
+		return http.StatusBadGateway, body
+	}
+	body["apply"] = applyReply(res)
+	body["markApplied"] = reply
+	return http.StatusOK, body
 }
 
-// markOpFailure reduces a relayed MarkCapabilityProposalApplied outcome to one
-// operator-facing reason, or "" when the op really committed.
+// receiptRecoveryNote is the clause the resumable error carries whenever this
+// close leaves no receipt behind — a failed submit and an apply arm that had
+// nothing to bind alike. Both leave recovery resolving the install by package
+// name and version, which cannot tell this proposal's install from any other
+// write at that name and version, and that is what the operator reading a
+// half-committed apply needs to know.
+//
+// A failed submit is deliberately reported as unconfirmed rather than as
+// absent: the submission may have reached the Processor and committed with the
+// reply lost on the way back, and asserting "it did not land" about a message
+// already published is a claim this side cannot make.
+func receiptRecoveryNote(receipt, receiptFailure string) string {
+	switch receipt {
+	case receiptRecorded:
+		return ""
+	case receiptNotApplicable:
+		return " (this apply committed nothing to bind, so the recovery resolves this proposal's install by package name and version alone)"
+	default:
+		return " (the install receipt was not confirmed either: " + receiptFailure +
+			" — unless it committed with the reply lost, the recovery resolves this proposal's install by package name and version alone)"
+	}
+}
+
+// installReceiptRequestID is the receipt op's Contract #4 requestId, derived
+// rather than minted so a retry of the same close is COLLAPSED by the requestId
+// tracker instead of arriving as a second submission.
+//
+// A second submission is not harmless here: .install is create-only, so a retry
+// bearing a fresh requestId is refused by the commit batch's conditioning, and
+// the caller then reports "no receipt landed" while a perfectly valid receipt
+// sits in KV. The inputs are exactly the receipt's own content — the proposal
+// is write-once and binds to one package — so a genuine retry derives the same
+// id and dedups, while a receipt naming a DIFFERENT package derives a different
+// one and is left to create-only conditioning to refuse, which is the
+// arbitration that belongs there.
+func installReceiptRequestID(proposalKey, packageKey string) string {
+	// derived-key: the receipt op's Contract #4 requestId, not a declared read —
+	// nothing is addressed by it, and the DDL never sees it (the Processor tracks
+	// the envelope by it before the script runs). It is derived rather than minted
+	// so a retry of the same close submits the same id and the tracker collapses
+	// it; a minted one would reach .install's create-only conditioning and be
+	// refused, which reads to the caller as "no receipt landed".
+	return substrate.SHA256NanoID("RecordCapabilityInstallReceipt:" + proposalKey + ":" + packageKey)
+}
+
+// capabilityCloseReads is the exact read set BOTH ops closing an apply declare
+// — the receipt and MarkCapabilityProposalApplied alike, which run the same
+// guards over the same four keys: the proposal's review state and target, and
+// the package root plus its manifest, both of which each op checks live before
+// binding the proposal to that package. Each op hydrates from these keys alone,
+// so a dispatcher declaring a different set fails the whole op on a hydration
+// miss — which is why the set is written once here rather than at each site.
+func capabilityCloseReads(proposalKey, packageKey string) []string {
+	return []string{
+		proposalKey + ".review",
+		proposalKey + ".target",
+		packageKey,
+		packageKey + ".manifest",
+	}
+}
+
+// submitInstallReceipt relays RecordCapabilityInstallReceipt for an apply that
+// committed, stamping the Processor's own receipt onto the proposal's vertex so
+// a later reader can name the package this proposal actually wrote.
+//
+// A result carrying no observed InstallRequestID is not applicable rather than
+// failed: that arm committed nothing, so there is no install to bind, and a
+// receipt written from a reconstructed pointer would record a fiction.
+//
+// The outcome comes back as one of the three receipt states plus a reason,
+// never as an error, because the receipt is not part of the apply's success —
+// its caller reports it and carries on.
+func (s *server) submitInstallReceipt(ctx context.Context, id, proposalKey string, res *pkgmgr.ApplyResult) (receipt, failure string) {
+	if res.InstallRequestID == "" {
+		return receiptNotApplicable, ""
+	}
+	raw, err := json.Marshal(map[string]any{
+		"proposalId":       id,
+		"packageKey":       res.PackageKey,
+		"installRequestId": res.InstallRequestID,
+	})
+	if err != nil {
+		return receiptFailed, "marshal receipt payload: " + err.Error()
+	}
+	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		RequestID: installReceiptRequestID(proposalKey, res.PackageKey),
+		// op-name: (submits) reviewCapabilityApply submits this the moment ApplyCapabilityPlan commits and before the mark-applied close, binding the proposal to the exact install the Processor recorded.
+		OperationType: "RecordCapabilityInstallReceipt",
+		Lane:          string(processor.LaneDefault),
+		Payload:       raw,
+		Reads:         capabilityCloseReads(proposalKey, res.PackageKey),
+	})
+	if failure := markOpFailure(reply, err); failure != "" {
+		return receiptFailed, failure
+	}
+	return receiptRecorded, ""
+}
+
+// markOpFailure reduces a relayed capability-close op's outcome — the install
+// receipt or MarkCapabilityProposalApplied — to one operator-facing reason, or
+// "" when the op really committed.
 //
 // A transport error is only half of it. submitOpViaGateway returns (reply,
 // nil) whenever the Gateway shaped a reply at all, so a Processor REJECTION —
@@ -828,21 +1008,29 @@ func markOpFailure(reply *processor.OperationReply, err error) string {
 	if reply == nil {
 		return "the Gateway returned no reply"
 	}
-	if reply.Status != processor.ReplyStatusRejected {
+	// Only the two statuses that mean "this op's effect is in state" count as
+	// success. Reading success as "not rejected" would report an empty or
+	// unrecognized status — a reply this console cannot interpret — as a
+	// commit, which is the one direction a close must never guess in.
+	switch reply.Status {
+	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
 		return ""
+	case processor.ReplyStatusRejected:
+		if reply.Error != nil && reply.Error.Message != "" {
+			return "rejected by the Processor: " + reply.Error.Message
+		}
+		return "rejected by the Processor"
 	}
-	if reply.Error != nil && reply.Error.Message != "" {
-		return "rejected by the Processor: " + reply.Error.Message
-	}
-	return "rejected by the Processor"
+	return fmt.Sprintf("the Gateway returned an unrecognized reply status %q", reply.Status)
 }
 
 // recoveredInstallRequestID is the audit pointer mark-applied stamps as
-// appliedByOp. It is deliberately NOT the "install:<name>@<version>" string a
-// successful apply would have produced: this path never observed that op, and
-// a reconstructed pointer that reads identically to an observed one would put
-// a small fiction into the audit record. The "recovered:" prefix says which
-// path wrote it.
+// appliedByOp for a proposal carrying no install receipt. It is deliberately
+// NOT the "install:<name>@<version>" string a successful apply would have
+// produced: with no receipt this path never observed that op, and a
+// reconstructed pointer that reads identically to an observed one would put a
+// small fiction into the audit record. The "recovered:" prefix says which path
+// wrote it.
 func recoveredInstallRequestID(packageName, version string) string {
 	return "recovered:" + packageName + "@" + version
 }
@@ -944,31 +1132,281 @@ func coreKVGetter(ctx context.Context, conn *substrate.Conn) (get kvGetter, read
 	return get, func() error { return first }
 }
 
-// targetInstall reports whether the package a proposal's apply would install
-// is ALREADY live at that proposal's target version — i.e. whether the install
-// half of the two-commit apply has landed.
+// installResolution is targetInstall's answer: which package a proposal's
+// apply produced, whether it is still live at the proposal's target version,
+// and — when a receipt supplied it — the Processor's own pointer to the commit
+// that produced it.
+type installResolution struct {
+	// PackageKey is the resolved vtx.package.<id> root. It is set even when
+	// Installed is false, for a live package carrying the target name at a
+	// different version.
+	PackageKey string
+	// Version is that package's own recorded .manifest version — the value an
+	// operator-facing message must quote, rather than the version the proposal
+	// merely declares.
+	Version string
+	// InstallRequestID is the receipt's observed pointer, empty whenever the
+	// resolution came from the name+version fallback — that path observed no
+	// op and so has nothing to stamp.
+	InstallRequestID string
+	Installed        bool
+	// ByReceipt says which of the two resolutions answered. A receipt hit is
+	// evidence that THIS proposal's apply produced this package; a name+version
+	// hit is not evidence of anything but a name and a version, and a caller
+	// deciding whether it may bind the proposal to that package needs to know
+	// which one it is holding.
+	ByReceipt bool
+
+	// ReceiptStale marks a proposal that HAS a receipt whose package no longer
+	// answers for it: uninstalled since, or live at a version other than the
+	// one this proposal targets. The fields below say which, so a caller can
+	// state what actually happened instead of the "never committed" a bare
+	// name+version miss would otherwise imply.
+	ReceiptStale bool
+	// ReceiptPackageKey is the package the stale receipt names, and
+	// ReceiptVersion that package's live manifest version — empty when it is
+	// no longer live at all.
+	ReceiptPackageKey string
+	ReceiptVersion    string
+}
+
+// installReceipt is the slice of a vtx.capabilityproposal.<id>.install aspect
+// this console reads: the package key the proposal's apply committed and the
+// Processor request id that commit was recorded under.
+type installReceipt struct {
+	PackageKey       string
+	InstallRequestID string
+}
+
+// readInstallReceipt reads a proposal's install receipt from Core KV, reporting
+// ok only for a LIVE, well-formed aspect that names a package key.
+//
+// The isDeleted filter is load-bearing: a tombstone retains the prior document,
+// so an unfiltered read hands a revoked receipt back as direct evidence of
+// provenance — the strongest claim this resolver makes.
+//
+// So is the split between an absent key and an unusable one. Absent means this
+// proposal has no receipt, and the name+version fallback is the designed answer
+// for it. A present but undecodable document, or one recording no packageKey,
+// means the receipt exists and cannot be read — falling back there would answer
+// a provenance question with the very heuristic the receipt was written to
+// replace, silently. That is an error, and the raw bytes are fetched here
+// rather than going through readPkgEnvelope precisely because that helper folds
+// the two cases into one absent.
+func readInstallReceipt(get kvGetter, proposalKey string) (installReceipt, bool, error) {
+	key := proposalKey + ".install"
+	raw, found := get(key)
+	if !found {
+		return installReceipt{}, false, nil
+	}
+	var env pkgEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return installReceipt{}, false, fmt.Errorf("decode install receipt %s: %w", key, err)
+	}
+	if env.IsDeleted {
+		return installReceipt{}, false, nil
+	}
+	packageKey := dataString(env.Data, "packageKey")
+	if packageKey == "" {
+		return installReceipt{}, false, fmt.Errorf("install receipt %s records no packageKey", key)
+	}
+	return installReceipt{
+		PackageKey:       packageKey,
+		InstallRequestID: dataString(env.Data, "installRequestId"),
+	}, true, nil
+}
+
+// livePackageAt returns the recorded manifest version of packageKey when that
+// package is live and its .manifest still records name — the facts a receipt
+// cannot vouch for, because the package it names can be uninstalled, upgraded
+// past the version this proposal produced, or renamed out from under it.
+//
+// Both the root and the manifest are checked for isDeleted, exactly as
+// findInstalledPackageByName does: an uninstall tombstones them rather than
+// removing the keys, and either one can be tombstoned on its own.
+func livePackageAt(get kvGetter, packageKey, name string) (version string, ok bool) {
+	if packageKey == "" || name == "" {
+		return "", false
+	}
+	root, found := readPkgEnvelope(get, packageKey)
+	if !found || root.IsDeleted {
+		return "", false
+	}
+	manifest, found := readPkgEnvelope(get, packageKey+".manifest")
+	if !found || manifest.IsDeleted {
+		return "", false
+	}
+	if dataString(manifest.Data, "name") != name {
+		return "", false
+	}
+	return dataString(manifest.Data, "version"), true
+}
+
+// targetInstall resolves the package a proposal's apply produced and reports
+// whether it is live at that proposal's target version — i.e. whether the
+// install half of the two-commit apply has landed and still stands.
+//
+// The receipt answers first. A live vtx.capabilityproposal.<id>.install aspect
+// names the package key the apply wrote, so it settles PROVENANCE, which the
+// name+version pair cannot: a package at that name and version installed by
+// anything else satisfies the pair exactly. The receipted package must still be
+// live, still carry the target name, AND still be at the target version — the
+// receipt's own installRequestId is caller-supplied and verified by nothing, so
+// dropping the version comparison here would let whoever can submit the receipt
+// op bind an approved-but-never-applied proposal to any live package of that
+// name and have this console close it with no version check at all. Provenance
+// NARROWS the heuristic; it does not replace its guard.
+//
+// A proposal with no receipt falls back to name+version alone: a live package
+// whose .manifest name is the proposal's target.packageName at
+// targetInstallVersion. So does a proposal whose receipt has gone STALE, but
+// that case is flagged rather than laundered — the receipt is standing evidence
+// that this proposal's install was some other package, so a name+version hit
+// here is a different package than the one it wrote, and closing over it is the
+// exact falsified audit record the receipt exists to prevent. Installed stays
+// false and the caller is handed what it needs to say so precisely.
 //
 // It is the single source of that answer for both halves of the flow: apply
 // consults it to recognize a proposal it can no longer install, and
 // mark-applied consults it to refuse closing a proposal whose install never
 // ran. Deriving it once keeps the two from disagreeing about the same state.
-func (s *server) targetInstall(ctx context.Context, conn *substrate.Conn, cols capabilityProposalCols) (packageKey string, installed bool, err error) {
+func (s *server) targetInstall(ctx context.Context, conn *substrate.Conn, proposalKey string, cols capabilityProposalCols) (installResolution, error) {
 	if cols.TargetPackageName == "" {
-		return "", false, nil
-	}
-	coreKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.package.")
-	if err != nil {
-		return "", false, fmt.Errorf("list core-kv packages: %w", err)
+		return installResolution{}, nil
 	}
 	get, readErr := coreKVGetter(ctx, conn)
+
+	receipt, haveReceipt, err := readInstallReceipt(get, proposalKey)
+	if rErr := readErr(); rErr != nil {
+		return installResolution{}, fmt.Errorf("read core-kv install receipt: %w", rErr)
+	}
+	if err != nil {
+		return installResolution{}, err
+	}
+	if !haveReceipt {
+		return resolveByNameAndVersion(ctx, conn, get, readErr, cols)
+	}
+
+	version, live := livePackageAt(get, receipt.PackageKey, cols.TargetPackageName)
+	if rErr := readErr(); rErr != nil {
+		return installResolution{}, fmt.Errorf("read core-kv package catalog: %w", rErr)
+	}
+	if live && version == targetInstallVersion(cols) {
+		return installResolution{
+			PackageKey:       receipt.PackageKey,
+			Version:          version,
+			InstallRequestID: receipt.InstallRequestID,
+			Installed:        true,
+			ByReceipt:        true,
+		}, nil
+	}
+	// The receipted package cannot answer for this proposal any more. The name
+	// scan still runs, because what it finds is what the operator has to be
+	// told about — but its hit closes nothing here.
+	stale, err := resolveByNameAndVersion(ctx, conn, get, readErr, cols)
+	if err != nil {
+		return installResolution{}, err
+	}
+	stale.Installed = false
+	stale.InstallRequestID = ""
+	stale.ReceiptStale = true
+	stale.ReceiptPackageKey = receipt.PackageKey
+	stale.ReceiptVersion = version
+	return stale, nil
+}
+
+// resolveByNameAndVersion is the provenance-blind fallback: the live package
+// whose .manifest records the proposal's target.packageName, installed at the
+// version the proposal's apply would land. It cannot tell this proposal's
+// install from any other write at that name and version — which is why it is
+// the fallback and not the answer.
+func resolveByNameAndVersion(ctx context.Context, conn *substrate.Conn, get kvGetter, readErr func() error, cols capabilityProposalCols) (installResolution, error) {
+	coreKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.package.")
+	if err != nil {
+		return installResolution{}, fmt.Errorf("list core-kv packages: %w", err)
+	}
 	key, version, found := findInstalledPackageByName(coreKeys, get, cols.TargetPackageName)
 	if rErr := readErr(); rErr != nil {
-		return "", false, fmt.Errorf("read core-kv package catalog: %w", rErr)
+		return installResolution{}, fmt.Errorf("read core-kv package catalog: %w", rErr)
 	}
-	if !found || version != targetInstallVersion(cols) {
-		return key, false, nil
+	return installResolution{
+		PackageKey: key,
+		Version:    version,
+		Installed:  found && version == targetInstallVersion(cols),
+	}, nil
+}
+
+// unprovenNewPackageClose reports the board's own headline state: a newPackage
+// proposal that a live package of its target name and version resolves for, on
+// the name+version fallback alone.
+//
+// A newPackage proposal declares that its apply MINTS the package. So a package
+// already sitting at that name is, by that proposal's own declaration, not
+// something its apply could have produced unless the apply already ran — and if
+// it ran, it left a receipt. The fallback matching therefore means one of two
+// things, and cannot say which: this proposal's install committed before
+// receipts existed, or some other writer — another proposal, an operator's
+// `lattice-pkg install`, a second proposal declaring the same target — put it
+// there. Closing on that match binds the proposal to an artifact it may never
+// have written, with an appliedAs link and an audit pointer to prove it.
+//
+// It is not a rare collision either: targetInstallVersion substitutes "0.1.0"
+// for a proposal that declares no newVersion, which is the first version most
+// hand-installed packages carry.
+//
+// ApplyCapabilityPlan already reaches the same verdict from the other side — it
+// refuses a newPackage whose name was claimed before the apply ran, saying the
+// artifact did NOT land — so this only stops the console from advising the
+// opposite of the platform it fronts.
+//
+// upgradeExisting is deliberately excluded. A live package of that name is that
+// mode's own PRECONDITION, present before the apply by definition, so its
+// presence carries no provenance signal to lose; the version preconditions in
+// ValidateCapabilityApplyTarget are what own that mode.
+func unprovenNewPackageClose(cols capabilityProposalCols, resolved installResolution) bool {
+	return cols.TargetMode == "newPackage" && resolved.Installed && !resolved.ByReceipt
+}
+
+// unprovenNewPackageReason is what an operator is told instead. It states the
+// gap (no receipt binds this proposal to that package), why the match is not
+// evidence (anything can install a name), and the one path that is a decision
+// rather than a guess: submitting MarkCapabilityProposalApplied with an
+// explicit packageKey through lattice-pkg, where naming the package is the
+// operator's own authorized act.
+func unprovenNewPackageReason(cols capabilityProposalCols, resolved installResolution) string {
+	return fmt.Sprintf(
+		"%s is installed at version %s as %s, but nothing records that THIS proposal's install produced it: "+
+			"no install receipt is recorded against the proposal, and a package of that name and version can have been "+
+			"installed by anything — another proposal, or an operator's own `lattice-pkg install`. This proposal declares "+
+			"mode newPackage, so closing it over that package would bind it, permanently and in the audit record, to an "+
+			"artifact it may never have written. If you know this proposal's install DID commit (an apply that predates "+
+			"install receipts, say), submit MarkCapabilityProposalApplied directly with `lattice-pkg` naming the packageKey "+
+			"explicitly — that is your decision to make and to sign; it is not one this console may guess at.",
+		cols.TargetPackageName, resolved.Version, resolved.PackageKey)
+}
+
+// staleReceiptReason states what a stale receipt actually means for one
+// proposal, in place of the "no package of this name is installed at this
+// version" a bare fallback miss would report — which for a receipted proposal
+// is false twice over: its install DID commit, and a package of that name may
+// well be live.
+func staleReceiptReason(cols capabilityProposalCols, resolved installResolution) string {
+	var head string
+	if resolved.ReceiptVersion == "" {
+		head = fmt.Sprintf(
+			"this proposal's install committed as %s, which has since been uninstalled",
+			resolved.ReceiptPackageKey)
+	} else {
+		head = fmt.Sprintf(
+			"this proposal's install committed as %s, which is now at version %s rather than the %s this proposal targets",
+			resolved.ReceiptPackageKey, resolved.ReceiptVersion, targetInstallVersion(cols))
 	}
-	return key, true, nil
+	if resolved.PackageKey != "" && resolved.PackageKey != resolved.ReceiptPackageKey {
+		return head + fmt.Sprintf(
+			" — %s is now held by %s at version %s, which this proposal did not write, so closing it over that package would record an artifact it never produced. This proposal cannot be closed or re-applied; escalate it.",
+			cols.TargetPackageName, resolved.PackageKey, resolved.Version)
+	}
+	return head + " — there is nothing this proposal can honestly be closed over. This proposal cannot be closed or re-applied; escalate it."
 }
 
 // reviewCapabilityMarkApplied implements POST /api/review/capability/<id>/
@@ -985,12 +1423,15 @@ func (s *server) targetInstall(ctx context.Context, conn *substrate.Conn, cols c
 // the proposal's own read-model row plus the live package catalog, so there is
 // no client-supplied provenance to trust and the in-session retry and the
 // post-reload recovery are the same call. The op re-verifies all of it anyway
-// (an approved-only transition, a live .manifest, a name matching this
-// proposal's target.packageName), so this handler's checks exist to refuse
-// with an operator-legible reason rather than to be the boundary — with one
-// exception it owns alone: the op cannot check the VERSION, so "a package of
-// this name exists" versus "this proposal's install committed" is decided
-// here or nowhere.
+// (an approved-only transition, a live package + .manifest, a name matching
+// this proposal's target.packageName), so this handler's checks exist to refuse
+// with an operator-legible reason rather than to be the boundary — with two
+// exceptions it owns alone, both turning on facts the op cannot see. It cannot
+// check the VERSION, so "a package of this name exists" versus "this package is
+// at the version this proposal's apply would land" is decided here or nowhere.
+// And it cannot check PROVENANCE: the packageKey reaching it is the caller's
+// word, so whether anything actually binds this proposal to that package — the
+// .install receipt — is likewise decided here or nowhere.
 func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Request, id string) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -1042,22 +1483,39 @@ func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Loupe reads the package catalog straight from Core KV as the console
-	// inspector (P5's named exception, the same read handleSystemMap and
-	// findOwningPackage already make), scoped to the vtx.package. subtree.
-	packageKey, installed, err := s.targetInstall(ctx, conn, cols)
+	// Loupe reads the proposal's install receipt and the package catalog
+	// straight from Core KV as the console inspector (P5's named exception, the
+	// same read handleSystemMap and findOwningPackage already make), scoped to
+	// this proposal's own key and the vtx.package. subtree.
+	resolved, err := s.targetInstall(ctx, conn, proposalKey, cols)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if !installed {
+	if !resolved.Installed {
+		if resolved.ReceiptStale {
+			s.writeError(w, http.StatusConflict, staleReceiptReason(cols, resolved))
+			return
+		}
 		s.writeError(w, http.StatusConflict, fmt.Sprintf(
 			"no package named %q is installed at version %s — this proposal's install never committed, so run Apply rather than mark-applied",
 			cols.TargetPackageName, targetInstallVersion(cols)))
 		return
 	}
 
-	installRequestID := recoveredInstallRequestID(cols.TargetPackageName, targetInstallVersion(cols))
+	if unprovenNewPackageClose(cols, resolved) {
+		s.writeError(w, http.StatusConflict, unprovenNewPackageReason(cols, resolved))
+		return
+	}
+
+	packageKey := resolved.PackageKey
+	// The receipt's pointer is the one the apply's own Processor commit
+	// produced, so a recovery that found one stamps the observed op rather than
+	// a reconstruction of it.
+	installRequestID := resolved.InstallRequestID
+	if installRequestID == "" {
+		installRequestID = recoveredInstallRequestID(cols.TargetPackageName, targetInstallVersion(cols))
+	}
 	markPayload, err := json.Marshal(map[string]any{
 		"proposalId":       id,
 		"packageKey":       packageKey,
@@ -1072,7 +1530,7 @@ func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Requ
 		OperationType: "MarkCapabilityProposalApplied",
 		Lane:          string(processor.LaneDefault),
 		Payload:       markPayload,
-		Reads:         []string{proposalKey + ".review", proposalKey + ".target", packageKey + ".manifest"},
+		Reads:         capabilityCloseReads(proposalKey, packageKey),
 	})
 	if failure := markOpFailure(reply, err); failure != "" {
 		// A rejection is a refusal by the Processor's own guards (the proposal

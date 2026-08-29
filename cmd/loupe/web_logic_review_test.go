@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The F16.1 AI-review-console logic tier: row shaping/sort, display state,
 // confidence banding, actionability, and the ago formatter — asserted
@@ -461,5 +464,45 @@ func TestProposalRowsCarryTheInstallLabel(t *testing.T) {
 	label, _ := row["installLabel"].(string)
 	if !containsSub(label, "edits leaseComplete") {
 		t.Errorf("installLabel = %q, want the edit spelled out on the queue card", label)
+	}
+}
+
+// A refused install receipt leaves the apply itself green, so the console has
+// to say so on the SUCCESS path or the failure is invisible — and the binding
+// is unobtainable afterwards, because the aspect is create-only and the op
+// requires an approved proposal that mark-applied has already flipped.
+func TestReceiptNotice(t *testing.T) {
+	vm := logicVM(t, "review.js")
+
+	failed, _ := call(t, vm, "receiptNotice", map[string]any{
+		"receipt":        "failed",
+		"receiptFailure": "rejected by the Processor: UnknownPackage",
+	}).(string)
+	if !strings.Contains(failed, "receipt failed") || !strings.Contains(failed, "UnknownPackage") {
+		t.Errorf("failed receipt notice = %q, want the failure and its reason", failed)
+	}
+	if !strings.Contains(failed, "name and version alone") {
+		t.Errorf("failed receipt notice = %q, want what the console degrades to", failed)
+	}
+	// A refusal with no reason still warns: the state is what matters, and a
+	// notice that appears only when a reason came back would go silent on the
+	// transport failures that carry none.
+	if got, _ := call(t, vm, "receiptNotice", map[string]any{"receipt": "failed"}).(string); got == "" {
+		t.Error("a receipt failure carrying no reason produced no notice at all")
+	}
+
+	// The paired vectors — the two outcomes that must stay silent, or the
+	// notice above would fire on every apply and mean nothing.
+	for _, quiet := range []map[string]any{
+		{"receipt": "recorded"},
+		{"receipt": "not-applicable"},
+		{},
+	} {
+		if got, _ := call(t, vm, "receiptNotice", quiet).(string); got != "" {
+			t.Errorf("receiptNotice(%v) = %q, want no notice", quiet, got)
+		}
+	}
+	if got, _ := call(t, vm, "receiptNotice", nil).(string); got != "" {
+		t.Errorf("receiptNotice(nil) = %q, want no notice", got)
 	}
 }

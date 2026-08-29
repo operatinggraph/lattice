@@ -97,14 +97,6 @@ type UpgradeResult struct {
 	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
 	// declared LeafBudget. Advisory only — the upgrade still succeeded.
 	LeafBudgetWarnings []string
-
-	// InstallRequestID and OpTrackerKey are the Processor reply's own durable
-	// receipt (Contract #4) for the commit that produced this upgrade — the
-	// only record a caller can later use to prove THIS upgrade, and not some
-	// other write at the same name/version, is the one it holds a reference
-	// to. Empty on the Skipped arm, which committed nothing.
-	InstallRequestID string
-	OpTrackerKey     string
 }
 
 // Upgrade applies an in-place version upgrade of an already-installed package
@@ -199,12 +191,9 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 	}
 
 	// Step 5 — submit one UpgradePackage op.
-	reply, err := i.submitUpgradeOp(ctx, def, existing.Version, mutations)
-	if err != nil {
+	if _, err := i.submitUpgradeOp(ctx, def, existing.Version, mutations); err != nil {
 		return nil, err
 	}
-	res.InstallRequestID = reply.RequestID
-	res.OpTrackerKey = reply.OpTrackerKey
 	return res, nil
 }
 
@@ -256,9 +245,8 @@ func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installed
 }
 
 // submitUpgradeOp submits one UpgradePackage op carrying the upgrade delta and
-// returns the Processor's reply — including its durable Contract #4 receipt
-// (RequestID, OpTrackerKey) — so a caller can bind its result to the commit
-// that actually produced it.
+// returns the Processor's reply, whose echoed RequestID is the Contract #4
+// audit pointer a caller records against the commit this call produced.
 // Deterministic requestId from name+from+to+content so a re-submit of the same
 // delta dedup-short-circuits while distinct (from,to) pairs — and distinct
 // same-version edits — stay independent (Contract #8 §8.2 pattern).

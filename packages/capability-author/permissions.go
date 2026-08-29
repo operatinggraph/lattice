@@ -36,6 +36,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     separately applying the proposal through the existing F-004
 //     InstallPackage/UpgradePackage op (design §3.5); it only records the
 //     applied-flip, never installs/upgrades anything itself.
+//   - RecordCapabilityInstallReceipt — the same operator apply path submits
+//     this between the F-004 install/upgrade and the applied-flip, recording
+//     which commit produced the package. It writes one create-only aspect on
+//     the proposal's own vertex and installs nothing, so it grants no reach
+//     the mark-applied grant does not already carry.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -80,6 +85,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Authorizes a human operator to record that an approved proposal has been applied via a separate F-004 install/upgrade (design §3.5).",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "RecordCapabilityInstallReceipt",
+			Scope:         "any",
+			Note:          "Authorizes a human operator to record which install/upgrade commit produced an approved proposal's package — {packageKey, installRequestId, recordedAt} on a create-only .install aspect (capability-proposal-install-receipt-design.md §2). Same guards as MarkCapabilityProposalApplied (approved-only, live name-matched package); it flips no state and installs nothing.",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
 
@@ -97,5 +108,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "RecordAuthoringDispatch"},
 		{OperationType: "ReviewCapabilityProposal"},
 		{OperationType: "MarkCapabilityProposalApplied"},
+		{OperationType: "RecordCapabilityInstallReceipt"},
 	}
 }

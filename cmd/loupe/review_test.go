@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/processor/opwire"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	"github.com/operatinggraph/lattice/packages/augur"
 	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
@@ -558,6 +560,12 @@ func TestReviewCapabilityApply_AlreadyInstalledIsResumable(t *testing.T) {
 		"targetNewVersion": "1.2.0",
 	})
 	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
+	// The receipt is what makes this proposal's install PROVEN, and only a
+	// proven install is resumable: a newPackage proposal matched by name and
+	// version alone is refused instead (see
+	// TestReviewCapabilityApply_UnprovenNewPackageIsNotResumable, the row's own
+	// regression test).
+	putInstallReceipt(t, put, "resume1", "vtx.package.liveAlpha", "req-observed-livealpha", false)
 
 	res, body := postReview(t, client, base, "/api/review/capability/resume1/apply")
 	if res.StatusCode != http.StatusConflict {
@@ -875,6 +883,9 @@ func TestReviewCapabilityMarkApplied_InstalledReachesGatewaySubmit(t *testing.T)
 		"targetNewVersion": "1.2.0",
 	})
 	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
+	// A newPackage proposal reaches the relay only once its install is proven —
+	// the receipt is that proof, and without it this close is refused.
+	putInstallReceipt(t, put, "mkok1", "vtx.package.liveAlpha", "req-observed-livealpha", false)
 
 	// Every precondition holds, so the handler derives the payload and relays
 	// it; this fixture has no operator credential, so the relay fails — a 502
@@ -924,9 +935,14 @@ func callMarkApplied(t *testing.T, srv *server, id string) (*httptest.ResponseRe
 
 func TestReviewCapabilityMarkApplied_SubmitsResolvedPackage(t *testing.T) {
 	srv, _, _, put := newTestReviewServerWithSrv(t)
+	// upgradeExisting is the mode whose close still resolves by name+version
+	// alone — a live package of that name is its own precondition, so its
+	// presence carries no provenance signal for the receipt to add. It is
+	// therefore the only mode on which the reconstructed "recovered:" pointer
+	// is still reachable, which is what this test pins.
 	putCapProposal(t, put, "mksub1", map[string]any{
 		"intent": "approved, install committed", "kind": "lens", "content": validLensContent,
-		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "alpha",
 		"targetNewVersion": "1.2.0",
 	})
 	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
@@ -962,6 +978,7 @@ func TestReviewCapabilityMarkApplied_SubmitsResolvedPackage(t *testing.T) {
 	wantReads := []string{
 		"vtx.capabilityproposal.mksub1.review",
 		"vtx.capabilityproposal.mksub1.target",
+		"vtx.package.liveAlpha",
 		"vtx.package.liveAlpha.manifest",
 	}
 	if strings.Join(captured.Reads, ",") != strings.Join(wantReads, ",") {
@@ -977,6 +994,9 @@ func TestReviewCapabilityMarkApplied_RejectedReplyIsNotSuccess(t *testing.T) {
 		"targetNewVersion": "1.2.0",
 	})
 	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
+	// The receipt proves this proposal's install, so the handler reaches the
+	// relay at all — an unproven newPackage close never gets that far.
+	putInstallReceipt(t, put, "mkrej1", "vtx.package.liveAlpha", "req-observed-livealpha", false)
 	// A Processor refusal comes back as a well-formed reply with a nil error,
 	// so a handler branching on the error alone reports it as success.
 	url, _ := stubGateway(t, processor.OperationReply{
@@ -1359,5 +1379,836 @@ func TestPackageApplyStatus_UndeclaredSecureColumnDropIs409(t *testing.T) {
 	err := fmt.Errorf("wrapped: %w", pkgmgr.ErrUndeclaredSecureColumnDrop)
 	if got := packageApplyStatus(err); got != http.StatusConflict {
 		t.Fatalf("packageApplyStatus = %d, want 409 — an unattested erasure is not a transient", got)
+	}
+}
+
+// putInstallReceipt writes the Core-KV shape targetInstall's receipt-first
+// resolution reads: the create-only vtx.capabilityproposal.<id>.install aspect
+// naming the package the proposal's apply committed.
+func putInstallReceipt(t *testing.T, put func(bucket, key, value string), proposalID, packageKey, installRequestID string, deleted bool) {
+	t.Helper()
+	proposalKey := "vtx.capabilityproposal." + proposalID
+	doc, err := json.Marshal(map[string]any{
+		"class":     "capabilityAuthor.install",
+		"isDeleted": deleted,
+		"vertexKey": proposalKey,
+		"localName": "install",
+		"data": map[string]any{
+			"packageKey":       packageKey,
+			"installRequestId": installRequestID,
+			"recordedAt":       "2026-08-29T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal receipt for %s: %v", proposalID, err)
+	}
+	put(bootstrap.CoreKVBucket, proposalKey+".install", string(doc))
+}
+
+// resolveTargetInstall drives targetInstall for one proposal id, from the
+// read-model row the console itself would have decoded.
+func resolveTargetInstall(t *testing.T, srv *server, id string) installResolution {
+	t.Helper()
+	resolved, err := tryResolveTargetInstall(t, srv, id)
+	if err != nil {
+		t.Fatalf("targetInstall(%s): %v", id, err)
+	}
+	return resolved
+}
+
+func tryResolveTargetInstall(t *testing.T, srv *server, id string) (installResolution, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	proposalKey := "vtx.capabilityproposal." + id
+	cols, ok := srv.capabilityRow(ctx, srv.conn, proposalKey)
+	if !ok {
+		t.Fatalf("read the read-model row for %s", id)
+	}
+	return srv.targetInstall(ctx, srv.conn, proposalKey, cols)
+}
+
+// seedForeignInstallFixture is the defect's own state: a newPackage proposal
+// whose target.packageName AND version match a live package some OTHER writer
+// installed, alongside a second live package at the same name and version that
+// this proposal's own apply produced. The name scan sorts foreignAlpha first
+// and so can only ever answer with it, which makes "which of the two came
+// back" exactly the provenance question.
+func seedForeignInstallFixture(t *testing.T, put func(bucket, key, value string), id string) {
+	t.Helper()
+	putCapProposal(t, put, id, map[string]any{
+		"intent": "approved, a name another writer already installed", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "foreignAlpha", "alpha", "1.2.0", false)
+	putInstalledPackage(t, put, "ownAlpha", "alpha", "1.2.0", false)
+}
+
+// The legacy behaviour, preserved: with no receipt there is nothing but the
+// name and the version to go on, so the foreign install resolves. This is the
+// vector the receipted cases below are measured against — without it, a test
+// asserting "the receipt won" could pass on a resolver that never ran either
+// branch.
+func TestTargetInstall_NoReceiptFallsBackToNameAndVersion(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedForeignInstallFixture(t, put, "recv1")
+
+	resolved := resolveTargetInstall(t, srv, "recv1")
+	if !resolved.Installed {
+		t.Fatalf("resolution = %+v, want installed — the name+version heuristic still answers when no receipt exists", resolved)
+	}
+	if resolved.PackageKey != "vtx.package.foreignAlpha" {
+		t.Errorf("packageKey = %q, want the name+version match", resolved.PackageKey)
+	}
+	if resolved.Version != "1.2.0" {
+		t.Errorf("version = %q, want the resolved package's own manifest version", resolved.Version)
+	}
+	if resolved.InstallRequestID != "" || resolved.ReceiptStale {
+		t.Errorf("resolution = %+v, want no observed pointer and no stale flag", resolved)
+	}
+}
+
+// The defect's regression test. The same proposal, now carrying the receipt its
+// own apply stamped: the resolution must name the package the receipt records,
+// not the same-named package at the same version the catalog scan finds first.
+func TestTargetInstall_ReceiptOutranksTheNameScan(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedForeignInstallFixture(t, put, "recv2")
+	putInstallReceipt(t, put, "recv2", "vtx.package.ownAlpha", "req-observed-ownalpha", false)
+
+	resolved := resolveTargetInstall(t, srv, "recv2")
+	if !resolved.Installed {
+		t.Fatalf("resolution = %+v, want installed", resolved)
+	}
+	if resolved.PackageKey == "vtx.package.foreignAlpha" {
+		t.Fatalf("the proposal resolved to the package another writer installed — the receipt naming vtx.package.ownAlpha was ignored: %+v", resolved)
+	}
+	if resolved.PackageKey != "vtx.package.ownAlpha" {
+		t.Errorf("packageKey = %q, want the receipt's own key", resolved.PackageKey)
+	}
+	if resolved.InstallRequestID != "req-observed-ownalpha" {
+		t.Errorf("installRequestId = %q, want the observed pointer the receipt carries", resolved.InstallRequestID)
+	}
+}
+
+// The receipt narrows the heuristic; it does not remove its guard. A receipt's
+// installRequestId is caller-supplied and verified by nothing, so a receipt
+// alone must never close a proposal over a package at a version the proposal
+// does not target — that is the refusal the name+version pair was carrying, and
+// dropping it would leave whoever can submit the receipt op able to bind an
+// approved-but-never-applied proposal to any live package of that name.
+func TestTargetInstall_ReceiptAtTheWrongVersionDoesNotClose(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	putCapProposal(t, put, "recvver", map[string]any{
+		"intent": "approved, receipt points at another version", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "ownAlpha", "alpha", "0.9.9", false)
+	putInstallReceipt(t, put, "recvver", "vtx.package.ownAlpha", "req-observed-ownalpha", false)
+
+	resolved := resolveTargetInstall(t, srv, "recvver")
+	if resolved.Installed {
+		t.Fatalf("a receipt at the wrong version closed the proposal anyway: %+v", resolved)
+	}
+	if !resolved.ReceiptStale || resolved.ReceiptPackageKey != "vtx.package.ownAlpha" || resolved.ReceiptVersion != "0.9.9" {
+		t.Errorf("resolution = %+v, want the stale receipt reported with the version it is actually at", resolved)
+	}
+
+	// The positive vector: move that same package to the target version and the
+	// same receipt now closes — so the refusal above is the version comparison,
+	// not an unread receipt.
+	putInstalledPackage(t, put, "ownAlpha", "alpha", "1.2.0", false)
+	resolved = resolveTargetInstall(t, srv, "recvver")
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.ownAlpha" || resolved.ReceiptStale {
+		t.Errorf("resolution = %+v, want the receipted package once it is at the target version", resolved)
+	}
+}
+
+// A tombstone retains the prior document, so a reader that does not filter
+// isDeleted sees a revoked receipt as live — and this receipt is the strongest
+// claim the resolver makes. A dead one must contribute nothing, leaving the
+// name+version fallback to answer as if no receipt were ever written.
+func TestTargetInstall_TombstonedReceiptIsIgnored(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedForeignInstallFixture(t, put, "recv3")
+	putInstallReceipt(t, put, "recv3", "vtx.package.ownAlpha", "req-observed-ownalpha", true)
+
+	resolved := resolveTargetInstall(t, srv, "recv3")
+	if resolved.PackageKey == "vtx.package.ownAlpha" || resolved.InstallRequestID != "" || resolved.ReceiptStale {
+		t.Fatalf("a tombstoned receipt was read as live: %+v", resolved)
+	}
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.foreignAlpha" {
+		t.Errorf("resolution = %+v, want the name+version fallback's answer", resolved)
+	}
+
+	// The paired positive vector: the identical fixture with the receipt ALIVE
+	// resolves to the receipted package, so the fall-through above is the
+	// isDeleted filter and not a receipt the reader never looked for.
+	putInstallReceipt(t, put, "recv3", "vtx.package.ownAlpha", "req-observed-ownalpha", false)
+	resolved = resolveTargetInstall(t, srv, "recv3")
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.ownAlpha" {
+		t.Errorf("resolution = %+v, want the live receipt's own package", resolved)
+	}
+}
+
+// receiptedThenUninstalledFixture is the stale-receipt state: this proposal's
+// install committed and was receipted, that package was later uninstalled, and
+// a DIFFERENT package now holds the same name at the same version. The name
+// scan therefore says "installed" while the receipt says the proposal's own
+// artifact is gone.
+func receiptedThenUninstalledFixture(t *testing.T, put func(bucket, key, value string), id string, rootDeleted, manifestDeleted bool) {
+	t.Helper()
+	putCapProposal(t, put, id, map[string]any{
+		"intent": "approved, its own install since removed", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "foreignAlpha", "alpha", "1.2.0", false)
+	put(bootstrap.CoreKVBucket, "vtx.package.deadAlpha",
+		`{"class":"package","isDeleted":`+boolLit(rootDeleted)+`,"data":{}}`)
+	put(bootstrap.CoreKVBucket, "vtx.package.deadAlpha.manifest",
+		`{"class":"packageManifest","isDeleted":`+boolLit(manifestDeleted)+
+			`,"data":{"name":"alpha","version":"1.2.0","declaredKeys":[]}}`)
+	putInstallReceipt(t, put, id, "vtx.package.deadAlpha", "req-observed-deadalpha", false)
+}
+
+// The receipt names a package that has since been uninstalled, while another
+// package now answers the name+version pair. Closing over that one would record
+// an artifact this proposal never wrote — the exact defect — so the resolution
+// refuses, and it carries what it knows so the endpoints can say why.
+//
+// Root-only and manifest-only tombstones are separate rows: an uninstall
+// tombstones both, so a fixture that only ever sets both passes even if one of
+// the two isDeleted checks is dropped.
+func TestTargetInstall_StaleReceiptRefusesAndReportsWhy(t *testing.T) {
+	cases := []struct {
+		name                     string
+		id                       string
+		rootDeleted, manifestDel bool
+	}{
+		{"both tombstoned, as a real uninstall leaves them", "recv4a", true, true},
+		{"only the package root tombstoned", "recv4b", true, false},
+		{"only the manifest tombstoned", "recv4c", false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, _, put := newTestReviewServerWithSrv(t)
+			receiptedThenUninstalledFixture(t, put, c.id, c.rootDeleted, c.manifestDel)
+
+			resolved := resolveTargetInstall(t, srv, c.id)
+			if resolved.Installed {
+				t.Fatalf("a proposal whose own install is gone was closed over the package that replaced it: %+v", resolved)
+			}
+			if !resolved.ReceiptStale || resolved.ReceiptPackageKey != "vtx.package.deadAlpha" {
+				t.Fatalf("resolution = %+v, want the stale receipt named", resolved)
+			}
+			if resolved.ReceiptVersion != "" {
+				t.Errorf("receiptVersion = %q, want empty — the receipted package is not live", resolved.ReceiptVersion)
+			}
+			// The fall-through still ran: what the name scan found is what the
+			// operator has to be warned about.
+			if resolved.PackageKey != "vtx.package.foreignAlpha" {
+				t.Errorf("packageKey = %q, want the package that now holds the name", resolved.PackageKey)
+			}
+		})
+	}
+
+	// The positive vector for all three rows: leave the receipted package LIVE
+	// and the same fixture closes over it, so each refusal above is its own
+	// isDeleted check firing rather than a receipt that was never read.
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	receiptedThenUninstalledFixture(t, put, "recv4d", false, false)
+	resolved := resolveTargetInstall(t, srv, "recv4d")
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.deadAlpha" || resolved.ReceiptStale {
+		t.Errorf("resolution = %+v, want the receipted package while it is live", resolved)
+	}
+}
+
+// The receipt records which package the apply wrote, not what it is called now,
+// so the name is re-checked against the live manifest. The fixture keeps a live
+// foreign alpha@1.2.0 so the receipt branch and the fallback give DIFFERENT
+// answers — otherwise both the refusal and its positive vector pass for a
+// resolver that never reads the receipt at all.
+func TestTargetInstall_ReceiptedPackageUnderAnotherNameIsNotInstalled(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	putCapProposal(t, put, "recv5", map[string]any{
+		"intent": "approved, receipt points at a package carrying another name", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "foreignAlpha", "alpha", "1.2.0", false)
+	putInstalledPackage(t, put, "otherPkg", "beta", "1.2.0", false)
+	putInstallReceipt(t, put, "recv5", "vtx.package.otherPkg", "req-observed-otherpkg", false)
+
+	resolved := resolveTargetInstall(t, srv, "recv5")
+	if resolved.Installed {
+		t.Fatalf("a receipt naming a package under a different name resolved as installed: %+v", resolved)
+	}
+	if !resolved.ReceiptStale || resolved.PackageKey != "vtx.package.foreignAlpha" {
+		t.Fatalf("resolution = %+v, want the stale flag and the name scan's own find", resolved)
+	}
+
+	// The positive vector: rename the receipted package's manifest to the
+	// proposal's target and the same receipt now stands — and it resolves to
+	// otherPkg, which the name scan (which answers foreignAlpha) never would.
+	putInstalledPackage(t, put, "otherPkg", "alpha", "1.2.0", false)
+	resolved = resolveTargetInstall(t, srv, "recv5")
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.otherPkg" {
+		t.Errorf("resolution = %+v, want the receipted package once its manifest carries the target name", resolved)
+	}
+}
+
+// A receipt that exists and cannot be read is NOT an absent receipt. Falling
+// back there would answer a provenance question with the very heuristic the
+// receipt was written to replace, and would do it silently — the one outcome
+// coreKVGetter's absent-vs-unreadable split exists to prevent.
+func TestTargetInstall_UnreadableReceiptIsAnError(t *testing.T) {
+	cases := []struct {
+		name, id, doc string
+	}{
+		{"undecodable document", "recv6a", `not json at all`},
+		{"live receipt recording no packageKey", "recv6b",
+			`{"class":"capabilityAuthor.install","isDeleted":false,"data":{"installRequestId":"req-observed"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, _, put := newTestReviewServerWithSrv(t)
+			seedForeignInstallFixture(t, put, c.id)
+			put(bootstrap.CoreKVBucket, "vtx.capabilityproposal."+c.id+".install", c.doc)
+
+			resolved, err := tryResolveTargetInstall(t, srv, c.id)
+			if err == nil {
+				t.Fatalf("an unusable receipt silently fell back to the name scan: %+v", resolved)
+			}
+			if !strings.Contains(err.Error(), "install receipt") {
+				t.Errorf("error = %v, want it to name the receipt it could not use", err)
+			}
+		})
+	}
+
+	// The positive vector: the same fixture with a WELL-FORMED receipt resolves
+	// without error, so the errors above are the decode guard and not a read
+	// that fails for every document.
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedForeignInstallFixture(t, put, "recv6c")
+	putInstallReceipt(t, put, "recv6c", "vtx.package.ownAlpha", "req-observed-ownalpha", false)
+	resolved := resolveTargetInstall(t, srv, "recv6c")
+	if !resolved.Installed || resolved.PackageKey != "vtx.package.ownAlpha" {
+		t.Errorf("resolution = %+v, want the well-formed receipt honoured", resolved)
+	}
+}
+
+// The operator-facing half of the stale-receipt state. "No package named X is
+// installed at version V — this proposal's install never committed, so run
+// Apply" is false in both clauses here, and Apply then refuses because the name
+// IS live, leaving the proposal holding two contradictory refusals. The message
+// has to say what actually happened.
+func TestReviewCapabilityMarkApplied_StaleReceiptExplainsItself(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	receiptedThenUninstalledFixture(t, put, "mkstale1", true, true)
+
+	res, body := postReview(t, client, base, "/api/review/capability/mkstale1/mark-applied")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	msg, _ := body["error"].(string)
+	if strings.Contains(msg, "never committed") {
+		t.Fatalf("the refusal still claims the install never committed, which the receipt disproves: %q", msg)
+	}
+	for _, want := range []string{"vtx.package.deadAlpha", "uninstalled", "vtx.package.foreignAlpha"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// Apply must not answer a stale receipt with the plan builder's opaque refusal
+// either — and it must never call it resumable, which would send the operator
+// to a recovery that refuses.
+func TestReviewCapabilityApply_StaleReceiptIsNotResumable(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	receiptedThenUninstalledFixture(t, put, "appstale1", true, true)
+
+	res, body := postReview(t, client, base, "/api/review/capability/appstale1/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("a proposal whose own install is gone was offered the mark-applied recovery: %+v", body)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "vtx.package.deadAlpha") {
+		t.Errorf("want the refusal to name the receipted package, got %+v", body)
+	}
+}
+
+// The recovery endpoint's audit pointer. With a receipt it stamps the OBSERVED
+// installRequestId; TestReviewCapabilityMarkApplied_SubmitsResolvedPackage is
+// the paired vector for the no-receipt case, where the reconstructed
+// "recovered:" pointer is stamped instead.
+func TestReviewCapabilityMarkApplied_StampsObservedReceipt(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedForeignInstallFixture(t, put, "mkrcpt1")
+	putInstallReceipt(t, put, "mkrcpt1", "vtx.package.ownAlpha", "req-observed-ownalpha", false)
+	url, captured := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv.gatewayURL = url
+
+	rec, body := callMarkApplied(t, srv, "mkrcpt1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %+v", rec.Code, body)
+	}
+	if body["installRequestId"] != "req-observed-ownalpha" {
+		t.Errorf("reply installRequestId = %v, want the observed pointer", body["installRequestId"])
+	}
+	if body["packageKey"] != "vtx.package.ownAlpha" {
+		t.Errorf("reply packageKey = %v, want the receipt's own key", body["packageKey"])
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(captured.Payload, &payload); err != nil {
+		t.Fatalf("decode relayed payload: %v", err)
+	}
+	if payload["installRequestId"] != "req-observed-ownalpha" || payload["packageKey"] != "vtx.package.ownAlpha" {
+		t.Errorf("relayed payload = %+v, want the receipt's package and observed pointer", payload)
+	}
+	// The op reads the package ROOT as well as its manifest, so the recovery
+	// endpoint declares all four or the whole op fails on a hydration miss.
+	wantReads := []string{
+		"vtx.capabilityproposal.mkrcpt1.review",
+		"vtx.capabilityproposal.mkrcpt1.target",
+		"vtx.package.ownAlpha",
+		"vtx.package.ownAlpha.manifest",
+	}
+	if strings.Join(captured.Reads, ",") != strings.Join(wantReads, ",") {
+		t.Errorf("declared reads = %v, want %v", captured.Reads, wantReads)
+	}
+}
+
+func TestApplyInstallRequestID(t *testing.T) {
+	// The observed receipt names the actual commit, so it wins outright.
+	observed := &pkgmgr.ApplyResult{
+		Action: "install", PackageName: "alpha", ToVersion: "1.2.0",
+		InstallRequestID: "req-observed-alpha",
+	}
+	if got := applyInstallRequestID(observed); got != "req-observed-alpha" {
+		t.Errorf("with a receipt = %q, want the observed pointer", got)
+	}
+	// Without one there is only the reconstruction, which cannot tell this
+	// apply from any other write at the same name and version.
+	none := &pkgmgr.ApplyResult{Action: "skip", PackageName: "alpha", ToVersion: "1.2.0"}
+	if got := applyInstallRequestID(none); got != "skip:alpha@1.2.0" {
+		t.Errorf("without a receipt = %q, want the composed fallback", got)
+	}
+}
+
+// stubGatewayRecording stands in for the Gateway across the MULTI-submit close:
+// it records every relayed request in order and answers each from replyFor, so
+// a test can assert what was submitted, in what order, and what the handler did
+// with a per-op outcome.
+func stubGatewayRecording(t *testing.T, replyFor func(gatewayOperationRequest) processor.OperationReply) (url string, relayed func() []gatewayOperationRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []gatewayOperationRequest
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req gatewayOperationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode relayed request: %v", err)
+		}
+		mu.Lock()
+		seen = append(seen, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(replyFor(req))
+	}))
+	t.Cleanup(hs.Close)
+	return hs.URL, func() []gatewayOperationRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]gatewayOperationRequest(nil), seen...)
+	}
+}
+
+// acceptEvery is the stub reply for a close where both submits commit.
+func acceptEvery(gatewayOperationRequest) processor.OperationReply {
+	return processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"}
+}
+
+// rejectReceipt answers the receipt submit with a Processor refusal and commits
+// everything else — the likelier of the two close failures, and the one that
+// otherwise produces a clean 200 carrying no trace of it.
+func rejectReceipt(req gatewayOperationRequest) processor.OperationReply {
+	if req.OperationType == "RecordCapabilityInstallReceipt" {
+		return processor.OperationReply{
+			Status: processor.ReplyStatusRejected,
+			Error:  &opwire.ReplyError{Code: "UnknownPackage", Message: "vtx.package.ownAlpha is not a live installed package"},
+		}
+	}
+	return acceptEvery(req)
+}
+
+// callCloseApply drives the apply's close directly, with an operator token in
+// the context (requireOperator, which normally puts it there, is not part of
+// this fixture).
+func callCloseApply(t *testing.T, srv *server, id string, res *pkgmgr.ApplyResult) (int, map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, operatorTokenContextKey{}, "test-operator-token")
+	return srv.closeApply(ctx, id, "vtx.capabilityproposal."+id, res)
+}
+
+// committedApplyResult is the shape ApplyCapabilityPlan returns from an arm
+// that actually committed: the Processor's receipt field is populated.
+func committedApplyResult() *pkgmgr.ApplyResult {
+	return &pkgmgr.ApplyResult{
+		PackageName:      "alpha",
+		PackageKey:       "vtx.package.ownAlpha",
+		Action:           "install",
+		ToVersion:        "1.2.0",
+		InstallRequestID: "req-observed-ownalpha",
+	}
+}
+
+func TestCloseApply_SubmitsReceiptBeforeMarkApplied(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	url, relayed := stubGatewayRecording(t, acceptEvery)
+	srv.gatewayURL = url
+
+	status, body := callCloseApply(t, srv, "close1", committedApplyResult())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %+v", status, body)
+	}
+	if body["receipt"] != receiptRecorded {
+		t.Errorf("receipt = %v, want %q", body["receipt"], receiptRecorded)
+	}
+	if _, present := body["receiptFailure"]; present {
+		t.Errorf("a recorded receipt reported a failure: %+v", body)
+	}
+	if body["installRequestId"] != "req-observed-ownalpha" {
+		t.Errorf("installRequestId = %v, want the observed pointer", body["installRequestId"])
+	}
+
+	ops := relayed()
+	if len(ops) != 2 {
+		t.Fatalf("relayed %d ops, want 2: %+v", len(ops), ops)
+	}
+	// Order is the point: the receipt is stamped while the proposal is still
+	// approved — the state the op requires — and mark-applied flips it away.
+	if ops[0].OperationType != "RecordCapabilityInstallReceipt" || ops[1].OperationType != "MarkCapabilityProposalApplied" {
+		t.Fatalf("relayed order = [%s, %s]", ops[0].OperationType, ops[1].OperationType)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil {
+		t.Fatalf("decode receipt payload: %v", err)
+	}
+	want := map[string]any{
+		"proposalId":       "close1",
+		"packageKey":       "vtx.package.ownAlpha",
+		"installRequestId": "req-observed-ownalpha",
+	}
+	for k, v := range want {
+		if payload[k] != v {
+			t.Errorf("receipt payload[%s] = %v, want %v", k, payload[k], v)
+		}
+	}
+	if len(payload) != len(want) {
+		t.Errorf("receipt payload = %+v, want exactly the three declared fields", payload)
+	}
+	wantReads := []string{
+		"vtx.capabilityproposal.close1.review",
+		"vtx.capabilityproposal.close1.target",
+		"vtx.package.ownAlpha",
+		"vtx.package.ownAlpha.manifest",
+	}
+	// Both close ops run the same guards over the same four keys, and each
+	// hydrates from its declared set alone — so both are pinned, not just the
+	// new one.
+	for i, op := range ops {
+		if strings.Join(op.Reads, ",") != strings.Join(wantReads, ",") {
+			t.Errorf("%s reads = %v, want %v", ops[i].OperationType, op.Reads, wantReads)
+		}
+	}
+}
+
+// A retry of the same close must carry the SAME requestId, so the Contract #4
+// tracker collapses it. A minted one would reach the commit batch instead,
+// where .install's create-only conditioning refuses it — and the close would
+// then report "no receipt" while a valid one sits in KV.
+func TestCloseApply_ReceiptRequestIDIsDerivedAndStable(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	url, relayed := stubGatewayRecording(t, acceptEvery)
+	srv.gatewayURL = url
+
+	callCloseApply(t, srv, "close6", committedApplyResult())
+	callCloseApply(t, srv, "close6", committedApplyResult())
+	ops := relayed()
+	if len(ops) != 4 {
+		t.Fatalf("relayed %d ops, want 4", len(ops))
+	}
+	first, second := ops[0].RequestID, ops[2].RequestID
+	if first == "" {
+		t.Fatal("the receipt submitted no requestId, so the Gateway mints one and a retry cannot dedup")
+	}
+	if first != second {
+		t.Errorf("retry requestId = %q, want the first submit's %q", second, first)
+	}
+	if !keys.IsValidNanoID(first) {
+		t.Errorf("requestId %q is not a valid Contract #1 NanoID, so the envelope is rejected before it is tracked", first)
+	}
+	// The paired vector: a receipt naming a DIFFERENT package is a different
+	// receipt and must NOT collapse into the first one — create-only
+	// conditioning is what arbitrates that, and it only gets to if the ids differ.
+	other := committedApplyResult()
+	other.PackageKey = "vtx.package.foreignAlpha"
+	callCloseApply(t, srv, "close6", other)
+	if got := relayed()[4].RequestID; got == first {
+		t.Errorf("a receipt naming another package derived the same requestId %q, so it would dedup instead of being refused", got)
+	}
+}
+
+// An arm that committed nothing has no install to bind, so recording one would
+// stamp a fiction. That is "not applicable", a different fact from a receipt
+// that was submitted and refused — and the response has to distinguish them.
+func TestCloseApply_NoObservedReceiptIsNotApplicable(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	url, relayed := stubGatewayRecording(t, acceptEvery)
+	srv.gatewayURL = url
+
+	res := committedApplyResult()
+	res.Action, res.Skipped, res.InstallRequestID = "skip", true, ""
+
+	status, body := callCloseApply(t, srv, "close2", res)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %+v", status, body)
+	}
+	if body["receipt"] != receiptNotApplicable {
+		t.Errorf("receipt = %v, want %q — nothing committed, so nothing was refused either", body["receipt"], receiptNotApplicable)
+	}
+	if body["installRequestId"] != "skip:alpha@1.2.0" {
+		t.Errorf("installRequestId = %v, want the composed fallback", body["installRequestId"])
+	}
+	ops := relayed()
+	if len(ops) != 1 || ops[0].OperationType != "MarkCapabilityProposalApplied" {
+		t.Fatalf("relayed %+v, want the mark-applied submit alone", ops)
+	}
+}
+
+// The non-fatal proof, and the invisibility fix with it: a rejected receipt is
+// not a failed apply, so the close carries on and answers 200 — but a 200
+// carrying no trace of the refusal is how a permission gap disables the whole
+// feature unnoticed. The binding is unobtainable afterwards (.install is
+// create-only and the op needs an approved proposal, which mark-applied has
+// just flipped), so this response is the only place the fact ever surfaces.
+func TestCloseApply_ReceiptFailureIsNonFatalAndVisible(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	url, relayed := stubGatewayRecording(t, rejectReceipt)
+	srv.gatewayURL = url
+
+	status, body := callCloseApply(t, srv, "close3", committedApplyResult())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a failed receipt is not a failed apply; body %+v", status, body)
+	}
+	if body["receipt"] != receiptFailed {
+		t.Errorf("receipt = %v, want %q", body["receipt"], receiptFailed)
+	}
+	failure, _ := body["receiptFailure"].(string)
+	if !strings.Contains(failure, "not a live installed package") {
+		t.Errorf("receiptFailure = %q, want the Processor's own reason on the SUCCESS path", failure)
+	}
+	ops := relayed()
+	if len(ops) != 2 || ops[1].OperationType != "MarkCapabilityProposalApplied" {
+		t.Fatalf("relayed %+v, want the close to carry on to mark-applied", ops)
+	}
+}
+
+// When the close fails too, the operator's resumable error has to say what
+// recovery will do. That holds for BOTH no-receipt outcomes — a refused submit
+// and an apply with nothing to bind — because either leaves recovery resolving
+// by name and version.
+func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
+	rejectEverything := func(gatewayOperationRequest) processor.OperationReply {
+		return processor.OperationReply{
+			Status: processor.ReplyStatusRejected,
+			Error:  &opwire.ReplyError{Code: "InvalidApplyTransition", Message: "proposal is not approved"},
+		}
+	}
+	cases := []struct {
+		name, id    string
+		mutate      func(*pkgmgr.ApplyResult)
+		wantReceipt string
+	}{
+		{"the receipt submit was refused", "close4", func(*pkgmgr.ApplyResult) {}, receiptFailed},
+		{"the apply had nothing to bind", "close7", func(r *pkgmgr.ApplyResult) {
+			r.Action, r.Skipped, r.InstallRequestID = "skip", true, ""
+		}, receiptNotApplicable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, _, _ := newTestReviewServerWithSrv(t)
+			url, _ := stubGatewayRecording(t, rejectEverything)
+			srv.gatewayURL = url
+
+			res := committedApplyResult()
+			c.mutate(res)
+			status, body := callCloseApply(t, srv, c.id, res)
+			if status != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", status)
+			}
+			if body["resumable"] != true || body["receipt"] != c.wantReceipt {
+				t.Errorf("body = %+v, want resumable:true and receipt:%q", body, c.wantReceipt)
+			}
+			if msg, _ := body["error"].(string); !strings.Contains(msg, "name and version alone") {
+				t.Errorf("want the error to say what recovery falls back to, got %q", msg)
+			}
+		})
+	}
+
+	// The paired vector: with the receipt committed and only the close failing,
+	// that clause must be absent — otherwise the assertions above pass for a
+	// message that always carries it.
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	url, _ := stubGatewayRecording(t, func(req gatewayOperationRequest) processor.OperationReply {
+		if req.OperationType == "RecordCapabilityInstallReceipt" {
+			return acceptEvery(req)
+		}
+		return rejectEverything(req)
+	})
+	srv.gatewayURL = url
+	status, body := callCloseApply(t, srv, "close5", committedApplyResult())
+	if status != http.StatusBadGateway || body["receipt"] != receiptRecorded {
+		t.Fatalf("status = %d, body %+v", status, body)
+	}
+	if msg, _ := body["error"].(string); strings.Contains(msg, "name and version alone") {
+		t.Errorf("a recorded receipt was still reported as missing: %q", msg)
+	}
+}
+
+// A reply this console cannot interpret is not a commit. Reading success as
+// "not rejected" would report an empty status as a landed receipt, which is the
+// one direction a close must never guess in.
+func TestMarkOpFailure_UnrecognizedStatusIsNotSuccess(t *testing.T) {
+	if got := markOpFailure(&processor.OperationReply{}, nil); got == "" {
+		t.Error("an empty reply status was reported as a commit")
+	}
+	// The paired positive: duplicate IS a commit — the Contract #4 tracker
+	// collapsing a retry means the effect is in state, and a derived requestId
+	// makes that the ordinary outcome of a retried receipt.
+	if got := markOpFailure(&processor.OperationReply{Status: processor.ReplyStatusDuplicate}, nil); got != "" {
+		t.Errorf("a duplicate reply = %q, want no failure", got)
+	}
+}
+
+// seedUnprovenNewPackage is the board row's own state: a newPackage proposal,
+// approved but with no receipt, and a live package that some OTHER writer
+// installed at exactly the name and version the proposal targets. Everything
+// the name+version heuristic can see says "closeable"; nothing at all says this
+// proposal wrote it.
+func seedUnprovenNewPackage(t *testing.T, put func(bucket, key, value string), id string) {
+	t.Helper()
+	putCapProposal(t, put, id, map[string]any{
+		"intent": "approved, never applied", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "newPackage", "targetPackageName": "alpha",
+		"targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "foreignAlpha", "alpha", "1.2.0", false)
+}
+
+// TestReviewCapabilityMarkApplied_UnprovenNewPackageIsRefused is the board
+// row's regression test: "a newPackage proposal is closed over a same-named
+// package it never wrote."
+//
+// This is the state the row names, and it is the one the receipt cannot fix by
+// existing: a proposal whose apply never ran has no receipt, so the resolution
+// falls back to name+version and matches the foreign install exactly. The close
+// has to refuse on the ABSENCE of provenance, not merely prefer provenance when
+// it happens to be there.
+func TestReviewCapabilityMarkApplied_UnprovenNewPackageIsRefused(t *testing.T) {
+	client, base, put := newTestReviewServer(t)
+	seedUnprovenNewPackage(t, put, "unproven1")
+
+	res, body := postReview(t, client, base, "/api/review/capability/unproven1/mark-applied")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — this proposal was closed over a package nothing shows it wrote", res.StatusCode)
+	}
+	msg, _ := body["error"].(string)
+	for _, want := range []string{"no install receipt is recorded", "newPackage", "lattice-pkg"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not mention %q — it must name the gap and the deliberate path out", msg, want)
+		}
+	}
+}
+
+// The positive vector for that refusal, and the proof it is a PROVENANCE check
+// rather than a blanket block on newPackage: the identical proposal carrying a
+// receipt for that same package closes normally.
+func TestReviewCapabilityMarkApplied_ProvenNewPackageStillCloses(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	seedUnprovenNewPackage(t, put, "unproven2")
+	putInstallReceipt(t, put, "unproven2", "vtx.package.foreignAlpha", "req-observed-foreignalpha", false)
+	url, _ := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv.gatewayURL = url
+
+	rec, body := callMarkApplied(t, srv, "unproven2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a receipted newPackage proposal is closable; body %+v", rec.Code, body)
+	}
+	if body["installRequestId"] != "req-observed-foreignalpha" {
+		t.Errorf("installRequestId = %v, want the observed pointer", body["installRequestId"])
+	}
+}
+
+// The narrowing held: upgradeExisting keeps today's behaviour exactly. A live
+// package of that name is that mode's own precondition — present before the
+// apply by definition — so its presence never carried a provenance signal to
+// lose, and the version preconditions own that mode instead.
+func TestReviewCapabilityMarkApplied_UnprovenUpgradeStillCloses(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	putCapProposal(t, put, "unproven3", map[string]any{
+		"intent": "approved, upgrade whose close never landed", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "alpha",
+		"targetBaseVersion": "1.1.0", "targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
+	url, _ := stubGateway(t, processor.OperationReply{Status: processor.ReplyStatusAccepted, Decision: "committed"})
+	srv.gatewayURL = url
+
+	rec, body := callMarkApplied(t, srv, "unproven3")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — upgradeExisting must be untouched by the newPackage refusal; body %+v", rec.Code, body)
+	}
+	if body["installRequestId"] != "recovered:alpha@1.2.0" {
+		t.Errorf("installRequestId = %v, want the reconstructed recovery pointer", body["installRequestId"])
+	}
+}
+
+// The apply endpoint's half. Its 409 used to answer this exact state with
+// resumable:true and "close it with mark-applied" — advice pointing straight at
+// the close that is now refused, and the opposite of what ApplyCapabilityPlan
+// says about the same state (ErrPackageNameClaimed: the artifact did NOT land).
+func TestReviewCapabilityApply_UnprovenNewPackageIsNotResumable(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	seedUnprovenNewPackage(t, put, "unproven4")
+
+	res, body := postReview(t, client, base, "/api/review/capability/unproven4/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", res.StatusCode)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("apply still steers this proposal into the mark-applied close that refuses it: %+v", body)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "no install receipt is recorded") {
+		t.Errorf("want the provenance refusal, got %+v", body)
+	}
+
+	// The paired vector: with the receipt present the SAME fixture is resumable
+	// again, so the refusal above is the provenance check and not apply
+	// refusing every already-installed newPackage target.
+	putInstallReceipt(t, put, "unproven4", "vtx.package.foreignAlpha", "req-observed-foreignalpha", false)
+	res, body = postReview(t, client, base, "/api/review/capability/unproven4/apply")
+	if res.StatusCode != http.StatusConflict || body["resumable"] != true {
+		t.Errorf("status = %d, body = %+v; want the receipted proposal classified resumable", res.StatusCode, body)
 	}
 }
