@@ -1386,6 +1386,19 @@ async function submitApply(ev) {
 
 // ---- My Applications (status tracker) ----
 
+// loadApplicationsQuiet refreshes state.applications without touching the
+// Applications view's DOM — loadTasksQuiet's own shape, so a task card
+// (outside that view) can join t.scopedTo against a fresh application list.
+async function loadApplicationsQuiet() {
+  if (!state.applicant) {
+    state.applications = [];
+    return state.applications;
+  }
+  const data = await appGet("/api/applications");
+  state.applications = data.applications || [];
+  return state.applications;
+}
+
 async function loadApplications() {
   const grid = $("#apps");
   const empty = $("#apps-empty");
@@ -1927,8 +1940,10 @@ async function loadTasks() {
   $("#tasks-summary").textContent = "loading…";
   // The catalog AND the shared renderer module decide which tasks offer a
   // working Complete button (canCompleteOp), so both have to be in hand
-  // before the cards render — neither is fetched per card.
-  await Promise.all([loadOpCatalogQuiet(), loadDescriptorformQuiet()]);
+  // before the cards render — neither is fetched per card. applications are
+  // loaded too: renderTaskCard joins t.scopedTo against them to discriminate
+  // two same-op tasks (e.g. two "Sign lease" tasks for different units).
+  await Promise.all([loadOpCatalogQuiet(), loadDescriptorformQuiet(), loadApplicationsQuiet()]);
   try {
     await loadTasksQuiet();
   } catch (e) {
@@ -1969,6 +1984,18 @@ function renderTaskCard(t) {
   desc.className = "addr-sub";
   desc.textContent = t.operationDescription || "";
 
+  // Two tasks for the SAME op (e.g. two "Sign lease" tasks) render identical
+  // title+desc — nothing above distinguishes WHICH application each is about.
+  // t.scopedTo is the task's subject entity (tasks.go's own doc comment); for
+  // an applicant-facing task that is the application's own entityKey, so a
+  // join against the applications already loaded for this view (state.applications,
+  // loaded by loadApplications) resolves a human discriminator — the unit
+  // address, never the bare scopedTo key (D4).
+  const target = document.createElement("div");
+  target.className = "addr-sub";
+  const app = (state.applications || []).find((a) => a.entityKey === t.scopedTo);
+  if (app && app.unitAddress) target.textContent = "For: " + app.unitAddress;
+
   const expired = t.expiresAt && new Date(t.expiresAt).getTime() < Date.now();
 
   const meta = document.createElement("div");
@@ -2000,6 +2027,7 @@ function renderTaskCard(t) {
 
   card.append(title);
   if (desc.textContent) card.append(desc);
+  if (target.textContent) card.append(target);
   if (meta.textContent) card.append(meta);
   card.append(actions);
   return card;
