@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-27 · `2ce7da1d`+`d8988c1e` · Task liveness closed — `capabilityEphemeral` stops granting past completion, `staleAssignedTasks` mirrors unroutedTasks. orchestration-base 0.7.13
+- 2026-08-27 · `5f12d337` · DetachObject gets a full OpMetaSpec via `derive_reads`, closing AttachObject/DetachObject at its ratified scope ([design §22](../../implementation-artifacts/staff-descriptor-rendering-design.md)). objects-base 0.3.8
+- 2026-08-27 · `fab81059` · Auto no-show sweep stops billing $25; `WellnessCreditAccount` gains `reason` (payment\|waiver) mirroring `7e6b1ab3`. Live 21 fees/$525 not remediated (needs Andrew). wellness-domain 0.22.7, wellness-ledger 0.2.14
+- 2026-08-27 · (live-stack op run) · A settled café tab finally posts — stranded-epoch operator grants revoked + restored (lattice.md done log), `CreateAccount` now dispatches; the $8.00 tab's account opened, `missing_account` closed live.
+- 2026-08-27 · `3a35bde` (closed by audit, no new code) · Weaver's inflight suppression already fires — `InflightActionMismatch`, the check this row named, was deleted 2026-08-24, before this row was filed.
+- 2026-08-27 · `587f06f6` · 12 Riverside Walk's 7 co-managers reap to 1 — reapExcessCoManagersLive generalizes reapExcessCoManagers past the seed's pinned unit to every live `manages` link; 6 reaped live.
+- 2026-08-27 · `cba0f5c4` · A café menu item can finally be relocated instead of stranded — SetMenuItemLocation + menuCatalog's missingLocation flag; 10 broken items converged live. cafe-domain 0.11.23
+- 2026-08-27 · `8b024aae` · The clinic front desk finally has a forward schedule — 4 future appointments backfilled, 5 named agent-verify litter appointments reaped; also fixes a `640b97d1` rerun regression.
+- 2026-08-27 · `640b97d1` · 26 café leases finally have a staffer — seed-classic-demo's bare unit joins Riverside Building via WireContainedIn (best-effort); all pre-existing leases re-projected live, no backfill needed.
+- 2026-08-27 · `a322a31e` · A resident class price can finally be set and seen — wellnessSessions/wellnessBookings project residentPriceCents, both FE forms gain a field, My Classes shows the rate-resolved price. wellness-domain 0.22.6
 - 2026-08-26 · `70fc2d88` · A wellness member with no ledger account is charged, not stranded — missing_account gap mirrors clinic-ledger's. Live: 1 account opened, 14 charges posted. Also `8071e7d9` loftspace-domain RLS fix.
 - 2026-08-26 · `ba1c6773` · Repaired the lease-signing convergence test left red on main by `b9cc8558` — its fixture predated the new `unitKey <> null` gap terms.
 - 2026-08-26 · `6165434e` · A tombstoned provider no longer strands its appointments/patients from front-desk view — anchors fall back to the appointment's own `atSite` link. clinic-domain 0.34.7
