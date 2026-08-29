@@ -277,7 +277,39 @@ function applyOutcome(body) {
       hint: "the package IS installed — close the proposal with “Mark applied (recover)”; re-applying cannot succeed now.",
     };
   }
+  // A failure reply naming the packageKey the apply produced is saying the
+  // INSTALL committed and only the close did not. Re-arming "Apply now" there
+  // walks the operator into the plan builder's own refusal — for a newPackage
+  // target the name is now claimed — so the control stays down even when the
+  // recovery is unavailable too. The server's message carries the exit in that
+  // case; this only stops the console from offering a worse one.
+  if (body && body.packageKey) {
+    return { message: "apply failed: " + reason, resumable: false, retryable: false, hint: "" };
+  }
   return { message: "apply failed: " + reason, resumable: false, retryable: true, hint: "" };
+}
+
+// receiptNotice states what happened to the apply's install RECEIPT — the
+// aspect binding this proposal to the package its install actually produced.
+//
+// It has to be said out loud on a SUCCESSFUL apply, not only on a failed one.
+// A receipt the Processor refuses (a permission gap, a package the op cannot
+// verify) leaves the apply itself green, and the binding is then unobtainable
+// forever: the aspect is create-only and the op requires an approved proposal,
+// which the mark-applied submit right behind it has already flipped to applied.
+// With no notice, that failure looks exactly like a clean apply, and the
+// console silently degrades to the name+version guess the receipt replaces.
+//
+// "not-applicable" is not a failure and gets no warning: that apply committed
+// nothing, so there was never an install to bind.
+function receiptNotice(body) {
+  var state = body && body.receipt;
+  if (!state || state === "recorded" || state === "not-applicable") return "";
+  var reason = errorText(body && body.receiptFailure);
+  return "the artifact installed, but recording this proposal's install receipt failed" +
+    (reason ? ": " + reason : "") +
+    " — the binding cannot be written afterwards, so any later recovery for this proposal " +
+    "resolves its install by package name and version alone. Escalate it.";
 }
 
 // opRejected reports whether a relayed op reply came back refused by the
@@ -289,4 +321,4 @@ function opRejected(reply) {
   return !!(reply && reply.status === "rejected");
 }
 
-export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, sourceLabel, agoFrom, artifactTargetId, installTargetLabel, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };
+export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, sourceLabel, agoFrom, artifactTargetId, installTargetLabel, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, receiptNotice, opRejected, errorText };

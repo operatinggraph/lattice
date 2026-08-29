@@ -217,6 +217,7 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	switch reply.Status {
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
 		res.DeclaredKeys = declared
+		res.InstallRequestID = reply.RequestID
 		return res, nil
 	default:
 		return nil, fmt.Errorf("pkgmgr: InstallPackage rejected: %s", replyError(reply))
@@ -672,6 +673,13 @@ type InstallResult struct {
 	// rejecting it would let one package's lens narrowing veto another
 	// package's type declaration. Empty when nothing is at risk.
 	LeafBudgetWarnings []string
+
+	// InstallRequestID is the requestId this install committed under, echoed
+	// back by the Processor (Contract #4). It is the caller's own
+	// content-derived id, not a Processor-minted commit identity — an audit
+	// pointer rather than a proof of authorship. Empty on the Skipped arm,
+	// which committed nothing.
+	InstallRequestID string
 }
 
 // ErrVersionMismatch is returned by Install when a different version of

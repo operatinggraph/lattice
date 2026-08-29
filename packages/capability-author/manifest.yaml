@@ -1,5 +1,5 @@
 name: capability-author
-version: 0.12.2
+version: 0.13.0
 description: |
   AI-authored capabilities — Fire 1 capture + escalation dispatch + review lenses, Fire 2
   review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern
@@ -14,7 +14,11 @@ description: |
   (a human operator flips a pending proposal to approved | rejected, re-running the §5
   boundary against the live catalog on approve); MarkCapabilityProposalApplied (the operator
   records the applied-flip after separately applying an approved proposal through the
-  existing, unmodified F-004 InstallPackage/UpgradePackage op); the capabilityAuthorPending
+  existing, unmodified F-004 InstallPackage/UpgradePackage op); RecordCapabilityInstallReceipt
+  (the same apply path, between those two commits, binds the proposal to the ONE install it
+  produced — {packageKey, installRequestId, recordedAt} on a create-only, write-once
+  .install aspect, so recovery names the real package instead of guessing by name+version);
+  the capabilityAuthorPending
   weaver-target lens + capabilityAuthor Loom pattern that drive the dispatch; and the
   capabilityProposals / capabilityAuthorContext P5 read-model lenses (the operator review
   surface + the installed-DDL self-description catalog); and SubmitCapabilityProposal
@@ -84,6 +88,9 @@ declares:
     - operationType: MarkCapabilityProposalApplied
       scope: any
       grantsTo: [operator]
+    - operationType: RecordCapabilityInstallReceipt
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: capabilityAuthorDispatch
       lensRef: capabilityAuthorPending
@@ -98,3 +105,4 @@ declares:
     - operationType: RecordAuthoringDispatch
     - operationType: ReviewCapabilityProposal
     - operationType: MarkCapabilityProposalApplied
+    - operationType: RecordCapabilityInstallReceipt

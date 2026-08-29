@@ -66,15 +66,20 @@ func Permissions() []pkgmgr.PermissionSpec {
 // capabilityReviewPermissions grants consoleOperator the human-in-the-loop ops
 // of the AI-authored-capabilities review console (packages/capability-author):
 // request AI authoring, submit a self-composed artifact, approve/reject a
-// pending proposal, and record that an approved proposal has been applied. The
+// pending proposal, record which install/upgrade commit produced an approved
+// proposal's package, and record that the proposal has been applied. The
 // console (cmd/loupe) submits exactly these under the operator's own scoped
 // identity; capability-author itself grants them to the root-equivalent
 // `operator`, so absent this the scoped console operator — never a holder of
-// `operator` (mechanism B) — cannot drive its own review console.
+// `operator` (mechanism B) — cannot drive its own review console. A missing
+// grant here does not surface as a console error: the receipt submission is
+// non-fatal by design, so a denied RecordCapabilityInstallReceipt would leave
+// the apply reporting success while the provenance binding it exists to write
+// silently never lands.
 //
-// These confer no authority the console operator lacks: none of the four
-// installs anything. The apply step is the F-004 InstallPackage/UpgradePackage
-// op already granted above (pkgLifecyclePermissions), and approve-time
+// These confer no authority the console operator lacks: none of them installs
+// anything. The apply step is the F-004 InstallPackage/UpgradePackage op
+// already granted above (pkgLifecyclePermissions), and approve-time
 // re-validation reads the requester's LIVE held permissions for a grant
 // artifact, so a scoped operator cannot author past its own grants. Default
 // lane, scope any — the same tier as the shred/revoke/object ops.
@@ -84,6 +89,7 @@ func capabilityReviewPermissions() []pkgmgr.PermissionSpec {
 		"SubmitCapabilityProposal",
 		"ReviewCapabilityProposal",
 		"MarkCapabilityProposalApplied",
+		"RecordCapabilityInstallReceipt",
 	}
 	perms := make([]pkgmgr.PermissionSpec, 0, len(ops))
 	for _, op := range ops {

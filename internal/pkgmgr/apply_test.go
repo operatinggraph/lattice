@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -51,6 +52,16 @@ func TestApply_FreshInstall(t *testing.T) {
 	if ver, _ := pkg["data"].(map[string]any)["version"].(string); ver != "0.1.0" {
 		t.Fatalf("package version not recorded: got %q", ver)
 	}
+	// The receipt names the commit this Apply actually produced. Asserting the
+	// Contract #4 tracker key resolves is what makes it a receipt rather than a
+	// non-empty string: the tracker entry is written by the same atomic batch
+	// as the install, so a value that addresses one cannot have been invented
+	// by the caller. Consumers gate on this field being non-empty before they
+	// record provenance, so an unpopulated one disables them silently.
+	if res.InstallRequestID == "" {
+		t.Fatal("fresh install: InstallRequestID empty — the reply's requestId never reached ApplyResult")
+	}
+	kvDoc(t, ctx, conn, processor.TrackerKey(res.InstallRequestID))
 }
 
 // TestApply_PermissionLanesWrittenToVertexData proves PermissionSpec.Lanes
@@ -110,6 +121,12 @@ func TestApply_SameVersionSkips(t *testing.T) {
 	}
 	if res.Created != 0 || res.Updated != 0 || res.Tombstoned != 0 {
 		t.Fatalf("skip produced mutations: %+v", res)
+	}
+	// A skip committed nothing, so it has no receipt to carry. Consumers read a
+	// populated InstallRequestID as "an install landed and here is which one";
+	// carrying one here would name a commit this call never made.
+	if res.InstallRequestID != "" {
+		t.Fatalf("skip carries a receipt for a commit it never made: %q", res.InstallRequestID)
 	}
 }
 
@@ -183,6 +200,12 @@ func TestApply_DifferentVersionAutoUpgrades(t *testing.T) {
 	if ver, _ := pkg["data"].(map[string]any)["version"].(string); ver != "0.2.0" {
 		t.Fatalf("package version not bumped: got %q", ver)
 	}
+	// Same receipt assertion as the fresh-install arm: the in-place upgrade
+	// reaches the Processor by a different submit path, so it needs its own.
+	if res.InstallRequestID == "" {
+		t.Fatal("auto-upgrade: InstallRequestID empty — the reply's requestId never reached ApplyResult")
+	}
+	kvDoc(t, ctx, conn, processor.TrackerKey(res.InstallRequestID))
 }
 
 // TestApply_DryRunDoesNotSubmit: a dry-run on a real version change reports the
@@ -203,6 +226,11 @@ func TestApply_DryRunDoesNotSubmit(t *testing.T) {
 	}
 	if !res.DryRun || res.Action != "upgrade" {
 		t.Fatalf("dry-run: want dryRun upgrade preview, got %+v", res)
+	}
+	// A dry-run submits nothing, so it has no receipt: a preview that named a
+	// commit would be describing a write that never happened.
+	if res.InstallRequestID != "" {
+		t.Fatalf("dry-run carries a receipt for a commit it never made: %q", res.InstallRequestID)
 	}
 	if res.Created == 0 || res.Updated == 0 || res.Tombstoned == 0 {
 		t.Fatalf("dry-run: want a non-empty previewed delta, got %+v", res)
@@ -266,6 +294,11 @@ func TestApply_DryRunFreshInstall(t *testing.T) {
 	}
 	if !res.DryRun || res.Action != "install" {
 		t.Fatalf("dry-run fresh: want dryRun install preview, got %+v", res)
+	}
+	// A dry-run submits nothing, so it has no receipt: a preview that named a
+	// commit would be describing a write that never happened.
+	if res.InstallRequestID != "" {
+		t.Fatalf("dry-run carries a receipt for a commit it never made: %q", res.InstallRequestID)
 	}
 	if res.Created == 0 || len(res.CreatedKeys) != res.Created {
 		t.Fatalf("dry-run fresh: want a previewed create batch, got %+v", res)
