@@ -145,7 +145,12 @@ func creditAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"House tab payment"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{acctKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	if authContextTarget != "" {
 		env.AuthContext = &processor.AuthContext{Target: authContextTarget}

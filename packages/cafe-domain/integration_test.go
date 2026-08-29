@@ -310,6 +310,9 @@ func openTabExpect(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseAppKey},
 			OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -397,7 +400,12 @@ func TestCharge_AccumulatesTotalCents(t *testing.T) {
 			SubmittedAt:   "2026-07-07T12:05:00Z",
 			Class:         "tab",
 			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":` + strconv.Itoa(amountCents) + `}`),
-			ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
 		}
 		testutil.PublishOp(t, conn, env)
 		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -484,7 +492,12 @@ func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":850}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -497,7 +510,12 @@ func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:06:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":350}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -533,7 +551,12 @@ func TestVoidCharge_ClampsAtZero(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":300}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -546,7 +569,12 @@ func TestVoidCharge_ClampsAtZero(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:06:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":9000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -583,7 +611,12 @@ func TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided(t *testing.T) {
 			SubmittedAt:   "2026-07-22T12:05:00Z",
 			Class:         "tab",
 			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":` + strconv.Itoa(amountCents) + `}`),
-			ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
 		}
 		testutil.PublishOp(t, conn, env)
 		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -599,7 +632,12 @@ func TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:06:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -650,7 +688,12 @@ func TestVoidCharge_ByLineId_RejectsUnknownLine(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":450}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -688,7 +731,12 @@ func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":850}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -701,7 +749,12 @@ func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:06:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":350}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -762,6 +815,9 @@ func TestVoidCharge_RejectsAfterSettle(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -843,7 +899,12 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":1200}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -859,6 +920,9 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -935,6 +999,9 @@ func TestSettle_BackfillsChargedToWhenMissing(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -969,6 +1036,9 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleOnce)
@@ -1034,7 +1104,12 @@ func TestSettleStaleTab_ClosesTabAndBackfillsChargedTo(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":900}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1096,6 +1171,9 @@ func TestSettleStaleTab_NoOpsIfAlreadySettled(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -1217,6 +1295,9 @@ func TestCharge_RejectsAfterSettle(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -1280,6 +1361,9 @@ func TestOpenTab_AllowsReopenAfterSettle(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{firstTabKey, firstTabKey + ".status"},
 			OptionalReads: []string{chargedToOptionalRead(firstTabKey, leaseKey)},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
@@ -1506,7 +1590,12 @@ func createMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 		SubmittedAt:   "2026-07-18T12:00:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"name":"` + name + `","priceCents":` + strconv.Itoa(priceCents) + `,"locationKey":"` + locationKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{locationKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1634,7 +1723,12 @@ func TestRetireMenuItem_Tombstones(t *testing.T) {
 		SubmittedAt:   "2026-07-18T12:05:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{itemKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1885,6 +1979,9 @@ func TestCharge_Staff_CatalogItemDerivesAmount(t *testing.T) {
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1929,7 +2026,12 @@ func TestCharge_Staff_HandKeyedAmountStillAccepted(t *testing.T) {
 		SubmittedAt:   "2026-07-30T12:10:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":999,"description":"Lost key fob"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -1973,6 +2075,9 @@ func TestCharge_Staff_RejectedForMenuItemAtAnotherBuilding(t *testing.T) {
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, env)

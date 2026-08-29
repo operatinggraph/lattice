@@ -58,6 +58,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "accountKey",
 				TargetType:  "cafeaccount",
 				Reads:       []string{"{payload.accountKey}"},
+				// The operator-role confinement probe: workplace_exempt's
+				// short-circuit walks the actor's own holdsRole links to test
+				// for the operator role (scripts.go actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 	}

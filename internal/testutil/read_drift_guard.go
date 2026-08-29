@@ -136,7 +136,7 @@ func (g *ReadDriftGuard) ObserveScriptReads(_ context.Context, env *processor.Op
 		g.fail("walk:"+op+"|"+shape,
 			"read-drift: operation %q walked the enumeration %s, and nothing declared it.\n"+
 				"    fix: add {hub, relation, direction} to that dispatcher's contextHint.enumerations.\n"+
-				"    if the walk cannot be declared (an op dispatched from a pkgmgr.OpDispatchSpec descriptor has no Enumerations field to declare it in), add the row `walk\t%s\t%s` to internal/testutil/read_drift_baseline.txt, under a `#` comment stating why.\n"+
+				"    if the walk cannot be declared (a link-discovered hub — one only a prior read resolves, so no dispatcher can name it up front), add the row `walk\t%s\t%s` to internal/testutil/read_drift_baseline.txt, under a `#` comment stating why.\n"+
 				"    add that row BY HAND. Regenerating the baseline would re-record every walk the run made, including this one, and silence the finding without anyone reading it.",
 			op, shape, op, shape)
 	}

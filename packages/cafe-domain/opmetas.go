@@ -95,6 +95,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}.cafeOpenTab",
 					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
 				},
+				// The operator-role confinement probe: require_workplace's
+				// workplace-exempt short-circuit walks the actor's own
+				// holdsRole links to test for the operator role (ddls.go
+				// actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -131,6 +138,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
 				},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -158,6 +170,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "tabKey",
 				TargetType:  "tab",
 				Reads:       []string{"{payload.tabKey}", "{payload.tabKey}.status"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -200,6 +217,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
 					"lnk.tab.{payload.tabKey:id}.chargedTo.leaseapp.{me.leaseapp:id}",
 				},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -225,6 +247,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Class:       "menuitem",
 				AuthContext: "standing",
 				Reads:       []string{"{payload.locationKey}"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -248,6 +275,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "menuItemKey",
 				TargetType:  "menuitem",
 				Reads:       []string{"{payload.menuItemKey}"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
@@ -273,6 +305,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "menuItemKey",
 				TargetType:  "menuitem",
 				Reads:       []string{"{payload.menuItemKey}", "{payload.newLocation}"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 	}

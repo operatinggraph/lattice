@@ -355,7 +355,12 @@ func TestDebitCreditCafeAccount_PostEntries(t *testing.T) {
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "cafetransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"House tab payment"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{acctKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: ledgerActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, creditEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

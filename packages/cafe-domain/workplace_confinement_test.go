@@ -138,6 +138,9 @@ func submitOpenTabAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
 			OptionalReads: []string{leaseKey + ".cafeOpenTab"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -193,7 +196,12 @@ func wcSubmitVoidCharge(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-20T12:30:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":100}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	if forgedTarget != "" {
 		env.AuthContext = &processor.AuthContext{Target: forgedTarget}
@@ -237,7 +245,12 @@ func TestWorkplace_ForgedAuthContextTargetStaysConfined(t *testing.T) {
 			SubmittedAt:   "2026-07-20T12:10:00Z",
 			Class:         "tab",
 			Payload:       json.RawMessage(`{"tabKey":"` + tc.tab + `","amountCents":800}`),
-			ContextHint:   &processor.ContextHint{Reads: []string{tc.tab, tc.tab + ".status"}},
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tc.tab, tc.tab + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
 		}
 		testutil.PublishOp(t, conn, env)
 		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -345,7 +358,12 @@ func wcSubmitCreateMenuItem(t *testing.T, ctx context.Context, conn *substrate.C
 		SubmittedAt:   "2026-08-05T12:00:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"name":"Latte","priceCents":450,"locationKey":"` + locationKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{locationKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")
@@ -366,7 +384,12 @@ func wcSubmitCreateMenuItemWithReason(t *testing.T, ctx context.Context, conn *s
 		SubmittedAt:   "2026-08-05T12:00:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"name":"Latte","priceCents":450,"locationKey":"` + locationKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{locationKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	msg := ""
@@ -389,7 +412,12 @@ func wcSubmitRetireMenuItem(t *testing.T, ctx context.Context, conn *substrate.C
 		SubmittedAt:   "2026-08-05T12:05:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{itemKey}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	return testutil.DriveOne(t, ctx, cp, cons, "")

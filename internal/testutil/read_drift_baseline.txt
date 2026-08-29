@@ -27,14 +27,18 @@
 #     guard must stay quiet.
 #
 # WHAT THE WALK ROWS ACTUALLY ARE. A walk is declarable through
-# ContextHint.Enumerations, and four channels populate it: Loom StepSpec, Weaver
-# GapActionSpec, a hand-built envelope (cmd/lattice/candidates/candidates.go
-# does this for MergeIdentity), and a client passing enumerations through the
-# gateway or Loupe (internal/gateway/gateway.go, cmd/loupe/op.go). The channel
-# that does NOT exist is the descriptor one: pkgmgr.OpDispatchSpec carries Reads
-# and OptionalReads but no Enumerations field (internal/pkgmgr/definition.go),
-# so an ordinary descriptor-dispatched op cannot declare a walk at all. Those
-# rows are a missing vocabulary, not script debt.
+# ContextHint.Enumerations, and five channels populate it: Loom StepSpec, Weaver
+# GapActionSpec, pkgmgr.OpDispatchSpec (an ordinary descriptor-dispatched op's
+# own Enumerations field, internal/pkgmgr/definition.go), a hand-built envelope
+# (cmd/lattice/candidates/candidates.go does this for MergeIdentity), and a
+# client passing enumerations through the gateway or Loupe
+# (internal/gateway/gateway.go, cmd/loupe/op.go). The residue that remains is
+# the LINK-DISCOVERED hub: a walk whose hub vertex only exists after a prior
+# read resolves it — e.g. `vtx.building.<id> containedIn out`, reached from a
+# unit's own containedIn target — which no surface above can declare, because
+# every one of them resolves its hub at dispatch time, before the walk that
+# would produce this hub has run. Those rows are a structural gap, not script
+# debt.
 #
 # The two are not the same fix and the split is measurable: a walk row whose op
 # is ALSO seen declaring that exact shape in some other execution is a fixture
@@ -179,7 +183,6 @@ walk	CancelBooking	vtx.studio.<id> locatedAt out
 walk	CancelBooking	vtx.wellnesstransaction.<id> postedTo out
 walk	CancelRenewal	vtx.leaseapp.<id> appliesToUnit out
 walk	CancelRenewal	vtx.renewal.<id> renews out
-walk	Charge	vtx.identity.<id> holdsRole out
 walk	Charge	vtx.leaseapp.<id> appliesToUnit out
 walk	Charge	vtx.menuitem.<id> servedAt out
 walk	Charge	vtx.unit.<id> containedIn out
@@ -198,7 +201,6 @@ walk	CreateLeaseDocInstance	vtx.leaseapp.<id> applicationFor out
 walk	CreateLeaseDocInstance	vtx.leaseapp.<id> appliesToUnit out
 walk	CreateLeaseDocInstance	vtx.unit.<id> manages in
 walk	CreateMenuItem	vtx.building.<id> containedIn out
-walk	CreateMenuItem	vtx.identity.<id> holdsRole out
 walk	CreateSession	vtx.building.<id> containedIn out
 walk	CreateSession	vtx.identity.<id> holdsRole out
 walk	CreateSession	vtx.studio.<id> locatedAt out
@@ -213,7 +215,6 @@ walk	CreditCafeAccount	vtx.building.<id> containedIn out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> heldFor out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> postedTo in
 walk	CreditCafeAccount	vtx.floor.<id> containedIn out
-walk	CreditCafeAccount	vtx.identity.<id> holdsRole out
 walk	CreditCafeAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	CreditCafeAccount	vtx.unit.<id> containedIn out
 walk	DecideLeaseApplication	vtx.building.<id> containedIn out
@@ -234,7 +235,6 @@ walk	MarkPastDueNoShow	vtx.appointment.<id> withProvider out
 walk	MergeIdentity	vtx.identity.<id> assignedTo in
 walk	MergeIdentity	vtx.identity.<id> indexes in
 walk	OpenTab	vtx.building.<id> containedIn out
-walk	OpenTab	vtx.identity.<id> holdsRole out
 walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
 walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
@@ -262,7 +262,6 @@ walk	ResumeVisitSeries	vtx.identity.<id> holdsRole out
 walk	ResumeVisitSeries	vtx.provider.<id> practicesAt out
 walk	ResumeVisitSeries	vtx.visitseries.<id> withProvider out
 walk	RetireMenuItem	vtx.building.<id> containedIn out
-walk	RetireMenuItem	vtx.identity.<id> holdsRole out
 walk	RetireMenuItem	vtx.menuitem.<id> servedAt out
 walk	SetAppointmentSite	vtx.appointment.<id> atSite out
 walk	SetAppointmentSite	vtx.appointment.<id> withProvider out
@@ -285,7 +284,6 @@ walk	SetVisitSeriesSite	vtx.identity.<id> holdsRole out
 walk	SetVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> withProvider out
-walk	Settle	vtx.identity.<id> holdsRole out
 walk	Settle	vtx.leaseapp.<id> appliesToUnit out
 walk	SettleStaleTab	vtx.tab.<id> chargedTo out
 walk	SignLease	vtx.leaseapp.<id> appliesToUnit out
@@ -297,7 +295,6 @@ walk	TombstoneSession	vtx.session.<id> ledBy out
 walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out
 walk	VerifyGuarantor	vtx.renewal.<id> renews out
 walk	VoidCharge	vtx.building.<id> containedIn out
-walk	VoidCharge	vtx.identity.<id> holdsRole out
 walk	VoidCharge	vtx.leaseapp.<id> appliesToUnit out
 walk	VoidCharge	vtx.unit.<id> containedIn out
 walk	WellnessCreditAccount	vtx.wellnessaccount.<id> heldFor out
