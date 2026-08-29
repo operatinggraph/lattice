@@ -111,7 +111,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"staleAssignedTasks":                {"g0/o0!no-aggregating-item", 0, 0},
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
 	"visitSeriesDue":                    {"g2/o2!no-aggregating-item", 0, 2},
-	"visitSeriesRead":                   {"g2/o2!no-aggregating-item", 0, 2},
+	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
 	"visitSeriesSiteBackfill":           {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessBookingReminders":          {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessBookings":                  {"g2/o3!no-aggregating-item", 0, 2},
