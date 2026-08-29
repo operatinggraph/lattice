@@ -360,6 +360,23 @@ function ledgerBalanceLine(balanceCents) {
   return "Balance: $0.00 (paid in full)";
 }
 
+// statementLine renders the ledger's dueDate/isOverdue/daysOverdue fields (a
+// FIFO-aged statement, cmd/cafe-app/ledger.go's deriveStatement) as a due-by
+// note or a red overdue banner — "" when there's nothing owed to age.
+function statementLine(ledger) {
+  if (!ledger.dueDate) return "";
+  const due = new Date(ledger.dueDate).toLocaleDateString();
+  if (ledger.isOverdue) {
+    const days = ledger.daysOverdue || 0;
+    return (
+      '<p class="ledger-overdue" style="color:#b00020;font-weight:600;">' +
+      "OVERDUE — " + days + (days === 1 ? " day" : " days") + " past due (was due " + due + ")" +
+      "</p>"
+    );
+  }
+  return '<p class="meta">Due ' + due + "</p>";
+}
+
 // itemsMemoLine renders a tab's running itemsMemo (cafe-domain's tabStatus
 // aspect — comma-joined names, "" on a fresh tab) as its own meta line, or
 // nothing at all when there is nothing charged yet to show.
@@ -1214,6 +1231,7 @@ async function renderResident() {
     '<div class="panel" style="max-width:640px;">' +
     "<h2>Café ledger</h2>" +
     '<p class="ledger-balance">' + ledgerBalanceLine(ledger.balanceCents) + "</p>" +
+    statementLine(ledger) +
     (rows.length
       ? '<ul class="ledger-list">' +
         rows

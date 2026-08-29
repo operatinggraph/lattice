@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestComputeLedgerHistory_FiltersSumsAndOrders(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
@@ -28,6 +31,66 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	rows, balance := computeLedgerHistory(nil, func(string) ([]byte, bool) { return nil, false }, "vtx.leaseapp.fresh")
 	if len(rows) != 0 || balance != 0 {
 		t.Errorf("want no rows / zero balance, got %d rows, balance=%d", len(rows), balance)
+	}
+}
+
+func TestDeriveStatement_ZeroOrCreditBalanceHasNoDueDate(t *testing.T) {
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	if due, overdue, days := deriveStatement(nil, 0, now); due != "" || overdue || days != 0 {
+		t.Errorf("zero balance: want no due date, got due=%q overdue=%v days=%d", due, overdue, days)
+	}
+	if due, overdue, days := deriveStatement(nil, -500, now); due != "" || overdue || days != 0 {
+		t.Errorf("credit balance: want no due date, got due=%q overdue=%v days=%d", due, overdue, days)
+	}
+}
+
+func TestDeriveStatement_WithinGraceIsNotOverdue(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "2026-08-20T00:00:00Z"}}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 4750, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (15 days after the charge)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue within grace, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+func TestDeriveStatement_PastGraceIsOverdue(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "2026-08-01T00:00:00Z"}}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 4750, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+func TestDeriveStatement_CreditsAgeOffTheOldestDebitFirst(t *testing.T) {
+	// Two debits; a credit big enough to fully clear the older one leaves the
+	// NEWER debit's postedAt as the balance's true age — FIFO, not LIFO.
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, _ := deriveStatement(rows, 500, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (aged from the surviving Aug 20 debit)", due)
+	}
+	if overdue {
+		t.Errorf("want not overdue (grace runs from the surviving debit, not the paid-off one)")
+	}
+}
+
+func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "not-a-date"}}
+	due, overdue, days := deriveStatement(rows, 4750, time.Now())
+	if due != "" || overdue || days != 0 {
+		t.Errorf("malformed postedAt: want fail-closed (no due date), got due=%q overdue=%v days=%d", due, overdue, days)
 	}
 }
 

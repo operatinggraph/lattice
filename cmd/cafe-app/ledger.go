@@ -5,9 +5,14 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 )
+
+// statementGraceDays is the net term between a charge posting and it counting
+// overdue.
+const statementGraceDays = 15
 
 // ledgerEntryProjection is one row of the cafe-ledger `cafeLedgerHistory` lens.
 type ledgerEntryProjection struct {
@@ -79,6 +84,55 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 	return rows, balance
 }
 
+// deriveStatement turns a chronologically-sorted ledger into a due date and
+// overdue state, without the ledger ever storing either: credits offset the
+// OLDEST still-open debit first (FIFO aging, mirroring how a real statement
+// ages a balance), so the survivor at the front of the queue is the charge
+// that has actually been sitting unpaid the longest — not just the most
+// recent charge. A zero/credit balance has nothing to age and returns no due
+// date. A malformed postedAt on the oldest open debit fails closed (no due
+// date) rather than guessing.
+func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (dueDate string, isOverdue bool, daysOverdue int) {
+	if balanceCents <= 0 {
+		return "", false, 0
+	}
+	type openDebit struct {
+		postedAt  string
+		remaining int64
+	}
+	var open []openDebit
+	for _, r := range rows {
+		switch r.Type {
+		case "debit":
+			open = append(open, openDebit{postedAt: r.PostedAt, remaining: r.AmountCents})
+		case "credit":
+			remaining := r.AmountCents
+			for remaining > 0 && len(open) > 0 {
+				if open[0].remaining > remaining {
+					open[0].remaining -= remaining
+					remaining = 0
+				} else {
+					remaining -= open[0].remaining
+					open = open[1:]
+				}
+			}
+		}
+	}
+	if len(open) == 0 {
+		return "", false, 0
+	}
+	oldest, err := time.Parse(time.RFC3339, open[0].postedAt)
+	if err != nil {
+		return "", false, 0
+	}
+	due := oldest.AddDate(0, 0, statementGraceDays)
+	if !now.After(due) {
+		return due.Format(time.RFC3339), false, 0
+	}
+	days := int(now.Sub(due).Hours()/24) + 1
+	return due.Format(time.RFC3339), true, days
+}
+
 // resolveLeaseAccount scans the cafeLeaseAccounts lens rows for the one
 // matching leaseAppKey, returning its account key ("" if the lease has none
 // yet).
@@ -148,10 +202,14 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, balance := computeLedgerHistory(keys, s.kvGetter(ctx, bucket), leaseAppKey)
+	dueDate, isOverdue, daysOverdue := deriveStatement(rows, balance, time.Now().UTC())
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"leaseAppKey":  leaseAppKey,
 		"accountKey":   accountKey,
 		"transactions": rows,
 		"balanceCents": balance,
+		"dueDate":      dueDate,
+		"isOverdue":    isOverdue,
+		"daysOverdue":  daysOverdue,
 	})
 }
