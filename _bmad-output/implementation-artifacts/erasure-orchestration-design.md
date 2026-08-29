@@ -2722,8 +2722,19 @@ enumerations` row, unchanged by this increment.
 
 ### Non-goals
 
-Narrowing `ShredIdentityKey` (build-order step 3), the operator surface and the `lint-conventions`
-rule (step 4), and anything that would give the Weaver's `GapActionSpec` an `OptionalReads` field.
+Narrowing `ShredIdentityKey` (build-order step 3), and the operator surface and the `lint-conventions`
+rule (step 4).
+
+> **2026-08-29 — the `OptionalReads` clause of this non-goal is struck.** It read "and anything that
+> would give the Weaver's `GapActionSpec` an `OptionalReads` field." That field now exists
+> (`7eac550`): `GapActionSpec` and `ActionCatalogEntrySpec` declare `OptionalReads`, the installer
+> emits it, and `buildPlan`'s `directOp` arm resolves it into the dispatched op's
+> `contextHint.optionalReads`. The non-goal scoped THIS increment's build, not the platform, and it is
+> struck here rather than left standing because an unamended body is a wrong instruction to the next
+> fire. **This does not convert `packages/privacy-base`'s three erasure gaps.** Their reads are still
+> undeclared live `kv.Read`s, deliberately: declaring one changes Processor behaviour (step-4 snapshot
+> serve, no live-read-budget charge, and a create off a known-absent key becomes `CreateOnly`-
+> conditioned), so converting them is a posture change on the erasure path and owns its own review.
 
 ### What increment 8 built
 

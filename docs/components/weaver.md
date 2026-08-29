@@ -89,6 +89,37 @@ package (`lease-signing`):
 | `missing_payment` | `triggerLoom` of a collect-payment `externalTask` pattern (the bridge runs the call) |
 | `missing_signature` | `assignTask` — assign a sign **task** to the applicant |
 
+### Gap-action declaration surface — the value grammar and the declared reads
+
+A gap action's **param values** read as three arms, in this order: the token `row.<column>`,
+substituted from the violation row and delivering that column's own type; the token `json:<literal>`,
+decoded into the JSON value its suffix encodes (`json:5` → a number, `json:true` → a bool); or,
+unprefixed, a plain string passed through byte-for-byte. A value that must itself begin with the
+second token is written as its own JSON string — `json:"json:foo"` resolves to `json:foo`. A
+substituted row value is **never re-scanned** for a token, so a lens column literally holding
+`json:5` dispatches as that string rather than steering its own decoding.
+
+The typed token belongs to the **`Params` bag only**. Every other resolved field — `subject`,
+`pattern`, `operation`, `assignee`, `target`, and each `reads` / `optionalReads` /
+`enumerations[].hub` entry — is a key or an identifier, always a string, and refuses the token
+outright. That refusal is load-bearing rather than tidiness: the AI-authored-artifact scope gate
+(`internal/pkgmgr/authored_dispatch_scope.go`) classifies a dispatch by **raw string equality** on
+`operation`/`pattern`, so a field that decoded at dispatch would let an authored target name a
+protected op in a spelling the gate never sees.
+
+A suffix that does not decode, the literal `null`, an empty decoded string, and an integer too large
+to survive the float64 round trip are all **config errors**: the defect is authored and
+row-independent, so it is refused at install and at engine load, not merely at dispatch.
+
+`directOp` gaps also declare **`optionalReads`** — the absence-tolerant half of the Contract #2 §2.5
+read posture, same template grammar as `reads`, reaching the dispatched op's
+`contextHint.optionalReads`. It is `directOp`-only: every other action's optional reads are the
+engine's own to set (`assignTask` builds its stable task dedup key), so a package-declared value on
+another action is a second writer to one field and is refused at install and load. Declaring a key is
+a **semantic** change, not bookkeeping — the Processor serves it from the step-4 snapshot instead of a
+live read, it costs nothing against the live-read budget, and a create off its observed absence
+becomes a `CreateOnly` assertion whose conflict the commit path absorbs on retry.
+
 ### Actuator
 
 - **OCC** — every op carries a revision-condition (substrate per-key revisions) so
