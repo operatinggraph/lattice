@@ -136,6 +136,12 @@ func renewalCompleteTarget() pkgmgr.WeaverTargetSpec {
 			"automatically.",
 		LensRef: "renewalComplete",
 		Mode:    "planned",
+		// missing_renewalComplete carries its own retry cap (maxretries_renewalComplete
+		// = 6, renewal_lenses.go), so a stuck renewal that exhausts it escalates to the
+		// Augur AI-reasoning tier (mirroring targets.go's leaseApplicationComplete Augur
+		// block) instead of only raising a standing Health-KV GapBudgetExhausted issue
+		// with no remediation path.
+		Augur: &pkgmgr.AugurSpec{Escalate: []string{"exhausted"}},
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_renewalComplete": {
 				Goal:        goal,
