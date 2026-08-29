@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +65,16 @@ const rowTemplatePrefix = "row."
 // then json:<literal>, and an unprefixed value is a plain string literal.
 // A value whose json: suffix does not decode is a config error, never a
 // silent fall-through to plain-string.
+//
+// The token is confined to a gap's params bag. Every value that must be a
+// string — a key, an operationType, a pattern ref — refuses it outright
+// (resolveStringParam), because the gates upstream of dispatch compare those
+// fields as raw authored strings.
+//
+// Note when grepping: the escape spelling json:"…" is character-identical to
+// the opening of a Go struct tag (`json:"field,omitempty"`), so a bare grep
+// for it across this repo returns overwhelmingly struct tags. Search for the
+// constant, or for the token inside a params-bag literal.
 const typedLiteralPrefix = "json:"
 
 // errKind classifies a plan failure so the evaluator can route it: a config or
@@ -304,10 +316,25 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		// and template grammar as Reads, so a directOp can route a
 		// row.<column> candidate key into ContextHint.OptionalReads exactly as
 		// it routes one into Reads.
+		//
+		// A DATA-shaped failure drops that one entry instead of failing the
+		// gap, and this is the field where the two differ. The natural way to
+		// declare an absence-tolerant read is a nullable lens column
+		// (row.priorClaimKey, null exactly when there is no prior claim), and
+		// the rows where it is null are precisely the rows the declaration was
+		// written for — failing them would starve the gap forever on the
+		// dispatch it exists to make. A dropped entry degrades to what the
+		// script did before it was declared: a live undeclared read, correct
+		// but unhydrated. A CONFIG error (a typed-literal token, any
+		// permanently undispatchable shape) still fails the gap, because no
+		// row can fix it.
 		var optionalReads []string
 		for i, rt := range ga.OptionalReads {
 			r, perr := resolveReadKey(fmt.Sprintf("optionalReads[%d]", i), rt, row)
 			if perr != nil {
+				if perr.kind == errData {
+					continue
+				}
 				return nil, perr
 			}
 			optionalReads = append(optionalReads, r)
@@ -315,10 +342,11 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		// plan.optionalReads is a closure like plan.payload's own
 		// func(string) map[string]any — ignoring claimID here, since a
 		// directOp's declared reads are pure row-templates, unlike
-		// assignTask's claimId-seeded dedup key. Left nil when the playbook
-		// declares nothing: planOptionalReads treats nil as "none", and a
-		// non-nil closure returning an empty slice is a different, worse
-		// thing (it would attach an empty contextHint.optionalReads key).
+		// assignTask's claimId-seeded dedup key. Nil and empty are equivalent
+		// downstream (the actuator attaches a contextHint only when some list
+		// is non-empty, and the field carries omitempty), so nil is simply
+		// what `var` + `append` yields when nothing resolves, allocating no
+		// closure for a gap that declares none.
 		var optionalReadsFn func(claimID string) []string
 		if len(optionalReads) > 0 {
 			optionalReadsFn = func(string) []string { return optionalReads }
@@ -445,16 +473,17 @@ func (e *Engine) resolvePlannedAction(ctx context.Context, target *Target, targe
 // GapAction").
 func candidateGapAction(c GapCandidate) GapAction {
 	return GapAction{
-		Action:       c.Action,
-		Pattern:      c.Pattern,
-		Subject:      c.Subject,
-		Adapter:      c.Adapter,
-		Operation:    c.Operation,
-		Assignee:     c.Assignee,
-		Target:       c.Target,
-		Params:       c.Params,
-		Reads:        c.Reads,
-		Enumerations: c.Enumerations,
+		Action:        c.Action,
+		Pattern:       c.Pattern,
+		Subject:       c.Subject,
+		Adapter:       c.Adapter,
+		Operation:     c.Operation,
+		Assignee:      c.Assignee,
+		Target:        c.Target,
+		Params:        c.Params,
+		Reads:         c.Reads,
+		OptionalReads: c.OptionalReads,
+		Enumerations:  c.Enumerations,
 	}
 }
 
@@ -645,25 +674,45 @@ func augurEscalation(source *targetSource, target *Target, trigger, targetID, en
 	}, true
 }
 
-// resolveParam resolves one playbook param value against the three arms of the
-// value grammar: the token row.<column>, substituted from the violation row and
-// delivering that column's own Go type; the token json:<literal>, decoded into
-// the JSON value its suffix encodes; or, unprefixed, a plain string literal
-// passed through byte-for-byte. A row.<column> that resolves null/absent is a
-// data error — surface, do not fire a malformed remediation (§10.8
-// Templating). A json: suffix that does not decode is a config error: no row
-// can ever make it dispatchable.
+// resolveRowTemplate resolves the row.<column> arm shared by every value in
+// the playbook's grammar. templated reports whether the value claimed the
+// token at all; when it did, the column's own Go value is returned — an
+// int64 column arrives as an int64 — and a null or absent column is a data
+// error, surfaced rather than fired as a malformed remediation (§10.8
+// Templating).
+func resolveRowTemplate(name, value string, row map[string]any) (v any, templated bool, perr *planError) {
+	col, templated := strings.CutPrefix(value, rowTemplatePrefix)
+	if !templated {
+		return nil, false, nil
+	}
+	v, ok := row[col]
+	if !ok || v == nil {
+		return nil, true, &planError{kind: errData,
+			msg: fmt.Sprintf("param %q references row.%s, which is null/absent in the row", name, col)}
+	}
+	return v, true, nil
+}
+
+// resolveParam resolves one PARAMS-BAG value against the three arms of the
+// value grammar: row.<column>, substituted from the violation row and
+// delivering that column's own Go type; json:<literal>, decoded into the JSON
+// value its suffix encodes; or, unprefixed, a plain string literal passed
+// through byte-for-byte. A json: suffix that does not decode is a config
+// error: no row can ever make it dispatchable.
+//
+// Only the params bag reaches this resolver. Every other authored value is a
+// key, an operationType or a pattern ref — always a string — and takes the
+// two-arm resolveStringParam below, which refuses the typed-literal token
+// outright. The split is the security boundary: gates upstream of dispatch
+// (pkgmgr's authored-dispatch scope check, the Augur proposal scope check)
+// compare those fields as RAW authored strings, so a field that decoded at
+// dispatch would be one the gate never saw.
 func resolveParam(name, value string, row map[string]any) (any, *planError) {
 	if value == "" {
 		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("param %q is required", name)}
 	}
-	if col, templated := strings.CutPrefix(value, rowTemplatePrefix); templated {
-		v, ok := row[col]
-		if !ok || v == nil {
-			return nil, &planError{kind: errData,
-				msg: fmt.Sprintf("param %q references row.%s, which is null/absent in the row", name, col)}
-		}
-		return v, nil
+	if v, templated, perr := resolveRowTemplate(name, value, row); templated {
+		return v, perr
 	}
 	if literal, typed := strings.CutPrefix(value, typedLiteralPrefix); typed {
 		return decodeTypedLiteral(name, literal)
@@ -672,12 +721,16 @@ func resolveParam(name, value string, row map[string]any) (any, *planError) {
 }
 
 // decodeTypedLiteral decodes the suffix of a json:<literal> param into the
-// value it encodes. It fails closed on both refusals rather than degrading to
-// the plain-string arm: a suffix that is not valid JSON, and the literal null
-// — a null param is indistinguishable from an omitted one, and the templated
-// arm above already treats a null row value as an error, so accepting it here
-// would make "declared, deliberately empty" and "not declared" the same
-// dispatch.
+// value it encodes, failing closed rather than degrading to the plain-string
+// arm on each of four shapes:
+//
+//   - a suffix that is not valid JSON;
+//   - the literal null, and the empty string — both indistinguishable at the
+//     receiving op from a param that was never declared, so accepting either
+//     would give one dispatch two spellings (the plain arm likewise refuses an
+//     unwritten value, and the templated arm refuses a null column);
+//   - an integer whose decimal spelling float64 cannot hold exactly, which
+//     would otherwise dispatch a DIFFERENT number than the author wrote.
 func decodeTypedLiteral(name, literal string) (any, *planError) {
 	var v any
 	if err := json.Unmarshal([]byte(literal), &v); err != nil {
@@ -689,10 +742,80 @@ func decodeTypedLiteral(name, literal string) (any, *planError) {
 		return nil, &planError{kind: errConfig,
 			msg: fmt.Sprintf("param %q resolves to the %snull typed literal — a null param is indistinguishable from an absent one; omit the param instead", name, typedLiteralPrefix)}
 	}
+	if s, isStr := v.(string); isStr && s == "" {
+		return nil, &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q resolves to the empty string — an empty param is indistinguishable from an absent one; omit the param instead", name)}
+	}
+	if lossy, spelling := lossyJSONInteger(literal); lossy {
+		return nil, &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q declares the integer %s, which a JSON number (float64) cannot hold exactly — it would dispatch as %s; send it as a %sstring, or use a row.<column> template, which carries the column's exact type",
+				name, spelling, formatJSONFloat(spelling), typedLiteralPrefix)}
+	}
 	return v, nil
 }
 
-// typedLiteralError reports the config error a param value would raise at
+// lossyJSONInteger reports whether a JSON document contains an integer-spelled
+// number float64 cannot represent exactly, and returns that spelling. The
+// row.<column> arm delivers a lens column's exact int64, so a typed literal
+// that silently rounded (9007199254740993 → …92, a nanosecond timestamp →
+// …000) would be the one arm of the grammar that changes the author's value.
+// Only integer spellings are checked: a spelling that already carries a
+// decimal point or an exponent is float notation, where the author has asked
+// for float semantics outright.
+func lossyJSONInteger(literal string) (bool, string) {
+	dec := json.NewDecoder(strings.NewReader(literal))
+	dec.UseNumber()
+	var shadow any
+	if err := dec.Decode(&shadow); err != nil {
+		return false, ""
+	}
+	return walkJSONNumbers(shadow)
+}
+
+func walkJSONNumbers(v any) (bool, string) {
+	switch t := v.(type) {
+	case json.Number:
+		s := t.String()
+		if strings.ContainsAny(s, ".eE") {
+			return false, ""
+		}
+		if formatJSONFloat(s) != s {
+			return true, s
+		}
+	case []any:
+		for _, e := range t {
+			if lossy, s := walkJSONNumbers(e); lossy {
+				return true, s
+			}
+		}
+	case map[string]any:
+		// Sorted, because Go randomizes map range and two lossy numbers in one
+		// object would otherwise name a different one on each run.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if lossy, s := walkJSONNumbers(t[k]); lossy {
+				return true, s
+			}
+		}
+	}
+	return false, ""
+}
+
+// formatJSONFloat renders an integer spelling as the decimal float64 actually
+// dispatches for it, so a refusal can show the author both numbers.
+func formatJSONFloat(spelling string) string {
+	f, err := strconv.ParseFloat(spelling, 64)
+	if err != nil {
+		return spelling
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// typedLiteralError reports the config error a params-bag value would raise at
 // dispatch through decodeTypedLiteral, or nil when the value is not a typed
 // literal or is a well-formed one. The token's suffix is authored, never
 // row-derived, so the verdict is row-independent — which is what lets
@@ -707,12 +830,35 @@ func typedLiteralError(name, value string) *planError {
 	return perr
 }
 
-// resolveStringParam resolves a param that must produce a non-empty string
-// (keys, operation types, pattern refs).
+// resolveStringParam resolves a value that must produce a non-empty string
+// (keys, operation types, pattern refs) against TWO arms: row.<column>, or a
+// plain string literal.
+//
+// The json:<literal> token is refused outright here, loudly, rather than
+// decoded or quietly passed through. A string field has nothing to gain from
+// the token — json:"Foo" is a verbose spelling of Foo — and everything to
+// lose: pkgmgr's authored-dispatch scope guard compares ga.Operation and
+// ga.Pattern against its protected sets by RAW string equality, and Augur's
+// proposal scope check compares raw param values against the escalated
+// candidate, so a field that decoded at dispatch would let an authored target
+// name a protected op (or a foreign vertex key) in a spelling no gate
+// recognises. Refusing beats passing the token through untouched, which would
+// merely defer the failure to an unresolvable operationType.
 func resolveStringParam(name, value string, row map[string]any) (string, *planError) {
-	v, perr := resolveParam(name, value, row)
+	if value == "" {
+		return "", &planError{kind: errConfig, msg: fmt.Sprintf("param %q is required", name)}
+	}
+	if strings.HasPrefix(value, typedLiteralPrefix) {
+		return "", &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted here (it is meaningful only in a gap's params bag); write the value directly",
+				name, typedLiteralPrefix)}
+	}
+	v, templated, perr := resolveRowTemplate(name, value, row)
 	if perr != nil {
 		return "", perr
+	}
+	if !templated {
+		return value, nil
 	}
 	s, ok := v.(string)
 	if !ok || s == "" {
@@ -728,9 +874,10 @@ func resolveStringParam(name, value string, row map[string]any) (string, *planEr
 // row.<column>.<aspect> — the column resolves to a vertex root key and
 // <aspect> (which may itself contain dots) is joined onto it, mirroring the
 // Starlark idiom `unit + ".listing"` for a read one aspect below a row
-// column's own key (script-read-posture-design.md §13 hard case 4). Only
-// Reads uses this — Params/Target/Operation stay exact row-column lookups,
-// since a param value isn't necessarily a composable key.
+// column's own key (script-read-posture-design.md §13 hard case 4). The three
+// declared key lists use it — Reads, OptionalReads and each Enumerations hub —
+// while Params/Target/Operation stay exact row-column lookups, since those
+// values are not necessarily composable keys.
 func resolveReadKey(name, value string, row map[string]any) (string, *planError) {
 	s, perr := resolveStringParam(name, value, row)
 	if perr == nil {

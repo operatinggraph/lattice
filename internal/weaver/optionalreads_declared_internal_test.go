@@ -129,9 +129,9 @@ func TestDirectOpOptionalReads_ReachEnvelope(t *testing.T) {
 // to nil, and every dispatch publishes an optionalReads-free envelope with
 // nothing red anywhere.
 //
-// It also proves D2's mirror end to end: the catalog entry's OptionalReads
-// decodes AND survives catalogEntryGapAction's materialization into the
-// GapAction shape buildPlan actually consumes.
+// It also covers the catalog surface end to end: the catalog entry's
+// OptionalReads decodes AND survives catalogEntryGapAction's materialization
+// into the GapAction shape buildPlan actually consumes.
 func TestTargetGap_OptionalReadsRoundTripFromSpecBody(t *testing.T) {
 	t.Parallel()
 
@@ -173,8 +173,8 @@ func TestTargetGap_OptionalReadsRoundTripFromSpecBody(t *testing.T) {
 		"a gap declaring nothing round-trips as nil")
 }
 
-// TestValidateTarget_RejectsOptionalReadsOnNonDirectOp is checklist item 5's
-// enforcement: buildPlan's assignTask arm already builds its OWN
+// TestValidateTarget_RejectsOptionalReadsOnNonDirectOp enforces one
+// deterministic field, one writer: buildPlan's assignTask arm already builds its OWN
 // plan.optionalReads closure (the stable task dedup key + the assignee
 // availability aspect), so a package-declared OptionalReads on an assignTask
 // (or any non-directOp) gap would collide with it. validateTarget refuses the
@@ -225,7 +225,7 @@ func TestValidateTarget_RejectsOptionalReadsOnNonDirectOp(t *testing.T) {
 	require.ErrorContains(t, validateTarget(triggerLoomBad), "optionalReads")
 
 	// Negative: a goal catalog entry whose Action is assignTask hits the same
-	// collision through the OTHER surface (D2's mirror) — the whole target
+	// collision through the OTHER declaration surface — the whole target
 	// must be rejected, not just the offending entry silently dropped.
 	catalogBad := &Target{
 		TargetID: "fixtureOptReadsCatalog",
@@ -264,8 +264,9 @@ func TestValidateTarget_RejectsOptionalReadsOnNonDirectOp(t *testing.T) {
 	require.NoError(t, validateTarget(catalogOK), "a directOp catalog entry declaring OptionalReads must load")
 }
 
-// TestResolveGoalAction_CarriesOptionalReadsIntoDispatchedPlan proves D2 end
-// to end: an ActionCatalogEntrySpec's OptionalReads is not just decodable
+// TestResolveGoalAction_CarriesOptionalReadsIntoDispatchedPlan proves the
+// catalog surface end to end: an ActionCatalogEntrySpec's OptionalReads is not
+// just decodable
 // (TestTargetGap_OptionalReadsRoundTripFromSpecBody) but reaches a REAL
 // dispatched plan on the mode:"planned" path — resolveGoalAction picks the
 // entry, catalogEntryGapAction materializes it, and buildPlan resolves its

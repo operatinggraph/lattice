@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -53,8 +54,15 @@ const optionalReadsAction = actionDirectOp
 // typedLiteralPrefix is the playbook param-value token that carries a JSON
 // type: json:<literal> dispatches as whatever encoding/json decodes the suffix
 // into, so a map[string]string params bag can still deliver a number or a
-// bool. Re-stated here (the installer depends on no engine) and pinned against
-// internal/weaver's own constant by TestGapCompanionPrefixes_MatchWeaverVocabulary.
+// bool. Meaningful ONLY in a gap's params bag — every string-typed field
+// (subject, pattern, operation, assignee, target, and each declared read or
+// enumeration hub) refuses it, here and in the engine.
+//
+// Re-stated here because the installer depends on no engine, and tied back on
+// both axes: the CONSTANT by TestGapCompanionPrefixes_MatchWeaverVocabulary,
+// which reads internal/weaver's source, and the decode RULE by
+// TestTypedLiteralDecode_AgreesWithWeaverEngine, which runs this file's
+// implementation and the engine's over one shared corpus.
 //
 // Whether a suffix decodes depends on the authored value alone — no row
 // participates — so a malformed one is a permanent defect that could never
@@ -194,6 +202,12 @@ func (def Definition) validateWeaverTargets() error {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q: %w",
 					idx, t.TargetID, col, name, err)
 			}
+			if f, found := typedLiteralInStringField(dispatchStringFields(
+				ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Target,
+				ga.Reads, ga.OptionalReads, ga.Enumerations)); found {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
+					idx, t.TargetID, col, f.name, f.value, typedLiteralPrefix)
+			}
 			// A goal-authored gap (R1) legitimately declares no top-level
 			// Action — dispatch comes entirely from the Actions catalog via
 			// goal regression (mirrors the engine: buildPlan's Mode==planned
@@ -238,12 +252,17 @@ func sortedGapColumns(gaps map[string]GapActionSpec) []string {
 	return cols
 }
 
-// malformedTypedLiteral returns the first param (in name order) whose value
-// carries the json:<literal> typed-literal token over a suffix encoding/json
-// cannot decode, or whose suffix decodes to null — the two shapes the engine's
-// resolveParam refuses as config errors rather than degrading to a plain
-// string. null is refused because a null param is indistinguishable from an
-// omitted one.
+// malformedTypedLiteral returns the first param (in name order) whose
+// json:<literal> value carries a shape the engine's decodeTypedLiteral refuses
+// as a config error rather than degrading to a plain string: a suffix
+// encoding/json cannot decode, the literal null or the empty string (each
+// indistinguishable at the receiving op from a param that was never declared),
+// or an integer float64 cannot hold exactly (it would dispatch a different
+// number than the author wrote).
+//
+// This is a SECOND implementation of that rule — the installer depends on no
+// engine — so TestTypedLiteralDecode_AgreesWithWeaverEngine runs both over one
+// shared corpus and fails the moment they disagree.
 //
 // A value not carrying the token is a plain string literal and is never
 // inspected: an unrecognised prefix belongs to the plain-string arm, so the
@@ -258,20 +277,140 @@ func malformedTypedLiteral(params map[string]string) (string, error) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		literal, typed := strings.CutPrefix(params[name], typedLiteralPrefix)
-		if !typed {
-			continue
-		}
-		var v any
-		if err := json.Unmarshal([]byte(literal), &v); err != nil {
-			return name, fmt.Errorf("carries the %s typed-literal token but %q is not valid JSON: %w — a string that must itself begin with the token is written as its own JSON string (%s\"json:foo\" resolves to json:foo)",
-				typedLiteralPrefix, literal, err, typedLiteralPrefix)
-		}
-		if v == nil {
-			return name, fmt.Errorf("is the %snull typed literal — a null param is indistinguishable from an absent one; omit the param instead", typedLiteralPrefix)
+		if err := typedLiteralValueError(params[name]); err != nil {
+			return name, err
 		}
 	}
 	return "", nil
+}
+
+// typedLiteralValueError is malformedTypedLiteral's per-value rule, split out
+// so one corpus can exercise it directly against the engine's decoder.
+func typedLiteralValueError(value string) error {
+	literal, typed := strings.CutPrefix(value, typedLiteralPrefix)
+	if !typed {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal([]byte(literal), &v); err != nil {
+		return fmt.Errorf("carries the %s typed-literal token but %q is not valid JSON: %w — a string that must itself begin with the token is written as its own JSON string (%s\"json:foo\" resolves to json:foo)",
+			typedLiteralPrefix, literal, err, typedLiteralPrefix)
+	}
+	if v == nil {
+		return fmt.Errorf("is the %snull typed literal — a null param is indistinguishable from an absent one; omit the param instead", typedLiteralPrefix)
+	}
+	if s, isStr := v.(string); isStr && s == "" {
+		return fmt.Errorf("resolves to the empty string — an empty param is indistinguishable from an absent one; omit the param instead")
+	}
+	if lossy, spelling := lossyJSONInteger(literal); lossy {
+		return fmt.Errorf("declares the integer %s, which a JSON number (float64) cannot hold exactly — it would dispatch as %s; send it as a %sstring, or use a row.<column> template, which carries the column's exact type",
+			spelling, formatJSONFloat(spelling), typedLiteralPrefix)
+	}
+	return nil
+}
+
+// lossyJSONInteger reports whether a JSON document contains an integer-spelled
+// number float64 cannot represent exactly, and returns that spelling. Mirrors
+// the engine's rule: a row.<column> template carries a lens column's exact
+// int64, so a typed literal that silently rounded would be the one arm of the
+// grammar that changes the author's value. A spelling carrying a decimal point
+// or an exponent is float notation and is left alone.
+func lossyJSONInteger(literal string) (bool, string) {
+	dec := json.NewDecoder(strings.NewReader(literal))
+	dec.UseNumber()
+	var shadow any
+	if err := dec.Decode(&shadow); err != nil {
+		return false, ""
+	}
+	return walkJSONNumbers(shadow)
+}
+
+func walkJSONNumbers(v any) (bool, string) {
+	switch t := v.(type) {
+	case json.Number:
+		s := t.String()
+		if strings.ContainsAny(s, ".eE") {
+			return false, ""
+		}
+		if formatJSONFloat(s) != s {
+			return true, s
+		}
+	case []any:
+		for _, e := range t {
+			if lossy, s := walkJSONNumbers(e); lossy {
+				return true, s
+			}
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if lossy, s := walkJSONNumbers(t[k]); lossy {
+				return true, s
+			}
+		}
+	}
+	return false, ""
+}
+
+// formatJSONFloat renders an integer spelling as the decimal float64 actually
+// dispatches for it, so a refusal can show the author both numbers.
+func formatJSONFloat(spelling string) string {
+	f, err := strconv.ParseFloat(spelling, 64)
+	if err != nil {
+		return spelling
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// dispatchStringFields lists every field of one action-contract spec that must
+// resolve to a STRING at dispatch — keys, operationTypes, pattern refs — under
+// the name the engine's resolver reports it by. Params is deliberately absent:
+// it is the one bag whose values carry their own type, and so the only place
+// the typed-literal token is meaningful.
+func dispatchStringFields(subject, pattern, operation, assignee, target string,
+	reads, optionalReads []string, ens []EnumerationSpec) []namedValue {
+	out := []namedValue{
+		{"subject", subject},
+		{"pattern", pattern},
+		{"operation", operation},
+		{"assignee", assignee},
+		{"target", target},
+	}
+	for i, r := range reads {
+		out = append(out, namedValue{fmt.Sprintf("reads[%d]", i), r})
+	}
+	for i, r := range optionalReads {
+		out = append(out, namedValue{fmt.Sprintf("optionalReads[%d]", i), r})
+	}
+	for i, en := range ens {
+		out = append(out, namedValue{fmt.Sprintf("enumerations[%d].hub", i), en.Hub})
+	}
+	return out
+}
+
+// namedValue pairs one authored dispatch-binding value with the name the
+// engine's resolver reports it under.
+type namedValue struct{ name, value string }
+
+// typedLiteralInStringField returns the first string-typed field carrying the
+// typed-literal token. The engine refuses these at dispatch (resolveStringParam)
+// and at load (validateGapStringFields); install refuses them first, for the
+// same clearer-author-error reason reservedGapParam documents — and because
+// the fields it covers are the ones the authored-dispatch scope guard
+// (authored_dispatch_scope.go) compares by RAW string equality, so a token
+// that survived to dispatch would name an operation or pattern in a spelling
+// no gate recognises.
+func typedLiteralInStringField(fields []namedValue) (namedValue, bool) {
+	for _, f := range fields {
+		if strings.HasPrefix(f.value, typedLiteralPrefix) {
+			return f, true
+		}
+	}
+	return namedValue{}, false
 }
 
 // validateGapCompanionPair enforces Contract #10 §10.3 — "a gap that declares

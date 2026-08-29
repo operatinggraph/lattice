@@ -57,10 +57,11 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 
 	if action == actionDirectOp {
 		// directOp's final op payload can carry ANY JSON type (bool, number,
-		// nested object) — not just strings — so it is built directly here
-		// rather than round-tripped through GapAction.Params (map[string]string,
-		// designed for the STATIC playbook's literal-or-row.<column> STRING
-		// tokens). There is no live-registry resolution to reuse for directOp
+		// nested object) at ANY depth, already decoded on the row. GapAction's
+		// map[string]string params bag reaches those types only through the
+		// json:<literal> token, one authored value at a time — a re-encoding
+		// step with nothing to gain here, since the row IS the decoded data.
+		// There is no live-registry resolution to reuse for directOp
 		// (buildPlan's directOp case does none either), so bypassing it costs
 		// nothing.
 		pl, err := buildProposedDirectOpPlan(params, expectedRevision)
@@ -116,10 +117,18 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 // buildProposedDirectOpPlan materialises a proposed directOp {operation,
 // target?, params, reads?} directly into a plan — params is copied VERBATIM
 // (preserving bool/number/nested-object values a real op payload legitimately
-// carries; e.g. SetAvailability's `available` is a bool, not a string), unlike
-// GapAction.Params (map[string]string, the static playbook's literal-or-
-// row.<column> token shape). No live-registry resolution applies to directOp
-// (buildPlan's own directOp case does none either).
+// carries; e.g. SetAvailability's `available` is a bool, not a string), rather
+// than re-encoding them into GapAction.Params' map[string]string and its
+// row.<column> / json:<literal> / plain-string token grammar. No live-registry
+// resolution applies to directOp (buildPlan's own directOp case does none
+// either).
+//
+// Because this arm never calls resolveParam, validateProposedDispatch's
+// reserved-token refusals are, for directOp specifically, an over-refusal: no
+// decode or re-templating could happen here even if a token got through. They
+// are kept anyway — one vocabulary refused uniformly across every proposed
+// action, rather than a per-arm exemption whose correctness depends on this
+// function never gaining a resolver. Do not "simplify" it away.
 func buildProposedDirectOpPlan(params map[string]any, expectedRevision uint64) (*plan, error) {
 	operation, ok := stringField(params, "operation")
 	if !ok {
@@ -292,13 +301,16 @@ func validateProposedDispatch(action string, params map[string]any, candidateKey
 			return "proposed param value " + s + " uses the reserved row.<column> template prefix, not permitted in a model-proposed literal"
 		}
 		if strings.HasPrefix(s, typedLiteralPrefix) {
-			// The second reserved token, refused for the same reason and with
-			// more bite: resolveParam decodes json:"vtx.identity.other" into a
-			// vertex key that this scope check never saw, because the RAW value
-			// it inspects is not vtx-shaped (isVtxKey splits on dots, and the
-			// raw value's first segment is `json:"vtx`). Validation and dispatch
-			// must see the same string, so a proposal carrying the token is
-			// refused outright rather than decoded and re-checked.
+			// The second reserved token, refused on the same principle:
+			// validation and dispatch must see the same string. A model-
+			// proposed value is scope-checked RAW, and json:"vtx.identity.other"
+			// is not vtx-shaped raw (isVtxKey splits on dots, and the first
+			// segment here is `json:"vtx`), so containment would pass a value
+			// that means something else once decoded. Weaver's own resolvers
+			// now refuse the token on every string-typed field, and the
+			// directOp arm never decodes at all, so this is the outer of two
+			// independent refusals rather than the only one — kept because the
+			// proposal vocabulary is refused at ONE place, uniformly.
 			return "proposed param value " + s + " uses the reserved " + typedLiteralPrefix + "<literal> typed-literal prefix, not permitted in a model-proposed literal"
 		}
 		if s != candidateKey && isVtxKey(s) {

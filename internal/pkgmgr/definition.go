@@ -449,12 +449,24 @@ type GapActionSpec struct {
 	//                    json:foo.
 	//   anything else  — a plain string literal, dispatched byte-for-byte.
 	//
-	// A malformed json: suffix — invalid JSON, or the literal null, which is
-	// indistinguishable from an omitted param — is refused at INSTALL and
-	// again at the engine's own load, never quietly demoted to a plain string.
-	// The refusal is permanent by construction: whether the suffix decodes
-	// depends on the authored value alone, so a gap carrying one could never
-	// dispatch for any row.
+	// A json: suffix is refused — at INSTALL and again at the engine's own
+	// load, never quietly demoted to a plain string — when it is not valid
+	// JSON; when it is null or the empty string, each indistinguishable at the
+	// receiving op from a param that was never declared; or when it is an
+	// integer float64 cannot hold exactly (9007199254740993, a nanosecond
+	// timestamp), which would dispatch a different number than the one
+	// written. Every refusal is permanent by construction: whether a suffix
+	// decodes depends on the authored value alone, so a gap carrying one could
+	// never dispatch for any row.
+	//
+	// The token is confined to THIS bag. Every other field of a gap — Subject,
+	// Pattern, Operation, Assignee, Target, and each entry of Reads,
+	// OptionalReads and Enumerations — is a key, an operationType or a pattern
+	// ref, always a string, and carrying the token there is refused at install
+	// and at load. Those fields are compared as RAW authored strings by the
+	// gates that bound an authored target's dispatch authority
+	// (authored_dispatch_scope.go), so a value that decoded later at dispatch
+	// would be one no gate ever saw.
 	//
 	// Nothing type-checks the resolved value against the op's InputSchema on
 	// the submit path, so an op declaring `"type":"number"` and a playbook
@@ -490,6 +502,15 @@ type GapActionSpec struct {
 	// belongs here — declaring such a key as a required Read fails the whole
 	// dispatch the first time it is legitimately absent. Never for a key the
 	// script requires.
+	//
+	// An entry whose row.<column> template resolves null or absent for a given
+	// row is DROPPED from that dispatch, not an error — the natural way to
+	// declare an absence-tolerant read is a nullable lens column, and the rows
+	// where it is null are exactly the rows the declaration was written for.
+	// The dropped key degrades to what the script did before it was declared:
+	// a live undeclared read. A config error (the typed-literal token, any
+	// permanently undispatchable shape) still fails the gap, since no row can
+	// fix it.
 	//
 	// Declaring a key here changes what the Processor does with it, not merely
 	// where its value comes from: the key is served from the step-4 hydration

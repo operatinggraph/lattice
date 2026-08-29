@@ -136,12 +136,13 @@ func TestBuildPlan_DirectOp_ResolvesOptionalReads(t *testing.T) {
 }
 
 // TestBuildPlan_DirectOp_NoOptionalReadsLeavesPlanFieldNil proves the omission
-// path: a directOp gap that declares no OptionalReads at all must leave
-// pl.optionalReads NIL, not a non-nil closure returning an empty slice —
-// planOptionalReads (evaluator.go) treats nil as "the op declares none", and a
-// non-nil-but-empty closure would be a different, worse thing (every fixture
-// that always supplies an input pins only the supplied case; this is the
-// vector that proves the absent one too).
+// path: a directOp gap that declares no OptionalReads at all leaves
+// pl.optionalReads NIL, so nothing downstream allocates or consults a closure
+// for a declaration the playbook never made. Nil and an empty slice publish
+// the same envelope — the actuator attaches a contextHint only when some list
+// is non-empty — so this pins the shape, and every fixture that always
+// supplies an optional input pins only the supplied case; this is the vector
+// that covers the absent one.
 func TestBuildPlan_DirectOp_NoOptionalReadsLeavesPlanFieldNil(t *testing.T) {
 	t.Parallel()
 	ga := GapAction{

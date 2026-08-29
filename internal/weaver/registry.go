@@ -117,7 +117,10 @@ type GapAction struct {
 	// is the engine's own to set (e.g. assignTask's stable task dedup key +
 	// assignee availability aspect), and validateTarget refuses a
 	// non-directOp gap that declares this field rather than let the two
-	// writers collide.
+	// writers collide. An entry whose template resolves null/absent for a row
+	// is dropped from that dispatch rather than failing it — the field exists
+	// for keys whose absence is normal, so the rows that drop it are the rows
+	// it was written for.
 	OptionalReads []string `json:"optionalReads,omitempty"`
 	// Enumerations are the Contract #2 §2.5 class-(e) link walks the dispatched
 	// op runs (`kv.Links`), declared onto the envelope as metadata. Each Hub is
@@ -226,6 +229,14 @@ type GapCandidate struct {
 	// the same buildPlan), refused at load by the same validateGapParams.
 	Params map[string]string `json:"params,omitempty"`
 	Reads  []string          `json:"reads,omitempty"`
+	// OptionalReads are the chosen candidate's declared absence-tolerant
+	// reads, carried for the same reason Reads and Enumerations are: a
+	// candidate dispatches through the same buildPlan as an explicit
+	// GapAction, so a field the candidate shape omitted would be a
+	// declaration silently dropped from the envelope for every
+	// planner-selected dispatch. Valid only on a directOp, the same
+	// load-time refusal GapAction.OptionalReads carries.
+	OptionalReads []string `json:"optionalReads,omitempty"`
 	// Enumerations are the chosen candidate's declared kv.Links walks, carried
 	// for the same reason Reads is: a candidate dispatches through the same
 	// buildPlan as an explicit GapAction, so anything the action contract can
@@ -720,6 +731,9 @@ func validateTarget(t *Target) error {
 		if err := validateGapParams(fmt.Sprintf("gaps key %q", col), ga.Params); err != nil {
 			return err
 		}
+		if err := validateGapStringFields(fmt.Sprintf("gaps key %q", col), ga); err != nil {
+			return err
+		}
 		if ga.Action == actionSurface && ga.IssueSeverity != "" && ga.IssueSeverity != "warning" && ga.IssueSeverity != "error" {
 			return fmt.Errorf("gaps key %q action %q issueSeverity %q must be \"warning\" or \"error\" (omit for the \"warning\" default) — aggregateStatus only escalates those two",
 				col, ga.Action, ga.IssueSeverity)
@@ -801,6 +815,52 @@ func validateGapParams(where string, params map[string]string) error {
 	for _, name := range names {
 		if perr := typedLiteralError(name, params[name]); perr != nil {
 			return fmt.Errorf("%s: %s", where, perr.msg)
+		}
+	}
+	return nil
+}
+
+// namedValue pairs one authored dispatch-binding value with the name the
+// resolver reports it under.
+type namedValue struct{ name, value string }
+
+// dispatchStringValues lists every field of one action contract that must
+// resolve to a STRING at dispatch — keys, operationTypes, pattern refs — in
+// resolution order. Params is deliberately absent: it is the one bag whose
+// values carry their own type, and so the only place the json:<literal> token
+// is meaningful.
+func dispatchStringValues(ga GapAction) []namedValue {
+	out := []namedValue{
+		{"subject", ga.Subject},
+		{"pattern", ga.Pattern},
+		{"operation", ga.Operation},
+		{"assignee", ga.Assignee},
+		{"target", ga.Target},
+	}
+	for i, r := range ga.Reads {
+		out = append(out, namedValue{fmt.Sprintf("reads[%d]", i), r})
+	}
+	for i, r := range ga.OptionalReads {
+		out = append(out, namedValue{fmt.Sprintf("optionalReads[%d]", i), r})
+	}
+	for i, en := range ga.Enumerations {
+		out = append(out, namedValue{fmt.Sprintf("enumerations[%d].hub", i), en.Hub})
+	}
+	return out
+}
+
+// validateGapStringFields refuses the typed-literal token on any field that
+// must resolve to a string. resolveStringParam refuses it at dispatch for the
+// security reason stated there — the gates upstream compare these fields as
+// raw authored strings — and this makes the refusal one load-time verdict
+// rather than a config error re-raised per violation row forever. No decode
+// is attempted: on these fields the token has no valid form at all, so the
+// check is the leading token alone.
+func validateGapStringFields(where string, ga GapAction) error {
+	for _, f := range dispatchStringValues(ga) {
+		if strings.HasPrefix(f.value, typedLiteralPrefix) {
+			return fmt.Errorf("%s: %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
+				where, f.name, f.value, typedLiteralPrefix)
 		}
 	}
 	return nil
@@ -923,6 +983,12 @@ func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
 		if err := validateGapParams(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Params); err != nil {
 			return ga, err
 		}
+		if err := validateGapStringFields(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), candidateGapAction(cand)); err != nil {
+			return ga, err
+		}
+		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Action, cand.OptionalReads); err != nil {
+			return ga, err
+		}
 		if len(cand.Pre) > 0 {
 			g, err := guardgrammar.Parse(cand.Pre)
 			if err != nil {
@@ -1006,6 +1072,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 			return err
 		}
 		if err := validateGapParams(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Params); err != nil {
+			return err
+		}
+		if err := validateGapStringFields(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), catalogEntryGapAction(entry)); err != nil {
 			return err
 		}
 		if entry.Cost == 0 {
