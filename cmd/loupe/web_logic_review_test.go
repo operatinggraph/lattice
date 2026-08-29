@@ -333,6 +333,27 @@ func TestApplyOutcome(t *testing.T) {
 	if msg, _ := obj["message"].(string); msg != "apply failed: no grant for this op" {
 		t.Errorf("object-shaped error message = %q", msg)
 	}
+
+	// A close that failed with no recovery available still names the package
+	// the install produced. That means the install committed, so re-arming
+	// "Apply now" sends the operator into the plan builder's refusal — the name
+	// is claimed. The control must stay down; the server's message carries the
+	// exit.
+	stuck, _ := call(t, vm, "applyOutcome", map[string]any{
+		"error":      "apply succeeded … but MarkCapabilityProposalApplied failed … lattice op submit …",
+		"packageKey": "vtx.package.alpha",
+	}).(map[string]any)
+	if stuck["retryable"] != false {
+		t.Errorf("a committed install with no recovery = %v, want NOT retryable", stuck)
+	}
+	if stuck["resumable"] != false {
+		t.Errorf("a close the recovery refuses = %v, want NOT resumable", stuck)
+	}
+	// The paired vector: a failure that names no package never got as far as an
+	// install, so retrying it is exactly right.
+	if ordinary["retryable"] != true {
+		t.Errorf("an ordinary failure = %v, want retryable — otherwise the check above disables every retry", ordinary)
+	}
 }
 
 func TestErrorText(t *testing.T) {

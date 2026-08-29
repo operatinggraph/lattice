@@ -560,11 +560,9 @@ func TestReviewCapabilityApply_AlreadyInstalledIsResumable(t *testing.T) {
 		"targetNewVersion": "1.2.0",
 	})
 	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.2.0", false)
-	// The receipt is what makes this proposal's install PROVEN, and only a
-	// proven install is resumable: a newPackage proposal matched by name and
-	// version alone is refused instead (see
-	// TestReviewCapabilityApply_UnprovenNewPackageIsNotResumable, the row's own
-	// regression test).
+	// Only a proven install is resumable, and the receipt is that proof: a
+	// newPackage proposal matched by name and version alone is refused instead
+	// (TestReviewCapabilityApply_UnprovenNewPackageIsNotResumable).
 	putInstallReceipt(t, put, "resume1", "vtx.package.liveAlpha", "req-observed-livealpha", false)
 
 	res, body := postReview(t, client, base, "/api/review/capability/resume1/apply")
@@ -935,11 +933,11 @@ func callMarkApplied(t *testing.T, srv *server, id string) (*httptest.ResponseRe
 
 func TestReviewCapabilityMarkApplied_SubmitsResolvedPackage(t *testing.T) {
 	srv, _, _, put := newTestReviewServerWithSrv(t)
-	// upgradeExisting is the mode whose close still resolves by name+version
-	// alone — a live package of that name is its own precondition, so its
-	// presence carries no provenance signal for the receipt to add. It is
-	// therefore the only mode on which the reconstructed "recovered:" pointer
-	// is still reachable, which is what this test pins.
+	// upgradeExisting resolves its close by name+version alone: a live package
+	// of that name is the mode's own precondition, so its presence carries no
+	// provenance signal a receipt could add. That makes it the one mode on
+	// which the reconstructed "recovered:" pointer is reachable, which is what
+	// this test pins.
 	putCapProposal(t, put, "mksub1", map[string]any{
 		"intent": "approved, install committed", "kind": "lens", "content": validLensContent,
 		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "alpha",
@@ -1369,12 +1367,12 @@ func TestReviewCapabilityApply_SameVersionUpgradeIsNotResumable(t *testing.T) {
 	}
 }
 
-// TestPackageApplyStatus_UndeclaredSecureColumnDropIs409 covers the refusal a
-// partial capability apply used to reach FIRST, before the coverage guard was
-// moved ahead of it — and which any source-authored upgrade still reaches. It
-// returned a bare error, so it fell through to 502: the code this console's own
-// front end retries, for a state that stays refused until an author writes an
-// attestation.
+// TestPackageApplyStatus_UndeclaredSecureColumnDropIs409 pins the status an
+// undeclared secure-column drop answers with. Any source-authored upgrade
+// reaches this refusal, and it must not read as transient: a bare error falls
+// through to 502, which this console's own front end retries — but the state
+// stays refused until an author writes an attestation, so retrying it can only
+// fail again.
 func TestPackageApplyStatus_UndeclaredSecureColumnDropIs409(t *testing.T) {
 	err := fmt.Errorf("wrapped: %w", pkgmgr.ErrUndeclaredSecureColumnDrop)
 	if got := packageApplyStatus(err); got != http.StatusConflict {
@@ -1727,7 +1725,9 @@ func TestReviewCapabilityMarkApplied_StaleReceiptExplainsItself(t *testing.T) {
 
 // Apply must not answer a stale receipt with the plan builder's opaque refusal
 // either — and it must never call it resumable, which would send the operator
-// to a recovery that refuses.
+// to a recovery that refuses. This is the shape that earns the refusal: a
+// DIFFERENT live package now holds the target name, so an apply would write
+// into an artifact this proposal did not produce.
 func TestReviewCapabilityApply_StaleReceiptIsNotResumable(t *testing.T) {
 	srv, client, base, put := newTestReviewServerWithSrv(t)
 	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
@@ -1742,6 +1742,43 @@ func TestReviewCapabilityApply_StaleReceiptIsNotResumable(t *testing.T) {
 	}
 	if msg, _ := body["error"].(string); !strings.Contains(msg, "vtx.package.deadAlpha") {
 		t.Errorf("want the refusal to name the receipted package, got %+v", body)
+	}
+}
+
+// A stale receipt on its own is NOT a refusal, and this is the shape that shows
+// why: an upgradeExisting proposal (base 1.1.0 → new 1.2.0) whose receipted
+// package was rolled back out of band to 1.1.0. The receipt is stale — that
+// package is no longer at the proposal's target version — but it is the SAME
+// package, sitting at exactly the baseVersion the proposal declares, so the
+// plan builder builds a valid upgrade and the apply rolls forward.
+//
+// Refusing here would gate a re-apply that works, on a mode whose behaviour the
+// receipt is not supposed to touch at all: a live package of that name is that
+// mode's own precondition.
+func TestReviewCapabilityApply_StaleReceiptOnRolledBackUpgradeStillApplies(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+	putCapProposal(t, put, "appstale2", map[string]any{
+		"intent": "approved upgrade, target rolled back out of band", "kind": "lens", "content": validLensContent,
+		"reviewState": "approved", "targetMode": "upgradeExisting", "targetPackageName": "alpha",
+		"targetBaseVersion": "1.1.0", "targetNewVersion": "1.2.0",
+	})
+	putInstalledPackage(t, put, "liveAlpha", "alpha", "1.1.0", false)
+	putInstallReceipt(t, put, "appstale2", "vtx.package.liveAlpha", "req-observed-livealpha", false)
+
+	res, body := postReview(t, client, base, "/api/review/capability/appstale2/apply")
+	msg, _ := body["error"].(string)
+	if strings.Contains(msg, "cannot be closed or re-applied") {
+		t.Fatalf("a re-apply the plan builder would build was refused as unrecoverable: %+v", body)
+	}
+	if body["resumable"] == true {
+		t.Fatalf("a never-closed upgrade was classified resumable: %+v", body)
+	}
+	// It reaches CapabilityApplyPlanForProposal, which reads the proposal's
+	// aspects from Core KV — absent in this fixture, so it refuses there. That
+	// refusal is the proof the stale branch fell through to it.
+	if res.StatusCode != http.StatusConflict || !strings.Contains(msg, "build apply plan") {
+		t.Fatalf("status = %d, want the plan builder's own refusal; got %+v", res.StatusCode, body)
 	}
 }
 
@@ -1850,13 +1887,16 @@ func rejectReceipt(req gatewayOperationRequest) processor.OperationReply {
 
 // callCloseApply drives the apply's close directly, with an operator token in
 // the context (requireOperator, which normally puts it there, is not part of
-// this fixture).
-func callCloseApply(t *testing.T, srv *server, id string, res *pkgmgr.ApplyResult) (int, map[string]any) {
+// this fixture). mode is the proposal's declared target mode — the close reads
+// it to decide whether the mark-applied recovery it points at on failure can
+// actually run.
+func callCloseApply(t *testing.T, srv *server, id, mode string, res *pkgmgr.ApplyResult) (int, map[string]any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, operatorTokenContextKey{}, "test-operator-token")
-	return srv.closeApply(ctx, id, "vtx.capabilityproposal."+id, res)
+	cols := capabilityProposalCols{TargetMode: mode, TargetPackageName: "alpha", TargetNewVersion: "1.2.0"}
+	return srv.closeApply(ctx, id, "vtx.capabilityproposal."+id, cols, res)
 }
 
 // committedApplyResult is the shape ApplyCapabilityPlan returns from an arm
@@ -1876,7 +1916,7 @@ func TestCloseApply_SubmitsReceiptBeforeMarkApplied(t *testing.T) {
 	url, relayed := stubGatewayRecording(t, acceptEvery)
 	srv.gatewayURL = url
 
-	status, body := callCloseApply(t, srv, "close1", committedApplyResult())
+	status, body := callCloseApply(t, srv, "close1", "newPackage", committedApplyResult())
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %+v", status, body)
 	}
@@ -1941,8 +1981,8 @@ func TestCloseApply_ReceiptRequestIDIsDerivedAndStable(t *testing.T) {
 	url, relayed := stubGatewayRecording(t, acceptEvery)
 	srv.gatewayURL = url
 
-	callCloseApply(t, srv, "close6", committedApplyResult())
-	callCloseApply(t, srv, "close6", committedApplyResult())
+	callCloseApply(t, srv, "close6", "newPackage", committedApplyResult())
+	callCloseApply(t, srv, "close6", "newPackage", committedApplyResult())
 	ops := relayed()
 	if len(ops) != 4 {
 		t.Fatalf("relayed %d ops, want 4", len(ops))
@@ -1962,7 +2002,7 @@ func TestCloseApply_ReceiptRequestIDIsDerivedAndStable(t *testing.T) {
 	// conditioning is what arbitrates that, and it only gets to if the ids differ.
 	other := committedApplyResult()
 	other.PackageKey = "vtx.package.foreignAlpha"
-	callCloseApply(t, srv, "close6", other)
+	callCloseApply(t, srv, "close6", "newPackage", other)
 	if got := relayed()[4].RequestID; got == first {
 		t.Errorf("a receipt naming another package derived the same requestId %q, so it would dedup instead of being refused", got)
 	}
@@ -1979,7 +2019,7 @@ func TestCloseApply_NoObservedReceiptIsNotApplicable(t *testing.T) {
 	res := committedApplyResult()
 	res.Action, res.Skipped, res.InstallRequestID = "skip", true, ""
 
-	status, body := callCloseApply(t, srv, "close2", res)
+	status, body := callCloseApply(t, srv, "close2", "newPackage", res)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %+v", status, body)
 	}
@@ -2006,7 +2046,7 @@ func TestCloseApply_ReceiptFailureIsNonFatalAndVisible(t *testing.T) {
 	url, relayed := stubGatewayRecording(t, rejectReceipt)
 	srv.gatewayURL = url
 
-	status, body := callCloseApply(t, srv, "close3", committedApplyResult())
+	status, body := callCloseApply(t, srv, "close3", "newPackage", committedApplyResult())
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — a failed receipt is not a failed apply; body %+v", status, body)
 	}
@@ -2023,17 +2063,15 @@ func TestCloseApply_ReceiptFailureIsNonFatalAndVisible(t *testing.T) {
 	}
 }
 
-// When the close fails too, the operator's resumable error has to say what
-// recovery will do. That holds for BOTH no-receipt outcomes — a refused submit
-// and an apply with nothing to bind — because either leaves recovery resolving
-// by name and version.
-func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
-	rejectEverything := func(gatewayOperationRequest) processor.OperationReply {
-		return processor.OperationReply{
-			Status: processor.ReplyStatusRejected,
-			Error:  &opwire.ReplyError{Code: "InvalidApplyTransition", Message: "proposal is not approved"},
-		}
-	}
+// `resumable` is an instruction, not a description: the console latches the
+// mark-applied control on it. So it may be set only when that control can
+// finish the job.
+//
+// For a newPackage proposal left with no receipt — whether the submit was
+// refused or the apply had nothing to bind — mark-applied is exactly what
+// refuses, so arming it would leave the operator a button whose only outcome is
+// that refusal. The reply must instead carry the submission that does work.
+func TestCloseApply_UnprovenNewPackageCloseIsNotResumable(t *testing.T) {
 	cases := []struct {
 		name, id    string
 		mutate      func(*pkgmgr.ApplyResult)
@@ -2052,7 +2090,54 @@ func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
 
 			res := committedApplyResult()
 			c.mutate(res)
-			status, body := callCloseApply(t, srv, c.id, res)
+			status, body := callCloseApply(t, srv, c.id, "newPackage", res)
+			if status != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", status)
+			}
+			if body["resumable"] == true {
+				t.Fatalf("the reply arms a recovery that refuses this proposal, and offers nothing else: %+v", body)
+			}
+			if body["receipt"] != c.wantReceipt {
+				t.Errorf("receipt = %v, want %q", body["receipt"], c.wantReceipt)
+			}
+			msg, _ := body["error"].(string)
+			// The exit has to be one that exists and one that works — a
+			// remedy the named tool cannot perform is worse than none.
+			for _, want := range []string{"lattice op submit", "--context-hint-reads", "vtx.package.ownAlpha.manifest"} {
+				t.Run(want, func(t *testing.T) {
+					if !strings.Contains(msg, want) {
+						t.Errorf("failure reply %q does not carry %q", msg, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The paired vector for the refusals above, on the mode that still recovers by
+// name and version: an upgradeExisting proposal IS resumable with no receipt,
+// because its close never turned on provenance. Its error still says what
+// recovery will fall back to.
+func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
+	cases := []struct {
+		name, id    string
+		mutate      func(*pkgmgr.ApplyResult)
+		wantReceipt string
+	}{
+		{"the receipt submit was refused", "close8", func(*pkgmgr.ApplyResult) {}, receiptFailed},
+		{"the apply had nothing to bind", "close9", func(r *pkgmgr.ApplyResult) {
+			r.Action, r.Skipped, r.InstallRequestID = "skip", true, ""
+		}, receiptNotApplicable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, _, _ := newTestReviewServerWithSrv(t)
+			url, _ := stubGatewayRecording(t, rejectEverything)
+			srv.gatewayURL = url
+
+			res := committedApplyResult()
+			c.mutate(res)
+			status, body := callCloseApply(t, srv, c.id, "upgradeExisting", res)
 			if status != http.StatusBadGateway {
 				t.Fatalf("status = %d, want 502", status)
 			}
@@ -2065,9 +2150,9 @@ func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
 		})
 	}
 
-	// The paired vector: with the receipt committed and only the close failing,
-	// that clause must be absent — otherwise the assertions above pass for a
-	// message that always carries it.
+	// The paired vector for THAT: with the receipt committed and only the close
+	// failing, the fallback clause must be absent — otherwise the assertions
+	// above pass for a message that always carries it.
 	srv, _, _, _ := newTestReviewServerWithSrv(t)
 	url, _ := stubGatewayRecording(t, func(req gatewayOperationRequest) processor.OperationReply {
 		if req.OperationType == "RecordCapabilityInstallReceipt" {
@@ -2076,12 +2161,28 @@ func TestCloseApply_MissingReceiptNamedInResumableError(t *testing.T) {
 		return rejectEverything(req)
 	})
 	srv.gatewayURL = url
-	status, body := callCloseApply(t, srv, "close5", committedApplyResult())
+	status, body := callCloseApply(t, srv, "close5", "upgradeExisting", committedApplyResult())
 	if status != http.StatusBadGateway || body["receipt"] != receiptRecorded {
 		t.Fatalf("status = %d, body %+v", status, body)
 	}
 	if msg, _ := body["error"].(string); strings.Contains(msg, "name and version alone") {
 		t.Errorf("a recorded receipt was still reported as missing: %q", msg)
+	}
+
+	// And a newPackage proposal whose receipt DID land is resumable too — the
+	// refusal is the missing binding, not the mode.
+	status, body = callCloseApply(t, srv, "close10", "newPackage", committedApplyResult())
+	if status != http.StatusBadGateway || body["resumable"] != true {
+		t.Errorf("status = %d, body = %+v; want a receipted newPackage close still resumable", status, body)
+	}
+}
+
+// rejectEverything refuses every relayed op — the shape of a close where both
+// submits fail.
+func rejectEverything(gatewayOperationRequest) processor.OperationReply {
+	return processor.OperationReply{
+		Status: processor.ReplyStatusRejected,
+		Error:  &opwire.ReplyError{Code: "InvalidApplyTransition", Message: "proposal is not approved"},
 	}
 }
 
@@ -2159,10 +2260,10 @@ func TestReviewCapabilityMarkApplied_ProvenNewPackageStillCloses(t *testing.T) {
 	}
 }
 
-// The narrowing held: upgradeExisting keeps today's behaviour exactly. A live
-// package of that name is that mode's own precondition — present before the
-// apply by definition — so its presence never carried a provenance signal to
-// lose, and the version preconditions own that mode instead.
+// The refusal is scoped to newPackage. A live package of the target name is
+// upgradeExisting's own precondition — present before the apply by definition —
+// so its presence carries no provenance signal there, and the version
+// preconditions own that mode instead.
 func TestReviewCapabilityMarkApplied_UnprovenUpgradeStillCloses(t *testing.T) {
 	srv, _, _, put := newTestReviewServerWithSrv(t)
 	putCapProposal(t, put, "unproven3", map[string]any{
@@ -2183,10 +2284,11 @@ func TestReviewCapabilityMarkApplied_UnprovenUpgradeStillCloses(t *testing.T) {
 	}
 }
 
-// The apply endpoint's half. Its 409 used to answer this exact state with
-// resumable:true and "close it with mark-applied" — advice pointing straight at
-// the close that is now refused, and the opposite of what ApplyCapabilityPlan
-// says about the same state (ErrPackageNameClaimed: the artifact did NOT land).
+// The apply endpoint's half. Its 409 must not answer this state with
+// resumable:true and "close it with mark-applied": that advice points straight
+// at the close this proposal is refused, and contradicts what
+// ApplyCapabilityPlan says about the very same state (ErrPackageNameClaimed —
+// the artifact did NOT land).
 func TestReviewCapabilityApply_UnprovenNewPackageIsNotResumable(t *testing.T) {
 	srv, client, base, put := newTestReviewServerWithSrv(t)
 	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
