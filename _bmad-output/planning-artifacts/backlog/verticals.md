@@ -74,7 +74,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-29 · `0bda5e71` · Front-desk `ScriptTimeout`s (~1 in 10) fixed — clinic-domain's confinement check no longer runs `actor_holds_operator()` twice per write. clinic-domain 0.34.13.
+- 2026-08-29 · `0bda5e71`+`aca5009d` · Front-desk `ScriptTimeout`s (~1 in 10) fixed — confinement check no longer runs `actor_holds_operator()` twice per write. clinic-domain 0.34.14.
 - 2026-08-29 · `f8f4c454`+`3da97510`+`f9a03a08` · A recurring visit series' front-desk card now shows its clinic site and can set one via the existing `SetVisitSeriesSite` op, reusing the appointment "Set site" modal. clinic-reminders 0.10.5.
 - 2026-08-29 · `160ae80a` · A stuck renewal (retry budget exhausted) now escalates to Augur AI-reasoning instead of only raising a standing Health issue — mirrors leaseApplicationComplete's Augur block. lease-signing 0.31.11.
 - 2026-08-29 · `f7f58eac` · A landlord's decision now preserves the qualification profile it was based on — `.decidedProfileSnapshot` create-only-stamped on the first decision. lease-signing 0.31.10.
