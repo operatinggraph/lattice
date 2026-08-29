@@ -306,9 +306,20 @@ func TestHost_EnqueueForwardsEnumerationsToTheQueuedEnvelope(t *testing.T) {
 	if err != nil || len(intents) != 1 {
 		t.Fatalf("ListIntents: len=%d err=%v, want 1", len(intents), err)
 	}
-	var env opwire.OperationEnvelope
-	if err := json.Unmarshal(intents[0].Envelope, &env); err != nil {
-		t.Fatalf("unmarshal queued envelope: %v", err)
+	// A stored IntentRecord's Envelope holds the agent's own record — the
+	// envelope under an `envelope` key, alongside its touched keys — so the
+	// envelope is one level in. Decoding the record's bytes straight into an
+	// OperationEnvelope silently yields a zero value, since every key is
+	// unknown and encoding/json ignores unknown keys.
+	var record struct {
+		Envelope opwire.OperationEnvelope `json:"envelope"`
+	}
+	if err := json.Unmarshal(intents[0].Envelope, &record); err != nil {
+		t.Fatalf("unmarshal queued intent record: %v", err)
+	}
+	env := record.Envelope
+	if env.OperationType != "ResolveWorkOrder" {
+		t.Fatalf("OperationType = %q, want ResolveWorkOrder — the envelope was not decoded from the record", env.OperationType)
 	}
 	if env.ContextHint == nil {
 		t.Fatal("ContextHint = nil, want one built from Enumerations alone")
