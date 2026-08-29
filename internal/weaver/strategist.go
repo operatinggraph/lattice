@@ -2,6 +2,7 @@ package weaver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -47,6 +48,22 @@ const assignTaskGrantTTL = 30 * 24 * time.Hour
 // rowTemplatePrefix marks a templated param value: row.<column> substitutes
 // that column's value from the violation row (Contract #10 §10.8 Templating).
 const rowTemplatePrefix = "row."
+
+// typedLiteralPrefix marks a param value that carries its own JSON type:
+// json:<literal> resolves to whatever encoding/json decodes the suffix into
+// (json:5 → float64(5), json:true → true, json:[1,2] → a slice), so a playbook
+// authored in GapAction.Params' map[string]string shape can still hand an op a
+// number, a bool, or a structured value. A value that must itself begin with
+// the token is written as its own JSON string — json:"json:foo" resolves to
+// the string json:foo.
+//
+// The two tokens are checked in order and are mutually exclusive by their
+// leading bytes: row.<column> first (its resolved row value is never re-read
+// as a token — a row column literally holding "json:5" stays that string),
+// then json:<literal>, and an unprefixed value is a plain string literal.
+// A value whose json: suffix does not decode is a config error, never a
+// silent fall-through to plain-string.
+const typedLiteralPrefix = "json:"
 
 // errKind classifies a plan failure so the evaluator can route it: a config or
 // data error is alerted and the gap skipped (redelivery cannot fix it); a
@@ -628,24 +645,66 @@ func augurEscalation(source *targetSource, target *Target, trigger, targetID, en
 	}, true
 }
 
-// resolveParam resolves one playbook param value: either a literal or the
-// token row.<column> substituted from the violation row. A row.<column> that
-// resolves null/absent is a data error — surface, do not fire a malformed
-// remediation (§10.8 Templating).
+// resolveParam resolves one playbook param value against the three arms of the
+// value grammar: the token row.<column>, substituted from the violation row and
+// delivering that column's own Go type; the token json:<literal>, decoded into
+// the JSON value its suffix encodes; or, unprefixed, a plain string literal
+// passed through byte-for-byte. A row.<column> that resolves null/absent is a
+// data error — surface, do not fire a malformed remediation (§10.8
+// Templating). A json: suffix that does not decode is a config error: no row
+// can ever make it dispatchable.
 func resolveParam(name, value string, row map[string]any) (any, *planError) {
 	if value == "" {
 		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("param %q is required", name)}
 	}
-	col, templated := strings.CutPrefix(value, rowTemplatePrefix)
-	if !templated {
-		return value, nil
+	if col, templated := strings.CutPrefix(value, rowTemplatePrefix); templated {
+		v, ok := row[col]
+		if !ok || v == nil {
+			return nil, &planError{kind: errData,
+				msg: fmt.Sprintf("param %q references row.%s, which is null/absent in the row", name, col)}
+		}
+		return v, nil
 	}
-	v, ok := row[col]
-	if !ok || v == nil {
-		return nil, &planError{kind: errData,
-			msg: fmt.Sprintf("param %q references row.%s, which is null/absent in the row", name, col)}
+	if literal, typed := strings.CutPrefix(value, typedLiteralPrefix); typed {
+		return decodeTypedLiteral(name, literal)
+	}
+	return value, nil
+}
+
+// decodeTypedLiteral decodes the suffix of a json:<literal> param into the
+// value it encodes. It fails closed on both refusals rather than degrading to
+// the plain-string arm: a suffix that is not valid JSON, and the literal null
+// — a null param is indistinguishable from an omitted one, and the templated
+// arm above already treats a null row value as an error, so accepting it here
+// would make "declared, deliberately empty" and "not declared" the same
+// dispatch.
+func decodeTypedLiteral(name, literal string) (any, *planError) {
+	var v any
+	if err := json.Unmarshal([]byte(literal), &v); err != nil {
+		return nil, &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q carries the %s typed-literal token but %q is not valid JSON: %v — a string that must itself begin with the token is written as its own JSON string (%s\"json:foo\" resolves to json:foo)",
+				name, typedLiteralPrefix, literal, err, typedLiteralPrefix)}
+	}
+	if v == nil {
+		return nil, &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q resolves to the %snull typed literal — a null param is indistinguishable from an absent one; omit the param instead", name, typedLiteralPrefix)}
 	}
 	return v, nil
+}
+
+// typedLiteralError reports the config error a param value would raise at
+// dispatch through decodeTypedLiteral, or nil when the value is not a typed
+// literal or is a well-formed one. The token's suffix is authored, never
+// row-derived, so the verdict is row-independent — which is what lets
+// validateTarget refuse a malformed literal at load, for every row at once,
+// instead of leaving each dispatch to discover the same permanent defect.
+func typedLiteralError(name, value string) *planError {
+	literal, typed := strings.CutPrefix(value, typedLiteralPrefix)
+	if !typed {
+		return nil
+	}
+	_, perr := decodeTypedLiteral(name, literal)
+	return perr
 }
 
 // resolveStringParam resolves a param that must produce a non-empty string

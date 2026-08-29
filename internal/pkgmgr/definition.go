@@ -416,7 +416,9 @@ type AugurAutoApplySpec struct {
 // GapActionSpec mirrors the engine's GapAction (Contract #10 §10.8 action
 // table) field-for-field so the emitted body deserializes cleanly into the
 // runtime target. Action selects the contract; the remaining fields carry the
-// per-action params, each a literal or a `row.<column>` template token.
+// per-action params, each a literal or a `row.<column>` template token (the
+// Params bag additionally admits the `json:<literal>` typed-literal token —
+// see that field for the full grammar).
 // `Pattern` (triggerLoom) and `Operation` (assignTask/directOp) are
 // shipped verbatim and resolve live in the engine registry — the installer
 // does not rewrite them to NanoIDs.
@@ -428,7 +430,37 @@ type GapActionSpec struct {
 	Operation string
 	Assignee  string
 	Target    string
-	Params    map[string]string
+	// Params are the dispatched op's payload fields. Each value is written in
+	// a three-arm grammar, checked in this order:
+	//
+	//   row.<column>   — substituted from the violation row, delivering that
+	//                    column's own type (an int64 column arrives as an
+	//                    int64, not its decimal spelling). A column that is
+	//                    null or absent fails the dispatch rather than firing
+	//                    a malformed remediation. The substituted value is
+	//                    never re-read as a token: a row column literally
+	//                    holding "json:5" dispatches as that string.
+	//   json:<literal> — the value encoding/json decodes the suffix into, so a
+	//                    map[string]string bag can still hand an op a number,
+	//                    a bool, an array or an object. `json:5` dispatches as
+	//                    5, `json:true` as a bool. A string that must itself
+	//                    begin with the token is written as its own JSON
+	//                    string: `json:"json:foo"` dispatches as the string
+	//                    json:foo.
+	//   anything else  — a plain string literal, dispatched byte-for-byte.
+	//
+	// A malformed json: suffix — invalid JSON, or the literal null, which is
+	// indistinguishable from an omitted param — is refused at INSTALL and
+	// again at the engine's own load, never quietly demoted to a plain string.
+	// The refusal is permanent by construction: whether the suffix decodes
+	// depends on the authored value alone, so a gap carrying one could never
+	// dispatch for any row.
+	//
+	// Nothing type-checks the resolved value against the op's InputSchema on
+	// the submit path, so an op declaring `"type":"number"` and a playbook
+	// declaring a plain "5" disagree silently — the typed literal is how the
+	// playbook states the type it means.
+	Params map[string]string
 	// Class pins the dispatched op's DDL canonical name (Contract #2 §2.1
 	// operationType→class reverse index). Required whenever Operation is
 	// admitted by more than one installed vertexType DDL — the Processor's
@@ -546,8 +578,13 @@ type ActionCatalogEntrySpec struct {
 	Operation string
 	Assignee  string
 	Target    string
-	Params    map[string]string
-	Reads     []string
+	// Params are the entry's op payload fields, in the same value grammar
+	// GapActionSpec.Params documents (row.<column>, json:<literal>, or a plain
+	// string) and under the same install-time refusal of a malformed typed
+	// literal: a chosen entry dispatches through the engine's ordinary action
+	// contract.
+	Params map[string]string
+	Reads  []string
 	// OptionalReads are the entry's declared absence-tolerant reads, same
 	// grammar, same dispatch-time semantics, and same purpose as
 	// GapActionSpec.OptionalReads (see that field's doc for what declaring one

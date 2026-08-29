@@ -195,9 +195,11 @@ func recordDispatchOutcomePlan(handle, outcome, reason string) *plan {
 //
 // Every value here is a resolved literal (the row IS the resolved data, never
 // a row.<column> template) — validateProposedDispatch has already rejected any
-// value carrying the reserved row.<column> template prefix, so buildPlan's
-// resolveParam/resolveStringParam treat every field as a literal, never
-// re-templating it against Weaver's OWN internal row.
+// value carrying either reserved value-grammar token (the row.<column>
+// template prefix and the json:<literal> typed-literal prefix), so buildPlan's
+// resolveParam/resolveStringParam treat every field as a plain string literal,
+// never re-templating it against Weaver's OWN internal row nor decoding it
+// into a value the scope check never inspected.
 func materializeGapAction(action string, params map[string]any) (GapAction, error) {
 	switch action {
 	case actionTriggerLoom:
@@ -288,6 +290,16 @@ func validateProposedDispatch(action string, params map[string]any, candidateKey
 			// a template-injection scope-escape vector distinct from (and not
 			// caught by) the plain vtx-key check below. Fail-closed.
 			return "proposed param value " + s + " uses the reserved row.<column> template prefix, not permitted in a model-proposed literal"
+		}
+		if strings.HasPrefix(s, typedLiteralPrefix) {
+			// The second reserved token, refused for the same reason and with
+			// more bite: resolveParam decodes json:"vtx.identity.other" into a
+			// vertex key that this scope check never saw, because the RAW value
+			// it inspects is not vtx-shaped (isVtxKey splits on dots, and the
+			// raw value's first segment is `json:"vtx`). Validation and dispatch
+			// must see the same string, so a proposal carrying the token is
+			// refused outright rather than decoded and re-checked.
+			return "proposed param value " + s + " uses the reserved " + typedLiteralPrefix + "<literal> typed-literal prefix, not permitted in a model-proposed literal"
 		}
 		if s != candidateKey && isVtxKey(s) {
 			return "scope escape: param value " + s + " references an entity other than the escalated candidate " + candidateKey

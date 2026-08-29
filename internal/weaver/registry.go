@@ -72,16 +72,23 @@ var singleTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // GapAction is one playbook entry of a target's gaps map (Contract #10 §10.8
 // action table). Action selects the contract; the remaining fields carry the
-// per-action params, each either a literal or a row.<column> template token.
+// per-action params, each a literal or a row.<column> template token (the
+// Params bag additionally admits the json:<literal> typed-literal token — see
+// that field).
 type GapAction struct {
-	Action    string            `json:"action"`
-	Pattern   string            `json:"pattern,omitempty"`
-	Subject   string            `json:"subject,omitempty"`
-	Adapter   string            `json:"adapter,omitempty"`
-	Operation string            `json:"operation,omitempty"`
-	Assignee  string            `json:"assignee,omitempty"`
-	Target    string            `json:"target,omitempty"`
-	Params    map[string]string `json:"params,omitempty"`
+	Action    string `json:"action"`
+	Pattern   string `json:"pattern,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Adapter   string `json:"adapter,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Assignee  string `json:"assignee,omitempty"`
+	Target    string `json:"target,omitempty"`
+	// Params are the dispatched op's payload fields, each value written in the
+	// three-arm value grammar pkgmgr.GapActionSpec.Params documents:
+	// row.<column>, json:<literal>, or a plain string. resolveParam is the
+	// consumer; validateTarget refuses a malformed json: literal at load, as
+	// install refuses it first.
+	Params map[string]string `json:"params,omitempty"`
 	// Class pins the dispatched op's DDL canonical name onto the wire envelope
 	// (Contract #2 §2.1 operationType→class reverse index), for an Operation
 	// admitted by more than one installed vertexType DDL — the Processor's
@@ -207,15 +214,18 @@ type GapEnumeration struct {
 // dispatches exactly like an explicit GapAction), plus an optional
 // precondition (Pre) gating eligibility and a Cost the ranking prefers lower.
 type GapCandidate struct {
-	Action    string            `json:"action"`
-	Pattern   string            `json:"pattern,omitempty"`
-	Subject   string            `json:"subject,omitempty"`
-	Adapter   string            `json:"adapter,omitempty"`
-	Operation string            `json:"operation,omitempty"`
-	Assignee  string            `json:"assignee,omitempty"`
-	Target    string            `json:"target,omitempty"`
-	Params    map[string]string `json:"params,omitempty"`
-	Reads     []string          `json:"reads,omitempty"`
+	Action    string `json:"action"`
+	Pattern   string `json:"pattern,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Adapter   string `json:"adapter,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Assignee  string `json:"assignee,omitempty"`
+	Target    string `json:"target,omitempty"`
+	// Params are the chosen candidate's op payload fields, in the same value
+	// grammar GapAction.Params carries (a chosen candidate dispatches through
+	// the same buildPlan), refused at load by the same validateGapParams.
+	Params map[string]string `json:"params,omitempty"`
+	Reads  []string          `json:"reads,omitempty"`
 	// Enumerations are the chosen candidate's declared kv.Links walks, carried
 	// for the same reason Reads is: a candidate dispatches through the same
 	// buildPlan as an explicit GapAction, so anything the action contract can
@@ -255,15 +265,19 @@ type ActionCatalogEntry struct {
 	// catalog.
 	Ref string `json:"ref"`
 
-	Action    string            `json:"action"`
-	Pattern   string            `json:"pattern,omitempty"`
-	Subject   string            `json:"subject,omitempty"`
-	Adapter   string            `json:"adapter,omitempty"`
-	Operation string            `json:"operation,omitempty"`
-	Assignee  string            `json:"assignee,omitempty"`
-	Target    string            `json:"target,omitempty"`
-	Params    map[string]string `json:"params,omitempty"`
-	Reads     []string          `json:"reads,omitempty"`
+	Action    string `json:"action"`
+	Pattern   string `json:"pattern,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Adapter   string `json:"adapter,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Assignee  string `json:"assignee,omitempty"`
+	Target    string `json:"target,omitempty"`
+	// Params are the chosen entry's op payload fields, in the same value
+	// grammar GapAction.Params carries (a synthesized plan's step dispatches
+	// through the same buildPlan), refused at load by the same
+	// validateGapParams.
+	Params map[string]string `json:"params,omitempty"`
+	Reads  []string          `json:"reads,omitempty"`
 	// OptionalReads are the chosen entry's declared absence-tolerant reads,
 	// carried for the same reason Reads is: a synthesized plan's step
 	// dispatches through the same buildPlan as an explicit GapAction, so
@@ -703,6 +717,9 @@ func validateTarget(t *Target) error {
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q", col), ga.Action, ga.OptionalReads); err != nil {
 			return err
 		}
+		if err := validateGapParams(fmt.Sprintf("gaps key %q", col), ga.Params); err != nil {
+			return err
+		}
 		if ga.Action == actionSurface && ga.IssueSeverity != "" && ga.IssueSeverity != "warning" && ga.IssueSeverity != "error" {
 			return fmt.Errorf("gaps key %q action %q issueSeverity %q must be \"warning\" or \"error\" (omit for the \"warning\" default) — aggregateStatus only escalates those two",
 				col, ga.Action, ga.IssueSeverity)
@@ -765,6 +782,28 @@ func validateOptionalReadsScope(where, action string, optionalReads []string) er
 		return nil
 	}
 	return fmt.Errorf("%s: action %q declares optionalReads, but optionalReads is only meaningful for directOp — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it", where, action)
+}
+
+// validateGapParams refuses a params bag carrying a malformed json:<literal>
+// typed literal. Whether that suffix decodes is a property of the AUTHORED
+// value alone — no row participates — so the defect is permanent: the gap
+// could never dispatch, for any row, ever. Refusing it here makes it one loud
+// load-time verdict instead of a config error re-raised per violation row
+// forever. Params are visited in name order because Go randomizes map range,
+// and two malformed values on one gap would otherwise name a different param
+// on each run.
+func validateGapParams(where string, params map[string]string) error {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if perr := typedLiteralError(name, params[name]); perr != nil {
+			return fmt.Errorf("%s: %s", where, perr.msg)
+		}
+	}
+	return nil
 }
 
 // Link directions a declared enumeration may name (Contract #2 §2.5): the hub
@@ -881,6 +920,9 @@ func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
 		if err := validateGapEnumerations(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Enumerations); err != nil {
 			return ga, err
 		}
+		if err := validateGapParams(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Params); err != nil {
+			return ga, err
+		}
 		if len(cand.Pre) > 0 {
 			g, err := guardgrammar.Parse(cand.Pre)
 			if err != nil {
@@ -961,6 +1003,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 			return err
 		}
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Action, entry.OptionalReads); err != nil {
+			return err
+		}
+		if err := validateGapParams(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Params); err != nil {
 			return err
 		}
 		if entry.Cost == 0 {

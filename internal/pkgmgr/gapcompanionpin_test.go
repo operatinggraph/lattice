@@ -19,14 +19,15 @@ import (
 //
 // They read it by PATH rather than by import on purpose: every constant
 // involved (inflightColumnPrefix, maxretriesColumnPrefix, gapColumnPrefix, the
-// five action names) is unexported in internal/weaver, so even a test-file
-// import — which would not cycle, and would not enter the production package's
-// dependency tree — could not reach a single one of them. Reading the package
-// source keeps the production boundary intact and still fails loudly the moment
-// the engine's vocabulary or its classifier moves. It mirrors what
-// internal/refractor/ruleengine/full's variable_refs_completeness_test does with
-// go/ast, and what internal/processor's conformance_errorcode_table_test does
-// reading its contract by path.
+// five action names, typedLiteralPrefix) is unexported in internal/weaver, so
+// even a test-file import — which would not cycle, and would not enter the
+// production package's dependency tree — could not reach a single one of them.
+// Reading the package source keeps the production boundary intact and still
+// fails loudly the moment the engine's vocabulary or its classifier moves. It
+// mirrors what internal/refractor/ruleengine/full's
+// variable_refs_completeness_test does with go/ast, and what
+// internal/processor's conformance_errorcode_table_test does reading its
+// contract by path.
 
 const weaverPackageDir = "../weaver"
 
@@ -76,10 +77,12 @@ func weaverStringConsts(t *testing.T) map[string]string {
 	return out
 }
 
-// TestGapCompanionPrefixes_MatchWeaverVocabulary pins the gap-column vocabulary
-// this installer re-states against internal/weaver's own constants. Without it a
-// §10.2/§10.3 rename would leave validateGapCompanionPair silently looking for
-// columns no lens can ever declare — a gate that passes everything.
+// TestGapCompanionPrefixes_MatchWeaverVocabulary pins the gap-column, action
+// and param-grammar vocabulary this installer re-states against
+// internal/weaver's own constants. Without it a §10.2/§10.3 rename would leave
+// validateGapCompanionPair silently looking for columns no lens can ever
+// declare — a gate that passes everything — and a param-token rename would
+// leave malformedTypedLiteral inspecting a token no playbook writes.
 func TestGapCompanionPrefixes_MatchWeaverVocabulary(t *testing.T) {
 	t.Parallel()
 	consts := weaverStringConsts(t)
@@ -92,6 +95,7 @@ func TestGapCompanionPrefixes_MatchWeaverVocabulary(t *testing.T) {
 		{"actionDirectOp", actionDirectOp},
 		{"actionProposedOp", actionProposedOp},
 		{"actionSurface", actionSurface},
+		{"typedLiteralPrefix", typedLiteralPrefix},
 	} {
 		canonical, ok := consts[tc.engineName]
 		if !ok {

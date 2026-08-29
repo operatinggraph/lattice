@@ -1,6 +1,7 @@
 package pkgmgr
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -48,6 +49,19 @@ const reservedGapParam = "expectedRevision"
 // rejects it first for a clearer author error, on the same "reject it here
 // too" posture as reservedGapParam above.
 const optionalReadsAction = actionDirectOp
+
+// typedLiteralPrefix is the playbook param-value token that carries a JSON
+// type: json:<literal> dispatches as whatever encoding/json decodes the suffix
+// into, so a map[string]string params bag can still deliver a number or a
+// bool. Re-stated here (the installer depends on no engine) and pinned against
+// internal/weaver's own constant by TestGapCompanionPrefixes_MatchWeaverVocabulary.
+//
+// Whether a suffix decodes depends on the authored value alone — no row
+// participates — so a malformed one is a permanent defect that could never
+// dispatch for any row. The engine's validateTarget rejects it at load;
+// install rejects it first for a clearer author error, the same dual posture
+// reservedGapParam and optionalReadsAction above carry.
+const typedLiteralPrefix = "json:"
 
 // Loom step kinds (Contract #10 §10.5). Re-stated here so the installer
 // validates patterns without importing internal/loom (the installer must not
@@ -176,6 +190,10 @@ func (def Definition) validateWeaverTargets() error {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q declares optionalReads, but optionalReads is only meaningful for %s — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it",
 					idx, t.TargetID, col, ga.Action, optionalReadsAction)
 			}
+			if name, err := malformedTypedLiteral(ga.Params); err != nil {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q: %w",
+					idx, t.TargetID, col, name, err)
+			}
 			// A goal-authored gap (R1) legitimately declares no top-level
 			// Action — dispatch comes entirely from the Actions catalog via
 			// goal regression (mirrors the engine: buildPlan's Mode==planned
@@ -218,6 +236,42 @@ func sortedGapColumns(gaps map[string]GapActionSpec) []string {
 	}
 	sort.Strings(cols)
 	return cols
+}
+
+// malformedTypedLiteral returns the first param (in name order) whose value
+// carries the json:<literal> typed-literal token over a suffix encoding/json
+// cannot decode, or whose suffix decodes to null — the two shapes the engine's
+// resolveParam refuses as config errors rather than degrading to a plain
+// string. null is refused because a null param is indistinguishable from an
+// omitted one.
+//
+// A value not carrying the token is a plain string literal and is never
+// inspected: an unrecognised prefix belongs to the plain-string arm, so the
+// vocabulary can grow without this gate rejecting values it has never heard
+// of. Params are visited in name order because Go randomizes map range, and
+// two malformed values on one gap would otherwise name a different param on
+// each run.
+func malformedTypedLiteral(params map[string]string) (string, error) {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		literal, typed := strings.CutPrefix(params[name], typedLiteralPrefix)
+		if !typed {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal([]byte(literal), &v); err != nil {
+			return name, fmt.Errorf("carries the %s typed-literal token but %q is not valid JSON: %w — a string that must itself begin with the token is written as its own JSON string (%s\"json:foo\" resolves to json:foo)",
+				typedLiteralPrefix, literal, err, typedLiteralPrefix)
+		}
+		if v == nil {
+			return name, fmt.Errorf("is the %snull typed literal — a null param is indistinguishable from an absent one; omit the param instead", typedLiteralPrefix)
+		}
+	}
+	return "", nil
 }
 
 // validateGapCompanionPair enforces Contract #10 §10.3 — "a gap that declares
