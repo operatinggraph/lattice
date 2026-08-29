@@ -504,7 +504,15 @@ func (e *Engine) ReplayTarget(ctx context.Context, targetID string) (rowsQueued 
 	// an earlier failed replay or reconcile left there.
 	e.issues.clear(issueKeyConsumer(targetID))
 
-	queued, perr := e.supervisor.PendingForConsumer(resetCtx, name)
+	// The count the operator is owed is how much work this replay re-queued,
+	// which includes a row the pump has already fetched but not yet acked. The
+	// pump starts consuming the instant Reset recreates the durable, so a row it
+	// wins the race to fetch has already left NumPending — and PendingForConsumer
+	// reads NumPending alone, so racing it reports rowsQueued 0 for a replay that
+	// did queue a row, leaving the operator's diagnostic standing over a fact
+	// that is not true. OutstandingForConsumer adds NumAckPending, which on a
+	// just-recreated durable counts exactly this replay's own deliveries.
+	queued, perr := e.supervisor.OutstandingForConsumer(resetCtx, name)
 	if perr != nil {
 		e.logger.Warn("weaver: replay recreated the durable but its queued-row count could not be read",
 			"targetId", targetID, "durable", name, "err", perr)
